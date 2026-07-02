@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Mapping
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from kairyu.engine.backend import EngineBackend, GenerationRequest
+from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest
 from kairyu.entrypoints.chat_template import render_chat
 from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metrics import ServerMetrics
@@ -215,13 +215,19 @@ async def _stream_choices(choices: list[Choice], model: str) -> AsyncIterator[st
     yield "data: [DONE]\n\n"
 
 
+def _session_id(request: ChatCompletionRequest, http_request: Request) -> str | None:
+    """Session for ReplicaPool affinity: X-Session-ID header, else the OpenAI user field."""
+    return http_request.headers.get("x-session-id") or request.user
+
+
 def create_app(
     engines: Mapping[str, EngineBackend],
     orchestrator: Orchestrator | None = None,
     settings: ServerSettings | None = None,
+    lifespan=None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
-    app = FastAPI(title="kairyu", version="0.1.0")
+    app = FastAPI(title="kairyu", version="0.1.0", lifespan=lifespan)
     served_engines = dict(engines)
 
     metrics = ServerMetrics() if settings.metrics else None
@@ -274,10 +280,14 @@ def create_app(
         engine = served_engines.get(request.model)
         if engine is None:
             return _model_not_found(request.model)
+        session_id = _session_id(request, http_request)
         generation_request = GenerationRequest(
             request_id=f"http-{uuid.uuid4().hex[:12]}",
             prompt=prompt,
             sampling_params=_sampling_params_from(request),
+            # Affinity glue (m7 D6): keeps a session's turns on the replica
+            # holding its warm radix-KV prefix.
+            cache_hint=CacheHint(session_id=session_id) if session_id else None,
         )
         if request.stream and not request.tools:
             return StreamingResponse(

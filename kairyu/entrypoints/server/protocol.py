@@ -29,6 +29,7 @@ class ChatCompletionRequest(BaseModel):
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
     response_format: dict | None = None
+    user: str | None = None
 
 
 class FunctionCall(BaseModel):

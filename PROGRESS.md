@@ -26,6 +26,22 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 
 ## Change Log
 
+### 2026-07-02 — [progress] M7 Phase 2: `kairyu serve` CLI, DeploymentSpec, pool wiring, prober, HTTP affinity
+- What: `kairyu serve <deployment.yaml>` console entrypoint builds gateway or replica
+  from one YAML: `DeploymentSpec` (new, composes with — does not extend — ClusterSpec,
+  m7 D3) declares engines, pools (N remote `openai` members, keyless node-to-node),
+  server settings, optional DSL orchestrator, batch section. Builder wraps pool members
+  in `ReplicaPool` and passes it into `create_app` unchanged (the pool IS an
+  EngineBackend); lifespan starts a `HealthProber` per pool (GETs ejected replicas'
+  `/health`, restores via existing `probe()`) and shuts engines down gracefully.
+  HTTP affinity gap closed: OpenAI `user` field / `X-Session-ID` header now map to
+  `CacheHint(session_id=...)`, so external multi-turn traffic reaches the radix-KV
+  warm replica (previously cache_hint was never set on the HTTP path).
+- Refs: m7 D3/D4/D6; `kairyu/deploy/{spec,builder,prober}.py`,
+  `kairyu/entrypoints/cli.py`, `kairyu/entrypoints/server/{app,protocol}.py`;
+  tests `tests/unit/test_{deployment_spec,prober,cli}.py`,
+  `tests/server/test_serve_builder.py`
+
 ### 2026-07-02 — [progress] M7 Phase 1: server hardening landed
 - What: `/health`, `/readyz` (pool-aware: 503 unless every ReplicaPool has ≥1 healthy
   replica), `/metrics` (per-app Prometheus registry; request counts/latency histograms,
