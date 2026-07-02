@@ -36,7 +36,10 @@ def test_decode_has_priority_over_prefill():
     scheduler.add_request(_request("a", prompt_len=4))
     scheduler.schedule()  # a completes prefill
     scheduler.update({"a": 100})  # first sampled token
-    scheduler.add_request(_request("b", prompt_len=8))
+    # b's prompt is disjoint from a's so prefix caching doesn't shrink its chunk
+    scheduler.add_request(
+        EngineRequest("b", prompt_token_ids=tuple(range(101, 109)), max_new_tokens=4)
+    )
     step = scheduler.schedule()
     kinds = [(c.request_id, c.is_prefill, c.num_tokens) for c in step.scheduled]
     assert kinds[0] == ("a", False, 1)
@@ -139,3 +142,15 @@ def test_combined_mode_decodes_consume_shared_budget():
     step = scheduler.schedule()
     prefills = [c for c in step.scheduled if c.is_prefill]
     assert prefills[0].num_tokens == 5  # 8 - 3 decodes
+
+
+def test_cached_prefix_skips_prefill_compute():
+    scheduler, _ = _setup(budget=64)
+    scheduler.add_request(_request("a", prompt_len=8, max_new_tokens=1))
+    scheduler.schedule()
+    scheduler.update({"a": 100})  # finished; prompt pages committed to cache
+    scheduler.add_request(_request("b", prompt_len=8, max_new_tokens=1))
+    step = scheduler.schedule()
+    chunk = step.scheduled[0]
+    assert chunk.request_id == "b"
+    assert chunk.num_tokens == 1  # 7 of 8 tokens cached; only last token recomputed

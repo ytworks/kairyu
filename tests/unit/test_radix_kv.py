@@ -24,6 +24,7 @@ def test_first_allocation_is_all_misses():
 def test_second_allocation_hits_shared_prefix():
     cache = RadixKVCache(num_pages=8, page_size=PAGE)
     first = cache.allocate(_tokens([1, 2, 3, 4], [5, 6, 7, 8]))
+    cache.mark_computed(first)
     second = cache.allocate(_tokens([1, 2, 3, 4], [9, 9, 9, 9]))
     assert second.cached_pages == (first.new_full_pages[0],)
     assert len(second.new_full_pages) == 1
@@ -34,6 +35,7 @@ def test_second_allocation_hits_shared_prefix():
 def test_partial_page_tail_is_private():
     cache = RadixKVCache(num_pages=8, page_size=PAGE)
     first = cache.allocate((1, 2, 3, 4, 5, 6))  # 1 full page + 2-token tail
+    cache.mark_computed(first)
     assert len(first.new_full_pages) == 1
     assert first.tail_page is not None
     second = cache.allocate((1, 2, 3, 4, 5, 6))
@@ -45,6 +47,7 @@ def test_partial_page_tail_is_private():
 def test_multi_page_node_splits_on_partial_match():
     cache = RadixKVCache(num_pages=16, page_size=PAGE)
     first = cache.allocate(_tokens([1] * 4, [2] * 4, [3] * 4))
+    cache.mark_computed(first)
     second = cache.allocate(_tokens([1] * 4, [2] * 4, [7] * 4))
     assert second.cached_pages == first.new_full_pages[:2]
 
@@ -100,7 +103,9 @@ def test_shared_prefix_workload_hits_above_80_percent():
     allocations = []
     for i in range(20):
         unique = tuple(1000 + i * PAGE + j for j in range(PAGE))  # 1 unique page each
-        allocations.append(cache.allocate(shared + unique))
+        allocation = cache.allocate(shared + unique)
+        cache.mark_computed(allocation)  # prefill completes before the next arrival
+        allocations.append(allocation)
     for allocation in allocations:
         cache.free(allocation)
     assert cache.hit_rate > 0.80
@@ -146,3 +151,41 @@ def test_multiturn_history_reuse_hits_above_80_percent():
             cache.free(cache.allocate(prompt))
             histories[session] = histories[session] + new_turn
     assert cache.hit_rate > 0.80
+
+
+def test_allocation_reports_cached_token_count():
+    cache = RadixKVCache(num_pages=8, page_size=PAGE)
+    first = cache.allocate(_tokens([1] * 4, [2] * 4))
+    cache.free(first)
+    second = cache.allocate(_tokens([1] * 4, [2] * 4, [3] * 4))
+    assert second.num_cached_tokens == 8
+
+
+def test_uncomputed_pages_are_not_matched_by_later_requests():
+    cache = RadixKVCache(num_pages=8, page_size=PAGE)
+    first = cache.allocate(_tokens([1] * 4, [2] * 4))  # KV not computed yet
+    second = cache.allocate(_tokens([1] * 4, [2] * 4))
+    assert second.num_cached_tokens == 0  # must not share garbage KV
+    cache.mark_computed(first)
+    third = cache.allocate(_tokens([1] * 4, [2] * 4))
+    assert third.num_cached_tokens == 8
+
+
+def test_commit_and_release_folds_outputs_into_cache():
+    cache = RadixKVCache(num_pages=8, page_size=PAGE)
+    allocation = cache.allocate((1, 2, 3, 4))  # exactly one page, no tail
+    cache.mark_computed(allocation)
+    decode_page = cache.allocate_private_page()
+    cache.commit_and_release(allocation, output_tokens=(9, 8, 7, 6), decode_pages=(decode_page,))
+    reuse = cache.allocate((1, 2, 3, 4, 9, 8, 7, 6))
+    assert reuse.num_cached_tokens == 8  # prompt AND generated tokens hit
+
+
+def test_commit_frees_partially_filled_decode_pages():
+    cache = RadixKVCache(num_pages=2, page_size=PAGE)
+    allocation = cache.allocate((1, 2, 3, 4))
+    cache.mark_computed(allocation)
+    decode_page = cache.allocate_private_page()
+    assert cache.num_free_pages == 0
+    cache.commit_and_release(allocation, output_tokens=(9, 8), decode_pages=(decode_page,))
+    assert cache.num_free_pages == 1  # half-filled decode page returned to pool

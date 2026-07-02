@@ -1,6 +1,7 @@
 # M2 Design: Kairyu Core Engine (Overlap Scheduler + Radix-Paged KV)
 
-Status: Draft — requires review approval AND GPU hardware (H100 or A100) before implementation
+Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (agent design-review panel, 2026-07-02; see §6).
+GPU hardware (H100/A100) still required for the GPU phase; human sign-off pending.
 Milestone: M2
 Date: 2026-07-02
 Depends on: M1 (`EngineBackend` protocol is the integration seam; no L2/L3 changes needed)
@@ -59,8 +60,16 @@ scheduler hides CPU work under the GPU step; we adopt the same structure:
   don't require exact block-aligned hash hits.
 - `GenerationRequest.cache_hint.session_id` (plumbed in M1) pins a session's radix path
   against eviction between orchestration steps (bounded TTL so abandoned sessions drain).
-- Copy-on-write on divergence: shared pages stay shared until a sequence writes into a
-  partially-filled page, then the tail page is copied (refcount-aware).
+- No copy-on-write needed (amended per review): sharing is page-aligned and partial pages
+  (prompt tails, in-progress decode pages) are always private, so shared pages are
+  immutable by construction. Children are keyed by their first page's token tuple.
+- Computed gating (amended per review): nodes carry a ``computed`` flag; matching never
+  descends into uncomputed nodes, so chunked prefill in progress is never shared as if it
+  were valid KV. Identical in-flight prompts keep private pages instead of colliding.
+- Generated tokens are folded into the tree at request finish
+  (``commit_and_release``) — turn N+1 prompts with turn N's completion appended, so this
+  is what makes multi-turn prefixes actually hit. Partially-filled pages return to the
+  pool. A fully-cached prompt still recomputes its last token to produce logits.
 - Metrics: `kv_hit_tokens / prefill_tokens` exported per request and aggregated — this is
   the acceptance metric for the >80% hit-rate criterion.
 
@@ -117,7 +126,53 @@ committed alongside results (`bench/results/<date>-<gpu>.json`).
 ## 5. Risks
 
 - Overlap patching of the last-token slot is subtle (off-by-one on stop conditions);
-  mitigated by the correctness gate running with overlap on AND off.
+  mitigated by the correctness gate running with overlap on AND off. The implemented
+  CPU-side design carries an explicit ``position`` on each decode chunk plus per-request
+  ``in_flight`` accounting (scheduler.py/overlap.py); §2.2's "placeholder patching" prose
+  and this mechanism are the same technique — the GPU runner owns a future-token device
+  buffer indexed by (request, position). Restated invariant: the *scheduling* thread never
+  blocks on device sync; the worker thread syncs once per step to produce sampled ids.
 - FP8 accuracy drift on Llama-3.1-8B: measured via logprob tolerance gate before any perf
-  claim.
+  claim. FP8 **KV-cache** dtype is a separate decision from W8A8 weights (changes
+  FlashInfer kernel selection) — decide at GPU-phase start; default bf16 KV.
 - FlashInfer API churn: pin version in `pyproject.toml` GPU extra (`kairyu[gpu]`).
+
+Mandatory pre-GPU work items from the design review (not yet implemented):
+
+1. EOS/stop-token semantics under overlap: `EngineRequest` needs `eos_token_id`/stop
+   params, and `update()` must tolerate + trim one in-flight surplus token for requests
+   that finish one step late (currently finish is exact at `max_new_tokens` only).
+2. Preemption under KV pressure: victim selection + recompute requeue
+   (release-without-commit path that does NOT mark pages computed) and a decode watermark
+   so admission cannot starve running decodes. Today exhaustion raises "engine stall".
+3. Typed `StepInput` for the ModelRunner (page tables, positions, new token ids, sampling
+   params) instead of handing over mutable scheduler state; async result handle for M3
+   CUDA graphs; abort + per-step streaming output path out of the engine core; tokenizer /
+   incremental detokenizer component; ZMQ/msgpack frame spec for the process split.
+4. Session-pin TTL (abandoned orchestration sessions currently pin pages until unpin).
+5. Eviction victim scan is O(nodes) per eviction — switch to a heap before measuring
+   scheduler overhead; `PagePool.free` is O(n) membership churn.
+
+Bench controls (amended per review, applies to §4): pin exact versions of vLLM/SGLang/
+FlashInfer/driver; disclose that vLLM V1 runs CUDA graphs by default while kairyu M2 has
+none (M3 closes this); define goodput's SLO threshold explicitly; measure TTFT at first
+streamed token including tokenize+queueing; ≥3 runs with p50/p99 across runs, fixed seeds,
+warmup excluded; add an open-loop arrival-rate sweep, not just fixed concurrency; include
+SGLang as a baseline on the shared-prefix benchmark (its radix cache is the direct
+competitor there).
+
+## 6. Review record
+
+Agent design-review panel, 2026-07-02 (senior inference-engine reviewer persona over the
+doc + implemented CPU-side code). Verdict: **APPROVE-WITH-AMENDMENTS**. Disposition:
+
+- Fixed in code same day: cached-prefix compute skip (`KVAllocation.num_cached_tokens` +
+  scheduler init from cached tokens, last token always recomputed); computed-gating on
+  radix nodes (no garbage-KV sharing, in-flight collision keeps pages private);
+  generated-token fold-in at finish (`commit_and_release`). All covered by tests.
+- Fixed in doc same day: §2.3 rewritten to page-aligned no-COW design; §2.2/§5 reconciled
+  with the implemented position/in-flight mechanism; bench controls added to §5.
+- Deferred to GPU-phase start (tracked in §5 "mandatory pre-GPU work items"): EOS-under-
+  overlap surplus handling, preemption + decode watermark, typed StepInput/abort/streaming
+  /tokenizer/ZMQ spec, pin TTL, eviction heap.
+- Human sign-off: pending.

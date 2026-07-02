@@ -21,7 +21,10 @@ TARGETS = ("tier1", "tier2", "multi_agent")
 
 _DEFAULT_EPOCHS = 100
 _DEFAULT_LR = 0.1
-_DEFAULT_MIN_CONFIDENCE = 0.34  # just above uniform over 3 classes
+# Softmax max-prob is always >= 1/3 for 3 classes, so a near-uniform threshold
+# would never fire. 0.55 is a starting point; calibrate on held-out data for a
+# target selective accuracy before trusting it in serving (design doc m4 §2.3).
+_DEFAULT_MIN_CONFIDENCE = 0.55
 
 
 def _softmax(scores: Sequence[float]) -> list[float]:
