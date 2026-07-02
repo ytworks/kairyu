@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Sequence
 
 from kairyu.engine.backend import EngineBackend, GenerationRequest
+from kairyu.entrypoints.chat_template import render_chat
 from kairyu.outputs import RequestOutput
 from kairyu.sampling_params import SamplingParams
 
@@ -26,11 +27,6 @@ def _default_backend(model: str, enable_prefix_caching: bool | None) -> EngineBa
     from kairyu.engine.mock import MockBackend
 
     return MockBackend()
-
-
-def _render_chat(messages: Sequence[dict]) -> str:
-    lines = [f"{message['role']}: {message['content']}" for message in messages]
-    return "\n".join(lines) + "\nassistant:"
 
 
 class LLM:
@@ -128,5 +124,5 @@ class LLM:
             conversations = [messages]  # type: ignore[list-item]
         else:
             conversations = messages  # type: ignore[assignment]
-        prompts = [_render_chat(conversation) for conversation in conversations]
+        prompts = [render_chat(conversation) for conversation in conversations]
         return self.generate(prompts, sampling_params, use_tqdm=use_tqdm)
