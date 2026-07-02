@@ -202,6 +202,15 @@ class RadixKVCache:
         if allocation.tail_page is not None:
             self._pool.free((allocation.tail_page,))
 
+    def allocate_private_page(self) -> int:
+        """Allocate one non-shared page (decode growth beyond the prompt allocation)."""
+        if not self._ensure_free(1):
+            raise KVCacheFull("no free or evictable page for decode growth")
+        return self._pool.allocate(1)[0]
+
+    def free_private_pages(self, pages: tuple[int, ...]) -> None:
+        self._pool.free(pages)
+
     def pin(self, session_id: str, tokens: tuple[int, ...]) -> None:
         """Hold the matched prefix path against eviction (orchestration sessions)."""
         if session_id in self._pins:
