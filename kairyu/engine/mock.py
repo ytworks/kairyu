@@ -23,9 +23,16 @@ class MockBackend:
         self,
         responses: Mapping[str, str] | None = None,
         latency_s: float = 0.0,
+        tensor_parallel_size: int = 1,
     ) -> None:
+        if tensor_parallel_size < 1:
+            raise ValueError(
+                f"tensor_parallel_size must be >= 1, got {tensor_parallel_size}"
+            )
         self._responses = dict(responses) if responses else {}
         self._latency_s = latency_s
+        # recorded (not acted on) so tests can assert plumbing, design m5 D3
+        self.tensor_parallel_size = tensor_parallel_size
         self._prompts_seen: list[str] = []
 
     @property

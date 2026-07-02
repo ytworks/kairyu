@@ -111,6 +111,30 @@ class JsonlRouterLog:
             }
         )
 
+    def record_replica(
+        self, session_id: str | None, replica_index: int, reason: str
+    ) -> None:
+        """Log a ``ReplicaPool`` placement decision (design doc m5 D4).
+
+        The raw session id is never stored — only its SHA-256, matching the
+        no-raw-text rule of the other records. The M4 dataset builder filters
+        records by ``kind``, so ``replica`` entries never enter the training
+        corpus.
+        """
+        session_sha256 = (
+            hashlib.sha256(session_id.encode()).hexdigest()
+            if session_id is not None
+            else None
+        )
+        self._append(
+            {
+                "kind": "replica",
+                "session_sha256": session_sha256,
+                "replica": replica_index,
+                "reason": reason,
+            }
+        )
+
     def record_outcome(
         self,
         query: str,

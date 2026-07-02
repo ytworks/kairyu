@@ -1,4 +1,6 @@
 import importlib.util
+import sys
+import types
 
 import pytest
 
@@ -46,6 +48,58 @@ def test_param_mapping_is_pure_and_complete():
         "ignore_eos": True,
         "skip_special_tokens": True,
     }
+
+
+def _install_fake_vllm(monkeypatch) -> dict:
+    """Fake vllm module capturing AsyncEngineArgs kwargs (m5 D3 plumbing tests)."""
+    captured: dict = {}
+
+    class _FakeArgs:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    class _FakeEngine:
+        @staticmethod
+        def from_engine_args(args) -> object:
+            return object()
+
+    fake_vllm = types.SimpleNamespace(
+        AsyncEngineArgs=_FakeArgs, AsyncLLMEngine=_FakeEngine, SamplingParams=dict
+    )
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    return captured
+
+
+def test_tensor_parallel_size_reaches_vllm_engine_args(monkeypatch):
+    captured = _install_fake_vllm(monkeypatch)
+    VLLMBackend(model="m", tensor_parallel_size=4)
+    assert captured["model"] == "m"
+    assert captured["tensor_parallel_size"] == 4
+
+
+def test_llm_default_backend_forwards_tensor_parallel_size_to_vllm(monkeypatch):
+    from kairyu.entrypoints import llm as llm_module
+
+    captured = _install_fake_vllm(monkeypatch)
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name: object() if name == "vllm" else None
+    )
+    backend = llm_module._default_backend("m", None, tensor_parallel_size=8)
+    assert isinstance(backend, VLLMBackend)
+    assert captured["tensor_parallel_size"] == 8
+
+
+def test_async_engine_default_backend_forwards_tensor_parallel_size_to_vllm(monkeypatch):
+    from kairyu.entrypoints import async_engine
+
+    captured = _install_fake_vllm(monkeypatch)
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name: object() if name == "vllm" else None
+    )
+    args = async_engine.AsyncEngineArgs(model="m", tensor_parallel_size=2)
+    backend = async_engine._default_backend(args)
+    assert isinstance(backend, VLLMBackend)
+    assert captured["tensor_parallel_size"] == 2
 
 
 @pytest.mark.skipif(VLLM_INSTALLED, reason="vLLM installed; error path not applicable")

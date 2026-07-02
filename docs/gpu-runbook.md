@@ -74,3 +74,52 @@ scheduler protocol §2.1.
 - [ ] `docs/design/m3-spec-decode-and-graphs.md` (same)
 - [ ] `docs/design/m4-router-learning.md` (same)
 - [ ] Push to origin (nothing pushed yet)
+
+## 6. M5 — multi-GPU day(s), 8×H100 (prereq: Gates 1–3 green; goal G2 gates A1–A10)
+
+CPU half already merged: Communicator/FakeCommunicator, typed StepInput, TP plumbing
+(`tensor_parallel_size` no longer a no-op), ReplicaPool + affinity + `record_replica`,
+PDCoordinator + `resume_with_kv` + LocalKVHandoff — all tested. This section is the
+GPU-only remainder (design m5 §4.2).
+
+- 6.1 `NcclCommunicator` (+NVLS/symmetric-memory — required, not optional, m5 D2);
+  dedicated non-rank driver process wired over shm/zmq; per-step driver budget ≤1 ms
+  measured.
+- 6.2 Sharded FP8 70B load (per-rank safetensors); FlashInfer paged attention under
+  head-sharded KV; pool sized min-over-ranks (m5 D1).
+- 6.3 Decode CUDA-graph capture per TP topology (A4 prerequisite, m5 §3).
+- Gate A1: `bench/parity_tp.py` 8B TP=2 vs TP=1, overlap ON/OFF.
+- Gate A2: 70B TP=4/8 vs TP=2 match-rate ≥99% + logprob tolerance.
+- Gates A3–A5: `bench/serving_bench.py --sweep-tp 2,4,8` (TP=2 base in same file;
+  conc-64 report-only point).
+- Gate A6: vs pinned vLLM TP=4/8 (ShareGPT@128 + shared-prefix trace).
+- Gate A7: `bench/multiturn_prefix.py --tensor-parallel N` and `--pd`.
+- Gates A8–A9: `--dp-replicas 2` + `multiturn_prefix.py --replicas 2`; DP-vs-TP sweep.
+- Gate A10: `bench/pd_mixed.py` (stream-copy KVHandoff on side stream; ≤5 ms p99).
+
+## 7. M6 — 2-node day(s), IB/RoCE ≥400Gb/s (prereq: all M5 gates; goal G2 gates B1–B5)
+
+CPU half already merged: ClusterSpec, KVTransport protocol + LocalFabric +
+TCP-loopback, `bench/kv_transfer_bench.py` (CPU-runnable), `openai_backend` remote-
+replica fixes (real SSE, pooled client, optional auth, token counts).
+
+- 7.1 Record fabric truth: raw microbench via `kv_transfer_bench.py` →
+  `bench/results/env-<date>.json` (measured, not nominal, link rate).
+- Gate B1 (first — validates harness): 2-node DP via ReplicaPool over remote
+  `openai` backends; goodput ≥1.85×; router p99 <10 ms incl. hop; cross-node affinity
+  hit rate reported.
+- Gate B2: transport bake-off (NCCL p2p + staging ring vs UCX/RDMA SGL) on the REAL
+  sharded fragment layout; sustained ≥20 GB/s, ≤8 µs/token.
+- Gate B3: inter-node P-D — execute-hooked chunk sends, layer-group streaming for the
+  final chunk, P-D prefill chunk budget ≤1024; TTFT inflation ≤20%.
+- Gate B4: PP=2 via `PipelinedModelRunner` (async submit/handle, two in-flight steps,
+  full decode batches per stage); TPOT inflation ≤10%, throughput ≥1.6×, bubble
+  fraction reported. Serial-commit correctness pass first (m3 §2.1 precedent).
+- Gate B5: vLLM comparison for PP=2 and 2-node DP only (m6 §3 pins the set).
+
+## 8. Human sign-off checklist for G2 (blocking)
+
+- [ ] `docs/design/m5-intra-node-parallelism.md` (agent-reviewed, amendments applied)
+- [ ] `docs/design/m6-inter-node-parallelism.md` (same)
+- [ ] All M5 gates green, results pushed
+- [ ] All M6 gates green, results pushed

@@ -1,6 +1,7 @@
 import asyncio
 
 import httpx
+import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
@@ -53,6 +54,40 @@ async def test_concurrent_requests_are_continuously_batched():
 def test_registered_as_kairyu_backend():
     backend = create_backend("kairyu", num_pages=64)
     assert isinstance(backend, KairyuBackend)
+
+
+def test_tensor_parallel_size_recorded():
+    backend = KairyuBackend(num_pages=64, tensor_parallel_size=2)
+    assert backend.tensor_parallel_size == 2
+
+
+@pytest.mark.parametrize("degree", [0, 3])
+def test_tensor_parallel_size_rejects_invalid_degrees(degree):
+    with pytest.raises(ValueError):
+        KairyuBackend(num_pages=64, tensor_parallel_size=degree)
+
+
+async def test_tp2_greedy_output_equals_tp1():
+    # Deterministic toy ranks + FakeCommunicator: TP must not change sampling
+    # (design m5 D1: same step, identical samples on every rank).
+    prompts = ["hello world from kairyu", "another prompt entirely"]
+    results = {}
+    for degree in (1, 2):
+        backend = KairyuBackend(num_pages=256, tensor_parallel_size=degree)
+        outputs = await asyncio.gather(
+            *(
+                backend.generate(_request(f"tp{degree}-{i}", prompt, max_tokens=5))
+                for i, prompt in enumerate(prompts)
+            )
+        )
+        results[degree] = [result.completions[0].token_ids for result in outputs]
+    assert results[1] == results[2]
+
+
+def test_registry_forwards_tensor_parallel_size():
+    backend = create_backend("kairyu", num_pages=64, tensor_parallel_size=4)
+    assert isinstance(backend, KairyuBackend)
+    assert backend.tensor_parallel_size == 4
 
 
 async def test_full_stack_openai_server_over_engine_core():

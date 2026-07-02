@@ -35,10 +35,14 @@ def _default_backend(args: AsyncEngineArgs) -> EngineBackend:
     if importlib.util.find_spec("vllm") is not None:
         from kairyu.engine.vllm_backend import VLLMBackend
 
-        return VLLMBackend(model=args.model, enable_prefix_caching=args.enable_prefix_caching)
+        return VLLMBackend(
+            model=args.model,
+            enable_prefix_caching=args.enable_prefix_caching,
+            tensor_parallel_size=args.tensor_parallel_size,
+        )
     from kairyu.engine.mock import MockBackend
 
-    return MockBackend()
+    return MockBackend(tensor_parallel_size=args.tensor_parallel_size)
 
 
 class AsyncLLMEngine:

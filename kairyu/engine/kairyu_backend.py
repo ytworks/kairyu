@@ -16,8 +16,10 @@ import asyncio
 from collections.abc import AsyncIterator, Mapping
 
 from kairyu.engine.backend import GenerationRequest, GenerationResult
+from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
+from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput
 
@@ -58,12 +60,26 @@ class KairyuBackend:
         page_size: int = 16,
         max_num_batched_tokens: int = 2048,
         runner: object | None = None,
+        tensor_parallel_size: int = 1,
     ) -> None:
+        validate_tp_degree(tensor_parallel_size)
+        self.tensor_parallel_size = tensor_parallel_size
         self._cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
         self._scheduler = Scheduler(
             self._cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
         )
-        self._runner = runner or _ToyRunner()
+        if tensor_parallel_size > 1:
+            # CPU-testable TP path (design m5 D1/D3): deterministic rank runners
+            # over a FakeCommunicator group; outputs are identical to TP=1.
+            self._runner = TPModelRunner(
+                rank_runners=tuple(
+                    (runner if runner is not None else _ToyRunner())
+                    for _ in range(tensor_parallel_size)
+                ),
+                comms=FakeCommunicator.create_group(tensor_parallel_size),
+            )
+        else:
+            self._runner = runner or _ToyRunner()
         self._queues: dict[str, asyncio.Queue] = {}
         self._pump_task: asyncio.Task | None = None
 

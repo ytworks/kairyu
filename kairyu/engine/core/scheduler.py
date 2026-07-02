@@ -175,6 +175,38 @@ class Scheduler:
     def output_tokens(self, request_id: str) -> tuple[int, ...]:
         return tuple(self._states[request_id].outputs)
 
+    def resume_with_kv(
+        self, request: EngineRequest, allocation: KVAllocation, first_token: int
+    ) -> bool:
+        """Adopt a request whose prompt KV was computed elsewhere (P-D handoff, m5 D5).
+
+        The allocation must come from THIS scheduler's cache and cover the
+        prompt. State is constructed directly: ``computed_prompt = prompt_len``
+        bypasses the recompute-last-token rule (token 0 is adopted, never
+        re-sampled) and non-empty ``outputs`` shields the request from
+        recompute-preemption — both load-bearing invariants of the P-D design.
+        Returns True if the request finished immediately (EOS / max_new_tokens).
+        """
+        if request.request_id in self._states:
+            raise ValueError(f"duplicate request_id {request.request_id!r}")
+        if allocation.tokens != request.prompt_token_ids:
+            raise ValueError(
+                f"allocation covers tokens {allocation.tokens!r}, "
+                f"not this request's prompt"
+            )
+        state = _RequestState(request)
+        state.status = _Status.RUNNING
+        state.computed_prompt = state.prompt_len
+        state.outputs.append(first_token)
+        state.allocation = allocation
+        self._states[request.request_id] = state
+        self._running.append(request.request_id)
+        is_eos = request.eos_token_id is not None and first_token == request.eos_token_id
+        if is_eos or len(state.outputs) >= request.max_new_tokens:
+            self._finish(state)
+            return True
+        return False
+
     def _ensure_decode_capacity(self, state: _RequestState) -> bool:
         needed_tokens = state.prompt_len + len(state.outputs) + state.in_flight + 1
         while state.capacity_tokens(self._page_size) < needed_tokens:

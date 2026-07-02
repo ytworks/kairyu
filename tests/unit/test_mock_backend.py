@@ -1,3 +1,7 @@
+import importlib.util
+
+import pytest
+
 from kairyu import SamplingParams
 from kairyu.engine.backend import CacheHint, GenerationRequest
 from kairyu.engine.mock import MockBackend
@@ -63,3 +67,41 @@ async def test_call_log_records_prompts():
     await backend.generate(_request("first"))
     await backend.generate(_request("second"))
     assert [p for p in backend.prompts_seen] == ["first", "second"]
+
+
+def test_tensor_parallel_size_recorded_for_plumbing_assertions():
+    assert MockBackend().tensor_parallel_size == 1
+    assert MockBackend(tensor_parallel_size=4).tensor_parallel_size == 4
+
+
+def test_tensor_parallel_size_below_one_rejected():
+    with pytest.raises(ValueError, match="tensor_parallel_size"):
+        MockBackend(tensor_parallel_size=0)
+
+
+def test_llm_default_backend_forwards_tensor_parallel_size(monkeypatch):
+    from kairyu.entrypoints import llm as llm_module
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    backend = llm_module._default_backend("m", None, tensor_parallel_size=3)
+    assert isinstance(backend, MockBackend)
+    assert backend.tensor_parallel_size == 3
+
+
+def test_llm_constructor_forwards_tensor_parallel_size(monkeypatch):
+    from kairyu.entrypoints.llm import LLM
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    llm = LLM(model="m", tensor_parallel_size=2)
+    assert isinstance(llm.backend, MockBackend)
+    assert llm.backend.tensor_parallel_size == 2
+
+
+def test_async_engine_default_backend_forwards_tensor_parallel_size(monkeypatch):
+    from kairyu.entrypoints import async_engine
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    args = async_engine.AsyncEngineArgs(model="m", tensor_parallel_size=2)
+    backend = async_engine._default_backend(args)
+    assert isinstance(backend, MockBackend)
+    assert backend.tensor_parallel_size == 2

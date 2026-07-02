@@ -13,6 +13,8 @@ Run: uv run python bench/multiturn_prefix.py
 
 from __future__ import annotations
 
+import argparse
+import json
 import random
 
 from kairyu.engine.core.radix_kv import RadixKVCache
@@ -25,7 +27,35 @@ SYSTEM_PROMPT_TOKENS = 512  # shared prefix across every session
 TURN_TOKENS = 128  # user turn + assistant reply appended per turn
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    # M5 topology labels (design m5 D6); recorded in the run config for G2 §8.
+    # The GPU phase wires them into engine behavior (A7/A8 measurement modes).
+    parser.add_argument("--replicas", type=int, default=1,
+                        help="DP replica count for the A8 affinity mode (results label)")
+    parser.add_argument("--tensor-parallel", type=int, default=1,
+                        help="TP degree for the A7 hit-rate mode (results label)")
+    parser.add_argument("--pd", action="store_true",
+                        help="measure under the prefill-decode split (results label)")
+    return parser
+
+
+def build_run_config(args: argparse.Namespace) -> dict:
+    """Run config embedded in results so files carry topology (G2 §8, design m5 D6)."""
+    return {
+        "sessions": NUM_SESSIONS,
+        "turns_per_session": TURNS_PER_SESSION,
+        "system_prompt_tokens": SYSTEM_PROMPT_TOKENS,
+        "turn_tokens": TURN_TOKENS,
+        "replicas": args.replicas,
+        "tensor_parallel": args.tensor_parallel,
+        "pd": args.pd,
+    }
+
+
 def main() -> None:
+    args = build_parser().parse_args()
+    print(f"config={json.dumps(build_run_config(args))}")
     rng = random.Random(42)
     cache = RadixKVCache(num_pages=NUM_PAGES, page_size=PAGE_SIZE)
     system_prompt = tuple(range(SYSTEM_PROMPT_TOKENS))

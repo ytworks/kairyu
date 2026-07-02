@@ -19,14 +19,20 @@ from kairyu.sampling_params import SamplingParams
 _DEFAULT_PARAMS = SamplingParams()
 
 
-def _default_backend(model: str, enable_prefix_caching: bool | None) -> EngineBackend:
+def _default_backend(
+    model: str, enable_prefix_caching: bool | None, tensor_parallel_size: int = 1
+) -> EngineBackend:
     if importlib.util.find_spec("vllm") is not None:
         from kairyu.engine.vllm_backend import VLLMBackend
 
-        return VLLMBackend(model=model, enable_prefix_caching=enable_prefix_caching)
+        return VLLMBackend(
+            model=model,
+            enable_prefix_caching=enable_prefix_caching,
+            tensor_parallel_size=tensor_parallel_size,
+        )
     from kairyu.engine.mock import MockBackend
 
-    return MockBackend()
+    return MockBackend(tensor_parallel_size=tensor_parallel_size)
 
 
 class LLM:
@@ -52,7 +58,9 @@ class LLM:
         self.enable_prefix_caching = enable_prefix_caching
         self.trust_remote_code = trust_remote_code
         self.engine_kwargs = dict(engine_kwargs)
-        self.backend = backend or _default_backend(model, enable_prefix_caching)
+        self.backend = backend or _default_backend(
+            model, enable_prefix_caching, tensor_parallel_size
+        )
 
     def _normalize(
         self,

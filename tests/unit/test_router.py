@@ -68,3 +68,37 @@ def test_jsonl_router_log_records_decision(tmp_path):
     assert line["features"]["char_len"] == len(SIMPLE_QUERY)
     assert "query_sha256" in line
     assert SIMPLE_QUERY not in json.dumps(line)  # raw text is not logged
+
+
+def test_record_replica_hashes_session_id(tmp_path):
+    import hashlib
+
+    log_path = tmp_path / "router.jsonl"
+    log = JsonlRouterLog(log_path)
+    log.record_replica("session-42", 1, "session_affinity")
+    line = json.loads(log_path.read_text().splitlines()[0])
+    assert line["kind"] == "replica"
+    assert line["session_sha256"] == hashlib.sha256(b"session-42").hexdigest()
+    assert line["replica"] == 1
+    assert line["reason"] == "session_affinity"
+    assert "session-42" not in log_path.read_text()  # raw session id is never stored
+
+
+def test_record_replica_without_session_logs_null_hash(tmp_path):
+    log_path = tmp_path / "router.jsonl"
+    log = JsonlRouterLog(log_path)
+    log.record_replica(None, 0, "least_outstanding")
+    line = json.loads(log_path.read_text().splitlines()[0])
+    assert line["kind"] == "replica"
+    assert line["session_sha256"] is None
+    assert line["replica"] == 0
+
+
+def test_record_replica_entries_are_ignored_by_dataset_builder(tmp_path):
+    from kairyu.orchestration.learning.dataset import build_dataset
+
+    log_path = tmp_path / "router.jsonl"
+    log = JsonlRouterLog(log_path)
+    log.record_replica("session-42", 1, "session_affinity")
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert build_dataset(records) == ()  # kind filter keeps the corpus clean (m5 D4)
