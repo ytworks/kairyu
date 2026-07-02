@@ -130,3 +130,19 @@ def test_private_page_allocation_evicts_when_needed():
     assert page is not None
     with pytest.raises(KVCacheFull):
         cache.allocate_private_page()
+
+
+def test_multiturn_history_reuse_hits_above_80_percent():
+    """Multi-turn shape: shared system prompt + growing per-session history."""
+    cache = RadixKVCache(num_pages=2048, page_size=PAGE)
+    system_prompt = tuple(range(64))
+    histories: dict[int, tuple[int, ...]] = {s: () for s in range(8)}
+    for turn in range(6):
+        for session in range(8):
+            new_turn = tuple(
+                1_000_000 + session * 100_000 + turn * 1_000 + j for j in range(16)
+            )
+            prompt = system_prompt + histories[session] + new_turn
+            cache.free(cache.allocate(prompt))
+            histories[session] = histories[session] + new_turn
+    assert cache.hit_rate > 0.80

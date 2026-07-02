@@ -102,3 +102,40 @@ def test_decode_output_tokens_are_recorded():
     finished = scheduler.update({"a": 102})
     assert finished == ("a",)
     assert scheduler.output_tokens("a") == (100, 101, 102)
+
+
+def test_pd_separation_gives_prefill_and_decode_independent_budgets():
+    cache = RadixKVCache(num_pages=256, page_size=PAGE)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=8,
+        max_num_seqs=8,
+        pd_separation=True,
+        decode_token_budget=2,
+    )
+    # three requests reach decode phase
+    for i in range(3):
+        prompt = tuple(range(i * 100 + 1, i * 100 + 3))
+        scheduler.add_request(EngineRequest(f"d{i}", prompt, max_new_tokens=4))
+    scheduler.schedule()
+    scheduler.update({"d0": 1, "d1": 1, "d2": 1})
+    scheduler.add_request(_request("p", prompt_len=20))
+    step = scheduler.schedule()
+    decodes = [c for c in step.scheduled if not c.is_prefill]
+    prefills = [c for c in step.scheduled if c.is_prefill]
+    assert len(decodes) == 2  # capped by decode budget, third decode waits
+    assert prefills[0].num_tokens == 8  # full prefill budget, not reduced by decodes
+
+
+def test_combined_mode_decodes_consume_shared_budget():
+    cache = RadixKVCache(num_pages=256, page_size=PAGE)
+    scheduler = Scheduler(cache, max_num_batched_tokens=8, max_num_seqs=8)
+    for i in range(3):
+        prompt = tuple(range(i * 100 + 1, i * 100 + 3))
+        scheduler.add_request(EngineRequest(f"d{i}", prompt, max_new_tokens=4))
+    scheduler.schedule()
+    scheduler.update({"d0": 1, "d1": 1, "d2": 1})
+    scheduler.add_request(_request("p", prompt_len=20))
+    step = scheduler.schedule()
+    prefills = [c for c in step.scheduled if c.is_prefill]
+    assert prefills[0].num_tokens == 5  # 8 - 3 decodes
