@@ -15,6 +15,7 @@ _Last updated: 2026-07-02_
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
+| M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **In progress.** Design drafted (`docs/design/m7-productionization.md`, goal G3). CPU-verifiable scope: server hardening, `kairyu serve` + DeploymentSpec, compose topology, batch API, deployment guide. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -24,6 +25,28 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 `docs/gpu-runbook.md`. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-02 — [design] M7 productionization designed (G3 goal, D1–D8); G2 2-node scope clarified
+- What: Wrote `docs/goals/g3-production-deployment.md` (gates C1–C7) and
+  `docs/design/m7-productionization.md`. Decisions: D1 on-prem-DC topology (managed
+  cloud WAF/LB front → private interconnect → stateless CPU gateway tier running
+  `create_app` + Orchestrator + ReplicaPool of remote `openai`-backend replicas → N GPU
+  replica nodes running the same artifact); D2 no Kubernetes — systemd + docker compose
+  with everything containerized and documented k3s revisit triggers; D3 new
+  `DeploymentSpec` (ClusterSpec untouched — it binds the TP/PP coherence domain, not
+  fleet size); D4 health/readyz/metrics + serve-layer background prober (pool stays
+  passive); D5 edge-owned WAF/TLS, gateway static API keys + concurrency guard, keyless
+  node-to-node; D6 cache layer = per-replica radix KV + pool session affinity, no Redis
+  (revisit trigger recorded) — includes fixing the gap that the HTTP path never set
+  `cache_hint`; D7 minimal filesystem-backed `/v1/files` + `/v1/batches`; D8
+  prometheus-client + stdlib JSON logs, no OTel.
+- Why: The product-infrastructure review (LB/scaling, WAF, k8s, GPU pool + API layer,
+  cache layer, batch orchestrator, DC–cloud interconnect) found all deployment
+  machinery absent: components exist in-process (ReplicaPool, remote-replica backend)
+  but nothing wires, launches, secures, observes, or packages them.
+- Refs: `docs/goals/g3-production-deployment.md`, `docs/design/m7-productionization.md`;
+  amendment: g2 §6 "exactly 2 nodes" clarified as TP/PP coherence-domain cap, not a
+  ReplicaPool fleet-size cap (`docs/goals/g2-multi-gpu.md` §6, G3 §5).
 
 ### 2026-07-02 — [progress] Repo renamed to `ytworks/kairyu`; README refreshed for M5/M6
 - What: GitHub repository renamed from `ytworks/rLLM` to `ytworks/kairyu` (local origin
