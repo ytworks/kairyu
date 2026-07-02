@@ -7,7 +7,7 @@ command-level plan for the first GPU session. Est. scope: 2–4 focused days.
 
 ```bash
 # Ubuntu 22.04+, CUDA 12.4+, driver >= 550
-git clone <repo> && cd rLLM
+git clone https://github.com/ytworks/kairyu.git && cd kairyu
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --dev                          # 177 CPU tests must pass here first
 uv run pytest                          # gate 0: green before any GPU work

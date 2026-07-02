@@ -25,6 +25,13 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 
 ## Change Log
 
+### 2026-07-02 — [progress] Repo renamed to `ytworks/kairyu`; README refreshed for M5/M6
+- What: GitHub repository renamed from `ytworks/rLLM` to `ytworks/kairyu` (local origin
+  updated). README brought up to date: M5/M6 rows in the roadmap, TP / P-D / KV-transport /
+  PP components in architecture, engine-core and project-layout sections, test count 290+,
+  clone URL. Remaining `rLLM` references in CLAUDE.md / AGENTS.md / gpu-runbook fixed.
+- Refs: README.md, CLAUDE.md, AGENTS.md, docs/gpu-runbook.md
+
 ### 2026-07-02 — [progress] M5/M6 GPU-independent halves implemented (177 → 289 tests)
 - What: All CPU-testable pieces of both designs landed with tests (95% coverage):
   M5 — `Communicator`/`FakeCommunicator`, typed immutable `StepInput`, `TPModelRunner`
