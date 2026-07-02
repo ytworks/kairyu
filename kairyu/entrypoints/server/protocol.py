@@ -28,6 +28,7 @@ class ChatCompletionRequest(BaseModel):
     seed: int | None = None
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
+    response_format: dict | None = None
 
 
 class FunctionCall(BaseModel):

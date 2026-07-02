@@ -210,3 +210,26 @@ async def test_backend_error_returns_openai_error_envelope():
     error = response.json()["error"]
     assert "key missing" in error["message"]
     assert error["type"] == "upstream_error"
+
+
+async def test_response_format_passes_through_to_engine():
+    class CapturingBackend(StubBackend):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        async def generate(self, request):
+            self.seen = request
+            return await super().generate(request)
+
+    engine = CapturingBackend()
+    app = create_app(engines={"stub": engine})
+    body = _chat_body("give me json")
+    body["model"] = "stub"
+    body["response_format"] = {"type": "json_object"}
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 200
+    assert engine.seen.sampling_params.extra_args["response_format"] == {
+        "type": "json_object"
+    }
