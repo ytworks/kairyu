@@ -1,0 +1,212 @@
+import json
+
+import httpx
+import pytest
+
+from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints.server.app import create_app
+from kairyu.orchestration.orchestrator import Orchestrator
+
+TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
+
+
+def _client(app) -> httpx.AsyncClient:
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+@pytest.fixture()
+def app():
+    engines = {
+        "kairyu-mock": MockBackend(responses={"weather": TOOL_CALL_TEXT}),
+    }
+    orchestrator = Orchestrator(engines={"tier1": MockBackend(), "tier2": MockBackend()})
+    return create_app(engines=engines, orchestrator=orchestrator)
+
+
+def _chat_body(content: str, **extra) -> dict:
+    return {
+        "model": "kairyu-mock",
+        "messages": [{"role": "user", "content": content}],
+        **extra,
+    }
+
+
+async def test_models_endpoint_lists_engines_and_auto(app):
+    async with _client(app) as client:
+        response = await client.get("/v1/models")
+    assert response.status_code == 200
+    ids = [m["id"] for m in response.json()["data"]]
+    assert "kairyu-mock" in ids
+    assert "kairyu-auto" in ids
+
+
+async def test_chat_completion_happy_path(app):
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=_chat_body("hello"))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "chat.completion"
+    assert data["model"] == "kairyu-mock"
+    assert data["choices"][0]["message"]["role"] == "assistant"
+    assert data["choices"][0]["message"]["content"]
+    assert data["choices"][0]["finish_reason"] == "stop"
+    assert data["usage"]["total_tokens"] >= 0
+
+
+async def test_streaming_reassembles_to_full_answer(app):
+    async with _client(app) as client:
+        full = (await client.post("/v1/chat/completions", json=_chat_body("hello"))).json()
+        full_text = full["choices"][0]["message"]["content"]
+        response = await client.post(
+            "/v1/chat/completions", json=_chat_body("hello", stream=True)
+        )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+    assert lines[-1] == "data: [DONE]"
+    deltas = []
+    for line in lines[:-1]:
+        chunk = json.loads(line[len("data: "):])
+        assert chunk["object"] == "chat.completion.chunk"
+        delta = chunk["choices"][0]["delta"]
+        deltas.append(delta.get("content") or "")
+    assert "".join(deltas) == full_text
+
+
+async def test_tool_call_is_parsed_into_openai_schema(app):
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "get_weather", "parameters": {"type": "object"}},
+        }
+    ]
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions", json=_chat_body("what is the weather?", tools=tools)
+        )
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    tool_call = choice["message"]["tool_calls"][0]
+    assert tool_call["type"] == "function"
+    assert tool_call["function"]["name"] == "get_weather"
+    assert json.loads(tool_call["function"]["arguments"]) == {"city": "Tokyo"}
+
+
+async def test_kairyu_auto_routes_through_orchestrator(app):
+    body = _chat_body("What is the capital of France?")
+    body["model"] = "kairyu-auto"
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"]
+
+
+async def test_unknown_model_returns_404(app):
+    body = _chat_body("hi")
+    body["model"] = "ghost"
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 404
+    assert "ghost" in response.json()["error"]["message"]
+
+
+async def test_invalid_body_returns_422(app):
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json={"model": "kairyu-mock"})
+    assert response.status_code == 422
+
+
+class StubBackend:
+    """Fixed completions / optional failure, for finish_reason and error tests."""
+
+    def __init__(self, text="stub answer", finish_reason="length", error=None):
+        self._text = text
+        self._finish_reason = finish_reason
+        self._error = error
+
+    async def generate(self, request):
+        from kairyu.engine.backend import GenerationResult
+        from kairyu.outputs import CompletionOutput
+
+        if self._error is not None:
+            raise self._error
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0, text=self._text, token_ids=(), finish_reason=self._finish_reason
+                ),
+            ),
+        )
+
+    async def stream(self, request):
+        yield await self.generate(request)
+
+    async def shutdown(self):
+        return None
+
+
+async def test_streaming_with_n_gt_1_emits_all_choice_indexes(app):
+    async with _client(app) as client:
+        full = (
+            await client.post("/v1/chat/completions", json=_chat_body("hello", n=2))
+        ).json()
+        response = await client.post(
+            "/v1/chat/completions", json=_chat_body("hello", n=2, stream=True)
+        )
+    lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+    texts: dict[int, str] = {}
+    for line in lines[:-1]:
+        chunk = json.loads(line[len("data: "):])
+        for choice in chunk["choices"]:
+            texts[choice["index"]] = texts.get(choice["index"], "") + (
+                choice["delta"].get("content") or ""
+            )
+    expected = {c["index"]: c["message"]["content"] for c in full["choices"]}
+    assert texts == expected
+    assert set(texts) == {0, 1}
+
+
+async def test_streaming_with_tools_signals_tool_calls(app):
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("what is the weather?", tools=tools, stream=True),
+        )
+    lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+    chunks = [json.loads(line[len("data: "):]) for line in lines[:-1]]
+    finish_reasons = [
+        choice["finish_reason"] for chunk in chunks for choice in chunk["choices"]
+    ]
+    assert "tool_calls" in finish_reasons
+    tool_deltas = [
+        choice["delta"].get("tool_calls")
+        for chunk in chunks
+        for choice in chunk["choices"]
+        if choice["delta"].get("tool_calls")
+    ]
+    assert tool_deltas[0][0]["function"]["name"] == "get_weather"
+
+
+async def test_backend_finish_reason_passes_through():
+    app = create_app(engines={"stub": StubBackend(finish_reason="length")})
+    async with _client(app) as client:
+        body = _chat_body("hi")
+        body["model"] = "stub"
+        response = await client.post("/v1/chat/completions", json=body)
+    assert response.json()["choices"][0]["finish_reason"] == "length"
+
+
+async def test_backend_error_returns_openai_error_envelope():
+    app = create_app(engines={"stub": StubBackend(error=RuntimeError("key missing"))})
+    async with _client(app) as client:
+        body = _chat_body("hi")
+        body["model"] = "stub"
+        response = await client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 502
+    error = response.json()["error"]
+    assert "key missing" in error["message"]
+    assert error["type"] == "upstream_error"
