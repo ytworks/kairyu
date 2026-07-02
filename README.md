@@ -150,6 +150,148 @@ Endpoints: `GET /v1/models`, `POST /v1/chat/completions` — with SSE streaming
 enforced by an xgrammar token bitmask on the `kairyu` backend). The reserved model name
 `kairyu-auto` routes through the Orchestrator; concrete engine names bypass L2.
 
+## Using open models (Kimi, Qwen, Llama, …)
+
+Open-weight models plug in through two backends, chosen per worker:
+
+- **`vllm`** — weights run on a local GPU via `vllm.AsyncLLMEngine` (prefix caching on by
+  default).
+- **`openai`** — any OpenAI-compatible endpoint: hosted APIs (Moonshot for Kimi, Together,
+  Fireworks, Groq, OpenRouter, …) or a server you run yourself (`vllm serve`, SGLang,
+  Ollama).
+
+Model names below are illustrative — check your provider's docs for current identifiers.
+
+### Single model
+
+**Local GPU (vLLM backend).** With vLLM installed, `LLM` auto-selects it; construct
+`VLLMBackend` explicitly to pass extra `AsyncEngineArgs` (tensor parallelism etc.):
+
+```python
+from kairyu import LLM, SamplingParams
+from kairyu.engine.vllm_backend import VLLMBackend
+
+# simplest — vLLM auto-detected when installed
+llm = LLM(model="Qwen/Qwen2.5-7B-Instruct")
+
+# explicit backend for engine args (e.g. a large MoE across GPUs)
+backend = VLLMBackend(model="moonshotai/Kimi-K2-Instruct",
+                      tensor_parallel_size=8, trust_remote_code=True)
+llm = LLM(model="moonshotai/Kimi-K2-Instruct", backend=backend)
+```
+
+**Hosted API (OpenAI-compatible backend).** Kimi K2 is a ~1T-parameter MoE, so most setups
+use Moonshot's API (or another provider) instead of local weights. The API key is read
+from the environment variable named by `api_key_env` — never hardcoded:
+
+```bash
+export MOONSHOT_API_KEY=sk-...
+```
+
+```python
+from kairyu import LLM, SamplingParams
+from kairyu.engine.openai_backend import OpenAICompatBackend
+
+backend = OpenAICompatBackend(
+    base_url="https://api.moonshot.ai/v1",
+    model="kimi-k2-0905-preview",
+    api_key_env="MOONSHOT_API_KEY",
+)
+llm = LLM(model="kimi-k2", backend=backend)
+outputs = llm.generate(["Explain paged KV caching in two sentences."],
+                       SamplingParams(max_tokens=128))
+print(outputs[0].outputs[0].text)
+```
+
+**Your own server.** The same backend points at any self-hosted OpenAI-compatible server —
+useful when Kairyu runs on a laptop and the GPU box lives elsewhere:
+
+```bash
+# on the GPU box
+vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000
+# on the Kairyu side — the env var must exist even if the server ignores auth
+export LOCAL_LLM_API_KEY=unused
+```
+
+```python
+backend = OpenAICompatBackend(
+    base_url="http://gpu-box:8000/v1",
+    model="Qwen/Qwen2.5-7B-Instruct",
+    api_key_env="LOCAL_LLM_API_KEY",
+)
+```
+
+### Multi-model orchestration
+
+The Router's targets are the worker names `tier1` (light/cheap) and `tier2`
+(frontier/strong), plus `multi_agent` for role-DAG dispatch — so a typical mixed pool puts
+a small local open model on `tier1` and Kimi on `tier2`. Declaratively:
+
+```yaml
+# pool.yaml
+workers:
+  - name: tier1                      # easy queries: local open model on your GPU
+    backend: vllm
+    model: Qwen/Qwen2.5-7B-Instruct
+    options:                         # extra kwargs forwarded to the backend constructor
+      gpu_memory_utilization: 0.85
+  - name: tier2                      # hard queries + planner/verifier roles: Kimi K2
+    backend: openai
+    model: kimi-k2-0905-preview
+    base_url: https://api.moonshot.ai/v1
+    api_key_env: MOONSHOT_API_KEY
+
+roles:
+  - name: planner
+    worker: tier2
+    role_type: planner
+    prompt: "[planner] Break the task into a short plan.\nTask: {query}"
+  - name: worker
+    worker: tier1
+    prompt: "[worker] Execute the plan.\nPlan: {planner}\nTask: {query}"
+    depends_on: [planner]
+  - name: synthesizer
+    worker: tier2
+    role_type: synthesizer
+    prompt: "[synthesizer] Final answer.\nDraft: {worker}\nTask: {query}"
+    depends_on: [worker]
+
+budget:
+  max_steps: 12
+  max_cost_usd: 0.50                 # hard cap for one orchestrated request
+  cost_per_1k_chars_usd: 0.002
+```
+
+```python
+from kairyu.dsl.loader import build_orchestrator, load_spec
+
+orchestrator = build_orchestrator(load_spec("pool.yaml"))
+result = orchestrator.run_sync("Compare radix-tree and hash-based KV prefix sharing.")
+print(result.route.target, result.text)
+```
+
+Or programmatically, mixing backends freely:
+
+```python
+from kairyu import Orchestrator
+from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.engine.vllm_backend import VLLMBackend
+
+orchestrator = Orchestrator(engines={
+    "tier1": VLLMBackend(model="Qwen/Qwen2.5-7B-Instruct"),
+    "tier2": OpenAICompatBackend(
+        base_url="https://api.moonshot.ai/v1",
+        model="kimi-k2-0905-preview",
+        api_key_env="MOONSHOT_API_KEY",
+    ),
+})
+```
+
+Short queries route to the local Qwen worker; long or multi-step queries escalate to Kimi
+or the role DAG (thresholds are configurable via `RouteThresholds` in
+`kairyu/orchestration/router.py`). To serve the pool over HTTP, pass the orchestrator to
+`create_app` as in [`examples/serve.py`](examples/serve.py) and call model `kairyu-auto`.
+
 ## Engine core (`kairyu.engine.core`)
 
 The custom engine behind backend name `kairyu`, developed CPU-first so every component is
