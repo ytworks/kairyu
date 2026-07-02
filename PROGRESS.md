@@ -26,6 +26,19 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 
 ## Change Log
 
+### 2026-07-02 — [progress] M7 Phase 1: server hardening landed
+- What: `/health`, `/readyz` (pool-aware: 503 unless every ReplicaPool has ≥1 healthy
+  replica), `/metrics` (per-app Prometheus registry; request counts/latency histograms,
+  scrape-time pool collector for outstanding/health/decision counts), optional static
+  API-key auth (env-sourced, constant-time, health endpoints exempt), global concurrency
+  guard (429 + Retry-After on /v1/*), JSON access log with X-Request-ID — all pure-ASGI
+  middleware so SSE streams hold their concurrency slot to the last byte. `create_app`
+  gains an optional `ServerSettings`; defaults preserve pre-M7 behavior. `ReplicaPool`
+  gains read-only `healthy`/`replica_count`/`decision_counts` accessors (still no
+  background tasks, m5 D4). New dep: prometheus-client.
+- Refs: m7 D4/D5/D8; `kairyu/entrypoints/server/{health,metrics,middleware,settings}.py`,
+  `kairyu/orchestration/replica.py`; tests `tests/server/test_{health_metrics,auth,limits}.py`
+
 ### 2026-07-02 — [design] M7 productionization designed (G3 goal, D1–D8); G2 2-node scope clarified
 - What: Wrote `docs/goals/g3-production-deployment.md` (gates C1–C7) and
   `docs/design/m7-productionization.md`. Decisions: D1 on-prem-DC topology (managed

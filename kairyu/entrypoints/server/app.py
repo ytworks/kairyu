@@ -12,11 +12,19 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from kairyu.engine.backend import EngineBackend, GenerationRequest
 from kairyu.entrypoints.chat_template import render_chat
+from kairyu.entrypoints.server.health import add_health_routes
+from kairyu.entrypoints.server.metrics import ServerMetrics
+from kairyu.entrypoints.server.middleware import (
+    AccessLogMiddleware,
+    AuthMiddleware,
+    ConcurrencyLimitMiddleware,
+    MetricsMiddleware,
+)
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionChunk,
     ChatCompletionRequest,
@@ -31,7 +39,9 @@ from kairyu.entrypoints.server.protocol import (
     ToolCall,
     Usage,
 )
+from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.replica import ReplicaPool
 from kairyu.sampling_params import SamplingParams
 
 AUTO_MODEL = "kairyu-auto"
@@ -208,9 +218,33 @@ async def _stream_choices(choices: list[Choice], model: str) -> AsyncIterator[st
 def create_app(
     engines: Mapping[str, EngineBackend],
     orchestrator: Orchestrator | None = None,
+    settings: ServerSettings | None = None,
 ) -> FastAPI:
+    settings = settings or ServerSettings()
     app = FastAPI(title="kairyu", version="0.1.0")
     served_engines = dict(engines)
+
+    metrics = ServerMetrics() if settings.metrics else None
+    app.state.metrics = metrics
+    if metrics is not None:
+        for name, engine in served_engines.items():
+            if isinstance(engine, ReplicaPool):
+                metrics.track_pool(name, engine)
+    add_health_routes(app, served_engines, metrics)
+
+    # add_middleware prepends, so add innermost first: metrics -> concurrency
+    # guard -> auth -> access log (outermost).
+    if metrics is not None:
+        app.add_middleware(MetricsMiddleware, metrics=metrics)
+    if settings.max_concurrency is not None:
+        app.add_middleware(ConcurrencyLimitMiddleware, limit=settings.max_concurrency)
+    api_keys = settings.resolve_api_keys()
+    if api_keys:
+        app.add_middleware(
+            AuthMiddleware, api_keys=api_keys, protect_metrics=settings.protect_metrics
+        )
+    if settings.access_log:
+        app.add_middleware(AccessLogMiddleware)
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
@@ -220,7 +254,8 @@ def create_app(
         return ModelList(data=[ModelCard(id=name) for name in names])
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: ChatCompletionRequest):
+    async def chat_completions(request: ChatCompletionRequest, http_request: Request):
+        http_request.state.model = request.model  # label for the metrics middleware
         prompt = render_chat([message.model_dump() for message in request.messages])
         if request.model == AUTO_MODEL and orchestrator is not None:
             try:
