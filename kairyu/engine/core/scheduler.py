@@ -97,6 +97,11 @@ class Scheduler:
     def has_unfinished(self) -> bool:
         return bool(self._waiting or self._running)
 
+    @property
+    def states(self) -> dict[str, _RequestState]:
+        """Read view of request states for the ModelRunner (do not mutate)."""
+        return self._states
+
     def output_tokens(self, request_id: str) -> tuple[int, ...]:
         return tuple(self._states[request_id].outputs)
 
