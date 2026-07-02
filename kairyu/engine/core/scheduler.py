@@ -35,13 +35,24 @@ class _Status(Enum):
 
 
 class _RequestState:
-    __slots__ = ("request", "status", "computed_prompt", "outputs", "allocation", "decode_pages")
+    __slots__ = (
+        "request",
+        "status",
+        "computed_prompt",
+        "outputs",
+        "in_flight",
+        "allocation",
+        "decode_pages",
+    )
 
     def __init__(self, request: EngineRequest) -> None:
         self.request = request
         self.status = _Status.WAITING
         self.computed_prompt = 0
         self.outputs: list[int] = []
+        # sampled tokens scheduled but not yet committed via update() — this is
+        # what lets the overlap loop plan step N+1 before step N's tokens land
+        self.in_flight = 0
         self.allocation: KVAllocation | None = None
         self.decode_pages: list[int] = []
 
@@ -63,6 +74,7 @@ class ScheduledChunk:
     request_id: str
     num_tokens: int
     is_prefill: bool
+    position: int = 0  # decode: output index this chunk produces (overlap-safe)
 
 
 @dataclass(frozen=True)
@@ -112,7 +124,7 @@ class Scheduler:
         return tuple(self._states[request_id].outputs)
 
     def _ensure_decode_capacity(self, state: _RequestState) -> bool:
-        needed_tokens = state.prompt_len + len(state.outputs) + 1
+        needed_tokens = state.prompt_len + len(state.outputs) + state.in_flight + 1
         while state.capacity_tokens(self._page_size) < needed_tokens:
             try:
                 state.decode_pages.append(self._kv.allocate_private_page())
@@ -125,9 +137,19 @@ class Scheduler:
             state = self._states[request_id]
             if not state.prefill_done or budget < 1:
                 continue
+            if len(state.outputs) + state.in_flight >= state.request.max_new_tokens:
+                continue  # everything remaining is already in flight
             if not self._ensure_decode_capacity(state):
                 continue  # no KV space this step; retried next step
-            plan.append(ScheduledChunk(request_id=request_id, num_tokens=1, is_prefill=False))
+            plan.append(
+                ScheduledChunk(
+                    request_id=request_id,
+                    num_tokens=1,
+                    is_prefill=False,
+                    position=len(state.outputs) + state.in_flight,
+                )
+            )
+            state.in_flight += 1
             budget -= 1
         return budget
 
@@ -138,6 +160,8 @@ class Scheduler:
                 continue
             chunk = min(state.prompt_len - state.computed_prompt, budget)
             state.computed_prompt += chunk
+            if state.prefill_done:
+                state.in_flight += 1  # the prompt-completing chunk samples token 0
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
             budget -= chunk
         return budget
@@ -155,6 +179,8 @@ class Scheduler:
             self._running.append(request_id)
             chunk = min(state.prompt_len, budget)
             state.computed_prompt = chunk
+            if state.prefill_done:
+                state.in_flight += 1  # single-chunk prefill samples token 0
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
             budget -= chunk
         return budget
@@ -188,8 +214,14 @@ class Scheduler:
         finished: list[str] = []
         for request_id, token_id in sampled.items():
             state = self._states.get(request_id)
-            if state is None or state.status is not _Status.RUNNING or not state.prefill_done:
+            if (
+                state is None
+                or state.status is not _Status.RUNNING
+                or not state.prefill_done
+                or state.in_flight < 1
+            ):
                 raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
+            state.in_flight -= 1
             state.outputs.append(token_id)
             if len(state.outputs) >= state.request.max_new_tokens:
                 self._finish(state)
