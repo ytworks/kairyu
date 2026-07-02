@@ -13,8 +13,8 @@ _Last updated: 2026-07-02_
 | M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done: scheduler, KV manager, EngineCore step loop, overlap pipeline, pre-GPU robustness (EOS, preemption, abort, pin TTL). Paged-KV attention validated with real tensors on CPU (greedy-equivalence). **Blocked on GPU hardware** for the GPU phase. |
 | M3 — Spec decode / CUDA graphs / P-D separation | n-gram draft spec-decode policy and xgrammar structured output implemented CPU-side. CUDA graphs and the rest gated on M2 GPU phase. |
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
-| M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed (APPROVE-WITH-AMENDMENTS, `docs/design/m5-intra-node-parallelism.md`). CPU half in progress. GPU phase prereq: M2 Gates 1–3. |
-| M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed (APPROVE-WITH-AMENDMENTS, `docs/design/m6-inter-node-parallelism.md`). GPU phase prereq: all M5 gates. |
+| M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
+| M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -24,6 +24,23 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 `docs/gpu-runbook.md`. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-02 — [progress] M5/M6 GPU-independent halves implemented (177 → 289 tests)
+- What: All CPU-testable pieces of both designs landed with tests (95% coverage):
+  M5 — `Communicator`/`FakeCommunicator`, typed immutable `StepInput`, `TPModelRunner`
+  (divergence-checked driver protocol; TP=2 greedy-equivalent to TP=1 through
+  KairyuBackend), `tensor_parallel_size` plumbed end-to-end (no-op resolved),
+  `ReplicaPool` (rendezvous-hash affinity, queue-depth valve, health ejection,
+  `record_replica` JSONL), `PDCoordinator` + `LocalKVHandoff` + `Scheduler.resume_with_kv`
+  (copy-before-commit ordering, preemption shield, P-D greedy-equivalence).
+  M6 — `ClusterSpec` (topology validation), `KVTransport` protocol + `LocalFabric` +
+  TCP-loopback transport, `bench/kv_transfer_bench.py` (CPU-runnable, real fragment
+  layout), `openai_backend` replica fixes (real SSE streaming, pooled client, optional
+  auth, token counts), async submit/handle runner contract + `PipelinedModelRunner`/
+  `PipelinedEngineCore` (inter-step pipelining, bubble accounting: depth-2 <0.2 vs
+  depth-1 ≈0.5 pinned by test). GPU-runbook §6/§7 added for the GPU days.
+- Refs: `kairyu/engine/core/{comm,step_input,tp_runner,pd,kv_transport,pipeline}.py`,
+  `kairyu/orchestration/{replica,cluster}.py`, `docs/gpu-runbook.md` §6–7
 
 ### 2026-07-02 — [design] M5/M6 designs written and reviewed (APPROVE-WITH-AMENDMENTS)
 - What: `docs/design/m5-intra-node-parallelism.md` (TP runner with non-rank driver +

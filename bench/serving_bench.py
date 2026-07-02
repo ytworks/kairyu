@@ -96,7 +96,28 @@ def _percentile(sorted_values: list[float], fraction: float) -> float:
     return sorted_values[min(int(len(sorted_values) * fraction), len(sorted_values) - 1)]
 
 
+def build_run_config(args: argparse.Namespace) -> dict:
+    """Run config embedded in results so files carry topology (G2 §8, design m5 D6).
+
+    The topology args (``--tensor-parallel``, ``--dp-replicas``, ``--pd``) are
+    labels for the results file; the GPU phase wires them into engine behavior.
+    """
+    return {
+        "base_url": args.base_url,
+        "model": args.model,
+        "dataset": args.dataset,
+        "num_requests": args.num_requests,
+        "concurrency": args.concurrency,
+        "max_tokens": args.max_tokens,
+        "ttft_slo_s": args.ttft_slo_s,
+        "tensor_parallel": args.tensor_parallel,
+        "dp_replicas": args.dp_replicas,
+        "pd": args.pd,
+    }
+
+
 async def run_benchmark(args: argparse.Namespace) -> None:
+    print(f"config={json.dumps(build_run_config(args))}")
     prompts, dataset_label = load_prompts(
         Path(args.dataset) if args.dataset else None, args.num_requests
     )
@@ -128,7 +149,7 @@ async def run_benchmark(args: argparse.Namespace) -> None:
     )
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--model", default="kairyu-mock")
@@ -138,7 +159,18 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--ttft-slo-s", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=120.0)
-    asyncio.run(run_benchmark(parser.parse_args()))
+    # M5 topology labels (design m5 D6); recorded in the run config for G2 §8.
+    parser.add_argument("--tensor-parallel", type=int, default=1,
+                        help="TP degree of the target server (results label)")
+    parser.add_argument("--dp-replicas", type=int, default=1,
+                        help="DP replica count behind the target (results label)")
+    parser.add_argument("--pd", action="store_true",
+                        help="target runs prefill-decode disaggregated (results label)")
+    return parser
+
+
+def main() -> None:
+    asyncio.run(run_benchmark(build_parser().parse_args()))
 
 
 if __name__ == "__main__":
