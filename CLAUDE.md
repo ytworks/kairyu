@@ -1,4 +1,4 @@
-# Kairyu (rLLM)
+# Kairyu
 
 Kairyu is a vLLM-compatible LLM inference framework with native orchestration,
 layered as L3 Interface / L2 Orchestration / L1 Engines. Package: `kairyu/`.

@@ -7,9 +7,11 @@ orchestration layer: a learned-router-ready **Router**, a Planner/Worker/Verifie
 **Conductor** (role DAG), and **Mixture-of-Agents** — all behind one Python API and one
 OpenAI-compatible endpoint. Under the hood, a custom engine core (Radix-Paged KV cache,
 chunked-prefill scheduler, speculative decoding, xgrammar structured output) is being built
-against the same pluggable backend seam.
+against the same pluggable backend seam, along with multi-GPU serving — tensor parallelism,
+DP replicas, prefill-decode separation, inter-node KV transfer, pipeline parallelism —
+developed CPU-first against the same protocols.
 
-- **Python**: 3.11+ &nbsp;|&nbsp; **License**: MIT &nbsp;|&nbsp; **Tests**: 170+ (coverage gate 80%)
+- **Python**: 3.11+ &nbsp;|&nbsp; **License**: MIT &nbsp;|&nbsp; **Tests**: 290+ (coverage gate 80%)
 
 ## Why Kairyu
 
@@ -33,12 +35,15 @@ application-side afterthought bolted onto a raw completion endpoint. Kairyu make
 L3  Interface       kairyu.entrypoints   LLM / AsyncLLMEngine (vLLM drop-in),
                                          OpenAI-compatible FastAPI server (SSE, tools)
 L2  Orchestration   kairyu.orchestration Router → Conductor (role DAG) / MoA,
-                                         Budget, JSONL decision logs, learning pipeline
+                                         Budget, JSONL decision logs, learning pipeline,
+                                         ReplicaPool (DP replicas), ClusterSpec (2-node)
 L1  Engines         kairyu.engine        EngineBackend protocol:
                                          mock | vllm | openai | kairyu (custom core)
                     kairyu.engine.core   Radix-Paged KV, chunked-prefill scheduler,
                                          EngineCore step loop, n-gram spec decode,
-                                         xgrammar structured output, FP8 quant config
+                                         xgrammar structured output, FP8 quant config,
+                                         TP runner, P-D coordinator, KV transport,
+                                         PP inter-step pipelining
 ```
 
 Everything above L1 is engine-agnostic: the custom M2 engine is "a fourth backend", not a
@@ -52,17 +57,20 @@ rewrite.
 | **M2** | Custom engine core: Radix-Paged KV manager, chunked-prefill scheduler, EngineCore step loop, torch CPU runner with greedy-equivalence proof | ✅ CPU half done — FlashInfer runner / FP8 / overlap pipelining need H100/A100 |
 | **M3** | Speculative decoding: n-gram draft policy with tested greedy-equivalence invariant | ✅ CPU half done — EAGLE / CUDA graphs / P-D separation are GPU-phase |
 | **M4** | Router learning: JSONL serving logs → labeled dataset → distilled classifier (`LearnedRouter`) → contextual-bandit online refinement | ✅ Complete (CPU-only) |
+| **M5** | Intra-node multi-GPU: tensor parallelism (Communicator + TPModelRunner, TP=2 greedy-equivalent to TP=1 on CPU), DP replicas (ReplicaPool with session affinity), intra-node P-D separation (PDCoordinator + `resume_with_kv`) | ✅ CPU half done — GPU phase is runbook §6, gated on M2 |
+| **M6** | Inter-node multi-GPU: static 2-node ClusterSpec, page-granular KV transfer plane (KVTransport, TCP loopback), inter-node P-D, PP=2 via inter-step pipelining | ✅ CPU half done — GPU phase is runbook §7, gated on M5 |
 
 Per-milestone design docs (goals, decisions, review amendments) live in
-[`docs/design/`](docs/design/); the GPU-phase execution plan is in
-[`docs/gpu-runbook.md`](docs/gpu-runbook.md).
+[`docs/design/`](docs/design/); the multi-GPU acceptance contract is
+[`docs/goals/g2-multi-gpu.md`](docs/goals/g2-multi-gpu.md); the GPU-phase execution plan is
+in [`docs/gpu-runbook.md`](docs/gpu-runbook.md).
 
 ## Installation
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone <this-repo> && cd rLLM
+git clone https://github.com/ytworks/kairyu.git && cd kairyu
 uv sync
 ```
 
@@ -310,6 +318,16 @@ unit-tested before GPU time is spent:
   as per-step token bitmasks.
 - **Torch CPU runner** (`torch_runner.py`) — proves engine greedy-equivalence with real
   tensors, paged-KV attention included.
+- **Tensor parallelism** (`comm.py`, `step_input.py`, `tp_runner.py`) — `Communicator`
+  protocol (with a `FakeCommunicator` for tests) and a divergence-checked TP driver;
+  TP=2 is proven greedy-equivalent to TP=1 on CPU (`bench/parity_tp.py`).
+- **P-D separation** (`pd.py`) — `PDCoordinator` + `LocalKVHandoff` with copy-before-commit
+  KV handoff into `Scheduler.resume_with_kv`; mixed prefill/decode harness in
+  `bench/pd_mixed.py`.
+- **KV transfer plane** (`kv_transport.py`) — `KVTransport` protocol with in-process and
+  TCP-loopback transports for inter-node P-D; benched by `bench/kv_transfer_bench.py`.
+- **Pipeline parallelism** (`pipeline.py`) — async submit/handle runner contract and
+  `PipelinedEngineCore` inter-step pipelining, with bubble accounting pinned by tests.
 
 GPU acceptance criteria (vs vLLM / SGLang on identical hardware) and the step-by-step
 execution plan are in [`docs/gpu-runbook.md`](docs/gpu-runbook.md).
@@ -333,16 +351,20 @@ Acceptance target: ≥97% of tier2-only quality at ≥40% lower inference cost.
 ```
 kairyu/
   engine/            EngineBackend protocol, registry, mock/vllm/openai backends
-    core/            custom engine: radix KV, scheduler, spec decode, structured output
-  orchestration/     Router, Conductor, MoA, Budget, Orchestrator, feature extraction
+    core/            custom engine: radix KV, scheduler, spec decode, structured output,
+                     TP runner, P-D coordinator, KV transport, PP pipelining
+  orchestration/     Router, Conductor, MoA, Budget, Orchestrator, feature extraction,
+                     ReplicaPool (DP replicas), ClusterSpec (2-node topology)
     learning/        dataset builder, distilled classifier, contextual bandit
   dsl/               YAML / decorator agent-pool spec + loader
   entrypoints/       LLM, AsyncLLMEngine, chat templating
     server/          OpenAI-compatible FastAPI app + protocol models
 examples/            offline inference, YAML pool, serving
-bench/               router latency, orchestration overhead, serving, multi-turn prefix
+bench/               router latency, orchestration overhead, serving, multi-turn prefix,
+                     TP parity, mixed P-D, KV transfer
 tests/               unit / compat (vLLM surface) / server suites
-docs/design/         one reviewed design doc per milestone (M1–M4)
+docs/design/         one reviewed design doc per milestone (M1–M6)
+docs/goals/          evidence-first goal contracts (G2 multi-GPU)
 docs/gpu-runbook.md  consolidated GPU-day execution plan
 ```
 
