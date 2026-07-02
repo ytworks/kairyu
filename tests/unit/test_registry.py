@@ -19,6 +19,11 @@ def test_unknown_backend_lists_known_names():
         create_backend("does-not-exist")
 
 
+def test_lazy_backends_resolve_without_prior_import():
+    backend = create_backend("openai", base_url="https://api.example.com/v1", model="m")
+    assert type(backend).__name__ == "OpenAICompatBackend"
+
+
 def test_register_custom_backend():
     register_backend("custom-test", lambda **kwargs: MockBackend(**kwargs))
     assert "custom-test" in available_backends()

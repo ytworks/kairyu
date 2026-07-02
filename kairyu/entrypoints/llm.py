@@ -81,7 +81,7 @@ class LLM:
             GenerationRequest(
                 request_id=f"{batch}-{i}", prompt=prompt, sampling_params=params
             )
-            for i, (prompt, params) in enumerate(zip(prompt_list, params_list))
+            for i, (prompt, params) in enumerate(zip(prompt_list, params_list, strict=True))
         ]
         results = await asyncio.gather(*(self.backend.generate(r) for r in requests))
         return [

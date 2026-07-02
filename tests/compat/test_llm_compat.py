@@ -26,7 +26,7 @@ def test_vllm_basic_example_shape(llm):
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
     outputs = llm.generate(prompts, sampling_params)
     assert len(outputs) == len(prompts)
-    for prompt, output in zip(prompts, outputs):
+    for prompt, output in zip(prompts, outputs, strict=True):
         assert isinstance(output, RequestOutput)
         assert output.prompt == prompt
         assert isinstance(output.outputs[0].text, str)

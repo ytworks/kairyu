@@ -1,0 +1,38 @@
+# Declarative agent pool: workers, role DAG and budget (kairyu DSL).
+shared_prefix: |
+  You are a careful assistant working inside the kairyu orchestrator.
+
+workers:
+  - name: tier1
+    backend: mock          # swap for: vllm (local GPU) or openai (external API)
+  - name: tier2
+    backend: mock
+    # backend: openai
+    # base_url: https://api.openai.com/v1
+    # model: gpt-4o
+    # api_key_env: OPENAI_API_KEY
+
+roles:
+  - name: planner
+    worker: tier2
+    role_type: planner
+    prompt: "[planner] Break the task into a short plan.\nTask: {query}"
+  - name: worker
+    worker: tier1
+    prompt: "[worker] Execute the plan.\nPlan: {planner}\nTask: {query}"
+    depends_on: [planner]
+  - name: verifier
+    worker: tier2
+    role_type: verifier
+    verifies: worker
+    prompt: "[verifier] Reply PASS or FAIL with reasons.\nTask: {query}\nAnswer: {worker}"
+    depends_on: [worker]
+  - name: synthesizer
+    worker: tier2
+    role_type: synthesizer
+    prompt: "[synthesizer] Final answer.\nDraft: {worker}\nNotes: {verifier}"
+    depends_on: [worker, verifier]
+
+budget:
+  max_steps: 12
+  max_refine_depth: 2

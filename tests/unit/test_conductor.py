@@ -101,7 +101,9 @@ def test_unknown_dependency_and_worker_rejected():
 def test_verifier_must_depend_on_its_target():
     roles = (
         RoleSpec(name="worker", worker="w", prompt="do: {query}"),
-        RoleSpec(name="check", worker="w", prompt="verify", role_type="verifier", verifies="worker"),
+        RoleSpec(
+            name="check", worker="w", prompt="verify", role_type="verifier", verifies="worker"
+        ),
     )
     with pytest.raises(ValueError, match="depend on"):
         Conductor(roles=roles, workers={"w": MockBackend()})
