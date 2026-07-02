@@ -10,7 +10,7 @@ from kairyu.dsl.spec import OrchestratorSpec, WorkerSpec
 from kairyu.engine.backend import EngineBackend
 from kairyu.engine.registry import create_backend
 from kairyu.orchestration.budget import Budget
-from kairyu.orchestration.conductor import RoleSpec
+from kairyu.orchestration.conductor import RoleSpec, chars_cost_model, zero_cost
 from kairyu.orchestration.orchestrator import Orchestrator
 
 
@@ -59,6 +59,12 @@ def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
         max_refine_depth=spec.budget.max_refine_depth,
         max_cost_usd=spec.budget.max_cost_usd,
     )
+    rate = spec.budget.cost_per_1k_chars_usd
+    cost_model = chars_cost_model(rate) if rate is not None else zero_cost
     return Orchestrator(
-        engines=engines, roles=roles, budget=budget, shared_prefix=spec.shared_prefix
+        engines=engines,
+        roles=roles,
+        budget=budget,
+        shared_prefix=spec.shared_prefix,
+        cost_model=cost_model,
     )

@@ -175,3 +175,17 @@ async def test_concurrent_runs_do_not_share_state():
     conductor = Conductor(roles=_linear_roles(), workers={"w": backend})
     results = await asyncio.gather(conductor.run("one"), conductor.run("two"))
     assert results[0].final_text != results[1].final_text
+
+
+async def test_cost_model_charges_budget_and_trips_cost_cap():
+    backend = MockBackend()
+    conductor = Conductor(
+        roles=_linear_roles(),
+        workers={"w": backend},
+        cost_model=lambda request, result: 1.0,
+    )
+    result = await conductor.run("q", budget=Budget(max_cost_usd=0.5))
+    assert result.budget_state.cost_used == 1.0
+    assert result.budget_state.is_exhausted is True
+    assert "worker" not in result.outputs
+    assert result.final_text == result.outputs["planner"]

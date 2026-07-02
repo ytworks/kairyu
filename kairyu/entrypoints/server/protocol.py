@@ -71,6 +71,7 @@ class ChatCompletionResponse(BaseModel):
 class ChunkDelta(BaseModel):
     role: str | None = None
     content: str | None = None
+    tool_calls: list[ToolCall] | None = None
 
 
 class ChunkChoice(BaseModel):

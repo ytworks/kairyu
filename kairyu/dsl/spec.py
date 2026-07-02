@@ -33,6 +33,7 @@ class BudgetSpec(BaseModel):
     max_steps: int = Field(default=16, ge=1)
     max_refine_depth: int = Field(default=2, ge=0)
     max_cost_usd: float | None = Field(default=None, gt=0)
+    cost_per_1k_chars_usd: float | None = Field(default=None, gt=0)
 
 
 class OrchestratorSpec(BaseModel):

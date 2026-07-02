@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest
 from kairyu.orchestration.budget import Budget
-from kairyu.orchestration.conductor import Conductor, RoleSpec
+from kairyu.orchestration.conductor import Conductor, CostModel, RoleSpec, zero_cost
 from kairyu.orchestration.router import RouteDecision, Router, RuleRouter
 from kairyu.sampling_params import SamplingParams
 
@@ -66,6 +66,7 @@ class Orchestrator:
         budget: Budget | None = None,
         shared_prefix: str = "",
         sampling_params: SamplingParams | None = None,
+        cost_model: CostModel = zero_cost,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
@@ -75,6 +76,7 @@ class Orchestrator:
         self._budget = budget or Budget()
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
+        self._cost_model = cost_model
 
     def _resolve_engine(self, tier: str, notes: list[str]) -> EngineBackend:
         engine = self._engines.get(tier)
@@ -107,6 +109,7 @@ class Orchestrator:
                 workers=self._conductor_workers(notes),
                 shared_prefix=self._shared_prefix,
                 sampling_params=self._sampling_params,
+                cost_model=self._cost_model,
             )
             result = await conductor.run(query, budget=self._budget)
             notes.extend(f"{event.node}: {event.kind} {event.detail}" for event in result.trace)

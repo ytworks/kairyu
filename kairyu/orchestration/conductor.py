@@ -11,14 +11,30 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest
+from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest, GenerationResult
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.sampling_params import SamplingParams
 
 _PASS_PREFIX = "PASS"
+
+CostModel = Callable[[GenerationRequest, GenerationResult], float]
+
+
+def zero_cost(request: GenerationRequest, result: GenerationResult) -> float:
+    return 0.0
+
+
+def chars_cost_model(usd_per_1k_chars: float) -> CostModel:
+    """Approximate cost from prompt+completion character volume."""
+
+    def estimate(request: GenerationRequest, result: GenerationResult) -> float:
+        chars = len(request.prompt) + sum(len(c.text) for c in result.completions)
+        return chars / 1000 * usd_per_1k_chars
+
+    return estimate
 
 
 @dataclass(frozen=True)
@@ -76,11 +92,13 @@ class Conductor:
         workers: Mapping[str, EngineBackend],
         shared_prefix: str = "",
         sampling_params: SamplingParams | None = None,
+        cost_model: CostModel = zero_cost,
     ) -> None:
         self._roles = tuple(roles)
         self._workers = dict(workers)
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
+        self._cost_model = cost_model
         self._by_name = {role.name: role for role in self._roles}
         self._verifier_for = {
             role.verifies: role for role in self._roles if role.role_type == "verifier"
@@ -148,7 +166,7 @@ class Conductor:
             cache_hint=self._cache_hint(session),
         )
         result = await backend.generate(request)
-        run.budget = run.budget.charge()
+        run.budget = run.budget.charge(cost=self._cost_model(request, result))
         return result.text
 
     async def _run_unit(self, run: _RunState, session: str, query: str, spec: RoleSpec) -> None:

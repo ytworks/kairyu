@@ -62,21 +62,21 @@ class MockBackend:
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         final = await self.generate(request)
-        full_text = final.completions[0].text
-        chunk_ends = list(range(_STREAM_CHUNK_CHARS, len(full_text), _STREAM_CHUNK_CHARS))
-        for end in chunk_ends:
-            partial_text = full_text[:end]
+        longest = max(len(completion.text) for completion in final.completions)
+        for end in range(_STREAM_CHUNK_CHARS, longest, _STREAM_CHUNK_CHARS):
+            partials = tuple(
+                CompletionOutput(
+                    index=completion.index,
+                    text=completion.text[:end],
+                    token_ids=_fake_token_ids(completion.text[:end]),
+                    cumulative_logprob=0.0,
+                )
+                for completion in final.completions
+            )
             yield GenerationResult(
                 request_id=request.request_id,
                 prompt=request.prompt,
-                completions=(
-                    CompletionOutput(
-                        index=0,
-                        text=partial_text,
-                        token_ids=_fake_token_ids(partial_text),
-                        cumulative_logprob=0.0,
-                    ),
-                ),
+                completions=partials,
                 finished=False,
             )
         yield final

@@ -88,19 +88,39 @@ def _model_not_found(model: str) -> JSONResponse:
     )
 
 
-def _build_choice(index: int, text: str, request: ChatCompletionRequest) -> Choice:
+def _upstream_error(error: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": {
+                "message": str(error),
+                "type": "upstream_error",
+                "code": "backend_error",
+            }
+        },
+    )
+
+
+def _build_choice(
+    index: int, text: str, request: ChatCompletionRequest, finish_reason: str | None
+) -> Choice:
     tool_calls = _parse_tool_calls(text) if request.tools else []
     if tool_calls:
         message = ResponseMessage(content=None, tool_calls=tool_calls)
         return Choice(index=index, message=message, finish_reason="tool_calls")
-    return Choice(index=index, message=ResponseMessage(content=text), finish_reason="stop")
+    return Choice(
+        index=index, message=ResponseMessage(content=text), finish_reason=finish_reason or "stop"
+    )
 
 
 def _completion_response(
-    request: ChatCompletionRequest, prompt: str, texts: list[str]
+    request: ChatCompletionRequest, prompt: str, texts: list[tuple[str, str | None]]
 ) -> ChatCompletionResponse:
-    choices = [_build_choice(i, text, request) for i, text in enumerate(texts)]
-    completion_tokens = sum(_approx_tokens(text) for text in texts)
+    choices = [
+        _build_choice(i, text, request, finish_reason)
+        for i, (text, finish_reason) in enumerate(texts)
+    ]
+    completion_tokens = sum(_approx_tokens(text) for text, _ in texts)
     prompt_tokens = _approx_tokens(prompt)
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:16]}",
@@ -115,32 +135,69 @@ def _completion_response(
     )
 
 
+def _sse_chunk(
+    response_id: str, created: int, model: str, index: int, delta: ChunkDelta,
+    finish_reason: str | None = None,
+) -> str:
+    payload = ChatCompletionChunk(
+        id=response_id,
+        created=created,
+        model=model,
+        choices=[ChunkChoice(index=index, delta=delta, finish_reason=finish_reason)],
+    )
+    return f"data: {payload.model_dump_json()}\n\n"
+
+
 async def _stream_engine(
     engine: EngineBackend, generation_request: GenerationRequest, model: str
 ) -> AsyncIterator[str]:
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
-
-    def chunk(delta: ChunkDelta, finish_reason: str | None = None) -> str:
-        payload = ChatCompletionChunk(
-            id=response_id,
-            created=created,
-            model=model,
-            choices=[ChunkChoice(index=0, delta=delta, finish_reason=finish_reason)],
+    sent: dict[int, int] = {}
+    last = None
+    try:
+        async for partial in engine.stream(generation_request):
+            last = partial
+            for completion in partial.completions:
+                delta_text = completion.text[sent.get(completion.index, 0):]
+                if not delta_text and not partial.finished:
+                    continue
+                is_first = completion.index not in sent
+                sent[completion.index] = len(completion.text)
+                yield _sse_chunk(
+                    response_id, created, model, completion.index,
+                    ChunkDelta(role="assistant" if is_first else None, content=delta_text),
+                )
+    except Exception as error:  # surface backend failures inside the SSE stream
+        payload = {"error": {"message": str(error), "type": "upstream_error"}}
+        yield f"data: {json.dumps(payload)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    for completion in last.completions if last else ():
+        yield _sse_chunk(
+            response_id, created, model, completion.index, ChunkDelta(),
+            finish_reason=completion.finish_reason or "stop",
         )
-        return f"data: {payload.model_dump_json()}\n\n"
+    yield "data: [DONE]\n\n"
 
-    sent = 0
-    first = True
-    async for partial in engine.stream(generation_request):
-        text = partial.completions[0].text
-        delta_text = text[sent:]
-        sent = len(text)
-        if not delta_text and not partial.finished:
-            continue
-        yield chunk(ChunkDelta(role="assistant" if first else None, content=delta_text))
-        first = False
-    yield chunk(ChunkDelta(), finish_reason="stop")
+
+async def _stream_choices(choices: list[Choice], model: str) -> AsyncIterator[str]:
+    """Stream already-final choices (orchestrated or tool-call responses)."""
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
+    created = int(time.time())
+    for choice in choices:
+        yield _sse_chunk(
+            response_id, created, model, choice.index,
+            ChunkDelta(
+                role="assistant",
+                content=choice.message.content,
+                tool_calls=choice.message.tool_calls,
+            ),
+        )
+        yield _sse_chunk(
+            response_id, created, model, choice.index, ChunkDelta(),
+            finish_reason=choice.finish_reason,
+        )
     yield "data: [DONE]\n\n"
 
 
@@ -162,11 +219,16 @@ def create_app(
     async def chat_completions(request: ChatCompletionRequest):
         prompt = render_chat([message.model_dump() for message in request.messages])
         if request.model == AUTO_MODEL and orchestrator is not None:
-            result = await orchestrator.run(prompt)
-            texts = [result.text]
+            try:
+                result = await orchestrator.run(prompt)
+            except Exception as error:
+                return _upstream_error(error)
+            texts = [(result.text, "stop")]
             if request.stream:
+                response = _completion_response(request, prompt, texts)
                 return StreamingResponse(
-                    _stream_text(texts[0], request.model), media_type="text/event-stream"
+                    _stream_choices(response.choices, request.model),
+                    media_type="text/event-stream",
                 )
             return _completion_response(request, prompt, texts)
 
@@ -178,34 +240,26 @@ def create_app(
             prompt=prompt,
             sampling_params=_sampling_params_from(request),
         )
-        if request.stream:
+        if request.stream and not request.tools:
             return StreamingResponse(
                 _stream_engine(engine, generation_request, request.model),
                 media_type="text/event-stream",
             )
-        result = await engine.generate(generation_request)
-        texts = [completion.text for completion in result.completions]
-        return _completion_response(request, prompt, texts)
+        try:
+            result = await engine.generate(generation_request)
+        except Exception as error:
+            return _upstream_error(error)
+        texts = [
+            (completion.text, completion.finish_reason) for completion in result.completions
+        ]
+        response = _completion_response(request, prompt, texts)
+        if request.stream:
+            # Tool calling + streaming: generate fully, then emit structured chunks so
+            # tool_calls and finish_reason stay correct.
+            return StreamingResponse(
+                _stream_choices(response.choices, request.model),
+                media_type="text/event-stream",
+            )
+        return response
 
     return app
-
-
-async def _stream_text(text: str, model: str) -> AsyncIterator[str]:
-    """Stream an already-final text as a single-delta SSE sequence (orchestrated path)."""
-    response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
-    created = int(time.time())
-    head = ChatCompletionChunk(
-        id=response_id,
-        created=created,
-        model=model,
-        choices=[ChunkChoice(index=0, delta=ChunkDelta(role="assistant", content=text))],
-    )
-    tail = ChatCompletionChunk(
-        id=response_id,
-        created=created,
-        model=model,
-        choices=[ChunkChoice(index=0, delta=ChunkDelta(), finish_reason="stop")],
-    )
-    yield f"data: {head.model_dump_json()}\n\n"
-    yield f"data: {tail.model_dump_json()}\n\n"
-    yield "data: [DONE]\n\n"

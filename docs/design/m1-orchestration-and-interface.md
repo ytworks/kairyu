@@ -60,8 +60,11 @@ Roles (`planner`, `worker`, `verifier`, `synthesizer`, or custom) are nodes of a
 DAG; edges are data dependencies (a node's prompt template can reference upstream outputs).
 Execution is a topological wave schedule with `asyncio.gather` per wave — no threads, no Ray
 in M1 (YAGNI; Ray arrives with multi-node). Recursive self-correction is modeled as a
-verifier-gated retry loop with depth bounded by `Budget.max_refine_depth`; cost/latency are
-bounded by `Budget.max_cost_usd` / `Budget.deadline_s`. Exceeding a budget is a normal,
+verifier-gated retry loop with depth bounded by `Budget.max_refine_depth`; spend is bounded
+by `Budget.max_cost_usd`, charged per generation via a pluggable `CostModel` (default
+zero-cost; `chars_cost_model` estimates from prompt+completion volume, and the DSL exposes
+`budget.cost_per_1k_chars_usd`). A wall-clock deadline bound is deferred to M2, where the
+engine can enforce it per-step. Exceeding a budget is a normal,
 reported outcome (best result so far is returned), not an exception, matching Fugu's
 "recursion depth as inference-time compute axis" framing.
 
