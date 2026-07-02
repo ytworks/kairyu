@@ -13,8 +13,8 @@ _Last updated: 2026-07-02_
 | M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done: scheduler, KV manager, EngineCore step loop, overlap pipeline, pre-GPU robustness (EOS, preemption, abort, pin TTL). Paged-KV attention validated with real tensors on CPU (greedy-equivalence). **Blocked on GPU hardware** for the GPU phase. |
 | M3 — Spec decode / CUDA graphs / P-D separation | n-gram draft spec-decode policy and xgrammar structured output implemented CPU-side. CUDA graphs and the rest gated on M2 GPU phase. |
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
-| M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Goal defined (`docs/goals/g2-multi-gpu.md`); design doc pending. Prereq: M2 GPU phase Gates 1–3. |
-| M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Goal defined (`docs/goals/g2-multi-gpu.md`); design doc pending. Prereq: all M5 gates. |
+| M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed (APPROVE-WITH-AMENDMENTS, `docs/design/m5-intra-node-parallelism.md`). CPU half in progress. GPU phase prereq: M2 Gates 1–3. |
+| M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed (APPROVE-WITH-AMENDMENTS, `docs/design/m6-inter-node-parallelism.md`). GPU phase prereq: all M5 gates. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -24,6 +24,30 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 `docs/gpu-runbook.md`. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-02 — [design] M5/M6 designs written and reviewed (APPROVE-WITH-AMENDMENTS)
+- What: `docs/design/m5-intra-node-parallelism.md` (TP runner with non-rank driver +
+  typed StepInput prerequisite, ReplicaPool with session affinity, P-D copy-on-handoff
+  with copy-before-commit protocol and `resume_with_kv`) and
+  `docs/design/m6-inter-node-parallelism.md` (static ClusterSpec — no Ray, KVTransport
+  with fragment aggregation, streamed P-D with layer-group final chunk, PP=2 via
+  inter-step pipelining on an async ModelRunner handle). Three-reviewer agent panel
+  fixed 6 blockers: zero-copy P-D donation withdrawn (dual-tree pool accounting unsound
+  + incompatible with disjoint-GPU roles); PP intra-step micro-batching withdrawn
+  (bounded at ~1.33× vs B4's 1.6×); `openai_backend` "no change" claim corrected (fake
+  streaming, per-request client, mandatory auth, empty token_ids all block B1).
+- Why: G2 requires reviewed design docs before implementing each milestone; review
+  against the real scheduler/radix code caught mechanisms that could not work as drafted.
+- Refs: `docs/design/m5-intra-node-parallelism.md` §7, `m6-inter-node-parallelism.md`
+  §7, `docs/goals/g2-multi-gpu.md` §7 Amendments
+
+### 2026-07-02 — [amendment] m1 "Ray arrives with multi-node" superseded
+- What: M6 D1 uses a static ClusterSpec + torchrun-style rendezvous for the 2-node
+  topology; Ray is not adopted.
+- Why: G2 excludes elasticity; a dynamic-placement framework for two static nodes fails
+  YAGNI. m1 §3/D4's note was forward-looking, not a binding decision.
+- Refs: `docs/design/m6-inter-node-parallelism.md` D1;
+  `docs/design/m1-orchestration-and-interface.md` §3
 
 ### 2026-07-02 — [design] Multi-GPU goal (G2) defined — drives M5/M6
 - What: Wrote `docs/goals/g2-multi-gpu.md`, the acceptance contract for intra-node

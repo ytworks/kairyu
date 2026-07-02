@@ -141,6 +141,18 @@ break one, that is an amendment to this goal, flagged in review.
 - **vLLM-compat surface**: `tensor_parallel_size` (`kairyu/entrypoints/llm.py`,
   `async_engine.py`) stops being a no-op; the API shape does not change.
 
+### Amendments (2026-07-02, flagged by the m5/m6 design review per this section's rule)
+
+- **DP routing seam reworded**: the `Router` protocol returns tiers, not replicas, so DP
+  placement lives in a sibling L2 component (`ReplicaPool`), inheriting the router's
+  <10 ms budget and JSONL decision log (via a new `record_replica` entry kind). The
+  intent of the seam — DP is an orchestration-layer concern, engine untouched — is
+  unchanged (m5 D4).
+- **Step-loop contract extension**: the `ModelRunner` protocol gains an async
+  submit/handle form (already reserved by m2 §5 item 3 for CUDA graphs); PP=2's B4
+  gates are unreachable under the synchronous contract (m6 D5). Scheduler and RadixKV
+  contracts remain unchanged except the additive `resume_with_kv` entry point (m5 D5).
+
 ## 8. Evidence and reporting rules
 
 G1 rules carried forward verbatim, plus:
