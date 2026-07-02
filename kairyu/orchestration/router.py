@@ -95,13 +95,38 @@ class JsonlRouterLog:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
 
-    def record(self, query: str, decision: RouteDecision) -> None:
-        entry = {
-            "query_sha256": hashlib.sha256(query.encode()).hexdigest(),
-            "target": decision.target,
-            "confidence": decision.confidence,
-            "reason": decision.reason,
-            "features": decision.features.as_dict(),
-        }
+    def _append(self, entry: dict) -> None:
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
+
+    def record(self, query: str, decision: RouteDecision) -> None:
+        self._append(
+            {
+                "kind": "decision",
+                "query_sha256": hashlib.sha256(query.encode()).hexdigest(),
+                "target": decision.target,
+                "confidence": decision.confidence,
+                "reason": decision.reason,
+                "features": decision.features.as_dict(),
+            }
+        )
+
+    def record_outcome(
+        self,
+        query: str,
+        target: RouteTarget,
+        quality: float,
+        cost_usd: float,
+        latency_s: float | None = None,
+    ) -> None:
+        """Log the observed outcome of a routed request (M4 training signal)."""
+        self._append(
+            {
+                "kind": "outcome",
+                "query_sha256": hashlib.sha256(query.encode()).hexdigest(),
+                "target": target,
+                "quality": quality,
+                "cost_usd": cost_usd,
+                "latency_s": latency_s,
+            }
+        )
