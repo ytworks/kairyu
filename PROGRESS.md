@@ -26,6 +26,19 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 
 ## Change Log
 
+### 2026-07-02 — [progress] M7 Phase 3: container image, compose topology, CI smoke drill
+- What: Multi-stage uv `Dockerfile` (one image for every role; the mounted
+  DeploymentSpec decides gateway vs replica), `deploy/compose/` (1 gateway + 3 mock
+  replicas with healthchecks, gateway/replica YAML configs), `scripts/compose_smoke.sh`
+  (readiness → completion → SSE → affinity-by-metrics → replica kill/eject/zero-5xx →
+  prober recovery), and a `compose-smoke` CI job separate from the coverage-gated
+  pytest job. The full drill was verified end-to-end with the same configs as local
+  processes (kill/eject: 10/10 subsequent 200s; prober auto-restore observed in the
+  gateway JSON log); the container build itself runs in CI — this dev environment's
+  network policy blocks registry CDNs.
+- Refs: m7 D1/D2, G3 gates C1–C3; `Dockerfile`, `deploy/compose/`,
+  `scripts/compose_smoke.sh`, `.github/workflows/ci.yml`
+
 ### 2026-07-02 — [progress] M7 Phase 2: `kairyu serve` CLI, DeploymentSpec, pool wiring, prober, HTTP affinity
 - What: `kairyu serve <deployment.yaml>` console entrypoint builds gateway or replica
   from one YAML: `DeploymentSpec` (new, composes with — does not extend — ClusterSpec,

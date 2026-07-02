@@ -1,0 +1,9 @@
+# Replica-node role: serves a local engine under the model name the gateway
+# pool targets. CPU smoke uses the mock backend; a GPU node swaps in
+# `backend: kairyu` or `backend: vllm` (docs/gpu-runbook.md §9).
+server:
+  host: 0.0.0.0
+  port: 8000
+engines:
+  llama:
+    backend: mock
