@@ -26,6 +26,7 @@ class EngineRequest:
     request_id: str
     prompt_token_ids: tuple[int, ...]
     max_new_tokens: int = 16
+    eos_token_id: int | None = None
 
 
 class _Status(Enum):
@@ -41,6 +42,7 @@ class _RequestState:
         "computed_prompt",
         "outputs",
         "in_flight",
+        "surplus_in_flight",
         "allocation",
         "decode_pages",
     )
@@ -53,6 +55,9 @@ class _RequestState:
         # sampled tokens scheduled but not yet committed via update() — this is
         # what lets the overlap loop plan step N+1 before step N's tokens land
         self.in_flight = 0
+        # tokens still in flight when the request finished/preempted early
+        # (EOS under overlap); their late arrivals are trimmed, not errors
+        self.surplus_in_flight = 0
         self.allocation: KVAllocation | None = None
         self.decode_pages: list[int] = []
 
@@ -91,6 +96,7 @@ class Scheduler:
         page_size: int = 16,
         pd_separation: bool = False,
         decode_token_budget: int | None = None,
+        decode_watermark_pages: int = 0,
     ) -> None:
         if max_num_batched_tokens < 1:
             raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
@@ -101,6 +107,7 @@ class Scheduler:
         self._max_seqs = max_num_seqs
         self._pd_separation = pd_separation
         self._decode_budget = decode_token_budget
+        self._decode_watermark = decode_watermark_pages
         self._page_size = getattr(kv_cache, "_page_size", page_size)
         self._states: dict[str, _RequestState] = {}
         self._waiting: list[str] = []
@@ -120,6 +127,51 @@ class Scheduler:
         """Read view of request states for the ModelRunner (do not mutate)."""
         return self._states
 
+    @property
+    def waiting_ids(self) -> tuple[str, ...]:
+        return tuple(self._waiting)
+
+    def _release_without_commit(self, state: _RequestState) -> None:
+        if state.allocation is not None:
+            self._kv.release_preempted(state.allocation, tuple(state.decode_pages))
+            state.allocation = None
+        elif state.decode_pages:
+            self._kv.free_private_pages(tuple(state.decode_pages))
+        state.decode_pages.clear()
+        state.surplus_in_flight += state.in_flight
+        state.in_flight = 0
+
+    def abort(self, request_id: str) -> None:
+        """Cancel a request (client disconnect); late in-flight tokens are trimmed."""
+        state = self._states.get(request_id)
+        if state is None or state.status is _Status.FINISHED:
+            return
+        if state.status is _Status.WAITING:
+            self._waiting.remove(request_id)
+        else:
+            self._running.remove(request_id)
+            self._release_without_commit(state)
+        state.status = _Status.FINISHED
+
+    def _preempt_for_decode(self, needy_id: str) -> bool:
+        """Recompute-preempt the youngest output-free running request.
+
+        Victims are restricted to requests with no committed outputs so
+        requeueing them recomputes the prompt only (output-KV recompute is a
+        GPU-phase extension, see design m2 §5).
+        """
+        for victim_id in reversed(self._running):
+            state = self._states[victim_id]
+            if victim_id == needy_id or state.outputs:
+                continue
+            self._running.remove(victim_id)
+            self._release_without_commit(state)
+            state.computed_prompt = 0
+            state.status = _Status.WAITING
+            self._waiting.insert(0, victim_id)
+            return True
+        return False
+
     def output_tokens(self, request_id: str) -> tuple[int, ...]:
         return tuple(self._states[request_id].outputs)
 
@@ -133,14 +185,20 @@ class Scheduler:
         return True
 
     def _schedule_decodes(self, budget: int, plan: list[ScheduledChunk]) -> int:
-        for request_id in self._running:
+        for request_id in list(self._running):
             state = self._states[request_id]
+            if state.status is not _Status.RUNNING:
+                continue  # preempted earlier in this pass
             if not state.prefill_done or budget < 1:
                 continue
             if len(state.outputs) + state.in_flight >= state.request.max_new_tokens:
                 continue  # everything remaining is already in flight
             if not self._ensure_decode_capacity(state):
-                continue  # no KV space this step; retried next step
+                # decode must not starve: recompute-preempt a prefilling victim
+                if not self._preempt_for_decode(request_id):
+                    continue
+                if not self._ensure_decode_capacity(state):
+                    continue  # still no space; retried next step
             plan.append(
                 ScheduledChunk(
                     request_id=request_id,
@@ -154,9 +212,9 @@ class Scheduler:
         return budget
 
     def _schedule_prefills(self, budget: int, plan: list[ScheduledChunk]) -> int:
-        for request_id in self._running:
+        for request_id in list(self._running):
             state = self._states[request_id]
-            if state.prefill_done or budget < 1:
+            if state.status is not _Status.RUNNING or state.prefill_done or budget < 1:
                 continue
             chunk = min(state.prompt_len - state.computed_prompt, budget)
             state.computed_prompt += chunk
@@ -172,6 +230,10 @@ class Scheduler:
         while self._waiting and budget > 0 and len(self._running) < self._max_seqs:
             request_id = self._waiting[0]
             state = self._states[request_id]
+            if self._decode_watermark > 0:
+                estimate = -(-state.prompt_len // self._page_size)  # ceil division
+                if self._kv.num_free_pages < estimate + self._decode_watermark:
+                    break  # keep pages in reserve so running decodes never starve
             try:
                 state.allocation = self._kv.allocate(state.request.prompt_token_ids)
             except KVCacheFull:
@@ -225,16 +287,26 @@ class Scheduler:
         finished: list[str] = []
         for request_id, token_id in sampled.items():
             state = self._states.get(request_id)
-            if (
-                state is None
-                or state.status is not _Status.RUNNING
-                or not state.prefill_done
-                or state.in_flight < 1
-            ):
+            if state is None:
+                raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
+            if state.status is not _Status.RUNNING:
+                if state.surplus_in_flight > 0:
+                    # scheduled ahead under overlap, then the request finished
+                    # (EOS) or was preempted/aborted: trim silently
+                    state.surplus_in_flight -= 1
+                    continue
+                raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
+            if not state.prefill_done or state.in_flight < 1:
                 raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
             state.in_flight -= 1
             state.outputs.append(token_id)
-            if len(state.outputs) >= state.request.max_new_tokens:
+            is_eos = (
+                state.request.eos_token_id is not None
+                and token_id == state.request.eos_token_id
+            )
+            if is_eos or len(state.outputs) >= state.request.max_new_tokens:
+                state.surplus_in_flight += state.in_flight
+                state.in_flight = 0
                 self._finish(state)
                 finished.append(request_id)
         return tuple(finished)
