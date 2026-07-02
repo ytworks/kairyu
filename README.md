@@ -4,9 +4,16 @@ vLLM-compatible LLM inference framework with **native orchestration**: a learned
 Router, a Planner/Worker/Verifier/Synthesizer Conductor (role DAG), and Mixture-of-Agents —
 all behind one Python API and one OpenAI-compatible endpoint.
 
-Status: **M1** — orchestration (L2) + interface (L3) layers, running on pluggable engine
-backends (`mock` for dev/CI, `vllm` on GPU hosts, `openai` for external APIs). The custom
-engine (overlap scheduler + Radix-Paged KV) is milestone M2; see `docs/design/`.
+Status: **M1 complete**; GPU-independent halves of M2/M3/M4 implemented (see `docs/design/`):
+
+- M1 — L2 orchestration + L3 interface on pluggable backends (`mock` / `vllm` / `openai`),
+  incl. `LLM` and `AsyncLLMEngine` vLLM drop-in compatibility
+- M2 (CPU half) — Radix-Paged KV manager, chunked-prefill scheduler, EngineCore step loop
+  (`kairyu/engine/core/`); FlashInfer runner / FP8 / overlap pipelining need H100/A100
+- M3 (CPU half) — n-gram draft speculative decoding policy with a tested
+  greedy-equivalence invariant; EAGLE / CUDA graphs / P-D split are GPU-phase
+- M4 — router learning pipeline: JSONL serving logs → labeled dataset → distilled
+  classifier (`LearnedRouter`) → contextual bandit online refinement
 
 ## Quick start
 
