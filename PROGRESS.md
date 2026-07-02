@@ -13,6 +13,8 @@ _Last updated: 2026-07-02_
 | M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done: scheduler, KV manager, EngineCore step loop, overlap pipeline, pre-GPU robustness (EOS, preemption, abort, pin TTL). Paged-KV attention validated with real tensors on CPU (greedy-equivalence). **Blocked on GPU hardware** for the GPU phase. |
 | M3 — Spec decode / CUDA graphs / P-D separation | n-gram draft spec-decode policy and xgrammar structured output implemented CPU-side. CUDA graphs and the rest gated on M2 GPU phase. |
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
+| M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Goal defined (`docs/goals/g2-multi-gpu.md`); design doc pending. Prereq: M2 GPU phase Gates 1–3. |
+| M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Goal defined (`docs/goals/g2-multi-gpu.md`); design doc pending. Prereq: all M5 gates. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -22,6 +24,20 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 `docs/gpu-runbook.md`. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-02 — [design] Multi-GPU goal (G2) defined — drives M5/M6
+- What: Wrote `docs/goals/g2-multi-gpu.md`, the acceptance contract for intra-node
+  (M5: TP, DP replicas via L2 Router, P-D intra-node) and inter-node (M6: 2-node DP,
+  page-granular KV transfer plane, P-D inter-node, PP=2) multi-GPU serving.
+  Targets: Llama-3.3-70B FP8 on 8×H100 + 2 nodes (IB/RoCE); vLLM-parity-or-better plus
+  absolute scaling-efficiency gates (A1–A10, B1–B5); TP=2 is the scaling base (70B FP8
+  cannot run TP=1). MoE/expert parallelism is an explicit non-goal.
+- Why: Multi-GPU support existed only as a no-op `tensor_parallel_size` arg and the
+  P-D admission-policy half; M5/M6 need a G1-style evidence-first goal to drive
+  autonomous development. `docs/goals/` created since the original G1 goal was never
+  filed as a document.
+- Refs: `docs/goals/g2-multi-gpu.md`; seams: `kairyu/engine/core/engine_core.py`
+  (ModelRunner), `scheduler.py` (`pd_separation`), `kairyu/orchestration/router.py`
 
 ### 2026-07-02 — [progress] Design-change memory harness added
 - What: Added PROGRESS.md, `.claude/rules/progress-log.md`, CLAUDE.md, and AGENTS.md so
