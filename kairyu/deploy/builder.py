@@ -8,6 +8,8 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from kairyu.batch.store import BatchStore
+from kairyu.batch.worker import BatchWorker
 from kairyu.deploy.prober import HealthProber
 from kairyu.deploy.spec import DeploymentSpec, load_deployment_spec
 from kairyu.dsl.loader import build_orchestrator, load_spec
@@ -56,9 +58,12 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             orchestrator_path = base_dir / orchestrator_path
         orchestrator = build_orchestrator(load_spec(orchestrator_path))
 
+    workers: list[BatchWorker] = []  # filled after create_app (worker needs app metrics)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         tasks = [asyncio.create_task(prober.run()) for prober in probers]
+        tasks += [asyncio.create_task(worker.run()) for worker in workers]
         try:
             yield
         finally:
@@ -78,6 +83,22 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)
+
+    if spec.batch is not None:
+        from kairyu.entrypoints.server.batch_routes import add_batch_routes
+
+        store = BatchStore(spec.batch.data_dir)
+        store.recover_orphans()
+        worker = BatchWorker(
+            store,
+            engines,
+            max_concurrency=spec.batch.max_concurrency,
+            metrics=app.state.metrics,
+        )
+        workers.append(worker)
+        add_batch_routes(app, store, worker)
+        app.state.batch_store = store
+        app.state.batch_worker = worker
     return app
 
 

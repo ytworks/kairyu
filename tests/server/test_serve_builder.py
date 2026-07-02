@@ -73,10 +73,10 @@ pools:
 """
     app = build_app_from_spec(load_deployment_spec(yaml_text))
     assert len(app.state.probers) == 1
-    transport = httpx.ASGITransport(app=app)
-    # Enter/exit the ASGI lifespan; prober task must start and cancel cleanly.
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        async with transport:
+    # httpx's ASGITransport never runs the lifespan; drive it directly. The
+    # prober task must start and cancel cleanly, and shutdown must close engines.
+    async with app.router.lifespan_context(app):
+        async with _client(app) as client:
             assert (await client.get("/health")).status_code == 200
 
 

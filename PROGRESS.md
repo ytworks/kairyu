@@ -26,6 +26,20 @@ Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 
 ## Change Log
 
+### 2026-07-02 — [progress] M7 Phase 4: OpenAI-compatible batch API
+- What: `/v1/files` (multipart upload/metadata/content) and `/v1/batches`
+  (create/get/list/cancel) backed by a filesystem `BatchStore` (atomic JSON job state,
+  JSONL input/output/error files) and an in-gateway `BatchWorker` lifespan task that
+  drains jobs through the same served engines/pools under its own semaphore — strictly
+  below the server's global concurrency guard, so interactive traffic stays admitted
+  (gate C4, pinned by test). Cancel skips remaining lines; restart recovery marks
+  in-flight jobs failed with an explicit resubmit message (single-gateway scope, m7 D7).
+  Server helpers `sampling_params_from` / `completion_response` made public for reuse.
+  New dep: python-multipart (FastAPI form uploads).
+- Refs: m7 D7, G3 gate C4; `kairyu/batch/{store,worker}.py`,
+  `kairyu/entrypoints/server/batch_routes.py`, `kairyu/deploy/builder.py`;
+  tests `tests/server/test_batches.py`
+
 ### 2026-07-02 — [progress] M7 Phase 3: container image, compose topology, CI smoke drill
 - What: Multi-stage uv `Dockerfile` (one image for every role; the mounted
   DeploymentSpec decides gateway vs replica), `deploy/compose/` (1 gateway + 3 mock
