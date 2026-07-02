@@ -20,6 +20,7 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.6",
     "torch>=2.6",
+    "xgrammar>=0.2.3",
 ]
 
 [build-system]

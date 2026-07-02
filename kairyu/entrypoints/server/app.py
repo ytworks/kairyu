@@ -39,6 +39,9 @@ _TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
 
 def _sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
+    extra_args = (
+        {"response_format": request.response_format} if request.response_format else {}
+    )
     return SamplingParams(
         temperature=request.temperature,
         top_p=request.top_p,
@@ -46,6 +49,7 @@ def _sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
         max_tokens=request.max_tokens,
         stop=request.stop,
         seed=request.seed,
+        extra_args=extra_args,
     )
 
 
