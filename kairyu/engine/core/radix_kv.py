@@ -74,7 +74,8 @@ class RadixKVCache:
         self._root.ref_count = 1  # never evictable
         self._root.computed = True
         self._clock = 0
-        self._pins: dict[str, _Node] = {}
+        self._alloc_tick = 0
+        self._pins: dict[str, tuple[_Node, int | None]] = {}  # node, expiry tick
         self._hit_tokens = 0
         self._total_tokens = 0
 
@@ -176,8 +177,20 @@ class RadixKVCache:
             del victim.parent.children[victim.key[: self._page_size]]
         return True
 
+    def _expire_pins(self) -> None:
+        expired = [
+            session_id
+            for session_id, (_, expiry) in self._pins.items()
+            if expiry is not None and self._alloc_tick >= expiry
+        ]
+        for session_id in expired:
+            node, _ = self._pins.pop(session_id)
+            self._unlock_path(node)
+
     def allocate(self, tokens: tuple[int, ...]) -> KVAllocation:
         tokens = tuple(tokens)
+        self._alloc_tick += 1
+        self._expire_pins()
         matched_tokens, cached_pages, node = self._match_and_lock(tokens)
         suffix_len = len(tokens) - matched_tokens
         full_pages_needed = suffix_len // self._page_size
@@ -281,15 +294,47 @@ class RadixKVCache:
     def free_private_pages(self, pages: tuple[int, ...]) -> None:
         self._pool.free(pages)
 
-    def pin(self, session_id: str, tokens: tuple[int, ...]) -> None:
-        """Hold the matched prefix path against eviction (orchestration sessions)."""
+    def release_preempted(
+        self, allocation: KVAllocation, decode_pages: tuple[int, ...] = ()
+    ) -> None:
+        """Release a preempted/aborted request WITHOUT marking KV computed.
+
+        The request did not complete, so its uncomputed tree node (if any)
+        stays unmatched until LRU eviction reclaims it; private pages return
+        to the pool immediately.
+        """
+        if allocation._freed:
+            raise ValueError("allocation was already freed")
+        object.__setattr__(allocation, "_freed", True)
+        self._unlock_path(allocation._node)
+        if not allocation._tree_inserted and allocation.new_full_pages:
+            self._pool.free(allocation.new_full_pages)
+        loose = (
+            ((allocation.tail_page,) if allocation.tail_page is not None else ())
+            + tuple(decode_pages)
+        )
+        if loose:
+            self._pool.free(loose)
+
+    def pin(
+        self,
+        session_id: str,
+        tokens: tuple[int, ...],
+        ttl_allocations: int | None = None,
+    ) -> None:
+        """Hold the matched prefix path against eviction (orchestration sessions).
+
+        ``ttl_allocations`` bounds the pin's lifetime in allocate() calls so
+        abandoned sessions drain instead of pinning pages forever.
+        """
         if session_id in self._pins:
             raise ValueError(f"session {session_id!r} is already pinned")
         _, _, node = self._match_and_lock(tuple(tokens))
-        self._pins[session_id] = node
+        expiry = self._alloc_tick + ttl_allocations if ttl_allocations is not None else None
+        self._pins[session_id] = (node, expiry)
 
     def unpin(self, session_id: str) -> None:
-        node = self._pins.pop(session_id, None)
-        if node is None:
+        entry = self._pins.pop(session_id, None)
+        if entry is None:
             raise ValueError(f"session {session_id!r} is not pinned")
-        self._unlock_path(node)
+        self._unlock_path(entry[0])

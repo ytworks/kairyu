@@ -137,21 +137,25 @@ committed alongside results (`bench/results/<date>-<gpu>.json`).
   FlashInfer kernel selection) — decide at GPU-phase start; default bf16 KV.
 - FlashInfer API churn: pin version in `pyproject.toml` GPU extra (`kairyu[gpu]`).
 
-Mandatory pre-GPU work items from the design review (not yet implemented):
+Mandatory pre-GPU work items from the design review:
 
-1. EOS/stop-token semantics under overlap: `EngineRequest` needs `eos_token_id`/stop
-   params, and `update()` must tolerate + trim one in-flight surplus token for requests
-   that finish one step late (currently finish is exact at `max_new_tokens` only).
-2. Preemption under KV pressure: victim selection + recompute requeue
-   (release-without-commit path that does NOT mark pages computed) and a decode watermark
-   so admission cannot starve running decodes. Today exhaustion raises "engine stall".
+1. ~~EOS/stop-token semantics under overlap~~ **DONE 2026-07-02**: `EngineRequest.eos_token_id`,
+   surplus in-flight tokens trimmed (not errors) when a request finishes early under
+   schedule-ahead; tested (`test_scheduler_robustness.py`).
+2. ~~Preemption under KV pressure~~ **DONE 2026-07-02**: decode-priority recompute-preemption
+   of the youngest output-free running request via `release_preempted` (does NOT mark
+   pages computed), plus `decode_watermark_pages` admission reserve; tested. Output-KV
+   recompute for victims that already generated tokens is a GPU-phase extension.
 3. Typed `StepInput` for the ModelRunner (page tables, positions, new token ids, sampling
    params) instead of handing over mutable scheduler state; async result handle for M3
-   CUDA graphs; abort + per-step streaming output path out of the engine core; tokenizer /
+   CUDA graphs; per-step streaming output path out of the engine core; tokenizer /
    incremental detokenizer component; ZMQ/msgpack frame spec for the process split.
-4. Session-pin TTL (abandoned orchestration sessions currently pin pages until unpin).
+   `Scheduler.abort()` (client disconnect) **DONE 2026-07-02**; the rest lands with the
+   GPU runner since its shape depends on FlashInfer metadata layout.
+4. ~~Session-pin TTL~~ **DONE 2026-07-02**: `pin(..., ttl_allocations=N)` expires lazily on
+   allocation ticks; tested.
 5. Eviction victim scan is O(nodes) per eviction — switch to a heap before measuring
-   scheduler overhead; `PagePool.free` is O(n) membership churn.
+   scheduler overhead (profiling first; only matters at large tree sizes).
 
 Bench controls (amended per review, applies to §4): pin exact versions of vLLM/SGLang/
 FlashInfer/driver; disclose that vLLM V1 runs CUDA graphs by default while kairyu M2 has
