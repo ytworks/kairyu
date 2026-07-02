@@ -77,12 +77,18 @@ class Scheduler:
         max_num_batched_tokens: int = _DEFAULT_TOKEN_BUDGET,
         max_num_seqs: int = _DEFAULT_MAX_SEQS,
         page_size: int = 16,
+        pd_separation: bool = False,
+        decode_token_budget: int | None = None,
     ) -> None:
         if max_num_batched_tokens < 1:
             raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
+        if pd_separation and (decode_token_budget is None or decode_token_budget < 1):
+            raise ValueError("pd_separation=True requires decode_token_budget >= 1")
         self._kv = kv_cache
         self._budget = max_num_batched_tokens
         self._max_seqs = max_num_seqs
+        self._pd_separation = pd_separation
+        self._decode_budget = decode_token_budget
         self._page_size = getattr(kv_cache, "_page_size", page_size)
         self._states: dict[str, _RequestState] = {}
         self._waiting: list[str] = []
@@ -154,11 +160,18 @@ class Scheduler:
         return budget
 
     def schedule(self) -> SchedulerOutput:
+        """Plan one step. With P-D separation, decodes and prefills draw from
+        independent token budgets (TPOT and TTFT tuned separately, design m2 §2.4);
+        combined mode shares one budget with decode priority."""
         plan: list[ScheduledChunk] = []
-        budget = self._budget
-        budget = self._schedule_decodes(budget, plan)
-        budget = self._schedule_prefills(budget, plan)
-        self._admit_waiting(budget, plan)
+        if self._pd_separation:
+            assert self._decode_budget is not None
+            self._schedule_decodes(self._decode_budget, plan)
+            prefill_budget = self._budget
+        else:
+            prefill_budget = self._schedule_decodes(self._budget, plan)
+        prefill_budget = self._schedule_prefills(prefill_budget, plan)
+        self._admit_waiting(prefill_budget, plan)
         return SchedulerOutput(scheduled=tuple(plan))
 
     def _finish(self, state: _RequestState) -> None:
