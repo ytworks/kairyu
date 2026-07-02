@@ -162,6 +162,8 @@ class Scheduler:
             state.computed_prompt += chunk
             if state.prefill_done:
                 state.in_flight += 1  # the prompt-completing chunk samples token 0
+                if state.allocation is not None:
+                    self._kv.mark_computed(state.allocation)
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
             budget -= chunk
         return budget
@@ -177,10 +179,14 @@ class Scheduler:
             self._waiting.pop(0)
             state.status = _Status.RUNNING
             self._running.append(request_id)
-            chunk = min(state.prompt_len, budget)
-            state.computed_prompt = chunk
+            # cached prefix skips prefill compute; the last prompt token is
+            # always recomputed so the step produces logits for sampling
+            cached = min(state.allocation.num_cached_tokens, state.prompt_len - 1)
+            chunk = min(state.prompt_len - cached, budget)
+            state.computed_prompt = cached + chunk
             if state.prefill_done:
-                state.in_flight += 1  # single-chunk prefill samples token 0
+                state.in_flight += 1  # prompt-completing chunk samples token 0
+                self._kv.mark_computed(state.allocation)
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
             budget -= chunk
         return budget
@@ -204,8 +210,13 @@ class Scheduler:
         state.status = _Status.FINISHED
         self._running.remove(state.request.request_id)
         if state.allocation is not None:
-            self._kv.free(state.allocation)
-        if state.decode_pages:
+            # fold fully-generated pages into the radix tree so the next
+            # conversation turn's prompt (prompt + this completion) hits cache
+            self._kv.commit_and_release(
+                state.allocation, tuple(state.outputs), tuple(state.decode_pages)
+            )
+            state.decode_pages.clear()
+        elif state.decode_pages:
             self._kv.free_private_pages(tuple(state.decode_pages))
             state.decode_pages.clear()
 

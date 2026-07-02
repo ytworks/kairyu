@@ -22,7 +22,7 @@ class KVCacheFull(MemoryError):
 
 
 class _Node:
-    __slots__ = ("key", "pages", "children", "parent", "ref_count", "last_access")
+    __slots__ = ("key", "pages", "children", "parent", "ref_count", "last_access", "computed")
 
     def __init__(
         self,
@@ -36,6 +36,10 @@ class _Node:
         self.parent = parent
         self.ref_count = 0
         self.last_access = 0
+        # KV for these pages has actually been written. Matching skips
+        # uncomputed nodes so chunked prefill in progress is never shared
+        # as if it were valid cache (garbage-KV protection).
+        self.computed = False
 
 
 @dataclass(frozen=True)
@@ -46,11 +50,18 @@ class KVAllocation:
     tail_page: int | None
     _node: _Node = field(repr=False)
     _freed: bool = field(default=False, repr=False)
+    _tree_inserted: bool = field(default=True, repr=False)
+    _page_size: int = field(default=16, repr=False)
 
     @property
     def pages(self) -> tuple[int, ...]:
         tail = (self.tail_page,) if self.tail_page is not None else ()
         return self.cached_pages + self.new_full_pages + tail
+
+    @property
+    def num_cached_tokens(self) -> int:
+        """Prompt tokens whose KV is already computed — prefill can skip them."""
+        return len(self.cached_pages) * self._page_size
 
 
 class RadixKVCache:
@@ -61,6 +72,7 @@ class RadixKVCache:
         self._page_size = page_size
         self._root = _Node(key=(), pages=(), parent=None)
         self._root.ref_count = 1  # never evictable
+        self._root.computed = True
         self._clock = 0
         self._pins: dict[str, _Node] = {}
         self._hit_tokens = 0
@@ -95,6 +107,7 @@ class RadixKVCache:
         )
         upper.ref_count = node.ref_count
         upper.last_access = node.last_access
+        upper.computed = node.computed
         parent = node.parent
         assert parent is not None  # root is never split (its key is empty)
         parent.children[upper.key[: self._page_size]] = upper
@@ -116,7 +129,7 @@ class RadixKVCache:
             if len(first_page) < self._page_size:
                 break
             child = node.children.get(first_page)
-            if child is None:
+            if child is None or not child.computed:
                 break
             whole_pages = len(child.key) // self._page_size
             common_pages = 0
@@ -177,13 +190,19 @@ class RadixKVCache:
             )
         new_full_pages = self._pool.allocate(full_pages_needed)
         tail_page = self._pool.allocate(1)[0] if tail_tokens else None
+        tree_inserted = True
         if full_pages_needed:
             key = tokens[matched_tokens : matched_tokens + full_pages_needed * self._page_size]
-            child = _Node(key=key, pages=new_full_pages, parent=node)
-            child.ref_count = 1
-            self._touch(child)
-            node.children[key[: self._page_size]] = child
-            node = child
+            if key[: self._page_size] in node.children:
+                # an uncomputed sibling owns this key (in-flight prefill of the
+                # same prefix); keep our pages private instead of colliding
+                tree_inserted = False
+            else:
+                child = _Node(key=key, pages=new_full_pages, parent=node)
+                child.ref_count = 1
+                self._touch(child)
+                node.children[key[: self._page_size]] = child
+                node = child
         self._hit_tokens += matched_tokens
         self._total_tokens += len(tokens)
         return KVAllocation(
@@ -192,15 +211,66 @@ class RadixKVCache:
             new_full_pages=new_full_pages,
             tail_page=tail_page,
             _node=node,
+            _tree_inserted=tree_inserted,
+            _page_size=self._page_size,
         )
 
-    def free(self, allocation: KVAllocation) -> None:
+    def mark_computed(self, allocation: KVAllocation) -> None:
+        """Record that the allocation's prefill KV has been written (prefill done)."""
+        if allocation._tree_inserted and allocation.new_full_pages:
+            allocation._node.computed = True
+
+    def _release(self, allocation: KVAllocation) -> None:
         if allocation._freed:
             raise ValueError("allocation was already freed")
         object.__setattr__(allocation, "_freed", True)
+        # free()/commit run only at request completion, so the KV is written;
+        # a future preemption path must release WITHOUT marking computed
+        self.mark_computed(allocation)
         self._unlock_path(allocation._node)
+        if not allocation._tree_inserted and allocation.new_full_pages:
+            self._pool.free(allocation.new_full_pages)
+
+    def free(self, allocation: KVAllocation) -> None:
+        self._release(allocation)
         if allocation.tail_page is not None:
             self._pool.free((allocation.tail_page,))
+
+    def commit_and_release(
+        self,
+        allocation: KVAllocation,
+        output_tokens: tuple[int, ...],
+        decode_pages: tuple[int, ...],
+    ) -> None:
+        """Finish a request: fold fully-generated pages into the radix tree.
+
+        Turn N+1 of a conversation prompts with turn N's completion appended,
+        so caching generated tokens is what makes multi-turn prefixes hit.
+        Partially-filled pages are returned to the pool.
+        """
+        sequence = allocation.tokens + tuple(output_tokens)
+        prompt_full = len(allocation.tokens) // self._page_size
+        sequence_full = len(sequence) // self._page_size
+        extra_full = sequence_full - prompt_full
+        candidates = (
+            ((allocation.tail_page,) if allocation.tail_page is not None else ())
+            + tuple(decode_pages)
+        )
+        node = allocation._node
+        kept: tuple[int, ...] = ()
+        if extra_full > 0 and allocation._tree_inserted:
+            key = sequence[prompt_full * self._page_size : sequence_full * self._page_size]
+            first_page = key[: self._page_size]
+            if first_page not in node.children:
+                kept = candidates[:extra_full]
+                child = _Node(key=key, pages=kept, parent=node)
+                child.computed = True
+                self._touch(child)
+                node.children[first_page] = child
+        leftover = tuple(page for page in candidates if page not in kept)
+        self._release(allocation)
+        if leftover:
+            self._pool.free(leftover)
 
     def allocate_private_page(self) -> int:
         """Allocate one non-shared page (decode growth beyond the prompt allocation)."""

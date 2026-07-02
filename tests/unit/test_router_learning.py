@@ -140,3 +140,51 @@ def test_outcome_logging_joins_with_decisions(tmp_path):
     assert records[0]["query_sha256"] == records[1]["query_sha256"]
     dataset = build_dataset(records, cost_weight=1.0)
     assert dataset[0].label == decision.target
+
+
+def test_bandit_exploration_rate_is_honored():
+    bandit = GreedyLinearBandit(epsilon=0.3, seed=1)
+    features = extract_features("a plain query with no signals")
+    picks = [bandit.select(features) for _ in range(2000)]
+    # untrained weights tie at 0 -> exploitation always picks the first arm;
+    # only exploration (eps * 2/3) produces non-tier1 picks
+    explore_fraction = sum(1 for pick in picks if pick != "tier1") / len(picks)
+    assert 0.10 < explore_fraction < 0.30
+
+
+def test_bandit_rejects_malformed_saved_weights():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="missing arms"):
+        GreedyLinearBandit(weights={"tier1": [0.0] * 8})
+    with _pytest.raises(ValueError, match="dimension"):
+        GreedyLinearBandit(
+            weights={"tier1": [0.0] * 3, "tier2": [0.0] * 8, "multi_agent": [0.0] * 8}
+        )
+
+
+def test_bandit_router_defers_to_base_until_warm():
+    from kairyu.orchestration.learning.bandit import BanditRouter
+
+    router = BanditRouter(
+        GreedyLinearBandit(epsilon=0.0, seed=2), base=RuleRouter(), min_updates_per_arm=3
+    )
+    cold = router.route(SHORT)
+    assert cold.target == RuleRouter().route(SHORT).target
+    assert "cold_start" in cold.reason
+    for arm in ("tier1", "tier2", "multi_agent"):
+        for _ in range(3):
+            router.record_reward(SHORT, arm, reward=1.0 if arm == "tier1" else 0.0)
+    warm = router.route(SHORT)
+    assert warm.reason == "bandit"
+    assert warm.target == "tier1"
+
+
+def test_record_outcome_validates_ranges(tmp_path):
+    import pytest as _pytest
+
+    log = JsonlRouterLog(tmp_path / "router.jsonl")
+    with _pytest.raises(ValueError, match="quality"):
+        log.record_outcome("q", target="tier1", quality=1.5, cost_usd=0.1)
+    with _pytest.raises(ValueError, match="cost_usd"):
+        log.record_outcome("q", target="tier1", quality=0.5, cost_usd=-0.1)

@@ -120,6 +120,10 @@ class JsonlRouterLog:
         latency_s: float | None = None,
     ) -> None:
         """Log the observed outcome of a routed request (M4 training signal)."""
+        if not 0.0 <= quality <= 1.0:
+            raise ValueError(f"quality must be in [0, 1], got {quality}")
+        if cost_usd < 0.0:
+            raise ValueError(f"cost_usd must be >= 0, got {cost_usd}")
         self._append(
             {
                 "kind": "outcome",
