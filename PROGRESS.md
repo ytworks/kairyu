@@ -15,16 +15,29 @@ _Last updated: 2026-07-02_
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
-| M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **In progress.** Design drafted (`docs/design/m7-productionization.md`, goal G3). CPU-verifiable scope: server hardening, `kairyu serve` + DeploymentSpec, compose topology, batch API, deployment guide. |
+| M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
-in `bench/`.
+in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
+replicas, auth, metrics, batch) or a replica node, and the compose topology
+(1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
 
 Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 `docs/gpu-runbook.md`. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-02 — [progress] M7 Phase 5: deployment guide, runbook §9, README — M7 CPU half complete
+- What: `docs/deployment.md` (DC topology, security duty split with the managed cloud
+  edge, systemd + compose node setup with documented k8s revisit triggers, config
+  walkthrough, rolling model-update drill, observability, interconnect sizing, untested
+  k8s appendix); `docs/gpu-runbook.md` §9 (production bring-up on real GPUs: real-engine
+  compose smoke, affinity/radix hit-rate measurement through the gateway, rolling-update
+  and batch-under-load drills on hardware); README M7 row + serving quickstart. With
+  this, every CPU-verifiable G3 gate is implemented and tested (328 tests, 95% cov).
+- Refs: `docs/deployment.md`, `docs/gpu-runbook.md` §9, README.md;
+  m7 status line updated to Implemented — CPU half
 
 ### 2026-07-02 — [progress] M7 Phase 4: OpenAI-compatible batch API
 - What: `/v1/files` (multipart upload/metadata/content) and `/v1/batches`

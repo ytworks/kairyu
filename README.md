@@ -59,11 +59,13 @@ rewrite.
 | **M4** | Router learning: JSONL serving logs → labeled dataset → distilled classifier (`LearnedRouter`) → contextual-bandit online refinement | ✅ Complete (CPU-only) |
 | **M5** | Intra-node multi-GPU: tensor parallelism (Communicator + TPModelRunner, TP=2 greedy-equivalent to TP=1 on CPU), DP replicas (ReplicaPool with session affinity), intra-node P-D separation (PDCoordinator + `resume_with_kv`) | ✅ CPU half done — GPU phase is runbook §6, gated on M2 |
 | **M6** | Inter-node multi-GPU: static 2-node ClusterSpec, page-granular KV transfer plane (KVTransport, TCP loopback), inter-node P-D, PP=2 via inter-step pipelining | ✅ CPU half done — GPU phase is runbook §7, gated on M5 |
+| **M7** | Productionization: `kairyu serve` CLI + DeploymentSpec, health/metrics/auth/concurrency guard, ReplicaPool gateway wiring + background health prober, HTTP session affinity, OpenAI-compatible batch API, Docker/compose topology with CI smoke drill | ✅ CPU half done — GPU bring-up is runbook §9 |
 
 Per-milestone design docs (goals, decisions, review amendments) live in
 [`docs/design/`](docs/design/); the multi-GPU acceptance contract is
 [`docs/goals/g2-multi-gpu.md`](docs/goals/g2-multi-gpu.md); the GPU-phase execution plan is
-in [`docs/gpu-runbook.md`](docs/gpu-runbook.md).
+in [`docs/gpu-runbook.md`](docs/gpu-runbook.md); production deployment (DC topology,
+cloud front, rolling updates) is [`docs/deployment.md`](docs/deployment.md).
 
 ## Installation
 
@@ -86,6 +88,21 @@ uv run python examples/basic_offline_inference.py    # LLM API on the mock backe
 uv run python examples/run_yaml_pool.py              # declarative agent pool
 uv run python examples/serve.py                      # OpenAI-compatible server on :8000
 ```
+
+### Serving (production)
+
+One config file declares the node's role — a gateway (ReplicaPool over remote
+replicas, auth, metrics, batch API) or a replica (local engine):
+
+```bash
+uv run kairyu serve deploy/compose/gateway.yaml      # or your own DeploymentSpec
+./scripts/compose_smoke.sh                           # 1 gateway + 3 replicas via Docker
+```
+
+Endpoints: `/v1/chat/completions` (SSE, tools), `/v1/models`, `/v1/files` +
+`/v1/batches`, `/health`, `/readyz`, `/metrics` (Prometheus). Requests carrying
+the OpenAI `user` field (or `X-Session-ID`) stick to the replica holding their
+warm radix-KV prefix. See [`docs/deployment.md`](docs/deployment.md).
 
 ### vLLM drop-in
 
