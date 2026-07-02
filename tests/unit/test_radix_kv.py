@@ -112,3 +112,21 @@ def test_double_free_rejected():
     cache.free(allocation)
     with pytest.raises(ValueError, match="freed"):
         cache.free(allocation)
+
+
+def test_private_pages_for_decode_growth():
+    cache = RadixKVCache(num_pages=2, page_size=PAGE)
+    page = cache.allocate_private_page()
+    assert cache.num_free_pages == 1
+    cache.free_private_pages((page,))
+    assert cache.num_free_pages == 2
+
+
+def test_private_page_allocation_evicts_when_needed():
+    cache = RadixKVCache(num_pages=1, page_size=PAGE)
+    allocation = cache.allocate((1, 2, 3, 4))
+    cache.free(allocation)  # page stays cached with refcount 0
+    page = cache.allocate_private_page()  # must evict the cached page
+    assert page is not None
+    with pytest.raises(KVCacheFull):
+        cache.allocate_private_page()
