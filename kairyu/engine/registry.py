@@ -25,6 +25,7 @@ def available_backends() -> tuple[str, ...]:
 _LAZY_MODULES = {
     "openai": "kairyu.engine.openai_backend",
     "vllm": "kairyu.engine.vllm_backend",
+    "kairyu": "kairyu.engine.kairyu_backend",
 }
 
 
