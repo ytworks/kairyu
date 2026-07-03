@@ -24,7 +24,11 @@ def add_health_routes(
     @app.post("/admin/drain")
     async def drain_node():
         """Node-level drain (m10a A5): flips /readyz to 503; gateway-side pool
-        drains go through PoolReconciler membership instead."""
+        drains go through PoolReconciler membership instead.
+
+        NOT in the auth exempt list: when API keys are configured this
+        endpoint requires one (pinned by test); keyless deployments are the
+        node-to-node trusted-mesh mode (m7 D5) by explicit choice."""
         app.state.draining = True
         return {"status": "draining"}
 

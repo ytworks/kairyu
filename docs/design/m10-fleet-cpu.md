@@ -1,6 +1,6 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
-Status: **M10a Implemented** (2026-07-03); M10b in progress. Reviewed (1-reviewer
+Status: **M10a + M10b Implemented** (2026-07-03). Reviewed (1-reviewer
 panel with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03

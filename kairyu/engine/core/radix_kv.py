@@ -73,7 +73,9 @@ class RadixKVCache:
     def page_size(self) -> int:
         return self._page_size
 
-    def __init__(self, num_pages: int, page_size: int = 16) -> None:
+    def __init__(
+        self, num_pages: int, page_size: int = 16, event_sink=None
+    ) -> None:
         if page_size < 1:
             raise ValueError(f"page_size must be >= 1, got {page_size}")
         self._pool = PagePool(num_pages)
@@ -87,6 +89,8 @@ class RadixKVCache:
         self._pins: dict[str, tuple[_Node, int | None]] = {}  # node, expiry tick
         self._hit_tokens = 0
         self._total_tokens = 0
+        # m10b D7: optional KV-event sink (BlockStored/BlockRemoved)
+        self._event_sink = event_sink
 
     @property
     def num_free_pages(self) -> int:
@@ -181,6 +185,7 @@ class RadixKVCache:
             if not leaves:
                 return False
             victim = min(leaves, key=lambda leaf: leaf.last_access)
+            self._emit_removed(victim)  # the ONLY BlockRemoved source (A13)
             self._pool.free(victim.pages)
             assert victim.parent is not None
             del victim.parent.children[victim.key[: self._page_size]]
@@ -237,10 +242,68 @@ class RadixKVCache:
             _page_size=self._page_size,
         )
 
+    def _full_prefix(self, node) -> tuple[int, ...]:
+        parts = []
+        current = node
+        while current is not None and current.key:
+            parts.append(tuple(current.key))
+            current = current.parent
+        tokens: tuple[int, ...] = ()
+        for part in reversed(parts):
+            tokens += part
+        return tokens
+
+    def _emit_stored(self, node) -> None:
+        """BlockStored on the computed False->True transition (m10b A13)."""
+        if self._event_sink is None:
+            return
+        import hashlib as _hashlib
+
+        prefix = self._full_prefix(node)
+        start = len(prefix) - len(node.key)
+        hashes = []
+        for offset in range(0, len(node.key), self._page_size):
+            end = start + offset + self._page_size
+            hashes.append(
+                _hashlib.sha256(repr(prefix[:end]).encode()).hexdigest()[:16]
+            )
+        parent_hash = (
+            _hashlib.sha256(repr(prefix[:start]).encode()).hexdigest()[:16]
+            if start
+            else None
+        )
+        self._event_sink(
+            {
+                "type": "BlockStored",
+                "block_hashes": hashes,
+                "parent_block_hash": parent_hash,
+                "token_ids": list(node.key),
+                "block_size": self._page_size,
+            }
+        )
+
+    def _emit_removed(self, node) -> None:
+        if self._event_sink is None:
+            return
+        import hashlib as _hashlib
+
+        prefix = self._full_prefix(node)
+        start = len(prefix) - len(node.key)
+        hashes = [
+            _hashlib.sha256(repr(prefix[: start + offset + self._page_size]).encode())
+            .hexdigest()[:16]
+            for offset in range(0, len(node.key), self._page_size)
+        ]
+        self._event_sink({"type": "BlockRemoved", "block_hashes": hashes})
+
     def mark_computed(self, allocation: KVAllocation) -> None:
         """Record that the allocation's prefill KV has been written (prefill done)."""
         if allocation._tree_inserted and allocation.new_full_pages:
-            allocation._node.computed = True
+            if not allocation._node.computed:  # guard the _release double-fire
+                allocation._node.computed = True
+                self._emit_stored(allocation._node)
+            else:
+                allocation._node.computed = True
 
     def _release(self, allocation: KVAllocation) -> None:
         if allocation._freed:
@@ -289,6 +352,7 @@ class RadixKVCache:
                 child.computed = True
                 self._touch(child)
                 node.children[first_page] = child
+                self._emit_stored(child)  # decode-extension store (A13)
         leftover = tuple(page for page in candidates if page not in kept)
         self._release(allocation)
         if leftover:

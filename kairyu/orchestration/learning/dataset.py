@@ -13,7 +13,7 @@ future inverse-propensity weighting.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 FEATURE_ORDER = (
@@ -73,3 +73,53 @@ def build_dataset(
             LabeledExample(query_hash=query_hash, features=dict(features), label=label)
         )
     return tuple(examples)
+
+
+# --- m10b D8: placement records + offline (alpha, beta) grid tuning ---------
+
+
+@dataclass(frozen=True)
+class PlacementRecord:
+    """One placement decision joined with its outcome (TTFT seconds)."""
+
+    replica_id: str
+    reason: str
+    overlap_chunks: int
+    outstanding: int
+    ttft_s: float
+
+
+def tune_prefix_weights(
+    records: Sequence[PlacementRecord],
+    alphas: Sequence[float] = (0.5, 1.0, 2.0, 4.0),
+    betas: Sequence[float] = (0.0, 0.25, 0.5, 1.0),
+) -> tuple[float, float]:
+    """Offline grid: pick (alpha, beta) minimizing predicted-mean TTFT.
+
+    Pure counterfactual scoring over the logged records: a candidate weighting
+    is judged by the mean TTFT of the records whose decision it AGREES with
+    (records where alpha*overlap - beta*outstanding would have picked the same
+    replica class — approximated by whether the record's own score ranks
+    positive). Deliberately simple: the dataset is small and the goal is a
+    starting point for the online bandit, not the bandit itself.
+    """
+    if not records:
+        raise ValueError("no placement records to tune on")
+    best: tuple[float, tuple[float, float]] | None = None
+    for alpha in alphas:
+        for beta in betas:
+            agreeing = [
+                record.ttft_s
+                for record in records
+                if (alpha * record.overlap_chunks - beta * record.outstanding > 0)
+                == (record.reason == "prefix_match")
+            ]
+            if not agreeing:
+                continue
+            mean_ttft = sum(agreeing) / len(agreeing)
+            coverage = len(agreeing) / len(records)
+            score = mean_ttft / max(coverage, 1e-9)  # penalize tiny agreement sets
+            if best is None or score < best[0]:
+                best = (score, (alpha, beta))
+    assert best is not None
+    return best[1]
