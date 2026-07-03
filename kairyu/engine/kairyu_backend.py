@@ -2,18 +2,23 @@
 
 Full-stack integration on CPU: OpenAI server / LLM API → this backend →
 Scheduler + RadixKVCache + EngineCore step loop. The model forward is a
-deterministic toy runner on CPU; the GPU phase swaps in the FlashInfer
-ModelRunner behind the same ModelRunner protocol — nothing above it changes.
+deterministic toy runner on CPU; the GPU phase swaps in the real ModelRunner
+behind the same protocol — nothing above it changes.
 
-Tokenization is a placeholder word-hash (the real tokenizer/detokenizer
-component arrives with the GPU runner, m2 §5 item 3); completion text is a
-readable rendering of toy token ids, clearly not model output.
+Threading discipline (m8 D1): all scheduler mutations — add_request and
+stop-string ``finish_early`` — happen on the step thread, between ``update()``
+and the next ``schedule()``. The event loop only appends ops and reads queues.
+Stop strings are enforced with SSE-safe holdback: text that could still become
+part of a stop string is withheld from the stream, so a stop spanning two
+deltas never leaks its prefix to a client.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 
 from kairyu.engine.backend import GenerationRequest, GenerationResult
 from kairyu.engine.core.comm import FakeCommunicator
@@ -21,6 +26,7 @@ from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
 from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
 from kairyu.engine.registry import register_backend
+from kairyu.engine.tokenizer import IncrementalDetokenizer, Tokenizer, resolve_tokenizer
 from kairyu.outputs import CompletionOutput
 
 _VOCAB_SIZE = 50_000
@@ -42,15 +48,30 @@ class _ToyRunner:
         return sampled
 
 
-def _tokenize(prompt: str) -> tuple[int, ...]:
-    words = prompt.split()
-    if not words:
-        return (0,)
-    return tuple(hash(word) % _VOCAB_SIZE for word in words)
+@dataclass(frozen=True)
+class _StreamUpdate:
+    outputs: tuple[int, ...]
+    text: str
+    finished: bool
+    finish_reason: str | None
+    error: Exception | None = None
 
 
-def _render(token_ids: tuple[int, ...]) -> str:
-    return " ".join(f"tok{token_id}" for token_id in token_ids)
+class _RequestTrack:
+    """Step-thread-only streaming state for one request."""
+
+    __slots__ = ("detok", "stops", "holdback", "consumed", "stable")
+
+    def __init__(self, detok: IncrementalDetokenizer, stops: tuple[str, ...]) -> None:
+        self.detok = detok
+        self.stops = stops
+        self.holdback = max((len(stop) for stop in stops), default=1) - 1
+        self.consumed = 0
+        self.stable = ""
+
+    def find_stop(self, text: str) -> int | None:
+        indices = [index for stop in self.stops if (index := text.find(stop)) != -1]
+        return min(indices) if indices else None
 
 
 class KairyuBackend:
@@ -61,9 +82,11 @@ class KairyuBackend:
         max_num_batched_tokens: int = 2048,
         runner: object | None = None,
         tensor_parallel_size: int = 1,
+        tokenizer: str | Tokenizer = "toy",
     ) -> None:
         validate_tp_degree(tensor_parallel_size)
         self.tensor_parallel_size = tensor_parallel_size
+        self._tokenizer = resolve_tokenizer(tokenizer)
         self._cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
         self._scheduler = Scheduler(
             self._cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
@@ -80,77 +103,121 @@ class KairyuBackend:
             )
         else:
             self._runner = runner or _ToyRunner()
-        self._queues: dict[str, asyncio.Queue] = {}
+        self._ops: deque[tuple[EngineRequest, _RequestTrack]] = deque()
+        self._tracked: dict[str, _RequestTrack] = {}  # step-thread only
+        self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._pump_task: asyncio.Task | None = None
 
-    def _step(self) -> None:
-        plan = self._scheduler.schedule()
-        if not plan.scheduled:
-            if self._scheduler.has_unfinished():
+    def _drain_ops(self) -> None:
+        while self._ops:
+            engine_request, track = self._ops.popleft()
+            self._scheduler.add_request(engine_request)
+            self._tracked[engine_request.request_id] = track
+
+    def _step(self) -> list[tuple[str, _StreamUpdate]]:
+        """One engine step on the step thread; returns per-request updates."""
+        self._drain_ops()
+        if self._scheduler.has_unfinished():
+            plan = self._scheduler.schedule()
+            if not plan.scheduled:
                 raise RuntimeError("engine stall: nothing schedulable")
-            return
-        sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
-        if sampled:
-            self._scheduler.update(sampled)
+            sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
+            if sampled:
+                self._scheduler.update(sampled)
+        updates: list[tuple[str, _StreamUpdate]] = []
+        for request_id, track in list(self._tracked.items()):
+            update = self._track_update(request_id, track)
+            if update is None:
+                continue
+            updates.append((request_id, update))
+            if update.finished:
+                del self._tracked[request_id]
+        return updates
+
+    def _track_update(self, request_id: str, track: _RequestTrack) -> _StreamUpdate | None:
+        state = self._scheduler.states.get(request_id)
+        if state is None:
+            return None
+        outputs = self._scheduler.output_tokens(request_id)
+        new_ids = outputs[track.consumed :]
+        track.consumed = len(outputs)
+        if new_ids:
+            track.stable = track.detok.push(new_ids)
+        if state.status.value == "finished":
+            full = track.detok.finalize()
+            stop_at = track.find_stop(full)
+            if stop_at is not None:
+                return _StreamUpdate(outputs, full[:stop_at], True, "stop")
+            reason = self._scheduler.finish_reason(request_id) or "length"
+            return _StreamUpdate(outputs, full, True, reason)
+        stop_at = track.find_stop(track.stable)
+        if stop_at is not None:
+            # between update() and the next schedule(): the safe finish point
+            self._scheduler.finish_early(request_id)
+            return _StreamUpdate(outputs, track.stable[:stop_at], True, "stop")
+        visible_end = max(0, len(track.stable) - track.holdback)
+        return _StreamUpdate(outputs, track.stable[:visible_end], False, None)
 
     async def _pump(self) -> None:
         try:
-            while self._scheduler.has_unfinished():
-                await asyncio.to_thread(self._step)
-                for request_id, queue in list(self._queues.items()):
-                    state = self._scheduler.states.get(request_id)
-                    if state is None:
-                        continue
-                    outputs = self._scheduler.output_tokens(request_id)
-                    finished = state.status.value == "finished"
-                    queue.put_nowait((outputs, finished, None))
+            while self._ops or self._scheduler.has_unfinished():
+                updates = await asyncio.to_thread(self._step)
+                for request_id, update in updates:
+                    queue = self._queues.get(request_id)
+                    if queue is not None:
+                        queue.put_nowait(update)
         except Exception as error:
+            failure = _StreamUpdate((), "", True, None, error)
             for queue in self._queues.values():
-                queue.put_nowait(((), True, error))
+                queue.put_nowait(failure)
         finally:
             self._pump_task = None
 
     def _submit(self, request: GenerationRequest) -> asyncio.Queue:
-        max_new = request.sampling_params.max_tokens or _DEFAULT_MAX_NEW_TOKENS
-        self._scheduler.add_request(
-            EngineRequest(
-                request_id=request.request_id,
-                prompt_token_ids=_tokenize(request.prompt),
-                max_new_tokens=max_new,
-            )
+        params = request.sampling_params
+        engine_request = EngineRequest(
+            request_id=request.request_id,
+            prompt_token_ids=self._tokenizer.encode(request.prompt),
+            max_new_tokens=params.max_tokens or _DEFAULT_MAX_NEW_TOKENS,
+            eos_token_id=self._tokenizer.eos_token_id,
+            stop_token_ids=tuple(params.stop_token_ids or ()),
+            min_tokens=params.min_tokens,
+            ignore_eos=params.ignore_eos,
         )
+        track = _RequestTrack(
+            detok=IncrementalDetokenizer(self._tokenizer), stops=tuple(params.stop or ())
+        )
+        self._ops.append((engine_request, track))
         queue: asyncio.Queue = asyncio.Queue()
         self._queues[request.request_id] = queue
         if self._pump_task is None:
             self._pump_task = asyncio.get_running_loop().create_task(self._pump())
         return queue
 
-    def _result(
-        self, request: GenerationRequest, outputs: tuple[int, ...], finished: bool
-    ) -> GenerationResult:
+    def _result(self, request: GenerationRequest, update: _StreamUpdate) -> GenerationResult:
         completion = CompletionOutput(
             index=0,
-            text=_render(outputs),
-            token_ids=outputs,
+            text=update.text,
+            token_ids=update.outputs,
             cumulative_logprob=0.0,
-            finish_reason="length" if finished else None,
+            finish_reason=update.finish_reason,
         )
         return GenerationResult(
             request_id=request.request_id,
             prompt=request.prompt,
             completions=(completion,),
-            finished=finished,
+            finished=update.finished,
         )
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         queue = self._submit(request)
         try:
             while True:
-                outputs, finished, error = await queue.get()
-                if error is not None:
-                    raise error
-                if finished:
-                    return self._result(request, outputs, finished=True)
+                update: _StreamUpdate = await queue.get()
+                if update.error is not None:
+                    raise update.error
+                if update.finished:
+                    return self._result(request, update)
         finally:
             self._queues.pop(request.request_id, None)
 
@@ -159,13 +226,13 @@ class KairyuBackend:
         emitted = -1
         try:
             while True:
-                outputs, finished, error = await queue.get()
-                if error is not None:
-                    raise error
-                if len(outputs) > emitted or finished:
-                    emitted = len(outputs)
-                    yield self._result(request, outputs, finished=finished)
-                if finished:
+                update: _StreamUpdate = await queue.get()
+                if update.error is not None:
+                    raise update.error
+                if len(update.outputs) > emitted or update.finished:
+                    emitted = len(update.outputs)
+                    yield self._result(request, update)
+                if update.finished:
                     return
         finally:
             self._queues.pop(request.request_id, None)

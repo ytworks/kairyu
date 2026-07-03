@@ -12,7 +12,7 @@ the token being generated).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass
 from enum import Enum
 
 from kairyu.engine.core.radix_kv import KVAllocation, KVCacheFull, RadixKVCache
@@ -27,6 +27,13 @@ class EngineRequest:
     prompt_token_ids: tuple[int, ...]
     max_new_tokens: int = 16
     eos_token_id: int | None = None
+    # m8 additions are keyword-only so positional construction can never
+    # silently shift meaning across milestones
+    _: KW_ONLY
+    stop_token_ids: tuple[int, ...] = ()
+    min_tokens: int = 0
+    ignore_eos: bool = False
+    priority: int = 0  # admission ordering lands in M11; field reserved here
 
 
 class _Status(Enum):
@@ -45,6 +52,7 @@ class _RequestState:
         "surplus_in_flight",
         "allocation",
         "decode_pages",
+        "finish_reason",
     )
 
     def __init__(self, request: EngineRequest) -> None:
@@ -60,6 +68,7 @@ class _RequestState:
         self.surplus_in_flight = 0
         self.allocation: KVAllocation | None = None
         self.decode_pages: list[int] = []
+        self.finish_reason: str | None = None
 
     @property
     def prompt_len(self) -> int:
@@ -152,6 +161,32 @@ class Scheduler:
             self._running.remove(request_id)
             self._release_without_commit(state)
         state.status = _Status.FINISHED
+        state.finish_reason = "abort"
+
+    def finish_early(self, request_id: str) -> None:
+        """Finish a running request now (stop-string / grammar termination, m8 D1).
+
+        Unlike ``abort``, outputs are committed to the radix tree via the normal
+        ``_finish`` path so multi-turn prefix reuse survives a stop finish.
+        Must be called between ``update()`` and the next ``schedule()`` (the
+        step-thread op discipline); with in-flight tokens pending the surplus
+        trim covers their late arrival exactly like an EOS finish under overlap.
+        """
+        state = self._states[request_id]
+        if state.status is _Status.FINISHED:
+            return
+        if state.status is _Status.WAITING:
+            self._waiting.remove(request_id)
+            state.status = _Status.FINISHED
+            state.finish_reason = "stop"
+            return
+        state.surplus_in_flight += state.in_flight
+        state.in_flight = 0
+        state.finish_reason = "stop"
+        self._finish(state)
+
+    def finish_reason(self, request_id: str) -> str | None:
+        return self._states[request_id].finish_reason
 
     def _preempt_for_decode(self, needy_id: str) -> bool:
         """Recompute-preempt the youngest output-free running request.
@@ -332,13 +367,28 @@ class Scheduler:
                 raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
             state.in_flight -= 1
             state.outputs.append(token_id)
-            is_eos = (
-                state.request.eos_token_id is not None
-                and token_id == state.request.eos_token_id
-            )
-            if is_eos or len(state.outputs) >= state.request.max_new_tokens:
+            reason = self._terminal_reason(state, token_id)
+            if reason is not None:
                 state.surplus_in_flight += state.in_flight
                 state.in_flight = 0
+                state.finish_reason = reason
                 self._finish(state)
                 finished.append(request_id)
         return tuple(finished)
+
+    @staticmethod
+    def _terminal_reason(state: _RequestState, token_id: int) -> str | None:
+        """Stop semantics per committed token (m8 D1): EOS/stop_token_ids gated
+        by min_tokens and ignore_eos; max_new_tokens is the length backstop."""
+        request = state.request
+        is_eos = (
+            not request.ignore_eos
+            and request.eos_token_id is not None
+            and token_id == request.eos_token_id
+        )
+        is_stop = is_eos or token_id in request.stop_token_ids
+        if is_stop and len(state.outputs) >= request.min_tokens:
+            return "stop"
+        if len(state.outputs) >= request.max_new_tokens:
+            return "length"
+        return None

@@ -15,6 +15,13 @@ dependencies = [
     "python-multipart>=0.0.9",
 ]
 
+[project.optional-dependencies]
+# Real-model support (tokenizer/weights); heavy GPU kernels live in the gpu extra.
+hf = [
+    "tokenizers>=0.20",
+    "safetensors>=0.5",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8",
@@ -23,6 +30,8 @@ dev = [
     "ruff>=0.6",
     "torch>=2.6",
     "xgrammar>=0.2.3",
+    "tokenizers>=0.20",
+    "safetensors>=0.5",
 ]
 
 [project.scripts]

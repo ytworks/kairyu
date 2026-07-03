@@ -40,6 +40,25 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-03 — [design] M8 engine-CPU-core designed and reviewed (local-complete program begins)
+- What: `docs/design/m8-engine-cpu.md` — real tokenizer/incremental detokenizer
+  (toy stays default), real sampling (SampledToken, StepOutput protocol ripple,
+  grammar-mask-first, raw-logits logprobs, sha256 seeds), scheduler multi-token
+  commit (capped reservation, degrade-not-stall, scheduler-enforced spec
+  precondition), n-gram SpeculativeRunner (overlay-state scoring, per-request
+  gating), quant/NVFP4 detection + HardwareProfile + safetensors reader, and the
+  ZMQ/msgpack API↔engine process split. 3-reviewer panel APPROVE-WITH-AMENDMENTS;
+  amendments applied inline (§6): stop-string SSE holdback + `finish_early`
+  radix-commit path, step-thread op discipline (fixes a pre-existing add/abort
+  race), budget/watermark accounting for spec chunks, loud update() validation.
+- Why: The local-complete mandate (implement everything before GPU hardware;
+  only measurement/tuning waits) starts with the engine core. Implementation
+  milestones M8–M19 continue the m1..m7 numbering and map to roadmap tracks:
+  M8/M9→E1-E2/P-A, M10→F1-F2, M11→P-B/P-C/F5, M12–M18→E-track local halves
+  (model zoo, attention backends, quant compute, MoE/MLA, gloo/NCCL distributed,
+  CUDA-graph/EAGLE seams, KV transport), M19→deploy packaging.
+- Refs: `docs/design/m8-engine-cpu.md`; roadmap §4 Track E/P
+
 ### 2026-07-03 — [amendment] G2 hardware contract widened to capability profiles (A100+); fleet-scale decisions amended
 - What: G2 §7 gains 2026-07-03 amendments: the goal now spans capability profiles
   covering all NVIDIA GPUs from A100 (SM80) onward — original NVLink arithmetic and

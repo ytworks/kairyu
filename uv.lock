@@ -421,12 +421,20 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+hf = [
+    { name = "safetensors" },
+    { name = "tokenizers" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "safetensors" },
+    { name = "tokenizers" },
     { name = "torch" },
     { name = "xgrammar" },
 ]
@@ -439,8 +447,11 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "safetensors", marker = "extra == 'hf'", specifier = ">=0.5" },
+    { name = "tokenizers", marker = "extra == 'hf'", specifier = ">=0.20" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
+provides-extras = ["hf"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -448,6 +459,8 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-cov", specifier = ">=5" },
     { name = "ruff", specifier = ">=0.6" },
+    { name = "safetensors", specifier = ">=0.5" },
+    { name = "tokenizers", specifier = ">=0.20" },
     { name = "torch", specifier = ">=2.6" },
     { name = "xgrammar", specifier = ">=0.2.3" },
 ]
