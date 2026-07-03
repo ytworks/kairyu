@@ -23,6 +23,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
 | M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, `docs/design/m8-engine-cpu.md`): HF tokenizer seam + SSE-safe stop strings, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. 437 tests, 95% cov. |
+| M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -40,6 +41,24 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M9 complete: the API is truthful (usage, templates, logprobs, n>1)
+- What: all five m9 phases landed (437 → 471 tests, 94% cov; goal G6 gates
+  P-A1..P-A5 CPU-green). D1 usage truth — GenerationUsage reported by every
+  backend (kairyu/proc/mock/openai-passthrough incl. cached_tokens), OpenAI
+  include_usage chunk contract exact, batch JSONL outputs truthful. D2 HF Jinja
+  chat templates with transformers byte-match parity (trim/lstrip blocks,
+  loopcontrols, HF tojson), per-model DeploymentSpec.chat_templates threaded to
+  HTTP AND batch identically. D3 logprobs surfaced (TokenLogprob with bytes,
+  chunk-choice placement), /v1/completions (legacy four-array logprobs), real
+  n>1 via engine sub-request fan-out (seed identity at i=0, cumulative merged
+  streams, sibling aborts, prompt counted once). D4 response_format validated
+  (400 not crash) + server-level schema-valid-JSON gate with grammar-stop.
+  D5 serving_bench: bearer auth, token-granularity TPOT via include_usage with
+  labeled chunk fallback, timestamped results JSON.
+- Refs: `docs/design/m9-truthful-api.md` (Status: Implemented);
+  `kairyu/entrypoints/server/{app,protocol}.py`, `kairyu/entrypoints/chat_template.py`,
+  `kairyu/outputs.py`, `kairyu/engine/kairyu_backend.py`, `bench/serving_bench.py`
 
 ### 2026-07-03 — [progress] M8 complete: engine CPU core is real (tokens, sampling, spec decode, process split)
 - What: all six m8 phases landed (328 → 437 tests, 95% cov). D1 tokenizer seam

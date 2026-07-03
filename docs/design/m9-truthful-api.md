@@ -1,7 +1,8 @@
 # M9 Design: Truthful API — Usage, Chat Templates, Logprobs, Structured Outputs
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2-reviewer agent panel,
-2026-07-03; all amendments applied inline, see §6).
+Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS
+(2-reviewer agent panel, 2026-07-03; amendments applied inline, see §6).
+All five phases (D1–D5) landed with tests: 437 → 471 tests, 94% coverage.
 Milestone: M9 (realizes roadmap Track P-A, goal G6 gates P-A1..P-A5)
 Date: 2026-07-03
 Depends on: M8 (tokenizer seam, StreamUpdate usage fields,
