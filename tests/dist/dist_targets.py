@@ -129,3 +129,136 @@ def pp_greedy_parity(rank: int, world_size: int, init_file: str, out_dir: str,
     outputs = pp_greedy_generate(stage, comm, pool, page_table, prompt, max_new)
     _finish(out_dir, rank, {"outputs": outputs})
 
+
+def pd_prefill_process(rank: int, world_size: int, init_file: str, out_dir: str,
+                       model_dir: str, prompt: list[int], max_new: int) -> None:
+    """m18 D5 prefill half: prefill token 0, extract page BYTES between
+    execute() and update() (the copy-before-commit point), send over TCP."""
+    import asyncio
+    import hashlib
+    import time
+
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.kv_serde import extract_pages, pool_fingerprint
+    from kairyu.engine.core.kv_transport import SequenceMeta, TcpLoopbackTransport
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+    from kairyu.models.loader import load_model
+
+    torch.set_num_threads(1)
+    model, config, _ = load_model(model_dir)
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    scheduler = Scheduler(cache, max_num_batched_tokens=6, page_size=4)
+    pool = PagedKVPool.for_cache(cache, config)
+    runner = PagedModelRunner(model, pool, sampler=Sampler())
+
+    # rendezvous: decode wrote "addr|fingerprint"
+    deadline = time.monotonic() + 60
+    address = None
+    while time.monotonic() < deadline:
+        try:
+            content = Path(init_file).read_text()
+            if "|" in content:
+                address, fingerprint = content.split("|")
+                break
+        except FileNotFoundError:
+            pass
+        time.sleep(0.05)
+    assert address, "decode process never published its address"
+    assert fingerprint == pool_fingerprint(pool), "pool mismatch (m18 D1 handshake)"
+
+    scheduler.add_request(
+        EngineRequest("req", tuple(prompt), max_new_tokens=1, sampling=EngineSampling())
+    )
+    transport = TcpLoopbackTransport("prefill")
+    transport.register(pool.num_pages)
+    hashes: list[str] = []
+
+    async def _run() -> None:
+        while scheduler.has_unfinished():
+            plan = scheduler.schedule()
+            sampled = runner.execute(plan.scheduled, scheduler.states)
+            if "req" in sampled:
+                # copy-before-commit: extract while every page is locked
+                pages = tuple(scheduler.states["req"].allocation.pages)
+                frames = extract_pages(pool, pages)
+                for frame in frames:
+                    hashes.append(hashlib.sha256(b"".join(frame.fragments)).hexdigest())
+                token0 = sampled["req"][0].token_id
+                await transport.send(
+                    address, frames, SequenceMeta(tuple(prompt), token0)
+                )
+            scheduler.update({rid: [t.token_id for t in ts] for rid, ts in sampled.items()})
+        await transport.close()
+
+    asyncio.run(_run())
+    Path(out_dir, f"rank{rank}.json").write_text(json.dumps({"hashes": hashes}))
+
+
+def pd_decode_process(rank: int, world_size: int, init_file: str, out_dir: str,
+                      model_dir: str, prompt: list[int], max_new: int) -> None:
+    """m18 D5 decode half: recv bytes, adopt via resume_with_kv, decode."""
+    import asyncio
+    import hashlib
+
+    from kairyu.engine.core.engine_core import EngineCore
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.kv_serde import pool_fingerprint
+    from kairyu.engine.core.kv_transport import TcpLoopbackTransport
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.pd_remote import RemoteKVReceiver
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+    from kairyu.models.loader import load_model
+
+    torch.set_num_threads(1)
+    model, config, _ = load_model(model_dir)
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    scheduler = Scheduler(cache, max_num_batched_tokens=6, page_size=4)
+    pool = PagedKVPool.for_cache(cache, config)
+    runner = PagedModelRunner(model, pool, sampler=Sampler())
+    receiver = RemoteKVReceiver(cache, pool)
+    transport = TcpLoopbackTransport("decode")
+    transport.register(pool.num_pages)
+
+    async def _run() -> dict:
+        address = await transport.start_server()
+        Path(init_file).write_text(f"{address}|{pool_fingerprint(pool)}")
+        frames, meta = await transport.recv("prefill")
+        received_hashes = [
+            hashlib.sha256(b"".join(frame.fragments)).hexdigest() for frame in frames
+        ]
+        allocation = receiver.adopt(frames, meta)
+        request = EngineRequest(
+            "req", tuple(meta.token_ids), max_new_tokens=max_new,
+            sampling=EngineSampling(),
+        )
+        engine = EngineCore(scheduler, runner)
+        finished = scheduler.resume_with_kv(request, allocation, meta.first_token)
+        while not finished and scheduler.has_unfinished():
+            engine.step()
+            finished = not scheduler.has_unfinished()
+        outputs = list(scheduler.output_tokens("req"))
+        await transport.close()
+        return {
+            "outputs": outputs,
+            "hashes": received_hashes,
+            "injected": receiver.injected_pages,
+        }
+
+    result = asyncio.run(_run())
+    Path(out_dir, f"rank{rank}.json").write_text(json.dumps(result))
+
+
+def pd_two_process(rank: int, world_size: int, init_file: str, out_dir: str,
+                   model_dir: str, prompt: list[int], max_new: int) -> None:
+    """Rank 0 = prefill, rank 1 = decode (no torch.distributed needed)."""
+    if rank == 0:
+        pd_prefill_process(rank, world_size, init_file, out_dir, model_dir, prompt, max_new)
+    else:
+        pd_decode_process(rank, world_size, init_file, out_dir, model_dir, prompt, max_new)

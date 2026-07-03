@@ -27,8 +27,15 @@ class KVHandoffError(RuntimeError):
 
 
 class KVHandoff(Protocol):
-    def transfer(self, tokens: tuple[int, ...], first_token: int) -> KVAllocation:
-        """Move one prompt's KV to the destination; return its allocation there."""
+    def transfer(
+        self, tokens: tuple[int, ...], first_token: int, pages: tuple[int, ...] = ()
+    ) -> KVAllocation:
+        """Move one prompt's KV to the destination; return its allocation there.
+
+        ``pages`` are the SOURCE-side page ids holding the prompt's KV (m18:
+        byte-extracting handoffs need them; the accounting-only LocalKVHandoff
+        ignores them).
+        """
         ...
 
 
@@ -43,7 +50,9 @@ class LocalKVHandoff:
     def __init__(self, dest_kv: RadixKVCache) -> None:
         self._dest = dest_kv
 
-    def transfer(self, tokens: tuple[int, ...], first_token: int) -> KVAllocation:
+    def transfer(
+        self, tokens: tuple[int, ...], first_token: int, pages: tuple[int, ...] = ()
+    ) -> KVAllocation:
         try:
             allocation = self._dest.allocate(tuple(tokens))
         except KVCacheFull as error:
@@ -94,8 +103,14 @@ class PDCoordinator:
     def _handoff_or_retry(self, internal_id: str, token0: int) -> bool:
         """Transfer one prompt's KV; return True if the commit may proceed."""
         original, attempt = self._pending.pop(internal_id)
+        state = self._prefill.states.get(internal_id)
+        source_pages: tuple[int, ...] = ()
+        if state is not None and state.allocation is not None:
+            source_pages = tuple(state.allocation.pages)
         try:
-            allocation = self._handoff.transfer(original.prompt_token_ids, token0)
+            allocation = self._handoff.transfer(
+                original.prompt_token_ids, token0, source_pages
+            )
         except KVHandoffError:
             # copy failed before commit: the prefill-side KV is released
             # un-marked and the request recomputes from scratch (design m6 D4)
