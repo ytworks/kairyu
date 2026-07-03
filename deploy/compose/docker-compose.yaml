@@ -1,0 +1,39 @@
+# CPU-verifiable DC topology: 1 gateway + 3 mock replicas (goal G3 gate C3).
+# Same shape as production: swap replica.yaml's backend for the GPU engine.
+
+x-replica: &replica
+  build:
+    context: ../..
+  volumes:
+    - ./replica.yaml:/etc/kairyu/config.yaml:ro
+  healthcheck: &healthcheck
+    test:
+      [
+        "CMD",
+        "python",
+        "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+      ]
+    interval: 2s
+    timeout: 2s
+    retries: 15
+
+services:
+  replica-1: *replica
+  replica-2: *replica
+  replica-3: *replica
+  gateway:
+    build:
+      context: ../..
+    volumes:
+      - ./gateway.yaml:/etc/kairyu/config.yaml:ro
+    ports:
+      - "8000:8000"
+    healthcheck: *healthcheck
+    depends_on:
+      replica-1:
+        condition: service_healthy
+      replica-2:
+        condition: service_healthy
+      replica-3:
+        condition: service_healthy

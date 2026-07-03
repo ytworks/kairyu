@@ -22,3 +22,12 @@ jobs:
         run: uv run ruff check kairyu tests bench
       - name: Test with coverage gate
         run: uv run pytest --cov=kairyu --cov-fail-under=80
+
+  compose-smoke:
+    # Black-box gate C3 (goal G3): gateway + 3 mock replicas from a cold
+    # docker compose up, incl. the kill/recover drill. Outside the coverage gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose smoke drill
+        run: ./scripts/compose_smoke.sh

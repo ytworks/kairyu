@@ -63,11 +63,31 @@ class ReplicaPool:
         self._queue_depth_threshold = queue_depth_threshold
         self._outstanding: list[int] = [0] * len(self._replicas)
         self._consecutive_failures: list[int] = [0] * len(self._replicas)
+        self._decision_counts: dict[str, int] = {
+            "session_affinity": 0,
+            "queue_depth_fallback": 0,
+            "least_outstanding": 0,
+        }
 
     @property
     def outstanding(self) -> tuple[int, ...]:
         """In-flight request count per replica (dispatch-incremented, completion-decremented)."""
         return tuple(self._outstanding)
+
+    @property
+    def replica_count(self) -> int:
+        return len(self._replicas)
+
+    @property
+    def healthy(self) -> tuple[bool, ...]:
+        """Per-replica health (read-only; consumed by /readyz, /metrics, the prober)."""
+        healthy = set(self._healthy_indices())
+        return tuple(index in healthy for index in range(len(self._replicas)))
+
+    @property
+    def decision_counts(self) -> dict[str, int]:
+        """Cumulative placement decisions by reason (read-only, for /metrics)."""
+        return dict(self._decision_counts)
 
     async def probe(self, index: int) -> None:
         """Declare replica ``index`` healthy again, returning it to the hash ring.
@@ -113,6 +133,7 @@ class ReplicaPool:
     def _place(self, request: GenerationRequest) -> int:
         """Select a replica and log the decision before dispatch (design m5 D4)."""
         index, reason, session_id = self._select(request)
+        self._decision_counts[reason] += 1
         if self._log is not None:
             self._log.record_replica(session_id, index, reason)
         return index

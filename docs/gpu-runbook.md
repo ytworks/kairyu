@@ -123,3 +123,26 @@ replica fixes (real SSE, pooled client, optional auth, token counts).
 - [ ] `docs/design/m6-inter-node-parallelism.md` (same)
 - [ ] All M5 gates green, results pushed
 - [ ] All M6 gates green, results pushed
+
+## 9. M7 — production bring-up on real GPUs (prereq: §1–2 gates; §6/§7 for multi-GPU layouts)
+
+The M7 CPU half (goal G3 gates C1–C7) is proven against mock replicas by
+`scripts/compose_smoke.sh`. This section swaps in real engines — the topology,
+image, and drill are unchanged.
+
+- 9.1 Replica node: edit `deploy/compose/replica.yaml` — `backend: kairyu`
+  (or `vllm`) with the model + `tensor_parallel_size` for this node; add the
+  GPU device stanza to the compose service (`docs/deployment.md` §3).
+- 9.2 Re-run the smoke drill against the real fleet:
+  `scripts/compose_smoke.sh` end to end, including the kill/recover step
+  (drains one GPU replica — schedule accordingly).
+- 9.3 Measure the cache story under the gateway: `bench/multiturn_prefix.py`
+  through the gateway with per-session `user` ids; report
+  `kairyu_pool_decisions_total{reason="session_affinity"}` share and the
+  engine-level radix hit rate side by side (G2 A7/A8 through the M7 path).
+- 9.4 Rolling-update drill on real weights (`docs/deployment.md` §5), one
+  replica at a time, gateway `/metrics` watched throughout — gate C7 on
+  hardware.
+- 9.5 Batch under load: submit a `/v1/batches` job while an interactive
+  trace runs; verify interactive p99 is unaffected with the batch cap at its
+  configured value (gate C4 on hardware).

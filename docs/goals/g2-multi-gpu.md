@@ -153,6 +153,15 @@ break one, that is an amendment to this goal, flagged in review.
   gates are unreachable under the synchronous contract (m6 D5). Scheduler and RadixKV
   contracts remain unchanged except the additive `resume_with_kv` entry point (m5 D5).
 
+### Amendment (2026-07-02, flagged by the M7 productionization design)
+
+- **">2 nodes" scope clarified**: §6's node cap bounds the TP/PP **coherence domain**
+  (collectives, KV transfer plane) that this goal validates — it does not cap the
+  number of independent DP replica endpoints behind `ReplicaPool`, which share no
+  collective state. Serving fleets of N replica endpoints are a G3/M7 concern
+  (`docs/goals/g3-production-deployment.md` §5); each endpoint internally uses a
+  layout validated under this goal.
+
 ## 8. Evidence and reporting rules
 
 G1 rules carried forward verbatim, plus:

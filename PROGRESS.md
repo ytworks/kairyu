@@ -15,15 +15,107 @@ _Last updated: 2026-07-02_
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
+| M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
-in `bench/`.
+in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
+replicas, auth, metrics, batch) or a replica node, and the compose topology
+(1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
 
 Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
 `docs/gpu-runbook.md`. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-02 — [progress] M7 Phase 5: deployment guide, runbook §9, README — M7 CPU half complete
+- What: `docs/deployment.md` (DC topology, security duty split with the managed cloud
+  edge, systemd + compose node setup with documented k8s revisit triggers, config
+  walkthrough, rolling model-update drill, observability, interconnect sizing, untested
+  k8s appendix); `docs/gpu-runbook.md` §9 (production bring-up on real GPUs: real-engine
+  compose smoke, affinity/radix hit-rate measurement through the gateway, rolling-update
+  and batch-under-load drills on hardware); README M7 row + serving quickstart. With
+  this, every CPU-verifiable G3 gate is implemented and tested (328 tests, 95% cov).
+- Refs: `docs/deployment.md`, `docs/gpu-runbook.md` §9, README.md;
+  m7 status line updated to Implemented — CPU half
+
+### 2026-07-02 — [progress] M7 Phase 4: OpenAI-compatible batch API
+- What: `/v1/files` (multipart upload/metadata/content) and `/v1/batches`
+  (create/get/list/cancel) backed by a filesystem `BatchStore` (atomic JSON job state,
+  JSONL input/output/error files) and an in-gateway `BatchWorker` lifespan task that
+  drains jobs through the same served engines/pools under its own semaphore — strictly
+  below the server's global concurrency guard, so interactive traffic stays admitted
+  (gate C4, pinned by test). Cancel skips remaining lines; restart recovery marks
+  in-flight jobs failed with an explicit resubmit message (single-gateway scope, m7 D7).
+  Server helpers `sampling_params_from` / `completion_response` made public for reuse.
+  New dep: python-multipart (FastAPI form uploads).
+- Refs: m7 D7, G3 gate C4; `kairyu/batch/{store,worker}.py`,
+  `kairyu/entrypoints/server/batch_routes.py`, `kairyu/deploy/builder.py`;
+  tests `tests/server/test_batches.py`
+
+### 2026-07-02 — [progress] M7 Phase 3: container image, compose topology, CI smoke drill
+- What: Multi-stage uv `Dockerfile` (one image for every role; the mounted
+  DeploymentSpec decides gateway vs replica), `deploy/compose/` (1 gateway + 3 mock
+  replicas with healthchecks, gateway/replica YAML configs), `scripts/compose_smoke.sh`
+  (readiness → completion → SSE → affinity-by-metrics → replica kill/eject/zero-5xx →
+  prober recovery), and a `compose-smoke` CI job separate from the coverage-gated
+  pytest job. The full drill was verified end-to-end with the same configs as local
+  processes (kill/eject: 10/10 subsequent 200s; prober auto-restore observed in the
+  gateway JSON log); the container build itself runs in CI — this dev environment's
+  network policy blocks registry CDNs.
+- Refs: m7 D1/D2, G3 gates C1–C3; `Dockerfile`, `deploy/compose/`,
+  `scripts/compose_smoke.sh`, `.github/workflows/ci.yml`
+
+### 2026-07-02 — [progress] M7 Phase 2: `kairyu serve` CLI, DeploymentSpec, pool wiring, prober, HTTP affinity
+- What: `kairyu serve <deployment.yaml>` console entrypoint builds gateway or replica
+  from one YAML: `DeploymentSpec` (new, composes with — does not extend — ClusterSpec,
+  m7 D3) declares engines, pools (N remote `openai` members, keyless node-to-node),
+  server settings, optional DSL orchestrator, batch section. Builder wraps pool members
+  in `ReplicaPool` and passes it into `create_app` unchanged (the pool IS an
+  EngineBackend); lifespan starts a `HealthProber` per pool (GETs ejected replicas'
+  `/health`, restores via existing `probe()`) and shuts engines down gracefully.
+  HTTP affinity gap closed: OpenAI `user` field / `X-Session-ID` header now map to
+  `CacheHint(session_id=...)`, so external multi-turn traffic reaches the radix-KV
+  warm replica (previously cache_hint was never set on the HTTP path).
+- Refs: m7 D3/D4/D6; `kairyu/deploy/{spec,builder,prober}.py`,
+  `kairyu/entrypoints/cli.py`, `kairyu/entrypoints/server/{app,protocol}.py`;
+  tests `tests/unit/test_{deployment_spec,prober,cli}.py`,
+  `tests/server/test_serve_builder.py`
+
+### 2026-07-02 — [progress] M7 Phase 1: server hardening landed
+- What: `/health`, `/readyz` (pool-aware: 503 unless every ReplicaPool has ≥1 healthy
+  replica), `/metrics` (per-app Prometheus registry; request counts/latency histograms,
+  scrape-time pool collector for outstanding/health/decision counts), optional static
+  API-key auth (env-sourced, constant-time, health endpoints exempt), global concurrency
+  guard (429 + Retry-After on /v1/*), JSON access log with X-Request-ID — all pure-ASGI
+  middleware so SSE streams hold their concurrency slot to the last byte. `create_app`
+  gains an optional `ServerSettings`; defaults preserve pre-M7 behavior. `ReplicaPool`
+  gains read-only `healthy`/`replica_count`/`decision_counts` accessors (still no
+  background tasks, m5 D4). New dep: prometheus-client.
+- Refs: m7 D4/D5/D8; `kairyu/entrypoints/server/{health,metrics,middleware,settings}.py`,
+  `kairyu/orchestration/replica.py`; tests `tests/server/test_{health_metrics,auth,limits}.py`
+
+### 2026-07-02 — [design] M7 productionization designed (G3 goal, D1–D8); G2 2-node scope clarified
+- What: Wrote `docs/goals/g3-production-deployment.md` (gates C1–C7) and
+  `docs/design/m7-productionization.md`. Decisions: D1 on-prem-DC topology (managed
+  cloud WAF/LB front → private interconnect → stateless CPU gateway tier running
+  `create_app` + Orchestrator + ReplicaPool of remote `openai`-backend replicas → N GPU
+  replica nodes running the same artifact); D2 no Kubernetes — systemd + docker compose
+  with everything containerized and documented k3s revisit triggers; D3 new
+  `DeploymentSpec` (ClusterSpec untouched — it binds the TP/PP coherence domain, not
+  fleet size); D4 health/readyz/metrics + serve-layer background prober (pool stays
+  passive); D5 edge-owned WAF/TLS, gateway static API keys + concurrency guard, keyless
+  node-to-node; D6 cache layer = per-replica radix KV + pool session affinity, no Redis
+  (revisit trigger recorded) — includes fixing the gap that the HTTP path never set
+  `cache_hint`; D7 minimal filesystem-backed `/v1/files` + `/v1/batches`; D8
+  prometheus-client + stdlib JSON logs, no OTel.
+- Why: The product-infrastructure review (LB/scaling, WAF, k8s, GPU pool + API layer,
+  cache layer, batch orchestrator, DC–cloud interconnect) found all deployment
+  machinery absent: components exist in-process (ReplicaPool, remote-replica backend)
+  but nothing wires, launches, secures, observes, or packages them.
+- Refs: `docs/goals/g3-production-deployment.md`, `docs/design/m7-productionization.md`;
+  amendment: g2 §6 "exactly 2 nodes" clarified as TP/PP coherence-domain cap, not a
+  ReplicaPool fleet-size cap (`docs/goals/g2-multi-gpu.md` §6, G3 §5).
 
 ### 2026-07-02 — [progress] Repo renamed to `ytworks/kairyu`; README refreshed for M5/M6
 - What: GitHub repository renamed from `ytworks/rLLM` to `ytworks/kairyu` (local origin

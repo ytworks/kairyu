@@ -1,0 +1,246 @@
+"""Batch API lifecycle, caps, cancel, restart recovery (goal G3 gate C4)."""
+
+import asyncio
+import json
+
+import httpx
+
+from kairyu.batch.store import BatchStore
+from kairyu.batch.worker import BatchWorker
+from kairyu.deploy.builder import build_app_from_spec
+from kairyu.deploy.spec import load_deployment_spec
+from kairyu.engine.backend import GenerationResult
+from kairyu.engine.mock import MockBackend
+from kairyu.outputs import CompletionOutput
+
+
+def _client(app) -> httpx.AsyncClient:
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+def _batch_line(custom_id: str, content: str, model: str = "m") -> str:
+    return json.dumps(
+        {
+            "custom_id": custom_id,
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": model,
+                "messages": [{"role": "user", "content": content}],
+            },
+        }
+    )
+
+
+def _spec_yaml(tmp_path, max_concurrency: int = 2) -> str:
+    return f"""
+engines:
+  m: {{ backend: mock }}
+batch:
+  data_dir: {tmp_path / "batch-data"}
+  max_concurrency: {max_concurrency}
+"""
+
+
+async def _wait_status(client, batch_id: str, wanted: str, attempts: int = 100) -> dict:
+    for _ in range(attempts):
+        job = (await client.get(f"/v1/batches/{batch_id}")).json()
+        if job["status"] == wanted:
+            return job
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"batch never reached {wanted}: {job}")
+
+
+async def test_batch_lifecycle_end_to_end(tmp_path):
+    app = build_app_from_spec(load_deployment_spec(_spec_yaml(tmp_path)))
+    # httpx's ASGITransport never runs the lifespan; drive it directly so the
+    # worker task is live while requests flow.
+    async with app.router.lifespan_context(app):
+        async with _client(app) as client:
+            content = "\n".join(
+                [
+                    _batch_line("a", "hello"),
+                    _batch_line("b", "world"),
+                    _batch_line("c", "!", model="missing"),
+                ]
+            ).encode()
+            upload = await client.post(
+                "/v1/files",
+                files={"file": ("input.jsonl", content, "application/jsonl")},
+                data={"purpose": "batch"},
+            )
+            assert upload.status_code == 200
+            file_id = upload.json()["id"]
+
+            created = await client.post(
+                "/v1/batches",
+                json={"input_file_id": file_id, "endpoint": "/v1/chat/completions"},
+            )
+            assert created.status_code == 200
+            batch_id = created.json()["id"]
+
+            job = await _wait_status(client, batch_id, "completed")
+            assert job["request_counts"] == {"total": 3, "completed": 2, "failed": 1}
+
+            output = await client.get(f"/v1/files/{job['output_file_id']}/content")
+            lines = [json.loads(line) for line in output.text.splitlines()]
+            assert {line["custom_id"] for line in lines} == {"a", "b"}
+            assert all(line["response"]["status_code"] == 200 for line in lines)
+            assert all(
+                line["response"]["body"]["choices"][0]["message"]["content"]
+                for line in lines
+            )
+
+            errors = await client.get(f"/v1/files/{job['error_file_id']}/content")
+            error_lines = [json.loads(line) for line in errors.text.splitlines()]
+            assert error_lines[0]["custom_id"] == "c"
+            assert "not found" in error_lines[0]["error"]["message"]
+
+            listing = (await client.get("/v1/batches")).json()
+            assert listing["data"][0]["id"] == batch_id
+
+
+async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
+    """The batch worker never exceeds its own cap (strictly below the server's)."""
+
+    class CountingBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+
+        async def generate(self, request):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.02)
+                return await super().generate(request)
+            finally:
+                self.active -= 1
+
+    backend = CountingBackend()
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": backend}, max_concurrency=2)
+    lines = "\n".join(_batch_line(f"r{i}", f"prompt {i}") for i in range(8))
+    file = store.save_file(lines.encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    interactive = asyncio.create_task(backend.generate(_interactive_request()))
+    await worker.process(job.id)
+    await interactive  # interactive request completed alongside the batch
+
+    finished = store.get_batch(job.id)
+    assert finished.status == "completed"
+    assert finished.request_counts.completed == 8
+    assert backend.max_active <= 3  # 2 batch slots + the 1 interactive request
+
+
+def _interactive_request():
+    from kairyu.engine.backend import GenerationRequest
+    from kairyu.sampling_params import SamplingParams
+
+    return GenerationRequest(
+        request_id="interactive", prompt="hi", sampling_params=SamplingParams()
+    )
+
+
+async def test_cancel_stops_remaining_lines(tmp_path):
+    class SlowBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return await super().generate(request)
+
+    backend = SlowBackend()
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": backend}, max_concurrency=1)
+    lines = "\n".join(_batch_line(f"r{i}", f"p{i}") for i in range(10))
+    file = store.save_file(lines.encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    task = asyncio.create_task(worker.process(job.id))
+    await asyncio.sleep(0.08)  # let a line or two start
+    cancelled = store.get_batch(job.id)
+    cancelled.status = "cancelled"
+    store.update_batch(cancelled)
+    await task
+
+    assert store.get_batch(job.id).status == "cancelled"
+    assert backend.calls < 10  # remaining lines were skipped
+
+
+async def test_restart_marks_inflight_jobs_failed(tmp_path):
+    store = BatchStore(tmp_path)
+    file = store.save_file(b"", "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    job.status = "in_progress"
+    store.update_batch(job)
+
+    recovered = BatchStore(tmp_path)  # same data dir, fresh process
+    assert recovered.recover_orphans() == (job.id,)
+    failed = recovered.get_batch(job.id)
+    assert failed.status == "failed"
+    assert "restarted" in failed.errors["message"]
+
+
+async def test_invalid_input_file_fails_job(tmp_path):
+    store = BatchStore(tmp_path)
+    file = store.save_file(b"not json\n", "bad.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    worker = BatchWorker(store, {"m": MockBackend()})
+    await worker.process(job.id)
+    failed = store.get_batch(job.id)
+    assert failed.status == "failed"
+    assert "invalid input file" in failed.errors["message"]
+
+
+async def test_unsupported_endpoint_and_missing_file(tmp_path):
+    app = build_app_from_spec(load_deployment_spec(_spec_yaml(tmp_path)))
+    async with _client(app) as client:
+        missing = await client.post(
+            "/v1/batches",
+            json={"input_file_id": "file-nope", "endpoint": "/v1/chat/completions"},
+        )
+        assert missing.status_code == 404
+
+        upload = await client.post(
+            "/v1/files",
+            files={"file": ("i.jsonl", b"", "application/jsonl")},
+            data={"purpose": "batch"},
+        )
+        bad_endpoint = await client.post(
+            "/v1/batches",
+            json={"input_file_id": upload.json()["id"], "endpoint": "/v1/embeddings"},
+        )
+        assert bad_endpoint.status_code == 400
+        assert (await client.get("/v1/batches/batch_nope")).status_code == 404
+        assert (await client.get("/v1/files/file-nope")).status_code == 404
+
+
+async def test_empty_result_still_completes(tmp_path):
+    """A GenerationResult with no completions must not crash the worker."""
+
+    class EmptyBackend(MockBackend):
+        async def generate(self, request):
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0, text="", token_ids=(), cumulative_logprob=0.0,
+                        finish_reason="stop",
+                    ),
+                ),
+            )
+
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": EmptyBackend()})
+    file = store.save_file(_batch_line("a", "x").encode(), "i.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    await worker.process(job.id)
+    assert store.get_batch(job.id).status == "completed"

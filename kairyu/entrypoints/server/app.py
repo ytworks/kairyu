@@ -12,11 +12,19 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from kairyu.engine.backend import EngineBackend, GenerationRequest
+from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest
 from kairyu.entrypoints.chat_template import render_chat
+from kairyu.entrypoints.server.health import add_health_routes
+from kairyu.entrypoints.server.metrics import ServerMetrics
+from kairyu.entrypoints.server.middleware import (
+    AccessLogMiddleware,
+    AuthMiddleware,
+    ConcurrencyLimitMiddleware,
+    MetricsMiddleware,
+)
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionChunk,
     ChatCompletionRequest,
@@ -31,14 +39,16 @@ from kairyu.entrypoints.server.protocol import (
     ToolCall,
     Usage,
 )
+from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.replica import ReplicaPool
 from kairyu.sampling_params import SamplingParams
 
 AUTO_MODEL = "kairyu-auto"
 _TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
 
-def _sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
+def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
     extra_args = (
         {"response_format": request.response_format} if request.response_format else {}
     )
@@ -117,7 +127,7 @@ def _build_choice(
     )
 
 
-def _completion_response(
+def completion_response(
     request: ChatCompletionRequest, prompt: str, texts: list[tuple[str, str | None]]
 ) -> ChatCompletionResponse:
     choices = [
@@ -205,12 +215,42 @@ async def _stream_choices(choices: list[Choice], model: str) -> AsyncIterator[st
     yield "data: [DONE]\n\n"
 
 
+def _session_id(request: ChatCompletionRequest, http_request: Request) -> str | None:
+    """Session for ReplicaPool affinity: X-Session-ID header, else the OpenAI user field."""
+    return http_request.headers.get("x-session-id") or request.user
+
+
 def create_app(
     engines: Mapping[str, EngineBackend],
     orchestrator: Orchestrator | None = None,
+    settings: ServerSettings | None = None,
+    lifespan=None,
 ) -> FastAPI:
-    app = FastAPI(title="kairyu", version="0.1.0")
+    settings = settings or ServerSettings()
+    app = FastAPI(title="kairyu", version="0.1.0", lifespan=lifespan)
     served_engines = dict(engines)
+
+    metrics = ServerMetrics() if settings.metrics else None
+    app.state.metrics = metrics
+    if metrics is not None:
+        for name, engine in served_engines.items():
+            if isinstance(engine, ReplicaPool):
+                metrics.track_pool(name, engine)
+    add_health_routes(app, served_engines, metrics)
+
+    # add_middleware prepends, so add innermost first: metrics -> concurrency
+    # guard -> auth -> access log (outermost).
+    if metrics is not None:
+        app.add_middleware(MetricsMiddleware, metrics=metrics)
+    if settings.max_concurrency is not None:
+        app.add_middleware(ConcurrencyLimitMiddleware, limit=settings.max_concurrency)
+    api_keys = settings.resolve_api_keys()
+    if api_keys:
+        app.add_middleware(
+            AuthMiddleware, api_keys=api_keys, protect_metrics=settings.protect_metrics
+        )
+    if settings.access_log:
+        app.add_middleware(AccessLogMiddleware)
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
@@ -220,7 +260,8 @@ def create_app(
         return ModelList(data=[ModelCard(id=name) for name in names])
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: ChatCompletionRequest):
+    async def chat_completions(request: ChatCompletionRequest, http_request: Request):
+        http_request.state.model = request.model  # label for the metrics middleware
         prompt = render_chat([message.model_dump() for message in request.messages])
         if request.model == AUTO_MODEL and orchestrator is not None:
             try:
@@ -229,20 +270,24 @@ def create_app(
                 return _upstream_error(error)
             texts = [(result.text, "stop")]
             if request.stream:
-                response = _completion_response(request, prompt, texts)
+                response = completion_response(request, prompt, texts)
                 return StreamingResponse(
                     _stream_choices(response.choices, request.model),
                     media_type="text/event-stream",
                 )
-            return _completion_response(request, prompt, texts)
+            return completion_response(request, prompt, texts)
 
         engine = served_engines.get(request.model)
         if engine is None:
             return _model_not_found(request.model)
+        session_id = _session_id(request, http_request)
         generation_request = GenerationRequest(
             request_id=f"http-{uuid.uuid4().hex[:12]}",
             prompt=prompt,
-            sampling_params=_sampling_params_from(request),
+            sampling_params=sampling_params_from(request),
+            # Affinity glue (m7 D6): keeps a session's turns on the replica
+            # holding its warm radix-KV prefix.
+            cache_hint=CacheHint(session_id=session_id) if session_id else None,
         )
         if request.stream and not request.tools:
             return StreamingResponse(
@@ -256,7 +301,7 @@ def create_app(
         texts = [
             (completion.text, completion.finish_reason) for completion in result.completions
         ]
-        response = _completion_response(request, prompt, texts)
+        response = completion_response(request, prompt, texts)
         if request.stream:
             # Tool calling + streaming: generate fully, then emit structured chunks so
             # tool_calls and finish_reason stay correct.
