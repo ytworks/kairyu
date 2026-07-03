@@ -2,6 +2,13 @@
 
 Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (agent design-review panel, 2026-07-02;
 see §7). GPU hardware (8×H100) required for the GPU phase; human sign-off pending.
+**Amended 2026-07-03** (roadmap): this design applies as written on NVLink-HBM
+profiles; on the PCIe-GDDR profile (RTX PRO 6000 fleet) TP is demoted from the
+scaling base to switch-pair/prefill use and DP/PP are promoted — see
+`docs/roadmap.md` §2 and G2 §7 (2026-07-03). D4's session-hash affinity gains a
+prefix-aware placement extension under goal G5 F2. The mechanisms designed here
+(Communicator seam, StepInput, TPModelRunner, ReplicaPool, `resume_with_kv`) carry
+over unchanged.
 Milestone: M5
 Date: 2026-07-02
 Depends on: Goal G2 (`docs/goals/g2-multi-gpu.md`, gates A1–A10); M2 GPU phase Gates 1–3

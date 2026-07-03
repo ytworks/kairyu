@@ -3,6 +3,12 @@
 Status: Goal defined (drives M5 and M6). Design docs `docs/design/m5-*.md` and
 `docs/design/m6-*.md` must exist and pass design review (APPROVE-WITH-AMENDMENTS or
 better) before implementation of each milestone begins — same flow as M1–M4.
+**Amended 2026-07-03** (see §7): the hardware contract widens from "8×H100 only" to
+capability profiles covering **all NVIDIA GPUs from A100 (SM80) onward**. The
+original NVLink arithmetic and all gates stand as written on NVLink-HBM profiles
+(A100/H100/H200/B200 nodes); a PCIe-GDDR profile (RTX PRO 6000 fleet) gets its own
+arithmetic and replaces A3–A5 with a placement-crossover gate, per
+`docs/roadmap.md` §2. The §6 MoE non-goal is lifted into goal G4.
 Depends on: M2 GPU phase Gates 1–3 (`docs/gpu-runbook.md` §1–2: single-GPU 8B runner
 correct and benchmarked).
 Date: 2026-07-02
@@ -161,6 +167,43 @@ break one, that is an amendment to this goal, flagged in review.
   collective state. Serving fleets of N replica endpoints are a G3/M7 concern
   (`docs/goals/g3-production-deployment.md` §5); each endpoint internally uses a
   layout validated under this goal.
+
+### Amendments (2026-07-03, hardware contract widened to capability profiles — `docs/roadmap.md`)
+
+Production spans **all NVIDIA GPUs from A100 (SM80) onward**, in two fleet shapes:
+NVLink-HBM nodes (A100/H100/H200/B200 — this goal's original assumption) and a
+PCIe-only RTX PRO 6000 Blackwell fleet (96 GB GDDR7, no NVLink). The original
+entries above stay as the record and **remain binding on NVLink-HBM profiles**; the
+following define how the goal applies to the PCIe-GDDR profile and to non-H100
+NVLink parts:
+
+- **§2 memory arithmetic is per-profile**: on 80 GB H100 the original "TP=2 is the
+  minimal viable 70B config" stands. On 96 GB SM120 parts, 70B FP8 fits one GPU
+  with usable KV headroom (NVFP4 ≈ 37 GB) — there, **TP=1/DP is the scaling base**,
+  and TP over the PCIe root complex is an anti-pattern (per-layer all-reduce latency
+  exceeds decode compute); TP is limited to PCIe-switch pairs and prefill-heavy use.
+- **A3–A5 (TP-scaling gates) are NVLink-profile gates**: their premises (near-linear
+  prefill over NVLink, TP=2 base) do not hold on PCIe. On the PCIe-GDDR profile they
+  are replaced by the **placement-crossover report** (roadmap E3) — DP×1 vs PP=2 vs
+  TP=2 goodput/TTFT/TPOT across the arrival sweep per model class, generalizing A9's
+  "no threshold, publish the crossover" discipline. A1/A2 (correctness anchors),
+  A6 (vLLM comparison), A7 (KV invariance), A8 (DP+affinity), A9, A10 (P-D value)
+  apply on **every** profile.
+- **B2's fabric assumption restated for portability**: "≥20 GB/s on 400 Gb/s IB"
+  becomes "≥70% of the **measured** NIC line rate" (G5 F3a); the ≤8 µs/token
+  amortized budget stands everywhere. A10's "NVLink page-granular handoff ≤5 ms"
+  becomes the same budget over the profile's fast path (NVLink, PCIe-P2P, or NIC),
+  measured.
+- **§6 MoE / expert-parallelism non-goal lifted** into goal G4
+  (`docs/goals/g4-moe-engine.md`): two of the four production model classes are MoE.
+- **§6 autoscaling/elasticity non-goal lifted** into goal G5
+  (`docs/goals/g5-fleet-scale.md`).
+- **§6 "A100 tuning (H100 only)" non-goal lifted**: A100 (SM80) is a supported
+  compatibility profile — no FP8/FP4 tensor cores, so its quant path is W4A16
+  (AWQ/GPTQ/Marlin) + INT8 W8A8; correctness gates apply as written.
+- **§2 model contract widened**: Llama-3.3-70B stays the dense anchor; NVFP4 joins
+  FP8 as a planning-default weight format where the SM supports it (KV stays BF16 on
+  SM120 pending the FP8-KV correctness bake, G4 E-KV).
 
 ## 8. Evidence and reporting rules
 

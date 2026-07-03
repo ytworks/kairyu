@@ -1,5 +1,16 @@
 # GPU-Day Runbook (H100/A100)
 
+> **Hardware profiles (2026-07-03)**: production spans all NVIDIA GPUs from A100
+> onward, in two shapes — NVLink-HBM nodes (A100/H100/H200/B200; this runbook's
+> original assumption) and a PCIe-only RTX PRO 6000 Blackwell fleet (SM120, some
+> units available now). This runbook applies as written on NVLink-HBM boxes. On the
+> PCIe/SM120 fleet, the single-GPU sections (§0–§5, §9) apply with the caveats in
+> `docs/roadmap.md` §2 (FA2-path kernels only, ~99 KB smem, Triton-first FP8,
+> BF16 KV default); the multi-GPU sections (§6–§7) keep their correctness gates but
+> the TP-scaling targets are replaced per G2 §7's 2026-07-03 amendments
+> (DP-first/PP/EP strategy, placement-crossover report). On A100 (SM80), FP8 steps
+> substitute W4A16/INT8. See `docs/roadmap.md` §4 Track E for the phase plan.
+
 Purpose: everything CPU-verifiable is done (177 tests, main). This is the ordered,
 command-level plan for the first GPU session. Est. scope: 2–4 focused days.
 
@@ -82,9 +93,14 @@ CPU half already merged: Communicator/FakeCommunicator, typed StepInput, TP plum
 PDCoordinator + `resume_with_kv` + LocalKVHandoff — all tested. This section is the
 GPU-only remainder (design m5 §4.2).
 
-- 6.1 `NcclCommunicator` (+NVLS/symmetric-memory — required, not optional, m5 D2);
-  dedicated non-rank driver process wired over shm/zmq; per-step driver budget ≤1 ms
-  measured.
+- 6.1 `NcclCommunicator`; dedicated non-rank driver process wired over shm/zmq;
+  per-step driver budget ≤1 ms measured.
+  *(Amended 2026-07-03: NVLS/symmetric-memory is NVSwitch-only — required on
+  NVLink-HBM boxes as before, inapplicable on the PCIe fleet. On PCIe add instead:
+  NCCL topology tuning for PCIe/EPYC hosts, a measured GPU↔GPU P2P matrix recorded
+  in `bench/results/env-<date>.json`, and a MIG/vBIOS audit of the inventory. TP is
+  demoted on the PCIe profile per G2 §7 2026-07-03 — run correctness gates A1/A2,
+  then the placement-crossover sweep instead of A3–A5 there.)*
 - 6.2 Sharded FP8 70B load (per-rank safetensors); FlashInfer paged attention under
   head-sharded KV; pool sized min-over-ranks (m5 D1).
 - 6.3 Decode CUDA-graph capture per TP topology (A4 prerequisite, m5 §3).
