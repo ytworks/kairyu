@@ -484,6 +484,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "jinja2" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "python-multipart" },
@@ -512,6 +513,7 @@ dev = [
     { name = "safetensors" },
     { name = "tokenizers" },
     { name = "torch" },
+    { name = "transformers" },
     { name = "xgrammar" },
 ]
 
@@ -519,6 +521,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "msgpack", marker = "extra == 'fleet'", specifier = ">=1.0" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -542,6 +545,7 @@ dev = [
     { name = "safetensors", specifier = ">=0.5" },
     { name = "tokenizers", specifier = ">=0.20" },
     { name = "torch", specifier = ">=2.6" },
+    { name = "transformers", specifier = ">=5.12,<5.13" },
     { name = "xgrammar", specifier = ">=0.2.3" },
 ]
 

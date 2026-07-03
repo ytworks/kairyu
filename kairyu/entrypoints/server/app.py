@@ -21,7 +21,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationUsage,
 )
-from kairyu.entrypoints.chat_template import render_chat
+from kairyu.entrypoints.chat_template import ChatTemplate, render_chat
 from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
@@ -109,6 +109,20 @@ def _invalid_request(message: str) -> JSONResponse:
             }
         },
     )
+
+
+def render_prompt(
+    request: ChatCompletionRequest,
+    chat_templates: Mapping[str, ChatTemplate] | None,
+) -> str:
+    """Per-model HF template when configured, legacy concatenator otherwise
+    (m9 D2). Shared by the HTTP path and the batch worker — the two must
+    render identical prompts for the same model."""
+    template = (chat_templates or {}).get(request.model)
+    messages = [message.model_dump() for message in request.messages]
+    if template is None:
+        return render_chat(messages)
+    return template.render(messages, tools=request.tools)
 
 
 def _model_not_found(model: str) -> JSONResponse:
@@ -302,6 +316,7 @@ def create_app(
     orchestrator: Orchestrator | None = None,
     settings: ServerSettings | None = None,
     lifespan=None,
+    chat_templates: Mapping[str, ChatTemplate] | None = None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
     app = FastAPI(title="kairyu", version="0.1.0", lifespan=lifespan)
@@ -342,7 +357,8 @@ def create_app(
         if request.stream_options is not None and not request.stream:
             return _invalid_request("stream_options is only allowed when stream is true")
         include_usage = bool(request.stream_options and request.stream_options.include_usage)
-        prompt = render_chat([message.model_dump() for message in request.messages])
+        # rendered after model resolution: templates are per served model (m9 D2)
+        prompt = render_prompt(request, chat_templates)
         if request.model == AUTO_MODEL and orchestrator is not None:
             try:
                 result = await orchestrator.run(prompt)

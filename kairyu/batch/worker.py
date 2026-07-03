@@ -17,8 +17,12 @@ from collections.abc import Mapping
 
 from kairyu.batch.store import BatchJob, BatchStore
 from kairyu.engine.backend import EngineBackend, GenerationRequest
-from kairyu.entrypoints.chat_template import render_chat
-from kairyu.entrypoints.server.app import completion_response, sampling_params_from
+from kairyu.entrypoints.chat_template import ChatTemplate
+from kairyu.entrypoints.server.app import (
+    completion_response,
+    render_prompt,
+    sampling_params_from,
+)
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 
 logger = logging.getLogger("kairyu.batch")
@@ -31,11 +35,13 @@ class BatchWorker:
         engines: Mapping[str, EngineBackend],
         max_concurrency: int = 4,
         metrics=None,
+        chat_templates: Mapping[str, ChatTemplate] | None = None,
     ) -> None:
         self._store = store
         self._engines = engines
         self._max_concurrency = max_concurrency
         self._metrics = metrics
+        self._chat_templates = chat_templates
         self._queue: asyncio.Queue[str] = asyncio.Queue()
 
     def submit(self, batch_id: str) -> None:
@@ -68,7 +74,7 @@ class BatchWorker:
             engine = self._engines.get(request.model)
             if engine is None:
                 raise ValueError(f"model {request.model!r} not found")
-            prompt = render_chat([message.model_dump() for message in request.messages])
+            prompt = render_prompt(request, self._chat_templates)
             result = await engine.generate(
                 GenerationRequest(
                     request_id=f"batch-{uuid.uuid4().hex[:12]}",

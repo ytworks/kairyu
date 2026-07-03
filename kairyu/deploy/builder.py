@@ -15,6 +15,7 @@ from kairyu.deploy.spec import DeploymentSpec, load_deployment_spec
 from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.engine.backend import EngineBackend
 from kairyu.engine.registry import create_backend
+from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
@@ -51,6 +52,15 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 HealthProber(name, pool, health_urls, pool_spec.probe_interval_s)
             )
 
+    chat_templates: dict[str, ChatTemplate] = {}
+    for model_name, source in spec.chat_templates.items():
+        template_source = source
+        if source.endswith(".jinja") and base_dir is not None:
+            path = Path(source)
+            if not path.is_absolute():
+                template_source = str(base_dir / path)
+        chat_templates[model_name] = ChatTemplate.load(template_source)
+
     orchestrator: Orchestrator | None = None
     if spec.orchestrator is not None:
         orchestrator_path = Path(spec.orchestrator.spec)
@@ -80,6 +90,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         orchestrator=orchestrator,
         settings=_server_settings(spec),
         lifespan=lifespan,
+        chat_templates=chat_templates,
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)
@@ -94,6 +105,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             engines,
             max_concurrency=spec.batch.max_concurrency,
             metrics=app.state.metrics,
+            chat_templates=chat_templates,  # batch and HTTP must render identically
         )
         workers.append(worker)
         add_batch_routes(app, store, worker)
