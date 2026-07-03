@@ -1,5 +1,5 @@
 # GPU replica DeploymentSpec: the kairyu engine on a local checkpoint.
-models:
+engines:
   default:
     backend: kairyu
     options:
