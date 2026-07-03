@@ -21,11 +21,22 @@ from collections.abc import AsyncIterator
 from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
 from kairyu.engine.core.engine_service import run_engine_service, sampling_params_to_wire
 from kairyu.engine.registry import register_backend
-from kairyu.outputs import CompletionOutput
+from kairyu.outputs import CompletionOutput, TokenLogprob
 
 _SPAWN_TIMEOUT_S = 30.0
 _SHUTDOWN_TIMEOUT_S = 5.0
 _RECV_TICK_S = 1.0
+
+
+def _decode_token_logprob(raw: list) -> TokenLogprob:
+    token, token_id, logprob, bytes_, top = raw
+    return TokenLogprob(
+        token=token,
+        token_id=token_id,
+        logprob=logprob,
+        bytes_=tuple(bytes_) if bytes_ is not None else None,
+        top=tuple(_decode_token_logprob(entry) for entry in top),
+    )
 
 
 class EngineServiceError(RuntimeError):
@@ -47,10 +58,15 @@ def _import_deps():
 class ZmqEngineBackend:
     """EngineBackend over a spawned engine-service process.
 
+    ``supports_n = False``: the server validates n>1 per backend and returns
+    400 (m9 D3 review — a backend exception would surface as 502).
+
     ``tokenizer`` must be a string ("toy" or a tokenizer path): the config
     crosses a process boundary. Custom runner objects cannot cross either —
     the service builds its own (real model runners arrive with M12 configs).
     """
+
+    supports_n = False  # revisited in M11
 
     def __init__(
         self,
@@ -209,6 +225,9 @@ class ZmqEngineBackend:
                 {int(token_id): logprob for token_id, logprob in entry.items()}
                 for entry in event["logprobs"]
             )
+        content = None
+        if event.get("logprob_content") is not None:
+            content = tuple(_decode_token_logprob(raw) for raw in event["logprob_content"])
         completion = CompletionOutput(
             index=0,
             text=event["text"],
@@ -216,6 +235,7 @@ class ZmqEngineBackend:
             cumulative_logprob=event.get("cumulative_logprob", 0.0),
             logprobs=logprobs,
             finish_reason=event.get("finish_reason"),
+            logprob_content=content,
         )
         return GenerationResult(
             request_id=request.request_id,

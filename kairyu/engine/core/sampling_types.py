@@ -7,7 +7,23 @@ logits import the ``Sampler``.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
+
+_MASK64 = (1 << 64) - 1
+_SEED_BITS = (1 << 63) - 1
+
+
+def stable_request_seed(request_id: str) -> int:
+    return int.from_bytes(hashlib.sha256(request_id.encode()).digest()[:8], "big") & _SEED_BITS
+
+
+def mix_seed(base: int, position: int) -> int:
+    """splitmix64-style mixer: plain addition collides across adjacent seeds."""
+    x = (base ^ ((position + 1) * 0x9E3779B97F4A7C15)) & _MASK64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return (x ^ (x >> 31)) & _SEED_BITS
 
 
 @dataclass(frozen=True)

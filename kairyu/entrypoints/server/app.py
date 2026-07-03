@@ -35,20 +35,28 @@ from kairyu.entrypoints.server.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     Choice,
+    ChoiceLogprobs,
     ChunkChoice,
     ChunkDelta,
+    CompletionChoice,
+    CompletionChunk,
+    CompletionLogprobs,
+    CompletionRequest,
+    CompletionResponse,
     FunctionCall,
+    LogprobEntry,
     ModelCard,
     ModelList,
     PromptTokensDetails,
     ResponseMessage,
     ToolCall,
+    TopLogprobEntry,
     Usage,
 )
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
-from kairyu.outputs import CompletionOutput
+from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import SamplingParams
 
 AUTO_MODEL = "kairyu-auto"
@@ -59,6 +67,9 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
     extra_args = (
         {"response_format": request.response_format} if request.response_format else {}
     )
+    logprobs = None
+    if request.logprobs:
+        logprobs = request.top_logprobs or 0  # 0 = sampled token only
     return SamplingParams(
         temperature=request.temperature,
         top_p=request.top_p,
@@ -68,6 +79,7 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
         frequency_penalty=request.frequency_penalty,
         stop=request.stop,
         seed=request.seed,
+        logprobs=logprobs,
         extra_args=extra_args,
     )
 
@@ -151,15 +163,49 @@ def _upstream_error(error: Exception) -> JSONResponse:
     )
 
 
+def _logprob_entries(content: tuple[TokenLogprob, ...]) -> list[LogprobEntry]:
+    return [
+        LogprobEntry(
+            token=entry.token,
+            logprob=entry.logprob,
+            bytes=list(entry.bytes_) if entry.bytes_ is not None else None,
+            top_logprobs=[
+                TopLogprobEntry(
+                    token=top.token,
+                    logprob=top.logprob,
+                    bytes=list(top.bytes_) if top.bytes_ is not None else None,
+                )
+                for top in entry.top
+            ],
+        )
+        for entry in content
+    ]
+
+
+def _choice_logprobs(completion: CompletionOutput) -> ChoiceLogprobs | None:
+    if completion.logprob_content is None:
+        return None
+    return ChoiceLogprobs(content=_logprob_entries(completion.logprob_content))
+
+
 def _build_choice(
-    index: int, text: str, request: ChatCompletionRequest, finish_reason: str | None
+    index: int,
+    text: str,
+    request: ChatCompletionRequest,
+    finish_reason: str | None,
+    logprobs: ChoiceLogprobs | None = None,
 ) -> Choice:
     tool_calls = _parse_tool_calls(text) if request.tools else []
     if tool_calls:
         message = ResponseMessage(content=None, tool_calls=tool_calls)
-        return Choice(index=index, message=message, finish_reason="tool_calls")
+        return Choice(
+            index=index, message=message, finish_reason="tool_calls", logprobs=logprobs
+        )
     return Choice(
-        index=index, message=ResponseMessage(content=text), finish_reason=finish_reason or "stop"
+        index=index,
+        message=ResponseMessage(content=text),
+        finish_reason=finish_reason or "stop",
+        logprobs=logprobs,
     )
 
 
@@ -199,7 +245,8 @@ def completion_response(
     usage: GenerationUsage | None = None,
 ) -> ChatCompletionResponse:
     choices = [
-        _build_choice(c.index, c.text, request, c.finish_reason) for c in completions
+        _build_choice(c.index, c.text, request, c.finish_reason, _choice_logprobs(c))
+        for c in completions
     ]
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:16]}",
@@ -213,13 +260,17 @@ def completion_response(
 def _sse_chunk(
     response_id: str, created: int, model: str, index: int, delta: ChunkDelta,
     finish_reason: str | None = None, include_usage: bool = False,
-    usage: Usage | None = None,
+    usage: Usage | None = None, logprobs: ChoiceLogprobs | None = None,
 ) -> str:
     payload = ChatCompletionChunk(
         id=response_id,
         created=created,
         model=model,
-        choices=[ChunkChoice(index=index, delta=delta, finish_reason=finish_reason)],
+        choices=[
+            ChunkChoice(
+                index=index, delta=delta, finish_reason=finish_reason, logprobs=logprobs
+            )
+        ],
         usage=usage,
     )
     # OpenAI contract: usage key omitted unless include_usage; then explicit
@@ -245,6 +296,7 @@ async def _stream_engine(
     created = int(time.time())
     include_usage = bool(request.stream_options and request.stream_options.include_usage)
     sent: dict[int, int] = {}
+    logprobs_sent: dict[int, int] = {}
     last = None
     try:
         async for partial in engine.stream(generation_request):
@@ -255,10 +307,18 @@ async def _stream_engine(
                     continue
                 is_first = completion.index not in sent
                 sent[completion.index] = len(completion.text)
+                chunk_logprobs = None
+                if request.logprobs and completion.logprob_content is not None:
+                    seen = logprobs_sent.get(completion.index, 0)
+                    fresh = completion.logprob_content[seen:]
+                    logprobs_sent[completion.index] = len(completion.logprob_content)
+                    if fresh:
+                        chunk_logprobs = ChoiceLogprobs(content=_logprob_entries(fresh))
                 yield _sse_chunk(
                     response_id, created, model, completion.index,
                     ChunkDelta(role="assistant" if is_first else None, content=delta_text),
                     include_usage=include_usage,
+                    logprobs=chunk_logprobs,
                 )
     except Exception as error:  # surface backend failures inside the SSE stream
         payload = {"error": {"message": str(error), "type": "upstream_error"}}
@@ -303,6 +363,80 @@ async def _stream_choices(
         )
     if usage is not None:
         yield _usage_chunk(response_id, created, model, usage)
+    yield "data: [DONE]\n\n"
+
+
+def _completion_logprobs(completion: CompletionOutput) -> CompletionLogprobs | None:
+    """Legacy four-parallel-array shape (m9 D3); offsets from 0 within text."""
+    if completion.logprob_content is None:
+        return None
+    tokens: list[str] = []
+    token_logprobs: list[float] = []
+    top_logprobs: list[dict[str, float]] = []
+    text_offset: list[int] = []
+    offset = 0
+    has_top = False
+    for entry in completion.logprob_content:
+        tokens.append(entry.token)
+        token_logprobs.append(entry.logprob)
+        top_logprobs.append({top.token: top.logprob for top in entry.top})
+        has_top = has_top or bool(entry.top)
+        text_offset.append(offset)
+        offset += len(entry.token)
+    return CompletionLogprobs(
+        tokens=tokens,
+        token_logprobs=token_logprobs,
+        top_logprobs=top_logprobs if has_top else None,
+        text_offset=text_offset,
+    )
+
+
+def _completion_choice(index: int, completion: CompletionOutput) -> CompletionChoice:
+    return CompletionChoice(
+        index=index,
+        text=completion.text,
+        logprobs=_completion_logprobs(completion),
+        finish_reason=completion.finish_reason or "stop",
+    )
+
+
+async def _stream_completions(
+    engine: EngineBackend, generation_request: GenerationRequest, request: CompletionRequest
+) -> AsyncIterator[str]:
+    """Legacy text_completion stream: cumulative text deltas, not delta objects."""
+    response_id = f"cmpl-{uuid.uuid4().hex[:16]}"
+    created = int(time.time())
+    include_usage = bool(request.stream_options and request.stream_options.include_usage)
+    sent: dict[int, int] = {}
+    last = None
+
+    def _chunk(choices: list[CompletionChoice], usage: Usage | None = None) -> str:
+        payload = CompletionChunk(
+            id=response_id, created=created, model=request.model,
+            choices=choices, usage=usage,
+        )
+        exclude = None if include_usage else {"usage"}
+        return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
+
+    try:
+        async for partial in engine.stream(generation_request):
+            last = partial
+            for completion in partial.completions:
+                delta = completion.text[sent.get(completion.index, 0):]
+                if not delta and not partial.finished:
+                    continue
+                sent[completion.index] = len(completion.text)
+                finish = (completion.finish_reason or "stop") if partial.finished else None
+                yield _chunk(
+                    [CompletionChoice(index=completion.index, text=delta, finish_reason=finish)]
+                )
+    except Exception as error:
+        payload = {"error": {"message": str(error), "type": "upstream_error"}}
+        yield f"data: {json.dumps(payload)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    if include_usage and last is not None:
+        yield _chunk([], usage=_wire_usage(generation_request.prompt, last.completions, last.usage))
     yield "data: [DONE]\n\n"
 
 
@@ -356,6 +490,10 @@ def create_app(
         http_request.state.model = request.model  # label for the metrics middleware
         if request.stream_options is not None and not request.stream:
             return _invalid_request("stream_options is only allowed when stream is true")
+        if request.top_logprobs is not None and not request.logprobs:
+            return _invalid_request("top_logprobs requires logprobs to be true")
+        if request.top_logprobs is not None and not 0 <= request.top_logprobs <= 20:
+            return _invalid_request("top_logprobs must be between 0 and 20")
         include_usage = bool(request.stream_options and request.stream_options.include_usage)
         # rendered after model resolution: templates are per served model (m9 D2)
         prompt = render_prompt(request, chat_templates)
@@ -383,6 +521,8 @@ def create_app(
         engine = served_engines.get(request.model)
         if engine is None:
             return _model_not_found(request.model)
+        if request.n > 1 and getattr(engine, "supports_n", True) is False:
+            return _invalid_request(f"model {request.model!r} does not support n > 1")
         session_id = _session_id(request, http_request)
         generation_request = GenerationRequest(
             request_id=f"http-{uuid.uuid4().hex[:12]}",
@@ -414,5 +554,80 @@ def create_app(
                 media_type="text/event-stream",
             )
         return response
+
+    @app.post("/v1/completions")
+    async def completions(request: CompletionRequest, http_request: Request):
+        http_request.state.model = request.model
+        extra = request.model_extra or {}
+        for unsupported in ("echo", "suffix", "best_of"):
+            if extra.get(unsupported) is not None:
+                return _invalid_request(f"{unsupported} is not supported")
+        if request.logprobs is not None and not 0 <= request.logprobs <= 5:
+            return _invalid_request("logprobs must be between 0 and 5")
+        if request.stream_options is not None and not request.stream:
+            return _invalid_request("stream_options is only allowed when stream is true")
+        if isinstance(request.prompt, list) and request.stream:
+            return _invalid_request("streaming with a prompt array is not supported")
+        engine = served_engines.get(request.model)
+        if engine is None:
+            return _model_not_found(request.model)
+        if request.n > 1 and getattr(engine, "supports_n", True) is False:
+            return _invalid_request(f"model {request.model!r} does not support n > 1")
+        prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
+
+        def _generation_request(prompt: str) -> GenerationRequest:
+            return GenerationRequest(
+                request_id=f"http-{uuid.uuid4().hex[:12]}",
+                prompt=prompt,
+                sampling_params=SamplingParams(
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    n=request.n,
+                    max_tokens=request.max_tokens,
+                    stop=request.stop,
+                    seed=request.seed,
+                    presence_penalty=request.presence_penalty,
+                    frequency_penalty=request.frequency_penalty,
+                    logprobs=request.logprobs,
+                ),
+            )
+
+        if request.stream:
+            return StreamingResponse(
+                _stream_completions(engine, _generation_request(prompts[0]), request),
+                media_type="text/event-stream",
+            )
+        choices: list[CompletionChoice] = []
+        usage_totals = [0, 0, 0]  # prompt, completion, cached
+        try:
+            for prompt_index, prompt in enumerate(prompts):
+                result = await engine.generate(_generation_request(prompt))
+                for completion in result.completions:
+                    choices.append(
+                        _completion_choice(
+                            prompt_index * request.n + completion.index, completion
+                        )
+                    )
+                if result.usage is not None:
+                    usage_totals[0] += result.usage.prompt_tokens
+                    usage_totals[1] += result.usage.completion_tokens
+                    usage_totals[2] += result.usage.cached_tokens
+        except Exception as error:
+            return _upstream_error(error)
+        details = (
+            PromptTokensDetails(cached_tokens=usage_totals[2]) if usage_totals[2] else None
+        )
+        return CompletionResponse(
+            id=f"cmpl-{uuid.uuid4().hex[:16]}",
+            created=int(time.time()),
+            model=request.model,
+            choices=choices,
+            usage=Usage(
+                prompt_tokens=usage_totals[0],
+                completion_tokens=usage_totals[1],
+                total_tokens=usage_totals[0] + usage_totals[1],
+                prompt_tokens_details=details,
+            ),
+        )
 
     return app

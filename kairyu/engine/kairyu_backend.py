@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Mapping
 from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.radix_kv import RadixKVCache
-from kairyu.engine.core.sampling_types import SampledToken
+from kairyu.engine.core.sampling_types import SampledToken, mix_seed
 from kairyu.engine.core.scheduler import ScheduledChunk, Scheduler
 from kairyu.engine.core.spec_runner import SpeculativeRunner
 from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
@@ -147,6 +147,7 @@ class KairyuBackend:
             cumulative_logprob=update.cumulative_logprob,
             logprobs=update.logprobs,
             finish_reason=update.finish_reason,
+            logprob_content=update.logprob_content,
         )
         return GenerationResult(
             request_id=request.request_id,
@@ -160,7 +161,63 @@ class KairyuBackend:
             ),
         )
 
-    async def generate(self, request: GenerationRequest) -> GenerationResult:
+    def _sub_requests(self, request: GenerationRequest) -> list[GenerationRequest]:
+        """n>1 as n engine sub-requests (m9 D3). Completion 0 uses the user
+        seed IDENTICALLY (reproducibility parity with n=1); i>0 derive via
+        splitmix. Siblings prefill independently (documented: same-schedule
+        admissions do not share radix pages; n x prompt page pressure)."""
+        params = request.sampling_params
+        subs = []
+        for index in range(params.n):
+            seed = params.seed
+            if seed is not None and index > 0:
+                seed = mix_seed(seed, index)
+            subs.append(
+                GenerationRequest(
+                    request_id=f"{request.request_id}#c{index}",
+                    prompt=request.prompt,
+                    sampling_params=params.clone(n=1, seed=seed),
+                    cache_hint=request.cache_hint,
+                )
+            )
+        return subs
+
+    def _merged(
+        self,
+        request: GenerationRequest,
+        latest: dict[int, StreamUpdate],
+        finished: bool,
+    ) -> GenerationResult:
+        completions = tuple(
+            CompletionOutput(
+                index=index,
+                text=update.text,
+                token_ids=update.outputs,
+                cumulative_logprob=update.cumulative_logprob,
+                logprobs=update.logprobs,
+                finish_reason=update.finish_reason,
+                logprob_content=update.logprob_content,
+            )
+            for index, update in sorted(latest.items())
+        )
+        first = latest.get(0)
+        usage = None
+        if first is not None:
+            # prompt counted ONCE (m9 D1 aggregation rule); completions summed
+            usage = GenerationUsage(
+                prompt_tokens=first.num_prompt_tokens,
+                completion_tokens=sum(len(u.outputs) for u in latest.values()),
+                cached_tokens=first.num_cached_tokens,
+            )
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=completions,
+            finished=finished,
+            usage=usage,
+        )
+
+    async def _generate_one(self, request: GenerationRequest) -> GenerationResult:
         queue = self._submit(request)
         try:
             while True:
@@ -172,7 +229,33 @@ class KairyuBackend:
         finally:
             self._queues.pop(request.request_id, None)
 
-    async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        if request.sampling_params.n <= 1:
+            return await self._generate_one(request)
+        subs = self._sub_requests(request)
+        try:
+            results = await asyncio.gather(*(self._generate_one(sub) for sub in subs))
+        except Exception:
+            for sub in subs:  # abort surviving siblings on any failure
+                self._loop.abort(sub.request_id)
+            raise
+        latest = {
+            index: StreamUpdate(
+                outputs=result.completions[0].token_ids,
+                text=result.completions[0].text,
+                finished=True,
+                finish_reason=result.completions[0].finish_reason,
+                logprobs=result.completions[0].logprobs,
+                cumulative_logprob=result.completions[0].cumulative_logprob or 0.0,
+                num_prompt_tokens=result.usage.prompt_tokens if result.usage else 0,
+                num_cached_tokens=result.usage.cached_tokens if result.usage else 0,
+                logprob_content=result.completions[0].logprob_content,
+            )
+            for index, result in enumerate(results)
+        }
+        return self._merged(request, latest, finished=True)
+
+    async def _stream_one(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         queue = self._submit(request)
         emitted = -1
         try:
@@ -187,6 +270,50 @@ class KairyuBackend:
                     return
         finally:
             self._queues.pop(request.request_id, None)
+
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
+        if request.sampling_params.n <= 1:
+            async for result in self._stream_one(request):
+                yield result
+            return
+        # merged n>1 stream: every partial is the cumulative snapshot of ALL
+        # completions seen so far (MockBackend semantics — the SSE layer emits
+        # finish chunks from the LAST partial's completions)
+        subs = self._sub_requests(request)
+        queues = {index: self._submit(sub) for index, sub in enumerate(subs)}
+        pending = {
+            index: asyncio.ensure_future(queue.get()) for index, queue in queues.items()
+        }
+        latest: dict[int, StreamUpdate] = {}
+        finished: set[int] = set()
+        try:
+            while len(finished) < len(subs):
+                done, _ = await asyncio.wait(
+                    pending.values(), return_when=asyncio.FIRST_COMPLETED
+                )
+                for index in list(pending):
+                    task = pending[index]
+                    if task not in done:
+                        continue
+                    update: StreamUpdate = task.result()
+                    if update.error is not None:
+                        raise update.error
+                    latest[index] = update
+                    if update.finished:
+                        finished.add(index)
+                        del pending[index]
+                    else:
+                        pending[index] = asyncio.ensure_future(queues[index].get())
+                yield self._merged(request, latest, finished=len(finished) == len(subs))
+        except BaseException:
+            for sub in subs:  # abandonment/failure aborts siblings
+                self._loop.abort(sub.request_id)
+            raise
+        finally:
+            for task in pending.values():
+                task.cancel()
+            for index in range(len(subs)):
+                self._queues.pop(f"{request.request_id}#c{index}", None)
 
     async def shutdown(self) -> None:
         if self._pump_task is not None:

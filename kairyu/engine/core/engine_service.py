@@ -73,7 +73,19 @@ def _event_from_update(request_id: str, update: StreamUpdate) -> dict:
             {str(token_id): logprob for token_id, logprob in entry.items()}
             for entry in update.logprobs
         ]
+    if update.logprob_content is not None:
+        event["logprob_content"] = [_encode_token_logprob(t) for t in update.logprob_content]
     return event
+
+
+def _encode_token_logprob(entry) -> list:
+    return [
+        entry.token,
+        entry.token_id,
+        entry.logprob,
+        list(entry.bytes_) if entry.bytes_ is not None else None,
+        [_encode_token_logprob(t) for t in entry.top],
+    ]
 
 
 def run_engine_service(port_pipe, config: dict) -> None:

@@ -16,6 +16,7 @@ from kairyu.engine.core.engine_core import grammar_finished, token_ids
 from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 from kairyu.engine.tokenizer import IncrementalDetokenizer, Tokenizer
+from kairyu.outputs import TokenLogprob
 from kairyu.sampling_params import SamplingParams
 
 _DEFAULT_MAX_NEW_TOKENS = 16
@@ -34,6 +35,7 @@ class StreamUpdate:
     cumulative_logprob: float = 0.0
     num_prompt_tokens: int = 0
     num_cached_tokens: int = 0
+    logprob_content: tuple[TokenLogprob, ...] | None = None
 
 
 def engine_sampling_from(params: SamplingParams) -> EngineSampling:
@@ -77,6 +79,43 @@ def _logprob_fields(
             entry.setdefault(top_id, top_lp)
         entries.append(entry)
     return tuple(entries), cumulative
+
+
+def _token_logprob(tokenizer: Tokenizer, token_id: int, logprob: float) -> TokenLogprob:
+    token = tokenizer.decode((token_id,))
+    return TokenLogprob(
+        token=token,
+        token_id=token_id,
+        logprob=logprob,
+        # bytes_ is the lossless form: byte-level BPE fragments decode to U+FFFD
+        bytes_=tuple(token.encode("utf-8")),
+    )
+
+
+def _logprob_content(
+    tokenizer: Tokenizer, meta: list[SampledToken]
+) -> tuple[TokenLogprob, ...] | None:
+    if not any(token.logprob is not None for token in meta):
+        return None
+    entries = []
+    for token in meta:
+        if token.logprob is None:
+            continue
+        top = tuple(
+            _token_logprob(tokenizer, top_id, top_lp)
+            for top_id, top_lp in token.top_logprobs or ()
+        )
+        base = _token_logprob(tokenizer, token.token_id, token.logprob)
+        entries.append(
+            TokenLogprob(
+                token=base.token,
+                token_id=base.token_id,
+                logprob=base.logprob,
+                bytes_=base.bytes_,
+                top=top,
+            )
+        )
+    return tuple(entries)
 
 
 class _RequestTrack:
@@ -203,6 +242,7 @@ class EngineLoop:
             track.num_cached_tokens, self._scheduler.num_cached_tokens(request_id)
         )
         logprobs, cumulative = _logprob_fields(track.meta)
+        content = _logprob_content(self._tokenizer, track.meta)
 
         def _update(text: str, finished: bool, reason: str | None) -> StreamUpdate:
             return StreamUpdate(
@@ -214,6 +254,7 @@ class EngineLoop:
                 cumulative_logprob=cumulative,
                 num_prompt_tokens=track.num_prompt_tokens,
                 num_cached_tokens=track.num_cached_tokens,
+                logprob_content=content,
             )
 
         if state.status.value == "finished":

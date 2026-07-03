@@ -41,6 +41,7 @@ dev = [
     "pyzmq>=26",
     "msgpack>=1.0",
     "transformers>=5.12,<5.13",  # pinned band: template goldens byte-match (m9 D2)
+    "openai>=1.50",
 ]
 
 [project.scripts]
