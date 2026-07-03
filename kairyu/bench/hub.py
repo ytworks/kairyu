@@ -52,6 +52,28 @@ def load_hf_rows(
         raise _classify(dataset, error) from error
 
 
+def download_file(
+    repo_id: str, filename: str, dest: Path, *, repo_type: str = "dataset"
+) -> Path | None:
+    """Fetch one repo file into `dest` (None if it doesn't exist upstream)."""
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as error:
+        raise BenchExtrasMissing("bench", "downloading benchmark assets") from error
+    try:
+        cached = hf_hub_download(
+            repo_id,
+            filename,
+            repo_type=repo_type,
+            token=os.environ.get("HF_TOKEN"),
+        )
+    except Exception:  # noqa: BLE001 - missing file/network: caller degrades
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(Path(cached).read_bytes())
+    return dest
+
+
 def save_asset(data: bytes, assets_dir: Path, filename: str) -> str:
     """Write a binary asset (e.g. an image) and return its cache-relative name."""
     assets_dir.mkdir(parents=True, exist_ok=True)

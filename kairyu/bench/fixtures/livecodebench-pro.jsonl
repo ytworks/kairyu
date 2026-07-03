@@ -1,0 +1,1 @@
+{"id": "fixture-lcb-pro-0001", "question": "Read an integer n from stdin and print n squared.", "starter_code": "", "fn_name": null, "tests": [{"input": "3\n", "output": "9\n", "testtype": "stdin"}, {"input": "12\n", "output": "144\n", "testtype": "stdin"}]}

@@ -26,15 +26,21 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
     from kairyu.bench.adapters.charxiv import CharXivAdapter
     from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
     from kairyu.bench.adapters.hle import HleAdapter
+    from kairyu.bench.adapters.livecodebench import LiveCodeBenchAdapter
+    from kairyu.bench.adapters.livecodebench_pro import LiveCodeBenchProAdapter
     from kairyu.bench.adapters.longbench_v2 import LongBenchV2Adapter
     from kairyu.bench.adapters.mrcr import MrcrAdapter
+    from kairyu.bench.adapters.scicode import SciCodeAdapter
 
     adapters: list[BenchmarkAdapter] = [
         CharXivAdapter(),
         GpqaDiamondAdapter(),
         HleAdapter(),
+        LiveCodeBenchAdapter(),
+        LiveCodeBenchProAdapter(),
         LongBenchV2Adapter(),
         MrcrAdapter(),
+        SciCodeAdapter(),
     ]
     return {adapter.info.name: adapter for adapter in adapters}
 
