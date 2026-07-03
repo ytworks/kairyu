@@ -90,6 +90,10 @@ class DeploymentSpec(BaseModel):
     # and stays out of BackendSpec.options (factory kwargs). m9 D2.
     chat_templates: dict[str, str] = Field(default_factory=dict)
     orchestrator: OrchestratorSection | None = None
+    # served auto-model name -> orchestrator spec; serves ANY number of named
+    # orchestrations (e.g. kairyu-auto + kairyu-auto-max) from one YAML. The
+    # legacy single `orchestrator:` key stays and is served as "kairyu-auto".
+    orchestrators: dict[str, OrchestratorSection] = Field(default_factory=dict)
     batch: BatchSection | None = None
 
     @model_validator(mode="after")
@@ -107,6 +111,22 @@ class DeploymentSpec(BaseModel):
             raise ValueError(
                 f"chat_templates for unknown models {sorted(unknown)}; "
                 "keys must match engines: or pools: names"
+            )
+        if any(not name for name in self.orchestrators):
+            raise ValueError("orchestrators: names must be non-empty strings")
+        auto_overlap = self.orchestrators.keys() & (
+            self.engines.keys() | self.pools.keys()
+        )
+        if auto_overlap:
+            raise ValueError(
+                f"orchestrators names {sorted(auto_overlap)} collide with "
+                "engines:/pools: names; served model names must be unique"
+            )
+        if self.orchestrator is not None and "kairyu-auto" in self.orchestrators:
+            raise ValueError(
+                'both orchestrator: and orchestrators["kairyu-auto"] are set; '
+                "declare kairyu-auto once (the legacy orchestrator: key is "
+                'served as "kairyu-auto")'
             )
         return self
 

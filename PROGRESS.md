@@ -58,6 +58,21 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-03 — [design] DeploymentSpec gains named `orchestrators:` (m7 D3 / m11 D2 amendment)
+- What: `DeploymentSpec.orchestrators: dict[name, OrchestratorSection]` serves any
+  number of named orchestrations (e.g. `kairyu-auto` + `kairyu-auto-max`) from one
+  YAML; the legacy single `orchestrator:` key stays and is still served as
+  `kairyu-auto`. Validators: name collisions with engines/pools rejected at spec
+  load; `orchestrator:` + `orchestrators["kairyu-auto"]` double-declaration
+  rejected. Builder passes the named map to `create_app(orchestrators=)` — the
+  m11 tiered-auto path was already server-side, just not YAML-expressible.
+- Why: The Fugu-suite benchmark work (G6 P-C1) needs "orchestration with an
+  arbitrary model composition" to be deployable, then benchmarked as just another
+  model name on the same endpoint. Previously `kairyu-auto-max` was reachable
+  only via the `create_app` kwarg in tests, never from `kairyu serve`.
+- Refs: `kairyu/deploy/{spec,builder}.py`,
+  `tests/unit/test_deployment_spec.py`, `tests/server/test_serve_builder.py`
+
 ### 2026-07-03 — [progress] M19 complete: deploy-ready — the local-complete plan is DONE
 - What: 627 → 646 tests. Dockerfile.cuda (nvidia/cuda 12.4 + gpu/hf/fleet
   extras), GPU compose (device reservations, model volume), Helm

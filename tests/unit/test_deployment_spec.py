@@ -81,3 +81,66 @@ pools:
 def test_non_mapping_yaml_rejected():
     with pytest.raises(ValueError, match="mapping"):
         load_deployment_spec("- a\n- b\n")
+
+
+MULTI_ORCH_YAML = """
+engines:
+  m: { backend: mock }
+orchestrators:
+  kairyu-auto: { spec: auto.yaml }
+  kairyu-auto-max: { spec: auto_max.yaml }
+"""
+
+
+def test_named_orchestrators_parse():
+    spec = load_deployment_spec(MULTI_ORCH_YAML)
+    assert spec.orchestrator is None
+    assert spec.orchestrators["kairyu-auto"].spec == "auto.yaml"
+    assert spec.orchestrators["kairyu-auto-max"].spec == "auto_max.yaml"
+
+
+def test_orchestrator_name_colliding_with_engine_rejected():
+    yaml_text = """
+engines:
+  m: { backend: mock }
+orchestrators:
+  m: { spec: auto.yaml }
+"""
+    with pytest.raises(ValueError, match="collide"):
+        load_deployment_spec(yaml_text)
+
+
+def test_legacy_orchestrator_plus_named_kairyu_auto_rejected():
+    yaml_text = """
+engines:
+  m: { backend: mock }
+orchestrator: { spec: auto.yaml }
+orchestrators:
+  kairyu-auto: { spec: other.yaml }
+"""
+    with pytest.raises(ValueError, match="declare kairyu-auto once"):
+        load_deployment_spec(yaml_text)
+
+
+def test_legacy_orchestrator_composes_with_other_named():
+    yaml_text = """
+engines:
+  m: { backend: mock }
+orchestrator: { spec: auto.yaml }
+orchestrators:
+  kairyu-auto-max: { spec: max.yaml }
+"""
+    spec = load_deployment_spec(yaml_text)
+    assert spec.orchestrator is not None
+    assert set(spec.orchestrators) == {"kairyu-auto-max"}
+
+
+def test_empty_orchestrator_name_rejected():
+    yaml_text = """
+engines:
+  m: { backend: mock }
+orchestrators:
+  "": { spec: auto.yaml }
+"""
+    with pytest.raises(ValueError, match="non-empty"):
+        load_deployment_spec(yaml_text)
