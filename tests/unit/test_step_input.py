@@ -76,7 +76,7 @@ def test_request_property_provides_toy_runner_compatible_view():
         request_id="a",
         prompt_token_ids=(1, 2, 3),
         computed_prompt=3,
-        output_len=0,
+        outputs=(),
         in_flight=1,
         page_ids=(0,),
         decode_page_ids=(),
