@@ -45,15 +45,17 @@ def _generation_defaults(directory: Path, config: dict) -> GenerationDefaults:
     return GenerationDefaults(eos_token_id=int(eos))
 
 
-def build_model(config: ModelConfig) -> DenseDecoder:
+def build_model(config: ModelConfig, attention_backend=None) -> DenseDecoder:
     """Registry: architecture -> module (one builder covers the dense family)."""
     if config.architecture not in _SUPPORTED_BUILDERS:
         raise ValueError(f"no builder for architecture {config.architecture!r}")
-    return DenseDecoder(config)
+    return DenseDecoder(config, attention_backend=attention_backend)
 
 
 def load_model(
-    path: str | Path, dtype: torch.dtype = torch.float32
+    path: str | Path,
+    dtype: torch.dtype = torch.float32,
+    attention_backend=None,
 ) -> tuple[DenseDecoder, ModelConfig, GenerationDefaults]:
     directory = Path(path)
     config_file = directory / "config.json"
@@ -66,7 +68,7 @@ def load_model(
             f"quantized checkpoint ({quant.method.value}) loading arrives in M14"
         )
     config = parse_model_config(raw_config)
-    model = build_model(config)
+    model = build_model(config, attention_backend=attention_backend)
     reader = CheckpointReader(directory)
     state: dict[str, torch.Tensor] = {}
     for name, _ in model.named_parameters():

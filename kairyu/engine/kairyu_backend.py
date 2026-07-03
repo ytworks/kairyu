@@ -81,12 +81,17 @@ def build_engine_loop(
     default_stop_ids: tuple[int, ...] = ()
     num_kv_heads_for_tp = None
     if model_path is not None:
+        from kairyu.engine.core.attention import select_backend
+        from kairyu.engine.core.hw_profile import probe
         from kairyu.engine.core.kv_pool import PagedKVPool
         from kairyu.engine.core.model_runner import PagedModelRunner
         from kairyu.engine.core.sampler import Sampler
         from kairyu.models.loader import load_model
 
-        model, model_config, generation = load_model(model_path)
+        # deploy day is config-free: the probed profile picks the kernel
+        model, model_config, generation = load_model(
+            model_path, attention_backend=select_backend(probe())
+        )
         default_eos = generation.eos_token_id
         default_stop_ids = generation.stop_token_ids
         num_kv_heads_for_tp = model_config.num_key_value_heads

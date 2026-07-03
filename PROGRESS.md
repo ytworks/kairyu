@@ -25,6 +25,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, `docs/design/m8-engine-cpu.md`): HF tokenizer seam + SSE-safe stop strings, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. 437 tests, 95% cov. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
+| M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -42,6 +43,25 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M13 complete: AttentionBackend seam + FlashInfer adapter + MLA reference
+- What: attention extracted into a swappable seam (501 → 514 tests, all M12
+  parity suites unchanged — the extraction is behavior-free). Backends are
+  plain objects (never nn.Module; state_dict safety), ONE instance shared
+  across layers (FlashInfer workspace/plan-cache is per-instance).
+  FlashInfer adapter written locally with the reviewed API pins (head_dim_qk
+  spelling, workspace buffers, explicit q/kv dtypes, int32 host/device index
+  arrays, bottom-right causal assertion, per-chunk plan cache) — logic
+  CPU-pinned against an injected fake module, kernels mirrored in tests/gpu/
+  (7 deselected until deploy day). MLA reference math (decompress ≡ absorbed
+  ≡ naive oracle at the pinned (d_nope+d_rope)^-0.5 scale; shared single-head
+  k_pe; post-RoPE cache layout) — M15's trusted oracle for the highest-risk
+  kernel work. Selector: env override + hw-profile kernel tier;
+  build_engine_loop(model_path=) picks the backend from probe() — deploy day
+  is config-free.
+- Refs: `docs/design/m13-attention-backend.md` (Status: Implemented);
+  `kairyu/engine/core/attention/{__init__,torch_backend,mla_torch,flashinfer_gpu,selector}.py`,
+  `tests/gpu/test_flashinfer_gpu.py`
 
 ### 2026-07-03 — [progress] M12 complete: real dense models with transformers parity
 - What: all five m12 phases landed (471 → 501 tests, 95% cov). ModelConfig

@@ -1,11 +1,9 @@
-"""Paged GQA attention (m12 D2).
+"""Paged GQA attention module (m12 D2, m13 D2).
 
-``paged_attention`` is the ONE function M13 extracts into the
-``AttentionBackend`` seam — it takes the pool + page table (not pre-gathered
-K/V). The chunk mask is rectangular: a query at absolute position
-``chunk_start + i`` attends keys ``[0, chunk_start + i]`` — SDPA's
-``is_causal=True`` is top-left aligned and WRONG for chunks over a cached
-prefix (reviewed, measured).
+Score computation is delegated to the ``AttentionBackend`` seam (m13):
+backends are plain objects, NEVER nn.Module (a stateful backend's buffers
+must not register into state_dict), and the same backend INSTANCE is shared
+across all layers (FlashInfer's workspace/plan cache depends on it).
 """
 
 from __future__ import annotations
@@ -13,39 +11,20 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from kairyu.engine.core.attention import AttentionBackend, TorchAttentionBackend
 from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, apply_rope
 
 
-def paged_attention(
-    query: torch.Tensor,
-    kv_pool: PagedKVPool,
-    layer: int,
-    page_table: list[int],
-    seq_len: int,
-    chunk_start: int,
-) -> torch.Tensor:
-    """query: [T, num_heads, head_dim] -> context [T, num_heads * head_dim]."""
-    keys, values = kv_pool.gather(layer, page_table, seq_len)
-    chunk_len = query.shape[0]
-    positions = torch.arange(chunk_len)[:, None] + chunk_start
-    mask = torch.arange(seq_len)[None, :] <= positions  # [T, S] rectangular causal
-    out = nn.functional.scaled_dot_product_attention(
-        query.transpose(0, 1)[None],  # [1, heads, T, d]
-        keys.transpose(0, 1)[None],  # [1, kv_heads, S, d]
-        values.transpose(0, 1)[None],
-        attn_mask=mask[None, None],
-        enable_gqa=True,
-    )
-    return out[0].transpose(0, 1).reshape(chunk_len, -1)
-
-
 class Attention(nn.Module):
     """GQA attention over the paged pool; HF module names (m12 D2)."""
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, backend: AttentionBackend | None = None) -> None:
         super().__init__()
+        # plain attribute, not a submodule; None default avoids a shared
+        # import-time instance (m13 review C2)
+        self.backend = backend or TorchAttentionBackend()
         heads, kv_heads, dim = (
             config.num_attention_heads,
             config.num_key_value_heads,
@@ -94,5 +73,7 @@ class Attention(nn.Module):
                 layer, page_table, positions[writable], keys[writable], values[writable]
             )
         chunk_start = int(positions[0].item())
-        context = paged_attention(query, kv_pool, layer, page_table, seq_len, chunk_start)
+        context = self.backend.attend(
+            query, kv_pool, layer, page_table, seq_len, chunk_start
+        )
         return self.o_proj(context)

@@ -17,9 +17,9 @@ from kairyu.models.layers import RMSNorm, RotaryEmbedding, SwiGluMlp
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, backend=None) -> None:
         super().__init__()
-        self.self_attn = Attention(config)
+        self.self_attn = Attention(config, backend=backend)
         self.mlp = SwiGluMlp(config)
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -53,11 +53,13 @@ class DecoderLayer(nn.Module):
 class _Backbone(nn.Module):
     """The HF ``model.*`` subtree."""
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, backend=None) -> None:
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        # ONE backend instance shared across layers (m13: FlashInfer workspace
+        # and plan cache are per-instance — sharing is load-bearing)
         self.layers = nn.ModuleList(
-            DecoderLayer(config) for _ in range(config.num_hidden_layers)
+            DecoderLayer(config, backend=backend) for _ in range(config.num_hidden_layers)
         )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.rotary_emb = RotaryEmbedding(config)
@@ -66,10 +68,10 @@ class _Backbone(nn.Module):
 class DenseDecoder(nn.Module):
     """Paged incremental decoder; covers the m12 dense family via config."""
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, attention_backend=None) -> None:
         super().__init__()
         self.config = config
-        self.model = _Backbone(config)
+        self.model = _Backbone(config, backend=attention_backend)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
