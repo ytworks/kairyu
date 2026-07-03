@@ -63,6 +63,7 @@ class ConductorResult:
     outputs: dict[str, str]
     budget_state: BudgetState
     trace: tuple[TraceEvent, ...]
+    usage: tuple[int, int] = (0, 0)  # (prompt, completion) summed over units (m11 A1)
 
 
 class _SafeDict(dict):
@@ -78,6 +79,7 @@ class _RunState:
     outputs: dict[str, str] = field(default_factory=dict)
     trace: list[TraceEvent] = field(default_factory=list)
     completion_order: list[str] = field(default_factory=list)
+    usage: list[int] = field(default_factory=lambda: [0, 0])
 
 
 def _is_pass(verdict_text: str) -> bool:
@@ -167,6 +169,9 @@ class Conductor:
         )
         result = await backend.generate(request)
         run.budget = run.budget.charge(cost=self._cost_model(request, result))
+        if result.usage is not None:  # m11 A1: usage was dropped here
+            run.usage[0] += result.usage.prompt_tokens
+            run.usage[1] += result.usage.completion_tokens
         return result.text
 
     async def _run_unit(self, run: _RunState, session: str, query: str, spec: RoleSpec) -> None:
@@ -232,4 +237,5 @@ class Conductor:
             outputs=dict(run.outputs),
             budget_state=run.budget,
             trace=tuple(run.trace),
+            usage=tuple(run.usage),
         )

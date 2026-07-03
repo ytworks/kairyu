@@ -1,0 +1,19 @@
+# m11 D7: Open WebUI against the kairyu gateway (chat UI surface).
+# Usage: docker compose -f deploy/compose/docker-compose.webui.yaml up
+services:
+  kairyu:
+    build: ../..
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../../deploy/compose/config.yaml:/etc/kairyu/config.yaml:ro
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3000:8080"
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local
+      WEBUI_AUTH: "false"
+    depends_on:
+      - kairyu

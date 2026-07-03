@@ -43,7 +43,7 @@ dev = [
     "msgpack>=1.0",
     "opentelemetry-sdk>=1.27",
     "transformers>=5.12,<5.13",  # pinned band: template goldens byte-match (m9 D2)
-    "openai>=1.50",
+    "openai>=1.66",
 ]
 
 [project.scripts]

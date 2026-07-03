@@ -353,6 +353,55 @@ async def _stream_engine(
     yield "data: [DONE]\n\n"
 
 
+async def _stream_orchestrator(
+    orchestrator, prompt: str, request: ChatCompletionRequest,
+    include_usage: bool, want_trace: bool,
+) -> AsyncIterator[str]:
+    """AUTO-model SSE (m11 D1/A2): status keep-alives ride SSE COMMENT lines
+    (the OpenAI SDK parses every data: payload as a chunk), deltas and the
+    final chunk are standard chat chunks."""
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
+    created = int(time.time())
+    first = True
+    final_result = None
+    try:
+        stream = await orchestrator.run_chat(prompt, stream=True)
+        async for event in stream:
+            if event.kind == "status":
+                yield f": status {event.text}\n\n"  # SSE comment (A2)
+            elif event.kind == "delta":
+                delta = (
+                    ChunkDelta(role="assistant", content=event.text)
+                    if first
+                    else ChunkDelta(content=event.text)
+                )
+                first = False
+                yield _sse_chunk(
+                    response_id, created, request.model, 0, delta,
+                    include_usage=include_usage,
+                )
+            else:
+                final_result = event.result
+    except Exception as error:  # surface as an SSE error event, then close
+        yield f"data: {{\"error\": {{\"message\": \"{type(error).__name__}\"}}}}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    yield _sse_chunk(
+        response_id, created, request.model, 0, ChunkDelta(),
+        finish_reason="stop", include_usage=include_usage,
+    )
+    if include_usage and final_result is not None:
+        usage = Usage(
+            prompt_tokens=final_result.prompt_tokens,
+            completion_tokens=final_result.completion_tokens,
+            total_tokens=final_result.prompt_tokens + final_result.completion_tokens,
+        )
+        yield _usage_chunk(response_id, created, request.model, usage)
+    if want_trace and final_result is not None:
+        yield f": trace {' | '.join(final_result.trace)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 async def _stream_choices(
     choices: list[Choice], model: str, usage: Usage | None = None
 ) -> AsyncIterator[str]:
@@ -454,6 +503,19 @@ async def _stream_completions(
     yield "data: [DONE]\n\n"
 
 
+def _ledger_of(http_request: Request):
+    return getattr(http_request.app.state, "usage_ledger", None)
+
+
+def _record_usage(http_request: Request, model: str, usage) -> None:
+    """m11 D3/A7: metering happens in handlers (middleware can't see tokens)."""
+    ledger = _ledger_of(http_request)
+    if ledger is None or usage is None:
+        return
+    tenant = getattr(http_request.state, "tenant", None) or "default"
+    ledger.record(tenant, model, usage.prompt_tokens, usage.completion_tokens)
+
+
 def _session_id(request: ChatCompletionRequest, http_request: Request) -> str | None:
     """Session for ReplicaPool affinity: X-Session-ID header, else the OpenAI user field."""
     return http_request.headers.get("x-session-id") or request.user
@@ -465,10 +527,20 @@ def create_app(
     settings: ServerSettings | None = None,
     lifespan=None,
     chat_templates: Mapping[str, ChatTemplate] | None = None,
+    orchestrators: Mapping[str, Orchestrator] | None = None,
+    tenant_config=None,
+    embedding_backend=None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
     app = FastAPI(title="kairyu", version="0.1.0", lifespan=lifespan)
     served_engines = dict(engines)
+    # m11 D2: tiered auto models; the single-orchestrator kwarg is a shim
+    auto_models: dict[str, Orchestrator] = dict(orchestrators or {})
+    if orchestrator is not None:
+        auto_models.setdefault(AUTO_MODEL, orchestrator)
+    collisions = set(auto_models) & set(served_engines)
+    if collisions:
+        raise ValueError(f"orchestrator names collide with engines: {sorted(collisions)}")
 
     metrics = ServerMetrics() if settings.metrics else None
     app.state.metrics = metrics
@@ -477,6 +549,12 @@ def create_app(
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
     add_health_routes(app, served_engines, metrics)
+    from kairyu.entrypoints.server.extra_routes import add_extra_routes
+
+    add_extra_routes(
+        app, served_engines, embedding_backend=embedding_backend,
+        chat_templates=chat_templates,
+    )
 
     # add_middleware prepends, so add innermost first: metrics -> concurrency
     # guard -> auth -> access log (outermost).
@@ -484,11 +562,35 @@ def create_app(
         app.add_middleware(MetricsMiddleware, metrics=metrics)
     if settings.max_concurrency is not None:
         app.add_middleware(ConcurrencyLimitMiddleware, limit=settings.max_concurrency)
+    if tenant_config is not None:
+        from kairyu.entrypoints.server.tenancy import (
+            TenantLimiter,
+            TenantLimitMiddleware,
+        )
+
+        # added BEFORE auth => auth wraps it: 401 wins over 429 and
+        # unauthenticated requests never drain buckets (m11 A6)
+        app.add_middleware(
+            TenantLimitMiddleware,
+            config=tenant_config,
+            limiter=TenantLimiter(tenant_config),
+        )
     api_keys = settings.resolve_api_keys()
     if api_keys:
         app.add_middleware(
             AuthMiddleware, api_keys=api_keys, protect_metrics=settings.protect_metrics
         )
+    ledger = None
+    if settings.usage_ledger_path:
+        from kairyu.entrypoints.server.tenancy import UsageLedger
+
+        ledger = UsageLedger(settings.usage_ledger_path)
+        app.state.usage_ledger = ledger
+
+        @app.get("/admin/usage")
+        async def admin_usage(tenant: str | None = None):
+            return {"usage": ledger.totals(tenant)}
+
     if settings.tracing:
         from kairyu.entrypoints.server.middleware import TracingMiddleware
         from kairyu.telemetry import configure_tracing
@@ -500,9 +602,7 @@ def create_app(
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
-        names = list(served_engines)
-        if orchestrator is not None:
-            names.append(AUTO_MODEL)
+        names = list(served_engines) + list(auto_models)
         return ModelList(data=[ModelCard(id=name) for name in names])
 
     @app.post("/v1/chat/completions")
@@ -518,27 +618,43 @@ def create_app(
         if format_error is not None:
             return _invalid_request(format_error)
         include_usage = bool(request.stream_options and request.stream_options.include_usage)
+        # m11 D5: image parts need a vision engine; wire format only for now
+        from kairyu.entrypoints.chat_template import flatten_content
+
+        for message in request.messages:
+            _, has_images = flatten_content(message.content)
+            if has_images:
+                return _invalid_request(
+                    f"model {request.model!r} does not support image inputs"
+                )
         # rendered after model resolution: templates are per served model (m9 D2)
         prompt = render_prompt(request, chat_templates)
-        if request.model == AUTO_MODEL and orchestrator is not None:
-            try:
-                result = await orchestrator.run(prompt)
-            except Exception as error:
-                return _upstream_error(error)
-            # orchestrator has no token accounting until M11: usage=None fallback
-            completions = (
-                CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
-            )
-            response = completion_response(request, prompt, completions, usage=None)
+        if request.model in auto_models:
+            selected = auto_models[request.model]
+            want_trace = http_request.headers.get("x-kairyu-trace") == "1"
             if request.stream:
                 return StreamingResponse(
-                    _stream_choices(
-                        response.choices,
-                        request.model,
-                        usage=response.usage if include_usage else None,
+                    _stream_orchestrator(
+                        selected, prompt, request, include_usage, want_trace
                     ),
                     media_type="text/event-stream",
                 )
+            try:
+                result = await selected.run(prompt)
+            except Exception as error:
+                return _upstream_error(error)
+            completions = (
+                CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
+            )
+            # m11 A1/A3: REAL summed usage replaces the m9 usage=None fallback
+            usage = GenerationUsage(
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+            )
+            response = completion_response(request, prompt, completions, usage=usage)
+            if want_trace:
+                response = response.model_copy(update={"kairyu_trace": list(result.trace)})
+            _record_usage(http_request, request.model, response.usage)
             return response
 
         engine = served_engines.get(request.model)
@@ -565,6 +681,7 @@ def create_app(
         except Exception as error:
             return _upstream_error(error)
         response = completion_response(request, prompt, result.completions, result.usage)
+        _record_usage(http_request, request.model, response.usage)
         if request.stream:
             # Tool calling + streaming: generate fully, then emit structured chunks so
             # tool_calls and finish_reason stay correct.

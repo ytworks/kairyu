@@ -55,6 +55,17 @@ class OrchestratorResult:
     text: str
     route: RouteDecision
     trace: tuple[str, ...]
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class OrchestratorEvent:
+    """Streaming event (m11 D1): status keep-alive, token delta, or final."""
+
+    kind: str  # "status" | "delta" | "result"
+    text: str = ""
+    result: OrchestratorResult | None = None
 
 
 class Orchestrator:
@@ -67,6 +78,7 @@ class Orchestrator:
         shared_prefix: str = "",
         sampling_params: SamplingParams | None = None,
         cost_model: CostModel = zero_cost,
+        moa_samples: int = 0,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
@@ -77,6 +89,8 @@ class Orchestrator:
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
         self._cost_model = cost_model
+        # m11 A4: >0 routes multi_agent through MoA (the deep kairyu-auto-max tier)
+        self._moa_samples = moa_samples
 
     def _resolve_engine(self, tier: str, notes: list[str]) -> EngineBackend:
         engine = self._engines.get(tier)
@@ -90,7 +104,9 @@ class Orchestrator:
         needed = {role.worker for role in self._roles}
         return {name: self._resolve_engine(name, notes) for name in needed}
 
-    async def _run_direct(self, query: str, tier: str, notes: list[str]) -> str:
+    async def _run_direct(
+        self, query: str, tier: str, notes: list[str]
+    ) -> tuple[str, tuple[int, int]]:
         engine = self._resolve_engine(tier, notes)
         request = GenerationRequest(
             request_id=f"direct-{uuid.uuid4().hex[:12]}",
@@ -98,12 +114,36 @@ class Orchestrator:
             sampling_params=self._sampling_params,
             cache_hint=CacheHint(session_id=uuid.uuid4().hex[:12]),
         )
-        return (await engine.generate(request)).text
+        result = await engine.generate(request)
+        usage = (
+            (result.usage.prompt_tokens, result.usage.completion_tokens)
+            if result.usage is not None
+            else (0, 0)
+        )
+        return result.text, usage
 
     async def run(self, query: str) -> OrchestratorResult:
         decision = self._router.route(query)
         notes: list[str] = [f"route: {decision.target} ({decision.reason})"]
         if decision.target == "multi_agent":
+            if self._moa_samples > 0:  # m11 A4: the deep tier's MoA route
+                from kairyu.orchestration.moa import run_moa
+
+                moa = await run_moa(
+                    self._resolve_engine("tier1", notes),
+                    query,
+                    n_samples=self._moa_samples,
+                    synthesizer=self._resolve_engine("tier2", notes),
+                    shared_prefix=self._shared_prefix,
+                )
+                notes.append(f"moa: {len(moa.proposals)} proposals synthesized")
+                return OrchestratorResult(
+                    text=moa.final_text,
+                    route=decision,
+                    trace=tuple(notes),
+                    prompt_tokens=moa.usage[0],
+                    completion_tokens=moa.usage[1],
+                )
             conductor = Conductor(
                 roles=self._roles,
                 workers=self._conductor_workers(notes),
@@ -114,10 +154,74 @@ class Orchestrator:
             result = await conductor.run(query, budget=self._budget)
             notes.extend(f"{event.node}: {event.kind} {event.detail}" for event in result.trace)
             return OrchestratorResult(
-                text=result.final_text, route=decision, trace=tuple(notes)
+                text=result.final_text,
+                route=decision,
+                trace=tuple(notes),
+                prompt_tokens=result.usage[0],
+                completion_tokens=result.usage[1],
             )
-        text = await self._run_direct(query, decision.target, notes)
-        return OrchestratorResult(text=text, route=decision, trace=tuple(notes))
+        text, usage = await self._run_direct(query, decision.target, notes)
+        return OrchestratorResult(
+            text=text,
+            route=decision,
+            trace=tuple(notes),
+            prompt_tokens=usage[0],
+            completion_tokens=usage[1],
+        )
+
+    async def run_chat(self, prompt: str, stream: bool = False):
+        """The m11 D1 surface: pre-rendered prompt in (A4), events out.
+
+        Non-stream: returns OrchestratorResult (same as run()). Stream:
+        async-yields OrchestratorEvent — status keep-alives while pre-final
+        stages run, token deltas for the FINAL text (direct route streams
+        live; conductor/MoA finals are buffered per A5 — refine regeneration
+        would invalidate streamed deltas), then one result event.
+        """
+        if not stream:
+            return await self.run(prompt)
+        return self._run_chat_stream(prompt)
+
+    async def _run_chat_stream(self, prompt: str):
+        decision = self._router.route(prompt)
+        notes = [f"route: {decision.target} ({decision.reason})"]
+        if decision.target != "multi_agent":
+            engine = self._resolve_engine(decision.target, notes)
+            request = GenerationRequest(
+                request_id=f"direct-{uuid.uuid4().hex[:12]}",
+                prompt=f"{self._shared_prefix}{prompt}",
+                sampling_params=self._sampling_params,
+                cache_hint=CacheHint(session_id=uuid.uuid4().hex[:12]),
+            )
+            emitted = 0
+            last = None
+            async for partial in engine.stream(request):
+                last = partial
+                text = partial.text
+                if len(text) > emitted:
+                    yield OrchestratorEvent(kind="delta", text=text[emitted:])
+                    emitted = len(text)
+            usage = (
+                (last.usage.prompt_tokens, last.usage.completion_tokens)
+                if last is not None and last.usage is not None
+                else (0, 0)
+            )  # usage read from the LAST partial (m11 A1 contract)
+            yield OrchestratorEvent(
+                kind="result",
+                result=OrchestratorResult(
+                    text=last.text if last is not None else "",
+                    route=decision,
+                    trace=tuple(notes),
+                    prompt_tokens=usage[0],
+                    completion_tokens=usage[1],
+                ),
+            )
+            return
+        # multi-stage routes: keep-alive, then buffered final (A5)
+        yield OrchestratorEvent(kind="status", text=f"routing: {decision.target}")
+        result = await self.run(prompt)
+        yield OrchestratorEvent(kind="delta", text=result.text)
+        yield OrchestratorEvent(kind="result", result=result)
 
     def run_sync(self, query: str) -> OrchestratorResult:
         try:

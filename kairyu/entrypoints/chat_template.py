@@ -23,7 +23,10 @@ from pathlib import Path
 
 def render_chat(messages: Sequence[dict]) -> str:
     """Legacy minimal renderer: role-prefixed concatenation (pre-m9 default)."""
-    lines = [f"{message['role']}: {message.get('content') or ''}" for message in messages]
+    lines = [
+        f"{message['role']}: {flatten_content(message.get('content'))[0]}"
+        for message in messages
+    ]
     return "\n".join(lines) + "\nassistant:"
 
 
@@ -45,9 +48,30 @@ def _strftime_now(fmt: str) -> str:
     return datetime.now().strftime(fmt)
 
 
+def flatten_content(content) -> tuple[str, bool]:
+    """Content-parts -> (text, has_images) (m11 A10). Strings pass through."""
+    if content is None:
+        return "", False
+    if isinstance(content, str):
+        return content, False
+    texts: list[str] = []
+    has_images = False
+    for part in content:
+        data = part if isinstance(part, dict) else part.model_dump()
+        if data.get("type") == "text":
+            texts.append(data.get("text") or "")
+        elif data.get("type") == "image_url":
+            has_images = True
+    return "".join(texts), has_images
+
+
 def _normalize_message(message: Mapping[str, object]) -> dict:
     """OpenAI wire form -> template form: tool_calls.arguments str -> dict."""
     normalized = dict(message)
+    content = normalized.get("content")
+    if content is not None and not isinstance(content, str):
+        # text-only HF templates must never see part lists (m11 A10)
+        normalized["content"], _ = flatten_content(content)
     tool_calls = normalized.get("tool_calls")
     if isinstance(tool_calls, list):
         fixed_calls = []
