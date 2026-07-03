@@ -27,6 +27,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
 | M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
+| M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -44,6 +45,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M15 complete: Qwen3-MoE and DeepSeek-V3 with full parity
+- What: 530 → 547 tests. Sparse MoE blocks (Qwen3 softmax top-k with fp32
+  routing; DeepSeek sigmoid + correction-bias grouped top-k matched exactly —
+  bias affects selection only, top-2 group scores, +1e-20 renorm eps,
+  routed_scaling on routed only, shared experts, first_k_dense_replace).
+  MlaAttention over the latent pool (post-kv_a_layernorm c_kv ‖ roped k_pe as
+  ONE kv head, v width 0 — M18 serde contract), q-LoRA and plain-q paths,
+  INTERLEAVED rope (DeepSeek default; half-split is wrong), decompress form
+  for prefill / absorbed for decode, HF's hardcoded 1e-6 MLA norm eps. yarn
+  rope (inv_freq ramp + attention factor + mscale_all_dim² softmax scale).
+  Config: dual-alias expert counts, MLA head_dim pinned to qk dims (never
+  hidden//heads), kv-pool props (1 head, r+d_rope wide, v=0). Flagship gates:
+  logits < 1e-4 AND full-engine greedy == hf.generate for Qwen3-MoE and
+  DeepSeek-V3 (q_lora int/None, yarn on/off). Fixture note: random tiny gates
+  produce near-tied routing that fp32 noise flips (block itself matches to
+  1e-9 on identical inputs) — gates scaled for decisive margins.
+- Refs: `docs/design/m15-moe-mla.md` (Status: Implemented);
+  `kairyu/models/{moe,mla}.py`, `kairyu/models/{config,layers,llama}.py`,
+  `kairyu/engine/core/kv_pool.py`
 
 ### 2026-07-03 — [progress] M14 complete: quantized checkpoints load and RUN on CPU
 - What: 514 → 530 tests. kairyu/quant/ reference implementations with formats

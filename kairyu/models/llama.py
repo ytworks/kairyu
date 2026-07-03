@@ -13,14 +13,23 @@ from torch import nn
 from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.models.attention import Attention
 from kairyu.models.config import ModelConfig
-from kairyu.models.layers import RMSNorm, RotaryEmbedding, SwiGluMlp
+from kairyu.models.layers import RMSNorm, RotaryEmbedding
+from kairyu.models.mla import MlaAttention
+from kairyu.models.moe import build_mlp
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: ModelConfig, backend=None, linear_factory=None) -> None:
+    def __init__(
+        self, config: ModelConfig, layer_index: int = 0, backend=None, linear_factory=None
+    ) -> None:
         super().__init__()
-        self.self_attn = Attention(config, backend=backend, linear_factory=linear_factory)
-        self.mlp = SwiGluMlp(config, linear_factory=linear_factory)
+        if config.is_mla:
+            self.self_attn = MlaAttention(config, linear_factory=linear_factory)
+        else:
+            self.self_attn = Attention(
+                config, backend=backend, linear_factory=linear_factory
+            )
+        self.mlp = build_mlp(config, layer_index, linear_factory=linear_factory)
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
@@ -59,8 +68,10 @@ class _Backbone(nn.Module):
         # ONE backend instance shared across layers (m13: FlashInfer workspace
         # and plan cache are per-instance — sharing is load-bearing)
         self.layers = nn.ModuleList(
-            DecoderLayer(config, backend=backend, linear_factory=linear_factory)
-            for _ in range(config.num_hidden_layers)
+            DecoderLayer(
+                config, layer_index=index, backend=backend, linear_factory=linear_factory
+            )
+            for index in range(config.num_hidden_layers)
         )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.rotary_emb = RotaryEmbedding(config)
