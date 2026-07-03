@@ -55,17 +55,55 @@ def build_engine_loop(
     max_num_batched_tokens: int = 2048,
     runner: object | None = None,
     tensor_parallel_size: int = 1,
-    tokenizer: str | Tokenizer = "toy",
+    tokenizer: str | Tokenizer | None = None,
     speculative: str | None = None,
     speculative_tokens: int = 4,
+    model_path: str | None = None,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
-    """Assemble the engine stack; shared by KairyuBackend and the ZMQ service."""
-    validate_tp_degree(tensor_parallel_size)
+    """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
+
+    ``model_path`` loads a real checkpoint (m12 D5): DenseDecoder +
+    PagedKVPool + PagedModelRunner + Sampler, tokenizer from the same dir
+    unless overridden. Mutually exclusive with ``runner``; TP > 1 with a real
+    model arrives in M16 (the CPU TP path duplicates one runner instance
+    across ranks — incompatible with a stateful pool/sampler runner).
+    """
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
     if speculative is not None and tensor_parallel_size > 1:
         raise ValueError("speculative decoding with tensor_parallel_size > 1 is not supported")
-    resolved = resolve_tokenizer(tokenizer)
+    if model_path is not None and runner is not None:
+        raise ValueError("model_path and runner are mutually exclusive")
+    if model_path is not None and tensor_parallel_size > 1:
+        raise ValueError("model_path with tensor_parallel_size > 1 arrives in M16")
+
+    default_eos: int | None = None
+    default_stop_ids: tuple[int, ...] = ()
+    num_kv_heads_for_tp = None
+    if model_path is not None:
+        from kairyu.engine.core.kv_pool import PagedKVPool
+        from kairyu.engine.core.model_runner import PagedModelRunner
+        from kairyu.engine.core.sampler import Sampler
+        from kairyu.models.loader import load_model
+
+        model, model_config, generation = load_model(model_path)
+        default_eos = generation.eos_token_id
+        default_stop_ids = generation.stop_token_ids
+        num_kv_heads_for_tp = model_config.num_key_value_heads
+        resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
+        vocab_size = len(resolved.vocab())
+        if vocab_size > model_config.vocab_size:
+            raise ValueError(
+                f"tokenizer vocab ({vocab_size}) exceeds the model's vocab_size "
+                f"({model_config.vocab_size})"
+            )
+    else:
+        resolved = resolve_tokenizer(tokenizer if tokenizer is not None else "toy")
+
+    validate_tp_degree(
+        tensor_parallel_size,
+        **({"num_kv_heads": num_kv_heads_for_tp} if num_kv_heads_for_tp else {}),
+    )
     cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(
         cache,
@@ -73,6 +111,11 @@ def build_engine_loop(
         page_size=page_size,
         speculative_tokens=speculative_tokens if speculative else 0,
     )
+    if model_path is not None:
+        pool = PagedKVPool.for_cache(cache, model_config)
+        runner = PagedModelRunner(
+            model, pool, sampler=Sampler(vocab_provider=resolved.vocab), cache=cache
+        )
     if tensor_parallel_size > 1:
         # CPU-testable TP path (design m5 D1/D3): deterministic rank runners
         # over a FakeCommunicator group; outputs are identical to TP=1.
@@ -87,7 +130,14 @@ def build_engine_loop(
         active = runner or _ToyRunner()
     if speculative == "ngram":
         active = SpeculativeRunner(active)
-    return EngineLoop(resolved, scheduler, active), cache, scheduler
+    loop = EngineLoop(
+        resolved,
+        scheduler,
+        active,
+        default_eos_token_id=default_eos,
+        default_stop_token_ids=default_stop_ids,
+    )
+    return loop, cache, scheduler
 
 
 class KairyuBackend:
@@ -98,9 +148,10 @@ class KairyuBackend:
         max_num_batched_tokens: int = 2048,
         runner: object | None = None,
         tensor_parallel_size: int = 1,
-        tokenizer: str | Tokenizer = "toy",
+        tokenizer: str | Tokenizer | None = None,
         speculative: str | None = None,
         speculative_tokens: int = 4,
+        model_path: str | None = None,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
@@ -112,6 +163,7 @@ class KairyuBackend:
             tokenizer=tokenizer,
             speculative=speculative,
             speculative_tokens=speculative_tokens,
+            model_path=model_path,
         )
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._pump_task: asyncio.Task | None = None
