@@ -1,0 +1,3 @@
+{"id": "fixture-hle-0001", "question": "Which planet in the solar system has the largest ring system?\n\nAnswer Choices:\nA. Jupiter\nB. Saturn\nC. Uranus\nD. Neptune", "answer": "B", "answer_type": "multipleChoice", "image": null}
+{"id": "fixture-hle-0002", "question": "What is 17 + 25?\n\nAnswer Choices:\nA. 32\nB. 40\nC. 42\nD. 52", "answer": "C", "answer_type": "multipleChoice", "image": null}
+{"id": "fixture-hle-0003", "question": "Name the process by which plants convert light energy into chemical energy.", "answer": "photosynthesis", "answer_type": "exactMatch", "image": null}
