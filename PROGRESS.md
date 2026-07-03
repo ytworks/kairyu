@@ -26,6 +26,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
+| M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -43,6 +44,27 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M14 complete: quantized checkpoints load and RUN on CPU
+- What: 514 → 530 tests. kairyu/quant/ reference implementations with formats
+  verified against AutoAWQ/AutoGPTQ/vLLM/compressed-tensors source and LIVE
+  Hub safetensors headers: FP8-E4M3 (clamp-before-cast — torch CPU cast is
+  non-saturating), INT8 W8A8 (exact int32 accumulation — the GPU kernels'
+  bit-exact oracle), AWQ (out-axis nibble ORDER [0,2,4,6,1,3,5,7], no +1),
+  GPTQ (sequential in-axis packing, z-1 storage offset, g_idx always), NVFP4
+  (low-nibble-even packing, bit-3 sign, fp8 block scales × fp32 global, RNE
+  boundaries). QuantizedLinear modules hold packed buffers under checkpoint
+  names; forward_fused is the Triton seam (kairyu/kernels/ stubs, gpu-marked).
+  Loader: linear_factory hook live, state_dict-based iteration (non-persistent
+  buffers excluded), quantized payloads verbatim + assign=True + lm_head
+  re-tie. Guards: AWQ non-gemm, GPTQ v2/non-4bit, compressed-tensors FP4
+  (different names + inverted scale) all rejected loudly. Flagship gate: all
+  five schemes quantize the tiny llama, write HF-format checkpoints, load,
+  and generate through the FULL engine on CPU (8-bit ≥50% greedy agreement;
+  4-bit non-degenerate at hidden-64).
+- Refs: `docs/design/m14-quant-compute.md` (Status: Implemented);
+  `kairyu/quant/{fp8,int8,awq,gptq,nvfp4,linear}.py`, `kairyu/kernels/`,
+  `tests/gpu/test_quant_kernels.py`
 
 ### 2026-07-03 — [progress] M13 complete: AttentionBackend seam + FlashInfer adapter + MLA reference
 - What: attention extracted into a swappable seam (501 → 514 tests, all M12

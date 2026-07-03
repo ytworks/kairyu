@@ -54,7 +54,9 @@ class TestQuantDetection:
         assert quant.method is QuantMethod.INT8
         assert quant.activation_bits == 8
 
-    def test_compressed_tensors_fp4(self):
+    def test_compressed_tensors_fp4_rejected(self):
+        # m14 A8: CT-FP4 uses different names + an inverted global scale vs
+        # modelopt — flowing it into the modelopt module would corrupt weights
         config = {
             "quantization_config": {
                 "quant_method": "compressed-tensors",
@@ -63,7 +65,8 @@ class TestQuantDetection:
                 },
             }
         }
-        assert detect_quantization(config).method is QuantMethod.NVFP4
+        with pytest.raises(ValueError, match="modelopt"):
+            detect_quantization(config)
 
     def test_existing_schemes_unchanged(self):
         assert detect_quantization({}).method is QuantMethod.NONE

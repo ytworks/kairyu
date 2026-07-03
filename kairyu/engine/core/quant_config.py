@@ -55,13 +55,15 @@ def _detect_compressed_tensors(quant: dict) -> QuantConfig:
             activation_bits=activations.get("num_bits"),
         )
     if weights.get("type") == "float" and weights.get("num_bits") == 4:
-        return QuantConfig(
-            method=QuantMethod.NVFP4,
-            weight_bits=4,
-            group_size=weights.get("group_size"),
+        # compressed-tensors FP4 uses DIFFERENT tensor names (weight_packed)
+        # and an INVERTED global scale vs modelopt — silently flowing it into
+        # the modelopt module would corrupt weights (m14 review A8)
+        raise ValueError(
+            "compressed-tensors FP4 checkpoints are not supported; "
+            "use a modelopt NVFP4 checkpoint (quant_method: modelopt)"
         )
     raise ValueError(
-        "unsupported compressed-tensors scheme: FP8/INT8 W8A8 and FP4 weights are supported"
+        "unsupported compressed-tensors scheme: FP8/INT8 W8A8 are supported"
     )
 
 
@@ -91,12 +93,24 @@ def detect_quantization(hf_config: dict) -> QuantConfig:
     if method == "fp8":
         return QuantConfig(method=QuantMethod.FP8, weight_bits=8, activation_bits=8)
     if method == "awq":
+        version = str(quant.get("version", "gemm")).lower()
+        if version != "gemm":
+            raise ValueError(
+                f"unsupported AWQ version {version!r}: only 'gemm' layout is supported"
+            )
         return QuantConfig(
             method=QuantMethod.AWQ,
             weight_bits=quant.get("bits"),
             group_size=quant.get("group_size"),
         )
     if method == "gptq":
+        if quant.get("bits") != 4:
+            raise ValueError(f"unsupported GPTQ bits={quant.get('bits')}: only 4-bit")
+        if str(quant.get("checkpoint_format", "gptq")).lower() == "gptq_v2":
+            raise ValueError(
+                "gptq_v2 checkpoints are not supported (v2 drops the zero-point "
+                "storage offset; loading as v1 would shift every zero by 1)"
+            )
         return QuantConfig(
             method=QuantMethod.GPTQ,
             weight_bits=quant.get("bits"),

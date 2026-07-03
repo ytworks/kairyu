@@ -20,11 +20,17 @@ from kairyu.models.layers import RMSNorm, apply_rope
 class Attention(nn.Module):
     """GQA attention over the paged pool; HF module names (m12 D2)."""
 
-    def __init__(self, config: ModelConfig, backend: AttentionBackend | None = None) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        backend: AttentionBackend | None = None,
+        linear_factory=None,
+    ) -> None:
         super().__init__()
         # plain attribute, not a submodule; None default avoids a shared
         # import-time instance (m13 review C2)
         self.backend = backend or TorchAttentionBackend()
+        make = linear_factory or (lambda i, o, b: nn.Linear(i, o, bias=b))
         heads, kv_heads, dim = (
             config.num_attention_heads,
             config.num_key_value_heads,
@@ -33,10 +39,10 @@ class Attention(nn.Module):
         self.num_heads = heads
         self.num_kv_heads = kv_heads
         self.head_dim = dim
-        self.q_proj = nn.Linear(config.hidden_size, heads * dim, bias=config.qkv_bias)
-        self.k_proj = nn.Linear(config.hidden_size, kv_heads * dim, bias=config.qkv_bias)
-        self.v_proj = nn.Linear(config.hidden_size, kv_heads * dim, bias=config.qkv_bias)
-        self.o_proj = nn.Linear(heads * dim, config.hidden_size, bias=config.o_bias)
+        self.q_proj = make(config.hidden_size, heads * dim, config.qkv_bias)
+        self.k_proj = make(config.hidden_size, kv_heads * dim, config.qkv_bias)
+        self.v_proj = make(config.hidden_size, kv_heads * dim, config.qkv_bias)
+        self.o_proj = make(heads * dim, config.hidden_size, config.o_bias)
         if config.qk_norm:  # Qwen3: per-head RMSNorm over head_dim, BEFORE RoPE
             self.q_norm = RMSNorm(dim, config.rms_norm_eps)
             self.k_norm = RMSNorm(dim, config.rms_norm_eps)

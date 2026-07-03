@@ -1,6 +1,6 @@
 # M14 Design: Quantization Compute Paths — CPU References + Triton Stubs
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (1-reviewer panel; formats
+Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS (1-reviewer panel; formats
 verified against AutoAWQ/AutoGPTQ/vLLM/compressed-tensors source and LIVE
 safetensors headers of four real Hub checkpoints, 2026-07-03; §6 binding).
 Milestone: M14 (roadmap Track E1/E2 quant half, goal G2-as-amended quant matrix)

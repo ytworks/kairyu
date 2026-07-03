@@ -79,11 +79,12 @@ def apply_rope(
 
 
 class SwiGluMlp(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, linear_factory=None) -> None:
         super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        make = linear_factory or (lambda i, o, b: nn.Linear(i, o, bias=b))
+        self.gate_proj = make(config.hidden_size, config.intermediate_size, False)
+        self.up_proj = make(config.hidden_size, config.intermediate_size, False)
+        self.down_proj = make(config.intermediate_size, config.hidden_size, False)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.down_proj(nn.functional.silu(self.gate_proj(hidden)) * self.up_proj(hidden))

@@ -71,7 +71,9 @@ def test_loader_roundtrip_matches_source_model(checkpoint):
     assert (mine - theirs).abs().max().item() < 1e-4
 
 
-def test_quantized_checkpoint_fails_fast(checkpoint, tmp_path):
+def test_quantized_config_with_unquantized_tensors_fails_loudly(checkpoint, tmp_path):
+    # m14: quantized configs now LOAD — but a checkpoint whose tensors don't
+    # match the declared scheme (missing weight_scale) must fail fast
     path, _ = checkpoint
     import shutil
 
@@ -80,7 +82,7 @@ def test_quantized_checkpoint_fails_fast(checkpoint, tmp_path):
     config = json.loads((quantized / "config.json").read_text())
     config["quantization_config"] = {"quant_method": "fp8"}
     (quantized / "config.json").write_text(json.dumps(config))
-    with pytest.raises(ValueError, match="M14"):
+    with pytest.raises(KeyError, match="weight_scale"):
         load_model(quantized)
 
 
