@@ -125,12 +125,15 @@ class TestTenancy:
             # unauthenticated: 401 wins, bucket untouched (A6)
             assert client.post("/v1/chat/completions", json=payload).status_code == 401
 
-            usage = client.get(
-                "/admin/usage", headers=a
-            ).json()["usage"]
-            assert usage["tenant-a"]["requests"] == 2
-            assert usage["tenant-b"]["requests"] == 1
-            assert usage["tenant-a"]["completion_tokens"] > 0
+            # security review: usage is scoped to the CALLER's tenant
+            usage_a = client.get("/admin/usage", headers=a).json()["usage"]
+            assert usage_a["tenant-a"]["requests"] == 2
+            assert "tenant-b" not in usage_a  # no cross-tenant disclosure
+            assert usage_a["tenant-a"]["completion_tokens"] > 0
+            forbidden = client.get("/admin/usage?tenant=tenant-b", headers=a)
+            assert forbidden.status_code == 403
+            usage_b = client.get("/admin/usage", headers=b).json()["usage"]
+            assert usage_b["tenant-b"]["requests"] == 1
 
     def test_ledger_reconciles_with_returned_usage(self, tmp_path):
         ledger = UsageLedger(tmp_path / "ledger.jsonl")

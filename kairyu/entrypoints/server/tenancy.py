@@ -84,12 +84,18 @@ class TenantLimitMiddleware:
         self._limiter = limiter
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+        path = scope.get("path", "")
+        if scope["type"] != "http" or not (
+            path.startswith("/v1/") or path.startswith("/admin/usage")
+        ):
             await self.app(scope, receive, send)
             return
         state = scope.setdefault("state", {})
         tenant = self._config.tenant_for_key(state.get("api_key"))
         state["tenant"] = tenant
+        if not path.startswith("/v1/"):
+            await self.app(scope, receive, send)  # identity only, no bucket
+            return
         if not self._limiter.admit(tenant):
             body = json.dumps(
                 {
