@@ -199,7 +199,7 @@ class _FlakyHandoff:
         self._failures = failures
         self.attempts = 0
 
-    def transfer(self, tokens, first_token):
+    def transfer(self, tokens, first_token, pages=()):
         self.attempts += 1
         if self.attempts <= self._failures:
             raise KVHandoffError("injected transfer failure")
