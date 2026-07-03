@@ -23,12 +23,14 @@ FUGU_ROW_ORDER: tuple[str, ...] = (
 
 
 def all_adapters() -> dict[str, BenchmarkAdapter]:
+    from kairyu.bench.adapters.charxiv import CharXivAdapter
     from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
     from kairyu.bench.adapters.hle import HleAdapter
     from kairyu.bench.adapters.longbench_v2 import LongBenchV2Adapter
     from kairyu.bench.adapters.mrcr import MrcrAdapter
 
     adapters: list[BenchmarkAdapter] = [
+        CharXivAdapter(),
         GpqaDiamondAdapter(),
         HleAdapter(),
         LongBenchV2Adapter(),
