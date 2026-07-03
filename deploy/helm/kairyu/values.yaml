@@ -10,7 +10,7 @@ resources: {}
 # DeploymentSpec YAML mounted at exactly /etc/kairyu/config.yaml (the
 # Dockerfile CMD — m10a A11)
 config: |
-  models:
+  engines:
     default:
       backend: mock
       options: {}
