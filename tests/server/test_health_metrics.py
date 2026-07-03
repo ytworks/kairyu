@@ -96,3 +96,27 @@ async def test_access_log_adds_request_id_header():
     async with _client(app) as client:
         response = await client.get("/health")
     assert response.headers.get("x-request-id")
+
+
+def test_admin_drain_requires_auth_and_flips_readyz(monkeypatch):
+    """m10a A5 + security review: /admin/drain is auth-protected when keys are
+    configured, and a drained node reports unready."""
+    from fastapi.testclient import TestClient
+
+    from kairyu.engine.registry import create_backend
+    from kairyu.entrypoints.server.app import create_app
+    from kairyu.entrypoints.server.settings import ServerSettings
+
+    monkeypatch.setenv("KAIRYU_TEST_KEYS", "sk-secret")
+    app = create_app(
+        {"m": create_backend("mock")},
+        settings=ServerSettings(api_keys_env="KAIRYU_TEST_KEYS"),
+    )
+    with TestClient(app) as client:
+        assert client.post("/admin/drain").status_code == 401  # no key
+        assert client.get("/readyz").status_code == 200
+        ok = client.post(
+            "/admin/drain", headers={"Authorization": "Bearer sk-secret"}
+        )
+        assert ok.status_code == 200
+        assert client.get("/readyz").status_code == 503  # draining

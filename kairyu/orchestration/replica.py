@@ -61,6 +61,9 @@ class ReplicaPool:
         log: JsonlRouterLog | None = None,
         unhealthy_after: int = _DEFAULT_UNHEALTHY_AFTER,
         queue_depth_threshold: int = _DEFAULT_QUEUE_DEPTH_THRESHOLD,
+        prefix_index=None,
+        prefix_alpha: float = 1.0,
+        prefix_beta: float = 0.25,
     ) -> None:
         if len(replicas) < 1:
             raise ValueError("ReplicaPool requires at least 1 replica")
@@ -80,6 +83,11 @@ class ReplicaPool:
         self._log = log
         self._unhealthy_after = unhealthy_after
         self._queue_depth_threshold = queue_depth_threshold
+        # m10b D6: KV-aware scoring is OPT-IN (prefix_index=None keeps m5
+        # behavior byte-identical); score = alpha*overlap - beta*outstanding
+        self._prefix_index = prefix_index
+        self._prefix_alpha = prefix_alpha
+        self._prefix_beta = prefix_beta
         self._decision_counts: dict[str, int] = {
             "session_affinity": 0,
             "queue_depth_fallback": 0,
@@ -195,12 +203,33 @@ class ReplicaPool:
                 "or draining); call probe() once a replica recovers"
             )
         session_id = request.cache_hint.session_id if request.cache_hint else None
-        if not session_id:
-            return self._least_outstanding(eligible), "least_outstanding", None
-        affine = max(eligible, key=lambda rid: _rendezvous_score(session_id, rid))
-        if self._entries[affine].outstanding > self._queue_depth_threshold:
-            return self._least_outstanding(eligible), "queue_depth_fallback", session_id
-        return affine, "session_affinity", session_id
+        if session_id:
+            affine = max(eligible, key=lambda rid: _rendezvous_score(session_id, rid))
+            if self._entries[affine].outstanding > self._queue_depth_threshold:
+                return self._least_outstanding(eligible), "queue_depth_fallback", session_id
+            return affine, "session_affinity", session_id
+        if self._prefix_index is not None:
+            best = self._prefix_select(eligible, request.prompt)
+            if best is not None:
+                return best, "prefix_match", None
+        return self._least_outstanding(eligible), "least_outstanding", None
+
+    def _prefix_select(self, eligible: tuple[str, ...], prompt: str) -> str | None:
+        """alpha*overlap - beta*outstanding; None when no candidate has overlap
+        (fall through to least-outstanding rather than pay a random placement)."""
+        scored = [
+            (
+                self._prefix_alpha * self._prefix_index.overlap(rid, prompt)
+                - self._prefix_beta * self._entries[rid].outstanding,
+                self._prefix_index.overlap(rid, prompt),
+                rid,
+            )
+            for rid in eligible
+        ]
+        best_score, best_overlap, best_rid = max(scored, key=lambda item: item[0])
+        if best_overlap == 0:
+            return None
+        return best_rid
 
     def _place(self, request: GenerationRequest) -> str:
         """Select a replica and log the decision before dispatch (m5 D4)."""
@@ -212,6 +241,8 @@ class ReplicaPool:
             "kairyu.pool.place", {"replica_id": replica_id, "reason": reason}
         ):
             pass
+        if self._prefix_index is not None:
+            self._prefix_index.observe(replica_id, request.prompt)
         if self._log is not None:
             # legacy field stays the ordinal; replica_id added alongside (A1)
             ordinal = list(self._entries).index(replica_id)

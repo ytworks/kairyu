@@ -33,6 +33,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
+| M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03). 610 tests. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
 
@@ -49,6 +50,24 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M10b complete: KV-aware routing
+- What: 594 → 610 tests. PrefixIndex (text-chunk approximate trie — the
+  gateway has no token ids, review A12; prefix-chained keys, LRU-capped);
+  ReplicaPool opt-in prefix scoring (α·overlap − β·outstanding, session
+  affinity still first, prefix_match decision reason; disabled default keeps
+  m5 behavior byte-identical). RadixKVCache(event_sink=): BlockStored on the
+  computed False→True transition + decode-extension nodes (allocate never
+  emits; _release double-fire guarded), BlockRemoved ONLY from eviction —
+  removed hashes proven identical to stored hashes. KvEventIndex (precise
+  per-replica block hashes, staleness > 500 ms → None = fall back to the
+  trie) + ZMQ PUB/SUB transport with a chaos gate (publisher killed →
+  staleness fallback). Offline (α, β) grid tuner over PlacementRecords.
+  Security-review hardening: /admin/drain pinned auth-protected when keys
+  are configured (keyless = trusted-mesh mode by explicit m7 D5 choice).
+- Refs: `docs/design/m10-fleet-cpu.md` (M10a+M10b Implemented);
+  `kairyu/orchestration/{prefix_index,kv_index}.py`,
+  `kairyu/engine/core/radix_kv.py`, `kairyu/orchestration/learning/dataset.py`
 
 ### 2026-07-03 — [progress] M10a complete: elastic fleet base
 - What: 584 → 594 tests. ReplicaPool reworked to id-keyed dynamic membership
