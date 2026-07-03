@@ -58,7 +58,14 @@ packages = ["kairyu"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "--cov=kairyu --cov-report=term-missing"
+# gpu/hf_hub are deselected by default (deploy-day / opt-in networked suites);
+# escape hatch: `pytest -m gpu` / `pytest -m hf_hub` (CLI -m overrides addopts)
+addopts = "--cov=kairyu --cov-report=term-missing --strict-markers -m 'not gpu and not hf_hub'"
+markers = [
+    "gpu: requires CUDA hardware (runs on deploy day via scripts/gpu_gates)",
+    "hf_hub: downloads real weights from the HF Hub (opt-in, networked)",
+    "dist: spawns torch.distributed multi-process workers (slower)",
+]
 
 [tool.coverage.run]
 # the spawned engine service (m8 D6) flushes coverage on clean exit
