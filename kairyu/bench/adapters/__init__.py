@@ -31,6 +31,7 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
     from kairyu.bench.adapters.longbench_v2 import LongBenchV2Adapter
     from kairyu.bench.adapters.mrcr import MrcrAdapter
     from kairyu.bench.adapters.scicode import SciCodeAdapter
+    from kairyu.bench.adapters.tau_bench import TauBenchBankingAdapter
 
     adapters: list[BenchmarkAdapter] = [
         CharXivAdapter(),
@@ -41,6 +42,7 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
         LongBenchV2Adapter(),
         MrcrAdapter(),
         SciCodeAdapter(),
+        TauBenchBankingAdapter(),
     ]
     return {adapter.info.name: adapter for adapter in adapters}
 
