@@ -95,12 +95,14 @@ def run_engine_service(port_pipe, config: dict) -> None:
 
     from kairyu.engine.kairyu_backend import build_engine_loop
 
-    engine_loop, _, _ = build_engine_loop(**config)
+    # bind + report BEFORE building the loop: model load must not eat into
+    # the client's spawn timeout (m12 D5 amendment)
     context = zmq.Context()
     socket = context.socket(zmq.ROUTER)
     port = socket.bind_to_random_port("tcp://127.0.0.1")
     port_pipe.send(port)
     port_pipe.close()
+    engine_loop, _, _ = build_engine_loop(**config)
 
     owners: dict[str, bytes] = {}
     running = True

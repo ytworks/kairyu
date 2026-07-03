@@ -1,8 +1,10 @@
 # M12 Design: Real Model Zoo (Dense) — Llama/Qwen, Multi-Layer Paged KV, Parity
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2-reviewer agent panel with
+Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS (2-reviewer agent panel with
 empirical verification against transformers 5.12.1 / torch 2.12.1, 2026-07-03;
 amendments applied — §6 is the binding record for items not rewritten inline).
+All five phases landed: 471 → 501 tests, 95% coverage; flagship gate green —
+full-engine greedy == transformers generate on Llama/Qwen2/Qwen3.
 Milestone: M12 (roadmap Track E1 local-complete half; the first of the
 GPU-path-implemented-locally milestones M12–M19)
 Date: 2026-07-03

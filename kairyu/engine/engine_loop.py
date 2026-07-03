@@ -154,10 +154,25 @@ class _RequestTrack:
 class EngineLoop:
     """Owns tokenizer + scheduler + runner; drains ops and produces updates."""
 
-    def __init__(self, tokenizer: Tokenizer, scheduler: Scheduler, runner: object) -> None:
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        scheduler: Scheduler,
+        runner: object,
+        default_eos_token_id: int | None = None,
+        default_stop_token_ids: tuple[int, ...] = (),
+    ) -> None:
         self._tokenizer = tokenizer
         self._scheduler = scheduler
         self._runner = runner
+        # generation_config.json may carry an eos LIST (m12 D5): first entry
+        # is eos, the rest are stop tokens; falls back to the tokenizer's eos
+        self._default_eos = (
+            default_eos_token_id
+            if default_eos_token_id is not None
+            else tokenizer.eos_token_id
+        )
+        self._default_stop_ids = default_stop_token_ids
         # deque appends are atomic: producers may enqueue from another thread
         self._ops: deque[tuple[str, object]] = deque()
         self._tracked: dict[str, _RequestTrack] = {}  # step-side only
@@ -167,8 +182,8 @@ class EngineLoop:
             request_id=request_id,
             prompt_token_ids=self._tokenizer.encode(prompt),
             max_new_tokens=params.max_tokens or _DEFAULT_MAX_NEW_TOKENS,
-            eos_token_id=self._tokenizer.eos_token_id,
-            stop_token_ids=tuple(params.stop_token_ids or ()),
+            eos_token_id=self._default_eos,
+            stop_token_ids=tuple(params.stop_token_ids or ()) + self._default_stop_ids,
             min_tokens=params.min_tokens,
             ignore_eos=params.ignore_eos,
             sampling=engine_sampling_from(params),

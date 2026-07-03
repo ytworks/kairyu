@@ -73,12 +73,13 @@ class ZmqEngineBackend:
         num_pages: int = 4096,
         page_size: int = 16,
         max_num_batched_tokens: int = 2048,
-        tokenizer: str = "toy",
+        tokenizer: str | None = None,
         speculative: str | None = None,
         speculative_tokens: int = 4,
         death_timeout_s: float = 10.0,
+        model_path: str | None = None,
     ) -> None:
-        if not isinstance(tokenizer, str):
+        if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
         self._config = {
             "num_pages": num_pages,
@@ -87,6 +88,7 @@ class ZmqEngineBackend:
             "tokenizer": tokenizer,
             "speculative": speculative,
             "speculative_tokens": speculative_tokens,
+            "model_path": model_path,
         }
         self._death_timeout_s = death_timeout_s
         self._process = None

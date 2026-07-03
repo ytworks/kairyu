@@ -24,6 +24,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
 | M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, `docs/design/m8-engine-cpu.md`): HF tokenizer seam + SSE-safe stop strings, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. 437 tests, 95% cov. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
+| M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -41,6 +42,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M12 complete: real dense models with transformers parity
+- What: all five m12 phases landed (471 → 501 tests, 95% cov). ModelConfig
+  parses both config.json generations; DenseDecoder (HF-exact module tree)
+  covers Llama-3.x / Qwen2 / Qwen3 with verified numerics (rotate_half RoPE,
+  llama3 scaling, Qwen3 per-head qk-norm, rectangular chunk masks — SDPA
+  is_causal measured wrong over cached prefixes); layer-major PagedKVPool;
+  PagedModelRunner behind the m8 ModelRunner protocol with the canonical
+  state-access contract, KV-write skip below num_cached_tokens, and
+  SpeculativeRunner-compatible decode reads. Flagship gates: fp32 logits
+  < 1e-4 vs transformers AND full-engine greedy == hf.generate through
+  chunked prefill / radix reuse / page-crossing decode / EOS, per arch.
+  Loader (tied embeddings mandatory — safetensors omits lm_head; eos LISTS
+  from generation_config; quantized checkpoints fail fast until M14);
+  KairyuBackend(model_path=) + kairyu-proc model_path (port reported before
+  model load). pytest markers gpu/hf_hub/dist (+strict, default-deselected);
+  scripts/parity_real_model.py is the opt-in pre-deploy real-model gate.
+- Refs: `docs/design/m12-model-zoo.md` (Status: Implemented);
+  `kairyu/models/{config,layers,attention,llama,loader}.py`,
+  `kairyu/engine/core/{kv_pool,model_runner}.py`, `scripts/parity_real_model.py`
 
 ### 2026-07-03 — [progress] M9 complete: the API is truthful (usage, templates, logprobs, n>1)
 - What: all five m9 phases landed (437 → 471 tests, 94% cov; goal G6 gates
