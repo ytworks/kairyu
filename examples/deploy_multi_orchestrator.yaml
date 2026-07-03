@@ -1,0 +1,18 @@
+# Gateway serving single models AND named orchestrations side by side —
+# the shape the Fugu benchmark suite measures. Benchmarking orchestration
+# is just another model name: --model m1 vs --model kairyu-auto-max.
+#
+#   kairyu serve examples/deploy_multi_orchestrator.yaml
+#   kairyu bench run --base-url http://localhost:8000/v1 \
+#       --model m1 --model kairyu-auto --model kairyu-auto-max
+server:
+  port: 8000
+
+engines:
+  m1: { backend: mock }   # swap for kairyu/vllm/openai backends in production
+  m2: { backend: mock }
+
+# Any number of named orchestrations, each an arbitrary worker/role DAG.
+orchestrators:
+  kairyu-auto: { spec: agent_pool.yaml }
+  kairyu-auto-max: { spec: agent_pool_max.yaml }

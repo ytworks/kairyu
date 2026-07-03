@@ -1,0 +1,33 @@
+# Fugu-suite bench config: one deployed gateway, three scoreboard columns
+# (a single model and two orchestration tiers), judge served by the same
+# gateway. Run with:
+#
+#   kairyu bench run --config examples/bench_fugu.yaml
+#
+# CLI flags override any field here (e.g. --smoke, --limit 50).
+suite: fugu
+
+targets:
+  - name: llama-70b          # scoreboard column label
+    base_url: http://localhost:8000/v1
+    model: m1                # a served engine/pool name
+  - name: kairyu-auto
+    base_url: http://localhost:8000/v1
+    model: kairyu-auto       # orchestration = just another model name
+  - name: kairyu-auto-max
+    base_url: http://localhost:8000/v1
+    model: kairyu-auto-max
+
+# LLM judge for free-form grading (HLE, CharXiv) and the tau-bench user
+# simulator. Pointing it at the deployed gateway keeps judging self-hosted;
+# the judge model is disclosed in every scoreboard's methodology.
+judge:
+  base_url: http://localhost:8000/v1
+  model: kairyu-auto
+
+# limit: 50                  # optional: cap items per benchmark
+# smoke: true                # tiny deterministic subset (CI)
+# seed: 0
+# concurrency: 8
+# results_dir: bench/results/fugu
+# cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

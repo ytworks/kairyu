@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Benchmark artifacts (kairyu bench): results are per-run evidence, data is
+# downloaded to the cache dir — neither belongs in the repo.
+bench/results/
+bench/data/

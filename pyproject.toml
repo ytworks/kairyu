@@ -34,6 +34,21 @@ fleet = [
     "pyzmq>=26",
     "msgpack>=1.0",
 ]
+# Fugu-suite dataset download/normalization (kairyu bench download); the
+# runner itself needs only core deps (httpx), so offline runs need no extras.
+bench = [
+    "datasets>=3.2",
+    "huggingface_hub>=0.26",
+    "pillow>=10",
+    "h5py>=3.11",  # SciCode golden data (test_data.h5)
+]
+# Official agentic harnesses (SWE-Bench Pro, Terminal-Bench 2.1); need docker.
+# The tau3/tau2 harness is not on PyPI — see docs/benchmarks.md.
+bench-agentic = [
+    "mini-swe-agent>=2",
+    "swebench>=4",
+    "harbor>=0.17; python_version >= '3.12'",  # Terminal-Bench 2.x harness
+]
 
 [dependency-groups]
 dev = [
@@ -50,6 +65,8 @@ dev = [
     "opentelemetry-sdk>=1.27",
     "transformers>=5.12,<5.13",  # pinned band: template goldens byte-match (m9 D2)
     "openai>=1.66",
+    "datasets>=3.2",  # hf_hub-marked bench download tests
+    "pillow>=10",
 ]
 
 [project.scripts]
