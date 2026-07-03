@@ -24,6 +24,12 @@ hf = [
 ]
 # Process-split engine service and fleet transports (m8 D6, G5).
 otel = ["opentelemetry-sdk>=1.27"]
+# GPU kernels/fabric: linux-only markers so macOS `uv sync` ignores them.
+gpu = [
+    "flashinfer-python>=0.2; sys_platform == 'linux'",
+    "triton>=3.0; sys_platform == 'linux'",
+    "nixl>=0.2; sys_platform == 'linux'",
+]
 fleet = [
     "pyzmq>=26",
     "msgpack>=1.0",

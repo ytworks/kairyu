@@ -1,0 +1,8 @@
+# GPU replica DeploymentSpec: the kairyu engine on a local checkpoint.
+models:
+  default:
+    backend: kairyu
+    options:
+      model_path: /models/checkpoint
+server:
+  api_keys_env: null
