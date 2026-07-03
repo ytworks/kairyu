@@ -220,3 +220,16 @@ def test_helm_chart_renders():
     assert "kind: Deployment" in rendered
     assert "path: /readyz" in rendered
     assert "mountPath: /etc/kairyu" in rendered  # the Dockerfile CMD path (A11)
+
+
+def test_helm_chart_config_is_a_valid_deployment_spec():
+    """kind-smoke root cause (PR #16): the chart shipped 'models:' which is
+    not a DeploymentSpec field — the pod crash-looped at validation. Pin the
+    embedded config to the real schema, no helm binary needed."""
+    import yaml
+
+    from kairyu.deploy.spec import load_deployment_spec
+
+    values = yaml.safe_load(open("deploy/helm/kairyu/values.yaml"))
+    spec = load_deployment_spec(values["config"])
+    assert spec.engines, "chart config must declare at least one engine"
