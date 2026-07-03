@@ -14,29 +14,56 @@ so _ToyRunner-style runners execute unchanged on snapshots.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import ScheduledChunk, SchedulerOutput
 
 
 @dataclass(frozen=True)
 class RequestSnapshot:
-    """Frozen per-request view of ``_RequestState`` at snapshot time."""
+    """Frozen per-request view of ``_RequestState`` at snapshot time.
+
+    m16 A1 extension (mandated by the m12 review): carries ``outputs`` values,
+    ``sampling`` and ``num_cached_tokens`` plus allocation-shaped aliases, so
+    ``PagedModelRunner``'s canonical state-access contract works on broadcast
+    snapshots — this is also how TP workers receive rank-0's committed tokens
+    (the NEXT step's snapshot outputs).
+    """
 
     request_id: str
     prompt_token_ids: tuple[int, ...]
     computed_prompt: int
-    output_len: int
+    outputs: tuple[int, ...]
     in_flight: int
     page_ids: tuple[int, ...]
     decode_page_ids: tuple[int, ...]
     eos_token_id: int | None
     max_new_tokens: int
+    num_cached_tokens: int = 0
+    sampling: EngineSampling = field(default_factory=EngineSampling)
+
+    @property
+    def output_len(self) -> int:
+        return len(self.outputs)
 
     @property
     def request(self) -> RequestSnapshot:
         """Runner-compatible alias: ``state.request.prompt_token_ids`` works here."""
         return self
+
+    @property
+    def allocation(self) -> RequestSnapshot:
+        """Runner-compatible alias: ``state.allocation.pages`` etc. (truthy)."""
+        return self
+
+    @property
+    def pages(self) -> tuple[int, ...]:
+        return self.page_ids
+
+    @property
+    def decode_pages(self) -> tuple[int, ...]:
+        return self.decode_page_ids
 
     @property
     def prefill_done(self) -> bool:
@@ -63,12 +90,14 @@ def _snapshot_state(state: object) -> RequestSnapshot:
         request_id=request.request_id,
         prompt_token_ids=tuple(request.prompt_token_ids),
         computed_prompt=state.computed_prompt,  # type: ignore[attr-defined]
-        output_len=len(state.outputs),  # type: ignore[attr-defined]
+        outputs=tuple(state.outputs),  # type: ignore[attr-defined]
         in_flight=state.in_flight,  # type: ignore[attr-defined]
         page_ids=tuple(allocation.pages) if allocation is not None else (),
         decode_page_ids=tuple(state.decode_pages),  # type: ignore[attr-defined]
         eos_token_id=request.eos_token_id,
         max_new_tokens=request.max_new_tokens,
+        num_cached_tokens=allocation.num_cached_tokens if allocation is not None else 0,
+        sampling=getattr(request, "sampling", EngineSampling()),
     )
 
 

@@ -1,6 +1,6 @@
 # M16 Design: Distributed Execution — gloo-Tested TP/PP/EP, NCCL by Constructor
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (1-reviewer panel with gloo
+Status: **Implemented** (2026-07-03). Reviewed (1-reviewer panel with gloo
 spawn verification incl. uneven all_to_all splits, 2026-07-03; §6 binding).
 Milestone: M16 (roadmap Track E3 local half; G2-as-amended multi-GPU gates'
 code, NCCL swapped in on deploy day)
