@@ -27,15 +27,26 @@ class PagedKVPool:
         head_dim: int,
         dtype: torch.dtype = torch.float32,
         device: str = "cpu",
+        v_head_dim: int | None = None,
     ) -> None:
-        shape = (num_layers, num_pages, page_size, num_kv_heads, head_dim)
-        self.k = torch.zeros(shape, dtype=dtype, device=device)
-        self.v = torch.zeros(shape, dtype=dtype, device=device)
+        # MLA caches only the latent in k (v width 0) — m15 A7
+        v_dim = head_dim if v_head_dim is None else v_head_dim
+        self.k = torch.zeros(
+            (num_layers, num_pages, page_size, num_kv_heads, head_dim),
+            dtype=dtype,
+            device=device,
+        )
+        self.v = torch.zeros(
+            (num_layers, num_pages, page_size, num_kv_heads, v_dim),
+            dtype=dtype,
+            device=device,
+        )
         self.num_layers = num_layers
         self.num_pages = num_pages
         self.page_size = page_size
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
+        self.v_head_dim = v_dim
 
     @classmethod
     def for_cache(
@@ -50,16 +61,18 @@ class PagedKVPool:
             num_layers=config.num_hidden_layers,
             num_pages=cache.num_pages,
             page_size=cache.page_size,
-            num_kv_heads=config.num_key_value_heads,
-            head_dim=config.head_dim,
+            num_kv_heads=config.kv_cache_num_heads,
+            head_dim=config.kv_cache_head_dim,
             dtype=dtype,
             device=device,
+            v_head_dim=config.kv_cache_v_head_dim,
         )
 
     @property
     def bytes_per_token(self) -> int:
         element = self.k.element_size()
-        return 2 * self.num_layers * self.num_kv_heads * self.head_dim * element
+        per_head = self.head_dim + self.v_head_dim
+        return self.num_layers * self.num_kv_heads * per_head * element
 
     def _flat_indices(self, page_table: list[int], positions: torch.Tensor) -> torch.Tensor:
         pages = torch.tensor(page_table, dtype=torch.long)[positions // self.page_size]
@@ -76,7 +89,8 @@ class PagedKVPool:
         """keys/values: [T, num_kv_heads, head_dim] at absolute positions [T]."""
         flat = self._flat_indices(page_table, positions)
         self.k[layer].reshape(-1, self.num_kv_heads, self.head_dim)[flat] = keys
-        self.v[layer].reshape(-1, self.num_kv_heads, self.head_dim)[flat] = values
+        if self.v_head_dim:  # MLA pools have no v payload (width 0)
+            self.v[layer].reshape(-1, self.num_kv_heads, self.v_head_dim)[flat] = values
 
     def gather(
         self, layer: int, page_table: list[int], seq_len: int
@@ -85,5 +99,10 @@ class PagedKVPool:
         num_pages = -(-seq_len // self.page_size)
         index = torch.tensor(page_table[:num_pages], dtype=torch.long)
         keys = self.k[layer, index].reshape(-1, self.num_kv_heads, self.head_dim)[:seq_len]
-        values = self.v[layer, index].reshape(-1, self.num_kv_heads, self.head_dim)[:seq_len]
+        if self.v_head_dim:
+            values = self.v[layer, index].reshape(-1, self.num_kv_heads, self.v_head_dim)[
+                :seq_len
+            ]
+        else:  # MLA: the latent lives in k; v is a width-0 placeholder
+            values = keys[:, :, :0]
         return keys, values

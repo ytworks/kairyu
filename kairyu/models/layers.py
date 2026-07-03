@@ -30,6 +30,52 @@ class RMSNorm(nn.Module):
         return (self.weight * hidden.to(dtype)).to(dtype)
 
 
+def _yarn_get_mscale(scale: float, mscale: float = 1.0) -> float:
+    if scale <= 1.0:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
+def _yarn_inv_freq_and_factor(
+    dim: int, base: float, scaling: RopeScaling
+) -> tuple[torch.Tensor, float]:
+    """HF ``_compute_yarn_parameters`` (m15 A5): interp/extrapolation ramp +
+    the cos/sin attention factor (1.0 for real DeepSeek-V3 configs)."""
+    pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)
+    inv_extra = 1.0 / pos_freqs
+    inv_inter = 1.0 / (scaling.factor * pos_freqs)
+    original_max = scaling.original_max_position_embeddings
+
+    def correction_dim(num_rotations: float) -> float:
+        return (dim * math.log(original_max / (num_rotations * 2 * math.pi))) / (
+            2 * math.log(base)
+        )
+
+    low = max(math.floor(correction_dim(scaling.beta_fast)), 0)
+    high = min(math.ceil(correction_dim(scaling.beta_slow)), dim - 1)
+    if low == high:
+        high += 0.001
+    ramp = ((torch.arange(dim // 2).float() - low) / (high - low)).clamp(0, 1)
+    extrapolation_factor = 1.0 - ramp
+    inv_freq = inv_inter * (1.0 - extrapolation_factor) + inv_extra * extrapolation_factor
+    if scaling.mscale is not None and scaling.mscale_all_dim is not None:
+        factor = _yarn_get_mscale(scaling.factor, scaling.mscale) / _yarn_get_mscale(
+            scaling.factor, scaling.mscale_all_dim
+        )
+    else:
+        factor = _yarn_get_mscale(scaling.factor)
+    return inv_freq, factor
+
+
+def mla_softmax_scale(qk_head_dim: int, scaling: RopeScaling | None) -> float:
+    """DeepSeek attention scale (m15 A5): base qk_head_dim^-0.5; yarn configs
+    with mscale_all_dim multiply by yarn_get_mscale(factor, mscale_all_dim)^2."""
+    scale = qk_head_dim**-0.5
+    if scaling is not None and scaling.kind != "default" and scaling.mscale_all_dim:
+        scale *= _yarn_get_mscale(scaling.factor, scaling.mscale_all_dim) ** 2
+    return scale
+
+
 def _llama3_inv_freq(inv_freq: torch.Tensor, scaling: RopeScaling) -> torch.Tensor:
     """HF ``_compute_llama3_parameters`` (attention_factor is 1.0 for llama3)."""
     low_freq_wavelen = scaling.original_max_position_embeddings / scaling.low_freq_factor
@@ -45,23 +91,45 @@ def _llama3_inv_freq(inv_freq: torch.Tensor, scaling: RopeScaling) -> torch.Tens
 
 
 class RotaryEmbedding(nn.Module):
-    """cos/sin computed once per forward at model level, fp32 (m12 D2)."""
+    """cos/sin computed once per forward at model level, fp32 (m12 D2).
+
+    ``attention_scaling`` multiplies cos AND sin (HF convention; 1.0 for
+    default/llama3 and for real DeepSeek-V3 yarn configs — m15 A5)."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
-        dim = config.head_dim
-        inv_freq = 1.0 / (
-            config.rope_theta
-            ** (torch.arange(0, dim, 2, dtype=torch.int64).to(torch.float32) / dim)
-        )
-        if config.rope_scaling is not None:
-            inv_freq = _llama3_inv_freq(inv_freq, config.rope_scaling)
+        dim = config.rope_dim  # MLA ropes only the decoupled qk_rope dims
+        self.attention_scaling = 1.0
+        scaling = config.rope_scaling
+        if scaling is not None and scaling.kind == "yarn":
+            inv_freq, self.attention_scaling = _yarn_inv_freq_and_factor(
+                dim, config.rope_theta, scaling
+            )
+        else:
+            inv_freq = 1.0 / (
+                config.rope_theta
+                ** (torch.arange(0, dim, 2, dtype=torch.int64).to(torch.float32) / dim)
+            )
+            if scaling is not None and scaling.kind == "llama3":
+                inv_freq = _llama3_inv_freq(inv_freq, scaling)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         freqs = positions.to(torch.float32)[:, None] * self.inv_freq[None, :]
         emb = torch.cat((freqs, freqs), dim=-1)
-        return emb.cos(), emb.sin()
+        return emb.cos() * self.attention_scaling, emb.sin() * self.attention_scaling
+
+
+def apply_rope_interleave(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
+    """DeepSeek interleaved rope (m15 A2): even/odd pairs, cos/sin truncated
+    to d/2; output is [rotated_evens ‖ rotated_odds] (NOT re-interleaved)."""
+    half = x.shape[-1] // 2
+    cos = cos[:, None, :half].to(x.dtype)
+    sin = sin[:, None, :half].to(x.dtype)
+    even, odd = x[..., 0::2], x[..., 1::2]
+    return torch.cat([even * cos - odd * sin, odd * cos + even * sin], dim=-1)
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:

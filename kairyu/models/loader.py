@@ -20,7 +20,13 @@ from kairyu.engine.core.weights import CheckpointReader
 from kairyu.models.config import ModelConfig, parse_model_config
 from kairyu.models.llama import DenseDecoder
 
-_SUPPORTED_BUILDERS = ("LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM")
+_SUPPORTED_BUILDERS = (
+    "LlamaForCausalLM",
+    "Qwen2ForCausalLM",
+    "Qwen3ForCausalLM",
+    "Qwen3MoeForCausalLM",
+    "DeepseekV3ForCausalLM",
+)
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,6 @@
 # M15 Design: MoE + MLA Architectures — Qwen3-MoE, DeepSeek-V3 Class
 
-Status: **Reviewed — REVISE-THEN-IMPLEMENT applied** (1-reviewer panel with
+Status: **Implemented** (2026-07-03). Reviewed (1-reviewer panel with
 empirical verification against transformers 5.12.1 tiny models, 2026-07-03;
 §6 amendments are binding — the MLA math itself verified to 3.7e-9 against
 DeepseekV3Attention before implementation).
