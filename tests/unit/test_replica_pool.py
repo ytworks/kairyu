@@ -207,7 +207,7 @@ async def test_all_unhealthy_raises_clear_runtime_error():
     backends[0].failing = True
     with pytest.raises(RuntimeError, match="injected failure"):
         await pool.generate(make_request("boom"))
-    with pytest.raises(RuntimeError, match="all 1 replicas are unhealthy"):
+    with pytest.raises(RuntimeError, match="none of the 1 replicas are eligible"):
         await pool.generate(make_request("nobody-home"))
 
 
