@@ -21,6 +21,11 @@ hf = [
     "tokenizers>=0.20",
     "safetensors>=0.5",
 ]
+# Process-split engine service and fleet transports (m8 D6, G5).
+fleet = [
+    "pyzmq>=26",
+    "msgpack>=1.0",
+]
 
 [dependency-groups]
 dev = [
@@ -32,6 +37,8 @@ dev = [
     "xgrammar>=0.2.3",
     "tokenizers>=0.20",
     "safetensors>=0.5",
+    "pyzmq>=26",
+    "msgpack>=1.0",
 ]
 
 [project.scripts]
@@ -49,6 +56,12 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "--cov=kairyu --cov-report=term-missing"
+
+[tool.coverage.run]
+# the spawned engine service (m8 D6) flushes coverage on clean exit
+concurrency = ["thread", "multiprocessing"]
+sigterm = true
+omit = ["*/*_gpu.py", "kairyu/kernels/*"]
 
 [tool.ruff]
 line-length = 100

@@ -201,6 +201,13 @@ class Scheduler:
     def finish_reason(self, request_id: str) -> str | None:
         return self._states[request_id].finish_reason
 
+    def num_cached_tokens(self, request_id: str) -> int:
+        """Prompt tokens served from the radix cache (usage truth, m8 D6/M9)."""
+        state = self._states[request_id]
+        if state.allocation is None:
+            return 0
+        return state.allocation.num_cached_tokens
+
     def _preempt_for_decode(self, needy_id: str) -> bool:
         """Recompute-preempt the youngest output-free running request.
 

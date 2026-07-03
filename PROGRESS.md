@@ -22,6 +22,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
+| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, `docs/design/m8-engine-cpu.md`): HF tokenizer seam + SSE-safe stop strings, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. 437 tests, 95% cov. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -39,6 +40,29 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M8 complete: engine CPU core is real (tokens, sampling, spec decode, process split)
+- What: all six m8 phases landed (328 → 437 tests, 95% cov). D1 tokenizer seam
+  (HF `tokenizers` + incremental detokenizer, SSE-safe stop-string holdback,
+  `finish_early` radix-commit path, finish_reason). D2 real sampling
+  (SampledToken/StepOutput protocol ripple across every runner and bench;
+  grammar-mask-first with xgrammar stop-token termination; raw-logits logprobs;
+  sha256+splitmix64 seeding). D3 scheduler multi-token commit (capped spec
+  reservation via chunk.num_tokens, capacity degrade-to-1, budget-accurate,
+  exact shortfall release via recorded reservation). D4 n-gram
+  SpeculativeRunner (overlay-state scoring, spec ≡ greedy pinned with measured
+  acceptance > 0, per-request bypass gating). D5 NVFP4/modelopt/INT8 detection,
+  HardwareProfile capability matrix + env-record writer, safetensors
+  CheckpointReader with get_slice (M16 seam). D6 process split: shared
+  `EngineLoop` extracted; ZMQ ROUTER `engine_service` child process (msgpack,
+  ephemeral-port pipe handshake) + `kairyu-proc` backend (lazy zmq.asyncio,
+  death detection, shutdown escalation, atexit); parity/stop/abort/usage-fields
+  pinned across the process boundary. New deps: tokenizers/safetensors ([hf]
+  extra), pyzmq/msgpack ([fleet] extra); coverage configured for the spawned
+  service.
+- Refs: `docs/design/m8-engine-cpu.md` (Status: Implemented);
+  `kairyu/engine/{tokenizer,engine_loop,zmq_backend}.py`,
+  `kairyu/engine/core/{sampler,sampling_types,spec_runner,hw_profile,weights,engine_service}.py`
 
 ### 2026-07-03 — [design] M8 engine-CPU-core designed and reviewed (local-complete program begins)
 - What: `docs/design/m8-engine-cpu.md` — real tokenizer/incremental detokenizer

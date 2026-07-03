@@ -1,8 +1,10 @@
 # M8 Design: Engine CPU Core — Real Tokens, Real Sampling, Multi-Token Commit
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (3-reviewer agent panel, 2026-07-03;
-all amendments applied inline, see §6). Local-complete mandate: everything here is
-implemented and tested on CPU; no deliverable waits for hardware.
+Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS
+(3-reviewer agent panel, 2026-07-03; all amendments applied inline, see §6).
+All six phases (D1–D6) landed with tests: 328 → 437 tests, 95% coverage.
+Local-complete mandate: everything here is implemented and tested on CPU; no
+deliverable waits for hardware.
 Milestone: M8 (implementation milestone; realizes roadmap Track E1/E2 CPU halves —
 the M8–M19 numbering continues docs/design/m1..m7 and maps to roadmap tracks:
 M8/M9→E1-E2/P-A, M10→F1-F2, M11→P-B/P-C/F5, M12–M18→E-track local halves,
