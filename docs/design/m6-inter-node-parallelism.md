@@ -2,6 +2,12 @@
 
 Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (agent design-review panel, 2026-07-02;
 see §7). Two-node GPU hardware required for the GPU phase; human sign-off pending.
+**Amended 2026-07-03** (roadmap): D1's no-Ray decision stands, but the static-only
+topology is relaxed — goal G5 adds a replica registry and `kairyu.launch`, and the
+ClusterSpec 2-node coherence-domain cap rises to 8 for frontier-MoE EP/PP domains
+(G5 F3). D3's transport bake-off gains NIXL as a third contender, and B2's fabric
+budget is restated against measured NIC line rate (G2 §7 2026-07-03). See
+`docs/roadmap.md` §5.
 Milestone: M6
 Date: 2026-07-02
 Depends on: Goal G2 (`docs/goals/g2-multi-gpu.md`, gates B1–B5); all M5 gates green;

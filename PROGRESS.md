@@ -5,7 +5,13 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 
 ## Current Status
 
-_Last updated: 2026-07-02_
+_Last updated: 2026-07-03_
+
+Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
+A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
+supported), three tracks (E: L1 engine → SOTA incl. MoE, F: fleet-scale control
+plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — RTX
+6000 Pro units are available now) + **P-A** (truthful API core, CPU).
 
 | Milestone | Status |
 |-----------|--------|
@@ -16,6 +22,9 @@ _Last updated: 2026-07-02_
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
+| G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
+| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -23,10 +32,62 @@ in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of r
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
 
-Active blockers: GPU (H100/A100) required for M2 GPU phase; execution plan is
-`docs/gpu-runbook.md`. Human sign-off pending on M2–M4 design reviews.
+Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
+unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
+execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
+(PCIe-switch chassis, ≥400 Gb/s RDMA NICs) gates E4/E5 and is decided during E3 from
+E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [amendment] G2 hardware contract widened to capability profiles (A100+); fleet-scale decisions amended
+- What: G2 §7 gains 2026-07-03 amendments: the goal now spans capability profiles
+  covering all NVIDIA GPUs from A100 (SM80) onward — original NVLink arithmetic and
+  gates A1–A10 stand on NVLink-HBM profiles; the PCIe-GDDR profile (RTX PRO 6000,
+  96 GB, no NVLink) uses TP=1/DP as the 70B scaling base and replaces A3–A5 with a
+  placement-crossover report; B2/A10 fabric budgets restated against measured link
+  rates; the §6 MoE, autoscaling, and H100-only non-goals are lifted. Related
+  amendments: m7 D2 no-k8s → k8s as machine layer only (its own revisit triggers fire
+  at thousands of GPUs); m5 D4/m7 D6 session-hash affinity → two-step prefix-aware
+  placement then KV tiering; m6 D1 static-only topology relaxed (no-Ray stands);
+  ClusterSpec coherence-domain cap 2 → 8; m7 D8 no-OTel flipped. Status notes added
+  to m5/m6/m7 design docs and `docs/gpu-runbook.md` (§ header note, §6.1 NVLS scoped
+  to NVLink profile).
+- Why: The product target is an on-prem DC of thousands of GPUs across BOTH fleet
+  shapes (8×H100-class NVLink nodes remain possible; the volume fleet is PCIe-only
+  RTX PRO 6000, where 96 GB flips the 70B memory arithmetic and PCIe all-reduce
+  latency makes TP-first the wrong default), serving all four model classes
+  including MoE — the single-hardware, dense-only, static-fleet assumptions no
+  longer hold. Original entries are preserved per progress-log rules.
+- Refs: `docs/goals/g2-multi-gpu.md` §7, `docs/roadmap.md` §2/§5,
+  `docs/design/m5-*.md` / `m6-*.md` / `m7-*.md` status notes, `docs/gpu-runbook.md`
+
+### 2026-07-03 — [design] Master roadmap + goals G4/G5/G6 defined (gap analysis vs frontier serving)
+- What: `docs/roadmap.md` — three-track improvement roadmap (E: own-L1 engine to
+  SOTA — real runner/sampling/quant per SM, CUDA graphs + EAGLE-3/MTP via a scheduler
+  multi-token commit, profile-aware multi-GPU, MoE/EP, frontier MoE over RDMA;
+  F: fleet control plane — dynamic ReplicaPool + registry + k8s machine layer,
+  prefix/KV-aware routing fed by RadixKV events, NIXL-candidate KV transport + P/D
+  pools, DRAM/NVMe KV tiering, tenancy/SLO admission/autoscaling; P: product
+  surface — tokenizer-true usage + cached_tokens, HF Jinja chat templates, streaming
+  `kairyu-auto` with orchestration-usage/trace disclosure, Open WebUI integration,
+  Responses API/embeddings, nightly frontier-API scoreboard). New goal docs:
+  `docs/goals/g4-moe-engine.md`, `g5-fleet-scale.md`, `g6-product-surface.md`.
+  Grounding research recorded in roadmap §3/§7: Sakana Fugu product facts (GA
+  2026-06, orchestration-as-a-model, Responses API, orchestration token accounting,
+  no latency win — Kairyu's wedge is orchestration quality at direct-call latency
+  plus trace transparency), SM120 kernel-support gotcha list, and the fleet
+  control-plane convergence (Dynamo/llm-d/SGLang gateway/Mooncake/AIBrix:
+  prefix-cache-aware routing is the top lever; Kairyu's own RadixKV enables native
+  KV-event routing; learned multi-model routing is uncovered white space).
+- Why: The product goal (Fugu-class orchestration API + chat UI on an on-prem
+  multi-thousand-GPU DC, beating Claude/GPT on TTFT/TPOT/goodput) needed a
+  comprehensive gap analysis: the engine compute is placeholder, MoE/quant/spec-decode
+  paths are absent, the control plane is static, and the API surface cannot yet
+  support billing or honest benchmarks. The roadmap sequences the gaps by impact
+  (E1+P-A first) while preserving every existing protocol seam.
+- Refs: `docs/roadmap.md`, `docs/goals/g4-moe-engine.md`,
+  `docs/goals/g5-fleet-scale.md`, `docs/goals/g6-product-surface.md`
 
 ### 2026-07-02 — [progress] M7 Phase 5: deployment guide, runbook §9, README — M7 CPU half complete
 - What: `docs/deployment.md` (DC topology, security duty split with the managed cloud

@@ -3,6 +3,11 @@
 Status: **Implemented — CPU half** (2026-07-02). All D1–D8 landed with tests;
 gates C1–C4/C5–C6 proven against mocks (C2/C3 additionally by the CI compose
 smoke drill); GPU bring-up is `docs/gpu-runbook.md` §9. Human sign-off pending.
+**Amended 2026-07-03** (roadmap, goal G5): at thousands-of-GPU fleet scale D2's own
+revisit triggers fire — k8s is adopted as the machine layer (G5 F1); D6 gains
+prefix-aware placement then KV tiering as its recorded revisit path (G5 F2/F4);
+D8's no-OTel stance flips now that a tracing consumer exists (G5 F1d). Everything
+shipped here remains the per-node baseline; see `docs/roadmap.md` §5.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
