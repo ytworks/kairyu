@@ -32,6 +32,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
+| M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
 
@@ -48,6 +49,27 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M10a complete: elastic fleet base
+- What: 584 → 594 tests. ReplicaPool reworked to id-keyed dynamic membership
+  (legacy sequences auto-id "0".."N-1" so HRW mappings AND Prometheus labels
+  are unchanged — zero existing-test edits beyond one error message).
+  add/drain/remove lifecycle: drain stops NEW placements (HRW runs over
+  eligible = healthy ∧ not-draining), remove refuses in-flight unless forced,
+  late completion on removed ids is a no-op. HRW remap property gates:
+  removal moves ONLY the departed replica's sessions; addition moves ~1/N.
+  deploy/registry.py: TTL-heartbeat ReplicaRegistry (injected clock),
+  DiscoverySource protocol (static + registry; k8s-endpoints is a deploy-day
+  adapter), PoolReconciler (drain-then-remove, tolerates in-flight refusal
+  across ticks). POST /admin/drain flips /readyz 503 (node role).
+  kairyu/telemetry.py traced_span (L2-safe, no-op without the otel extra) +
+  pure-ASGI TracingMiddleware + pool-placement span; opentelemetry-sdk in
+  dev group + otel extra. BatchStoreProtocol (full 8-method surface). Helm
+  chart (readiness /readyz, config at /etc/kairyu/config.yaml) +
+  scripts/kind_smoke.sh + CI kind-smoke job + helm-template render test.
+- Refs: `docs/design/m10-fleet-cpu.md` (M10a Implemented);
+  `kairyu/orchestration/replica.py`, `kairyu/deploy/registry.py`,
+  `kairyu/telemetry.py`, `deploy/helm/kairyu/`
 
 ### 2026-07-03 — [progress] M18 complete: real-byte KV transfer + two-process P-D
 - What: 571 → 584 tests. kv_serde (PagedKVPool ⇄ PageFrame, layer-major

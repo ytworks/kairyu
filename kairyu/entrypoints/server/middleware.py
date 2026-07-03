@@ -216,3 +216,34 @@ def configure_json_logging(level: int = logging.INFO) -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+
+
+class TracingMiddleware:
+    """Gateway request span (m10a D4): one span per /v1/* request.
+
+    Pure ASGI like the rest of this file — streaming responses must not be
+    buffered by a BaseHTTPMiddleware."""
+
+    def __init__(self, app: _ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+            await self.app(scope, receive, send)
+            return
+        from kairyu.telemetry import traced_span
+
+        status = {"code": 500}
+
+        async def wrapped_send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                status["code"] = message["status"]
+            await send(message)
+
+        with traced_span(
+            "kairyu.request",
+            {"http.route": scope["path"], "http.method": scope.get("method", "")},
+        ) as span:
+            await self.app(scope, receive, wrapped_send)
+            if span is not None:
+                span.set_attribute("http.status_code", status["code"])

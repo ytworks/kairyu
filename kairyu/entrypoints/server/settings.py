@@ -33,6 +33,10 @@ class ServerSettings(BaseModel):
     access_log: bool = Field(
         default=True, description="Emit one JSON access-log line per request."
     )
+    tracing: bool = Field(
+        default=False,
+        description="Enable OTel spans (needs the otel extra; no-op without it).",
+    )
 
     def resolve_api_keys(self) -> frozenset[str]:
         """Read keys from the configured env var; fail loud on an empty var."""

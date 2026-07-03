@@ -12,6 +12,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
@@ -50,6 +51,30 @@ class BatchJob(BaseModel):
     request_counts: RequestCounts = Field(default_factory=RequestCounts)
     metadata: dict | None = None
     errors: dict | None = None
+
+
+class BatchStoreProtocol(Protocol):
+    """The full store surface (m10a D3/A8) — worker, routes and builder use
+    exactly these eight methods; M11 tenancy ledgers fake this."""
+
+    def save_file(self, content: bytes, filename: str, purpose: str) -> FileObject: ...
+
+    def get_file(self, file_id: str) -> FileObject: ...
+
+    def read_file_content(self, file_id: str) -> bytes: ...
+
+    def create_batch(
+        self, input_file_id: str, endpoint: str, completion_window: str,
+        metadata: dict | None = None,
+    ) -> BatchJob: ...
+
+    def get_batch(self, batch_id: str) -> BatchJob: ...
+
+    def list_batches(self, limit: int = 20) -> list[BatchJob]: ...
+
+    def update_batch(self, job: BatchJob) -> None: ...
+
+    def recover_orphans(self) -> tuple[str, ...]: ...
 
 
 class BatchStore:

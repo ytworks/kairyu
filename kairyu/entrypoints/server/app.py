@@ -489,6 +489,12 @@ def create_app(
         app.add_middleware(
             AuthMiddleware, api_keys=api_keys, protect_metrics=settings.protect_metrics
         )
+    if settings.tracing:
+        from kairyu.entrypoints.server.middleware import TracingMiddleware
+        from kairyu.telemetry import configure_tracing
+
+        configure_tracing(True)
+        app.add_middleware(TracingMiddleware)
     if settings.access_log:
         app.add_middleware(AccessLogMiddleware)
 

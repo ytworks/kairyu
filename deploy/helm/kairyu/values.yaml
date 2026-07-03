@@ -1,0 +1,16 @@
+replicaCount: 1
+image:
+  repository: kairyu
+  tag: dev
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 8000
+resources: {}
+# DeploymentSpec YAML mounted at exactly /etc/kairyu/config.yaml (the
+# Dockerfile CMD — m10a A11)
+config: |
+  engines:
+    default:
+      backend: mock
+      options: {}

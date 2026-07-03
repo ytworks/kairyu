@@ -112,7 +112,11 @@ class JsonlRouterLog:
         )
 
     def record_replica(
-        self, session_id: str | None, replica_index: int, reason: str
+        self,
+        session_id: str | None,
+        replica_index: int,
+        reason: str,
+        replica_id: str | None = None,
     ) -> None:
         """Log a ``ReplicaPool`` placement decision (design doc m5 D4).
 
@@ -126,14 +130,15 @@ class JsonlRouterLog:
             if session_id is not None
             else None
         )
-        self._append(
-            {
-                "kind": "replica",
-                "session_sha256": session_sha256,
-                "replica": replica_index,
-                "reason": reason,
-            }
-        )
+        record = {
+            "kind": "replica",
+            "session_sha256": session_sha256,
+            "replica": replica_index,
+            "reason": reason,
+        }
+        if replica_id is not None:  # m10a A1: id alongside the legacy ordinal
+            record["replica_id"] = replica_id
+        self._append(record)
 
     def record_outcome(
         self,

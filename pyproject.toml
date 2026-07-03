@@ -23,6 +23,7 @@ hf = [
     "safetensors>=0.5",
 ]
 # Process-split engine service and fleet transports (m8 D6, G5).
+otel = ["opentelemetry-sdk>=1.27"]
 fleet = [
     "pyzmq>=26",
     "msgpack>=1.0",
@@ -40,6 +41,7 @@ dev = [
     "safetensors>=0.5",
     "pyzmq>=26",
     "msgpack>=1.0",
+    "opentelemetry-sdk>=1.27",
     "transformers>=5.12,<5.13",  # pinned band: template goldens byte-match (m9 D2)
     "openai>=1.50",
 ]

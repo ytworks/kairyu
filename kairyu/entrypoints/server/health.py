@@ -21,8 +21,21 @@ def add_health_routes(
     async def health() -> dict:
         return {"status": "ok"}
 
+    @app.post("/admin/drain")
+    async def drain_node():
+        """Node-level drain (m10a A5): flips /readyz to 503; gateway-side pool
+        drains go through PoolReconciler membership instead."""
+        app.state.draining = True
+        return {"status": "draining"}
+
     @app.get("/readyz")
     async def readyz():
+        # m10a A5: a drained node reports unready so the prober/load-balancer
+        # stops sending NEW work; in-flight requests keep completing.
+        if getattr(app.state, "draining", False):
+            return JSONResponse(
+                status_code=503, content={"status": "draining"}
+            )
         # Engines are constructed by the time the app exists; pools additionally
         # need >=1 healthy replica or every request would fail.
         degraded = {
