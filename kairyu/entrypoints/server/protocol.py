@@ -14,6 +14,10 @@ class ChatMessage(BaseModel):
     tool_call_id: str | None = None
 
 
+class StreamOptions(BaseModel):
+    include_usage: bool = False
+
+
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -23,7 +27,11 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = 1.0
     n: int = 1
     stream: bool = False
+    stream_options: StreamOptions | None = None
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None  # modern-SDK alias of max_tokens
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
     stop: str | list[str] | None = None
     seed: int | None = None
     tools: list[dict] | None = None
@@ -55,10 +63,15 @@ class Choice(BaseModel):
     finish_reason: str | None = None
 
 
+class PromptTokensDetails(BaseModel):
+    cached_tokens: int = 0
+
+
 class Usage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    prompt_tokens_details: PromptTokensDetails | None = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -88,6 +101,9 @@ class ChatCompletionChunk(BaseModel):
     created: int
     model: str
     choices: list[ChunkChoice]
+    # OpenAI contract (m9 D1): key OMITTED unless stream_options.include_usage,
+    # then null on every chunk except the final usage chunk (choices: [])
+    usage: Usage | None = None
 
 
 class ModelCard(BaseModel):

@@ -10,12 +10,17 @@ import json
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest
+from kairyu.engine.backend import (
+    CacheHint,
+    EngineBackend,
+    GenerationRequest,
+    GenerationUsage,
+)
 from kairyu.entrypoints.chat_template import render_chat
 from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metrics import ServerMetrics
@@ -35,6 +40,7 @@ from kairyu.entrypoints.server.protocol import (
     FunctionCall,
     ModelCard,
     ModelList,
+    PromptTokensDetails,
     ResponseMessage,
     ToolCall,
     Usage,
@@ -42,6 +48,7 @@ from kairyu.entrypoints.server.protocol import (
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
+from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 AUTO_MODEL = "kairyu-auto"
@@ -56,7 +63,9 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
         temperature=request.temperature,
         top_p=request.top_p,
         n=request.n,
-        max_tokens=request.max_tokens,
+        max_tokens=request.max_tokens or request.max_completion_tokens,
+        presence_penalty=request.presence_penalty,
+        frequency_penalty=request.frequency_penalty,
         stop=request.stop,
         seed=request.seed,
         extra_args=extra_args,
@@ -87,6 +96,19 @@ def _parse_tool_calls(text: str) -> list[ToolCall]:
             )
         )
     return calls
+
+
+def _invalid_request(message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": "invalid_request",
+            }
+        },
+    )
 
 
 def _model_not_found(model: str) -> JSONResponse:
@@ -127,46 +149,87 @@ def _build_choice(
     )
 
 
+def _wire_usage(
+    prompt: str, completions: Sequence[CompletionOutput], usage: GenerationUsage | None
+) -> Usage:
+    """Backend-reported counts when present; the word-split approximation
+    survives only for usage=None producers (orchestrator until M11,
+    third-party backends) — m9 D1."""
+    if usage is not None:
+        details = (
+            PromptTokensDetails(cached_tokens=usage.cached_tokens)
+            if usage.cached_tokens
+            else None
+        )
+        return Usage(
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.prompt_tokens + usage.completion_tokens,
+            prompt_tokens_details=details,
+        )
+    prompt_tokens = _approx_tokens(prompt)
+    completion_tokens = sum(
+        len(c.token_ids) if c.token_ids else _approx_tokens(c.text) for c in completions
+    )
+    return Usage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+
+
 def completion_response(
-    request: ChatCompletionRequest, prompt: str, texts: list[tuple[str, str | None]]
+    request: ChatCompletionRequest,
+    prompt: str,
+    completions: Sequence[CompletionOutput],
+    usage: GenerationUsage | None = None,
 ) -> ChatCompletionResponse:
     choices = [
-        _build_choice(i, text, request, finish_reason)
-        for i, (text, finish_reason) in enumerate(texts)
+        _build_choice(c.index, c.text, request, c.finish_reason) for c in completions
     ]
-    completion_tokens = sum(_approx_tokens(text) for text, _ in texts)
-    prompt_tokens = _approx_tokens(prompt)
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid.uuid4().hex[:16]}",
         created=int(time.time()),
         model=request.model,
         choices=choices,
-        usage=Usage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        ),
+        usage=_wire_usage(prompt, completions, usage),
     )
 
 
 def _sse_chunk(
     response_id: str, created: int, model: str, index: int, delta: ChunkDelta,
-    finish_reason: str | None = None,
+    finish_reason: str | None = None, include_usage: bool = False,
+    usage: Usage | None = None,
 ) -> str:
     payload = ChatCompletionChunk(
         id=response_id,
         created=created,
         model=model,
         choices=[ChunkChoice(index=index, delta=delta, finish_reason=finish_reason)],
+        usage=usage,
+    )
+    # OpenAI contract: usage key omitted unless include_usage; then explicit
+    # null on non-final chunks, populated on the final choices-less chunk
+    exclude = None if include_usage else {"usage"}
+    return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
+
+
+def _usage_chunk(response_id: str, created: int, model: str, usage: Usage) -> str:
+    payload = ChatCompletionChunk(
+        id=response_id, created=created, model=model, choices=[], usage=usage
     )
     return f"data: {payload.model_dump_json()}\n\n"
 
 
 async def _stream_engine(
-    engine: EngineBackend, generation_request: GenerationRequest, model: str
+    engine: EngineBackend,
+    generation_request: GenerationRequest,
+    model: str,
+    request: ChatCompletionRequest,
 ) -> AsyncIterator[str]:
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
+    include_usage = bool(request.stream_options and request.stream_options.include_usage)
     sent: dict[int, int] = {}
     last = None
     try:
@@ -181,6 +244,7 @@ async def _stream_engine(
                 yield _sse_chunk(
                     response_id, created, model, completion.index,
                     ChunkDelta(role="assistant" if is_first else None, content=delta_text),
+                    include_usage=include_usage,
                 )
     except Exception as error:  # surface backend failures inside the SSE stream
         payload = {"error": {"message": str(error), "type": "upstream_error"}}
@@ -191,14 +255,23 @@ async def _stream_engine(
         yield _sse_chunk(
             response_id, created, model, completion.index, ChunkDelta(),
             finish_reason=completion.finish_reason or "stop",
+            include_usage=include_usage,
+        )
+    if include_usage and last is not None:
+        yield _usage_chunk(
+            response_id, created, model,
+            _wire_usage(generation_request.prompt, last.completions, last.usage),
         )
     yield "data: [DONE]\n\n"
 
 
-async def _stream_choices(choices: list[Choice], model: str) -> AsyncIterator[str]:
+async def _stream_choices(
+    choices: list[Choice], model: str, usage: Usage | None = None
+) -> AsyncIterator[str]:
     """Stream already-final choices (orchestrated or tool-call responses)."""
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
+    include_usage = usage is not None
     for choice in choices:
         yield _sse_chunk(
             response_id, created, model, choice.index,
@@ -207,11 +280,15 @@ async def _stream_choices(choices: list[Choice], model: str) -> AsyncIterator[st
                 content=choice.message.content,
                 tool_calls=choice.message.tool_calls,
             ),
+            include_usage=include_usage,
         )
         yield _sse_chunk(
             response_id, created, model, choice.index, ChunkDelta(),
             finish_reason=choice.finish_reason,
+            include_usage=include_usage,
         )
+    if usage is not None:
+        yield _usage_chunk(response_id, created, model, usage)
     yield "data: [DONE]\n\n"
 
 
@@ -262,20 +339,30 @@ def create_app(
     @app.post("/v1/chat/completions")
     async def chat_completions(request: ChatCompletionRequest, http_request: Request):
         http_request.state.model = request.model  # label for the metrics middleware
+        if request.stream_options is not None and not request.stream:
+            return _invalid_request("stream_options is only allowed when stream is true")
+        include_usage = bool(request.stream_options and request.stream_options.include_usage)
         prompt = render_chat([message.model_dump() for message in request.messages])
         if request.model == AUTO_MODEL and orchestrator is not None:
             try:
                 result = await orchestrator.run(prompt)
             except Exception as error:
                 return _upstream_error(error)
-            texts = [(result.text, "stop")]
+            # orchestrator has no token accounting until M11: usage=None fallback
+            completions = (
+                CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
+            )
+            response = completion_response(request, prompt, completions, usage=None)
             if request.stream:
-                response = completion_response(request, prompt, texts)
                 return StreamingResponse(
-                    _stream_choices(response.choices, request.model),
+                    _stream_choices(
+                        response.choices,
+                        request.model,
+                        usage=response.usage if include_usage else None,
+                    ),
                     media_type="text/event-stream",
                 )
-            return completion_response(request, prompt, texts)
+            return response
 
         engine = served_engines.get(request.model)
         if engine is None:
@@ -291,22 +378,23 @@ def create_app(
         )
         if request.stream and not request.tools:
             return StreamingResponse(
-                _stream_engine(engine, generation_request, request.model),
+                _stream_engine(engine, generation_request, request.model, request),
                 media_type="text/event-stream",
             )
         try:
             result = await engine.generate(generation_request)
         except Exception as error:
             return _upstream_error(error)
-        texts = [
-            (completion.text, completion.finish_reason) for completion in result.completions
-        ]
-        response = completion_response(request, prompt, texts)
+        response = completion_response(request, prompt, result.completions, result.usage)
         if request.stream:
             # Tool calling + streaming: generate fully, then emit structured chunks so
             # tool_calls and finish_reason stay correct.
             return StreamingResponse(
-                _stream_choices(response.choices, request.model),
+                _stream_choices(
+                    response.choices,
+                    request.model,
+                    usage=response.usage if include_usage else None,
+                ),
                 media_type="text/event-stream",
             )
         return response

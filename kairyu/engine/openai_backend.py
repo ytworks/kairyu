@@ -19,13 +19,25 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult
+from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput
 
 _DEFAULT_TIMEOUT_S = 60.0
 _SSE_DATA_PREFIX = "data:"
 _SSE_DONE = "[DONE]"
+
+
+def _usage_from(data: dict | None) -> GenerationUsage | None:
+    """Parse an upstream usage object incl. prompt_tokens_details (m9 D1)."""
+    if not data:
+        return None
+    details = data.get("prompt_tokens_details") or {}
+    return GenerationUsage(
+        prompt_tokens=data.get("prompt_tokens", 0),
+        completion_tokens=data.get("completion_tokens", 0),
+        cached_tokens=details.get("cached_tokens", 0),
+    )
 
 
 class OpenAICompatBackend:
@@ -36,12 +48,16 @@ class OpenAICompatBackend:
         api_key_env: str | None = "OPENAI_API_KEY",
         timeout_s: float = _DEFAULT_TIMEOUT_S,
         transport: httpx.AsyncBaseTransport | None = None,
+        request_stream_usage: bool = True,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key_env = api_key_env
         self._timeout_s = timeout_s
         self._transport = transport
+        # m9 D1: upstreams only emit the usage chunk when asked; disable for
+        # upstreams that reject unknown stream_options
+        self._request_stream_usage = request_stream_usage
         self._client: httpx.AsyncClient | None = None
 
     def _api_key(self) -> str:
@@ -114,7 +130,10 @@ class OpenAICompatBackend:
         if not completions:
             raise RuntimeError(f"backend {self._base_url} returned no choices: {data}")
         return GenerationResult(
-            request_id=request.request_id, prompt=request.prompt, completions=completions
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=completions,
+            usage=_usage_from(data.get("usage")),
         )
 
     def _partial(
@@ -124,6 +143,7 @@ class OpenAICompatBackend:
         finish: dict[int, str],
         deltas_seen: dict[int, int],
         finished: bool,
+        usage: GenerationUsage | None = None,
     ) -> GenerationResult:
         completions = tuple(
             CompletionOutput(
@@ -139,11 +159,14 @@ class OpenAICompatBackend:
             prompt=request.prompt,
             completions=completions,
             finished=finished,
+            usage=usage,
         )
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         """Real SSE streaming: yields cumulative partials, then the final result."""
         payload = self._payload(request) | {"stream": True}
+        if self._request_stream_usage:
+            payload["stream_options"] = {"include_usage": True}
         async with self._get_client().stream(
             "POST",
             f"{self._base_url}/chat/completions",
@@ -158,6 +181,7 @@ class OpenAICompatBackend:
             texts: dict[int, str] = {}
             finish: dict[int, str] = {}
             deltas_seen: dict[int, int] = {}
+            usage: GenerationUsage | None = None
             async for line in response.aiter_lines():
                 if not line.startswith(_SSE_DATA_PREFIX):
                     continue
@@ -165,6 +189,8 @@ class OpenAICompatBackend:
                 if data_str == _SSE_DONE:
                     break
                 chunk = json.loads(data_str)
+                if chunk.get("usage"):  # final usage chunk has empty choices
+                    usage = _usage_from(chunk["usage"])
                 changed = False
                 for choice in chunk.get("choices", []):
                     index = choice.get("index", 0)
@@ -179,7 +205,7 @@ class OpenAICompatBackend:
                     yield self._partial(request, texts, finish, deltas_seen, finished=False)
         if not texts:
             raise RuntimeError(f"backend {self._base_url} streamed no content")
-        yield self._partial(request, texts, finish, deltas_seen, finished=True)
+        yield self._partial(request, texts, finish, deltas_seen, finished=True, usage=usage)
 
     async def shutdown(self) -> None:
         if self._client is not None and not self._client.is_closed:

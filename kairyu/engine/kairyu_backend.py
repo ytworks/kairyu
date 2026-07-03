@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult
+from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import SampledToken
@@ -153,6 +153,11 @@ class KairyuBackend:
             prompt=request.prompt,
             completions=(completion,),
             finished=update.finished,
+            usage=GenerationUsage(
+                prompt_tokens=update.num_prompt_tokens,
+                completion_tokens=len(update.outputs),
+                cached_tokens=update.num_cached_tokens,
+            ),
         )
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:

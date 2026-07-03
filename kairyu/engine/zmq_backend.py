@@ -18,7 +18,7 @@ import asyncio
 import atexit
 from collections.abc import AsyncIterator
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult
+from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
 from kairyu.engine.core.engine_service import run_engine_service, sampling_params_to_wire
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput
@@ -222,6 +222,11 @@ class ZmqEngineBackend:
             prompt=request.prompt,
             completions=(completion,),
             finished=event["finished"],
+            usage=GenerationUsage(
+                prompt_tokens=event.get("num_prompt_tokens", 0),
+                completion_tokens=len(event["outputs"]),
+                cached_tokens=event.get("num_cached_tokens", 0),
+            ),
         )
 
     @staticmethod

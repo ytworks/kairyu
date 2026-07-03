@@ -76,8 +76,7 @@ class BatchWorker:
                     sampling_params=sampling_params_from(request),
                 )
             )
-            texts = [(c.text, c.finish_reason) for c in result.completions]
-            response = completion_response(request, prompt, texts)
+            response = completion_response(request, prompt, result.completions, result.usage)
             return (
                 {
                     "id": f"batch_req_{uuid.uuid4().hex[:16]}",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult
+from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
 from kairyu.outputs import CompletionOutput
 
 _ECHO_TAIL_CHARS = 48
@@ -58,7 +58,14 @@ class MockBackend:
             for i in range(request.sampling_params.n)
         )
         return GenerationResult(
-            request_id=request.request_id, prompt=request.prompt, completions=completions
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=completions,
+            usage=GenerationUsage(
+                prompt_tokens=len(request.prompt.split()),
+                completion_tokens=sum(len(c.token_ids) for c in completions),
+                cached_tokens=0,
+            ),
         )
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:

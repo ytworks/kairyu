@@ -35,11 +35,26 @@ class GenerationRequest:
 
 
 @dataclass(frozen=True)
+class GenerationUsage:
+    """Backend-reported token accounting (m9 D1): the source of usage truth.
+
+    ``prompt_tokens`` is counted once per request (not per completion);
+    ``completion_tokens`` sums across completions; ``cached_tokens`` is the
+    prompt prefix served from the radix cache.
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+
+
+@dataclass(frozen=True)
 class GenerationResult:
     request_id: str
     prompt: str
     completions: tuple[CompletionOutput, ...]
     finished: bool = True
+    usage: GenerationUsage | None = None
 
     @property
     def text(self) -> str:
