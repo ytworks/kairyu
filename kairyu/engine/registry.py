@@ -26,6 +26,7 @@ _LAZY_MODULES = {
     "openai": "kairyu.engine.openai_backend",
     "vllm": "kairyu.engine.vllm_backend",
     "kairyu": "kairyu.engine.kairyu_backend",
+    "kairyu-proc": "kairyu.engine.zmq_backend",
 }
 
 

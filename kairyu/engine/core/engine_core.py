@@ -1,9 +1,10 @@
 """EngineCore step loop: scheduler plans, a pluggable ModelRunner executes.
 
-The GPU FlashInfer runner (M2 GPU phase) and CPU test stubs implement the same
-``ModelRunner`` protocol, so the loop, scheduling and KV behavior verified here
-carry over unchanged. Overlap pipelining (design doc §2.2) wraps this loop in
-the GPU phase; the step contract stays the same.
+The GPU runner (M12+) and CPU test stubs implement the same ``ModelRunner``
+protocol, so the loop, scheduling and KV behavior verified here carry over
+unchanged. ``StepOutput`` is the one written name of the runner's return
+contract (m8 D2): always a tuple of ``SampledToken`` per request — usually
+length 1, longer under speculative decoding (m8 D3/D4).
 """
 
 from __future__ import annotations
@@ -11,14 +12,37 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Protocol
 
+from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
+
+StepOutput = dict[str, tuple[SampledToken, ...]]
+
+
+def token_ids(step_output: Mapping[str, tuple[SampledToken, ...]]) -> dict[str, list[int]]:
+    """Convert a runner's StepOutput into the Scheduler.update payload."""
+    return {
+        request_id: [token.token_id for token in tokens]
+        for request_id, tokens in step_output.items()
+    }
+
+
+def grammar_finished(
+    step_output: Mapping[str, tuple[SampledToken, ...]], already_finished: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Requests whose grammar terminated this step and were not otherwise finished."""
+    return tuple(
+        request_id
+        for request_id, tokens in step_output.items()
+        if request_id not in already_finished
+        and any(token.grammar_terminated for token in tokens)
+    )
 
 
 class ModelRunner(Protocol):
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
-    ) -> dict[str, int]:
-        """Run one engine step; return sampled token per prefill-complete request."""
+    ) -> StepOutput:
+        """Run one engine step; return sampled tokens per prefill-complete request."""
         ...
 
 
@@ -44,7 +68,11 @@ class EngineCore:
                 )
             return ()
         sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
-        finished = self._scheduler.update(sampled) if sampled else ()
+        finished = self._scheduler.update(token_ids(sampled)) if sampled else ()
+        for request_id in grammar_finished(sampled or {}, finished):
+            # between update() and the next schedule(): the safe finish point
+            self._scheduler.finish_early(request_id)
+            finished = (*finished, request_id)
         for request_id in finished:
             self._outputs[request_id] = self._scheduler.output_tokens(request_id)
         return finished

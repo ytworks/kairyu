@@ -1,0 +1,46 @@
+{%- if tools %}
+    {{- '<|im_start|>system\n' }}
+    {%- if messages[0]['role'] == 'system' %}
+        {{- messages[0]['content'] }}
+    {%- else %}
+        {{- 'You are a helpful assistant.' }}
+    {%- endif %}
+    {{- "\n\n# Tools\n\nYou may call one or more functions.\n\n<tools>" }}
+    {%- for tool in tools %}
+        {{- "\n" }}
+        {{- tool | tojson }}
+    {%- endfor %}
+    {{- "\n</tools>\n\nReturn calls within <tool_call></tool_call> tags.<|im_end|>\n" }}
+{%- else %}
+    {%- if messages[0]['role'] == 'system' %}
+        {{- '<|im_start|>system\n' + messages[0]['content'] + '<|im_end|>\n' }}
+    {%- endif %}
+{%- endif %}
+{%- for message in messages %}
+    {%- if message.role == 'system' and loop.first %}
+        {%- continue %}
+    {%- endif %}
+    {%- if message.role == 'user' %}
+        {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' }}
+    {%- elif message.role == 'assistant' %}
+        {{- '<|im_start|>assistant\n' }}
+        {%- if message.content %}
+            {{- message.content }}
+        {%- endif %}
+        {%- if message.tool_calls %}
+            {%- for tool_call in message.tool_calls %}
+                {{- '\n<tool_call>\n{"name": "' + tool_call.function.name + '", "arguments": ' }}
+                {{- tool_call.function.arguments | tojson }}
+                {{- '}\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+    {%- elif message.role == 'tool' %}
+        {{- '<|im_start|>user\n<tool_response>\n' + message.content + '\n</tool_response><|im_end|>\n' }}
+    {%- else %}
+        {{- raise_exception('unknown role: ' + message.role) }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+{%- endif %}

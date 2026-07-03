@@ -1,5 +1,6 @@
 from kairyu.engine.core.engine_core import EngineCore
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
 PAGE = 4
@@ -11,13 +12,13 @@ class EchoRunner:
     def __init__(self) -> None:
         self.steps_executed = 0
 
-    def execute(self, scheduled, states) -> dict[str, int]:
+    def execute(self, scheduled, states) -> dict[str, tuple[SampledToken, ...]]:
         self.steps_executed += 1
         sampled = {}
         for chunk in scheduled:
             state = states[chunk.request_id]
             if state.prefill_done:
-                sampled[chunk.request_id] = 1000 + len(state.outputs)
+                sampled[chunk.request_id] = (SampledToken(1000 + len(state.outputs)),)
         return sampled
 
 

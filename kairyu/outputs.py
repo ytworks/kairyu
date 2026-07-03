@@ -7,6 +7,21 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class TokenLogprob:
+    """Rich per-token logprob (m9 D3): OpenAI needs token strings + bytes.
+
+    ``bytes_`` is the lossless form — byte-level BPE fragments may decode to
+    U+FFFD in ``token``. ``top`` entries carry no nested ``top`` of their own.
+    """
+
+    token: str
+    token_id: int
+    logprob: float
+    bytes_: tuple[int, ...] | None = None
+    top: tuple[TokenLogprob, ...] = ()
+
+
+@dataclass(frozen=True)
 class CompletionOutput:
     index: int
     text: str
@@ -15,6 +30,8 @@ class CompletionOutput:
     logprobs: tuple[dict[int, float], ...] | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
+    # rich server-facing form (m9 D3); id-keyed `logprobs` stays for vLLM compat
+    logprob_content: tuple[TokenLogprob, ...] | None = None
 
 
 @dataclass(frozen=True)

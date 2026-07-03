@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Protocol
 
-from kairyu.engine.core.engine_core import ModelRunner
+from kairyu.engine.core.engine_core import ModelRunner, token_ids
 from kairyu.engine.core.radix_kv import KVAllocation, KVCacheFull, RadixKVCache
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
@@ -119,10 +119,12 @@ class PDCoordinator:
                 raise RuntimeError("P-D prefill stall: nothing schedulable")
             return
         sampled = self._prefill_runner.execute(plan.scheduled, self._prefill.states)
+        # explicit SampledToken -> int unwrap (m8 D2): KVHandoff.transfer and
+        # resume_with_kv keep their int-typed first_token contracts
         commit = {
             internal_id: token0
-            for internal_id, token0 in sampled.items()
-            if self._handoff_or_retry(internal_id, token0)
+            for internal_id, tokens in sampled.items()
+            if self._handoff_or_retry(internal_id, token0 := tokens[0].token_id)
         }
         if commit:
             self._prefill.update(commit)
@@ -134,7 +136,7 @@ class PDCoordinator:
                 raise RuntimeError("P-D decode stall: nothing schedulable")
             return
         sampled = self._decode_runner.execute(plan.scheduled, self._decode.states)
-        finished = self._decode.update(sampled) if sampled else ()
+        finished = self._decode.update(token_ids(sampled)) if sampled else ()
         for request_id in finished:
             self._outputs[request_id] = self._decode.output_tokens(request_id)
 

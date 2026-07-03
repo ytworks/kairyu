@@ -85,6 +85,10 @@ class DeploymentSpec(BaseModel):
     server: ServerSection = ServerSection()
     engines: dict[str, BackendSpec] = Field(default_factory=dict)
     pools: dict[str, PoolSpec] = Field(default_factory=dict)
+    # served model name -> HF Jinja chat template (inline text or *.jinja path);
+    # per-MODEL, not per-replica — one map avoids engines-vs-pools ambiguity
+    # and stays out of BackendSpec.options (factory kwargs). m9 D2.
+    chat_templates: dict[str, str] = Field(default_factory=dict)
     orchestrator: OrchestratorSection | None = None
     batch: BatchSection | None = None
 
@@ -97,6 +101,12 @@ class DeploymentSpec(BaseModel):
             raise ValueError(
                 f"names {sorted(overlap)} appear in both engines: and pools:; "
                 "served model names must be unique"
+            )
+        unknown = self.chat_templates.keys() - self.engines.keys() - self.pools.keys()
+        if unknown:
+            raise ValueError(
+                f"chat_templates for unknown models {sorted(unknown)}; "
+                "keys must match engines: or pools: names"
             )
         return self
 

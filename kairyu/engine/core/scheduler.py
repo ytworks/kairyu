@@ -12,10 +12,12 @@ the token being generated).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import KW_ONLY, dataclass, field
 from enum import Enum
 
 from kairyu.engine.core.radix_kv import KVAllocation, KVCacheFull, RadixKVCache
+from kairyu.engine.core.sampling_types import EngineSampling
 
 _DEFAULT_TOKEN_BUDGET = 2048
 _DEFAULT_MAX_SEQS = 256
@@ -27,6 +29,14 @@ class EngineRequest:
     prompt_token_ids: tuple[int, ...]
     max_new_tokens: int = 16
     eos_token_id: int | None = None
+    # m8 additions are keyword-only so positional construction can never
+    # silently shift meaning across milestones
+    _: KW_ONLY
+    stop_token_ids: tuple[int, ...] = ()
+    min_tokens: int = 0
+    ignore_eos: bool = False
+    priority: int = 0  # admission ordering lands in M11; field reserved here
+    sampling: EngineSampling = field(default_factory=EngineSampling)
 
 
 class _Status(Enum):
@@ -45,6 +55,8 @@ class _RequestState:
         "surplus_in_flight",
         "allocation",
         "decode_pages",
+        "finish_reason",
+        "spec_in_flight",
     )
 
     def __init__(self, request: EngineRequest) -> None:
@@ -60,6 +72,10 @@ class _RequestState:
         self.surplus_in_flight = 0
         self.allocation: KVAllocation | None = None
         self.decode_pages: list[int] = []
+        self.finish_reason: str | None = None
+        # reservation size of the one outstanding speculative chunk (m8 D3);
+        # 0 when no spec chunk is in flight
+        self.spec_in_flight = 0
 
     @property
     def prompt_len(self) -> int:
@@ -97,18 +113,25 @@ class Scheduler:
         pd_separation: bool = False,
         decode_token_budget: int | None = None,
         decode_watermark_pages: int = 0,
+        speculative_tokens: int = 0,
     ) -> None:
         if max_num_batched_tokens < 1:
             raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
         if pd_separation and (decode_token_budget is None or decode_token_budget < 1):
             raise ValueError("pd_separation=True requires decode_token_budget >= 1")
+        if speculative_tokens < 0:
+            raise ValueError(f"speculative_tokens must be >= 0, got {speculative_tokens}")
         self._kv = kv_cache
         self._budget = max_num_batched_tokens
         self._max_seqs = max_num_seqs
         self._pd_separation = pd_separation
         self._decode_budget = decode_token_budget
         self._decode_watermark = decode_watermark_pages
-        self._page_size = getattr(kv_cache, "_page_size", page_size)
+        # note: decode_watermark_pages was sized for +1 growth per step; with
+        # speculative_tokens=k it should scale with k (m8 D3, documented knob)
+        self._spec_k = speculative_tokens
+        # page_size param kept for back-compat; the cache is the source of truth
+        self._page_size = getattr(kv_cache, "page_size", page_size)
         self._states: dict[str, _RequestState] = {}
         self._waiting: list[str] = []
         self._running: list[str] = []
@@ -152,6 +175,39 @@ class Scheduler:
             self._running.remove(request_id)
             self._release_without_commit(state)
         state.status = _Status.FINISHED
+        state.finish_reason = "abort"
+
+    def finish_early(self, request_id: str) -> None:
+        """Finish a running request now (stop-string / grammar termination, m8 D1).
+
+        Unlike ``abort``, outputs are committed to the radix tree via the normal
+        ``_finish`` path so multi-turn prefix reuse survives a stop finish.
+        Must be called between ``update()`` and the next ``schedule()`` (the
+        step-thread op discipline); with in-flight tokens pending the surplus
+        trim covers their late arrival exactly like an EOS finish under overlap.
+        """
+        state = self._states[request_id]
+        if state.status is _Status.FINISHED:
+            return
+        if state.status is _Status.WAITING:
+            self._waiting.remove(request_id)
+            state.status = _Status.FINISHED
+            state.finish_reason = "stop"
+            return
+        state.surplus_in_flight += state.in_flight
+        state.in_flight = 0
+        state.finish_reason = "stop"
+        self._finish(state)
+
+    def finish_reason(self, request_id: str) -> str | None:
+        return self._states[request_id].finish_reason
+
+    def num_cached_tokens(self, request_id: str) -> int:
+        """Prompt tokens served from the radix cache (usage truth, m8 D6/M9)."""
+        state = self._states[request_id]
+        if state.allocation is None:
+            return 0
+        return state.allocation.num_cached_tokens
 
     def _preempt_for_decode(self, needy_id: str) -> bool:
         """Recompute-preempt the youngest output-free running request.
@@ -207,8 +263,8 @@ class Scheduler:
             return True
         return False
 
-    def _ensure_decode_capacity(self, state: _RequestState) -> bool:
-        needed_tokens = state.prompt_len + len(state.outputs) + state.in_flight + 1
+    def _ensure_decode_capacity(self, state: _RequestState, extra: int = 1) -> bool:
+        needed_tokens = state.prompt_len + len(state.outputs) + state.in_flight + extra
         while state.capacity_tokens(self._page_size) < needed_tokens:
             try:
                 state.decode_pages.append(self._kv.allocate_private_page())
@@ -223,24 +279,38 @@ class Scheduler:
                 continue  # preempted earlier in this pass
             if not state.prefill_done or budget < 1:
                 continue
-            if len(state.outputs) + state.in_flight >= state.request.max_new_tokens:
+            remaining = state.request.max_new_tokens - len(state.outputs) - state.in_flight
+            if remaining < 1:
                 continue  # everything remaining is already in flight
-            if not self._ensure_decode_capacity(state):
+            # speculative chunks require in_flight == 0 (scheduler-enforced,
+            # m8 D3): under overlap-ahead planning a second chunk's position
+            # would assume full commit of the first, which rejection breaks
+            if self._spec_k > 0 and state.in_flight == 0:
+                reserve = min(self._spec_k + 1, remaining, budget)
+            else:
+                reserve = 1
+            if not self._ensure_decode_capacity(state, reserve):
                 # decode must not starve: recompute-preempt a prefilling victim
-                if not self._preempt_for_decode(request_id):
-                    continue
-                if not self._ensure_decode_capacity(state):
-                    continue  # still no space; retried next step
+                if not self._preempt_for_decode(request_id) or not self._ensure_decode_capacity(
+                    state, reserve
+                ):
+                    # degrade to a plain 1-token reservation: k+1 must never
+                    # stall a workload that completes under k=0 (m8 D3)
+                    reserve = 1
+                    if not self._ensure_decode_capacity(state, reserve):
+                        continue  # still no space; retried next step
             plan.append(
                 ScheduledChunk(
                     request_id=request_id,
-                    num_tokens=1,
+                    num_tokens=reserve,
                     is_prefill=False,
                     position=len(state.outputs) + state.in_flight,
                 )
             )
-            state.in_flight += 1
-            budget -= 1
+            state.in_flight += reserve
+            if self._spec_k > 0 and reserve > 0 and state.in_flight == reserve:
+                state.spec_in_flight = reserve
+            budget -= reserve
         return budget
 
     def _schedule_prefills(self, budget: int, plan: list[ScheduledChunk]) -> int:
@@ -314,31 +384,93 @@ class Scheduler:
             self._kv.free_private_pages(tuple(state.decode_pages))
             state.decode_pages.clear()
 
-    def update(self, sampled: dict[str, int]) -> tuple[str, ...]:
-        """Commit sampled tokens for prefill-complete requests; return finished ids."""
+    @staticmethod
+    def _normalize_tokens(request_id: str, tokens: int | Sequence[int]) -> list[int]:
+        """Widen int-sugar to a list; reject non-int tokens loudly (m8 D2/D3) —
+        an unconverted SampledToken would silently defeat the EOS comparison."""
+        token_list = [tokens] if isinstance(tokens, int) else list(tokens)
+        for token in token_list:
+            if isinstance(token, bool) or not isinstance(token, int):
+                raise TypeError(
+                    f"request {request_id!r}: sampled tokens must be ints, "
+                    f"got {token!r} (convert StepOutput via engine_core.token_ids)"
+                )
+        return token_list
+
+    def update(self, sampled: Mapping[str, int | Sequence[int]]) -> tuple[str, ...]:
+        """Commit sampled tokens for prefill-complete requests; return finished ids.
+
+        A bare int is single-token sugar (all pre-m8 call sites); a sequence
+        commits in order with per-token terminal checks — tokens after a
+        terminal token are discarded (speculative shortfall, m8 D3), never
+        routed through the surplus-trim path.
+        """
         finished: list[str] = []
-        for request_id, token_id in sampled.items():
+        for request_id, tokens in sampled.items():
+            was_list = not isinstance(tokens, int)
+            token_list = self._normalize_tokens(request_id, tokens)
             state = self._states.get(request_id)
             if state is None:
                 raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
-            if state.status is not _Status.RUNNING:
-                if state.surplus_in_flight > 0:
-                    # scheduled ahead under overlap, then the request finished
-                    # (EOS) or was preempted/aborted: trim silently
-                    state.surplus_in_flight -= 1
-                    continue
-                raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
-            if not state.prefill_done or state.in_flight < 1:
-                raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
-            state.in_flight -= 1
-            state.outputs.append(token_id)
-            is_eos = (
-                state.request.eos_token_id is not None
-                and token_id == state.request.eos_token_id
-            )
-            if is_eos or len(state.outputs) >= state.request.max_new_tokens:
-                state.surplus_in_flight += state.in_flight
-                state.in_flight = 0
-                self._finish(state)
-                finished.append(request_id)
+            # a speculative chunk's tokens arrive as one list commit; its
+            # recorded reservation is how the rejected-draft shortfall is
+            # released exactly (m8 D3 — never via arithmetic on k)
+            spec_expected = state.spec_in_flight if was_list and state.spec_in_flight else 0
+            if spec_expected:
+                state.spec_in_flight = 0
+            committed_here = 0
+            finished_here = False
+            for token_id in token_list:
+                if state.status is not _Status.RUNNING:
+                    if finished_here:
+                        break  # terminal mid-list: discard the rest
+                    if state.surplus_in_flight > 0:
+                        # scheduled ahead under overlap, then the request finished
+                        # (EOS) or was preempted/aborted: trim silently
+                        state.surplus_in_flight -= 1
+                        continue
+                    raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
+                if not state.prefill_done or state.in_flight < 1:
+                    raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
+                state.in_flight -= 1
+                state.outputs.append(token_id)
+                committed_here += 1
+                reason = self._terminal_reason(state, token_id)
+                if reason is not None:
+                    state.surplus_in_flight += state.in_flight
+                    state.in_flight = 0
+                    state.finish_reason = reason
+                    self._finish(state)
+                    finished.append(request_id)
+                    finished_here = True
+            if spec_expected:
+                shortfall = spec_expected - committed_here
+                if shortfall > 0:
+                    if state.status is _Status.RUNNING:
+                        # rejected draft slots never arrive: release directly,
+                        # NOT via surplus (surplus means "WILL arrive, trim it")
+                        state.in_flight -= shortfall
+                    else:
+                        # terminal/aborted: the terminal path moved the whole
+                        # remainder to surplus — the never-arriving part leaves
+                        state.surplus_in_flight = max(
+                            0, state.surplus_in_flight - shortfall
+                        )
         return tuple(finished)
+
+    @staticmethod
+    def _terminal_reason(state: _RequestState, token_id: int) -> str | None:
+        """Stop semantics per committed token (m8 D1): EOS/stop_token_ids gated
+        by min_tokens and ignore_eos; max_new_tokens is the length backstop."""
+        request = state.request
+        is_eos = (
+            not request.ignore_eos
+            and request.eos_token_id is not None
+            and token_id == request.eos_token_id
+        )
+        is_stop = is_eos or token_id in request.stop_token_ids
+        if is_stop and len(state.outputs) >= request.min_tokens:
+            return "stop"
+        if len(state.outputs) >= request.max_new_tokens:
+            return "length"
+        return None

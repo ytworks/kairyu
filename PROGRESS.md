@@ -22,6 +22,11 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
+| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, `docs/design/m8-engine-cpu.md`): HF tokenizer seam + SSE-safe stop strings, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. 437 tests, 95% cov. |
+| M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
+| M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
+| M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
+| M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -39,6 +44,126 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M14 complete: quantized checkpoints load and RUN on CPU
+- What: 514 → 530 tests. kairyu/quant/ reference implementations with formats
+  verified against AutoAWQ/AutoGPTQ/vLLM/compressed-tensors source and LIVE
+  Hub safetensors headers: FP8-E4M3 (clamp-before-cast — torch CPU cast is
+  non-saturating), INT8 W8A8 (exact int32 accumulation — the GPU kernels'
+  bit-exact oracle), AWQ (out-axis nibble ORDER [0,2,4,6,1,3,5,7], no +1),
+  GPTQ (sequential in-axis packing, z-1 storage offset, g_idx always), NVFP4
+  (low-nibble-even packing, bit-3 sign, fp8 block scales × fp32 global, RNE
+  boundaries). QuantizedLinear modules hold packed buffers under checkpoint
+  names; forward_fused is the Triton seam (kairyu/kernels/ stubs, gpu-marked).
+  Loader: linear_factory hook live, state_dict-based iteration (non-persistent
+  buffers excluded), quantized payloads verbatim + assign=True + lm_head
+  re-tie. Guards: AWQ non-gemm, GPTQ v2/non-4bit, compressed-tensors FP4
+  (different names + inverted scale) all rejected loudly. Flagship gate: all
+  five schemes quantize the tiny llama, write HF-format checkpoints, load,
+  and generate through the FULL engine on CPU (8-bit ≥50% greedy agreement;
+  4-bit non-degenerate at hidden-64).
+- Refs: `docs/design/m14-quant-compute.md` (Status: Implemented);
+  `kairyu/quant/{fp8,int8,awq,gptq,nvfp4,linear}.py`, `kairyu/kernels/`,
+  `tests/gpu/test_quant_kernels.py`
+
+### 2026-07-03 — [progress] M13 complete: AttentionBackend seam + FlashInfer adapter + MLA reference
+- What: attention extracted into a swappable seam (501 → 514 tests, all M12
+  parity suites unchanged — the extraction is behavior-free). Backends are
+  plain objects (never nn.Module; state_dict safety), ONE instance shared
+  across layers (FlashInfer workspace/plan-cache is per-instance).
+  FlashInfer adapter written locally with the reviewed API pins (head_dim_qk
+  spelling, workspace buffers, explicit q/kv dtypes, int32 host/device index
+  arrays, bottom-right causal assertion, per-chunk plan cache) — logic
+  CPU-pinned against an injected fake module, kernels mirrored in tests/gpu/
+  (7 deselected until deploy day). MLA reference math (decompress ≡ absorbed
+  ≡ naive oracle at the pinned (d_nope+d_rope)^-0.5 scale; shared single-head
+  k_pe; post-RoPE cache layout) — M15's trusted oracle for the highest-risk
+  kernel work. Selector: env override + hw-profile kernel tier;
+  build_engine_loop(model_path=) picks the backend from probe() — deploy day
+  is config-free.
+- Refs: `docs/design/m13-attention-backend.md` (Status: Implemented);
+  `kairyu/engine/core/attention/{__init__,torch_backend,mla_torch,flashinfer_gpu,selector}.py`,
+  `tests/gpu/test_flashinfer_gpu.py`
+
+### 2026-07-03 — [progress] M12 complete: real dense models with transformers parity
+- What: all five m12 phases landed (471 → 501 tests, 95% cov). ModelConfig
+  parses both config.json generations; DenseDecoder (HF-exact module tree)
+  covers Llama-3.x / Qwen2 / Qwen3 with verified numerics (rotate_half RoPE,
+  llama3 scaling, Qwen3 per-head qk-norm, rectangular chunk masks — SDPA
+  is_causal measured wrong over cached prefixes); layer-major PagedKVPool;
+  PagedModelRunner behind the m8 ModelRunner protocol with the canonical
+  state-access contract, KV-write skip below num_cached_tokens, and
+  SpeculativeRunner-compatible decode reads. Flagship gates: fp32 logits
+  < 1e-4 vs transformers AND full-engine greedy == hf.generate through
+  chunked prefill / radix reuse / page-crossing decode / EOS, per arch.
+  Loader (tied embeddings mandatory — safetensors omits lm_head; eos LISTS
+  from generation_config; quantized checkpoints fail fast until M14);
+  KairyuBackend(model_path=) + kairyu-proc model_path (port reported before
+  model load). pytest markers gpu/hf_hub/dist (+strict, default-deselected);
+  scripts/parity_real_model.py is the opt-in pre-deploy real-model gate.
+- Refs: `docs/design/m12-model-zoo.md` (Status: Implemented);
+  `kairyu/models/{config,layers,attention,llama,loader}.py`,
+  `kairyu/engine/core/{kv_pool,model_runner}.py`, `scripts/parity_real_model.py`
+
+### 2026-07-03 — [progress] M9 complete: the API is truthful (usage, templates, logprobs, n>1)
+- What: all five m9 phases landed (437 → 471 tests, 94% cov; goal G6 gates
+  P-A1..P-A5 CPU-green). D1 usage truth — GenerationUsage reported by every
+  backend (kairyu/proc/mock/openai-passthrough incl. cached_tokens), OpenAI
+  include_usage chunk contract exact, batch JSONL outputs truthful. D2 HF Jinja
+  chat templates with transformers byte-match parity (trim/lstrip blocks,
+  loopcontrols, HF tojson), per-model DeploymentSpec.chat_templates threaded to
+  HTTP AND batch identically. D3 logprobs surfaced (TokenLogprob with bytes,
+  chunk-choice placement), /v1/completions (legacy four-array logprobs), real
+  n>1 via engine sub-request fan-out (seed identity at i=0, cumulative merged
+  streams, sibling aborts, prompt counted once). D4 response_format validated
+  (400 not crash) + server-level schema-valid-JSON gate with grammar-stop.
+  D5 serving_bench: bearer auth, token-granularity TPOT via include_usage with
+  labeled chunk fallback, timestamped results JSON.
+- Refs: `docs/design/m9-truthful-api.md` (Status: Implemented);
+  `kairyu/entrypoints/server/{app,protocol}.py`, `kairyu/entrypoints/chat_template.py`,
+  `kairyu/outputs.py`, `kairyu/engine/kairyu_backend.py`, `bench/serving_bench.py`
+
+### 2026-07-03 — [progress] M8 complete: engine CPU core is real (tokens, sampling, spec decode, process split)
+- What: all six m8 phases landed (328 → 437 tests, 95% cov). D1 tokenizer seam
+  (HF `tokenizers` + incremental detokenizer, SSE-safe stop-string holdback,
+  `finish_early` radix-commit path, finish_reason). D2 real sampling
+  (SampledToken/StepOutput protocol ripple across every runner and bench;
+  grammar-mask-first with xgrammar stop-token termination; raw-logits logprobs;
+  sha256+splitmix64 seeding). D3 scheduler multi-token commit (capped spec
+  reservation via chunk.num_tokens, capacity degrade-to-1, budget-accurate,
+  exact shortfall release via recorded reservation). D4 n-gram
+  SpeculativeRunner (overlay-state scoring, spec ≡ greedy pinned with measured
+  acceptance > 0, per-request bypass gating). D5 NVFP4/modelopt/INT8 detection,
+  HardwareProfile capability matrix + env-record writer, safetensors
+  CheckpointReader with get_slice (M16 seam). D6 process split: shared
+  `EngineLoop` extracted; ZMQ ROUTER `engine_service` child process (msgpack,
+  ephemeral-port pipe handshake) + `kairyu-proc` backend (lazy zmq.asyncio,
+  death detection, shutdown escalation, atexit); parity/stop/abort/usage-fields
+  pinned across the process boundary. New deps: tokenizers/safetensors ([hf]
+  extra), pyzmq/msgpack ([fleet] extra); coverage configured for the spawned
+  service.
+- Refs: `docs/design/m8-engine-cpu.md` (Status: Implemented);
+  `kairyu/engine/{tokenizer,engine_loop,zmq_backend}.py`,
+  `kairyu/engine/core/{sampler,sampling_types,spec_runner,hw_profile,weights,engine_service}.py`
+
+### 2026-07-03 — [design] M8 engine-CPU-core designed and reviewed (local-complete program begins)
+- What: `docs/design/m8-engine-cpu.md` — real tokenizer/incremental detokenizer
+  (toy stays default), real sampling (SampledToken, StepOutput protocol ripple,
+  grammar-mask-first, raw-logits logprobs, sha256 seeds), scheduler multi-token
+  commit (capped reservation, degrade-not-stall, scheduler-enforced spec
+  precondition), n-gram SpeculativeRunner (overlay-state scoring, per-request
+  gating), quant/NVFP4 detection + HardwareProfile + safetensors reader, and the
+  ZMQ/msgpack API↔engine process split. 3-reviewer panel APPROVE-WITH-AMENDMENTS;
+  amendments applied inline (§6): stop-string SSE holdback + `finish_early`
+  radix-commit path, step-thread op discipline (fixes a pre-existing add/abort
+  race), budget/watermark accounting for spec chunks, loud update() validation.
+- Why: The local-complete mandate (implement everything before GPU hardware;
+  only measurement/tuning waits) starts with the engine core. Implementation
+  milestones M8–M19 continue the m1..m7 numbering and map to roadmap tracks:
+  M8/M9→E1-E2/P-A, M10→F1-F2, M11→P-B/P-C/F5, M12–M18→E-track local halves
+  (model zoo, attention backends, quant compute, MoE/MLA, gloo/NCCL distributed,
+  CUDA-graph/EAGLE seams, KV transport), M19→deploy packaging.
+- Refs: `docs/design/m8-engine-cpu.md`; roadmap §4 Track E/P
 
 ### 2026-07-03 — [amendment] G2 hardware contract widened to capability profiles (A100+); fleet-scale decisions amended
 - What: G2 §7 gains 2026-07-03 amendments: the goal now spans capability profiles

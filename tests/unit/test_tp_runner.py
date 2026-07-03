@@ -5,6 +5,7 @@ import pytest
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.engine_core import EngineCore
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 from kairyu.engine.core.step_input import RequestSnapshot
 from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
@@ -20,14 +21,15 @@ class _DeterministicRunner:
         self.offset = offset
         self.states_seen: list[dict] = []
 
-    def execute(self, scheduled, states) -> dict[str, int]:
+    def execute(self, scheduled, states) -> dict[str, tuple[SampledToken, ...]]:
         self.states_seen.append(dict(states))
         sampled = {}
         for chunk in scheduled:
             state = states[chunk.request_id]
             if not chunk.is_prefill or state.prefill_done:
                 seed = sum(state.request.prompt_token_ids)
-                sampled[chunk.request_id] = (seed + 31 * chunk.position + self.offset) % VOCAB
+                token = (seed + 31 * chunk.position + self.offset) % VOCAB
+                sampled[chunk.request_id] = (SampledToken(token),)
         return sampled
 
 

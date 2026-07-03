@@ -13,6 +13,19 @@ dependencies = [
     "uvicorn>=0.30",
     "prometheus-client>=0.20",
     "python-multipart>=0.0.9",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+# Real-model support (tokenizer/weights); heavy GPU kernels live in the gpu extra.
+hf = [
+    "tokenizers>=0.20",
+    "safetensors>=0.5",
+]
+# Process-split engine service and fleet transports (m8 D6, G5).
+fleet = [
+    "pyzmq>=26",
+    "msgpack>=1.0",
 ]
 
 [dependency-groups]
@@ -23,6 +36,12 @@ dev = [
     "ruff>=0.6",
     "torch>=2.6",
     "xgrammar>=0.2.3",
+    "tokenizers>=0.20",
+    "safetensors>=0.5",
+    "pyzmq>=26",
+    "msgpack>=1.0",
+    "transformers>=5.12,<5.13",  # pinned band: template goldens byte-match (m9 D2)
+    "openai>=1.50",
 ]
 
 [project.scripts]
@@ -39,7 +58,20 @@ packages = ["kairyu"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "--cov=kairyu --cov-report=term-missing"
+# gpu/hf_hub are deselected by default (deploy-day / opt-in networked suites);
+# escape hatch: `pytest -m gpu` / `pytest -m hf_hub` (CLI -m overrides addopts)
+addopts = "--cov=kairyu --cov-report=term-missing --strict-markers -m 'not gpu and not hf_hub'"
+markers = [
+    "gpu: requires CUDA hardware (runs on deploy day via scripts/gpu_gates)",
+    "hf_hub: downloads real weights from the HF Hub (opt-in, networked)",
+    "dist: spawns torch.distributed multi-process workers (slower)",
+]
+
+[tool.coverage.run]
+# the spawned engine service (m8 D6) flushes coverage on clean exit
+concurrency = ["thread", "multiprocessing"]
+sigterm = true
+omit = ["*/*_gpu.py", "kairyu/kernels/*"]
 
 [tool.ruff]
 line-length = 100

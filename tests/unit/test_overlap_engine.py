@@ -3,6 +3,7 @@ import time
 from kairyu.engine.core.engine_core import EngineCore
 from kairyu.engine.core.overlap import OverlapEngineCore
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
 PAGE = 4
@@ -24,7 +25,7 @@ class PositionRunner:
         if self._latency_s:
             time.sleep(self._latency_s)
         sampled = {
-            chunk.request_id: 1000 + chunk.position
+            chunk.request_id: (SampledToken(1000 + chunk.position),)
             for chunk in scheduled
             if not chunk.is_prefill or states[chunk.request_id].prefill_done
         }

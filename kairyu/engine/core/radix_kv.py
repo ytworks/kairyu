@@ -65,10 +65,19 @@ class KVAllocation:
 
 
 class RadixKVCache:
+    @property
+    def num_pages(self) -> int:
+        return self._num_pages
+
+    @property
+    def page_size(self) -> int:
+        return self._page_size
+
     def __init__(self, num_pages: int, page_size: int = 16) -> None:
         if page_size < 1:
             raise ValueError(f"page_size must be >= 1, got {page_size}")
         self._pool = PagePool(num_pages)
+        self._num_pages = num_pages
         self._page_size = page_size
         self._root = _Node(key=(), pages=(), parent=None)
         self._root.ref_count = 1  # never evictable

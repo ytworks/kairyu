@@ -74,8 +74,13 @@ class TPModelRunner:
 
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
-    ) -> dict[str, int]:
-        """Snapshot once, broadcast, run every rank, gather, and check agreement."""
+    ) -> dict[str, tuple]:
+        """Snapshot once, broadcast, run every rank, gather, and check agreement.
+
+        Agreement compares token ids only (m8 D2 review): the m5 D1 invariant
+        is about tokens; logprob float equality would be brittle on GPU. Rank
+        0's full StepOutput (with logprobs) is what the driver returns.
+        """
         step_input = snapshot_step(scheduled, states)
         driver_comm = self._comms[_DRIVER_RANK]
         sent = driver_comm.broadcast(step_input, src=_DRIVER_RANK)
@@ -85,12 +90,20 @@ class TPModelRunner:
             received = sent if rank == _DRIVER_RANK else comm.broadcast(None, src=_DRIVER_RANK)
             sampled = runner.execute(received.chunks, received.states_view())
             comm.send(_DRIVER_RANK, dict(sampled))
-        reference: dict[str, int] = driver_comm.recv(_DRIVER_RANK)
+        reference: dict[str, tuple] = driver_comm.recv(_DRIVER_RANK)
+        reference_ids = _agreement_view(reference)
         for rank in range(1, len(self._comms)):
             candidate = driver_comm.recv(rank)
-            if candidate != reference:
+            if _agreement_view(candidate) != reference_ids:
                 raise RuntimeError(
                     f"TP rank {rank} sampled {candidate!r} but rank 0 sampled "
                     f"{reference!r}; TP ranks must agree (design m5 D1)"
                 )
         return reference
+
+
+def _agreement_view(step_output: dict[str, tuple]) -> dict[str, tuple[int, ...]]:
+    return {
+        request_id: tuple(token.token_id for token in tokens)
+        for request_id, tokens in step_output.items()
+    }

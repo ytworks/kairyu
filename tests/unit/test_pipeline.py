@@ -18,6 +18,7 @@ from kairyu.engine.core.pipeline import (
     SyncRunnerAdapter,
 )
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
 _VOCAB = 50_000
@@ -30,7 +31,7 @@ class _ToyRunner:
             state = states[chunk.request_id]
             if not chunk.is_prefill or state.prefill_done:
                 seed = sum(state.request.prompt_token_ids)
-                sampled[chunk.request_id] = (seed + 31 * chunk.position) % _VOCAB
+                sampled[chunk.request_id] = (SampledToken((seed + 31 * chunk.position) % _VOCAB),)
         return sampled
 
 

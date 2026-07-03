@@ -14,6 +14,8 @@ from collections.abc import Mapping
 
 import torch
 
+from kairyu.engine.core.sampler import Sampler
+from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 
 _DEFAULT_VOCAB = 128
@@ -71,11 +73,23 @@ class TinyAttentionLM:
 
 
 class TorchPagedRunner:
-    """ModelRunner writing/reading KV through the scheduler's page tables."""
+    """ModelRunner writing/reading KV through the scheduler's page tables.
 
-    def __init__(self, model: TinyAttentionLM, num_pages: int, page_size: int) -> None:
+    Without a ``Sampler`` the runner is pure greedy (pre-m8 behavior); with one,
+    logits route through the full sampling pipeline (penalties, temperature,
+    filters, grammar mask) — same seam the real model runner (M12) uses.
+    """
+
+    def __init__(
+        self,
+        model: TinyAttentionLM,
+        num_pages: int,
+        page_size: int,
+        sampler: Sampler | None = None,
+    ) -> None:
         self._model = model
         self._page_size = page_size
+        self._sampler = sampler
         self._k_pool = torch.zeros(num_pages, page_size, model.dim)
         self._v_pool = torch.zeros(num_pages, page_size, model.dim)
 
@@ -92,15 +106,32 @@ class TorchPagedRunner:
         values = self._v_pool[page_index].reshape(-1, self._model.dim)[:seq_len]
         return keys, values
 
-    def _sample(self, query_token: int, seq_len: int, pages: list[int]) -> int:
+    def _sample(
+        self,
+        state: object,
+        query_token: int,
+        seq_len: int,
+        pages: list[int],
+        position: int,
+    ) -> SampledToken:
         keys, values = self._gather_kv(pages, seq_len)
         logits = self._model.logits_for_last(query_token, keys, values)
-        return int(torch.argmax(logits).item())
+        if self._sampler is None:
+            return SampledToken(int(torch.argmax(logits).item()))
+        return self._sampler.sample(
+            state.request.request_id,
+            state.request.sampling,
+            position,
+            logits,
+            prompt=state.request.prompt_token_ids,
+            outputs=tuple(state.outputs),
+            eos_token_id=state.request.eos_token_id,
+        )
 
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
-    ) -> dict[str, int]:
-        sampled: dict[str, int] = {}
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        sampled: dict[str, tuple[SampledToken, ...]] = {}
         for chunk in scheduled:
             state = states[chunk.request_id]
             prompt = state.request.prompt_token_ids
@@ -110,8 +141,10 @@ class TorchPagedRunner:
                 for position in range(end - chunk.num_tokens, end):
                     self._write_kv(prompt[position], position, pages)
                 if state.prefill_done and end == len(prompt):
-                    sampled[chunk.request_id] = self._sample(
-                        prompt[-1], seq_len=len(prompt), pages=pages
+                    sampled[chunk.request_id] = (
+                        self._sample(
+                            state, prompt[-1], seq_len=len(prompt), pages=pages, position=0
+                        ),
                     )
             else:
                 # decode for output index p: previous token's KV lands at
@@ -120,7 +153,9 @@ class TorchPagedRunner:
                 input_token = state.outputs[p - 1] if p > 0 else prompt[-1]
                 absolute = len(prompt) + p - 1
                 self._write_kv(input_token, absolute, pages)
-                sampled[chunk.request_id] = self._sample(
-                    input_token, seq_len=absolute + 1, pages=pages
+                sampled[chunk.request_id] = (
+                    self._sample(
+                        state, input_token, seq_len=absolute + 1, pages=pages, position=p
+                    ),
                 )
         return sampled
