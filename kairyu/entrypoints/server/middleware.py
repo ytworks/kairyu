@@ -54,7 +54,12 @@ class AuthMiddleware:
         prefix, _, token = header.decode("latin-1").partition(" ")
         if prefix.lower() != "bearer" or not token:
             return False
-        return any(hmac.compare_digest(token, key) for key in self._api_keys)
+        for key in self._api_keys:
+            if hmac.compare_digest(token, key):
+                # m11 A6: downstream tenant resolution reads this
+                _state(scope)["api_key"] = key
+                return True
+        return False
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":

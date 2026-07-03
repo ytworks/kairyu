@@ -114,6 +114,8 @@ class Scheduler:
         decode_token_budget: int | None = None,
         decode_watermark_pages: int = 0,
         speculative_tokens: int = 0,
+        priority_age_s: float | None = None,
+        clock=None,
     ) -> None:
         if max_num_batched_tokens < 1:
             raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
@@ -134,6 +136,14 @@ class Scheduler:
         self._page_size = getattr(kv_cache, "page_size", page_size)
         self._states: dict[str, _RequestState] = {}
         self._waiting: list[str] = []
+        # m11 D6: priority admission — effective priority ages up so low
+        # priorities cannot starve; EngineRequest is frozen, so aging is
+        # computed at sort time from the arrival timestamp
+        import time as _time
+
+        self._clock = clock or _time.monotonic
+        self._priority_age_s = priority_age_s
+        self._arrivals: dict[str, float] = {}
         self._running: list[str] = []
 
     def add_request(self, request: EngineRequest) -> None:
@@ -141,6 +151,7 @@ class Scheduler:
             raise ValueError(f"duplicate request_id {request.request_id!r}")
         self._states[request.request_id] = _RequestState(request)
         self._waiting.append(request.request_id)
+        self._arrivals[request.request_id] = self._clock()
 
     def has_unfinished(self) -> bool:
         return bool(self._waiting or self._running)
@@ -328,7 +339,19 @@ class Scheduler:
             budget -= chunk
         return budget
 
+    def _effective_priority(self, request_id: str) -> float:
+        state = self._states[request_id]
+        priority = float(getattr(state.request, "priority", 0))
+        if self._priority_age_s:
+            waited = self._clock() - self._arrivals.get(request_id, self._clock())
+            priority += waited / self._priority_age_s  # starvation guard
+        return priority
+
     def _admit_waiting(self, budget: int, plan: list[ScheduledChunk]) -> int:
+        if self._priority_age_s is not None:
+            # highest effective priority first; FIFO within ties (stable sort);
+            # the head still BLOCKS on KVCacheFull — no skip-ahead (m11 A11)
+            self._waiting.sort(key=lambda rid: -self._effective_priority(rid))
         while self._waiting and budget > 0 and len(self._running) < self._max_seqs:
             request_id = self._waiting[0]
             state = self._states[request_id]

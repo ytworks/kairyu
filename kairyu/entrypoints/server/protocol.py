@@ -5,11 +5,19 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class ContentPart(BaseModel):
+    """OpenAI vision content part (m11 D5): text or image_url."""
+
+    type: str
+    text: str | None = None
+    image_url: dict | None = None
+
+
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     role: str
-    content: str | None = None
+    content: str | list[ContentPart] | None = None
     name: str | None = None
     tool_call_id: str | None = None
 
@@ -72,7 +80,7 @@ class ToolCall(BaseModel):
 
 class ResponseMessage(BaseModel):
     role: str = "assistant"
-    content: str | None = None
+    content: str | list[ContentPart] | None = None
     tool_calls: list[ToolCall] | None = None
 
 
@@ -101,11 +109,13 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[Choice]
     usage: Usage = Usage()
+    # m11 D1: explicit opt-in trace (X-Kairyu-Trace: 1); excluded when None
+    kairyu_trace: list[str] | None = Field(default=None, exclude=False)
 
 
 class ChunkDelta(BaseModel):
     role: str | None = None
-    content: str | None = None
+    content: str | list[ContentPart] | None = None
     tool_calls: list[ToolCall] | None = None
 
 

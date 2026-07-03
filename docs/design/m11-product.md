@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (1-reviewer panel with
+Status: **Implemented** (2026-07-03). Reviewed (1-reviewer panel with
 file/line evidence + OpenAI SDK verification, 2026-07-03; §5 binding).
 Milestone: M11 (roadmap P-B/P-C + F5 CPU halves; goal G6)
 Date: 2026-07-03

@@ -35,6 +35,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03). 610 tests. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, `docs/design/m11-product.md`). 627 tests. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
@@ -50,6 +51,34 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M11 complete: Fugu-class product surface + tenancy
+- What: 610 → 627 tests. Usage threaded through MoA/Conductor/Orchestrator
+  (was dropped at three layers) — the AUTO path now returns REAL summed
+  usage (the m9 usage=None fallback removed at that call site only).
+  run_chat streaming: direct route streams live token deltas; multi-stage
+  routes emit SSE COMMENT keep-alives (data: lines would break the OpenAI
+  SDK) then a buffered final; X-Kairyu-Trace: 1 opts into a kairyu_trace
+  field. Tiered auto models (orchestrators dict; kairyu-auto-max routes
+  multi_agent through MoA — previously dead code). Tenancy v1: auth stores
+  the matched key in scope state, TenantLimitMiddleware runs INSIDE auth
+  (401 wins; unauthenticated never drains buckets), per-tenant token
+  buckets, O_APPEND JSONL usage ledger written from handlers,
+  /admin/usage; isolation + exact reconciliation gates. /v1/responses
+  (reviewed subset: exact output-item shapes, input/output_tokens usage
+  names, instructions, previous_response_id store; stream descoped) and
+  /v1/embeddings (base64 = the SDK default) — both OpenAI SDK round-trip
+  tested (openai>=1.66). Vision wire format (content-parts flattening
+  everywhere incl. batch-worker path; image parts 400 on non-vision
+  engines). F5 CPU: priority admission with aging (injectable clock,
+  effective priority at sort time, head still blocks on KVCacheFull),
+  AdmissionController (gateway-observable TTFT EMA; admit/defer/shed),
+  autoscale_decision hysteresis. Open WebUI compose + frontier_compare
+  bench harness (scoreboard schema pinned).
+- Refs: `docs/design/m11-product.md` (Status: Implemented);
+  `kairyu/entrypoints/server/{tenancy,extra_routes,slo}.py`,
+  `kairyu/orchestration/{orchestrator,conductor,moa}.py`,
+  `bench/frontier_compare.py`, `deploy/compose/docker-compose.webui.yaml`
 
 ### 2026-07-03 — [progress] M10b complete: KV-aware routing
 - What: 594 → 610 tests. PrefixIndex (text-chunk approximate trie — the

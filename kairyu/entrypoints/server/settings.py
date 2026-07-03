@@ -37,6 +37,10 @@ class ServerSettings(BaseModel):
         default=False,
         description="Enable OTel spans (needs the otel extra; no-op without it).",
     )
+    usage_ledger_path: str | None = Field(
+        default=None,
+        description="JSONL usage-ledger path; None disables metering (m11 D3).",
+    )
 
     def resolve_api_keys(self) -> frozenset[str]:
         """Read keys from the configured env var; fail loud on an empty var."""
