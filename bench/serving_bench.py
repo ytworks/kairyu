@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as _datetime
 import json
 import statistics
 import time
@@ -33,13 +34,24 @@ class RequestMetrics:
     ttft_s: float
     total_s: float
     output_chunks: int
+    completion_tokens: int | None = None  # from the include_usage final chunk
 
     @property
     def tpot_s(self) -> float:
-        decode_chunks = self.output_chunks - 1
-        if decode_chunks <= 0:
+        """Token-granularity when the target reported usage (m9 D5); falls
+        back to chunk granularity — the method is labeled in the output."""
+        units = (
+            self.completion_tokens - 1
+            if self.completion_tokens is not None
+            else self.output_chunks - 1
+        )
+        if units is None or units <= 0:
             return 0.0
-        return (self.total_s - self.ttft_s) / decode_chunks
+        return (self.total_s - self.ttft_s) / units
+
+    @property
+    def token_granular(self) -> bool:
+        return self.completion_tokens is not None
 
 
 def load_prompts(dataset: Path | None, num_requests: int) -> tuple[list[str], str]:
@@ -66,7 +78,11 @@ def load_prompts(dataset: Path | None, num_requests: int) -> tuple[list[str], st
 
 
 async def run_one(
-    client: httpx.AsyncClient, model: str, prompt: str, max_tokens: int
+    client: httpx.AsyncClient,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    request_usage: bool = True,
 ) -> RequestMetrics:
     body = {
         "model": model,
@@ -74,22 +90,37 @@ async def run_one(
         "max_tokens": max_tokens,
         "stream": True,
     }
+    if request_usage:
+        body["stream_options"] = {"include_usage": True}
     start = time.perf_counter()
     ttft = None
     chunks = 0
+    completion_tokens = None
     async with client.stream("POST", "/v1/chat/completions", json=body) as response:
+        if response.status_code == 400 and request_usage:
+            # target rejects stream_options: retry once without (labeled fallback)
+            return await run_one(client, model, prompt, max_tokens, request_usage=False)
         response.raise_for_status()
         async for line in response.aiter_lines():
             if not line.startswith(_SSE_PREFIX) or line == f"{_SSE_PREFIX}[DONE]":
                 continue
             chunk = json.loads(line[len(_SSE_PREFIX):])
-            if any(choice["delta"].get("content") for choice in chunk.get("choices", [])):
+            if chunk.get("usage"):  # final usage chunk (empty choices)
+                completion_tokens = chunk["usage"].get("completion_tokens")
+            if any(
+                (choice.get("delta") or {}).get("content")
+                for choice in chunk.get("choices", [])
+            ):
                 chunks += 1
                 if ttft is None:
                     ttft = time.perf_counter() - start
     total = time.perf_counter() - start
-    return RequestMetrics(ttft_s=ttft if ttft is not None else total, total_s=total,
-                          output_chunks=chunks)
+    return RequestMetrics(
+        ttft_s=ttft if ttft is not None else total,
+        total_s=total,
+        output_chunks=chunks,
+        completion_tokens=completion_tokens,
+    )
 
 
 def _percentile(sorted_values: list[float], fraction: float) -> float:
@@ -122,7 +153,10 @@ async def run_benchmark(args: argparse.Namespace) -> None:
         Path(args.dataset) if args.dataset else None, args.num_requests
     )
     semaphore = asyncio.Semaphore(args.concurrency)
-    async with httpx.AsyncClient(base_url=args.base_url, timeout=args.timeout) as client:
+    headers = {"Authorization": f"Bearer {args.api_key}"} if args.api_key else {}
+    async with httpx.AsyncClient(
+        base_url=args.base_url, timeout=args.timeout, headers=headers
+    ) as client:
 
         async def bounded(prompt: str) -> RequestMetrics:
             async with semaphore:
@@ -134,19 +168,40 @@ async def run_benchmark(args: argparse.Namespace) -> None:
 
     ttfts = sorted(metric.ttft_s for metric in results)
     tpots = [metric.tpot_s for metric in results if metric.tpot_s > 0]
+    token_granular = all(metric.token_granular for metric in results)
+    tpot_method = "token" if token_granular else "chunk"
     within_slo = sum(1 for metric in results if metric.ttft_s <= args.ttft_slo_s)
+    summary = {
+        "dataset": dataset_label,
+        "requests": len(results),
+        "wall_s": round(wall, 3),
+        "ttft_p50_ms": round(statistics.median(ttfts) * 1e3, 2),
+        "ttft_p99_ms": round(_percentile(ttfts, 0.99) * 1e3, 2),
+        "tpot_mean_ms": round(statistics.mean(tpots) * 1e3, 3) if tpots else None,
+        "tpot_method": tpot_method,  # labeled: token (usage-true) vs chunk fallback
+        "throughput_rps": round(len(results) / wall, 2),
+        "goodput_rps": round(within_slo / wall, 2),
+    }
     print(f"target={args.base_url} model={args.model} dataset={dataset_label}")
     print(f"requests={len(results)} concurrency={args.concurrency} wall={wall:.2f}s")
     print(
-        f"TTFT p50={statistics.median(ttfts) * 1e3:.1f}ms "
-        f"p99={_percentile(ttfts, 0.99) * 1e3:.1f}ms"
+        f"TTFT p50={summary['ttft_p50_ms']}ms p99={summary['ttft_p99_ms']}ms"
     )
     if tpots:
-        print(f"TPOT mean={statistics.mean(tpots) * 1e3:.2f}ms/token (chunk-granularity)")
+        print(f"TPOT mean={summary['tpot_mean_ms']}ms/token ({tpot_method}-granularity)")
     print(
-        f"throughput={len(results) / wall:.1f} req/s; "
-        f"goodput(TTFT<={args.ttft_slo_s}s)={within_slo / wall:.1f} req/s"
+        f"throughput={summary['throughput_rps']} req/s; "
+        f"goodput(TTFT<={args.ttft_slo_s}s)={summary['goodput_rps']} req/s"
     )
+    if args.results_dir:
+        stamp = _datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
+        results_dir = Path(args.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        out = results_dir / f"{stamp}-serving.json"  # timestamped: same-day safe
+        out.write_text(
+            json.dumps({"config": build_run_config(args), "summary": summary}, indent=2)
+        )
+        print(f"results written to {out}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -159,6 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--ttft-slo-s", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--api-key", default=None,
+                        help="Bearer token for authenticated targets (m9 D5)")
+    parser.add_argument("--results-dir", default="bench/results",
+                        help="Write a timestamped results JSON here ('' to disable)")
     # M5 topology labels (design m5 D6); recorded in the run config for G2 §8.
     parser.add_argument("--tensor-parallel", type=int, default=1,
                         help="TP degree of the target server (results label)")

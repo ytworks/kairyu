@@ -110,6 +110,20 @@ def _parse_tool_calls(text: str) -> list[ToolCall]:
     return calls
 
 
+def _validate_response_format(response_format: dict | None) -> str | None:
+    """400 (not an engine crash) for malformed response_format (m9 D4)."""
+    if response_format is None:
+        return None
+    kind = response_format.get("type")
+    if kind not in ("text", "json_object", "json_schema"):
+        return f"response_format.type must be text, json_object or json_schema, got {kind!r}"
+    if kind == "json_schema":
+        schema = (response_format.get("json_schema") or {}).get("schema")
+        if not isinstance(schema, dict):
+            return "response_format.json_schema.schema must be a JSON schema object"
+    return None
+
+
 def _invalid_request(message: str) -> JSONResponse:
     return JSONResponse(
         status_code=400,
@@ -494,6 +508,9 @@ def create_app(
             return _invalid_request("top_logprobs requires logprobs to be true")
         if request.top_logprobs is not None and not 0 <= request.top_logprobs <= 20:
             return _invalid_request("top_logprobs must be between 0 and 20")
+        format_error = _validate_response_format(request.response_format)
+        if format_error is not None:
+            return _invalid_request(format_error)
         include_usage = bool(request.stream_options and request.stream_options.include_usage)
         # rendered after model resolution: templates are per served model (m9 D2)
         prompt = render_prompt(request, chat_templates)
