@@ -12,10 +12,12 @@ the token being generated).
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import KW_ONLY, dataclass, field
 from enum import Enum
 
 from kairyu.engine.core.radix_kv import KVAllocation, KVCacheFull, RadixKVCache
+from kairyu.engine.core.sampling_types import EngineSampling
 
 _DEFAULT_TOKEN_BUDGET = 2048
 _DEFAULT_MAX_SEQS = 256
@@ -34,6 +36,7 @@ class EngineRequest:
     min_tokens: int = 0
     ignore_eos: bool = False
     priority: int = 0  # admission ordering lands in M11; field reserved here
+    sampling: EngineSampling = field(default_factory=EngineSampling)
 
 
 class _Status(Enum):
@@ -349,31 +352,56 @@ class Scheduler:
             self._kv.free_private_pages(tuple(state.decode_pages))
             state.decode_pages.clear()
 
-    def update(self, sampled: dict[str, int]) -> tuple[str, ...]:
-        """Commit sampled tokens for prefill-complete requests; return finished ids."""
+    @staticmethod
+    def _normalize_tokens(request_id: str, tokens: int | Sequence[int]) -> list[int]:
+        """Widen int-sugar to a list; reject non-int tokens loudly (m8 D2/D3) —
+        an unconverted SampledToken would silently defeat the EOS comparison."""
+        token_list = [tokens] if isinstance(tokens, int) else list(tokens)
+        for token in token_list:
+            if isinstance(token, bool) or not isinstance(token, int):
+                raise TypeError(
+                    f"request {request_id!r}: sampled tokens must be ints, "
+                    f"got {token!r} (convert StepOutput via engine_core.token_ids)"
+                )
+        return token_list
+
+    def update(self, sampled: Mapping[str, int | Sequence[int]]) -> tuple[str, ...]:
+        """Commit sampled tokens for prefill-complete requests; return finished ids.
+
+        A bare int is single-token sugar (all pre-m8 call sites); a sequence
+        commits in order with per-token terminal checks — tokens after a
+        terminal token are discarded (speculative shortfall, m8 D3), never
+        routed through the surplus-trim path.
+        """
         finished: list[str] = []
-        for request_id, token_id in sampled.items():
+        for request_id, tokens in sampled.items():
+            token_list = self._normalize_tokens(request_id, tokens)
             state = self._states.get(request_id)
             if state is None:
                 raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
-            if state.status is not _Status.RUNNING:
-                if state.surplus_in_flight > 0:
-                    # scheduled ahead under overlap, then the request finished
-                    # (EOS) or was preempted/aborted: trim silently
-                    state.surplus_in_flight -= 1
-                    continue
-                raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
-            if not state.prefill_done or state.in_flight < 1:
-                raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
-            state.in_flight -= 1
-            state.outputs.append(token_id)
-            reason = self._terminal_reason(state, token_id)
-            if reason is not None:
-                state.surplus_in_flight += state.in_flight
-                state.in_flight = 0
-                state.finish_reason = reason
-                self._finish(state)
-                finished.append(request_id)
+            finished_here = False
+            for token_id in token_list:
+                if state.status is not _Status.RUNNING:
+                    if finished_here:
+                        break  # terminal mid-list: discard the rest
+                    if state.surplus_in_flight > 0:
+                        # scheduled ahead under overlap, then the request finished
+                        # (EOS) or was preempted/aborted: trim silently
+                        state.surplus_in_flight -= 1
+                        continue
+                    raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
+                if not state.prefill_done or state.in_flight < 1:
+                    raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
+                state.in_flight -= 1
+                state.outputs.append(token_id)
+                reason = self._terminal_reason(state, token_id)
+                if reason is not None:
+                    state.surplus_in_flight += state.in_flight
+                    state.in_flight = 0
+                    state.finish_reason = reason
+                    self._finish(state)
+                    finished.append(request_id)
+                    finished_here = True
         return tuple(finished)
 
     @staticmethod

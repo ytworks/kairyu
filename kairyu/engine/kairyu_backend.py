@@ -22,7 +22,9 @@ from dataclasses import dataclass
 
 from kairyu.engine.backend import GenerationRequest, GenerationResult
 from kairyu.engine.core.comm import FakeCommunicator
+from kairyu.engine.core.engine_core import grammar_finished, token_ids
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
 from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
 from kairyu.engine.registry import register_backend
@@ -34,17 +36,19 @@ _DEFAULT_MAX_NEW_TOKENS = 16
 
 
 class _ToyRunner:
-    """Deterministic CPU stand-in for the GPU model forward."""
+    """Deterministic CPU stand-in for the GPU model forward (greedy only —
+    sampling params take effect with a Sampler-equipped runner, m8 D2)."""
 
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
-    ) -> dict[str, int]:
-        sampled = {}
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        sampled: dict[str, tuple[SampledToken, ...]] = {}
         for chunk in scheduled:
             state = states[chunk.request_id]
             if not chunk.is_prefill or state.prefill_done:
                 seed = sum(state.request.prompt_token_ids) if state.request.prompt_token_ids else 0
-                sampled[chunk.request_id] = (seed + 31 * chunk.position) % _VOCAB_SIZE
+                token_id = (seed + 31 * chunk.position) % _VOCAB_SIZE
+                sampled[chunk.request_id] = (SampledToken(token_id),)
         return sampled
 
 
@@ -55,12 +59,57 @@ class _StreamUpdate:
     finished: bool
     finish_reason: str | None
     error: Exception | None = None
+    logprobs: tuple[dict[int, float], ...] | None = None
+    cumulative_logprob: float = 0.0
+
+
+def _engine_sampling(params) -> EngineSampling:
+    """Map API SamplingParams (+ response_format in extra_args) to the engine
+    subset (m8 D2): {"type": "json_object"} -> builtin JSON grammar;
+    {"type": "json_schema", "json_schema": {"schema": ...}} -> schema."""
+    response_format = (params.extra_args or {}).get("response_format") or {}
+    kind = response_format.get("type")
+    json_schema = None
+    json_mode = kind == "json_object"
+    if kind == "json_schema":
+        json_schema = (response_format.get("json_schema") or {}).get("schema") or {}
+    return EngineSampling(
+        temperature=params.temperature,
+        top_k=params.top_k,
+        top_p=params.top_p,
+        min_p=params.min_p,
+        presence_penalty=params.presence_penalty,
+        frequency_penalty=params.frequency_penalty,
+        repetition_penalty=params.repetition_penalty,
+        seed=params.seed,
+        logprobs=params.logprobs,
+        json_schema=json_schema,
+        json_mode=json_mode,
+    )
+
+
+def _logprob_fields(
+    meta: list[SampledToken],
+) -> tuple[tuple[dict[int, float], ...] | None, float]:
+    if not any(token.logprob is not None for token in meta):
+        return None, 0.0
+    entries = []
+    cumulative = 0.0
+    for token in meta:
+        if token.logprob is None:
+            continue
+        cumulative += token.logprob
+        entry = {token.token_id: token.logprob}
+        for top_id, top_lp in token.top_logprobs or ():
+            entry.setdefault(top_id, top_lp)
+        entries.append(entry)
+    return tuple(entries), cumulative
 
 
 class _RequestTrack:
     """Step-thread-only streaming state for one request."""
 
-    __slots__ = ("detok", "stops", "holdback", "consumed", "stable")
+    __slots__ = ("detok", "stops", "holdback", "consumed", "stable", "meta", "pending")
 
     def __init__(self, detok: IncrementalDetokenizer, stops: tuple[str, ...]) -> None:
         self.detok = detok
@@ -68,6 +117,8 @@ class _RequestTrack:
         self.holdback = max((len(stop) for stop in stops), default=1) - 1
         self.consumed = 0
         self.stable = ""
+        self.meta: list[SampledToken] = []  # committed tokens' logprob metadata
+        self.pending: list[SampledToken] = []
 
     def find_stop(self, text: str) -> int | None:
         indices = [index for stop in self.stops if (index := text.find(stop)) != -1]
@@ -123,7 +174,14 @@ class KairyuBackend:
                 raise RuntimeError("engine stall: nothing schedulable")
             sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
             if sampled:
-                self._scheduler.update(sampled)
+                finished = self._scheduler.update(token_ids(sampled))
+                for request_id in grammar_finished(sampled, finished):
+                    # between update() and the next schedule(): safe finish point
+                    self._scheduler.finish_early(request_id)
+                for request_id, tokens in sampled.items():
+                    track = self._tracked.get(request_id)
+                    if track is not None:
+                        track.pending.extend(tokens)
         updates: list[tuple[str, _StreamUpdate]] = []
         for request_id, track in list(self._tracked.items()):
             update = self._track_update(request_id, track)
@@ -141,22 +199,39 @@ class KairyuBackend:
         outputs = self._scheduler.output_tokens(request_id)
         new_ids = outputs[track.consumed :]
         track.consumed = len(outputs)
+        # committed tokens are the prefix of this step's pending metadata;
+        # discarded (post-terminal) tokens drop with the clear
+        track.meta.extend(track.pending[: len(new_ids)])
+        track.pending.clear()
         if new_ids:
             track.stable = track.detok.push(new_ids)
+        logprobs, cumulative = _logprob_fields(track.meta)
         if state.status.value == "finished":
             full = track.detok.finalize()
             stop_at = track.find_stop(full)
-            if stop_at is not None:
-                return _StreamUpdate(outputs, full[:stop_at], True, "stop")
             reason = self._scheduler.finish_reason(request_id) or "length"
-            return _StreamUpdate(outputs, full, True, reason)
+            if stop_at is not None:
+                return _StreamUpdate(
+                    outputs, full[:stop_at], True, "stop",
+                    logprobs=logprobs, cumulative_logprob=cumulative,
+                )
+            return _StreamUpdate(
+                outputs, full, True, reason,
+                logprobs=logprobs, cumulative_logprob=cumulative,
+            )
         stop_at = track.find_stop(track.stable)
         if stop_at is not None:
             # between update() and the next schedule(): the safe finish point
             self._scheduler.finish_early(request_id)
-            return _StreamUpdate(outputs, track.stable[:stop_at], True, "stop")
+            return _StreamUpdate(
+                outputs, track.stable[:stop_at], True, "stop",
+                logprobs=logprobs, cumulative_logprob=cumulative,
+            )
         visible_end = max(0, len(track.stable) - track.holdback)
-        return _StreamUpdate(outputs, track.stable[:visible_end], False, None)
+        return _StreamUpdate(
+            outputs, track.stable[:visible_end], False, None,
+            logprobs=logprobs, cumulative_logprob=cumulative,
+        )
 
     async def _pump(self) -> None:
         try:
@@ -183,6 +258,7 @@ class KairyuBackend:
             stop_token_ids=tuple(params.stop_token_ids or ()),
             min_tokens=params.min_tokens,
             ignore_eos=params.ignore_eos,
+            sampling=_engine_sampling(params),
         )
         track = _RequestTrack(
             detok=IncrementalDetokenizer(self._tokenizer), stops=tuple(params.stop or ())
@@ -199,7 +275,8 @@ class KairyuBackend:
             index=0,
             text=update.text,
             token_ids=update.outputs,
-            cumulative_logprob=0.0,
+            cumulative_logprob=update.cumulative_logprob,
+            logprobs=update.logprobs,
             finish_reason=update.finish_reason,
         )
         return GenerationResult(

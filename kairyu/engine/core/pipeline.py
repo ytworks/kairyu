@@ -17,12 +17,12 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Protocol
 
-from kairyu.engine.core.engine_core import ModelRunner
+from kairyu.engine.core.engine_core import ModelRunner, StepOutput, token_ids
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
 
 
 class StepHandle(Protocol):
-    def result(self) -> dict[str, int]:
+    def result(self) -> StepOutput:
         """Block until this step's sampled tokens land; return them."""
         ...
 
@@ -39,10 +39,10 @@ class AsyncModelRunner(Protocol):
 
 
 class _ResolvedHandle:
-    def __init__(self, sampled: dict[str, int]) -> None:
+    def __init__(self, sampled: StepOutput) -> None:
         self._sampled = sampled
 
-    def result(self) -> dict[str, int]:
+    def result(self) -> StepOutput:
         return self._sampled
 
 
@@ -67,7 +67,7 @@ class StageWorker(Protocol):
         step_index: int,
         scheduled: tuple[ScheduledChunk, ...],
         states: Mapping[str, object],
-    ) -> dict[str, int] | None:
+    ) -> StepOutput | None:
         """Run this stage's layer slice; the final stage returns sampled tokens."""
         ...
 
@@ -85,7 +85,7 @@ class _InFlightStep:
         self.scheduled = scheduled
         self.states = states
         self.next_stage = 0
-        self.sampled: dict[str, int] = {}
+        self.sampled: StepOutput = {}
         self.done = False
 
 
@@ -94,7 +94,7 @@ class _PipelineHandle:
         self._runner = runner
         self._step = step
 
-    def result(self) -> dict[str, int]:
+    def result(self) -> StepOutput:
         while not self._step.done:
             self._runner._tick()
         return self._step.sampled
@@ -188,7 +188,7 @@ class PipelinedEngineCore:
                     continue
             if pending:
                 sampled = pending.popleft().result()
-                finished = self._scheduler.update(sampled) if sampled else ()
+                finished = self._scheduler.update(token_ids(sampled)) if sampled else ()
                 for request_id in finished:
                     self._outputs[request_id] = self._scheduler.output_tokens(request_id)
                 continue

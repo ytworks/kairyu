@@ -22,14 +22,30 @@ def _import_xgrammar():
 
 
 class XGrammarEnforcer:
-    """Per-request grammar state: masks logits to grammar-legal tokens."""
+    """Per-request grammar state: masks logits to grammar-legal tokens.
 
-    def __init__(self, vocab: list[str], json_schema: dict | None = None) -> None:
+    ``stop_token_id`` (the tokenizer's EOS) is how a completed grammar
+    terminates: once the JSON value is complete the bitmask allows the stop
+    token, accepting it flips ``is_terminated()``. Without one, a completed
+    grammar has no legal continuation and generation cannot end cleanly.
+    """
+
+    def __init__(
+        self,
+        vocab: list[str],
+        json_schema: dict | None = None,
+        stop_token_id: int | None = None,
+    ) -> None:
         xgr = self._xgr = _import_xgrammar()
-        tokenizer_info = xgr.TokenizerInfo(vocab)
+        stop_ids = [stop_token_id] if stop_token_id is not None else None
+        tokenizer_info = xgr.TokenizerInfo(vocab, stop_token_ids=stop_ids)
         compiler = xgr.GrammarCompiler(tokenizer_info)
         if json_schema is not None:
-            compiled = compiler.compile_json_schema(json.dumps(json_schema))
+            # strict format (no free whitespace): removes degenerate unbounded
+            # whitespace runs — matches vLLM's disable_any_whitespace guidance
+            compiled = compiler.compile_json_schema(
+                json.dumps(json_schema), any_whitespace=False
+            )
         else:
             compiled = compiler.compile_builtin_json_grammar()
         self._matcher = xgr.GrammarMatcher(compiled)

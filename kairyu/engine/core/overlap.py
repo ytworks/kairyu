@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 
-from kairyu.engine.core.engine_core import ModelRunner
+from kairyu.engine.core.engine_core import ModelRunner, token_ids
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
 _DEFAULT_PIPELINE_DEPTH = 2
@@ -46,7 +46,7 @@ class OverlapEngineCore:
 
     def _commit(self, future: Future) -> None:
         sampled = future.result()
-        finished = self._scheduler.update(sampled) if sampled else ()
+        finished = self._scheduler.update(token_ids(sampled)) if sampled else ()
         for request_id in finished:
             self._outputs[request_id] = self._scheduler.output_tokens(request_id)
 

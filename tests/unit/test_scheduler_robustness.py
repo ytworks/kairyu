@@ -1,5 +1,6 @@
 from kairyu.engine.core.overlap import OverlapEngineCore
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
 PAGE = 4
@@ -29,7 +30,9 @@ def test_overlap_surplus_token_after_eos_is_trimmed():
     class EosAtPositionOne:
         def execute(self, scheduled, states):
             return {
-                chunk.request_id: EOS if chunk.position == 1 else 1000 + chunk.position
+                chunk.request_id: (
+                    SampledToken(EOS if chunk.position == 1 else 1000 + chunk.position),
+                )
                 for chunk in scheduled
                 if not chunk.is_prefill or states[chunk.request_id].prefill_done
             }
