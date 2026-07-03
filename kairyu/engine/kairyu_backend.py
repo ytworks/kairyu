@@ -26,6 +26,7 @@ from kairyu.engine.core.engine_core import grammar_finished, token_ids
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
+from kairyu.engine.core.spec_runner import SpeculativeRunner
 from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
 from kairyu.engine.registry import register_backend
 from kairyu.engine.tokenizer import IncrementalDetokenizer, Tokenizer, resolve_tokenizer
@@ -134,13 +135,22 @@ class KairyuBackend:
         runner: object | None = None,
         tensor_parallel_size: int = 1,
         tokenizer: str | Tokenizer = "toy",
+        speculative: str | None = None,
+        speculative_tokens: int = 4,
     ) -> None:
         validate_tp_degree(tensor_parallel_size)
+        if speculative is not None and speculative != "ngram":
+            raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
+        if speculative is not None and tensor_parallel_size > 1:
+            raise ValueError("speculative decoding with tensor_parallel_size > 1 is not supported")
         self.tensor_parallel_size = tensor_parallel_size
         self._tokenizer = resolve_tokenizer(tokenizer)
         self._cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
         self._scheduler = Scheduler(
-            self._cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
+            self._cache,
+            max_num_batched_tokens=max_num_batched_tokens,
+            page_size=page_size,
+            speculative_tokens=speculative_tokens if speculative else 0,
         )
         if tensor_parallel_size > 1:
             # CPU-testable TP path (design m5 D1/D3): deterministic rank runners
@@ -154,6 +164,8 @@ class KairyuBackend:
             )
         else:
             self._runner = runner or _ToyRunner()
+        if speculative == "ngram":
+            self._runner = SpeculativeRunner(self._runner)
         self._ops: deque[tuple[EngineRequest, _RequestTrack]] = deque()
         self._tracked: dict[str, _RequestTrack] = {}  # step-thread only
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
