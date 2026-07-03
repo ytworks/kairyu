@@ -5,6 +5,12 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 
 ## Current Status
 
+**Deploy-ready (2026-07-03): every milestone of the local-complete plan
+(M8–M19) is implemented and CPU-verified — 646 tests, 92% cov. The only
+remaining work is GPU execution: performance gates, kernel tuning, fabric
+bring-up, `pytest -m gpu`, and `scripts/gpu_gates/` (all pre-written and
+dry-run pinned).**
+
 _Last updated: 2026-07-03_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
@@ -51,6 +57,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M19 complete: deploy-ready — the local-complete plan is DONE
+- What: 627 → 646 tests. Dockerfile.cuda (nvidia/cuda 12.4 + gpu/hf/fleet
+  extras), GPU compose (device reservations, model volume), Helm
+  values-gpu.yaml (per-profile nodeSelector: pcie-gddr / nvlink-hbm),
+  scripts/gpu_gates/ covering runbook §0/1/2/3/6/7/9 + G4/G5 — every script
+  --dry-run capable, with a CPU suite pinning that dry-runs emit command
+  plans AND every referenced path exists today. [gpu] extra with
+  sys_platform=='linux' markers (macOS uv sync clean — verified).
+  **All 13 milestones of the local-complete plan (M8–M19 + M10a/b) are
+  implemented.** Remaining work is strictly the hardware list: performance
+  gates, kernel selection/tuning, fabric bring-up, and `pytest -m gpu` /
+  scripts/gpu_gates execution.
+- Refs: `docs/design/m19-deploy-packaging.md`, `Dockerfile.cuda`,
+  `scripts/gpu_gates/`, `deploy/helm/kairyu/values-gpu.yaml`
 
 ### 2026-07-03 — [progress] M11 complete: Fugu-class product surface + tenancy
 - What: 610 → 627 tests. Usage threaded through MoA/Conductor/Orchestrator

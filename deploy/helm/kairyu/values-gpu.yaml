@@ -1,0 +1,14 @@
+# m19 D2: GPU overrides — helm install -f values-gpu.yaml
+replicaCount: 1
+image:
+  repository: kairyu
+  tag: cuda
+resources:
+  limits:
+    nvidia.com/gpu: 1
+# per-profile node selection (roadmap hardware matrix):
+#   rtx6000pro pools:  kairyu.dev/gpu-profile: pcie-gddr
+#   h100 pools:        kairyu.dev/gpu-profile: nvlink-hbm
+nodeSelector:
+  kairyu.dev/gpu-profile: pcie-gddr
+runtimeClassName: nvidia

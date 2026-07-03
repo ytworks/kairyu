@@ -588,7 +588,24 @@ def create_app(
         app.state.usage_ledger = ledger
 
         @app.get("/admin/usage")
-        async def admin_usage(tenant: str | None = None):
+        async def admin_usage(http_request: Request, tenant: str | None = None):
+            """Scoped to the CALLER's tenant when tenancy is configured
+            (security review: no cross-tenant disclosure); single-tenant
+            deployments (no tenant_config) see everything behind auth."""
+            if tenant_config is not None:
+                caller = getattr(http_request.state, "tenant", None)
+                if caller is None:
+                    caller = tenant_config.default_tenant
+                if tenant is not None and tenant != caller:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"error": {
+                            "message": "cannot query another tenant's usage",
+                            "type": "invalid_request_error",
+                            "code": "tenant_forbidden",
+                        }},
+                    )
+                return {"usage": ledger.totals(caller)}
             return {"usage": ledger.totals(tenant)}
 
     if settings.tracing:

@@ -1,0 +1,26 @@
+# m19 D2: single-node GPU serving (gateway + one GPU replica).
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.cuda
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./gateway.yaml:/etc/kairyu/config.yaml:ro
+    depends_on:
+      - replica
+  replica:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.cuda
+    volumes:
+      - ./gpu-replica.yaml:/etc/kairyu/config.yaml:ro
+      - ${KAIRYU_MODEL_DIR:-/models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

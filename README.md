@@ -11,7 +11,7 @@ against the same pluggable backend seam, along with multi-GPU serving — tensor
 DP replicas, prefill-decode separation, inter-node KV transfer, pipeline parallelism —
 developed CPU-first against the same protocols.
 
-- **Python**: 3.11+ &nbsp;|&nbsp; **License**: MIT &nbsp;|&nbsp; **Tests**: 290+ (coverage gate 80%)
+- **Python**: 3.11+ &nbsp;|&nbsp; **License**: MIT &nbsp;|&nbsp; **Tests**: 640+ (coverage gate 80%, currently 92%)
 
 ## Why Kairyu
 
@@ -60,6 +60,20 @@ rewrite.
 | **M5** | Intra-node multi-GPU: tensor parallelism (Communicator + TPModelRunner, TP=2 greedy-equivalent to TP=1 on CPU), DP replicas (ReplicaPool with session affinity), intra-node P-D separation (PDCoordinator + `resume_with_kv`) | ✅ CPU half done — GPU phase is runbook §6, gated on M2 |
 | **M6** | Inter-node multi-GPU: static 2-node ClusterSpec, page-granular KV transfer plane (KVTransport, TCP loopback), inter-node P-D, PP=2 via inter-step pipelining | ✅ CPU half done — GPU phase is runbook §7, gated on M5 |
 | **M7** | Productionization: `kairyu serve` CLI + DeploymentSpec, health/metrics/auth/concurrency guard, ReplicaPool gateway wiring + background health prober, HTTP session affinity, OpenAI-compatible batch API, Docker/compose topology with CI smoke drill | ✅ CPU half done — GPU bring-up is runbook §9 |
+| **M8** | Engine core on real tokens: HF tokenizer seam, full sampler (temp/top-k/top-p/min-p/penalties/seed/logprobs), multi-token scheduler commits, n-gram speculative pipeline, ZMQ process-split engine (`kairyu-proc`) | ✅ Complete |
+| **M9** | Truthful API: token-accurate usage + `cached_tokens`, HF Jinja chat templates (byte-matched), logprobs, `/v1/completions`, `n>1`, `json_schema` structured output | ✅ Complete |
+| **M12** | Real model zoo: Llama-3.x / Qwen2 / Qwen3 from safetensors; full-engine greedy == `transformers.generate`; fp32 logits < 1e-4 | ✅ Complete |
+| **M13** | AttentionBackend seam: torch backend, FlashInfer adapter (contract-pinned), MLA reference math (≡ DeepseekV3Attention to 3.7e-9) | ✅ Complete — kernels verified on deploy day |
+| **M14** | Quantization compute: FP8/INT8/AWQ/GPTQ/NVFP4 — all five load and RUN through the full engine on CPU; Triton kernel seams | ✅ Complete |
+| **M15** | MoE + MLA architectures: Qwen3-MoE and DeepSeek-V3 (yarn incl.) with full `hf.generate` parity; latent MLA KV pool | ✅ Complete |
+| **M16** | Distributed execution over real collectives (gloo): TP=2/EP=2/PP=2 spawn parity gates in the default suite; NCCL is a constructor arg | ✅ Complete — NCCL run on deploy day |
+| **M17** | StepExecutor (CUDA-graph seam, fake-graph pinned) + DraftSource + EAGLE-3/MTP heads with checkpoint loaders | ✅ Complete — capture on deploy day |
+| **M18** | KV transport: serde, remote P-D handoff, NIXL adapter; two-REAL-process P-D over TCP with byte-parity gates | ✅ Complete — RDMA on deploy day |
+| **M10a/b** | Fleet: dynamic ReplicaPool membership, registry/reconciler, OTel tracing, Helm+kind; KV-aware routing (prefix trie + radix KV events + staleness fallback) | ✅ Complete |
+| **M11** | Product surface: streaming `kairyu-auto` tiers with honest usage, tenancy v1 (limits/ledger), `/v1/responses`, `/v1/embeddings`, vision wire format, F5 SLO/priority/autoscale logic | ✅ Complete |
+| **M19** | Deploy packaging: `Dockerfile.cuda`, GPU compose/Helm, `scripts/gpu_gates/` (runbook §0–§9 + G4/G5, all `--dry-run` pinned) | ✅ Complete — **deploy-ready** |
+
+**Current state: every planned milestone is implemented and CPU-verified. The remaining work is strictly GPU execution — performance gates, kernel tuning, fabric bring-up, `pytest -m gpu`, `scripts/gpu_gates/` — with no code left to write first.** See [`PROGRESS.md`](PROGRESS.md).
 
 Per-milestone design docs (goals, decisions, review amendments) live in
 [`docs/design/`](docs/design/); the multi-GPU acceptance contract is
@@ -384,6 +398,150 @@ docs/design/         one reviewed design doc per milestone (M1–M6)
 docs/goals/          evidence-first goal contracts (G2 multi-GPU)
 docs/gpu-runbook.md  consolidated GPU-day execution plan
 ```
+
+
+## Configuration reference
+
+Everything a deployment can set, in one place. The single source of truth is the
+**DeploymentSpec YAML** passed to `kairyu serve <config.yaml>` (also mounted at
+`/etc/kairyu/config.yaml` in the Docker/Helm images).
+
+### DeploymentSpec (YAML)
+
+```yaml
+server:                        # ServerSection = bind address + ServerSettings
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: KAIRYU_KEYS    # env var with comma-separated keys; null = keyless
+                               #   (keyless = trusted node-to-node mesh mode)
+  max_concurrency: 256         # global in-flight cap on /v1/*; null disables
+  metrics: true                # expose /metrics (Prometheus)
+  protect_metrics: false       # require an API key for /metrics too
+  access_log: true             # one JSON line per request (X-Request-ID echoed)
+  tracing: false               # OTel spans (needs the otel extra; no-op without)
+  usage_ledger_path: null      # JSONL usage ledger; enables GET /admin/usage
+
+engines:                       # served model name -> one backend
+  qwen:
+    backend: kairyu            # mock | kairyu | kairyu-proc | openai | vllm
+    options:                   # factory kwargs (see backend options below)
+      model_path: /models/qwen2.5-0.5b
+  remote-a:
+    backend: openai
+    options: {base_url: "http://replica-a:8000/v1"}
+    health_url: null           # default: <base_url minus /v1>/health
+
+pools:                         # served model name -> ReplicaPool of N replicas
+  fleet:
+    replicas:
+      - {backend: openai, options: {base_url: "http://replica-a:8000/v1"}}
+      - {backend: openai, options: {base_url: "http://replica-b:8000/v1"}}
+    unhealthy_after: 3         # consecutive failures before leaving the ring
+    queue_depth_threshold: 8   # session-affinity load valve
+    probe_interval_s: 5.0      # background health prober
+
+chat_templates:                # served model -> HF Jinja template (text or *.jinja path)
+  qwen: templates/qwen.jinja
+
+orchestrator:                  # optional kairyu-auto (OrchestratorSpec YAML)
+  spec: orchestrator.yaml
+
+batch:                         # optional OpenAI-compatible /v1/files + /v1/batches
+  data_dir: /var/kairyu/batches
+  max_concurrency: 4
+```
+
+### Backend options (`engines.*.options`)
+
+| backend | option | default | meaning |
+|---|---|---|---|
+| `kairyu` | `model_path` | — | safetensors checkpoint dir (Llama-3.x / Qwen2 / Qwen3 / Qwen3-MoE / DeepSeek-V3; FP8/INT8/AWQ/GPTQ/NVFP4 quantized checkpoints auto-detected) |
+| | `tokenizer` | model dir | HF tokenizer dir override (`tokenizer.json`) |
+| | `num_pages` | 4096 | KV pool pages |
+| | `page_size` | 16 | tokens per KV page |
+| | `max_num_batched_tokens` | 2048 | chunked-prefill budget per step |
+| | `speculative` | null | `"ngram"` enables speculative decoding |
+| | `speculative_tokens` | 4 | draft length k |
+| | `tensor_parallel_size` | 1 | TP degree (CPU toy path; real-model TP runs through `kairyu/engine/core/worker.py`) |
+| `kairyu-proc` | same as `kairyu` | — | runs the engine in a separate process over ZMQ/msgpack (crash isolation) |
+| `openai` | `base_url`, `api_key`, `model` | — | any OpenAI-compatible endpoint |
+| `vllm` | vLLM engine kwargs | — | needs a Linux GPU host with vllm installed |
+| `mock` | — | — | deterministic CI backend |
+
+### Environment variables
+
+| variable | effect |
+|---|---|
+| `KAIRYU_ATTENTION_BACKEND` | `torch` \| `flashinfer` — overrides the hw-profile kernel selection (invalid values fail loudly) |
+| value of `server.api_keys_env` | comma-separated API keys |
+| `KAIRYU_MODEL_DIR` | model volume for `docker-compose.gpu.yaml` |
+| `GLOO_SOCKET_IFNAME` | set `lo0` on macOS if gloo rendezvous fails (dist tests) |
+
+### HTTP surface
+
+`/v1/chat/completions` (SSE, tools, logprobs, n>1, `response_format: json_schema`,
+vision content-parts wire format), `/v1/completions`, `/v1/embeddings`
+(float + base64), `/v1/responses` (subset: `input`, `instructions`,
+`previous_response_id`), `/v1/models`, `/v1/files` + `/v1/batches`, `/health`,
+`/readyz`, `/metrics`, `POST /admin/drain` (auth-protected; flips readyz to 503),
+`GET /admin/usage?tenant=` (when the ledger is enabled).
+
+Request extras: `X-Session-ID` (or the OpenAI `user` field) pins a session to the
+replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds a `kairyu_trace`
+block to `kairyu-auto` responses; `stream_options: {include_usage: true}` appends
+the final usage chunk.
+
+### Multi-tenancy (programmatic)
+
+`create_app(..., tenant_config=TenantConfig(key_tenants={...}, limits={"team-a":
+TenantLimits(requests_per_minute=600, tokens_per_minute=200_000)}))` — per-tenant
+token buckets run inside auth (401 wins over 429); usage lands in the JSONL
+ledger (`server.usage_ledger_path`).
+
+### Tiered auto models
+
+`create_app(..., orchestrators={"kairyu-auto": Orchestrator(...), "kairyu-auto-max":
+Orchestrator(..., moa_samples=4)})` — the max tier routes heavy queries through
+Mixture-of-Agents. Streaming emits SSE comment keep-alives between stages, so any
+OpenAI SDK client works unchanged.
+
+### Distributed serving
+
+- **TP** (tensor parallel): `kairyu/engine/core/worker.py` — rank 0 drives the
+  scheduler and broadcasts frozen step snapshots; per-rank sharded weights load
+  via safetensors slicing. gloo on CPU, `backend="nccl"` on GPUs (constructor arg).
+- **EP** (expert parallel): `EpMoeBlock` over `all_to_all` — wraps the MoE blocks.
+- **PP** (pipeline parallel): `PpStageModel` stage slices over send/recv.
+- **P-D separation**: same-process `PDCoordinator`, or two processes with real
+  KV byte transfer over TCP (`RemoteKVHandoff`/`RemoteKVReceiver`; NIXL/RDMA
+  adapter ready for deploy day).
+
+### Installation extras & test markers
+
+| extra / marker | contents |
+|---|---|
+| `uv sync` | core (pydantic, fastapi, httpx, pyyaml, uvicorn, jinja2) |
+| `--extra hf` | tokenizers, safetensors (real checkpoints) |
+| `--extra fleet` | pyzmq, msgpack (process-split engine, KV events) |
+| `--extra otel` | opentelemetry-sdk (tracing) |
+| `--extra gpu` | flashinfer / triton / nixl (linux-only markers; macOS ignores) |
+| `pytest` (default) | everything except `gpu` and `hf_hub` |
+| `pytest -m gpu` | deploy-day kernel/graph tests (`tests/gpu/`) |
+| `pytest -m hf_hub` | opt-in real-checkpoint downloads |
+| `pytest -m dist` | multi-process gloo tests (included in the default run) |
+
+### Deployment artifacts
+
+| artifact | purpose |
+|---|---|
+| `Dockerfile` / `Dockerfile.cuda` | CPU / CUDA images (one image per role; the mounted spec decides) |
+| `deploy/compose/docker-compose.yaml` | gateway + 3 CPU replicas smoke topology |
+| `deploy/compose/docker-compose.gpu.yaml` | gateway + GPU replica (nvidia device reservation) |
+| `deploy/compose/docker-compose.webui.yaml` | Open WebUI chat surface on the gateway |
+| `deploy/helm/kairyu/` (+ `values-gpu.yaml`) | k8s chart; readiness `/readyz`, per-GPU-profile nodeSelector |
+| `scripts/kind_smoke.sh` | end-to-end kind cluster smoke (CI job) |
+| `scripts/gpu_gates/*.sh` | GPU-day gate scripts (runbook §0–§9 + G4/G5); all support `--dry-run` |
+| `bench/serving_bench.py`, `bench/frontier_compare.py`, `bench/kv_transfer_bench.py` | latency/goodput/transfer benches |
 
 ## Development
 
