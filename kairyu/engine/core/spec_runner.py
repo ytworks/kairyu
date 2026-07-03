@@ -20,10 +20,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 
+from kairyu.engine.core.draft import DraftSource, NGramDraftSource
 from kairyu.engine.core.engine_core import ModelRunner, StepOutput
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
-from kairyu.engine.core.spec_decode import propose_ngram, verify_greedy
+from kairyu.engine.core.spec_decode import verify_greedy
 
 
 class _OverlayState:
@@ -42,7 +43,9 @@ class _OverlayState:
 class SpeculativeRunner:
     """Wraps a ModelRunner; speculative chunks (num_tokens > 1) get draft+verify."""
 
-    def __init__(self, runner: ModelRunner) -> None:
+    def __init__(self, runner: ModelRunner, draft_source: DraftSource | None = None) -> None:
+        # default n-gram keeps m8 behavior byte-identical (m17 D3)
+        self._draft_source = draft_source or NGramDraftSource()
         self._runner = runner
         self.draft_proposed = 0
         self.draft_accepted = 0
@@ -94,7 +97,7 @@ class SpeculativeRunner:
         state = states[chunk.request_id]
         committed = tuple(state.outputs)
         context = state.request.prompt_token_ids + committed
-        draft = propose_ngram(context, max_draft=chunk.num_tokens - 1)
+        draft = self._draft_source.propose(context, max_draft=chunk.num_tokens - 1)
         draft = draft[: chunk.num_tokens - 1]
         # target_tokens[i] is the model's own next token given the DRAFT prefix
         # of length i (verify_greedy's contract; walkthrough in m8 §6)

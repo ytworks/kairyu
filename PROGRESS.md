@@ -29,6 +29,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
 | M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. |
+| M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -46,6 +47,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] M17 complete: graph-capture seam + EAGLE-3/MTP draft heads
+- What: 553 → 571 tests. StepExecutor seam: decode_buckets policy
+  (vLLM-style sizes), GraphStepExecutor (capture-once-per-bucket, static
+  buffer copy-in, padding to scratch page with outputs dropped, invalidate(),
+  oversize→eager) fully pinned against FakeGraphBackend; cuda_graph_gpu.py
+  holds the only CUDA lines (side-stream warmup, shared pool). DraftSource
+  protocol: n-gram default byte-identical; ModelDraftSource e2e gate — a
+  perfect draft through the FULL spec pipeline == plain greedy with >0.9
+  acceptance. EAGLE-3 head per corrected review pins (2H midlayer, pre-norm
+  residual, fc [H,3H] once per cycle, TRAINED reduced-vocab lm_head + d2t
+  offset map, target-aliased embeddings) + SpecForge loader with format-drift
+  guards. DeepSeek MTP head (embedding-first eh_proj, separate physical
+  head/embed tensors, MoE decoder block at layer_index=num_hidden_layers) +
+  extra-layer checkpoint loader. Scope honesty: batched decode capture rides
+  FlashInfer's decode wrapper on deploy day (A1); grammar-rollback spec
+  stays deferred.
+- Refs: `docs/design/m17-graphs-drafts.md` (Status: Implemented);
+  `kairyu/engine/core/{step_executor,graph_buckets,draft,cuda_graph_gpu}.py`,
+  `kairyu/models/{eagle,mtp}.py`
 
 ### 2026-07-03 — [progress] M16 complete: TP/EP/PP run over real multi-process collectives
 - What: 547 → 553 tests (incl. 5 gloo spawn gates that run in the default
