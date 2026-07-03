@@ -130,7 +130,8 @@ class Scheduler:
         # note: decode_watermark_pages was sized for +1 growth per step; with
         # speculative_tokens=k it should scale with k (m8 D3, documented knob)
         self._spec_k = speculative_tokens
-        self._page_size = getattr(kv_cache, "_page_size", page_size)
+        # page_size param kept for back-compat; the cache is the source of truth
+        self._page_size = getattr(kv_cache, "page_size", page_size)
         self._states: dict[str, _RequestState] = {}
         self._waiting: list[str] = []
         self._running: list[str] = []
