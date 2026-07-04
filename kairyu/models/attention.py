@@ -83,3 +83,42 @@ class Attention(nn.Module):
             query, kv_pool, layer, page_table, seq_len, chunk_start
         )
         return self.o_proj(context)
+
+    def forward_decode_batch(
+        self,
+        hidden: torch.Tensor,  # [B, H] — one new token per sequence
+        cos: torch.Tensor,  # [B, head_dim] — per-sequence rotary
+        sin: torch.Tensor,
+        kv_pool: PagedKVPool,
+        layer: int,
+        page_tables: list[list[int]],
+        positions: torch.Tensor,  # [B]
+        seq_lens: list[int],
+        write_from: list[int],
+    ) -> torch.Tensor:
+        """Batched decode attention (C4): projections/RoPE are row-batched, each
+        sequence's single-token KV is written to its OWN pages, and attention is
+        per-sequence via ``attend_batched`` — output is IDENTICAL, row by row, to
+        running each sequence through ``forward``."""
+        batch = hidden.shape[0]
+        query = self.q_proj(hidden).view(batch, self.num_heads, self.head_dim)
+        keys = self.k_proj(hidden).view(batch, self.num_kv_heads, self.head_dim)
+        values = self.v_proj(hidden).view(batch, self.num_kv_heads, self.head_dim)
+        if self.q_norm is not None:
+            query = self.q_norm(query)
+            keys = self.k_norm(keys)
+        query, keys = apply_rope(query, keys, cos, sin)  # cos/sin [B, d] broadcast over heads
+        for i in range(batch):
+            if int(positions[i]) >= write_from[i]:  # decode pages are private, no conflict
+                kv_pool.write(
+                    layer, page_tables[i], positions[i : i + 1], keys[i : i + 1], values[i : i + 1]
+                )
+        contexts = self.backend.attend_batched(
+            [query[i : i + 1] for i in range(batch)],  # each [1, heads, d]
+            kv_pool,
+            layer,
+            page_tables,
+            seq_lens,
+            [int(positions[i]) for i in range(batch)],
+        )
+        return self.o_proj(torch.cat(contexts, dim=0))  # [B, heads*d] -> [B, H]

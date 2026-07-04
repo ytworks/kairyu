@@ -58,6 +58,16 @@ class DecoderLayer(nn.Module):
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
+    def forward_decode_batch(
+        self, hidden, cos, sin, kv_pool, layer, page_tables, positions, seq_lens, write_from
+    ):
+        """Batched decode (C4): row-batched residual around the batched attention."""
+        hidden = hidden + self.self_attn.forward_decode_batch(
+            self.input_layernorm(hidden),
+            cos, sin, kv_pool, layer, page_tables, positions, seq_lens, write_from,
+        )
+        return hidden + self.mlp(self.post_attention_layernorm(hidden))
+
 
 class _Backbone(nn.Module):
     """The HF ``model.*`` subtree."""
@@ -108,6 +118,28 @@ class DenseDecoder(nn.Module):
                 hidden, cos, sin, kv_pool, index, page_table, positions, seq_len, write_from
             )
         return self.model.norm(hidden)
+
+    @torch.no_grad()
+    def forward_decode_batch(
+        self,
+        token_ids: torch.Tensor,  # [B] one new token per sequence
+        positions: torch.Tensor,  # [B] each sequence's decode position
+        kv_pool: PagedKVPool,
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+        write_from: list[int],
+    ) -> torch.Tensor:
+        """Batched single-token decode over B sequences (C4): ONE forward pass
+        instead of B. Row i of the output equals ``forward_tokens`` for sequence
+        i's decode step — batching is a performance transform, not a numeric one
+        (pinned by test_batched_decode_equals_sequential)."""
+        hidden = self.model.embed_tokens(token_ids)  # [B, H]
+        cos, sin = self.model.rotary_emb(positions)  # [B, head_dim]
+        for index, layer in enumerate(self.model.layers):
+            hidden = layer.forward_decode_batch(
+                hidden, cos, sin, kv_pool, index, page_tables, positions, seq_lens, write_from
+            )
+        return self.model.norm(hidden)  # [B, H]
 
     @torch.no_grad()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:

@@ -26,6 +26,21 @@ class AttentionBackend(Protocol):
         """query [T, heads, head_dim] -> context [T, heads * head_dim]."""
         ...
 
+    def attend_batched(
+        self,
+        queries: list[torch.Tensor],
+        kv_pool: PagedKVPool,
+        layer: int,
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+        chunk_starts: list[int],
+    ) -> list[torch.Tensor]:
+        """Per-sequence contexts, identical to per-sequence ``attend`` (C4).
+
+        The batched seam the GPU runner needs: one call per layer per step over N
+        sequences instead of N calls. Backends may batch the kernel internally."""
+        ...
+
 
 from kairyu.engine.core.attention.selector import select_backend  # noqa: E402
 from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend  # noqa: E402

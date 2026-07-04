@@ -62,39 +62,75 @@ class PagedModelRunner:
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> dict[str, tuple[SampledToken, ...]]:
         sampled: dict[str, tuple[SampledToken, ...]] = {}
+        decodes = [chunk for chunk in scheduled if not chunk.is_prefill]
         for chunk in scheduled:
-            state = states[chunk.request_id]
-            prompt = state.request.prompt_token_ids
-            page_table = list(state.allocation.pages) + list(state.decode_pages)
-            cached = state.allocation.num_cached_tokens if state.allocation else 0
             if chunk.is_prefill:
-                end = state.computed_prompt
-                start = end - chunk.num_tokens
-                hidden = self._model.forward_tokens(
-                    torch.tensor(prompt[start:end], dtype=torch.long),
-                    torch.arange(start, end),
-                    self._pool,
-                    page_table,
-                    seq_len=end,
-                    write_from=cached,
-                )
-                if state.prefill_done and end == len(prompt):
-                    logits = self._model.logits(hidden[-1])
-                    sampled[chunk.request_id] = (self._sample(state, logits, position=0),)
-            else:
-                position = chunk.position
-                input_token = state.outputs[position - 1] if position > 0 else prompt[-1]
-                absolute = len(prompt) + position - 1
-                hidden = self._model.forward_tokens(
-                    torch.tensor([input_token], dtype=torch.long),
-                    torch.tensor([absolute]),
-                    self._pool,
-                    page_table,
-                    seq_len=absolute + 1,
-                    write_from=cached,
-                )
-                logits = self._model.logits(hidden[-1])
-                sampled[chunk.request_id] = (
-                    self._sample(state, logits, position=position),
-                )
+                self._execute_prefill(chunk, states[chunk.request_id], sampled)
+        # C4: single-token decodes for all sequences run as ONE batched forward
+        # (byte-identical to per-sequence decode; see test_batched_decode). Below
+        # two, the per-sequence path is not worth the batch bookkeeping.
+        if len(decodes) >= 2:
+            self._execute_decode_batch(decodes, states, sampled)
+        else:
+            for chunk in decodes:
+                self._execute_decode(chunk, states[chunk.request_id], sampled)
         return sampled
+
+    def _execute_prefill(self, chunk: ScheduledChunk, state, sampled: dict) -> None:
+        prompt = state.request.prompt_token_ids
+        page_table = list(state.allocation.pages) + list(state.decode_pages)
+        cached = state.allocation.num_cached_tokens if state.allocation else 0
+        end = state.computed_prompt
+        start = end - chunk.num_tokens
+        hidden = self._model.forward_tokens(
+            torch.tensor(prompt[start:end], dtype=torch.long),
+            torch.arange(start, end),
+            self._pool, page_table, seq_len=end, write_from=cached,
+        )
+        if state.prefill_done and end == len(prompt):
+            logits = self._model.logits(hidden[-1])
+            sampled[chunk.request_id] = (self._sample(state, logits, position=0),)
+
+    def _decode_inputs(self, chunk: ScheduledChunk, state):
+        prompt = state.request.prompt_token_ids
+        position = chunk.position
+        input_token = state.outputs[position - 1] if position > 0 else prompt[-1]
+        absolute = len(prompt) + position - 1
+        cached = state.allocation.num_cached_tokens if state.allocation else 0
+        page_table = list(state.allocation.pages) + list(state.decode_pages)
+        return input_token, absolute, page_table, cached
+
+    def _execute_decode(self, chunk: ScheduledChunk, state, sampled: dict) -> None:
+        input_token, absolute, page_table, cached = self._decode_inputs(chunk, state)
+        hidden = self._model.forward_tokens(
+            torch.tensor([input_token], dtype=torch.long),
+            torch.tensor([absolute]),
+            self._pool, page_table, seq_len=absolute + 1, write_from=cached,
+        )
+        logits = self._model.logits(hidden[-1])
+        sampled[chunk.request_id] = (self._sample(state, logits, position=chunk.position),)
+
+    def _execute_decode_batch(
+        self, chunks: list[ScheduledChunk], states: Mapping[str, object], sampled: dict
+    ) -> None:
+        tokens, positions, page_tables, seq_lens, write_from = [], [], [], [], []
+        for chunk in chunks:
+            input_token, absolute, page_table, cached = self._decode_inputs(
+                chunk, states[chunk.request_id]
+            )
+            tokens.append(input_token)
+            positions.append(absolute)
+            page_tables.append(page_table)
+            seq_lens.append(absolute + 1)
+            write_from.append(cached)
+        hidden = self._model.forward_decode_batch(
+            torch.tensor(tokens, dtype=torch.long),
+            torch.tensor(positions),
+            self._pool, page_tables, seq_lens, write_from,
+        )
+        logits = self._model.logits(hidden)  # [B, vocab]
+        for i, chunk in enumerate(chunks):
+            state = states[chunk.request_id]
+            sampled[chunk.request_id] = (
+                self._sample(state, logits[i], position=chunk.position),
+            )

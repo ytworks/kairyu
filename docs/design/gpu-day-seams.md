@@ -34,19 +34,23 @@ in-place writes but not attribute rebinds) plus
 Remaining GPU-day wiring: the `PagedModelRunner` decode path consumes the padded
 tensor when the real graph backend is enabled.
 
-## C4 — batched cross-request execution (CRITICAL)
+## C4 — batched cross-request execution (CRITICAL, **IMPLEMENTED (decode)**)
 
-**Gap.** `PagedModelRunner.execute` runs sequences sequentially; `AttentionBackend.
-attend(query, kv_pool, layer, page_table, seq_len, chunk_start)` is one-sequence-
-per-call; `flashinfer_gpu.py` always builds `indptr=[0, num_pages]` (batch 1) and
-replans per decode step; `sampler` does per-request `.item()` host syncs. N
-concurrent requests = N kernel-launch chains + N host syncs per layer per step →
-the E1 goodput gate (≥1.0× vLLM) is unreachable.
+**Gap (fixed for decode).** `PagedModelRunner.execute` ran sequences
+sequentially; `AttentionBackend.attend(...)` was one-sequence-per-call. N
+concurrent decodes = N kernel-launch chains per layer per step.
 
-**Design (CPU-testable now).** Batched `attend()` taking batch-level
-`indptr`/`indices` int32 arrays; a runner that builds ONE prefill plan + ONE
-decode plan per step; on-device batched sampling returning a device tensor with a
-single async D2H. Verify batch=1 reproduces today's parity gates exactly.
+**Fix (landed).** `AttentionBackend.attend_batched(...)` (per-sequence contexts,
+one call per layer per step); `DenseDecoder.forward_decode_batch` (row-batched
+projections/RoPE/MLP, per-sequence KV write to private decode pages, batched
+attention); `PagedModelRunner.execute` now runs all single-token decodes in a
+step as ONE batched forward when ≥2 are present. The torch backend loops
+internally (CPU reference); the GPU FlashInfer backend replaces the loop with one
+batched kernel over indptr/indices behind the same signature. Byte-identical to
+sequential decode — `test_batched_decode.py` pins `forward_decode_batch[i] ==
+forward_tokens(seq_i)` and KV-write equality, and the full parity suite is
+unchanged. Remaining GPU-day work: batched PREFILL plan, and on-device batched
+sampling with a single async D2H (the CPU sampler already samples per row).
 
 ## E3 — one engine loop with pluggable pipeline depth (HIGH)
 
