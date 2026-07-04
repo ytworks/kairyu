@@ -112,3 +112,34 @@ def test_snapshot_rejects_chunk_for_unknown_request():
     plan = scheduler.schedule()
     with pytest.raises(ValueError, match="unknown request"):
         snapshot_step(plan.scheduled, {})
+
+
+def test_state_sync_delta_reconstructs_full_snapshot_each_step():
+    # F4/TP: the delta broadcaster must reconstruct EXACTLY what snapshot_step
+    # would produce every step — over prefill, decodes, a second request joining,
+    # and the first finishing — so delta-broadcast TP == full-broadcast TP.
+    from kairyu.engine.core.step_input import StateSync
+
+    scheduler = _scheduler(max_seqs=2, budget=8)
+    driver, worker = StateSync(), StateSync()
+    scheduler.add_request(EngineRequest("a", (1, 2, 3, 4, 5), max_new_tokens=3))
+
+    def drive_one_step(token_map):
+        plan = scheduler.schedule()
+        chunks = plan.scheduled
+        full = snapshot_step(chunks, scheduler.states).states_view()
+        delta = driver.diff(chunks, scheduler.states)
+        driver_view = driver.apply(delta)
+        worker_view = worker.apply(delta)  # same delta over the wire
+        # both reconstructions equal the full snapshot, field for field
+        assert driver_view == full
+        assert worker_view == full
+        if chunks:
+            scheduler.update(token_map)
+
+    drive_one_step({})  # prefill "a" (samples token 0)
+    scheduler.add_request(EngineRequest("b", (6, 7, 8, 9), max_new_tokens=2))
+    drive_one_step({"a": 100})  # a decodes, b prefills
+    drive_one_step({"a": 101, "b": 200})  # both decode; a hits max_new_tokens -> finishes
+    drive_one_step({"b": 201})  # only b remains; "a" must be dropped from sync
+    assert "a" not in worker._states

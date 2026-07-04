@@ -66,18 +66,25 @@ reproduces today). Make `StepInput`/`snapshot_step` mandatory at submit/execute
 so the runner never reads live scheduler state. Run the whole CPU suite through
 the unified loop; delete/demote the two unused cores.
 
-## TP — delta broadcast + sampling ownership (HIGH)
+## TP — delta broadcast + sampling ownership (HIGH, **delta IMPLEMENTED**)
 
-**Gap.** `DistTPModelRunner.execute` broadcasts a full pickled `StepInput`
-snapshot every step (`dist.broadcast_object_list` — the vLLM-V0 control-plane
-mistake), and every rank samples independently from full logits (rank agreement
-proven only on gloo/CPU; one non-deterministic GPU kernel forks rank KV state).
+**Gap (fixed for the broadcast).** `DistTPModelRunner.execute` broadcast a full
+pickled snapshot of every active request's (growing) prompt+outputs every step.
 
-**Design.** Delta-broadcast only new/finished requests + committed tokens (the
-snapshot machinery already isolates the delta). Promote the rank-divergence
-check to a blocking runbook gate. Decide rank-0-samples-and-broadcasts vs
-all-ranks-sample now — it changes the worker step protocol. Also wire the runner
-into `build_engine_loop`/serve (today real-model TP exists only in `tests/dist`).
+**Fix (landed).** `StateSync` (step_input.py) diffs live scheduler state into a
+`StepDelta` — full snapshots only for first-seen or re-allocated (preempted)
+requests, small field deltas + the committed-token tail for the rest, dropped
+ids to evict finished ones. Both the driver and every worker apply the same
+delta to reconstruct snapshot_step()'s exact `RequestSnapshot`s, so
+`DistTPModelRunner`/`worker_step_loop` now broadcast O(chunks + committed tokens)
+per step instead of O(all active requests' full state). Byte-identical output:
+the `tests/dist` TP=2/EP=2/PP=2 spawn parity gates (TP=2 == TP=1) pass unchanged,
+plus `test_state_sync_delta_reconstructs_full_snapshot_each_step`.
+
+**Remaining GPU-day work.** Promote the rank-divergence check to a blocking
+runbook gate; decide rank-0-samples-and-broadcasts vs all-ranks-sample (changes
+the worker step protocol); wire `DistTPModelRunner` into `build_engine_loop`/serve
+(today real-model TP is spawn-tested but not wired into the single-process path).
 
 ## KVTransport — region ownership + source-addressed recv (HIGH)
 

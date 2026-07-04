@@ -101,6 +101,103 @@ def _snapshot_state(state: object) -> RequestSnapshot:
     )
 
 
+@dataclass(frozen=True)
+class RequestDelta:
+    """Only the MUTABLE fields of a request that already crossed the wire (F4).
+
+    prompt_token_ids / page_ids / sampling / eos / max_new_tokens are immutable
+    after admission, so a re-seen request sends just its changed fields plus the
+    NEW output tokens (the tail beyond what the peer already holds)."""
+
+    request_id: str
+    computed_prompt: int
+    new_outputs: tuple[int, ...]
+    in_flight: int
+    decode_page_ids: tuple[int, ...]
+    num_cached_tokens: int
+
+
+@dataclass(frozen=True)
+class StepDelta:
+    """Delta-broadcast step (F4): full snapshots only for first-seen (or
+    re-allocated) requests; small field deltas for the rest; dropped ids leave
+    the peer's state. Reconstructs snapshot_step()'s StepInput exactly."""
+
+    chunks: tuple[ScheduledChunk, ...]
+    new: tuple[RequestSnapshot, ...]
+    updates: tuple[RequestDelta, ...]
+    dropped: tuple[str, ...]
+
+
+class StateSync:
+    """Incremental peer state: rank 0 diffs live scheduler state into a StepDelta;
+    every rank applies it to reconstruct the SAME full RequestSnapshots without
+    re-sending immutable/accumulated fields each step."""
+
+    def __init__(self) -> None:
+        self._states: dict[str, RequestSnapshot] = {}
+
+    def diff(
+        self,
+        chunks: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> StepDelta:
+        active: list[str] = []
+        seen: set[str] = set()
+        for chunk in chunks:
+            if chunk.request_id not in seen:
+                seen.add(chunk.request_id)
+                active.append(chunk.request_id)
+        new: list[RequestSnapshot] = []
+        updates: list[RequestDelta] = []
+        for rid in active:
+            snap = _snapshot_state(states[rid])
+            prev = self._states.get(rid)
+            # a preempted+re-admitted request may change pages/prompt: re-send full
+            if (
+                prev is None
+                or prev.page_ids != snap.page_ids
+                or prev.prompt_token_ids != snap.prompt_token_ids
+                or len(prev.outputs) > len(snap.outputs)
+            ):
+                new.append(snap)
+            else:
+                updates.append(
+                    RequestDelta(
+                        request_id=rid,
+                        computed_prompt=snap.computed_prompt,
+                        new_outputs=snap.outputs[len(prev.outputs):],
+                        in_flight=snap.in_flight,
+                        decode_page_ids=snap.decode_page_ids,
+                        num_cached_tokens=snap.num_cached_tokens,
+                    )
+                )
+        dropped = tuple(rid for rid in self._states if rid not in seen)
+        return StepDelta(
+            chunks=chunks, new=tuple(new), updates=tuple(updates), dropped=dropped
+        )
+
+    def apply(self, delta: StepDelta) -> dict[str, RequestSnapshot]:
+        for rid in delta.dropped:
+            self._states.pop(rid, None)
+        for snap in delta.new:
+            self._states[snap.request_id] = snap
+        for update in delta.updates:
+            import dataclasses
+
+            prev = self._states[update.request_id]
+            self._states[update.request_id] = dataclasses.replace(
+                prev,
+                computed_prompt=update.computed_prompt,
+                outputs=prev.outputs + update.new_outputs,
+                in_flight=update.in_flight,
+                decode_page_ids=update.decode_page_ids,
+                num_cached_tokens=update.num_cached_tokens,
+            )
+        active = {chunk.request_id for chunk in delta.chunks}
+        return {rid: self._states[rid] for rid in active}
+
+
 def snapshot_step(
     scheduled: SchedulerOutput | tuple[ScheduledChunk, ...],
     states: Mapping[str, object],
