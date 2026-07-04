@@ -62,6 +62,25 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-04 — [design] Review remediation Phase 6: GPU-day seam changes (CPU design + C5 contract test)
+- What: Captured the five GPU-day seam changes from the full-repo review in
+  `docs/design/gpu-day-seams.md` (C5 CUDA-graph static buffers, C4 batched
+  execution, E3 engine-loop unification, TP delta-broadcast + sampling ownership,
+  KVTransport region ownership), and landed the **C5 contract test**: a faithful
+  `SnapshotGraphBackend` that freezes page_tables/seq_lens at capture (as a real
+  CUDA graph does), plus `test_graph_replay_reflects_current_page_tables`
+  (`xfail(strict=True)`) that concretely proves `GraphStepExecutor` currently
+  rebinds page tables as Python attributes a real graph never sees. The test
+  flips to pass when the static-device-buffer fix lands.
+- Why: These CPU-pinned abstractions silently break (C5) or make a perf gate
+  unreachable (C4) when real kernels/NCCL/FlashInfer replace the CPU references;
+  they must be designed + contract-tested on CPU before GPU time, but can only be
+  fully validated on hardware. The full implementations are a scheduled GPU-day
+  design milestone (land before the runbook perf gates), not a same-session edit.
+- Refs: review report; `docs/design/gpu-day-seams.md`,
+  `kairyu/engine/core/step_executor.py` (`SnapshotGraphBackend`),
+  `tests/unit/test_step_executor.py`.
+
 ### 2026-07-03 — [progress] Fugu benchmark suite: one-command quality scoreboard (G6 P-C1)
 - What: 646 → 730+ tests. New `kairyu/bench/` package + `kairyu bench
   run/download/report/list` CLI. All 11 rows of the Fugu release table

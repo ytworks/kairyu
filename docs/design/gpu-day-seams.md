@@ -1,0 +1,94 @@
+# GPU-Day Seam Changes (repo-review Phase 6)
+
+Status: **design + contract tests on CPU; implementation is GPU-day work.**
+
+The 2026-07-04 full-repo review found five CPU-pinned abstractions that will
+break — or silently produce wrong results — when real CUDA/NCCL/FlashInfer land.
+They are grouped here because each is a *protocol* change that must be designed
+and contract-tested on CPU before hardware time, but cannot be fully *validated*
+without a GPU (that is the point: the seam breaks exactly when kernels replace
+the CPU references). Land these before the `docs/gpu-runbook.md` perf gates.
+
+Priority order: C5 (silent corruption, contract test exists) → C4 (unreachable
+perf gate) → E3 (loop unification) → TP + KVTransport (widen before fabric).
+
+---
+
+## C5 — CUDA-graph static-buffer contract (CRITICAL, contract-tested)
+
+**Bug.** `GraphStepExecutor._copy_in` (`engine/core/step_executor.py`) writes
+`token_ids`/`positions` in place (fine — a real graph reads them from static
+device memory) but rebinds `page_tables`/`seq_lens` via `object.__setattr__`.
+A real CUDA graph replays fixed kernels over fixed memory and can NEVER see a
+post-capture Python-attribute change, so every replay attends over the
+capture-time scratch page → silent wrong logits. `FakeGraphBackend` masks this
+because it re-invokes `fn(static_batch)` and reads the new attributes.
+
+**Contract test (landed).** `SnapshotGraphBackend` freezes page_tables/seq_lens
+at capture and replays against the snapshot — a faithful CUDA-graph model.
+`test_graph_replay_reflects_current_page_tables` is `xfail(strict=True)` today
+and flips to pass when the fix lands.
+
+**Fix.** Make page_tables and seq_lens part of the static DEVICE buffers:
+`page_tables` → `[bucket, max_pages_per_seq] int32` padded, `seq_lens` →
+`[bucket] int32`. `_copy_in` writes into them in place (like token_ids). Update
+`DecodeFn`/`PagedModelRunner` decode path to consume the padded tensor. Remove
+the xfail marker.
+
+## C4 — batched cross-request execution (CRITICAL)
+
+**Gap.** `PagedModelRunner.execute` runs sequences sequentially; `AttentionBackend.
+attend(query, kv_pool, layer, page_table, seq_len, chunk_start)` is one-sequence-
+per-call; `flashinfer_gpu.py` always builds `indptr=[0, num_pages]` (batch 1) and
+replans per decode step; `sampler` does per-request `.item()` host syncs. N
+concurrent requests = N kernel-launch chains + N host syncs per layer per step →
+the E1 goodput gate (≥1.0× vLLM) is unreachable.
+
+**Design (CPU-testable now).** Batched `attend()` taking batch-level
+`indptr`/`indices` int32 arrays; a runner that builds ONE prefill plan + ONE
+decode plan per step; on-device batched sampling returning a device tensor with a
+single async D2H. Verify batch=1 reproduces today's parity gates exactly.
+
+## E3 — one engine loop with pluggable pipeline depth (HIGH)
+
+**Gap.** The production path is the synchronous `EngineLoop.step()`;
+`OverlapEngineCore`/`PipelinedEngineCore` are imported only by tests. Overlap +
+streaming + stop-string holdback + spec decode + grammar termination have never
+coexisted in one loop, and the overlap cores pass live mutable `_RequestState`
+across the execution seam (chunked-prefill range drift, decode-ahead IndexError,
+preemption races).
+
+**Design.** Converge on one `EngineLoop` with a pipeline-depth knob (depth=1
+reproduces today). Make `StepInput`/`snapshot_step` mandatory at submit/execute
+so the runner never reads live scheduler state. Run the whole CPU suite through
+the unified loop; delete/demote the two unused cores.
+
+## TP — delta broadcast + sampling ownership (HIGH)
+
+**Gap.** `DistTPModelRunner.execute` broadcasts a full pickled `StepInput`
+snapshot every step (`dist.broadcast_object_list` — the vLLM-V0 control-plane
+mistake), and every rank samples independently from full logits (rank agreement
+proven only on gloo/CPU; one non-deterministic GPU kernel forks rank KV state).
+
+**Design.** Delta-broadcast only new/finished requests + committed tokens (the
+snapshot machinery already isolates the delta). Promote the rank-divergence
+check to a blocking runbook gate. Decide rank-0-samples-and-broadcasts vs
+all-ranks-sample now — it changes the worker step protocol. Also wire the runner
+into `build_engine_loop`/serve (today real-model TP exists only in `tests/dist`).
+
+## KVTransport — region ownership + source-addressed recv (HIGH)
+
+**Gap.** `PageFrame.fragments: tuple[bytes,...]` and `register(num_pages)` carry
+no memory region, so an RDMA transport can't pin the pool through the seam (the
+NIXL adapter reaches around it); `kv_serde.extract_page` does per-layer D2H+copy;
+`TcpLoopbackTransport.recv(src)` ignores `src`; bf16 serde is unimplemented. G2
+B2 (≥70% NIC line rate) is unreachable through bytes-copy semantics.
+
+**Design (CPU-testable now).** Widen `register(pool_descriptor)` with region
+info; allow frames to carry `(page_id, region_offset)` alternatives to bytes; add
+a `recv(src)` conformance test; implement bf16 serde via uint8 views today.
+
+---
+
+Refs: repo-review report; `engine/core/{step_executor,model_runner,attention/,
+worker,kv_transport,kv_serde}.py`, `engine/{engine_loop,kairyu_backend}.py`.

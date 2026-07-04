@@ -50,7 +50,15 @@ class EagerStepExecutor:
 class FakeGraphBackend:
     """CPU test double honoring the real contract: capture returns a replayable
     bound to STATIC buffers; replay re-runs the fn on those buffers and
-    asserts the frozen shape (a real graph would silently corrupt instead)."""
+    asserts the frozen shape (a real graph would silently corrupt instead).
+
+    NOTE: this fake re-invokes ``fn(static_batch)`` at replay time, so it reads
+    whatever the executor most recently wrote onto ``static_batch`` — including
+    the page_tables/seq_lens that ``GraphStepExecutor._copy_in`` rebinds via
+    ``object.__setattr__``. A REAL CUDA graph cannot: it replays fixed kernels
+    over fixed device memory and never sees post-capture Python-attribute
+    mutation. ``SnapshotGraphBackend`` models that faithfully (see C5).
+    """
 
     def __init__(self) -> None:
         self.captures = 0
@@ -68,6 +76,48 @@ class FakeGraphBackend:
                 )
                 backend.replays += 1
                 return fn(static_batch)
+
+        return _Replayable()
+
+
+class SnapshotGraphBackend:
+    """Faithful CUDA-graph model for the contract test (C5).
+
+    Captures the batch's inputs AT CAPTURE TIME and replays against that frozen
+    snapshot, ignoring any later Python-attribute mutation — exactly what a real
+    graph does. Inputs a real graph reads from static DEVICE buffers (token_ids,
+    positions) are read live from the captured tensor object (in-place writes are
+    visible); inputs the executor rebinds as Python attributes (page_tables,
+    seq_lens) are frozen at capture, so post-capture changes are INVISIBLE.
+
+    Used to prove GraphStepExecutor currently mis-handles page_tables/seq_lens:
+    until they become in-place-written static device buffers, replay attends over
+    the capture-time scratch page instead of the request's real pages.
+    """
+
+    def __init__(self) -> None:
+        self.captures = 0
+        self.replays = 0
+
+    def capture(self, fn: DecodeFn, static_batch: DecodeBatch):
+        self.captures += 1
+        backend = self
+        frozen_pages = static_batch.page_tables  # snapshot: real graph bakes these in
+        frozen_seq_lens = static_batch.seq_lens
+        live_tokens = static_batch.token_ids  # device buffer: in-place writes seen
+        live_positions = static_batch.positions
+
+        class _Replayable:
+            def replay(self) -> torch.Tensor:
+                backend.replays += 1
+                # replay sees live device buffers but the CAPTURE-TIME page table
+                snapshot = DecodeBatch(
+                    token_ids=live_tokens,
+                    positions=live_positions,
+                    page_tables=frozen_pages,
+                    seq_lens=frozen_seq_lens,
+                )
+                return fn(snapshot)
 
         return _Replayable()
 

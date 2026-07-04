@@ -9,6 +9,7 @@ from kairyu.engine.core.step_executor import (
     EagerStepExecutor,
     FakeGraphBackend,
     GraphStepExecutor,
+    SnapshotGraphBackend,
 )
 
 
@@ -98,3 +99,32 @@ class TestGraphStepExecutor:
         _, static = executor._captured[4]
         assert static.page_tables[3] == (7,)
         assert static.seq_lens[3] == 1
+
+
+def _decode_fn_pages(batch: DecodeBatch) -> torch.Tensor:
+    """Output depends on each sequence's first page id — a proxy for 'attends
+    over the right KV pages'. If the page table doesn't reach replay, it's wrong."""
+    firsts = torch.tensor([pt[0] for pt in batch.page_tables], dtype=torch.float32)
+    return firsts[:, None]
+
+
+@pytest.mark.xfail(
+    reason="C5: GraphStepExecutor rebinds page_tables/seq_lens as Python attrs after "
+    "capture; a real CUDA graph never sees that. Fix = static device buffers written "
+    "in-place. This contract test flips to pass once they are.",
+    strict=True,
+)
+def test_graph_replay_reflects_current_page_tables():
+    # A faithful graph (SnapshotGraphBackend) freezes page_tables at capture time,
+    # so replay must still attend over the request's REAL pages — which today it
+    # cannot, because _copy_in only rebinds a Python attribute.
+    backend = SnapshotGraphBackend()
+    executor = GraphStepExecutor(_decode_fn_pages, backend, max_batch=8, scratch_page=0)
+    batch = DecodeBatch(
+        token_ids=torch.tensor([10, 11, 12], dtype=torch.int64),
+        positions=torch.tensor([5, 6, 7], dtype=torch.int64),
+        page_tables=((3,), (4,), (5,)),
+        seq_lens=(6, 6, 6),
+    )
+    out = executor.execute_decode(batch)
+    assert out.flatten().tolist() == [3.0, 4.0, 5.0]  # not the scratch page (0)
