@@ -136,6 +136,19 @@ class Conductor:
                     raise ValueError(
                         f"verifier {role.name!r} must depend on its target {role.verifies!r}"
                     )
+                # a verifier runs INLINE right after its target, so any OTHER
+                # dependency must also be the target's dependency (else it may not
+                # have run yet and _SafeDict would render it as "" → a silent
+                # wrong PASS/FAIL). Catch the misconfiguration loudly (M1).
+                target = self._by_name[role.verifies]
+                available = set(target.depends_on) | {role.verifies}
+                for dep in role.depends_on:
+                    if dep != role.verifies and dep not in available:
+                        raise ValueError(
+                            f"verifier {role.name!r} depends on {dep!r}, which is not "
+                            f"available when it runs inline after {role.verifies!r}; "
+                            f"add {dep!r} to {role.verifies!r}'s depends_on"
+                        )
         self._check_acyclic()
 
     def _check_acyclic(self) -> None:
@@ -206,6 +219,17 @@ class Conductor:
             )
         run.completion_order.append(spec.name)
 
+    async def _run_unit_safe(
+        self, run: _RunState, session: str, query: str, spec: RoleSpec
+    ) -> None:
+        # A transient backend failure on one unit must not destroy the whole
+        # multi-agent run: record it and let the Conductor return the best
+        # result produced so far (O4). Sibling units keep their completed work.
+        try:
+            await self._run_unit(run, session, query, spec)
+        except Exception as error:
+            run.trace.append(TraceEvent(spec.name, "failed", type(error).__name__))
+
     def _final_text(self, run: _RunState) -> str:
         dependents: set[str] = set()
         for deps in self._unit_deps.values():
@@ -226,7 +250,10 @@ class Conductor:
         while pending:
             ready = [name for name, deps in pending.items() if not deps]
             await asyncio.gather(
-                *(self._run_unit(run, session, query, self._by_name[name]) for name in ready)
+                *(
+                    self._run_unit_safe(run, session, query, self._by_name[name])
+                    for name in ready
+                )
             )
             for name in ready:
                 del pending[name]

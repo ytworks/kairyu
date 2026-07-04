@@ -54,14 +54,27 @@ def test_step_returns_finished_ids():
     assert engine.has_unfinished() is False
 
 
-def test_stall_without_progress_raises():
-    # A request whose prompt can never fit must error out, not loop forever.
+def test_oversized_prompt_is_rejected_gracefully_not_stalling():
+    # C2: a request whose prompt can never fit must be rejected (finished with
+    # reason "length" and empty output), not crash the engine with a stall that
+    # would take down every concurrent request.
     cache = RadixKVCache(num_pages=1, page_size=PAGE)
     scheduler = Scheduler(cache, max_num_batched_tokens=64)
     engine = EngineCore(scheduler=scheduler, runner=EchoRunner())
     engine.add_request(EngineRequest("big", tuple(range(1, 100)), max_new_tokens=1))
-    try:
-        engine.run_to_completion()
-        raise AssertionError("expected RuntimeError for stalled engine")
-    except RuntimeError as error:
-        assert "stall" in str(error)
+    outputs = engine.run_to_completion()  # no RuntimeError
+    assert outputs["big"] == ()  # rejected, nothing generated
+    assert scheduler.finish_reason("big") == "length"
+    assert engine.has_unfinished() is False
+
+
+def test_oversized_prompt_does_not_block_concurrent_requests():
+    # C2: an unadmittable request must not wedge a normal request behind it.
+    cache = RadixKVCache(num_pages=2, page_size=PAGE)  # capacity = 8 tokens
+    scheduler = Scheduler(cache, max_num_batched_tokens=64)
+    engine = EngineCore(scheduler=scheduler, runner=EchoRunner())
+    engine.add_request(EngineRequest("big", tuple(range(1, 100)), max_new_tokens=1))
+    engine.add_request(EngineRequest("ok", (1, 2, 3, 4), max_new_tokens=1))
+    outputs = engine.run_to_completion()
+    assert outputs["big"] == ()  # rejected
+    assert len(outputs["ok"]) == 1  # normal request still completed

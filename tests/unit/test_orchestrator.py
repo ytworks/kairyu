@@ -37,6 +37,38 @@ async def test_complex_query_uses_default_conductor_dag():
     assert len(tier1.prompts_seen) + len(tier2.prompts_seen) >= 3  # planner/worker/verifier/synth
 
 
+async def test_moa_tier_charges_cost_model_and_reports_budget(tmp_path):
+    # M3: the deep MoA tier must invoke the cost model and surface a budget
+    # overrun in the trace, instead of being invisible to max_cost_usd.
+    from kairyu.orchestration.budget import Budget
+    from kairyu.orchestration.conductor import chars_cost_model
+
+    orchestrator = _orchestrator(
+        moa_samples=2,
+        cost_model=chars_cost_model(usd_per_1k_chars=1000.0),  # huge -> exceeds
+        budget=Budget(max_cost_usd=0.001),
+    )
+    result = await orchestrator.run(COMPLEX)
+    assert any("moa:" in line and "cost=" in line for line in result.trace)
+    assert any("budget exceeded" in line for line in result.trace)
+
+
+async def test_multistage_stream_emits_periodic_keepalives(monkeypatch):
+    # M8: a long multi-stage run must emit PERIODIC status keep-alives, not one
+    # status then silence (which a proxy idle timeout would sever).
+    import kairyu.orchestration.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "_KEEPALIVE_INTERVAL_S", 0.01)
+    # backends with latency so the multi-agent run outlasts several keepalives
+    slow = {"tier1": MockBackend(latency_s=0.03), "tier2": MockBackend(latency_s=0.03)}
+    orchestrator = _orchestrator(engines=slow)
+    events = [event async for event in await orchestrator.run_chat(COMPLEX, stream=True)]
+    kinds = [e.kind for e in events]
+    assert kinds.count("status") >= 2  # routing + at least one "working" keepalive
+    assert kinds[-1] == "result"
+    assert any(e.kind == "delta" for e in events)
+
+
 async def test_missing_tier_falls_back_with_trace_note():
     only_engine = MockBackend()
     orchestrator = _orchestrator(engines={"tier1": only_engine})

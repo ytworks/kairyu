@@ -80,6 +80,202 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: review report; `docs/design/gpu-day-seams.md`,
   `kairyu/engine/core/step_executor.py` (`SnapshotGraphBackend`),
   `tests/unit/test_step_executor.py`.
+### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
+- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
+  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
+  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
+  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
+  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
+  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
+- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
+  from the serve entrypoint — so real tensor-parallel models could not be
+  deployed. Now `kairyu serve --tp 2` runs end to end.
+- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
+  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
+  `kairyu/models/loader.py`, test
+  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
+
+### 2026-07-04 — [progress] Review remediation Phase 8: packaging + doc accuracy
+- What: Fixed the cross-cutting packaging/doc defects from the full-repo review.
+  Added an **`[engine]` extra** (torch + xgrammar + tokenizers + safetensors) so
+  real models run WITHOUT the dev group, and pointed **`Dockerfile.cuda`** at it
+  (`--extra engine` replaces `--extra hf`) so the production GPU image ships
+  xgrammar and can serve `response_format: json_schema` (was missing). Fixed the
+  misplaced comment above the `otel` extra (it described the fleet transports).
+  `build_engine_loop`'s TP>1 error/docstring now state the truth — the
+  multi-process `DistTPModelRunner` exists (m16, tests/dist) but is not yet wired
+  into the single-process serve path — instead of "arrives in M16". Refreshed
+  `docs/gpu-runbook.md` §0/§1: corrected the stale "177 tests" count, the
+  `--group gpu`/`uv sync --dev` command errors (now `--extra gpu`/`--group dev`),
+  and the "replace KairyuBackend._tokenize / TorchPagedRunner" instructions that
+  M8/M12/M13 already delivered, with a note that the seams exist and GPU-day is
+  enabling/tuning them.
+- Why: The GPU image couldn't serve structured outputs, there was no non-dev
+  install path for real models, and the runbook (the artifact GPU day executes
+  from) contradicted the codebase.
+- Refs: review report; `pyproject.toml`, `uv.lock`, `Dockerfile.cuda`,
+  `kairyu/engine/kairyu_backend.py`, `docs/gpu-runbook.md`.
+  **Deferred follow-up:** `kairyu validate` cross-artifact command, typed
+  `GenerationRequest.prompt` (token-ids/multimodal), `deploy/spec.py`
+  ServerSection compose-not-inherit, and the `kairyu/bench/` package boundary.
+### 2026-07-04 — [progress] Review remediation Phase 7: host-path performance (safe subset)
+- What: Fixed the provably-safe, output-preserving host-path hot spots from the
+  full-repo review. **P5**: `prompt_chunks` re-hashed the whole prompt prefix per
+  256-char chunk (O(L²) sha256 on the placement path, event-loop-blocking) and
+  the pool called `overlap()` twice per replica; replaced with ONE streaming
+  sha256 chain (byte-identical keys, proven equivalent over random trials) and a
+  single `overlap()` per replica. **P-perf (completions)**: `/v1/completions`
+  ran a prompt array serially (`await` per prompt = sum of latencies); now
+  `asyncio.gather` runs them concurrently with order restored by index (response
+  byte-unchanged).
+- Why: Both are event-loop-blocking / latency costs on the request path that
+  survive the GPU swap; both are output-identical so they carry no correctness
+  risk.
+- Refs: review report; `kairyu/orchestration/{prefix_index,replica}.py`,
+  `kairyu/entrypoints/server/app.py`; tests `tests/unit/test_kv_routing.py`.
+  **Deferred (risk/complexity, need care or their own change):** P1 incremental
+  detokenization (correctness-sensitive output path — a subtle detok bug corrupts
+  generation, and CPU tests can't cover every tokenizer edge, so not worth a
+  perf-only rewrite), P3 (process-split delta wire), P4 (async ledger/router I/O
+  — file-handle lifecycle), P6 (eviction leaf heap), P7 (batched spec verify),
+  and the MEDIUM-perf items (sampler penalty state, stop-string offset, queue
+  coalescing, scheduler deque, KV-event hash chain, page-table cache).
+### 2026-07-04 — [progress] Review remediation Phase 5: bench scoring correctness + security
+- What: Fixed the scoring-integrity and security defects in the Fugu bench suite.
+  **B1**: the MCQ answer-extraction regex matched "answer" + the first letter of
+  the following word (so "Answer: B, because the answer depends…" extracted D)
+  and the fallback picked lone lowercase articles/pronouns — tightened to a
+  bounded letter after the marker and an uppercase-only fallback. **B2**: an
+  un-typed `normalize()` error (schema drift KeyError, image/codec, unpickling)
+  crashed the whole suite run; it now degrades THAT dataset to `unavailable`
+  ("degradation is data, not control flow"). **M6**: the dataset cache is now
+  invalidated when the pinned dataset/revision changes, so bumping `hf_revision`
+  re-downloads instead of scoring stale rows. **M7**: private-test blobs unpickle
+  through a `_RestrictedUnpickler` that blocks class/global loading (was a
+  download-time arbitrary-code vector); the judge response fed into the prompt is
+  length-capped. **M8**: LCB solutions that start with `from __future__ import`
+  no longer become a SyntaxError when the import header is prepended (the future
+  import is hoisted). **M10**: the judge verdict regex accepts markdown-emphasized
+  labels (`**correct:** yes`) and the judge token budget was raised so a reasoning
+  judge is not truncated before its verdict.
+- Why: Each silently corrupts the scoreboard (wrong scores, crashed runs, stale
+  data) or is a security hole (ACE at download time).
+- Refs: review report; `kairyu/bench/{adapters/base,adapters/livecodebench,cache,judge}.py`;
+  tests under `tests/bench/`. **Deferred follow-up (design/policy):** B3 (resume
+  per-pair config hash), B4 + denominator policy (skipped/unjudged as 0 or n/a,
+  show per-target n_scored), LCB per-line/tolerant scoring, sandbox NPROC/session
+  hardening, self-judge (judge==target) scoreboard flag, judge prompt delimiters.
+### 2026-07-04 — [progress] Review remediation Phase 4: model + quant parity
+- What: Fixed the parity-affecting model/quant defects from the full-repo review.
+  **M3 (rope)**: unsupported `rope_scaling` kinds (linear/dynamic/longrope) now
+  raise instead of silently dropping to None — a silent parity break vs
+  hf.generate. **M4 (fp8 load)**: `Fp8Linear` adopts the checkpoint's
+  weight_scale shape, so static per-tensor `(1,)` FP8 (and modelopt FP8) load
+  instead of a size-mismatch crash. **M1 (nvfp4 oracle)**: the RNE tie table
+  applied LUT *values* as indices and dropped two boundaries, corrupting the
+  GPU-kernel packing oracle by up to 60%; replaced with the correct even-index
+  table for all seven boundaries (and the test that pinned the wrong behavior).
+  MEDIUM: DeepSeek MoE config now falls back to HF defaults
+  (norm_topk_prob=True, routed_scaling=2.5, first_k_dense=3, n_group/topk_group
+  8/4) for trimmed configs, and a missing expert count raises clearly instead of
+  `int(None)`; GPTQ/AWQ `group_size=-1` (single whole-input group) normalizes to
+  in_features instead of a negative buffer count; `tp_view` fails fast on MoE
+  (no dense down_proj to row-parallelize) like it already does for MLA; bare
+  `quant_method: "fp8"` rejects block-wise FP8 (weight_block_size) loudly
+  instead of mis-routing DeepSeek block-FP8 to the per-channel path.
+- Why: Each is a silent wrong-output or load-time failure on real checkpoints;
+  all are CPU-validatable and covered by new tests.
+- Refs: review report; `kairyu/models/{config,parallel}.py`,
+  `kairyu/quant/{linear,nvfp4}.py`, `kairyu/engine/core/quant_config.py`;
+  `tests/unit/test_config_and_fp8_load.py`, `test_quant_compute.py`.
+  **Deferred (needs GPU + SpecForge reference to validate):** EAGLE-3 midlayer
+  RoPE (H1) and KV-cached rollout feedback (H2) — both affect draft ACCEPTANCE
+  RATE only, not output correctness (verification is by the target), so no CPU
+  test can validate a fix; plus the design items (linear_factory context,
+  forward_fused wiring, HF-name-preserving TP/EP wrappers, draft-head quant).
+### 2026-07-04 — [progress] Review remediation Phase 3: orchestration + fleet reliability
+- What: Fixed the L2 fleet/orchestration HIGH defects from the full-repo review.
+  **O1**: request errors were all counted as replica failures — a new
+  `UpstreamClientError` (4xx) is raised by the openai backend and excluded from
+  `consecutive_failures`, so one misbehaving client can no longer cascade-eject
+  the pool. **O2**: the HealthProber was ordinal-keyed against a dynamic
+  id-keyed pool (wrong-replica restore / IndexError / silent prober death);
+  it is now id-keyed, resolves URLs per id, and `run()` swallows a bad tick.
+  **O3**: the prober now probes `/readyz` (readiness) not `/health` (liveness),
+  so a drained/wedged node stays ejected — O1+O3 together kill the flap loop.
+  **O4**: the Conductor wraps each unit so a transient backend error records a
+  trace event and returns best-so-far instead of raising and discarding every
+  completed output. MEDIUM: **M2** orchestrator direct calls no longer mint a
+  random per-request session_id (which defeated prefix + least-outstanding
+  routing); **M4** KvEventIndex stamps freshness only after a valid apply,
+  handles vLLM `AllBlocksCleared`, and the ZMQ drain drops malformed frames
+  instead of aborting; **M5** `remove_replica` calls `prefix_index.forget_replica`
+  so a re-added id can't inherit phantom prefixes; **M7** lifespan shutdown
+  isolates a crashed background task and shuts every engine down independently.
+- Why: These are DoS / flap-loop / cost-and-routing-correctness defects the
+  single-node CPU tests could not exercise.
+- Refs: review report; `kairyu/orchestration/{replica,conductor,orchestrator,kv_index}.py`,
+  `kairyu/engine/{backend,openai_backend}.py`, `kairyu/deploy/{prober,registry,spec,builder}.py`;
+  tests under `tests/unit/`. Deferred follow-up: M1 (verifier non-target deps +
+  _SafeDict masking), M3 (MoA path Budget/cost wiring), M8 (run_chat periodic
+  keep-alive), and the KvEventIndex↔ReplicaPool integration (design item).
+### 2026-07-04 — [progress] Review remediation Phase 2: API security + tenant isolation
+- What: Fixed the CRITICAL/HIGH L3-server defects from the full-repo review.
+  **C3 (CRITICAL) batch/file tenant isolation**: File/Batch objects gained an
+  `owner`; the store scopes every get/read/list/cancel and cross-tenant access
+  reads as not-found — a tenant can no longer enumerate or read another's batch
+  prompts/outputs (worker output/error files inherit the batch owner). **S1**:
+  a non-object JSONL line becomes a per-line error instead of wedging the job
+  in_progress forever. **S2**: invalid sampling params (top_p=0, n=0,
+  temperature<0) return 400, not a 500/mislabeled-502. **S3**: streaming chat
+  and /v1/completions are now metered (were a billing bypass) — usage flows to
+  the ledger; orchestrator-stream/responses/embeddings metering still TODO.
+  **S4**: `tokens_per_minute` is enforced via a per-tenant token bucket charged
+  post-response. **S5**: `/admin/drain` requires an admin key when configured
+  (was any data-plane key = one-request DoS) and gains `/admin/undrain`.
+  **S6**: streamed `delta.tool_calls[]` carry the required `index` (SDK
+  accumulation). **S7**: `/v1/files` upload is size-capped (413) to prevent
+  gateway OOM.
+- Why: These are cross-tenant disclosure, billing bypass, and DoS holes that
+  the single-tenant CPU test suite could not see.
+- Refs: review report; `kairyu/batch/{store,worker}.py`,
+  `kairyu/entrypoints/server/{batch_routes,app,health,settings,tenancy,protocol}.py`;
+  tests under `tests/server/` + `tests/unit/test_batch_store_tenancy.py`.
+  Deferred to a Phase 2 follow-up: MEDIUM items (Prometheus label cardinality,
+  /v1/responses store bounds + tenant scope, error-body leak scrub, AUTO-model
+  param handling, non-ASCII bearer 401, embeddings validation) and full S3
+  metering coverage.
+
+### 2026-07-04 — [progress] Repo-wide review remediation Phase 1: engine-core correctness
+- What: Fixed the CRITICAL/HIGH engine-core defects found in the 2026-07-04
+  full-repo review (report in job scratch). **C1 radix cache poisoning**:
+  `commit_and_release` folded the final sampled token's page as computed even
+  though the decode loop never writes that token's KV — a page-boundary
+  completion poisoned the next multi-turn prefix (silent wrong output ~1/16 of
+  requests). Now caps committable length below the unwritten final token
+  (`radix_kv.py`). **C2 oversized-prompt permanent death**: a prompt larger
+  than the whole KV cache blocked the head of line forever, turning every empty
+  schedule into a fatal engine stall that killed all concurrent requests. The
+  scheduler now rejects unadmittable prompts at admission (finish_reason
+  "length", drained via `drain_rejected`), and all four engine cores
+  (EngineCore/OverlapEngineCore/PipelinedEngineCore/EngineLoop) replace the
+  fatal stall with `reject_waiting_head`. **E1 ZMQ receiver death**: a dead
+  receiver left every subsequent request hanging; `_ensure_started` now respawns
+  a fresh child over a crashed one and per-frame errors no longer kill the loop.
+  **E2 state leaks**: `Scheduler.forget` + runner `release` reclaim finished
+  per-request state (output lists, sampler seeds, grammar enforcers) — wired
+  into `EngineLoop`. MEDIUM: engine_service per-message fault isolation,
+  `resume_with_kv` honors ignore_eos/min_tokens/stop_token_ids/finish_reason,
+  `RemoteKVReceiver.adopt` frees the allocation on failure, `zmq generate()`
+  aborts on cancel, NIXL send yields instead of busy-spinning. LOW: PagePool
+  rejects duplicate free ids, torch attention builds indices on the query
+  device.
+- Why: The CPU test suite was single-turn/single-tenant and could not see these
+  multi-turn / long-running / crash-path failures; each is output-corrupting,
+  a DoS, or an unbounded leak on the deploy-day paths.
+- Refs: review report; `kairyu/engine/core/{radix_kv,scheduler,engine_core,
+  overlap,pipeline,pd_remote,pages,model_runner,spec_runner,engine_service}.py`,
+  `kairyu/engine/{engine_loop,zmq_backend}.py`; tests under `tests/unit/`
 
 ### 2026-07-03 — [progress] Fugu benchmark suite: one-command quality scoreboard (G6 P-C1)
 - What: 646 → 730+ tests. New `kairyu/bench/` package + `kairyu bench

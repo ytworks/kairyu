@@ -11,8 +11,16 @@
 > (DP-first/PP/EP strategy, placement-crossover report). On A100 (SM80), FP8 steps
 > substitute W4A16/INT8. See `docs/roadmap.md` §4 Track E for the phase plan.
 
-Purpose: everything CPU-verifiable is done (177 tests, main). This is the ordered,
+Purpose: everything CPU-verifiable is done (M8–M19: the full engine/model/quant/
+distributed/transport stack, ~647 tests on main). This is the ordered,
 command-level plan for the first GPU session. Est. scope: 2–4 focused days.
+
+> Note (2026-07-04): §1/§3 below predate M8/M12/M13 — the tokenizer seam,
+> `PagedModelRunner`, the `AttentionBackend`/`FlashInferBackend` seam, and quant
+> loading are already delivered. The GPU-day work is enabling/tuning the real
+> FlashInfer path behind the existing seam and running the perf gates, not
+> building the seam from scratch. The batched-execution / CUDA-graph seam changes
+> tracked in the repo-review Phase 6 land before the perf gates here.
 
 ## 0. Environment (30 min)
 
@@ -20,23 +28,26 @@ command-level plan for the first GPU session. Est. scope: 2–4 focused days.
 # Ubuntu 22.04+, CUDA 12.4+, driver >= 550
 git clone https://github.com/ytworks/kairyu.git && cd kairyu
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync --dev                          # 177 CPU tests must pass here first
+uv sync --group dev                    # the CPU suite must pass here first
 uv run pytest                          # gate 0: green before any GPU work
-uv add flashinfer-python --group gpu   # pin exact version in pyproject
-uv add vllm sglang --group bench       # baselines, pin versions
+uv sync --extra gpu --extra engine     # flashinfer/triton/nixl + torch/xgrammar
+uv sync --extra bench                  # baselines (vllm/sglang installed alongside)
 ```
 
 Record: GPU model, driver, CUDA, flashinfer/vllm/sglang versions → `bench/results/env-<date>.json`.
 
 ## 1. FlashInfer ModelRunner (day 1)
 
-Replace `TorchPagedRunner`'s naive gather+matmul with FlashInfer paged attention behind
-the same `ModelRunner` protocol (`kairyu/engine/core/engine_core.py`). Reference
-implementation of the paging math: `kairyu/engine/core/torch_runner.py` (tested).
+Enable the FlashInfer paged-attention path behind the delivered `AttentionBackend`
+seam (`kairyu/engine/core/attention/`; `FlashInferBackend` is CPU-pinned against a
+fake and mirrored in `tests/gpu/`). The real runner is `PagedModelRunner`
+(`kairyu/engine/core/model_runner.py`, m12); the paging-math reference remains
+`kairyu/engine/core/torch_runner.py`.
 
 - Llama-3.1-8B weights (BF16 first) via safetensors; `detect_quantization()`
   (`quant_config.py`) selects the load path.
-- Tokenizer: HF tokenizers; replace `KairyuBackend._tokenize` placeholder.
+- Tokenizer: the HF tokenizer seam is delivered (m8, `kairyu/engine/tokenizer.py`);
+  point `model_path=`/`tokenizer=` at the checkpoint dir.
 - Gate 1 (correctness): greedy token parity vs HF transformers BF16 on 64 fixed prompts
   — run with overlap ON and OFF (`EngineCore` vs `OverlapEngineCore`).
 - Gate 2: `uv run pytest` — the whole CPU suite still green with the GPU runner importable.
@@ -77,7 +88,7 @@ scheduler protocol §2.1.
 | TTFT ≥20% better vs vLLM @128 conc (or p99 win at equal tput) | `serving_bench.py`, step 2 |
 | KV hit >80% @50% shared prefix | `multiturn_prefix.py` on real engine (88.1% already shown at KV-manager level) |
 | Router −40% cost @97% quality | needs serving traffic + judge; pipeline ready (`m4-router-learning.md`) |
-| vLLM API compat pytest | already green (177); re-run with vLLM installed to un-skip cross-checks |
+| vLLM API compat pytest | already green; re-run with vLLM installed to un-skip cross-checks |
 
 ## 5. Human sign-off checklist (blocking, before implementation continues)
 

@@ -66,7 +66,7 @@ def test_batched_decode_equals_sequential():
 
     # sequential: one forward per sequence
     sequential = []
-    for i, seq in enumerate(seqs):
+    for i in range(len(seqs)):
         hidden = model.forward_tokens(
             torch.tensor([decode_tokens[i]], dtype=torch.long),
             torch.tensor([positions[i]]),

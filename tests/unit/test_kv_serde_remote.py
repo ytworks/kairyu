@@ -135,6 +135,22 @@ class TestRemoteHandoff:
         assert second.num_cached_tokens == 8  # 2 full pages radix-hit
         assert receiver.injected_pages == 3 + 1  # only the tail re-injected (A4)
 
+    def test_failed_adopt_does_not_leak_the_allocation(self):
+        # A frame-count mismatch after allocate() must free the allocation, or
+        # it pins the matched radix path against eviction and leaks pages.
+        source = _filled_pool()
+        decode_pool = PagedKVPool(2, 16, PAGE, 2, 8)
+        decode_cache = RadixKVCache(num_pages=16, page_size=PAGE)
+        receiver = RemoteKVReceiver(decode_cache, decode_pool)
+        before = decode_cache.num_free_pages
+        # two-token prompt needs one page, but hand it three frames -> mismatch
+        too_many = tuple(extract_page(source, page) for page in (0, 1, 2))
+        from kairyu.engine.core.kv_transport import SequenceMeta
+
+        with pytest.raises(KVTransportError, match="non-cached frames"):
+            receiver.adopt(too_many, SequenceMeta(token_ids=(1, 2), first_token=0))
+        assert decode_cache.num_free_pages == before  # allocation reclaimed
+
     def test_missing_pages_is_a_handoff_error(self):
         prefill_transport, decode_transport = self._pair()
         handoff = RemoteKVHandoff(

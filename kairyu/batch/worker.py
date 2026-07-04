@@ -66,10 +66,15 @@ class BatchWorker:
         if self._metrics is not None:
             self._metrics.batch_jobs_total.labels(state=state).inc()
 
-    async def _run_line(self, line: dict) -> tuple[dict | None, dict | None]:
+    async def _run_line(self, line: object) -> tuple[dict | None, dict | None]:
         """Execute one input line; returns (output_line, error_line)."""
-        custom_id = line.get("custom_id")
+        # a line that is valid JSON but not an object (e.g. a bare `5`) must
+        # become a per-line error record, never raise out of gather and wedge
+        # the whole job in "in_progress" forever (S1)
+        custom_id = line.get("custom_id") if isinstance(line, dict) else None
         try:
+            if not isinstance(line, dict):
+                raise ValueError("input line is not a JSON object")
             request = ChatCompletionRequest.model_validate(line["body"])
             engine = self._engines.get(request.model)
             if engine is None:
@@ -148,6 +153,7 @@ class BatchWorker:
                 "\n".join(json.dumps(line) for line in outputs).encode("utf-8"),
                 filename=f"{batch_id}_output.jsonl",
                 purpose="batch_output",
+                owner=job.owner,  # result files belong to the batch's tenant (C3)
             )
             job.output_file_id = output_file.id
         if errors:
@@ -155,6 +161,7 @@ class BatchWorker:
                 "\n".join(json.dumps(line) for line in errors).encode("utf-8"),
                 filename=f"{batch_id}_errors.jsonl",
                 purpose="batch_output",
+                owner=job.owner,
             )
             job.error_file_id = error_file.id
         job.request_counts.completed = len(outputs)

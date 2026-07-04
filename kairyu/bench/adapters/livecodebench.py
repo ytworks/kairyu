@@ -71,12 +71,37 @@ _FUNCTIONAL_INSTRUCTION = (
 )
 
 
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Blocks class/global loading so a hostile private-test blob cannot execute
+    arbitrary code at download time (M7). The payload is a JSON string, so no
+    globals are legitimately needed — any attempt fails loudly."""
+
+    def find_class(self, module, name):  # pragma: no cover - security guard
+        raise pickle.UnpicklingError(
+            f"blocked global {module}.{name} while decoding private tests"
+        )
+
+
+def _compose_solution(code: str, driver: str = "") -> str:
+    """Prepend the import header, hoisting any leading `from __future__` imports
+    the model wrote so they stay the first statements (M8 — otherwise the header
+    displaces them and every such solution is a SyntaxError)."""
+    future, body = [], []
+    for line in code.splitlines(keepends=True):
+        target = future if line.lstrip().startswith("from __future__ import") else body
+        target.append(line)
+    return "".join(future) + _IMPORT_HEADER + "".join(body) + driver
+
+
 def decode_private_tests(blob: str) -> list[dict]:
     """LCB lite stores private tests either as JSON or zlib+pickle+base64 JSON."""
     try:
         return json.loads(blob)
     except (json.JSONDecodeError, TypeError):
-        return json.loads(pickle.loads(zlib.decompress(base64.b64decode(blob.encode()))))
+        import io
+
+        raw = zlib.decompress(base64.b64decode(blob.encode()))
+        return json.loads(_RestrictedUnpickler(io.BytesIO(raw)).load())
 
 
 def grade_code(code: str, tests: list[dict], fn_name: str | None) -> tuple[bool, str]:
@@ -87,7 +112,7 @@ def grade_code(code: str, tests: list[dict], fn_name: str | None) -> tuple[bool,
                 {"input": test["input"], "expected": test["output"], "fn": fn_name}
             )
             result = run_python(
-                _IMPORT_HEADER + code + _FUNCTIONAL_DRIVER,
+                _compose_solution(code, _FUNCTIONAL_DRIVER),
                 stdin=spec,
                 timeout_s=_TEST_TIMEOUT_S,
                 memory_mb=_MEMORY_MB,
@@ -97,7 +122,7 @@ def grade_code(code: str, tests: list[dict], fn_name: str | None) -> tuple[bool,
                 return False, f"functional test {index}: {detail or 'wrong answer'}"
         else:
             result = run_python(
-                _IMPORT_HEADER + code,
+                _compose_solution(code),
                 stdin=test["input"],
                 timeout_s=_TEST_TIMEOUT_S,
                 memory_mb=_MEMORY_MB,

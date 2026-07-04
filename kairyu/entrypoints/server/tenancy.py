@@ -57,22 +57,49 @@ class _Bucket:
         self.tokens -= amount
         return True
 
+    def debit(self, amount: float, now: float) -> None:
+        """Unconditionally subtract (may go negative — overage carries forward)."""
+        self.tokens = min(self.capacity, self.tokens + (now - self.updated) * self.rate)
+        self.updated = now
+        self.tokens -= amount
+
 
 class TenantLimiter:
-    """Per-tenant request-rate token buckets (single-gateway; the distributed
-    limiter is a G6 note)."""
+    """Per-tenant request-rate AND token-rate buckets (single-gateway; the
+    distributed limiter is a G6 note)."""
 
     def __init__(self, config: TenantConfig, now: Callable[[], float] = time.monotonic):
         self._config = config
         self._now = now
         self._buckets: dict[str, _Bucket] = {}
+        self._token_buckets: dict[str, _Bucket] = {}
 
-    def admit(self, tenant: str) -> bool:
+    def _request_bucket(self, tenant: str) -> _Bucket:
         bucket = self._buckets.get(tenant)
         if bucket is None:
             bucket = _Bucket(self._config.limits_for(tenant).requests_per_minute, self._now)
             self._buckets[tenant] = bucket
-        return bucket.take(1.0, self._now())
+        return bucket
+
+    def _token_bucket(self, tenant: str) -> _Bucket:
+        bucket = self._token_buckets.get(tenant)
+        if bucket is None:
+            bucket = _Bucket(self._config.limits_for(tenant).tokens_per_minute, self._now)
+            self._token_buckets[tenant] = bucket
+        return bucket
+
+    def admit(self, tenant: str) -> bool:
+        # a tenant that has already burned its token budget is refused before a
+        # new request runs; tokens are charged after each response completes (S4)
+        token_bucket = self._token_bucket(tenant)
+        token_bucket.take(0.0, self._now())  # refill only
+        if token_bucket.tokens < 1.0:
+            return False
+        return self._request_bucket(tenant).take(1.0, self._now())
+
+    def charge_tokens(self, tenant: str, tokens: int) -> None:
+        """Debit a completed request's tokens from the tenant's token bucket."""
+        self._token_bucket(tenant).debit(float(tokens), self._now())  # may go negative
 
 
 class TenantLimitMiddleware:
@@ -122,11 +149,21 @@ class TenantLimitMiddleware:
 
 
 class UsageLedger:
-    """O_APPEND single-writer JSONL (A7): one line per completed request."""
+    """O_APPEND single-writer JSONL (A7): one line per completed request.
+
+    Keeps ONE append handle open (P4): the old open()/write()/close() per request
+    ran three syscalls synchronously on the event loop, stalling in-flight SSE
+    streams; a persistent append handle drops that to a buffered write+flush."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = None
+
+    def _get_handle(self):
+        if self._handle is None or self._handle.closed:
+            self._handle = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
+        return self._handle
 
     def record(
         self, tenant: str, model: str, prompt_tokens: int, completion_tokens: int
@@ -140,8 +177,13 @@ class UsageLedger:
                 "ts": time.time(),
             }
         )
-        with open(self._path, "a", encoding="utf-8") as handle:  # O_APPEND
-            handle.write(line + "\n")
+        handle = self._get_handle()
+        handle.write(line + "\n")
+        handle.flush()  # O_APPEND write is atomic; totals() readers see it at once
+
+    def close(self) -> None:
+        if self._handle is not None and not self._handle.closed:
+            self._handle.close()
 
     def totals(self, tenant: str | None = None) -> dict[str, dict[str, int]]:
         """Aggregate by tenant (optionally filtered) for /admin/usage."""

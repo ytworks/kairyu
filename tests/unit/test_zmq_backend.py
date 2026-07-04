@@ -12,7 +12,7 @@ from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.registry import create_backend
-from kairyu.engine.zmq_backend import EngineServiceError, ZmqEngineBackend
+from kairyu.engine.zmq_backend import ZmqEngineBackend
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
@@ -120,15 +120,36 @@ async def test_rejects_non_string_tokenizer():
         ZmqEngineBackend(tokenizer=ToyTokenizer())  # type: ignore[arg-type]
 
 
-async def test_service_death_surfaces_as_error():
+async def test_inflight_request_sees_service_death():
+    # A request awaiting when the child dies must be delivered an error event
+    # (death detection), not hang forever.
     backend = ZmqEngineBackend(num_pages=64, death_timeout_s=2.0)
     try:
         await backend.generate(_request("d1", "warm up", max_tokens=2))
-        backend._process.kill()  # simulate a crashed engine service
-        with pytest.raises(EngineServiceError):
-            await asyncio.wait_for(
-                backend.generate(_request("d2", "after crash", max_tokens=2)), timeout=10
-            )
+        queue = await backend._submit(_request("d2", "in flight", max_tokens=64))
+        backend._process.kill()  # crash while d2 awaits
+        event = await asyncio.wait_for(queue.get(), timeout=10)
+        assert "error" in event  # delivered, not a permanent hang
+    finally:
+        backend._queues.pop("d2", None)
+        await backend.shutdown()
+
+
+async def test_backend_recovers_after_service_death():
+    # E1: once the dead child is observed, the backend must respawn a fresh
+    # engine service for later requests instead of leaving them to hang.
+    backend = ZmqEngineBackend(num_pages=64, death_timeout_s=2.0)
+    try:
+        await backend.generate(_request("r1", "warm up", max_tokens=2))
+        queue = await backend._submit(_request("r2", "in flight", max_tokens=64))
+        backend._process.kill()
+        await asyncio.wait_for(queue.get(), timeout=10)  # error event; receiver exits
+        backend._queues.pop("r2", None)
+        # the next request respawns a fresh child and completes normally
+        result = await asyncio.wait_for(
+            backend.generate(_request("r3", "recovered", max_tokens=2)), timeout=15
+        )
+        assert result.completions[0].token_ids
     finally:
         await backend.shutdown()
 
