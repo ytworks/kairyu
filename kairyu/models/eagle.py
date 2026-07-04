@@ -26,7 +26,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from kairyu.models.layers import RMSNorm
+from kairyu.models.layers import RMSNorm, apply_rope
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,7 @@ class EagleConfig:
     intermediate_size: int
     draft_vocab_size: int
     rms_norm_eps: float = 1e-5
+    rope_theta: float = 10000.0  # SpecForge/vLLM EAGLE-3 midlayers are RoPE-trained (H1)
 
 
 class _EagleMidLayer(nn.Module):
@@ -46,6 +47,14 @@ class _EagleMidLayer(nn.Module):
         hidden = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = hidden // config.num_attention_heads
+        # RoPE over the head dim (H1): SpecForge/vLLM EAGLE-3 midlayers are Llama
+        # attention layers trained WITH rotary embeddings — omitting it makes the
+        # draft position-blind and collapses acceptance at any context length
+        inv_freq = 1.0 / (
+            config.rope_theta
+            ** (torch.arange(0, self.head_dim, 2, dtype=torch.int64).float() / self.head_dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.input_layernorm = RMSNorm(hidden, config.rms_norm_eps)
         self.hidden_norm = RMSNorm(hidden, config.rms_norm_eps)
         self.self_attn = nn.ModuleDict(
@@ -65,17 +74,32 @@ class _EagleMidLayer(nn.Module):
             }
         )
 
-    def forward(self, embeds: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
-        """embeds/hidden: [T, H]; dense causal attention over the T positions."""
+    def forward(
+        self,
+        embeds: torch.Tensor,
+        hidden: torch.Tensor,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """embeds/hidden: [T, H]; dense causal attention over the T positions.
+
+        ``positions`` (default 0..T-1) drives RoPE on q/k (H1)."""
         fused = torch.cat([self.input_layernorm(embeds), self.hidden_norm(hidden)], -1)
         chunk_len = fused.shape[0]
+        if positions is None:
+            positions = torch.arange(chunk_len, device=fused.device)
 
-        def heads(projection: torch.Tensor) -> torch.Tensor:
-            return projection.view(chunk_len, self.num_heads, self.head_dim).transpose(0, 1)
+        def heads_thd(projection: torch.Tensor) -> torch.Tensor:
+            return projection.view(chunk_len, self.num_heads, self.head_dim)
 
-        query = heads(self.self_attn["q_proj"](fused))
-        key = heads(self.self_attn["k_proj"](fused))
-        value = heads(self.self_attn["v_proj"](fused))
+        query = heads_thd(self.self_attn["q_proj"](fused))
+        key = heads_thd(self.self_attn["k_proj"](fused))
+        value = heads_thd(self.self_attn["v_proj"](fused))
+        freqs = positions.to(torch.float32)[:, None] * self.inv_freq[None, :]
+        emb = torch.cat((freqs, freqs), dim=-1)
+        query, key = apply_rope(query, key, emb.cos(), emb.sin())  # [T, heads, d]
+        query = query.transpose(0, 1)  # [heads, T, d]
+        key = key.transpose(0, 1)
+        value = value.transpose(0, 1)
         context = nn.functional.scaled_dot_product_attention(
             query[None], key[None], value[None], is_causal=chunk_len > 1
         )[0]
@@ -122,16 +146,23 @@ class EagleDraftHead(nn.Module):
         (the target's embedding — SpecForge ships none).
         """
         embeds = embeds.clone()
+        # `hidden` accumulates the midlayer's INPUT hidden per position: the
+        # context rows stay the original fuse(aux) inputs (their K/V are computed
+        # once and frozen in a KV-cached EAGLE), and each draft step appends ONE
+        # feedback row = the previous step's output for the last position (H2).
+        # The old code overwrote the whole tensor with the midlayer OUTPUT, so
+        # every context position's K/V was recomputed from mutated inputs.
         hidden = initial_hidden.clone()
         drafted: list[int] = []
         for _ in range(k):
-            hidden = self.midlayer(embeds, hidden)
-            logits = self.lm_head(self.norm(hidden[-1]))
+            positions = torch.arange(embeds.shape[0], device=embeds.device)
+            out = self.midlayer(embeds, hidden, positions)
+            logits = self.lm_head(self.norm(out[-1]))
             draft_id = int(torch.argmax(logits).item())
             target_id = draft_id + int(self.d2t[draft_id].item())  # offset map
             drafted.append(target_id)
             embeds = torch.cat([embeds, embed_fn(target_id)[None]], dim=0)
-            hidden = torch.cat([hidden, hidden[-1:]], dim=0)  # feed back own hidden
+            hidden = torch.cat([hidden, out[-1:]], dim=0)  # append feedback only
         return drafted
 
 

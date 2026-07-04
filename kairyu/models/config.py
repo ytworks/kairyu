@@ -174,6 +174,14 @@ def _rope_fields(config: dict) -> tuple[float, RopeScaling | None]:
                 config.get("max_position_embeddings", 4096),
             ),
         )
+    elif kind not in (None, "default"):
+        # unsupported kinds (linear/dynamic/longrope) must fail fast, not be
+        # silently dropped to None — that would load fine and then generate
+        # confidently wrong tokens vs hf.generate (M3), a silent parity break
+        raise ValueError(
+            f"unsupported rope_scaling type {kind!r}: only 'llama3' and 'yarn' "
+            "are implemented"
+        )
     return float(theta), scaling
 
 
@@ -187,18 +195,29 @@ def _moe_fields(config: dict, architecture: str) -> MoeConfig | None:
         or config.get("num_local_experts")
         or config.get("n_routed_experts")
     )
+    if num_experts is None:
+        raise ValueError(
+            "MoE config missing expert count "
+            "(num_experts / num_local_experts / n_routed_experts)"
+        )
+    # A trimmed/distilled config that omits these keys must fall back to the
+    # SAME defaults as the reference HF config for the architecture (M2), or the
+    # block routes unnormalized/unscaled where hf.generate normalizes and scales.
+    is_deepseek = architecture == "DeepseekV3ForCausalLM"
     return MoeConfig(
         num_experts=int(num_experts),
         num_experts_per_tok=int(config["num_experts_per_tok"]),
         moe_intermediate_size=int(config["moe_intermediate_size"]),
-        norm_topk_prob=bool(config.get("norm_topk_prob", False)),
+        norm_topk_prob=bool(config.get("norm_topk_prob", is_deepseek)),
         decoder_sparse_step=int(config.get("decoder_sparse_step", 1)),
         mlp_only_layers=tuple(config.get("mlp_only_layers") or ()),
-        n_group=config.get("n_group"),
-        topk_group=config.get("topk_group"),
-        routed_scaling_factor=float(config.get("routed_scaling_factor", 1.0)),
+        n_group=config.get("n_group", 8 if is_deepseek else None),
+        topk_group=config.get("topk_group", 4 if is_deepseek else None),
+        routed_scaling_factor=float(
+            config.get("routed_scaling_factor", 2.5 if is_deepseek else 1.0)
+        ),
         n_shared_experts=int(config.get("n_shared_experts") or 0),
-        first_k_dense_replace=int(config.get("first_k_dense_replace", 0)),
+        first_k_dense_replace=int(config.get("first_k_dense_replace", 3 if is_deepseek else 0)),
     )
 
 
