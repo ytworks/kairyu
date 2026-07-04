@@ -93,6 +93,31 @@ async def test_tool_call_is_parsed_into_openai_schema(app):
     assert json.loads(tool_call["function"]["arguments"]) == {"city": "Tokyo"}
 
 
+async def test_streamed_tool_calls_carry_required_index(app):
+    # S6: each streamed delta.tool_calls[] item must include `index` so OpenAI
+    # SDK stream accumulators can merge the fragments.
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "get_weather", "parameters": {"type": "object"}},
+        }
+    ]
+    async with _client(app) as client:
+        async with client.stream(
+            "POST", "/v1/chat/completions",
+            json=_chat_body("what is the weather?", tools=tools, stream=True),
+        ) as response:
+            saw_tool_call = False
+            async for line in response.aiter_lines():
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                chunk = json.loads(line[len("data: "):])
+                for tc in chunk["choices"][0]["delta"].get("tool_calls") or []:
+                    assert "index" in tc
+                    saw_tool_call = True
+    assert saw_tool_call  # a tool-call delta was actually emitted
+
+
 async def test_kairyu_auto_routes_through_orchestrator(app):
     body = _chat_body("What is the capital of France?")
     body["model"] = "kairyu-auto"
@@ -115,6 +140,25 @@ async def test_invalid_body_returns_422(app):
     async with _client(app) as client:
         response = await client.post("/v1/chat/completions", json={"model": "kairyu-mock"})
     assert response.status_code == 422
+
+
+async def test_invalid_sampling_params_return_400_not_500(app):
+    # S2: out-of-range sampling values must be a client error (400), not an
+    # unhandled ValueError surfacing as 500 (chat) or a mislabeled 502.
+    async with _client(app) as client:
+        for bad in ({"top_p": 0}, {"n": 0}, {"temperature": -1}):
+            response = await client.post("/v1/chat/completions", json=_chat_body("hi", **bad))
+            assert response.status_code == 400, (bad, response.status_code)
+            assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+async def test_completions_invalid_sampling_returns_400(app):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions", json={"model": "kairyu-mock", "prompt": "hi", "top_p": 0}
+        )
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
 
 
 class StubBackend:
@@ -201,15 +245,19 @@ async def test_backend_finish_reason_passes_through():
 
 
 async def test_backend_error_returns_openai_error_envelope():
-    app = create_app(engines={"stub": StubBackend(error=RuntimeError("key missing"))})
+    app = create_app(
+        engines={"stub": StubBackend(error=RuntimeError("secret://host:5432 key missing"))}
+    )
     async with _client(app) as client:
         body = _chat_body("hi")
         body["model"] = "stub"
         response = await client.post("/v1/chat/completions", json=body)
     assert response.status_code == 502
     error = response.json()["error"]
-    assert "key missing" in error["message"]
     assert error["type"] == "upstream_error"
+    # M3: the backend's raw message (which may carry secrets/hosts) must NOT leak
+    assert "secret://host:5432" not in error["message"]
+    assert "RuntimeError" in error["message"]  # only the class name is disclosed
 
 
 async def test_response_format_passes_through_to_engine():

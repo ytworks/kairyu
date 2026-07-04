@@ -62,6 +62,33 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-04 — [progress] Review remediation Phase 2: API security + tenant isolation
+- What: Fixed the CRITICAL/HIGH L3-server defects from the full-repo review.
+  **C3 (CRITICAL) batch/file tenant isolation**: File/Batch objects gained an
+  `owner`; the store scopes every get/read/list/cancel and cross-tenant access
+  reads as not-found — a tenant can no longer enumerate or read another's batch
+  prompts/outputs (worker output/error files inherit the batch owner). **S1**:
+  a non-object JSONL line becomes a per-line error instead of wedging the job
+  in_progress forever. **S2**: invalid sampling params (top_p=0, n=0,
+  temperature<0) return 400, not a 500/mislabeled-502. **S3**: streaming chat
+  and /v1/completions are now metered (were a billing bypass) — usage flows to
+  the ledger; orchestrator-stream/responses/embeddings metering still TODO.
+  **S4**: `tokens_per_minute` is enforced via a per-tenant token bucket charged
+  post-response. **S5**: `/admin/drain` requires an admin key when configured
+  (was any data-plane key = one-request DoS) and gains `/admin/undrain`.
+  **S6**: streamed `delta.tool_calls[]` carry the required `index` (SDK
+  accumulation). **S7**: `/v1/files` upload is size-capped (413) to prevent
+  gateway OOM.
+- Why: These are cross-tenant disclosure, billing bypass, and DoS holes that
+  the single-tenant CPU test suite could not see.
+- Refs: review report; `kairyu/batch/{store,worker}.py`,
+  `kairyu/entrypoints/server/{batch_routes,app,health,settings,tenancy,protocol}.py`;
+  tests under `tests/server/` + `tests/unit/test_batch_store_tenancy.py`.
+  Deferred to a Phase 2 follow-up: MEDIUM items (Prometheus label cardinality,
+  /v1/responses store bounds + tenant scope, error-body leak scrub, AUTO-model
+  param handling, non-ASCII bearer 401, embeddings validation) and full S3
+  metering coverage.
+
 ### 2026-07-04 — [progress] Repo-wide review remediation Phase 1: engine-core correctness
 - What: Fixed the CRITICAL/HIGH engine-core defects found in the 2026-07-04
   full-repo review (report in job scratch). **C1 radix cache poisoning**:

@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, Response, UploadFile
+from fastapi import FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
+
+
+def _tenant_of(request: Request) -> str:
+    """Owning tenant for this request (C3), or "default" in keyless mode."""
+    return request.scope.get("state", {}).get("tenant", "default")
+
+
+# cap the batch input upload so one client cannot OOM the gateway (S7)
+_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 
 class CreateBatchRequest(BaseModel):
@@ -35,37 +44,54 @@ def _not_found(kind: str, object_id: str) -> JSONResponse:
 def add_batch_routes(app: FastAPI, store: BatchStore, worker: BatchWorker) -> None:
     @app.post("/v1/files")
     async def upload_file(
-        file: Annotated[UploadFile, File()], purpose: Annotated[str, Form()]
+        request: Request,
+        file: Annotated[UploadFile, File()],
+        purpose: Annotated[str, Form()],
     ):
-        content = await file.read()
-        return store.save_file(content, filename=file.filename or "upload", purpose=purpose)
+        content = await file.read(_MAX_UPLOAD_BYTES + 1)
+        if len(content) > _MAX_UPLOAD_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": {
+                        "message": f"file exceeds the {_MAX_UPLOAD_BYTES}-byte upload limit",
+                        "type": "invalid_request_error",
+                        "code": "file_too_large",
+                    }
+                },
+            )
+        return store.save_file(
+            content, filename=file.filename or "upload", purpose=purpose,
+            owner=_tenant_of(request),
+        )
 
     @app.get("/v1/files/{file_id}")
-    async def get_file(file_id: str):
+    async def get_file(request: Request, file_id: str):
         try:
-            return store.get_file(file_id)
+            return store.get_file(file_id, owner=_tenant_of(request))
         except KeyError:
             return _not_found("file", file_id)
 
     @app.get("/v1/files/{file_id}/content")
-    async def get_file_content(file_id: str):
+    async def get_file_content(request: Request, file_id: str):
         try:
-            content = store.read_file_content(file_id)
+            content = store.read_file_content(file_id, owner=_tenant_of(request))
         except KeyError:
             return _not_found("file", file_id)
         return Response(content=content, media_type="application/octet-stream")
 
     @app.post("/v1/batches")
-    async def create_batch(request: CreateBatchRequest):
+    async def create_batch(request: Request, body: CreateBatchRequest):
         try:
             job = store.create_batch(
-                input_file_id=request.input_file_id,
-                endpoint=request.endpoint,
-                completion_window=request.completion_window,
-                metadata=request.metadata,
+                input_file_id=body.input_file_id,
+                endpoint=body.endpoint,
+                completion_window=body.completion_window,
+                metadata=body.metadata,
+                owner=_tenant_of(request),
             )
         except KeyError:
-            return _not_found("file", request.input_file_id)
+            return _not_found("file", body.input_file_id)
         except ValueError as error:
             return JSONResponse(
                 status_code=400,
@@ -81,23 +107,26 @@ def add_batch_routes(app: FastAPI, store: BatchStore, worker: BatchWorker) -> No
         return job
 
     @app.get("/v1/batches")
-    async def list_batches(limit: int = 20):
-        return {"object": "list", "data": [job.model_dump() for job in store.list_batches(limit)]}
+    async def list_batches(request: Request, limit: int = 20):
+        owner = _tenant_of(request)
+        jobs = store.list_batches(limit, owner=owner)
+        return {"object": "list", "data": [job.model_dump() for job in jobs]}
 
     @app.get("/v1/batches/{batch_id}")
-    async def get_batch(batch_id: str):
+    async def get_batch(request: Request, batch_id: str):
         try:
-            return store.get_batch(batch_id)
+            return store.get_batch(batch_id, owner=_tenant_of(request))
         except KeyError:
             return _not_found("batch", batch_id)
 
     @app.post("/v1/batches/{batch_id}/cancel")
-    async def cancel_batch(batch_id: str):
+    async def cancel_batch(request: Request, batch_id: str):
+        owner = _tenant_of(request)
         try:
-            job = store.get_batch(batch_id)
+            job = store.get_batch(batch_id, owner=owner)
         except KeyError:
             return _not_found("batch", batch_id)
         if job.status in ("validating", "in_progress"):
             job.status = "cancelled"
             store.update_batch(job)
-        return store.get_batch(batch_id)
+        return store.get_batch(batch_id, owner=owner)

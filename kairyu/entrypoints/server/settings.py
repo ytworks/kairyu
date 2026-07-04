@@ -41,16 +41,32 @@ class ServerSettings(BaseModel):
         default=None,
         description="JSONL usage-ledger path; None disables metering (m11 D3).",
     )
+    admin_keys_env: str | None = Field(
+        default=None,
+        description=(
+            "Env var holding comma-separated ADMIN API keys; when set, /admin/* "
+            "state changes (drain/undrain) require one of these, so an ordinary "
+            "data-plane key cannot take the node out of service (S5)."
+        ),
+    )
 
     def resolve_api_keys(self) -> frozenset[str]:
         """Read keys from the configured env var; fail loud on an empty var."""
-        if self.api_keys_env is None:
+        return self._resolve_keys(self.api_keys_env)
+
+    def resolve_admin_keys(self) -> frozenset[str]:
+        """Admin keys for /admin/* mutations; empty when unconfigured."""
+        return self._resolve_keys(self.admin_keys_env)
+
+    @staticmethod
+    def _resolve_keys(env_var: str | None) -> frozenset[str]:
+        if env_var is None:
             return frozenset()
-        raw = os.environ.get(self.api_keys_env, "")
+        raw = os.environ.get(env_var, "")
         keys = frozenset(key.strip() for key in raw.split(",") if key.strip())
         if not keys:
             raise ValueError(
-                f"api_keys_env={self.api_keys_env!r} is set but the env var "
-                "contains no keys; unset api_keys_env to serve without auth"
+                f"key env var {env_var!r} is set but contains no keys; "
+                "unset it to disable that key set"
             )
         return keys
