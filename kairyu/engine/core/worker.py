@@ -14,7 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from kairyu.engine.core.step_input import StepInput, snapshot_step
+from kairyu.engine.core.step_input import StateSync, StepDelta
 
 _SHUTDOWN = None
 
@@ -52,11 +52,17 @@ class DistTPModelRunner:
     def __init__(self, comm, local_runner) -> None:
         self._comm = comm
         self._local = local_runner
+        # delta-broadcast state (F4): only new/finished requests + committed
+        # tokens cross the wire each step, not a full pickled snapshot of every
+        # active request's (growing) prompt/outputs
+        self._sync = StateSync()
 
     def execute(self, scheduled, states) -> dict:
-        step = snapshot_step(scheduled, states)
-        self._comm.broadcast(step, src=0)
-        return self._local.execute(step.chunks, step.states_view())
+        chunks = tuple(scheduled)
+        delta = self._sync.diff(chunks, states)
+        self._comm.broadcast(delta, src=0)
+        view = self._sync.apply(delta)  # reconstructs snapshot_step()'s states exactly
+        return self._local.execute(chunks, view)
 
     def shutdown(self) -> None:
         self._comm.broadcast(_SHUTDOWN, src=0)
@@ -68,12 +74,14 @@ def worker_step_loop(comm, local_runner) -> int:
     Returns the number of steps executed (spawn tests assert on it).
     """
     steps = 0
+    sync = StateSync()
     while True:
         payload = comm.broadcast(_SHUTDOWN, src=0)
         if payload is _SHUTDOWN or payload is None:
             return steps
-        assert isinstance(payload, StepInput)
-        local_runner.execute(payload.chunks, payload.states_view())
+        assert isinstance(payload, StepDelta)
+        view = sync.apply(payload)  # same delta -> same reconstructed states
+        local_runner.execute(payload.chunks, view)
         steps += 1
 
 

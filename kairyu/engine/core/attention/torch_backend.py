@@ -39,3 +39,24 @@ class TorchAttentionBackend:
             enable_gqa=True,
         )
         return out[0].transpose(0, 1).reshape(chunk_len, -1)
+
+    def attend_batched(
+        self,
+        queries: list[torch.Tensor],
+        kv_pool: PagedKVPool,
+        layer: int,
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+        chunk_starts: list[int],
+    ) -> list[torch.Tensor]:
+        """Batched decode/prefill attention (C4): per-sequence contexts.
+
+        The CPU reference dispatches each sequence through ``attend`` — so the
+        result is per-sequence IDENTICAL to calling ``attend`` one at a time. On
+        GPU the FlashInfer backend replaces the loop with ONE batched kernel over
+        indptr/indices arrays behind this same signature (no batch = N launches).
+        """
+        return [
+            self.attend(queries[i], kv_pool, layer, page_tables[i], seq_lens[i], chunk_starts[i])
+            for i in range(len(queries))
+        ]
