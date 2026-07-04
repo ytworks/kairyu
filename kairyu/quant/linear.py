@@ -54,6 +54,16 @@ class Fp8Linear(QuantizedLinearBase):
         )
         self.register_buffer("weight_scale", torch.ones(out_features, 1))
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # static (per-tensor) FP8 checkpoints ship a (1,) scale, dynamic ones a
+        # per-channel [out,1] scale. Adopt the checkpoint's shape so both load —
+        # a fixed [out,1] buffer rejects the (1,) form even with assign=True (M4).
+        scale_key = prefix + "weight_scale"
+        incoming = state_dict.get(scale_key)
+        if incoming is not None and incoming.shape != self.weight_scale.shape:
+            self.register_buffer("weight_scale", torch.empty_like(incoming))
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def dequantize(self) -> torch.Tensor:
         return fp8.dequantize_fp8(self.weight, self.weight_scale)
 
@@ -80,11 +90,19 @@ class Int8Linear(QuantizedLinearBase):
         return out.to(x.dtype)
 
 
+def _resolve_group_size(group_size: int, in_features: int) -> int:
+    """group_size == -1 means one group over the whole input axis (AutoGPTQ/AWQ
+    convention). Normalize it to in_features so the group count is 1, not a
+    negative number that crashes the buffer allocation."""
+    return in_features if group_size <= 0 else group_size
+
+
 class AwqLinear(QuantizedLinearBase):
     def __init__(
         self, in_features: int, out_features: int, bias: bool, group_size: int = 128
     ) -> None:
         super().__init__(in_features, out_features, bias)
+        group_size = _resolve_group_size(group_size, in_features)
         self.group_size = group_size
         groups = in_features // group_size
         self.register_buffer(
@@ -106,6 +124,7 @@ class GptqLinear(QuantizedLinearBase):
         self, in_features: int, out_features: int, bias: bool, group_size: int = 128
     ) -> None:
         super().__init__(in_features, out_features, bias)
+        group_size = _resolve_group_size(group_size, in_features)
         self.group_size = group_size
         groups = -(-in_features // group_size)
         self.register_buffer(

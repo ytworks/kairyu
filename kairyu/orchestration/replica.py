@@ -29,7 +29,12 @@ import hashlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from kairyu.engine.backend import EngineBackend, GenerationRequest, GenerationResult
+from kairyu.engine.backend import (
+    EngineBackend,
+    GenerationRequest,
+    GenerationResult,
+    UpstreamClientError,
+)
 from kairyu.orchestration.router import JsonlRouterLog
 
 _DEFAULT_UNHEALTHY_AFTER = 3
@@ -124,6 +129,10 @@ class ReplicaPool:
             )
         entry.removed = True  # guarded decrement: late completions are no-ops (A2)
         del self._entries[replica_id]
+        # drop this id's prefix history (M5): a re-added replica with the same id
+        # must not inherit phantom prefixes and route shared traffic to a cold cache
+        if self._prefix_index is not None:
+            self._prefix_index.forget_replica(replica_id)
 
     def health_url(self, replica_id: str) -> str | None:
         return self._entry(replica_id).health_url
@@ -259,6 +268,10 @@ class ReplicaPool:
         entry.outstanding += 1
         try:
             result = await entry.backend.generate(request)
+        except UpstreamClientError:
+            # a bad client request (4xx) is not a replica health signal: do NOT
+            # count it, or one misbehaving client would eject the whole pool (O1)
+            raise
         except Exception:
             entry.consecutive_failures += 1
             raise
@@ -275,6 +288,8 @@ class ReplicaPool:
         try:
             async for chunk in entry.backend.stream(request):
                 yield chunk
+        except UpstreamClientError:
+            raise  # client-side 4xx, not a replica failure (O1)
         except Exception:
             entry.consecutive_failures += 1
             raise

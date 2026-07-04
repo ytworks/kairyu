@@ -51,7 +51,7 @@ def test_health_url_derived_from_base_url():
     entry = BackendSpec(
         backend="openai", options={"base_url": "http://gpu-0:8000/v1", "model": "m"}
     )
-    assert entry.resolved_health_url() == "http://gpu-0:8000/health"
+    assert entry.resolved_health_url() == "http://gpu-0:8000/readyz"
 
 
 def test_health_url_explicit_and_absent():

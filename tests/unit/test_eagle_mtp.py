@@ -66,6 +66,41 @@ class TestEagleHead:
         assert head.midlayer.self_attn["q_proj"].in_features == 64  # 2H (A2)
         assert head.fc.in_features == 96  # 3H
 
+    def test_midlayer_applies_rope_and_is_position_sensitive(self):
+        # H1: the midlayer is RoPE-trained. RoPE encodes RELATIVE position, so a
+        # uniform shift is (correctly) invariant, but changing the relative gaps
+        # between tokens must change the last token's attention output.
+        torch.manual_seed(3)
+        head = EagleDraftHead(EAGLE).eval()
+        embeds = torch.randn(3, 32)
+        hidden = torch.randn(3, 32)
+        base = head.midlayer(embeds, hidden, torch.tensor([0, 1, 2]))
+        uniform_shift = head.midlayer(embeds, hidden, torch.tensor([10, 11, 12]))
+        assert torch.allclose(base, uniform_shift, atol=1e-5)  # relative -> invariant
+        spread = head.midlayer(embeds, hidden, torch.tensor([0, 3, 9]))  # different gaps
+        assert not torch.allclose(base[-1], spread[-1], atol=1e-4)  # RoPE is applied
+
+    def test_rollout_freezes_context_hidden_inputs(self):
+        # H2: each draft step must APPEND one feedback row and leave the context
+        # rows' input hidden untouched — not overwrite the whole hidden with the
+        # midlayer output. We spy on the hidden passed into the midlayer.
+        torch.manual_seed(4)
+        head = EagleDraftHead(EAGLE).eval()
+        embed = torch.randn(128, 32)
+        initial = torch.randn(4, 32)
+        seen_hidden = []
+        original = head.midlayer.forward
+
+        def spy(embeds, hidden, positions=None):
+            seen_hidden.append(hidden.clone())
+            return original(embeds, hidden, positions)
+
+        head.midlayer.forward = spy  # type: ignore[method-assign]
+        head.rollout(embed[:4], initial, lambda t: embed[t], k=3)
+        # every step's first 4 (context) hidden rows equal the ORIGINAL fuse rows
+        for hidden in seen_hidden:
+            assert torch.equal(hidden[:4], initial)
+
     def test_loader_round_trip_and_format_guards(self, tmp_path):
         from safetensors.torch import save_file
 

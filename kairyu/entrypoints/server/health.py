@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from kairyu.engine.backend import EngineBackend
@@ -16,21 +16,57 @@ def add_health_routes(
     app: FastAPI,
     engines: Mapping[str, EngineBackend],
     metrics: ServerMetrics | None,
+    admin_keys: Iterable[str] = (),
 ) -> None:
+    admin_key_set = frozenset(admin_keys)
+
+    def _forbidden_if_not_admin(request: Request) -> JSONResponse | None:
+        # when admin keys are configured, /admin/* state changes require one, so
+        # an ordinary data-plane key cannot drain the node (S5). With no admin
+        # keys set, behavior is unchanged (auth-gated when api keys exist).
+        if not admin_key_set:
+            return None
+        caller = request.scope.get("state", {}).get("api_key")
+        if caller in admin_key_set:
+            return None
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "message": "admin privilege required",
+                    "type": "invalid_request_error",
+                    "code": "admin_required",
+                }
+            },
+        )
+
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok"}
 
     @app.post("/admin/drain")
-    async def drain_node():
+    async def drain_node(request: Request):
         """Node-level drain (m10a A5): flips /readyz to 503; gateway-side pool
         drains go through PoolReconciler membership instead.
 
-        NOT in the auth exempt list: when API keys are configured this
-        endpoint requires one (pinned by test); keyless deployments are the
-        node-to-node trusted-mesh mode (m7 D5) by explicit choice."""
+        NOT in the auth exempt list; additionally requires an ADMIN key when
+        admin keys are configured (S5). Keyless deployments are the node-to-node
+        trusted-mesh mode (m7 D5) by explicit choice."""
+        denied = _forbidden_if_not_admin(request)
+        if denied is not None:
+            return denied
         app.state.draining = True
         return {"status": "draining"}
+
+    @app.post("/admin/undrain")
+    async def undrain_node(request: Request):
+        """Clear the drain flag so the node reports ready again (S5) — without
+        this a drained node could only recover via a process restart."""
+        denied = _forbidden_if_not_admin(request)
+        if denied is not None:
+            return denied
+        app.state.draining = False
+        return {"status": "ready"}
 
     @app.get("/readyz")
     async def readyz():

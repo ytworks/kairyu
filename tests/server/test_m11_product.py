@@ -49,6 +49,23 @@ class TestOrchestratorSurface:
             assert usage["completion_tokens"] > 0  # m11 A1: real, not zero
             assert "kairyu_trace" not in response.json() or response.json()["kairyu_trace"] is None
 
+    def test_auto_model_rejects_unsupported_params(self, tmp_path):
+        # M4: params the orchestrator can't honor (n>1, logprobs, tools,
+        # response_format) must 400, not be silently dropped.
+        with TestClient(_auto_app(tmp_path)) as client:
+            for extra in (
+                {"n": 2},
+                {"logprobs": True},
+                {"tools": [{"type": "function", "function": {"name": "f"}}]},
+                {"response_format": {"type": "json_object"}},
+            ):
+                resp = client.post(
+                    "/v1/chat/completions",
+                    json={"model": "kairyu-auto",
+                          "messages": [{"role": "user", "content": "hi"}], **extra},
+                )
+                assert resp.status_code == 400, extra
+
     def test_trace_header_opt_in(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:
             response = client.post(
@@ -135,6 +152,32 @@ class TestTenancy:
             usage_b = client.get("/admin/usage", headers=b).json()["usage"]
             assert usage_b["tenant-b"]["requests"] == 1
 
+    def test_streaming_and_completions_are_metered(self, tmp_path):
+        # S3: streaming chat and /v1/completions were never written to the
+        # ledger (billing bypass). Both must now record usage.
+        ledger_path = tmp_path / "usage.jsonl"
+        app = create_app(
+            {"m": create_backend("mock")},
+            settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+        )
+        with TestClient(app) as client:
+            with client.stream(
+                "POST", "/v1/chat/completions",
+                json={
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+            ) as response:
+                for _ in response.iter_lines():
+                    pass
+            client.post("/v1/completions", json={"model": "m", "prompt": "hello"})
+        from kairyu.entrypoints.server.tenancy import UsageLedger
+
+        totals = UsageLedger(ledger_path).totals()["default"]
+        assert totals["requests"] == 2  # both the stream and the completion metered
+        assert totals["completion_tokens"] > 0
+
     def test_ledger_reconciles_with_returned_usage(self, tmp_path):
         ledger = UsageLedger(tmp_path / "ledger.jsonl")
         returned = []
@@ -158,6 +201,37 @@ class TestTenancy:
         assert limiter.admit("t")
         assert limiter.admit("t")
         assert not limiter.admit("t")
+
+    def test_token_budget_is_enforced(self):
+        # S4: a tenant that burns its per-minute token budget is refused the next
+        # request, even while its request-rate bucket still has room.
+        clock = {"t": 0.0}
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={"t": TenantLimits(requests_per_minute=600, tokens_per_minute=100)}
+            ),
+            now=lambda: clock["t"],
+        )
+        assert limiter.admit("t")
+        limiter.charge_tokens("t", 150)  # overspend the 100-token budget
+        assert not limiter.admit("t")  # refused despite request-rate room
+        clock["t"] = 60.0  # a full minute refills the token bucket
+        assert limiter.admit("t")
+
+
+class TestResponseStore:
+    def test_lru_cap_and_tenant_scope(self):
+        # M2: the in-memory store is LRU-capped and tenant-scoped — a leaked id
+        # from another tenant reads as not-found.
+        from kairyu.entrypoints.server.extra_routes import ResponseStore
+
+        store = ResponseStore(max_items=2)
+        store.save("r1", [{"a": 1}], owner="tenant-a")
+        assert store.get("r1", owner="tenant-a") == [{"a": 1}]
+        assert store.get("r1", owner="tenant-b") is None  # cross-tenant -> not found
+        store.save("r2", [{"b": 2}], owner="tenant-a")
+        store.save("r3", [{"c": 3}], owner="tenant-a")  # evicts the LRU (r1)
+        assert store.get("r1", owner="tenant-a") is None  # evicted
 
 
 class TestResponsesApi:
@@ -226,6 +300,16 @@ class TestEmbeddings:
                 f"<{len(as_float)}f", base64.b64decode(as_b64)
             )
             assert list(decoded) == pytest.approx(as_float)
+
+    def test_invalid_encoding_format_is_400(self, tmp_path):
+        # M6: an unknown encoding_format (e.g. the typo "Base64") must be a 400,
+        # not silently served as float.
+        with TestClient(_auto_app(tmp_path)) as client:
+            resp = client.post(
+                "/v1/embeddings",
+                json={"model": "m", "input": "hello", "encoding_format": "Base64"},
+            )
+            assert resp.status_code == 400
 
 
 class TestVisionWire:
