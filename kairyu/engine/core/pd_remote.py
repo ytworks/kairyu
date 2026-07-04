@@ -43,19 +43,25 @@ class RemoteKVReceiver:
             allocation = self._cache.allocate(tuple(meta.token_ids))
         except KVCacheFull as error:
             raise KVHandoffError(f"decode cache full: {error}") from error
-        cached = len(allocation.cached_pages)
-        targets = tuple(allocation.new_full_pages) + (allocation.tail_page,)
-        incoming = frames[cached:]
-        usable = [t for t in targets if t is not None]
-        if len(incoming) > len(usable):
-            raise KVTransportError(
-                f"received {len(incoming)} non-cached frames for {len(usable)} slots"
-            )
-        for frame, local_page in zip(incoming, usable, strict=False):
-            inject_page(self._pool, local_page, frame)
-            self.injected_pages += 1
-        self._cache.mark_computed(allocation)
-        return allocation
+        try:
+            cached = len(allocation.cached_pages)
+            targets = tuple(allocation.new_full_pages) + (allocation.tail_page,)
+            incoming = frames[cached:]
+            usable = [t for t in targets if t is not None]
+            if len(incoming) > len(usable):
+                raise KVTransportError(
+                    f"received {len(incoming)} non-cached frames for {len(usable)} slots"
+                )
+            for frame, local_page in zip(incoming, usable, strict=False):
+                inject_page(self._pool, local_page, frame)
+                self.injected_pages += 1
+            self._cache.mark_computed(allocation)
+            return allocation
+        except Exception:
+            # a failed injection must not leak the allocation — it would pin the
+            # matched radix path against eviction forever and leak fresh pages
+            self._cache.free(allocation)
+            raise
 
 
 class RemoteKVHandoff:

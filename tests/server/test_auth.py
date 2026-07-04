@@ -44,6 +44,19 @@ async def test_wrong_key_is_401(app):
     assert response.status_code == 401
 
 
+def test_non_ascii_bearer_token_is_rejected_not_crash():
+    # M5: a non-ASCII token (raw high bytes a client could send) would crash
+    # hmac.compare_digest with TypeError; _authorized must return False, not raise.
+    from kairyu.entrypoints.server.middleware import AuthMiddleware
+
+    auth = AuthMiddleware(app=None, api_keys=("secret-1",))
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer s\xe9cr\xe9t")],  # latin-1 high bytes
+    }
+    assert auth._authorized(scope) is False  # no TypeError
+
+
 async def test_valid_keys_are_admitted(app):
     async with _client(app) as client:
         for key in ("secret-1", "secret-2"):

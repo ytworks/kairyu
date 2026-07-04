@@ -218,9 +218,18 @@ class EngineLoop:
         self._drain_ops()
         if self._scheduler.has_unfinished():
             plan = self._scheduler.schedule()
+            # prompts too large to ever fit are rejected in schedule() (C2);
+            # their tracks surface as finished via _track_update below
+            self._scheduler.drain_rejected()
             if not plan.scheduled:
-                raise RuntimeError("engine stall: nothing schedulable")
-            sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
+                # No progress this step. An empty plan while unfinished implies
+                # nothing is running to free pages, so force the stuck waiting
+                # head to finish rather than crash the whole engine (and every
+                # concurrent request) with a fatal stall.
+                self._scheduler.reject_waiting_head()
+                sampled = {}
+            else:
+                sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
             if sampled:
                 finished = self._scheduler.update(token_ids(sampled))
                 for request_id in grammar_finished(sampled, finished):
@@ -238,7 +247,15 @@ class EngineLoop:
             updates.append((request_id, update))
             if update.finished:
                 del self._tracked[request_id]
+                self._forget(request_id)
         return updates
+
+    def _forget(self, request_id: str) -> None:
+        """Reclaim finished per-request state in the scheduler and runner (E2)."""
+        self._scheduler.forget(request_id)
+        release = getattr(self._runner, "release", None)
+        if release is not None:
+            release(request_id)
 
     def _track_update(self, request_id: str, track: _RequestTrack) -> StreamUpdate | None:
         state = self._scheduler.states.get(request_id)

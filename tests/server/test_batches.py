@@ -222,6 +222,83 @@ async def test_unsupported_endpoint_and_missing_file(tmp_path):
         assert (await client.get("/v1/files/file-nope")).status_code == 404
 
 
+async def test_files_and_batches_are_isolated_across_tenants(tmp_path, monkeypatch):
+    # C3: a tenant must never read, list, or cancel another tenant's files/batches.
+    from kairyu.entrypoints.server.app import create_app
+    from kairyu.entrypoints.server.batch_routes import add_batch_routes
+    from kairyu.entrypoints.server.settings import ServerSettings
+    from kairyu.entrypoints.server.tenancy import TenantConfig
+
+    monkeypatch.setenv("KAIRYU_TEST_KEYS", "key-a,key-b")
+    settings = ServerSettings(api_keys_env="KAIRYU_TEST_KEYS")
+    tenants = TenantConfig(key_tenants={"key-a": "tenant-a", "key-b": "tenant-b"})
+    app = create_app({"m": MockBackend()}, settings=settings, tenant_config=tenants)
+    store = BatchStore(tmp_path)
+    add_batch_routes(app, store, BatchWorker(store, {"m": MockBackend()}))
+    a = {"Authorization": "Bearer key-a"}
+    b = {"Authorization": "Bearer key-b"}
+
+    async with _client(app) as client:
+        up = await client.post(
+            "/v1/files", headers=a,
+            files={"file": ("in.jsonl", _batch_line("c1", "hi"))},
+            data={"purpose": "batch"},
+        )
+        file_id = up.json()["id"]
+        created = await client.post(
+            "/v1/batches", headers=a,
+            json={"input_file_id": file_id, "endpoint": "/v1/chat/completions"},
+        )
+        batch_id = created.json()["id"]
+
+        # tenant A sees its own objects
+        assert (await client.get(f"/v1/files/{file_id}", headers=a)).status_code == 200
+        assert (await client.get(f"/v1/batches/{batch_id}", headers=a)).status_code == 200
+
+        # tenant B cannot read, download, list, or cancel them
+        assert (await client.get(f"/v1/files/{file_id}", headers=b)).status_code == 404
+        assert (await client.get(f"/v1/files/{file_id}/content", headers=b)).status_code == 404
+        assert (await client.get(f"/v1/batches/{batch_id}", headers=b)).status_code == 404
+        assert (await client.post(f"/v1/batches/{batch_id}/cancel", headers=b)).status_code == 404
+        listing = (await client.get("/v1/batches", headers=b)).json()
+        assert listing["data"] == []  # B's list never shows A's batch
+
+
+async def test_oversized_upload_is_rejected(tmp_path, monkeypatch):
+    # S7: an upload above the size cap returns 413 instead of buffering
+    # unboundedly and risking an OOM.
+    import kairyu.entrypoints.server.batch_routes as batch_routes
+    from kairyu.entrypoints.server.app import create_app
+
+    monkeypatch.setattr(batch_routes, "_MAX_UPLOAD_BYTES", 16)
+    app = create_app({"m": MockBackend()})
+    store = BatchStore(tmp_path)
+    batch_routes.add_batch_routes(app, store, BatchWorker(store, {"m": MockBackend()}))
+    async with _client(app) as client:
+        resp = await client.post(
+            "/v1/files",
+            files={"file": ("big.jsonl", b"x" * 64)},
+            data={"purpose": "batch"},
+        )
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "file_too_large"
+
+
+async def test_non_object_input_line_does_not_wedge_the_job(tmp_path):
+    # S1: a JSON line that is not an object (e.g. `5`) must become a per-line
+    # error, not raise out of gather and leave the job stuck in_progress.
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()})
+    content = ("5\n" + _batch_line("ok", "hi") + "\n").encode()
+    file = store.save_file(content, "i.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    await worker.process(job.id)  # must not raise
+    done = store.get_batch(job.id)
+    assert done.status == "completed"
+    assert done.request_counts.failed == 1  # the bad line recorded as an error
+    assert done.request_counts.completed == 1  # the good line still ran
+
+
 async def test_empty_result_still_completes(tmp_path):
     """A GenerationResult with no completions must not crash the worker."""
 

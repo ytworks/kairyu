@@ -17,4 +17,4 @@ milestone status, and blockers.
 - Design decisions and rationale (D-IDs, review amendments): `docs/design/m1..m4-*.md`
 - GPU-day execution plan: `docs/gpu-runbook.md`
 - Implementation plans: `docs/superpowers/plans/`
-- Dev commands: `uv sync --extra dev`, `uv run pytest`, `uv run ruff check .`
+- Dev commands: `uv sync --group dev`, `uv run pytest`, `uv run ruff check .`
