@@ -105,8 +105,11 @@ class TestRadixKvEvents:
         allocation = cache.allocate(tuple(range(8)))
         cache.mark_computed(allocation)
         decode_pages = [cache.allocate_private_page() for _ in range(1)]
+        # Five outputs: the decode page (positions 8-11) is fully KV-written;
+        # the fifth token spills into a partial tail whose KV is not yet
+        # written, so the full decode page can be safely folded (C1).
         cache.commit_and_release(
-            allocation, output_tokens=(100, 101, 102, 103), decode_pages=tuple(decode_pages)
+            allocation, output_tokens=(100, 101, 102, 103, 104), decode_pages=tuple(decode_pages)
         )
         kinds = [e["type"] for e in events]
         assert kinds.count("BlockStored") == 2  # prefill + decode extension

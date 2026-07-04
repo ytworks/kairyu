@@ -38,6 +38,10 @@ class PagePool:
         not_allocated = [page for page in page_list if page not in self._allocated]
         if not_allocated:
             raise ValueError(f"pages {not_allocated} are not allocated")
+        if len(set(page_list)) != len(page_list):
+            # a duplicate id would append the same physical page to _free twice,
+            # allowing it to be handed out to two requests at once
+            raise ValueError(f"duplicate page ids in free batch: {page_list}")
         for page in page_list:
             self._allocated.discard(page)
             self._free.append(page)
