@@ -50,6 +50,22 @@ class TestSerde:
         inject_page(target, 2, frame)
         assert torch.equal(target.k[0, 2], source.k[0, 1])
 
+    def test_round_trip_bfloat16(self):
+        # Phase 6: bf16 (which numpy cannot represent) must round-trip byte-exact
+        # through the uint8-view serde.
+        source = PagedKVPool(2, 8, PAGE, 2, 8)
+        source.k.copy_(torch.randn_like(source.k))
+        source.v.copy_(torch.randn_like(source.v))
+        source.k = source.k.to(torch.bfloat16)
+        source.v = source.v.to(torch.bfloat16)
+        target = PagedKVPool(2, 8, PAGE, 2, 8)
+        target.k = target.k.to(torch.bfloat16)
+        target.v = target.v.to(torch.bfloat16)
+        frame = extract_page(source, 3)
+        inject_page(target, 5, frame)
+        assert torch.equal(target.k[0, 5], source.k[0, 3])
+        assert torch.equal(target.v[1, 5], source.v[1, 3])
+
     def test_length_and_count_mismatches_fail_loudly(self):
         pool = _filled_pool()
         with pytest.raises(KVTransportError, match="fragments"):

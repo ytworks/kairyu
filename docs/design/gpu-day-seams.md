@@ -85,7 +85,11 @@ B2 (≥70% NIC line rate) is unreachable through bytes-copy semantics.
 
 **Design (CPU-testable now).** Widen `register(pool_descriptor)` with region
 info; allow frames to carry `(page_id, region_offset)` alternatives to bytes; add
-a `recv(src)` conformance test; implement bf16 serde via uint8 views today.
+a `recv(src)` conformance test. **bf16 serde: IMPLEMENTED** — `kv_serde` now
+serializes every fragment through a dtype-agnostic uint8 view, so bfloat16 pools
+(which numpy cannot represent) round-trip byte-exact like fp32/fp16 (test:
+`test_round_trip_bfloat16`). The region-ownership `register(descriptor)` and
+source-addressed `recv(src)` widenings remain for the RDMA bring-up.
 
 ---
 
