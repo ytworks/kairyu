@@ -38,6 +38,7 @@ from kairyu.entrypoints.server.protocol import (
     ChoiceLogprobs,
     ChunkChoice,
     ChunkDelta,
+    ChunkToolCall,
     CompletionChoice,
     CompletionChunk,
     CompletionLogprobs,
@@ -305,6 +306,7 @@ async def _stream_engine(
     generation_request: GenerationRequest,
     model: str,
     request: ChatCompletionRequest,
+    http_request: Request | None = None,
 ) -> AsyncIterator[str]:
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
@@ -350,6 +352,8 @@ async def _stream_engine(
             response_id, created, model,
             _wire_usage(generation_request.prompt, last.completions, last.usage),
         )
+    if http_request is not None and last is not None:  # S3: streaming was never metered
+        _record_usage(http_request, model, last.usage)
     yield "data: [DONE]\n\n"
 
 
@@ -410,12 +414,20 @@ async def _stream_choices(
     created = int(time.time())
     include_usage = usage is not None
     for choice in choices:
+        tool_calls = None
+        if choice.message.tool_calls:
+            # attach the required per-item index so SDK stream accumulators merge
+            # the tool-call fragments correctly (S6)
+            tool_calls = [
+                ChunkToolCall(index=i, id=tc.id, type=tc.type, function=tc.function)
+                for i, tc in enumerate(choice.message.tool_calls)
+            ]
         yield _sse_chunk(
             response_id, created, model, choice.index,
             ChunkDelta(
                 role="assistant",
                 content=choice.message.content,
-                tool_calls=choice.message.tool_calls,
+                tool_calls=tool_calls,
             ),
             include_usage=include_usage,
         )
@@ -509,11 +521,16 @@ def _ledger_of(http_request: Request):
 
 def _record_usage(http_request: Request, model: str, usage) -> None:
     """m11 D3/A7: metering happens in handlers (middleware can't see tokens)."""
-    ledger = _ledger_of(http_request)
-    if ledger is None or usage is None:
+    if usage is None:
         return
     tenant = getattr(http_request.state, "tenant", None) or "default"
-    ledger.record(tenant, model, usage.prompt_tokens, usage.completion_tokens)
+    ledger = _ledger_of(http_request)
+    if ledger is not None:
+        ledger.record(tenant, model, usage.prompt_tokens, usage.completion_tokens)
+    # charge the tenant's per-minute token budget so it is actually enforced (S4)
+    limiter = getattr(http_request.app.state, "tenant_limiter", None)
+    if limiter is not None:
+        limiter.charge_tokens(tenant, usage.prompt_tokens + usage.completion_tokens)
 
 
 def _session_id(request: ChatCompletionRequest, http_request: Request) -> str | None:
@@ -548,7 +565,7 @@ def create_app(
         for name, engine in served_engines.items():
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
-    add_health_routes(app, served_engines, metrics)
+    add_health_routes(app, served_engines, metrics, admin_keys=settings.resolve_admin_keys())
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 
     add_extra_routes(
@@ -570,10 +587,12 @@ def create_app(
 
         # added BEFORE auth => auth wraps it: 401 wins over 429 and
         # unauthenticated requests never drain buckets (m11 A6)
+        limiter = TenantLimiter(tenant_config)
+        app.state.tenant_limiter = limiter  # handlers charge tokens post-response (S4)
         app.add_middleware(
             TenantLimitMiddleware,
             config=tenant_config,
-            limiter=TenantLimiter(tenant_config),
+            limiter=limiter,
         )
     api_keys = settings.resolve_api_keys()
     if api_keys:
@@ -680,17 +699,23 @@ def create_app(
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
             return _invalid_request(f"model {request.model!r} does not support n > 1")
         session_id = _session_id(request, http_request)
+        try:
+            sampling = sampling_params_from(request)  # bad temperature/top_p/n -> 400
+        except ValueError as error:
+            return _invalid_request(str(error))
         generation_request = GenerationRequest(
             request_id=f"http-{uuid.uuid4().hex[:12]}",
             prompt=prompt,
-            sampling_params=sampling_params_from(request),
+            sampling_params=sampling,
             # Affinity glue (m7 D6): keeps a session's turns on the replica
             # holding its warm radix-KV prefix.
             cache_hint=CacheHint(session_id=session_id) if session_id else None,
         )
         if request.stream and not request.tools:
             return StreamingResponse(
-                _stream_engine(engine, generation_request, request.model, request),
+                _stream_engine(
+                    engine, generation_request, request.model, request, http_request
+                ),
                 media_type="text/event-stream",
             )
         try:
@@ -731,22 +756,26 @@ def create_app(
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
             return _invalid_request(f"model {request.model!r} does not support n > 1")
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
+        try:
+            sampling = SamplingParams(  # invalid params are a client error, not a 502
+                temperature=request.temperature,
+                top_p=request.top_p,
+                n=request.n,
+                max_tokens=request.max_tokens,
+                stop=request.stop,
+                seed=request.seed,
+                presence_penalty=request.presence_penalty,
+                frequency_penalty=request.frequency_penalty,
+                logprobs=request.logprobs,
+            )
+        except ValueError as error:
+            return _invalid_request(str(error))
 
         def _generation_request(prompt: str) -> GenerationRequest:
             return GenerationRequest(
                 request_id=f"http-{uuid.uuid4().hex[:12]}",
                 prompt=prompt,
-                sampling_params=SamplingParams(
-                    temperature=request.temperature,
-                    top_p=request.top_p,
-                    n=request.n,
-                    max_tokens=request.max_tokens,
-                    stop=request.stop,
-                    seed=request.seed,
-                    presence_penalty=request.presence_penalty,
-                    frequency_penalty=request.frequency_penalty,
-                    logprobs=request.logprobs,
-                ),
+                sampling_params=sampling,
             )
 
         if request.stream:
@@ -773,6 +802,13 @@ def create_app(
             return _upstream_error(error)
         details = (
             PromptTokensDetails(cached_tokens=usage_totals[2]) if usage_totals[2] else None
+        )
+        _record_usage(  # S3: /v1/completions was never metered
+            http_request, request.model,
+            GenerationUsage(
+                prompt_tokens=usage_totals[0], completion_tokens=usage_totals[1],
+                cached_tokens=usage_totals[2],
+            ),
         )
         return CompletionResponse(
             id=f"cmpl-{uuid.uuid4().hex[:16]}",

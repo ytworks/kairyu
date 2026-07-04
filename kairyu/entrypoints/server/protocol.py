@@ -113,10 +113,19 @@ class ChatCompletionResponse(BaseModel):
     kairyu_trace: list[str] | None = Field(default=None, exclude=False)
 
 
+class ChunkToolCall(BaseModel):
+    # streamed tool-call deltas require an `index` so SDK accumulators can merge
+    # fragments across chunks (S6); the non-streaming ToolCall has no index
+    index: int
+    id: str
+    type: str = "function"
+    function: FunctionCall
+
+
 class ChunkDelta(BaseModel):
     role: str | None = None
     content: str | list[ContentPart] | None = None
-    tool_calls: list[ToolCall] | None = None
+    tool_calls: list[ChunkToolCall] | None = None
 
 
 class ChunkChoice(BaseModel):

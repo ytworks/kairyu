@@ -135,6 +135,32 @@ class TestTenancy:
             usage_b = client.get("/admin/usage", headers=b).json()["usage"]
             assert usage_b["tenant-b"]["requests"] == 1
 
+    def test_streaming_and_completions_are_metered(self, tmp_path):
+        # S3: streaming chat and /v1/completions were never written to the
+        # ledger (billing bypass). Both must now record usage.
+        ledger_path = tmp_path / "usage.jsonl"
+        app = create_app(
+            {"m": create_backend("mock")},
+            settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+        )
+        with TestClient(app) as client:
+            with client.stream(
+                "POST", "/v1/chat/completions",
+                json={
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+            ) as response:
+                for _ in response.iter_lines():
+                    pass
+            client.post("/v1/completions", json={"model": "m", "prompt": "hello"})
+        from kairyu.entrypoints.server.tenancy import UsageLedger
+
+        totals = UsageLedger(ledger_path).totals()["default"]
+        assert totals["requests"] == 2  # both the stream and the completion metered
+        assert totals["completion_tokens"] > 0
+
     def test_ledger_reconciles_with_returned_usage(self, tmp_path):
         ledger = UsageLedger(tmp_path / "ledger.jsonl")
         returned = []
@@ -158,6 +184,22 @@ class TestTenancy:
         assert limiter.admit("t")
         assert limiter.admit("t")
         assert not limiter.admit("t")
+
+    def test_token_budget_is_enforced(self):
+        # S4: a tenant that burns its per-minute token budget is refused the next
+        # request, even while its request-rate bucket still has room.
+        clock = {"t": 0.0}
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={"t": TenantLimits(requests_per_minute=600, tokens_per_minute=100)}
+            ),
+            now=lambda: clock["t"],
+        )
+        assert limiter.admit("t")
+        limiter.charge_tokens("t", 150)  # overspend the 100-token budget
+        assert not limiter.admit("t")  # refused despite request-rate room
+        clock["t"] = 60.0  # a full minute refills the token bucket
+        assert limiter.admit("t")
 
 
 class TestResponsesApi:
