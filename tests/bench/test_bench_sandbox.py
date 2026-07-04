@@ -1,5 +1,9 @@
 """Execution sandbox: success, failure, timeout, memory, file placement."""
 
+import sys
+
+import pytest
+
 from kairyu.bench.sandbox import has_module, run_python
 
 
@@ -27,6 +31,10 @@ def test_wall_clock_timeout():
     assert not result.ok
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="macOS rejects RLIMIT_AS/RLIMIT_DATA with EINVAL; containment is Linux-only",
+)
 def test_memory_bomb_is_contained():
     result = run_python("x = bytearray(10**10)", timeout_s=20.0, memory_mb=256)
     assert not result.ok  # MemoryError or killed, never host OOM

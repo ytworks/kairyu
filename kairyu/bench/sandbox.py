@@ -5,6 +5,10 @@ Isolation = fresh temp cwd, scrubbed env, `python -I`, and rlimits
 guard against runaway benchmark code, NOT a security boundary against a
 hostile model — documented in docs/benchmarks.md; a container runner is a
 future hook.
+
+Memory rlimits are best-effort: macOS rejects RLIMIT_AS / RLIMIT_DATA with
+EINVAL, so there the wall-clock kill is the only containment. Linux (CI and
+deploy) enforces the full set.
 """
 
 from __future__ import annotations
@@ -35,7 +39,12 @@ def _make_preexec(memory_mb: int, cpu_s: int):
 
     def preexec() -> None:  # pragma: no cover - runs in the forked child
         limit = memory_mb * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+        for memory_rlimit in (resource.RLIMIT_AS, resource.RLIMIT_DATA):
+            try:
+                resource.setrlimit(memory_rlimit, (limit, limit))
+                break
+            except (ValueError, OSError):
+                continue  # macOS rejects address-space rlimits with EINVAL
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_s, cpu_s))
         resource.setrlimit(resource.RLIMIT_FSIZE, (32_000_000, 32_000_000))
         try:
