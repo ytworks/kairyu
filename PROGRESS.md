@@ -62,6 +62,32 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-04 — [progress] Review remediation Phase 3: orchestration + fleet reliability
+- What: Fixed the L2 fleet/orchestration HIGH defects from the full-repo review.
+  **O1**: request errors were all counted as replica failures — a new
+  `UpstreamClientError` (4xx) is raised by the openai backend and excluded from
+  `consecutive_failures`, so one misbehaving client can no longer cascade-eject
+  the pool. **O2**: the HealthProber was ordinal-keyed against a dynamic
+  id-keyed pool (wrong-replica restore / IndexError / silent prober death);
+  it is now id-keyed, resolves URLs per id, and `run()` swallows a bad tick.
+  **O3**: the prober now probes `/readyz` (readiness) not `/health` (liveness),
+  so a drained/wedged node stays ejected — O1+O3 together kill the flap loop.
+  **O4**: the Conductor wraps each unit so a transient backend error records a
+  trace event and returns best-so-far instead of raising and discarding every
+  completed output. MEDIUM: **M2** orchestrator direct calls no longer mint a
+  random per-request session_id (which defeated prefix + least-outstanding
+  routing); **M4** KvEventIndex stamps freshness only after a valid apply,
+  handles vLLM `AllBlocksCleared`, and the ZMQ drain drops malformed frames
+  instead of aborting; **M5** `remove_replica` calls `prefix_index.forget_replica`
+  so a re-added id can't inherit phantom prefixes; **M7** lifespan shutdown
+  isolates a crashed background task and shuts every engine down independently.
+- Why: These are DoS / flap-loop / cost-and-routing-correctness defects the
+  single-node CPU tests could not exercise.
+- Refs: review report; `kairyu/orchestration/{replica,conductor,orchestrator,kv_index}.py`,
+  `kairyu/engine/{backend,openai_backend}.py`, `kairyu/deploy/{prober,registry,spec,builder}.py`;
+  tests under `tests/unit/`. Deferred follow-up: M1 (verifier non-target deps +
+  _SafeDict masking), M3 (MoA path Budget/cost wiring), M8 (run_chat periodic
+  keep-alive), and the KvEventIndex↔ReplicaPool integration (design item).
 ### 2026-07-04 — [progress] Review remediation Phase 2: API security + tenant isolation
 - What: Fixed the CRITICAL/HIGH L3-server defects from the full-repo review.
   **C3 (CRITICAL) batch/file tenant isolation**: File/Batch objects gained an

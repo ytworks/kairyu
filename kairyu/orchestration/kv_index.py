@@ -38,15 +38,20 @@ class KvEventIndex:
 
     def apply(self, replica_id: str, event: dict) -> None:
         entry = self._replicas.setdefault(replica_id, _ReplicaBlocks())
-        entry.last_event = self._now()
         kind = event.get("type")
         hashes = event.get("block_hashes") or []
         if kind == "BlockStored":
             entry.hashes.update(hashes)
         elif kind == "BlockRemoved":
             entry.hashes.difference_update(hashes)
+        elif kind == "AllBlocksCleared":
+            entry.hashes.clear()  # vLLM emits this on a cache reset
         else:
             raise ValueError(f"unknown KV event type {kind!r}")
+        # stamp freshness only AFTER a valid apply (M4): a stream of garbage
+        # events must NOT keep the replica "fresh" while its index rots — an
+        # unrecognized event lets staleness fall back to the trie instead
+        entry.last_event = self._now()
 
     def heartbeat(self, replica_id: str) -> None:
         self._replicas.setdefault(replica_id, _ReplicaBlocks()).last_event = self._now()
@@ -111,6 +116,7 @@ class ZmqKvEventSubscriber:
 
     def drain(self, max_events: int = 1000) -> int:
         import json
+        import logging
 
         import zmq
 
@@ -120,7 +126,14 @@ class ZmqKvEventSubscriber:
                 replica_id, payload = self._socket.recv_multipart(flags=zmq.NOBLOCK)
             except zmq.Again:
                 break
-            self._index.apply(replica_id.decode(), json.loads(payload))
+            # a single malformed frame or unknown event type must not abort the
+            # drain mid-queue and desync the whole index (M4): drop it and continue
+            try:
+                self._index.apply(replica_id.decode(), json.loads(payload))
+            except (ValueError, KeyError, UnicodeDecodeError) as error:
+                logging.getLogger("kairyu.kv_index").warning(
+                    "dropped a malformed KV event: %r", error
+                )
             drained += 1
         return drained
 
