@@ -68,6 +68,55 @@ def test_finished_request_prompt_is_reusable_from_cache():
     assert len(reuse.cached_pages) == 2  # radix reuse across requests
 
 
+def test_forget_reclaims_finished_state():
+    # E2: finished requests must be evictable from the scheduler, or a
+    # long-running engine grows _states/_arrivals without bound.
+    scheduler, _ = _setup(budget=64)
+    scheduler.add_request(_request("a", prompt_len=4, max_new_tokens=1))
+    scheduler.schedule()
+    scheduler.update({"a": 100})  # max_new_tokens=1 -> finished
+    assert scheduler.has_unfinished() is False
+    scheduler.forget("a")
+    assert "a" not in scheduler.states
+    assert "a" not in scheduler._arrivals
+
+
+def test_forget_leaves_a_live_request_untouched():
+    # forget() must not drop a still-running request's state.
+    scheduler, _ = _setup(budget=64)
+    scheduler.add_request(_request("a", prompt_len=4, max_new_tokens=4))
+    scheduler.schedule()
+    scheduler.update({"a": 100})  # still running (max_new_tokens=4)
+    scheduler.forget("a")
+    assert "a" in scheduler.states
+
+
+def test_oversized_prompt_is_rejected_not_blocking():
+    # C2: a prompt needing more pages than the cache can EVER hold must be
+    # rejected at admission, not left blocking the head of line forever (which
+    # turns an empty schedule into a fatal engine stall).
+    scheduler, _ = _setup(num_pages=2, budget=64)  # capacity = 8 tokens
+    scheduler.add_request(_request("big", prompt_len=20))  # needs 5 pages
+    scheduler.add_request(_request("small", prompt_len=4, max_new_tokens=1))
+    step = scheduler.schedule()
+    assert scheduler.finish_reason("big") == "length"  # rejected, not scheduled
+    assert "big" not in [c.request_id for c in step.scheduled]
+    # the normal request behind it still makes progress
+    assert "small" in [c.request_id for c in step.scheduled]
+
+
+def test_unadmittable_head_does_not_stall_scheduler():
+    # C2: with only an unadmittable request, schedule() returns an empty plan
+    # AND the request is finished, so has_unfinished() is False and the engine
+    # loop never trips its "nothing schedulable" stall guard.
+    scheduler, _ = _setup(num_pages=2, budget=64)
+    scheduler.add_request(_request("big", prompt_len=20))
+    step = scheduler.schedule()
+    assert step.scheduled == ()
+    assert scheduler.finish_reason("big") == "length"
+    assert scheduler.has_unfinished() is False
+
+
 def test_kv_pressure_keeps_request_waiting_then_admits():
     scheduler, _ = _setup(num_pages=2, budget=64, max_seqs=4)
     scheduler.add_request(

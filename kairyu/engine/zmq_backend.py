@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import logging
 from collections.abc import AsyncIterator
 
 from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
@@ -122,12 +123,44 @@ class ZmqEngineBackend:
             self._atexit_registered = True
         return port
 
-    async def _ensure_started(self) -> None:
+    def _is_healthy(self) -> bool:
+        return (
+            self._socket is not None
+            and self._receiver is not None
+            and not self._receiver.done()
+            and self._process is not None
+            and self._process.is_alive()
+        )
+
+    async def _reset_dead_locked(self) -> None:
+        """Tear down a crashed child's stale socket/context/process (E1).
+
+        A receiver that exited (child death or fatal frame) leaves ``_socket``
+        set, so the old ``_ensure_started`` returned early and every subsequent
+        request awaited a queue nothing would ever fill. Clearing the dead refs
+        lets the next request spawn a fresh service.
+        """
+        if self._receiver is not None and not self._receiver.done():
+            self._receiver.cancel()
+        self._receiver = None
         if self._socket is not None:
+            self._socket.close(linger=0)
+            self._socket = None
+        if self._context is not None:
+            self._context.term()
+            self._context = None
+        process = self._process
+        if process is not None and process.is_alive():
+            process.kill()
+        self._process = None
+
+    async def _ensure_started(self) -> None:
+        if self._is_healthy():
             return
         async with self._start_lock:
-            if self._socket is not None:
+            if self._is_healthy():
                 return
+            await self._reset_dead_locked()  # respawn over a crashed child (E1)
             zmq, _ = _import_deps()
             port = await asyncio.to_thread(self._spawn)
             self._context = zmq.asyncio.Context()
@@ -181,12 +214,18 @@ class ZmqEngineBackend:
                     if self._queues and not (self._process and self._process.is_alive()):
                         raise EngineServiceError("engine service process died") from None
                     continue
-                event = msgpack.unpackb(raw)
-                if event.get("op") in ("pong", "bye"):
+                try:
+                    event = msgpack.unpackb(raw)
+                    if event.get("op") in ("pong", "bye"):
+                        continue
+                    queue = self._queues.get(event["request_id"])
+                    if queue is not None:
+                        queue.put_nowait(event)
+                except Exception as error:
+                    # a single corrupt/malformed frame must not kill the receiver
+                    # and hang every request (E1); drop it and keep reading
+                    logging.warning("kairyu-proc dropped a malformed engine event: %r", error)
                     continue
-                queue = self._queues.get(event["request_id"])
-                if queue is not None:
-                    queue.put_nowait(event)
         except asyncio.CancelledError:  # pragma: no cover - clean shutdown
             raise
         except Exception as error:
@@ -258,14 +297,20 @@ class ZmqEngineBackend:
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         queue = await self._submit(request)
+        finished_cleanly = False
         try:
             while True:
                 event = await queue.get()
                 self._raise_on_error(event)
                 if event["finished"]:
+                    finished_cleanly = True
                     return self._result(request, event)
         finally:
             self._queues.pop(request.request_id, None)
+            if not finished_cleanly:
+                # client disconnect / cancellation: tell the engine to stop
+                # generating, or it keeps burning compute until max_tokens
+                await self._abort(request.request_id)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         queue = await self._submit(request)

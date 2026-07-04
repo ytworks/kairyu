@@ -45,6 +45,11 @@ class PagedModelRunner:
         self._pool = pool
         self._sampler = sampler
 
+    def release(self, request_id: str) -> None:
+        """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
+        if self._sampler is not None:
+            self._sampler.release(request_id)
+
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
         if self._sampler is None:
             return SampledToken(int(torch.argmax(logits).item()))

@@ -112,6 +112,24 @@ async def test_backend_model_path_generates(checkpoint):
     assert again.completions[0].token_ids == completion.token_ids
 
 
+async def test_backend_reclaims_state_after_generate(checkpoint):
+    # E2: the long-running backend must reclaim per-request scheduler state on
+    # finish; otherwise _states grows one full output-token list per request.
+    path, _ = checkpoint
+    backend = KairyuBackend(
+        num_pages=256, page_size=4, model_path=str(path), tokenizer=_SmallVocabTokenizer()
+    )
+    for i in range(5):
+        await backend.generate(
+            GenerationRequest(
+                request_id=f"leak{i}",
+                prompt="hello real model",
+                sampling_params=SamplingParams(max_tokens=4, temperature=0.0),
+            )
+        )
+    assert backend._scheduler.states == {}  # every finished request reclaimed
+
+
 def test_model_path_mutual_exclusions(checkpoint):
     path, _ = checkpoint
     with pytest.raises(ValueError, match="mutually exclusive"):

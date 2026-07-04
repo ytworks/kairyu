@@ -19,6 +19,7 @@ from typing import Protocol
 
 from kairyu.engine.core.engine_core import ModelRunner, StepOutput, token_ids
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
+from kairyu.engine.core.step_input import snapshot_step
 
 
 class StepHandle(Protocol):
@@ -180,9 +181,16 @@ class PipelinedEngineCore:
         while True:
             if self._scheduler.has_unfinished() and len(pending) < self._depth:
                 plan = self._scheduler.schedule()
+                # prompts too large to ever fit are rejected in schedule() (C2)
+                for request_id in self._scheduler.drain_rejected():
+                    self._outputs[request_id] = self._scheduler.output_tokens(request_id)
                 if plan.scheduled:
+                    # E3: a step lives across multiple ticks while update()
+                    # mutates live state on this loop — freeze it (torn-free
+                    # snapshot) so every stage reads a consistent view.
+                    step = snapshot_step(plan.scheduled, self._scheduler.states)
                     pending.append(
-                        self._runner.submit(step_index, plan.scheduled, self._scheduler.states)
+                        self._runner.submit(step_index, step.chunks, step.states_view())
                     )
                     step_index += 1
                     continue
@@ -193,8 +201,10 @@ class PipelinedEngineCore:
                     self._outputs[request_id] = self._scheduler.output_tokens(request_id)
                 continue
             if self._scheduler.has_unfinished():
-                raise RuntimeError(
-                    "engine stall: unfinished requests but nothing schedulable "
-                    "(request larger than KV capacity?)"
-                )
+                # nothing in flight and nothing schedulable: force the stuck
+                # waiting head to finish rather than crash the engine (C2)
+                head = self._scheduler.reject_waiting_head()
+                if head is not None:
+                    self._outputs[head] = self._scheduler.output_tokens(head)
+                    continue
             return dict(self._outputs)
