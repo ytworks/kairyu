@@ -10,15 +10,17 @@ from kairyu.engine.core.step_executor import (
     FakeGraphBackend,
     GraphStepExecutor,
     SnapshotGraphBackend,
+    build_decode_batch,
 )
 
 
-def _batch(size: int) -> DecodeBatch:
-    return DecodeBatch(
-        token_ids=torch.arange(size, dtype=torch.int64) + 10,
-        positions=torch.arange(size, dtype=torch.int64) + 5,
-        page_tables=tuple((i,) for i in range(size)),
-        seq_lens=tuple(6 for _ in range(size)),
+def _batch(size: int, max_pages: int = 1) -> DecodeBatch:
+    return build_decode_batch(
+        token_ids=[10 + i for i in range(size)],
+        positions=[5 + i for i in range(size)],
+        page_lists=[(i,) for i in range(size)],
+        seq_lens=[6] * size,
+        max_pages=max_pages,
     )
 
 
@@ -67,11 +69,9 @@ class TestGraphStepExecutor:
         backend = FakeGraphBackend()
         executor = GraphStepExecutor(_decode_fn, backend, max_batch=8)
         first = executor.execute_decode(_batch(2))
-        shifted = DecodeBatch(
-            token_ids=torch.tensor([99, 100]),
-            positions=torch.tensor([7, 8]),
-            page_tables=((0,), (1,)),
-            seq_lens=(8, 9),
+        shifted = build_decode_batch(
+            token_ids=[99, 100], positions=[7, 8],
+            page_lists=[(0,), (1,)], seq_lens=[8, 9], max_pages=1,
         )
         second = executor.execute_decode(shifted)
         assert not torch.equal(first, second)
@@ -83,6 +83,18 @@ class TestGraphStepExecutor:
         out = executor.execute_decode(_batch(6))
         assert backend.captures == 0  # never captured
         assert out.shape[0] == 6
+
+    def test_wide_page_table_falls_back_to_eager(self):
+        # a page table wider than the captured static buffer runs eager, never
+        # silently truncated (C5)
+        backend = FakeGraphBackend()
+        executor = GraphStepExecutor(_decode_fn, backend, max_batch=8, max_pages=2)
+        wide = build_decode_batch(
+            token_ids=[1], positions=[1], page_lists=[(0, 1, 2)], seq_lens=[9],
+            max_pages=3,
+        )
+        executor.execute_decode(wide)
+        assert backend.captures == 0
 
     def test_invalidate_forces_recapture(self):
         backend = FakeGraphBackend()
@@ -97,34 +109,26 @@ class TestGraphStepExecutor:
         executor = GraphStepExecutor(_decode_fn, backend, max_batch=8, scratch_page=7)
         executor.execute_decode(_batch(3))
         _, static = executor._captured[4]
-        assert static.page_tables[3] == (7,)
-        assert static.seq_lens[3] == 1
+        assert int(static.page_tables[3, 0]) == 7  # padding row -> scratch page
+        assert int(static.seq_lens[3]) == 1
 
 
 def _decode_fn_pages(batch: DecodeBatch) -> torch.Tensor:
     """Output depends on each sequence's first page id — a proxy for 'attends
     over the right KV pages'. If the page table doesn't reach replay, it's wrong."""
-    firsts = torch.tensor([pt[0] for pt in batch.page_tables], dtype=torch.float32)
-    return firsts[:, None]
+    return batch.page_tables[:, 0].to(torch.float32)[:, None]
 
 
-@pytest.mark.xfail(
-    reason="C5: GraphStepExecutor rebinds page_tables/seq_lens as Python attrs after "
-    "capture; a real CUDA graph never sees that. Fix = static device buffers written "
-    "in-place. This contract test flips to pass once they are.",
-    strict=True,
-)
 def test_graph_replay_reflects_current_page_tables():
-    # A faithful graph (SnapshotGraphBackend) freezes page_tables at capture time,
-    # so replay must still attend over the request's REAL pages — which today it
-    # cannot, because _copy_in only rebinds a Python attribute.
+    # C5 (fixed): page_tables is now a static device buffer written in place, so
+    # a faithful graph (SnapshotGraphBackend, which sees in-place writes but not
+    # attribute rebinds) attends over the request's REAL pages, not the
+    # capture-time scratch page.
     backend = SnapshotGraphBackend()
     executor = GraphStepExecutor(_decode_fn_pages, backend, max_batch=8, scratch_page=0)
-    batch = DecodeBatch(
-        token_ids=torch.tensor([10, 11, 12], dtype=torch.int64),
-        positions=torch.tensor([5, 6, 7], dtype=torch.int64),
-        page_tables=((3,), (4,), (5,)),
-        seq_lens=(6, 6, 6),
+    batch = build_decode_batch(
+        token_ids=[10, 11, 12], positions=[5, 6, 7],
+        page_lists=[(3,), (4,), (5,)], seq_lens=[6, 6, 6], max_pages=1,
     )
     out = executor.execute_decode(batch)
     assert out.flatten().tolist() == [3.0, 4.0, 5.0]  # not the scratch page (0)

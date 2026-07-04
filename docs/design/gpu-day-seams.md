@@ -14,26 +14,25 @@ perf gate) → E3 (loop unification) → TP + KVTransport (widen before fabric).
 
 ---
 
-## C5 — CUDA-graph static-buffer contract (CRITICAL, contract-tested)
+## C5 — CUDA-graph static-buffer contract (CRITICAL, **IMPLEMENTED**)
 
-**Bug.** `GraphStepExecutor._copy_in` (`engine/core/step_executor.py`) writes
-`token_ids`/`positions` in place (fine — a real graph reads them from static
-device memory) but rebinds `page_tables`/`seq_lens` via `object.__setattr__`.
-A real CUDA graph replays fixed kernels over fixed memory and can NEVER see a
-post-capture Python-attribute change, so every replay attends over the
-capture-time scratch page → silent wrong logits. `FakeGraphBackend` masks this
-because it re-invokes `fn(static_batch)` and reads the new attributes.
+**Bug (fixed).** `GraphStepExecutor._copy_in` wrote `token_ids`/`positions` in
+place but rebound `page_tables`/`seq_lens` via `object.__setattr__`. A real CUDA
+graph replays fixed kernels over fixed memory and can NEVER see a post-capture
+Python-attribute change, so every replay attended over the capture-time scratch
+page → silent wrong logits. `FakeGraphBackend` masked it by re-invoking
+`fn(static_batch)` and reading the new attributes.
 
-**Contract test (landed).** `SnapshotGraphBackend` freezes page_tables/seq_lens
-at capture and replays against the snapshot — a faithful CUDA-graph model.
-`test_graph_replay_reflects_current_page_tables` is `xfail(strict=True)` today
-and flips to pass when the fix lands.
-
-**Fix.** Make page_tables and seq_lens part of the static DEVICE buffers:
-`page_tables` → `[bucket, max_pages_per_seq] int32` padded, `seq_lens` →
-`[bucket] int32`. `_copy_in` writes into them in place (like token_ids). Update
-`DecodeFn`/`PagedModelRunner` decode path to consume the padded tensor. Remove
-the xfail marker.
+**Fix (landed).** `DecodeBatch.page_tables` is now a `[B, max_pages] int32`
+device tensor (padded with the scratch page) and `seq_lens` a `[B] int32`
+tensor; `GraphStepExecutor` pre-allocates the static buffers per bucket and
+`_copy_in` writes ALL four inputs in place. A page table wider than the captured
+`max_pages` falls back to eager (never silently truncated). `build_decode_batch`
+pads ragged page lists. `SnapshotGraphBackend` (a faithful graph that sees
+in-place writes but not attribute rebinds) plus
+`test_graph_replay_reflects_current_page_tables` now pass — the contract is met.
+Remaining GPU-day wiring: the `PagedModelRunner` decode path consumes the padded
+tensor when the real graph backend is enabled.
 
 ## C4 — batched cross-request execution (CRITICAL)
 

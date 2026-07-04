@@ -3,13 +3,19 @@
 ALL policy (bucketing, capture-once, padding, invalidation, eager fallback)
 lives here and is CPU-tested against ``FakeGraphBackend``; the only
 CUDA-touching lines are in ``cuda_graph_gpu.CudaGraphBackend``. The CUDA-graph
-contract: per-bucket STATIC input buffers, inputs copied in before replay,
-outputs read from the static output buffer.
+contract: per-bucket STATIC device buffers, inputs copied in place before
+replay, outputs read from the static output buffer.
+
+All four decode inputs — token_ids, positions, page_tables, seq_lens — are
+static device tensors written IN PLACE by ``_copy_in`` (C5). A real CUDA graph
+replays fixed kernels over fixed memory, so nothing may be a Python attribute
+rebound after capture — it would be invisible to the graph and every replay
+would attend over the capture-time scratch page.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -19,16 +25,49 @@ from kairyu.engine.core.graph_buckets import bucket_for, decode_buckets
 
 @dataclass(frozen=True)
 class DecodeBatch:
-    """Decode-shaped step input: one new token per sequence."""
+    """Decode-shaped step input: one new token per sequence. Every field is a
+    static device tensor so in-place writes are visible to a captured graph."""
 
     token_ids: torch.Tensor  # [B] int64
     positions: torch.Tensor  # [B] int64
-    page_tables: tuple[tuple[int, ...], ...]  # per-sequence
-    seq_lens: tuple[int, ...]
+    page_tables: torch.Tensor  # [B, max_pages] int32, padded with the scratch page
+    seq_lens: torch.Tensor  # [B] int32
 
     @property
     def batch_size(self) -> int:
         return int(self.token_ids.shape[0])
+
+    @property
+    def max_pages(self) -> int:
+        return int(self.page_tables.shape[1])
+
+
+def build_decode_batch(
+    token_ids: Sequence[int],
+    positions: Sequence[int],
+    page_lists: Sequence[Sequence[int]],
+    seq_lens: Sequence[int],
+    max_pages: int,
+    *,
+    scratch_page: int = 0,
+    device: str | torch.device = "cpu",
+) -> DecodeBatch:
+    """Pad ragged per-sequence page lists into a [B, max_pages] int32 tensor."""
+    batch = len(seq_lens)
+    page_tables = torch.full(
+        (batch, max_pages), scratch_page, dtype=torch.int32, device=device
+    )
+    for row, pages in enumerate(page_lists):
+        if pages:
+            page_tables[row, : len(pages)] = torch.tensor(
+                list(pages[:max_pages]), dtype=torch.int32, device=device
+            )
+    return DecodeBatch(
+        token_ids=torch.as_tensor(token_ids, dtype=torch.int64, device=device),
+        positions=torch.as_tensor(positions, dtype=torch.int64, device=device),
+        page_tables=page_tables,
+        seq_lens=torch.as_tensor(seq_lens, dtype=torch.int32, device=device),
+    )
 
 
 DecodeFn = Callable[[DecodeBatch], torch.Tensor]  # -> logits/hidden [B, ...]
@@ -48,17 +87,9 @@ class EagerStepExecutor:
 
 
 class FakeGraphBackend:
-    """CPU test double honoring the real contract: capture returns a replayable
-    bound to STATIC buffers; replay re-runs the fn on those buffers and
-    asserts the frozen shape (a real graph would silently corrupt instead).
-
-    NOTE: this fake re-invokes ``fn(static_batch)`` at replay time, so it reads
-    whatever the executor most recently wrote onto ``static_batch`` — including
-    the page_tables/seq_lens that ``GraphStepExecutor._copy_in`` rebinds via
-    ``object.__setattr__``. A REAL CUDA graph cannot: it replays fixed kernels
-    over fixed device memory and never sees post-capture Python-attribute
-    mutation. ``SnapshotGraphBackend`` models that faithfully (see C5).
-    """
+    """CPU test double honoring the real contract: capture binds the STATIC
+    device buffers; replay re-runs the fn on those SAME buffers (reading their
+    current in-place contents) and asserts the frozen shape."""
 
     def __init__(self) -> None:
         self.captures = 0
@@ -81,19 +112,12 @@ class FakeGraphBackend:
 
 
 class SnapshotGraphBackend:
-    """Faithful CUDA-graph model for the contract test (C5).
-
-    Captures the batch's inputs AT CAPTURE TIME and replays against that frozen
-    snapshot, ignoring any later Python-attribute mutation — exactly what a real
-    graph does. Inputs a real graph reads from static DEVICE buffers (token_ids,
-    positions) are read live from the captured tensor object (in-place writes are
-    visible); inputs the executor rebinds as Python attributes (page_tables,
-    seq_lens) are frozen at capture, so post-capture changes are INVISIBLE.
-
-    Used to prove GraphStepExecutor currently mis-handles page_tables/seq_lens:
-    until they become in-place-written static device buffers, replay attends over
-    the capture-time scratch page instead of the request's real pages.
-    """
+    """Faithful CUDA-graph model: captures the batch's static buffer OBJECTS and
+    replays against them, so it sees IN-PLACE writes (what a real graph reads
+    from fixed device memory) but never an attribute rebind. With all four
+    inputs now in-place-written device tensors (C5), replay reflects the
+    request's real page tables — which ``test_graph_replay_reflects_current_
+    page_tables`` pins (it caught the pre-fix Python-attribute rebind)."""
 
     def __init__(self) -> None:
         self.captures = 0
@@ -102,22 +126,11 @@ class SnapshotGraphBackend:
     def capture(self, fn: DecodeFn, static_batch: DecodeBatch):
         self.captures += 1
         backend = self
-        frozen_pages = static_batch.page_tables  # snapshot: real graph bakes these in
-        frozen_seq_lens = static_batch.seq_lens
-        live_tokens = static_batch.token_ids  # device buffer: in-place writes seen
-        live_positions = static_batch.positions
 
         class _Replayable:
             def replay(self) -> torch.Tensor:
                 backend.replays += 1
-                # replay sees live device buffers but the CAPTURE-TIME page table
-                snapshot = DecodeBatch(
-                    token_ids=live_tokens,
-                    positions=live_positions,
-                    page_tables=frozen_pages,
-                    seq_lens=frozen_seq_lens,
-                )
-                return fn(snapshot)
+                return fn(static_batch)  # reads the static buffers' live contents
 
         return _Replayable()
 
@@ -130,22 +143,26 @@ class GraphStepExecutor:
         decode_fn: DecodeFn,
         graph_backend,
         max_batch: int,
+        max_pages: int = 1,
         scratch_page: int = 0,
     ) -> None:
         self._decode_fn = decode_fn
         self._backend = graph_backend
         self._buckets = decode_buckets(max_batch)
+        self._max_pages = max_pages
         self._scratch_page = scratch_page
         self._captured: dict[int, tuple[object, DecodeBatch]] = {}
 
     def execute_decode(self, batch: DecodeBatch) -> torch.Tensor:
         bucket = bucket_for(batch.batch_size, self._buckets)
-        if bucket is None:  # oversize: never crash, run eager (D2)
+        # oversize batch OR a page table wider than the captured static buffer:
+        # never crash, run eager (D2)
+        if bucket is None or batch.max_pages > self._max_pages:
             return self._decode_fn(batch)
         if bucket not in self._captured:
             self._capture(bucket)
         replayable, static = self._captured[bucket]
-        self._copy_in(static, batch, bucket)
+        self._copy_in(static, batch)
         out = replayable.replay()
         return out[: batch.batch_size]  # padding rows dropped
 
@@ -157,22 +174,24 @@ class GraphStepExecutor:
         static = DecodeBatch(
             token_ids=torch.zeros(bucket, dtype=torch.int64),
             positions=torch.zeros(bucket, dtype=torch.int64),
-            page_tables=((self._scratch_page,),) * bucket,
-            seq_lens=(1,) * bucket,
+            page_tables=torch.full(
+                (bucket, self._max_pages), self._scratch_page, dtype=torch.int32
+            ),
+            seq_lens=torch.ones(bucket, dtype=torch.int32),
         )
         replayable = self._backend.capture(self._decode_fn, static)
         self._captured[bucket] = (replayable, static)
 
-    def _copy_in(self, static: DecodeBatch, batch: DecodeBatch, bucket: int) -> None:
-        """The static-buffer contract: copy real rows, point padding rows at
-        the scratch page with seq_len 1 (their outputs are dropped)."""
-        static.token_ids[: batch.batch_size] = batch.token_ids
-        static.token_ids[batch.batch_size :] = 0
-        static.positions[: batch.batch_size] = batch.positions
-        static.positions[batch.batch_size :] = 0
-        pad = ((self._scratch_page,),) * (bucket - batch.batch_size)
-        # frozen dataclass: page tables/seq_lens are rebuilt via object.__setattr__
-        object.__setattr__(static, "page_tables", batch.page_tables + pad)
-        object.__setattr__(
-            static, "seq_lens", batch.seq_lens + (1,) * (bucket - batch.batch_size)
-        )
+    def _copy_in(self, static: DecodeBatch, batch: DecodeBatch) -> None:
+        """Copy real rows into the static device buffers IN PLACE (C5); padding
+        rows point at the scratch page with seq_len 1 (their outputs dropped)."""
+        size = batch.batch_size
+        static.token_ids[:size] = batch.token_ids
+        static.token_ids[size:] = 0
+        static.positions[:size] = batch.positions
+        static.positions[size:] = 0
+        static.page_tables[:size, : batch.max_pages] = batch.page_tables
+        static.page_tables[:size, batch.max_pages :] = self._scratch_page
+        static.page_tables[size:] = self._scratch_page
+        static.seq_lens[:size] = batch.seq_lens
+        static.seq_lens[size:] = 1
