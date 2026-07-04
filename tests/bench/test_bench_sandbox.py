@@ -56,3 +56,29 @@ def test_env_is_scrubbed():
 def test_has_module():
     assert has_module("json")
     assert not has_module("definitely_not_a_module_xyz")
+
+
+def test_multiprocessing_code_is_not_blocked():
+    # M9: a legit multiprocessing solution must run (the old fixed RLIMIT_NPROC
+    # made this fail on busy hosts and pass on quiet ones — host-dependent scores).
+    code = (
+        "import multiprocessing as mp\n"
+        "def sq(x):\n    return x * x\n"
+        "if __name__ == '__main__':\n"
+        "    with mp.Pool(2) as p:\n        print(sum(p.map(sq, range(5))))\n"
+    )
+    result = run_python(code, timeout_s=20.0)
+    assert result.ok, result.stderr
+    assert result.stdout.strip() == "30"
+
+
+def test_timed_out_forking_tree_is_reaped():
+    # M9: a script that spawns a long-lived child then hangs must time out and
+    # the whole group is killed (no hang waiting on the grandchild's pipes).
+    code = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "time.sleep(60)\n"
+    )
+    result = run_python(code, timeout_s=1.0)
+    assert result.timed_out and not result.ok
