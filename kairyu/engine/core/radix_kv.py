@@ -335,7 +335,13 @@ class RadixKVCache:
         """
         sequence = allocation.tokens + tuple(output_tokens)
         prompt_full = len(allocation.tokens) // self._page_size
-        sequence_full = len(sequence) // self._page_size
+        # The decode loop writes the KV of the *previous* token each step, so
+        # the last sampled token's KV slot is never written (C1). Cap the
+        # committable length below that final token so a page ending exactly on
+        # the sequence boundary is not folded as computed — otherwise the next
+        # turn matches it as cache and reads a garbage KV row for that token.
+        written_len = len(sequence) - 1 if output_tokens else len(sequence)
+        sequence_full = written_len // self._page_size
         extra_full = sequence_full - prompt_full
         candidates = (
             ((allocation.tail_page,) if allocation.tail_page is not None else ())

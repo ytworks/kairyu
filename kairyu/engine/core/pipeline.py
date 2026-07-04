@@ -180,6 +180,9 @@ class PipelinedEngineCore:
         while True:
             if self._scheduler.has_unfinished() and len(pending) < self._depth:
                 plan = self._scheduler.schedule()
+                # prompts too large to ever fit are rejected in schedule() (C2)
+                for request_id in self._scheduler.drain_rejected():
+                    self._outputs[request_id] = self._scheduler.output_tokens(request_id)
                 if plan.scheduled:
                     pending.append(
                         self._runner.submit(step_index, plan.scheduled, self._scheduler.states)
@@ -193,8 +196,10 @@ class PipelinedEngineCore:
                     self._outputs[request_id] = self._scheduler.output_tokens(request_id)
                 continue
             if self._scheduler.has_unfinished():
-                raise RuntimeError(
-                    "engine stall: unfinished requests but nothing schedulable "
-                    "(request larger than KV capacity?)"
-                )
+                # nothing in flight and nothing schedulable: force the stuck
+                # waiting head to finish rather than crash the engine (C2)
+                head = self._scheduler.reject_waiting_head()
+                if head is not None:
+                    self._outputs[head] = self._scheduler.output_tokens(head)
+                    continue
             return dict(self._outputs)

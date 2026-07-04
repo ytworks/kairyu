@@ -78,13 +78,12 @@ def test_no_overscheduling_beyond_max_new_tokens():
     assert outputs["a"] == (1000, 1001, 1002)  # positions 0,1,2 — exactly max_new_tokens
 
 
-def test_overlap_stall_detection():
+def test_overlap_rejects_oversized_prompt_gracefully():
+    # C2: an unadmittable prompt is rejected (empty output), not a fatal stall.
     cache = RadixKVCache(num_pages=1, page_size=PAGE)
     scheduler = Scheduler(cache, max_num_batched_tokens=64)
     engine = OverlapEngineCore(scheduler=scheduler, runner=PositionRunner())
     engine.add_request(EngineRequest("big", tuple(range(1, 100)), max_new_tokens=1))
-    try:
-        engine.run_to_completion()
-        raise AssertionError("expected RuntimeError for stalled engine")
-    except RuntimeError as error:
-        assert "stall" in str(error)
+    outputs = engine.run_to_completion()  # no RuntimeError
+    assert outputs["big"] == ()
+    assert scheduler.finish_reason("big") == "length"

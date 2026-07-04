@@ -114,6 +114,26 @@ def test_resume_with_kv_finishes_immediately_at_max_or_eos() -> None:
     finished = scheduler.resume_with_kv(eos, kv.allocate(eos.prompt_token_ids), first_token=42)
     assert finished is True
     assert scheduler.output_tokens("eos") == (42,)
+    assert scheduler.finish_reason("eos") == "stop"  # reason set like the normal path
+
+
+def test_resume_with_kv_honors_ignore_eos_and_min_tokens() -> None:
+    # The P-D adoption path must respect ignore_eos / min_tokens exactly like the
+    # normal decode terminal check, not finish on a bare EOS match.
+    scheduler, kv = _make_pair()
+    ignored = EngineRequest(
+        "ig", prompt_token_ids=(1, 2, 3, 4), max_new_tokens=8, eos_token_id=42, ignore_eos=True
+    )
+    finished = scheduler.resume_with_kv(
+        ignored, kv.allocate(ignored.prompt_token_ids), first_token=42
+    )
+    assert finished is False  # ignore_eos -> the EOS-valued first token is kept
+
+    held = EngineRequest(
+        "mt", prompt_token_ids=(5, 6, 7, 8), max_new_tokens=8, eos_token_id=42, min_tokens=3
+    )
+    finished = scheduler.resume_with_kv(held, kv.allocate(held.prompt_token_ids), first_token=42)
+    assert finished is False  # min_tokens=3 not yet met, so EOS does not terminate
 
 
 def test_resumed_request_is_shielded_from_preemption() -> None:

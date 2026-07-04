@@ -145,6 +145,9 @@ class Scheduler:
         self._priority_age_s = priority_age_s
         self._arrivals: dict[str, float] = {}
         self._running: list[str] = []
+        # requests rejected at admission (C2), drained by the engine core/loop
+        # so they surface as finished-with-empty-output like any terminal request
+        self._rejected: list[str] = []
 
     def add_request(self, request: EngineRequest) -> None:
         if request.request_id in self._states:
@@ -210,6 +213,53 @@ class Scheduler:
         state.finish_reason = "stop"
         self._finish(state)
 
+    def _reject_unadmittable(self, request_id: str, state: _RequestState) -> None:
+        """Finish a waiting request that can never be admitted (C2).
+
+        Removes it from the waiting queue and marks it FINISHED with reason
+        ``length`` (no output was produced). The engine loop surfaces it as a
+        finished stream update like any other terminal request, so an oversized
+        prompt degrades to a graceful empty completion instead of a stall.
+        """
+        self._waiting.remove(request_id)
+        state.status = _Status.FINISHED
+        state.finish_reason = "length"
+        self._rejected.append(request_id)
+
+    def drain_rejected(self) -> tuple[str, ...]:
+        """Return and clear requests rejected at admission since the last call."""
+        rejected = tuple(self._rejected)
+        self._rejected.clear()
+        return rejected
+
+    def forget(self, request_id: str) -> None:
+        """Drop all per-request state once a finished request is fully consumed.
+
+        Long-running engines (the server, kairyu-proc) must reclaim finished
+        ``_RequestState`` objects — each holds the full output token list — and
+        their arrival timestamps, or memory grows without bound (E2). Called by
+        the engine loop after it emits the terminal update. Only forgets
+        already-finished requests; a live id is left untouched.
+        """
+        state = self._states.get(request_id)
+        if state is not None and state.status is not _Status.FINISHED:
+            return
+        self._states.pop(request_id, None)
+        self._arrivals.pop(request_id, None)
+
+    def reject_waiting_head(self) -> str | None:
+        """Force the current waiting head to finish (engine-loop stall backstop).
+
+        Called only when a step produced an empty schedule while requests are
+        unfinished — which implies nothing is running to free pages, so the head
+        is genuinely stuck. Returns the rejected id, or None if nothing waits.
+        """
+        if not self._waiting:
+            return None
+        request_id = self._waiting[0]
+        self._reject_unadmittable(request_id, self._states[request_id])
+        return request_id
+
     def finish_reason(self, request_id: str) -> str | None:
         return self._states[request_id].finish_reason
 
@@ -268,8 +318,11 @@ class Scheduler:
         state.allocation = allocation
         self._states[request.request_id] = state
         self._running.append(request.request_id)
-        is_eos = request.eos_token_id is not None and first_token == request.eos_token_id
-        if is_eos or len(state.outputs) >= request.max_new_tokens:
+        # honor ignore_eos / stop_token_ids / min_tokens / finish_reason exactly
+        # like the normal decode path, not a bare EOS-or-length check
+        reason = self._terminal_reason(state, first_token)
+        if reason is not None:
+            state.finish_reason = reason
             self._finish(state)
             return True
         return False
@@ -355,14 +408,32 @@ class Scheduler:
         while self._waiting and budget > 0 and len(self._running) < self._max_seqs:
             request_id = self._waiting[0]
             state = self._states[request_id]
-            if self._decode_watermark > 0:
-                estimate = -(-state.prompt_len // self._page_size)  # ceil division
+            required_pages = -(-state.prompt_len // self._page_size)  # ceil division
+            if required_pages > self._kv.num_pages:
+                # This prompt is larger than the whole KV cache: it can NEVER be
+                # admitted no matter how much drains. Reject it instead of
+                # blocking the head of line forever (C2 — an un-rejectable head
+                # turns every subsequent step's empty schedule into a fatal
+                # engine stall that kills all concurrent requests).
+                self._reject_unadmittable(request_id, state)
+                continue
+            if self._decode_watermark > 0 and self._running:
+                # reserve pages for running decodes only — with nothing running
+                # there is no decode to protect, so reserving would deadlock the
+                # sole waiting request forever (C2)
+                estimate = required_pages
                 if self._kv.num_free_pages < estimate + self._decode_watermark:
                     break  # keep pages in reserve so running decodes never starve
             try:
                 state.allocation = self._kv.allocate(state.request.prompt_token_ids)
             except KVCacheFull:
-                break  # head-of-line waits for pages; FIFO fairness
+                if not self._running:
+                    # Nothing is running to free pages and the cache still can't
+                    # fit this prompt (e.g. pinned sessions hold every page):
+                    # waiting is futile, so reject rather than deadlock (C2).
+                    self._reject_unadmittable(request_id, state)
+                    continue
+                break  # head-of-line waits for running requests to free pages
             self._waiting.pop(0)
             state.status = _Status.RUNNING
             self._running.append(request_id)
