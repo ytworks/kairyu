@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -87,10 +88,16 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             for task in tasks:
                 task.cancel()
             for task in tasks:
-                with contextlib.suppress(asyncio.CancelledError):
+                # a task that already crashed re-raises its stored exception on
+                # await; swallow it (and the CancelledError) so one dead task
+                # cannot skip the remaining awaits AND the engine shutdowns (M7)
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
             for engine in engines.values():
-                await engine.shutdown()
+                try:
+                    await engine.shutdown()  # each engine shuts down independently
+                except Exception:
+                    logging.getLogger("kairyu.deploy").exception("engine shutdown failed")
 
     app = create_app(
         engines=engines,

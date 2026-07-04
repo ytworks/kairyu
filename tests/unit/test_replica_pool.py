@@ -14,6 +14,7 @@ from kairyu.engine.backend import (
     EngineBackend,
     GenerationRequest,
     GenerationResult,
+    UpstreamClientError,
 )
 from kairyu.engine.mock import MockBackend
 from kairyu.orchestration.replica import ReplicaPool
@@ -27,6 +28,7 @@ class FlakyBackend:
     def __init__(self, latency_s: float = 0.0) -> None:
         self._inner = MockBackend(latency_s=latency_s)
         self.failing = False
+        self.client_failing = False  # raises a 4xx-style client error
         self.shutdown_count = 0
 
     @property
@@ -34,6 +36,8 @@ class FlakyBackend:
         return self._inner.prompts_seen
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
+        if self.client_failing:
+            raise UpstreamClientError("bad request", status_code=400)
         if self.failing:
             raise RuntimeError("injected failure")
         return await self._inner.generate(request)
@@ -127,6 +131,22 @@ async def test_rendezvous_remap_only_moves_ejected_sessions():
             assert after[session] != ejected  # remapped off the ejected replica
         else:
             assert after[session] == before[session]  # everyone else stays put
+
+
+async def test_client_errors_do_not_eject_the_replica():
+    # O1: a bad client request (4xx) repeated on a session-pinned replica must
+    # NOT count as a replica failure — otherwise one misbehaving client could
+    # cascade-eject the whole pool.
+    backends = [FlakyBackend() for _ in range(3)]
+    pool = ReplicaPool(backends, unhealthy_after=2)
+    target = await place_session(pool, backends, "sticky")
+    backends[target].client_failing = True
+    for _ in range(5):  # far more than unhealthy_after
+        with pytest.raises(UpstreamClientError):
+            await pool.generate(make_request("bad", session_id="sticky"))
+    backends[target].client_failing = False
+    # the replica is still healthy and still serves the session
+    assert await place_session(pool, backends, "sticky") == target
 
 
 async def test_sessionless_goes_to_least_outstanding_with_lowest_index_ties():

@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest
+from kairyu.engine.backend import EngineBackend, GenerationRequest
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.conductor import Conductor, CostModel, RoleSpec, zero_cost
 from kairyu.orchestration.router import RouteDecision, Router, RuleRouter
@@ -112,7 +112,10 @@ class Orchestrator:
             request_id=f"direct-{uuid.uuid4().hex[:12]}",
             prompt=f"{self._shared_prefix}{query}",
             sampling_params=self._sampling_params,
-            cache_hint=CacheHint(session_id=uuid.uuid4().hex[:12]),
+            # no random per-request session (M2): a fresh uuid forces uniform HRW
+            # placement and defeats prefix + least-outstanding routing. With no
+            # hint the pool routes by shared-prefix overlap and load instead.
+            cache_hint=None,
         )
         result = await engine.generate(request)
         usage = (
@@ -191,7 +194,7 @@ class Orchestrator:
                 request_id=f"direct-{uuid.uuid4().hex[:12]}",
                 prompt=f"{self._shared_prefix}{prompt}",
                 sampling_params=self._sampling_params,
-                cache_hint=CacheHint(session_id=uuid.uuid4().hex[:12]),
+                cache_hint=None,  # M2: no random session — route by prefix + load
             )
             emitted = 0
             last = None

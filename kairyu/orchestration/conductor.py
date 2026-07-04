@@ -206,6 +206,17 @@ class Conductor:
             )
         run.completion_order.append(spec.name)
 
+    async def _run_unit_safe(
+        self, run: _RunState, session: str, query: str, spec: RoleSpec
+    ) -> None:
+        # A transient backend failure on one unit must not destroy the whole
+        # multi-agent run: record it and let the Conductor return the best
+        # result produced so far (O4). Sibling units keep their completed work.
+        try:
+            await self._run_unit(run, session, query, spec)
+        except Exception as error:
+            run.trace.append(TraceEvent(spec.name, "failed", type(error).__name__))
+
     def _final_text(self, run: _RunState) -> str:
         dependents: set[str] = set()
         for deps in self._unit_deps.values():
@@ -226,7 +237,10 @@ class Conductor:
         while pending:
             ready = [name for name, deps in pending.items() if not deps]
             await asyncio.gather(
-                *(self._run_unit(run, session, query, self._by_name[name]) for name in ready)
+                *(
+                    self._run_unit_safe(run, session, query, self._by_name[name])
+                    for name in ready
+                )
             )
             for name in ready:
                 del pending[name]

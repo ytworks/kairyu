@@ -77,7 +77,7 @@ class RegistryDiscovery:
         return self._registry.alive()
 
 
-# factory: address -> (backend, health_url) — closes over create_backend and
+# factory: address -> (backend, readiness_url) — closes over create_backend and
 # the resolved_health_url /v1-strip rule (m10a A6)
 ReplicaFactory = Callable[[str], tuple[object, str | None]]
 
@@ -88,7 +88,8 @@ def openai_replica_factory(address: str) -> tuple[object, str | None]:
 
     backend = create_backend("openai", base_url=address)
     base = address[: -len("/v1")] if address.endswith("/v1") else address
-    return backend, f"{base}/health"
+    # readiness, not liveness: a drained/wedged replica must stay ejected (O3)
+    return backend, f"{base}/readyz"
 
 
 class PoolReconciler:

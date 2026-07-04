@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from kairyu import SamplingParams
-from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.backend import GenerationRequest, UpstreamClientError
 from kairyu.engine.openai_backend import OpenAICompatBackend
 
 
@@ -67,10 +67,12 @@ async def test_missing_api_key_raises_clear_error(monkeypatch):
         await backend.generate(_request())
 
 
-async def test_http_error_surfaces_status(monkeypatch):
+async def test_client_error_surfaces_as_upstream_client_error(monkeypatch):
+    # O1: a 4xx is the client's fault, raised as UpstreamClientError so the
+    # ReplicaPool does not count it against the replica's health.
     monkeypatch.setenv("TEST_API_KEY", "sk-test")
     transport = httpx.MockTransport(
-        lambda request: httpx.Response(429, json={"error": {"message": "rate limited"}})
+        lambda request: httpx.Response(400, json={"error": {"message": "bad request"}})
     )
     backend = OpenAICompatBackend(
         base_url="https://api.example.com/v1",
@@ -78,7 +80,22 @@ async def test_http_error_surfaces_status(monkeypatch):
         api_key_env="TEST_API_KEY",
         transport=transport,
     )
-    with pytest.raises(RuntimeError, match="429"):
+    with pytest.raises(UpstreamClientError) as excinfo:
+        await backend.generate(_request())
+    assert excinfo.value.status_code == 400
+
+
+async def test_server_error_surfaces_as_runtime_error(monkeypatch):
+    # 5xx is a replica/transport failure the pool SHOULD count.
+    monkeypatch.setenv("TEST_API_KEY", "sk-test")
+    transport = httpx.MockTransport(lambda request: httpx.Response(503, text="unavailable"))
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env="TEST_API_KEY",
+        transport=transport,
+    )
+    with pytest.raises(RuntimeError, match="503"):
         await backend.generate(_request())
 
 
