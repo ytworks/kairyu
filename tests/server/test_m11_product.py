@@ -49,6 +49,23 @@ class TestOrchestratorSurface:
             assert usage["completion_tokens"] > 0  # m11 A1: real, not zero
             assert "kairyu_trace" not in response.json() or response.json()["kairyu_trace"] is None
 
+    def test_auto_model_rejects_unsupported_params(self, tmp_path):
+        # M4: params the orchestrator can't honor (n>1, logprobs, tools,
+        # response_format) must 400, not be silently dropped.
+        with TestClient(_auto_app(tmp_path)) as client:
+            for extra in (
+                {"n": 2},
+                {"logprobs": True},
+                {"tools": [{"type": "function", "function": {"name": "f"}}]},
+                {"response_format": {"type": "json_object"}},
+            ):
+                resp = client.post(
+                    "/v1/chat/completions",
+                    json={"model": "kairyu-auto",
+                          "messages": [{"role": "user", "content": "hi"}], **extra},
+                )
+                assert resp.status_code == 400, extra
+
     def test_trace_header_opt_in(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:
             response = client.post(
@@ -202,6 +219,21 @@ class TestTenancy:
         assert limiter.admit("t")
 
 
+class TestResponseStore:
+    def test_lru_cap_and_tenant_scope(self):
+        # M2: the in-memory store is LRU-capped and tenant-scoped — a leaked id
+        # from another tenant reads as not-found.
+        from kairyu.entrypoints.server.extra_routes import ResponseStore
+
+        store = ResponseStore(max_items=2)
+        store.save("r1", [{"a": 1}], owner="tenant-a")
+        assert store.get("r1", owner="tenant-a") == [{"a": 1}]
+        assert store.get("r1", owner="tenant-b") is None  # cross-tenant -> not found
+        store.save("r2", [{"b": 2}], owner="tenant-a")
+        store.save("r3", [{"c": 3}], owner="tenant-a")  # evicts the LRU (r1)
+        assert store.get("r1", owner="tenant-a") is None  # evicted
+
+
 class TestResponsesApi:
     def test_sdk_round_trip_with_previous_response_id(self, tmp_path):
         import openai
@@ -268,6 +300,16 @@ class TestEmbeddings:
                 f"<{len(as_float)}f", base64.b64decode(as_b64)
             )
             assert list(decoded) == pytest.approx(as_float)
+
+    def test_invalid_encoding_format_is_400(self, tmp_path):
+        # M6: an unknown encoding_format (e.g. the typo "Base64") must be a 400,
+        # not silently served as float.
+        with TestClient(_auto_app(tmp_path)) as client:
+            resp = client.post(
+                "/v1/embeddings",
+                json={"model": "m", "input": "hello", "encoding_format": "Base64"},
+            )
+            assert resp.status_code == 400
 
 
 class TestVisionWire:

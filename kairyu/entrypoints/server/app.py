@@ -166,11 +166,14 @@ def _model_not_found(model: str) -> JSONResponse:
 
 
 def _upstream_error(error: Exception) -> JSONResponse:
+    # only the exception CLASS name leaves the gateway (M3): str(error) can carry
+    # connection strings, internal hostnames/ports, and file paths from arbitrary
+    # backend failures — those must not reach the client
     return JSONResponse(
         status_code=502,
         content={
             "error": {
-                "message": str(error),
+                "message": f"upstream backend error ({type(error).__name__})",
                 "type": "upstream_error",
                 "code": "backend_error",
             }
@@ -337,7 +340,12 @@ async def _stream_engine(
                     logprobs=chunk_logprobs,
                 )
     except Exception as error:  # surface backend failures inside the SSE stream
-        payload = {"error": {"message": str(error), "type": "upstream_error"}}
+        payload = {  # M3: only the class name, no raw backend message
+            "error": {
+                "message": f"upstream backend error ({type(error).__name__})",
+                "type": "upstream_error",
+            }
+        }
         yield f"data: {json.dumps(payload)}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -506,7 +514,12 @@ async def _stream_completions(
                     [CompletionChoice(index=completion.index, text=delta, finish_reason=finish)]
                 )
     except Exception as error:
-        payload = {"error": {"message": str(error), "type": "upstream_error"}}
+        payload = {  # M3: only the class name, no raw backend message
+            "error": {
+                "message": f"upstream backend error ({type(error).__name__})",
+                "type": "upstream_error",
+            }
+        }
         yield f"data: {json.dumps(payload)}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -666,6 +679,23 @@ def create_app(
         # rendered after model resolution: templates are per served model (m9 D2)
         prompt = render_prompt(request, chat_templates)
         if request.model in auto_models:
+            # the orchestrator path takes only the prompt; params it cannot honor
+            # must be a 400, not silently dropped (M4 — OpenAI-compat by refusal)
+            unsupported = [
+                name
+                for name, active in (
+                    ("n>1", request.n > 1),
+                    ("logprobs", bool(request.logprobs)),
+                    ("tools", bool(request.tools)),
+                    ("response_format", request.response_format is not None),
+                )
+                if active
+            ]
+            if unsupported:
+                return _invalid_request(
+                    f"model {request.model!r} (orchestrated) does not support: "
+                    + ", ".join(unsupported)
+                )
             selected = auto_models[request.model]
             want_trace = http_request.headers.get("x-kairyu-trace") == "1"
             if request.stream:

@@ -245,15 +245,19 @@ async def test_backend_finish_reason_passes_through():
 
 
 async def test_backend_error_returns_openai_error_envelope():
-    app = create_app(engines={"stub": StubBackend(error=RuntimeError("key missing"))})
+    app = create_app(
+        engines={"stub": StubBackend(error=RuntimeError("secret://host:5432 key missing"))}
+    )
     async with _client(app) as client:
         body = _chat_body("hi")
         body["model"] = "stub"
         response = await client.post("/v1/chat/completions", json=body)
     assert response.status_code == 502
     error = response.json()["error"]
-    assert "key missing" in error["message"]
     assert error["type"] == "upstream_error"
+    # M3: the backend's raw message (which may carry secrets/hosts) must NOT leak
+    assert "secret://host:5432" not in error["message"]
+    assert "RuntimeError" in error["message"]  # only the class name is disclosed
 
 
 async def test_response_format_passes_through_to_engine():
