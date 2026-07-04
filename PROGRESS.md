@@ -89,6 +89,37 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   param handling, non-ASCII bearer 401, embeddings validation) and full S3
   metering coverage.
 
+### 2026-07-04 — [progress] Repo-wide review remediation Phase 1: engine-core correctness
+- What: Fixed the CRITICAL/HIGH engine-core defects found in the 2026-07-04
+  full-repo review (report in job scratch). **C1 radix cache poisoning**:
+  `commit_and_release` folded the final sampled token's page as computed even
+  though the decode loop never writes that token's KV — a page-boundary
+  completion poisoned the next multi-turn prefix (silent wrong output ~1/16 of
+  requests). Now caps committable length below the unwritten final token
+  (`radix_kv.py`). **C2 oversized-prompt permanent death**: a prompt larger
+  than the whole KV cache blocked the head of line forever, turning every empty
+  schedule into a fatal engine stall that killed all concurrent requests. The
+  scheduler now rejects unadmittable prompts at admission (finish_reason
+  "length", drained via `drain_rejected`), and all four engine cores
+  (EngineCore/OverlapEngineCore/PipelinedEngineCore/EngineLoop) replace the
+  fatal stall with `reject_waiting_head`. **E1 ZMQ receiver death**: a dead
+  receiver left every subsequent request hanging; `_ensure_started` now respawns
+  a fresh child over a crashed one and per-frame errors no longer kill the loop.
+  **E2 state leaks**: `Scheduler.forget` + runner `release` reclaim finished
+  per-request state (output lists, sampler seeds, grammar enforcers) — wired
+  into `EngineLoop`. MEDIUM: engine_service per-message fault isolation,
+  `resume_with_kv` honors ignore_eos/min_tokens/stop_token_ids/finish_reason,
+  `RemoteKVReceiver.adopt` frees the allocation on failure, `zmq generate()`
+  aborts on cancel, NIXL send yields instead of busy-spinning. LOW: PagePool
+  rejects duplicate free ids, torch attention builds indices on the query
+  device.
+- Why: The CPU test suite was single-turn/single-tenant and could not see these
+  multi-turn / long-running / crash-path failures; each is output-corrupting,
+  a DoS, or an unbounded leak on the deploy-day paths.
+- Refs: review report; `kairyu/engine/core/{radix_kv,scheduler,engine_core,
+  overlap,pipeline,pd_remote,pages,model_runner,spec_runner,engine_service}.py`,
+  `kairyu/engine/{engine_loop,zmq_backend}.py`; tests under `tests/unit/`
+
 ### 2026-07-03 — [progress] Fugu benchmark suite: one-command quality scoreboard (G6 P-C1)
 - What: 646 → 730+ tests. New `kairyu/bench/` package + `kairyu bench
   run/download/report/list` CLI. All 11 rows of the Fugu release table
