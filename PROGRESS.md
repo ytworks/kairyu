@@ -62,6 +62,35 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-04 — [progress] Review remediation Phase 4: model + quant parity
+- What: Fixed the parity-affecting model/quant defects from the full-repo review.
+  **M3 (rope)**: unsupported `rope_scaling` kinds (linear/dynamic/longrope) now
+  raise instead of silently dropping to None — a silent parity break vs
+  hf.generate. **M4 (fp8 load)**: `Fp8Linear` adopts the checkpoint's
+  weight_scale shape, so static per-tensor `(1,)` FP8 (and modelopt FP8) load
+  instead of a size-mismatch crash. **M1 (nvfp4 oracle)**: the RNE tie table
+  applied LUT *values* as indices and dropped two boundaries, corrupting the
+  GPU-kernel packing oracle by up to 60%; replaced with the correct even-index
+  table for all seven boundaries (and the test that pinned the wrong behavior).
+  MEDIUM: DeepSeek MoE config now falls back to HF defaults
+  (norm_topk_prob=True, routed_scaling=2.5, first_k_dense=3, n_group/topk_group
+  8/4) for trimmed configs, and a missing expert count raises clearly instead of
+  `int(None)`; GPTQ/AWQ `group_size=-1` (single whole-input group) normalizes to
+  in_features instead of a negative buffer count; `tp_view` fails fast on MoE
+  (no dense down_proj to row-parallelize) like it already does for MLA; bare
+  `quant_method: "fp8"` rejects block-wise FP8 (weight_block_size) loudly
+  instead of mis-routing DeepSeek block-FP8 to the per-channel path.
+- Why: Each is a silent wrong-output or load-time failure on real checkpoints;
+  all are CPU-validatable and covered by new tests.
+- Refs: review report; `kairyu/models/{config,parallel}.py`,
+  `kairyu/quant/{linear,nvfp4}.py`, `kairyu/engine/core/quant_config.py`;
+  `tests/unit/test_config_and_fp8_load.py`, `test_quant_compute.py`.
+  **Deferred (needs GPU + SpecForge reference to validate):** EAGLE-3 midlayer
+  RoPE (H1) and KV-cached rollout feedback (H2) — both affect draft ACCEPTANCE
+  RATE only, not output correctness (verification is by the target), so no CPU
+  test can validate a fix; plus the design items (linear_factory context,
+  forward_fused wiring, HF-name-preserving TP/EP wrappers, draft-head quant).
+
 ### 2026-07-03 — [progress] Fugu benchmark suite: one-command quality scoreboard (G6 P-C1)
 - What: 646 → 730+ tests. New `kairyu/bench/` package + `kairyu bench
   run/download/report/list` CLI. All 11 rows of the Fugu release table
