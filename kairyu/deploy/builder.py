@@ -61,12 +61,19 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 template_source = str(base_dir / path)
         chat_templates[model_name] = ChatTemplate.load(template_source)
 
+    def _load_orchestrator(spec_path: str) -> Orchestrator:
+        path = Path(spec_path)
+        if base_dir is not None and not path.is_absolute():
+            path = base_dir / path
+        return build_orchestrator(load_spec(path))
+
     orchestrator: Orchestrator | None = None
     if spec.orchestrator is not None:
-        orchestrator_path = Path(spec.orchestrator.spec)
-        if base_dir is not None and not orchestrator_path.is_absolute():
-            orchestrator_path = base_dir / orchestrator_path
-        orchestrator = build_orchestrator(load_spec(orchestrator_path))
+        orchestrator = _load_orchestrator(spec.orchestrator.spec)
+    orchestrators: dict[str, Orchestrator] = {
+        name: _load_orchestrator(section.spec)
+        for name, section in spec.orchestrators.items()
+    }
 
     workers: list[BatchWorker] = []  # filled after create_app (worker needs app metrics)
 
@@ -88,6 +95,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     app = create_app(
         engines=engines,
         orchestrator=orchestrator,
+        orchestrators=orchestrators,
         settings=_server_settings(spec),
         lifespan=lifespan,
         chat_templates=chat_templates,

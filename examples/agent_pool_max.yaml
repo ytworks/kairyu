@@ -1,0 +1,37 @@
+# Deep-tier orchestration for `kairyu-auto-max`: same DAG as agent_pool.yaml
+# but with a bigger budget for deeper refinement passes. Swap the mock
+# backends for real engines/pools served by the same gateway.
+shared_prefix: |
+  You are a careful assistant working inside the kairyu orchestrator.
+  Prioritize answer quality over latency.
+
+workers:
+  - name: tier1
+    backend: mock          # swap for: openai (a served kairyu model) or vllm
+  - name: tier2
+    backend: mock
+
+roles:
+  - name: planner
+    worker: tier2
+    role_type: planner
+    prompt: "[planner] Break the task into a short plan.\nTask: {query}"
+  - name: worker
+    worker: tier1
+    prompt: "[worker] Execute the plan.\nPlan: {planner}\nTask: {query}"
+    depends_on: [planner]
+  - name: verifier
+    worker: tier2
+    role_type: verifier
+    verifies: worker
+    prompt: "[verifier] Reply PASS or FAIL with reasons.\nTask: {query}\nAnswer: {worker}"
+    depends_on: [worker]
+  - name: synthesizer
+    worker: tier2
+    role_type: synthesizer
+    prompt: "[synthesizer] Final answer.\nDraft: {worker}\nNotes: {verifier}"
+    depends_on: [worker, verifier]
+
+budget:
+  max_steps: 32
+  max_refine_depth: 4

@@ -49,6 +49,10 @@ OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benc
 in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
+`kairyu bench run` executes the 11-slot Fugu-release quality suite against any
+deployed gateway (single models and named orchestrations as scoreboard columns)
+with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
+footnoted scoreboard (G6 P-C1).
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -57,6 +61,50 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-03 — [progress] Fugu benchmark suite: one-command quality scoreboard (G6 P-C1)
+- What: 646 → 730+ tests. New `kairyu/bench/` package + `kairyu bench
+  run/download/report/list` CLI. All 11 rows of the Fugu release table
+  (sakana.ai/fugu-release) implemented as adapters: GPQA Diamond, HLE,
+  LiveCodeBench(+Pro community mirror), SciCode, CharXiv Reasoning, MRCRv2,
+  LongBench-v2 (annotated substitute for the unpublished "Long Context
+  Reasoning"), τ³-Bench Banking / SWE-Bench Pro (mini-swe-agent scaffold) /
+  Terminal-Bench 2.1 (Harbor) as official-harness wrappers. One command
+  downloads missing datasets (normalized JSONL cache under
+  ~/.cache/kairyu/benchmarks, $KAIRYU_BENCH_CACHE), runs every benchmark ×
+  every target, and writes bench/results/fugu/<run_id>/ with per-item
+  evidence, methodology (dataset revisions, judge model, truncation policy)
+  and a footnoted Fugu-layout scoreboard (JSON+MD). Degradation is data:
+  docker/gated-dataset/judge/vision/context-length preconditions produce
+  skipped/partial cells with reasons — exit 1 only on hard failures; same
+  --run-id resumes. Configurable LLM judge endpoint (HLE free-form, CharXiv,
+  τ user-simulator; unjudgeable items recorded, never guessed). Execution
+  scoring in an rlimit subprocess sandbox (documented as not a security
+  boundary). Orchestration measured as plain model names (kairyu-auto,
+  kairyu-auto-max) via the new `orchestrators:` DeploymentSpec map. New
+  extras: [bench] (datasets/hub/pillow/h5py), [bench-agentic]
+  (mini-swe-agent/swebench/harbor; tau3 documented as git install). Offline
+  fixtures keep the default CPU suite and --offline-fixtures runs hermetic;
+  networked download tests are hf_hub-marked.
+- Refs: goal G6 P-C1/P-B4, roadmap §6 evidence rules; `kairyu/bench/`,
+  `kairyu/entrypoints/cli.py`, `docs/benchmarks.md`,
+  `examples/{deploy_multi_orchestrator,bench_fugu,agent_pool_max}.yaml`,
+  `tests/bench/`
+
+### 2026-07-03 — [design] DeploymentSpec gains named `orchestrators:` (m7 D3 / m11 D2 amendment)
+- What: `DeploymentSpec.orchestrators: dict[name, OrchestratorSection]` serves any
+  number of named orchestrations (e.g. `kairyu-auto` + `kairyu-auto-max`) from one
+  YAML; the legacy single `orchestrator:` key stays and is still served as
+  `kairyu-auto`. Validators: name collisions with engines/pools rejected at spec
+  load; `orchestrator:` + `orchestrators["kairyu-auto"]` double-declaration
+  rejected. Builder passes the named map to `create_app(orchestrators=)` — the
+  m11 tiered-auto path was already server-side, just not YAML-expressible.
+- Why: The Fugu-suite benchmark work (G6 P-C1) needs "orchestration with an
+  arbitrary model composition" to be deployable, then benchmarked as just another
+  model name on the same endpoint. Previously `kairyu-auto-max` was reachable
+  only via the `create_app` kwarg in tests, never from `kairyu serve`.
+- Refs: `kairyu/deploy/{spec,builder}.py`,
+  `tests/unit/test_deployment_spec.py`, `tests/server/test_serve_builder.py`
 
 ### 2026-07-03 — [progress] M19 complete: deploy-ready — the local-complete plan is DONE
 - What: 627 → 646 tests. Dockerfile.cuda (nvidia/cuda 12.4 + gpu/hf/fleet

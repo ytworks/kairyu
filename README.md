@@ -118,6 +118,24 @@ Endpoints: `/v1/chat/completions` (SSE, tools), `/v1/models`, `/v1/files` +
 the OpenAI `user` field (or `X-Session-ID`) stick to the replica holding their
 warm radix-KV prefix. See [`docs/deployment.md`](docs/deployment.md).
 
+### Benchmarks (Fugu suite)
+
+One command runs every benchmark from the
+[Fugu release table](https://sakana.ai/fugu-release/) against a deployed
+gateway — single models and orchestration tiers as scoreboard columns — and
+prints a dated, footnoted scoreboard (goal G6 P-C1):
+
+```bash
+kairyu serve examples/deploy_multi_orchestrator.yaml &
+kairyu bench run --base-url http://localhost:8000/v1 \
+    --model m1 --model kairyu-auto --model kairyu-auto-max
+```
+
+Datasets are downloaded to `~/.cache/kairyu/benchmarks` (never committed);
+unmet preconditions (no docker, gated dataset, no judge) become annotated
+`skipped` cells, so the run always completes. See
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
 ### vLLM drop-in
 
 ```python
@@ -446,6 +464,10 @@ chat_templates:                # served model -> HF Jinja template (text or *.ji
 orchestrator:                  # optional kairyu-auto (OrchestratorSpec YAML)
   spec: orchestrator.yaml
 
+orchestrators:                 # optional NAMED auto models (any number; each an
+  kairyu-auto-max:             #   arbitrary worker/role DAG — arbitrary composition)
+    spec: agent_pool_max.yaml
+
 batch:                         # optional OpenAI-compatible /v1/files + /v1/batches
   data_dir: /var/kairyu/batches
   max_concurrency: 4
@@ -503,7 +525,8 @@ ledger (`server.usage_ledger_path`).
 `create_app(..., orchestrators={"kairyu-auto": Orchestrator(...), "kairyu-auto-max":
 Orchestrator(..., moa_samples=4)})` — the max tier routes heavy queries through
 Mixture-of-Agents. Streaming emits SSE comment keep-alives between stages, so any
-OpenAI SDK client works unchanged.
+OpenAI SDK client works unchanged. The same tiers are declarable in a
+DeploymentSpec via the `orchestrators:` map (see the YAML reference above).
 
 ### Distributed serving
 
@@ -525,6 +548,8 @@ OpenAI SDK client works unchanged.
 | `--extra fleet` | pyzmq, msgpack (process-split engine, KV events) |
 | `--extra otel` | opentelemetry-sdk (tracing) |
 | `--extra gpu` | flashinfer / triton / nixl (linux-only markers; macOS ignores) |
+| `--extra bench` | datasets / huggingface_hub / pillow / h5py (`kairyu bench download`) |
+| `--extra bench-agentic` | mini-swe-agent / swebench / harbor (docker-based benchmarks) |
 | `pytest` (default) | everything except `gpu` and `hf_hub` |
 | `pytest -m gpu` | deploy-day kernel/graph tests (`tests/gpu/`) |
 | `pytest -m hf_hub` | opt-in real-checkpoint downloads |

@@ -1,0 +1,3 @@
+{"id": "fixture-gpqa-0001", "question": "A ball is dropped from rest and falls freely for 2 seconds (g = 10 m/s^2). What distance has it fallen?", "correct_answer": "20 m", "incorrect_answers": ["10 m", "40 m", "5 m"]}
+{"id": "fixture-gpqa-0002", "question": "Which quantum number determines the shape of an atomic orbital?", "correct_answer": "The azimuthal quantum number l", "incorrect_answers": ["The principal quantum number n", "The magnetic quantum number m_l", "The spin quantum number m_s"]}
+{"id": "fixture-gpqa-0003", "question": "In molecular biology, which enzyme synthesizes RNA from a DNA template?", "correct_answer": "RNA polymerase", "incorrect_answers": ["DNA ligase", "Reverse transcriptase", "Helicase"]}

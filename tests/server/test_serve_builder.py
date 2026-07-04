@@ -103,3 +103,57 @@ orchestrator:
         models = await client.get("/v1/models")
         ids = {m["id"] for m in models.json()["data"]}
     assert "kairyu-auto" in ids
+
+
+ORCHESTRATOR_SPEC = """
+workers:
+  - { name: tier1, backend: mock }
+  - { name: tier2, backend: mock }
+"""
+
+
+async def test_named_orchestrators_served_and_answer(tmp_path):
+    (tmp_path / "auto.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
+    (tmp_path / "auto_max.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
+    (tmp_path / "deploy.yaml").write_text(
+        """
+engines:
+  m: { backend: mock }
+orchestrators:
+  kairyu-auto: { spec: auto.yaml }
+  kairyu-auto-max: { spec: auto_max.yaml }
+""",
+        encoding="utf-8",
+    )
+    app = build_app_from_config(tmp_path / "deploy.yaml")
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        ids = {m["id"] for m in models.json()["data"]}
+        assert {"m", "kairyu-auto", "kairyu-auto-max"} <= ids
+
+        for model in ("kairyu-auto", "kairyu-auto-max"):
+            response = await client.post(
+                "/v1/chat/completions", json=_chat_body("hi", model=model)
+            )
+            assert response.status_code == 200
+            assert response.json()["choices"][0]["message"]["content"]
+
+
+async def test_legacy_orchestrator_composes_with_named(tmp_path):
+    (tmp_path / "auto.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
+    (tmp_path / "auto_max.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
+    (tmp_path / "deploy.yaml").write_text(
+        """
+engines:
+  m: { backend: mock }
+orchestrator: { spec: auto.yaml }
+orchestrators:
+  kairyu-auto-max: { spec: auto_max.yaml }
+""",
+        encoding="utf-8",
+    )
+    app = build_app_from_config(tmp_path / "deploy.yaml")
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        ids = {m["id"] for m in models.json()["data"]}
+    assert {"kairyu-auto", "kairyu-auto-max"} <= ids
