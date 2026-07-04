@@ -94,3 +94,76 @@ def build_tp_runner(model_dir: str, tp: int, rank: int, comm, num_pages: int, pa
     )
     runner = PagedModelRunner(model, pool, sampler=Sampler())
     return runner, full_config
+
+
+def _tp_worker_entry(
+    spawn_index: int, world_size: int, init_file: str,
+    model_dir: str, num_pages: int, page_size: int,
+) -> None:
+    """Spawned worker (rank = spawn_index + 1; rank 0 is the driver process).
+
+    Module-level and side-effect-free at import (m16 A6) so torch spawn can
+    pickle it. Joins the group, validates the handshake, runs the step loop
+    until rank 0 broadcasts shutdown, then tears the group down."""
+    import torch
+
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+
+    rank = spawn_index + 1
+    torch.set_num_threads(1)
+    init_distributed(rank, world_size, f"file://{init_file}")
+    comm = TorchDistCommunicator()
+    runner, _ = build_tp_runner(model_dir, world_size, rank, comm, num_pages, page_size)
+    handshake = comm.broadcast(None, src=0)
+    validate_handshake(handshake, model_dir, num_pages, page_size)
+    try:
+        worker_step_loop(comm, runner)
+    finally:
+        import torch.distributed as dist
+
+        dist.destroy_process_group()
+
+
+class DistTPLauncher:
+    """Owns the spawned worker processes + the rank-0 DistTPModelRunner.
+
+    Wires real multi-process TP into a single-process serve path: rank 0 lives in
+    THIS process, ranks 1..tp-1 are spawned workers. ``shutdown()`` broadcasts the
+    terminating None (worker_step_loop returns), joins the workers, and destroys
+    the rank-0 group — so ``kairyu serve --tp N`` starts and stops cleanly."""
+
+    def __init__(self, model_dir: str, tp: int, num_pages: int, page_size: int) -> None:
+        import tempfile
+
+        import torch.multiprocessing as mp
+
+        from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+
+        # a fresh, not-yet-created path is the gloo file:// rendezvous point
+        self._init_file = tempfile.mktemp(prefix="kairyu-tp-")  # noqa: S306
+        self._ctx = mp.spawn(
+            _tp_worker_entry,
+            args=(tp, self._init_file, model_dir, num_pages, page_size),
+            nprocs=tp - 1,
+            join=False,
+        )
+        init_distributed(0, tp, f"file://{self._init_file}")
+        self._comm = TorchDistCommunicator()
+        runner, self.full_config = build_tp_runner(
+            model_dir, tp, 0, self._comm, num_pages, page_size
+        )
+        self._comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
+        self.runner = DistTPModelRunner(self._comm, runner)
+
+    def shutdown(self) -> None:
+        self.runner.shutdown()  # broadcasts None -> workers leave worker_step_loop
+        self._ctx.join()
+        import contextlib
+        import os
+
+        import torch.distributed as dist
+
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self._init_file)

@@ -79,7 +79,7 @@ def _single_process_greedy(model_dir: str, prompt: list[int], max_new: int) -> l
 
 def test_communicator_contract_on_gloo(spawn2):
     results = spawn2(dist_targets.comm_contract)
-    for rank, result in enumerate(results):
+    for result in results:
         assert result["broadcast"] == {"step": 7}
         assert result["reduced"] == [3.0, 20.0]  # (1+2, 10+10)
         assert result["gathered"] == ["r0", "r1"]
@@ -98,6 +98,35 @@ def test_tp2_engine_greedy_matches_single_process(spawn2, fixture_name, request)
     results = spawn2(dist_targets.tp_engine_parity, model_dir, prompt, 12)
     assert results[0]["outputs"] == reference
     assert results[1]["steps"] > 0  # the worker actually executed the steps
+
+
+def test_dist_tp_launcher_serve_path_matches_single_process(llama_dir):
+    # Deploy wiring: DistTPLauncher (rank 0 here + spawned worker) is what
+    # `kairyu serve --tp 2` uses. Driving EngineCore through it must reproduce the
+    # single-process greedy output, and shutdown() must stop the worker cleanly.
+    from kairyu.engine.core.engine_core import EngineCore
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+    from kairyu.engine.core.worker import DistTPLauncher
+
+    torch.manual_seed(83)
+    prompt = torch.randint(0, 256, (11,)).tolist()
+    reference = _single_process_greedy(llama_dir, prompt, max_new=12)
+
+    launcher = DistTPLauncher(llama_dir, tp=2, num_pages=64, page_size=4)
+    try:
+        scheduler = Scheduler(
+            RadixKVCache(num_pages=64, page_size=4), max_num_batched_tokens=6, page_size=4
+        )
+        engine = EngineCore(scheduler, launcher.runner)
+        engine.add_request(
+            EngineRequest("a", tuple(prompt), max_new_tokens=12, sampling=EngineSampling())
+        )
+        outputs = list(engine.run_to_completion()["a"])
+    finally:
+        launcher.shutdown()
+    assert outputs == reference
 
 
 def test_ep2_moe_block_matches_single_process(spawn2, moe_dir):

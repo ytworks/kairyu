@@ -64,9 +64,10 @@ def build_engine_loop(
 
     ``model_path`` loads a real checkpoint (m12 D5): DenseDecoder +
     PagedKVPool + PagedModelRunner + Sampler, tokenizer from the same dir
-    unless overridden. Mutually exclusive with ``runner``; TP > 1 with a real
-    model arrives in M16 (the CPU TP path duplicates one runner instance
-    across ranks — incompatible with a stateful pool/sampler runner).
+    unless overridden. Mutually exclusive with ``runner``. Real-model TP > 1
+    spawns the ``DistTPLauncher`` group (rank 0 here, ranks 1.. as workers) and
+    drives it via ``DistTPModelRunner``; the loop's ``.tp_launcher`` handle must
+    be ``shutdown()`` on serve teardown.
     """
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
@@ -74,8 +75,16 @@ def build_engine_loop(
         raise ValueError("speculative decoding with tensor_parallel_size > 1 is not supported")
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
+
     if model_path is not None and tensor_parallel_size > 1:
-        raise ValueError("model_path with tensor_parallel_size > 1 arrives in M16")
+        return _build_dist_tp_loop(
+            model_path=model_path,
+            tensor_parallel_size=tensor_parallel_size,
+            num_pages=num_pages,
+            page_size=page_size,
+            max_num_batched_tokens=max_num_batched_tokens,
+            tokenizer=tokenizer,
+        )
 
     default_eos: int | None = None
     default_stop_ids: tuple[int, ...] = ()
@@ -142,6 +151,47 @@ def build_engine_loop(
         default_eos_token_id=default_eos,
         default_stop_token_ids=default_stop_ids,
     )
+    loop.tp_launcher = None  # single-process: nothing to tear down
+    return loop, cache, scheduler
+
+
+def _build_dist_tp_loop(
+    *,
+    model_path: str,
+    tensor_parallel_size: int,
+    num_pages: int,
+    page_size: int,
+    max_num_batched_tokens: int,
+    tokenizer: str | Tokenizer | None,
+) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
+    """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
+    drive them through DistTPModelRunner, and expose the launcher on the loop so
+    serve teardown can stop the workers cleanly."""
+    from kairyu.engine.core.worker import DistTPLauncher
+    from kairyu.models.loader import load_generation_defaults
+
+    launcher = DistTPLauncher(model_path, tensor_parallel_size, num_pages, page_size)
+    generation = load_generation_defaults(model_path)
+    resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
+    vocab_size = len(resolved.vocab())
+    if vocab_size > launcher.full_config.vocab_size:
+        launcher.shutdown()
+        raise ValueError(
+            f"tokenizer vocab ({vocab_size}) exceeds the model's vocab_size "
+            f"({launcher.full_config.vocab_size})"
+        )
+    cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
+    scheduler = Scheduler(
+        cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
+    )
+    loop = EngineLoop(
+        resolved,
+        scheduler,
+        launcher.runner,
+        default_eos_token_id=generation.eos_token_id,
+        default_stop_token_ids=generation.stop_token_ids,
+    )
+    loop.tp_launcher = launcher  # serve teardown must call launcher.shutdown()
     return loop, cache, scheduler
 
 
@@ -375,6 +425,10 @@ class KairyuBackend:
     async def shutdown(self) -> None:
         if self._pump_task is not None:
             self._pump_task.cancel()
+        # stop the spawned TP worker ranks (no-op unless --tp N launched them)
+        launcher = getattr(self._loop, "tp_launcher", None)
+        if launcher is not None:
+            await asyncio.to_thread(launcher.shutdown)
 
 
 register_backend("kairyu", KairyuBackend)

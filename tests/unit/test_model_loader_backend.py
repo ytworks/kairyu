@@ -134,8 +134,8 @@ def test_model_path_mutual_exclusions(checkpoint):
     path, _ = checkpoint
     with pytest.raises(ValueError, match="mutually exclusive"):
         build_engine_loop(model_path=str(path), runner=object())
-    with pytest.raises(ValueError, match="M16"):
-        build_engine_loop(model_path=str(path), tensor_parallel_size=2)
+    # real-model TP > 1 now LAUNCHES the multi-process group instead of raising —
+    # covered by tests/dist test_dist_tp_launcher_serve_path_matches_single_process.
 
 
 def test_oversized_tokenizer_vocab_fails_fast(checkpoint):
