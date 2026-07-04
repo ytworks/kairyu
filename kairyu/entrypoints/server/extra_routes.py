@@ -14,11 +14,14 @@ import base64
 import struct
 import time
 import uuid
+from collections import OrderedDict
 from typing import Protocol
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+_MAX_EMBEDDING_INPUTS = 2048  # cap the embeddings batch (M6)
 
 
 class EmbeddingBackend(Protocol):
@@ -67,16 +70,28 @@ class ResponsesRequest(BaseModel):
 
 
 class ResponseStore:
-    """In-memory previous_response_id state (protocol-shaped for M11+)."""
+    """In-memory previous_response_id state (protocol-shaped for M11+).
 
-    def __init__(self) -> None:
-        self._items: dict[str, list[dict]] = {}
+    LRU-capped so it cannot grow without bound (M2), and each entry records its
+    owning tenant so a leaked previous_response_id cannot read another tenant's
+    conversation."""
 
-    def save(self, response_id: str, items: list[dict]) -> None:
-        self._items[response_id] = items
+    def __init__(self, max_items: int = 4096) -> None:
+        self._items: OrderedDict[str, tuple[str, list[dict]]] = OrderedDict()
+        self._max = max_items
 
-    def get(self, response_id: str) -> list[dict] | None:
-        return self._items.get(response_id)
+    def save(self, response_id: str, items: list[dict], owner: str = "default") -> None:
+        self._items[response_id] = (owner, items)
+        self._items.move_to_end(response_id)
+        while len(self._items) > self._max:
+            self._items.popitem(last=False)
+
+    def get(self, response_id: str, owner: str = "default") -> list[dict] | None:
+        entry = self._items.get(response_id)
+        if entry is None or entry[0] != owner:  # missing OR cross-tenant -> not found
+            return None
+        self._items.move_to_end(response_id)
+        return entry[1]
 
 
 def _input_items(payload: str | list[dict]) -> list[dict]:
@@ -89,6 +104,8 @@ def _item_text(item: dict) -> str:
     content = item.get("content", "")
     if isinstance(content, str):
         return content
+    if not isinstance(content, list):  # e.g. {"content": 5} — don't 500 (M2)
+        return ""
     parts = []
     for part in content:
         if isinstance(part, dict) and part.get("type") in ("input_text", "output_text", "text"):
@@ -116,6 +133,20 @@ def add_extra_routes(
                     status_code=400,
                     content={"error": {"message": "input must not be empty",
                                        "type": "invalid_request_error", "code": None}},
+                )
+            if len(texts) > _MAX_EMBEDDING_INPUTS:  # M6: bound the batch
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {
+                        "message": f"input exceeds {_MAX_EMBEDDING_INPUTS} items",
+                        "type": "invalid_request_error", "code": None}},
+                )
+            if request.encoding_format not in ("float", "base64"):  # M6: no silent fallthrough
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {
+                        "message": "encoding_format must be 'float' or 'base64'",
+                        "type": "invalid_request_error", "code": None}},
                 )
             vectors = await embedding_backend.embed(texts)
             data = []
@@ -150,9 +181,10 @@ def add_extra_routes(
                                    "type": "invalid_request_error",
                                    "code": "model_not_found"}},
             )
+        owner = http_request.scope.get("state", {}).get("tenant", "default")
         context: list[dict] = []
         if request.previous_response_id:
-            previous = store.get(request.previous_response_id)
+            previous = store.get(request.previous_response_id, owner=owner)
             if previous is None:
                 return JSONResponse(
                     status_code=404,
@@ -180,7 +212,15 @@ def add_extra_routes(
                 max_tokens=request.max_output_tokens or 1024
             ),
         )
-        result = await engine.generate(generation)
+        try:
+            result = await engine.generate(generation)
+        except Exception as error:  # backend failure -> 502, not an unhandled 500 (M2)
+            return JSONResponse(
+                status_code=502,
+                content={"error": {
+                    "message": f"upstream backend error ({type(error).__name__})",
+                    "type": "upstream_error", "code": "backend_error"}},
+            )
         response_id = f"resp_{uuid.uuid4().hex}"
         output_item = {
             "type": "message",
@@ -194,6 +234,7 @@ def add_extra_routes(
             store.save(
                 response_id,
                 context + [{"type": "message", "role": "assistant", "content": result.text}],
+                owner=owner,
             )
         usage = result.usage
         return {

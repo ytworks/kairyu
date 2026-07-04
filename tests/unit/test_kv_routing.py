@@ -118,8 +118,11 @@ class TestRadixKvEvents:
         allocation = cache.allocate(tuple(range(8)))
         cache.mark_computed(allocation)
         decode_pages = [cache.allocate_private_page() for _ in range(1)]
+        # Five outputs: the decode page (positions 8-11) is fully KV-written;
+        # the fifth token spills into a partial tail whose KV is not yet
+        # written, so the full decode page can be safely folded (C1).
         cache.commit_and_release(
-            allocation, output_tokens=(100, 101, 102, 103), decode_pages=tuple(decode_pages)
+            allocation, output_tokens=(100, 101, 102, 103, 104), decode_pages=tuple(decode_pages)
         )
         kinds = [e["type"] for e in events]
         assert kinds.count("BlockStored") == 2  # prefill + decode extension
@@ -162,6 +165,25 @@ class TestKvEventIndex:
         index = KvEventIndex()
         with pytest.raises(ValueError, match="unknown"):
             index.apply("r1", {"type": "Mystery"})
+
+    def test_all_blocks_cleared_is_handled(self):
+        # M4: vLLM emits AllBlocksCleared on a cache reset; it must clear the
+        # replica's blocks, not crash the subscriber.
+        index = KvEventIndex()
+        index.apply("r1", {"type": "BlockStored", "block_hashes": ["h1", "h2"]})
+        index.apply("r1", {"type": "AllBlocksCleared"})
+        assert index.overlap("r1", ["h1", "h2"]) == 0
+
+    def test_garbage_event_does_not_keep_replica_fresh(self):
+        # M4: freshness must be stamped only after a valid apply — a rejected
+        # event must not reset the staleness clock and mask a dead feed.
+        clock = {"t": 0.0}
+        index = KvEventIndex(staleness_s=0.5, now=lambda: clock["t"])
+        index.apply("r1", {"type": "BlockStored", "block_hashes": ["h1"]})
+        clock["t"] = 1.0  # > 500 ms since the last VALID event
+        with pytest.raises(ValueError):
+            index.apply("r1", {"type": "Mystery"})  # rejected, must not refresh
+        assert index.overlap("r1", ["h1"]) is None  # still stale -> trie fallback
 
 
 class TestZmqTransport:

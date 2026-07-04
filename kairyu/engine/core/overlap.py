@@ -19,6 +19,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from kairyu.engine.core.engine_core import ModelRunner, token_ids
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+from kairyu.engine.core.step_input import snapshot_step
 
 _DEFAULT_PIPELINE_DEPTH = 2
 
@@ -57,11 +58,21 @@ class OverlapEngineCore:
             while True:
                 if self._scheduler.has_unfinished() and len(pending) < self._depth:
                     plan = self._scheduler.schedule()
+                    # prompts too large to ever fit are rejected in schedule() (C2)
+                    for request_id in self._scheduler.drain_rejected():
+                        self._outputs[request_id] = self._scheduler.output_tokens(request_id)
                     if plan.scheduled:
                         self.events.append(f"scheduled:{step_index}")
+                        # E3: freeze the step BEFORE handing it to the device
+                        # thread. Passing live self._scheduler.states let the
+                        # concurrent update()/preemption on THIS thread mutate
+                        # outputs/decode_pages under the running execute (torn
+                        # reads: chunked-prefill range drift, decode-ahead
+                        # IndexError). The snapshot is the torn-free contract.
+                        step = snapshot_step(plan.scheduled, self._scheduler.states)
                         pending.append(
                             device.submit(
-                                self._runner.execute, plan.scheduled, self._scheduler.states
+                                self._runner.execute, step.chunks, step.states_view()
                             )
                         )
                         step_index += 1
@@ -70,8 +81,10 @@ class OverlapEngineCore:
                     self._commit(pending.popleft())
                     continue
                 if self._scheduler.has_unfinished():
-                    raise RuntimeError(
-                        "engine stall: unfinished requests but nothing schedulable "
-                        "(request larger than KV capacity?)"
-                    )
+                    # nothing in flight and nothing schedulable: force the stuck
+                    # waiting head to finish rather than crash the engine (C2)
+                    head = self._scheduler.reject_waiting_head()
+                    if head is not None:
+                        self._outputs[head] = self._scheduler.output_tokens(head)
+                        continue
                 return dict(self._outputs)

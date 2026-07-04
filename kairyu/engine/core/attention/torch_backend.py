@@ -26,8 +26,11 @@ class TorchAttentionBackend:
     ) -> torch.Tensor:
         keys, values = kv_pool.gather(layer, page_table, seq_len)
         chunk_len = query.shape[0]
-        positions = torch.arange(chunk_len)[:, None] + chunk_start
-        mask = torch.arange(seq_len)[None, :] <= positions  # [T, S] rectangular causal
+        # build index tensors on the query's device so SDPA does not trip on a
+        # cpu/cuda mismatch when real GPU tensors flow through this backend
+        device = query.device
+        positions = torch.arange(chunk_len, device=device)[:, None] + chunk_start
+        mask = torch.arange(seq_len, device=device)[None, :] <= positions  # [T, S] causal
         out = nn.functional.scaled_dot_product_attention(
             query.transpose(0, 1)[None],  # [1, heads, T, d]
             keys.transpose(0, 1)[None],  # [1, kv_heads, S, d]

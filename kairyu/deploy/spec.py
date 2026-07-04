@@ -28,8 +28,9 @@ class BackendSpec(BaseModel):
     health_url: str | None = Field(
         default=None,
         description=(
-            "Health endpoint the prober GETs for this replica; defaults to "
-            "<base_url minus /v1>/health for openai backends, None otherwise."
+            "Readiness endpoint the prober GETs for this replica; defaults to "
+            "<base_url minus /v1>/readyz for openai backends, None otherwise. "
+            "Readiness (not liveness) so a drained/wedged node stays ejected (O3)."
         ),
     )
 
@@ -41,7 +42,7 @@ class BackendSpec(BaseModel):
             return None
         root = base.rstrip("/")
         root = root.removesuffix("/v1")
-        return f"{root}/health"
+        return f"{root}/readyz"
 
 
 class PoolSpec(BaseModel):

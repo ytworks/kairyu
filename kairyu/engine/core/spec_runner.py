@@ -57,6 +57,12 @@ class SpeculativeRunner:
             return 0.0
         return self.draft_accepted / self.draft_proposed
 
+    def release(self, request_id: str) -> None:
+        """Forward finish cleanup to the wrapped runner (E2)."""
+        release = getattr(self._runner, "release", None)
+        if release is not None:
+            release(request_id)
+
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> StepOutput:

@@ -14,6 +14,17 @@ from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 
+class UpstreamClientError(Exception):
+    """A backend rejected the request itself (HTTP 4xx): the client's request
+    was bad, NOT a sign the replica is unhealthy. The ReplicaPool must not count
+    it as a replica failure, or one malformed client could eject the fleet (O1).
+    """
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 @dataclass(frozen=True)
 class CacheHint:
     """KV-affinity hint plumbed through now, consumed by the M2 Radix KV manager.

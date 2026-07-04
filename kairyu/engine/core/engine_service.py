@@ -21,6 +21,7 @@ port travels back over a multiprocessing Pipe.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from kairyu.sampling_params import SamplingParams
@@ -112,23 +113,43 @@ def run_engine_service(port_pipe, config: dict) -> None:
             socket.poll(timeout)
             while socket.poll(0):
                 identity, raw = socket.recv_multipart()
-                message = msgpack.unpackb(raw)
-                op = message.get("op")
-                if op == "add":
-                    request_id = message["request_id"]
-                    owners[request_id] = identity
-                    engine_loop.submit(
-                        request_id,
-                        message["prompt"],
-                        sampling_params_from_wire(message["sampling"]),
+                # Per-message fault isolation: a malformed frame, a bad sampling
+                # payload, or a duplicate request_id must fail only the offending
+                # client, never take down the shared engine for everyone else.
+                message = None
+                try:
+                    message = msgpack.unpackb(raw)
+                    op = message.get("op")
+                    if op == "add":
+                        request_id = message["request_id"]
+                        engine_loop.submit(
+                            request_id,
+                            message["prompt"],
+                            sampling_params_from_wire(message["sampling"]),
+                        )
+                        owners[request_id] = identity  # only after a clean submit
+                    elif op == "abort":
+                        engine_loop.abort(message["request_id"])
+                    elif op == "ping":
+                        socket.send_multipart([identity, msgpack.packb({"op": "pong"})])
+                    elif op == "shutdown":
+                        socket.send_multipart([identity, msgpack.packb({"op": "bye"})])
+                        running = False
+                except Exception as error:
+                    logging.warning("kairyu engine service rejected a message: %r", error)
+                    request_id = message.get("request_id") if isinstance(message, dict) else None
+                    socket.send_multipart(
+                        [
+                            identity,
+                            msgpack.packb(
+                                {
+                                    "request_id": request_id or "",
+                                    "error": repr(error),
+                                    "finished": True,
+                                }
+                            ),
+                        ]
                     )
-                elif op == "abort":
-                    engine_loop.abort(message["request_id"])
-                elif op == "ping":
-                    socket.send_multipart([identity, msgpack.packb({"op": "pong"})])
-                elif op == "shutdown":
-                    socket.send_multipart([identity, msgpack.packb({"op": "bye"})])
-                    running = False
             if engine_loop.has_work():
                 for request_id, update in engine_loop.step():
                     identity = owners.get(request_id)

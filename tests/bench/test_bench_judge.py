@@ -19,6 +19,10 @@ def test_parse_verdict():
     assert parse_verdict("the answer looks correct to me") is None
     # the last verdict field wins (models sometimes restate)
     assert parse_verdict("correct: no\n...revised...\ncorrect: yes") is True
+    # M10: markdown-emphasized labels must still parse (bold before the label)
+    assert parse_verdict("**correct:** yes") is True
+    assert parse_verdict("Correct: **No**") is False
+    assert parse_verdict("**Correct**: yes") is True
 
 
 def _canned_factory(reply_for_model):

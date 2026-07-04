@@ -176,9 +176,28 @@ def test_commit_and_release_folds_outputs_into_cache():
     allocation = cache.allocate((1, 2, 3, 4))  # exactly one page, no tail
     cache.mark_computed(allocation)
     decode_page = cache.allocate_private_page()
+    # Five outputs: the decode page (positions 4-7) is fully KV-written; the
+    # fifth token (5) lands in a partial tail page whose KV is not yet written.
+    cache.commit_and_release(allocation, output_tokens=(9, 8, 7, 6, 5), decode_pages=(decode_page,))
+    reuse = cache.allocate((1, 2, 3, 4, 9, 8, 7, 6, 5))
+    assert reuse.num_cached_tokens == 8  # prompt AND fully-written decode page hit
+
+
+def test_commit_does_not_cache_final_unwritten_token_on_page_boundary():
+    # Regression (C1 radix poisoning): the decode loop writes the KV of the
+    # *previous* token each step, so the last sampled token's KV is never
+    # written. When (prompt + outputs) lands exactly on a page boundary, that
+    # final page must NOT be folded as computed — otherwise the next turn's
+    # prompt matches it as cached and reuses a garbage KV slot for that token.
+    cache = RadixKVCache(num_pages=8, page_size=PAGE)
+    allocation = cache.allocate((1, 2, 3, 4))  # one full, computed prompt page
+    cache.mark_computed(allocation)
+    decode_page = cache.allocate_private_page()
+    # Four outputs exactly fill one decode page; the fourth (token 6) has no KV.
     cache.commit_and_release(allocation, output_tokens=(9, 8, 7, 6), decode_pages=(decode_page,))
     reuse = cache.allocate((1, 2, 3, 4, 9, 8, 7, 6))
-    assert reuse.num_cached_tokens == 8  # prompt AND generated tokens hit
+    # Only the prompt page is safely cached; the boundary decode page is not.
+    assert reuse.num_cached_tokens == 4
 
 
 def test_commit_frees_partially_filled_decode_pages():

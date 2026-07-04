@@ -10,6 +10,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
@@ -18,6 +19,16 @@ _ASGIApp = Callable[..., Awaitable[None]]
 
 _OPEN_PATHS = ("/health", "/readyz")
 _GUARDED_PREFIX = "/v1/"
+
+# collapse per-object id path segments (file-…, batch_…, uuids, long hex/digits)
+# to {id} so a Prometheus path label cannot explode in cardinality (M1)
+_ID_SEGMENT = re.compile(r"^(file-|batch_|resp_|chatcmpl-|cmpl-|[0-9a-f-]{16,}|\d{6,})")
+
+
+def _template_path(path: str) -> str:
+    return "/".join(
+        "{id}" if _ID_SEGMENT.match(segment) else segment for segment in path.split("/")
+    )
 
 access_logger = logging.getLogger("kairyu.access")
 
@@ -53,6 +64,10 @@ class AuthMiddleware:
         header = dict(scope.get("headers") or ()).get(b"authorization", b"")
         prefix, _, token = header.decode("latin-1").partition(" ")
         if prefix.lower() != "bearer" or not token:
+            return False
+        # hmac.compare_digest rejects non-ASCII strings with TypeError; a
+        # non-ASCII token can never match an ASCII key, so 401 not 500 (M5)
+        if not token.isascii():
             return False
         for key in self._api_keys:
             if hmac.compare_digest(token, key):
@@ -143,12 +158,16 @@ class MetricsMiddleware:
         try:
             await self.app(scope, receive, wrapped_send)
         finally:
-            path = scope["path"]
+            path = _template_path(scope["path"])  # bounded-cardinality label (M1)
             self._metrics.request_duration_seconds.labels(path=path).observe(
                 time.perf_counter() - started
             )
-            if path.startswith(_GUARDED_PREFIX):
+            if scope["path"].startswith(_GUARDED_PREFIX):
+                # an unknown model (404) collapses to "unknown" so an attacker
+                # looping random model names can't grow the timeseries (M1)
                 model = _state(scope).get("model", "-")
+                if status["code"] == 404:
+                    model = "unknown"
                 self._metrics.requests_total.labels(
                     model=model, code=str(status["code"])
                 ).inc()

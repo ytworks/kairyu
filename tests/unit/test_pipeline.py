@@ -142,15 +142,18 @@ def test_decode_batches_are_never_split_across_stages() -> None:
     assert seen_chunk_counts == runner.step_chunk_counts
 
 
-def test_engine_stall_still_raises_through_pipeline() -> None:
+def test_oversized_prompt_rejected_through_pipeline() -> None:
+    # C2: a prompt too large to ever fit is rejected (empty output) through the
+    # pipelined core too, not a fatal stall.
     kv = RadixKVCache(num_pages=1, page_size=4)
     scheduler = Scheduler(kv, max_num_batched_tokens=8, page_size=4)
     runner = SyncRunnerAdapter(_ToyRunner())
     core = PipelinedEngineCore(scheduler, runner, depth=2)
     core.add_request(EngineRequest("big", prompt_token_ids=tuple(range(50)), max_new_tokens=2))
 
-    with pytest.raises(RuntimeError, match="stall"):
-        core.run_to_completion()
+    outputs = core.run_to_completion()  # no RuntimeError
+    assert outputs["big"] == ()
+    assert scheduler.finish_reason("big") == "length"
 
 
 def test_invalid_depth_and_stage_count_rejected() -> None:

@@ -49,6 +49,13 @@ def tp_view(config: ModelConfig, tp: int, rank: int) -> ModelConfig:
         raise ValueError(f"vocab_size={config.vocab_size} not divisible by tp={tp}")
     if config.is_mla:
         raise ValueError("TP for MLA models is not supported (attention-DP, m16 §3)")
+    if config.moe is not None:
+        # sparse MoE layers have no `mlp.down_proj` to row-parallelize (M4); MoE
+        # is distributed by expert parallelism, not this dense-MLP TP path — fail
+        # fast instead of loading every shard and then AttributeError-ing
+        raise ValueError(
+            "TP for MoE models is not supported; use expert parallelism (m16 EP)"
+        )
     return dataclasses.replace(
         config,
         num_attention_heads=config.num_attention_heads // tp,
