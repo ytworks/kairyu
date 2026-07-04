@@ -226,15 +226,14 @@ class ReplicaPool:
     def _prefix_select(self, eligible: tuple[str, ...], prompt: str) -> str | None:
         """alpha*overlap - beta*outstanding; None when no candidate has overlap
         (fall through to least-outstanding rather than pay a random placement)."""
-        scored = [
-            (
-                self._prefix_alpha * self._prefix_index.overlap(rid, prompt)
-                - self._prefix_beta * self._entries[rid].outstanding,
-                self._prefix_index.overlap(rid, prompt),
-                rid,
+        scored = []
+        for rid in eligible:
+            overlap = self._prefix_index.overlap(rid, prompt)  # compute once per replica (P5)
+            score = (
+                self._prefix_alpha * overlap
+                - self._prefix_beta * self._entries[rid].outstanding
             )
-            for rid in eligible
-        ]
+            scored.append((score, overlap, rid))
         best_score, best_overlap, best_rid = max(scored, key=lambda item: item[0])
         if best_overlap == 0:
             return None

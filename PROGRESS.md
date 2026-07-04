@@ -62,6 +62,28 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-04 — [progress] Review remediation Phase 7: host-path performance (safe subset)
+- What: Fixed the provably-safe, output-preserving host-path hot spots from the
+  full-repo review. **P5**: `prompt_chunks` re-hashed the whole prompt prefix per
+  256-char chunk (O(L²) sha256 on the placement path, event-loop-blocking) and
+  the pool called `overlap()` twice per replica; replaced with ONE streaming
+  sha256 chain (byte-identical keys, proven equivalent over random trials) and a
+  single `overlap()` per replica. **P-perf (completions)**: `/v1/completions`
+  ran a prompt array serially (`await` per prompt = sum of latencies); now
+  `asyncio.gather` runs them concurrently with order restored by index (response
+  byte-unchanged).
+- Why: Both are event-loop-blocking / latency costs on the request path that
+  survive the GPU swap; both are output-identical so they carry no correctness
+  risk.
+- Refs: review report; `kairyu/orchestration/{prefix_index,replica}.py`,
+  `kairyu/entrypoints/server/app.py`; tests `tests/unit/test_kv_routing.py`.
+  **Deferred (risk/complexity, need care or their own change):** P1 incremental
+  detokenization (correctness-sensitive output path — a subtle detok bug corrupts
+  generation, and CPU tests can't cover every tokenizer edge, so not worth a
+  perf-only rewrite), P3 (process-split delta wire), P4 (async ledger/router I/O
+  — file-handle lifecycle), P6 (eviction leaf heap), P7 (batched spec verify),
+  and the MEDIUM-perf items (sampler penalty state, stop-string offset, queue
+  coalescing, scheduler deque, KV-event hash chain, page-table cache).
 ### 2026-07-04 — [progress] Review remediation Phase 5: bench scoring correctness + security
 - What: Fixed the scoring-integrity and security defects in the Fugu bench suite.
   **B1**: the MCQ answer-extraction regex matched "answer" + the first letter of

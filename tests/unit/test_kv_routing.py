@@ -35,6 +35,19 @@ class TestPrefixIndex:
         assert len(keys_short) == 2
         assert keys_long[:2] == keys_short  # shared prefix -> shared keys
 
+    def test_incremental_hashing_matches_whole_prefix_hash(self):
+        # P5: the streaming sha256 chain must be byte-identical to hashing each
+        # whole prefix (incl. multibyte chars split across chunk boundaries).
+        import hashlib
+
+        prompt = "こんにちは world 日本語" * 40
+        for cc in (1, 3, 256):
+            expected = tuple(
+                hashlib.sha256(prompt[:end].encode()).hexdigest()[:16]
+                for end in range(cc, len(prompt) + 1, cc)
+            )
+            assert prompt_chunks(prompt, chunk_chars=cc) == expected
+
     def test_overlap_stops_at_first_miss(self):
         index = PrefixIndex(chunk_chars=4)
         index.observe("r1", "aaaabbbbcccc")
