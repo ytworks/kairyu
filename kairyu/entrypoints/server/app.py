@@ -6,6 +6,7 @@ the same endpoint (design doc D6).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -757,20 +758,24 @@ def create_app(
         choices: list[CompletionChoice] = []
         usage_totals = [0, 0, 0]  # prompt, completion, cached
         try:
-            for prompt_index, prompt in enumerate(prompts):
-                result = await engine.generate(_generation_request(prompt))
-                for completion in result.completions:
-                    choices.append(
-                        _completion_choice(
-                            prompt_index * request.n + completion.index, completion
-                        )
-                    )
-                if result.usage is not None:
-                    usage_totals[0] += result.usage.prompt_tokens
-                    usage_totals[1] += result.usage.completion_tokens
-                    usage_totals[2] += result.usage.cached_tokens
+            # run the prompt array concurrently (latency = max, not sum); order is
+            # restored by prompt_index below so the response is unchanged (P-perf)
+            results = await asyncio.gather(
+                *(engine.generate(_generation_request(prompt)) for prompt in prompts)
+            )
         except Exception as error:
             return _upstream_error(error)
+        for prompt_index, result in enumerate(results):
+            for completion in result.completions:
+                choices.append(
+                    _completion_choice(
+                        prompt_index * request.n + completion.index, completion
+                    )
+                )
+            if result.usage is not None:
+                usage_totals[0] += result.usage.prompt_tokens
+                usage_totals[1] += result.usage.completion_tokens
+                usage_totals[2] += result.usage.cached_tokens
         details = (
             PromptTokensDetails(cached_tokens=usage_totals[2]) if usage_totals[2] else None
         )

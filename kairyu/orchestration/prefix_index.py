@@ -21,10 +21,20 @@ _DEFAULT_MAX_CHUNKS_PER_REPLICA = 4096
 
 
 def prompt_chunks(prompt: str, chunk_chars: int = _DEFAULT_CHUNK_CHARS) -> tuple[str, ...]:
-    """Prefix-chained chunk keys: chunk i hashes chars [0 : (i+1)*chunk)."""
+    """Prefix-chained chunk keys: chunk i hashes chars [0 : (i+1)*chunk).
+
+    Fed incrementally into ONE streaming sha256 (P5): key i is the digest after
+    feeding chunks 0..i. This is byte-identical to ``sha256(prompt[:end])`` —
+    sha256 is a streaming hash and str slicing never splits a character — but
+    O(L) total instead of re-hashing the whole prefix per chunk (O(L²)).
+    """
     keys: list[str] = []
+    hasher = hashlib.sha256()
+    pos = 0
     for end in range(chunk_chars, len(prompt) + 1, chunk_chars):
-        keys.append(hashlib.sha256(prompt[:end].encode()).hexdigest()[:16])
+        hasher.update(prompt[pos:end].encode())
+        keys.append(hasher.hexdigest()[:16])
+        pos = end
     return tuple(keys)
 
 
