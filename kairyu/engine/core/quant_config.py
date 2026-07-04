@@ -91,6 +91,14 @@ def detect_quantization(hf_config: dict) -> QuantConfig:
     if method == "modelopt":
         return _detect_modelopt(quant)
     if method == "fp8":
+        if quant.get("weight_block_size") is not None:
+            # DeepSeek-style block FP8 uses INVERSE-semantics weight_scale_inv
+            # tensors; routing it to the per-channel Fp8Linear misreads the scale
+            # (KeyError at best, silent multiply-instead-of-divide at worst) (M5)
+            raise ValueError(
+                "block-wise FP8 (weight_block_size) is not yet supported; only "
+                "per-tensor/per-channel FP8 checkpoints load"
+            )
         return QuantConfig(method=QuantMethod.FP8, weight_bits=8, activation_bits=8)
     if method == "awq":
         version = str(quant.get("version", "gemm")).lower()

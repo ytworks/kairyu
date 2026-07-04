@@ -41,6 +41,16 @@ def test_extract_choice_letter_fallback_and_none():
     assert extract_choice_letter("E is out of range") is None
 
 
+def test_extract_choice_letter_does_not_pick_up_prose_words():
+    # B1: the marker regex must not extract the first letter of the word AFTER
+    # "answer" (e.g. "depends"), and the fallback must ignore lone lowercase
+    # articles/pronouns ("a"/"i").
+    assert extract_choice_letter("Answer: B, because the answer depends on X.") == "B"
+    assert extract_choice_letter("The correct option is (B), a strong choice.") == "B"
+    # 26-way (HLE): the trailing "answers"/pronouns must not override the marker
+    assert extract_choice_letter("Final answer: B\n\nThis answers it.", num_choices=26) == "B"
+
+
 def test_mcq_prompt_layout():
     prompt = mcq_prompt("Q?", ["one", "two"])
     assert "A) one" in prompt and "B) two" in prompt

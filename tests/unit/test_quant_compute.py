@@ -50,10 +50,15 @@ class TestBitPatterns:
         assert (byte0 >> 4) & 0xF == 0xF  # HIGH nibble = odd element (-6.0)
 
     def test_nvfp4_rne_boundaries(self):
-        # 0.25 -> 0, 0.75 -> 1, 2.5 -> 2, 3.5 -> 4, 5.0 -> 4 (round to even)
-        values = torch.tensor([0.25, 0.75, 2.5, 3.5, 5.0])
+        # M1: each boundary rounds to the neighbor with the EVEN LUT index.
+        # LUT = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+        # 0.25->0(0.0) 0.75->2(1.0) 1.25->2(1.0) 1.75->4(2.0)
+        # 2.5->4(2.0) 3.5->6(4.0) 5.0->6(4.0)
+        values = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
         indices = nvfp4._cast_to_fp4_indices(values)
-        assert indices.tolist() == [0, 1, 2, 4, 4]
+        assert indices.tolist() == [0, 2, 2, 4, 4, 6, 6]
+        # the packed value is the LUT entry at that index (magnitude preserved)
+        assert nvfp4.E2M1_LUT[indices].tolist() == [0.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0]
 
     def test_fp8_quantize_clamps_before_cast(self):
         # torch CPU fp8 cast is non-saturating: without the clamp this is NaN

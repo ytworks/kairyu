@@ -60,15 +60,24 @@ class EngineCore:
 
     def step(self) -> tuple[str, ...]:
         plan = self._scheduler.schedule()
+        # Prompts too large to ever fit are rejected during schedule() (C2);
+        # surface them as finished-with-empty-output instead of stalling.
+        rejected = self._scheduler.drain_rejected()
+        for request_id in rejected:
+            self._outputs[request_id] = self._scheduler.output_tokens(request_id)
         if not plan.scheduled:
             if self._scheduler.has_unfinished():
-                raise RuntimeError(
-                    "engine stall: unfinished requests but nothing schedulable "
-                    "(request larger than KV capacity?)"
-                )
-            return ()
+                # An empty schedule while unfinished means nothing is running to
+                # free pages, so force the stuck waiting head to finish rather
+                # than loop or crash the whole engine.
+                head = self._scheduler.reject_waiting_head()
+                if head is not None:
+                    self._outputs[head] = self._scheduler.output_tokens(head)
+                    return (*rejected, head)
+            return rejected
         sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
         finished = self._scheduler.update(token_ids(sampled)) if sampled else ()
+        finished = (*rejected, *finished)
         for request_id in grammar_finished(sampled or {}, finished):
             # between update() and the next schedule(): the safe finish point
             self._scheduler.finish_early(request_id)

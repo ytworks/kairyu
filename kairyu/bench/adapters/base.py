@@ -138,20 +138,25 @@ def shuffle_choices(
     return choices, chr(ord("A") + choices.index(correct))
 
 
-_ANSWER_RE = re.compile(r"(?i)answer\s*(?:is|:)?\s*\**\(?([A-Z])\)?")
+# The answer letter must be a bounded token right after the marker, NOT the
+# first letter of the following word — `(?![A-Za-z])` stops "answer depends"
+# from extracting "D" (B1). Every gap piece stays optional so "Answer: B",
+# "the answer is (C)", and "answer**D**" all still match.
+_ANSWER_RE = re.compile(r"(?i)\banswer\b\s*(?:is\b\s*)?:?\s*\**\(?([A-Z])\)?(?![A-Za-z])")
 
 
 def extract_choice_letter(text: str, num_choices: int = 4) -> str | None:
-    """Last 'Answer: X' style marker, else the last standalone letter."""
+    """Last 'Answer: X' style marker, else the last standalone UPPERCASE letter."""
     valid = {chr(ord("A") + i) for i in range(num_choices)}
     markers = [m.group(1).upper() for m in _ANSWER_RE.finditer(text)]
     for letter in reversed(markers):
         if letter in valid:
             return letter
-    standalone = re.findall(r"\b([A-Za-z])\b", text)
+    # uppercase-only fallback: a lone "a"/"i" (article/pronoun) is not an answer
+    standalone = re.findall(r"\b([A-Z])\b", text)
     for letter in reversed(standalone):
-        if letter.upper() in valid:
-            return letter.upper()
+        if letter in valid:
+            return letter
     return None
 
 
@@ -377,7 +382,9 @@ class GenerativeAdapter(ABC):
     def download(self, ctx: DownloadContext) -> DownloadReport:
         from kairyu.bench.types import BenchExtrasMissing, DatasetGated, DatasetUnavailable
 
-        if not ctx.force and ctx.cache.is_ready(self.info.name):
+        if not ctx.force and ctx.cache.is_ready(
+            self.info.name, self.info.hf_dataset, self.info.hf_revision
+        ):
             return DownloadReport(adapter=self.info.name, status="cached")
         try:
             rows = self.normalize(ctx)
@@ -390,6 +397,16 @@ class GenerativeAdapter(ABC):
         except DatasetUnavailable as error:
             return DownloadReport(
                 adapter=self.info.name, status="unavailable", detail=str(error)
+            )
+        except Exception as error:
+            # schema drift (KeyError), image/codec errors, unpickling failures —
+            # any un-typed normalize() error must degrade THIS dataset to data,
+            # not crash the whole suite run (B2: "degradation is data, not
+            # control flow"). Treated as unavailable (a non-fatal skip).
+            return DownloadReport(
+                adapter=self.info.name,
+                status="unavailable",
+                detail=f"{type(error).__name__}: {error}",
             )
         ctx.cache.write_rows(
             self.info.name,

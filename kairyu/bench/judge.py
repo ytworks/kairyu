@@ -15,8 +15,15 @@ from dataclasses import dataclass
 from kairyu.bench.judge_prompts import HLE_JUDGE_TEMPLATE
 from kairyu.bench.types import JudgeConfig
 
-_VERDICT_RE = re.compile(r"(?im)^\s*correct\s*:\s*\**\s*(yes|no)\b")
+# allow markdown emphasis around the label and verdict — a judge that writes
+# "**correct:** yes" or "Correct: **Yes**" must still parse (M10)
+_VERDICT_RE = re.compile(r"(?im)^\s*\**\s*correct\s*\**\s*:\s*\**\s*(yes|no)\b")
 _EXCERPT = 500
+# bound the graded response fed into the judge prompt: an uncapped 200k-char
+# response would become a 200k-token judge call (cost) and widen the prompt
+# injection surface (M7). Generous enough not to trip on normal answers.
+_RESPONSE_CAP = 32_000
+_JUDGE_MAX_TOKENS = 4096  # reasoning judges need room before the verdict line (M10)
 
 
 @dataclass(frozen=True)
@@ -58,14 +65,16 @@ class JudgeClient:
         )
         from kairyu.bench.types import BenchTarget, ChatRequestSpec
 
-        prompt = template.format(question=question, expected=expected, response=response)
+        prompt = template.format(
+            question=question, expected=expected, response=response[:_RESPONSE_CAP]
+        )
         target = BenchTarget(
             base_url=self.config.base_url,
             model=self.config.model,
             api_key_env=self.config.api_key_env,
         )
         request = ChatRequestSpec(
-            messages=({"role": "user", "content": prompt},), max_tokens=2048
+            messages=({"role": "user", "content": prompt},), max_tokens=_JUDGE_MAX_TOKENS
         )
         api_key = os.environ.get(self.config.api_key_env)
         async with self._semaphore:

@@ -59,6 +59,28 @@ def test_overlap_outputs_equal_serial_engine_outputs():
     assert overlap.run_to_completion() == serial.run_to_completion()
 
 
+def test_runner_receives_frozen_snapshot_not_live_state():
+    # E3: the overlap loop must hand the runner a torn-free snapshot, not the
+    # live scheduler state a concurrent update() mutates. RequestSnapshot is
+    # frozen, so seeing it proves the freeze happened before dispatch.
+    from kairyu.engine.core.step_input import RequestSnapshot
+
+    seen_types: list[type] = []
+
+    class TypeCapturingRunner(PositionRunner):
+        def execute(self, scheduled, states):
+            for chunk in scheduled:
+                seen_types.append(type(states[chunk.request_id]))
+            return super().execute(scheduled, states)
+
+    engine = _build(OverlapEngineCore, TypeCapturingRunner())
+    for request in _requests(2):
+        engine.add_request(request)
+    engine.run_to_completion()
+    assert seen_types  # ran
+    assert all(t is RequestSnapshot for t in seen_types)
+
+
 def test_next_step_is_scheduled_while_previous_executes():
     events: list[str] = []
     runner = PositionRunner(latency_s=0.02, events=events)
@@ -78,13 +100,12 @@ def test_no_overscheduling_beyond_max_new_tokens():
     assert outputs["a"] == (1000, 1001, 1002)  # positions 0,1,2 — exactly max_new_tokens
 
 
-def test_overlap_stall_detection():
+def test_overlap_rejects_oversized_prompt_gracefully():
+    # C2: an unadmittable prompt is rejected (empty output), not a fatal stall.
     cache = RadixKVCache(num_pages=1, page_size=PAGE)
     scheduler = Scheduler(cache, max_num_batched_tokens=64)
     engine = OverlapEngineCore(scheduler=scheduler, runner=PositionRunner())
     engine.add_request(EngineRequest("big", tuple(range(1, 100)), max_new_tokens=1))
-    try:
-        engine.run_to_completion()
-        raise AssertionError("expected RuntimeError for stalled engine")
-    except RuntimeError as error:
-        assert "stall" in str(error)
+    outputs = engine.run_to_completion()  # no RuntimeError
+    assert outputs["big"] == ()
+    assert scheduler.finish_reason("big") == "length"

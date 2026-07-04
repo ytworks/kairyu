@@ -35,6 +35,19 @@ class TestPrefixIndex:
         assert len(keys_short) == 2
         assert keys_long[:2] == keys_short  # shared prefix -> shared keys
 
+    def test_incremental_hashing_matches_whole_prefix_hash(self):
+        # P5: the streaming sha256 chain must be byte-identical to hashing each
+        # whole prefix (incl. multibyte chars split across chunk boundaries).
+        import hashlib
+
+        prompt = "こんにちは world 日本語" * 40
+        for cc in (1, 3, 256):
+            expected = tuple(
+                hashlib.sha256(prompt[:end].encode()).hexdigest()[:16]
+                for end in range(cc, len(prompt) + 1, cc)
+            )
+            assert prompt_chunks(prompt, chunk_chars=cc) == expected
+
     def test_overlap_stops_at_first_miss(self):
         index = PrefixIndex(chunk_chars=4)
         index.observe("r1", "aaaabbbbcccc")
@@ -105,8 +118,11 @@ class TestRadixKvEvents:
         allocation = cache.allocate(tuple(range(8)))
         cache.mark_computed(allocation)
         decode_pages = [cache.allocate_private_page() for _ in range(1)]
+        # Five outputs: the decode page (positions 8-11) is fully KV-written;
+        # the fifth token spills into a partial tail whose KV is not yet
+        # written, so the full decode page can be safely folded (C1).
         cache.commit_and_release(
-            allocation, output_tokens=(100, 101, 102, 103), decode_pages=tuple(decode_pages)
+            allocation, output_tokens=(100, 101, 102, 103, 104), decode_pages=tuple(decode_pages)
         )
         kinds = [e["type"] for e in events]
         assert kinds.count("BlockStored") == 2  # prefill + decode extension
@@ -149,6 +165,25 @@ class TestKvEventIndex:
         index = KvEventIndex()
         with pytest.raises(ValueError, match="unknown"):
             index.apply("r1", {"type": "Mystery"})
+
+    def test_all_blocks_cleared_is_handled(self):
+        # M4: vLLM emits AllBlocksCleared on a cache reset; it must clear the
+        # replica's blocks, not crash the subscriber.
+        index = KvEventIndex()
+        index.apply("r1", {"type": "BlockStored", "block_hashes": ["h1", "h2"]})
+        index.apply("r1", {"type": "AllBlocksCleared"})
+        assert index.overlap("r1", ["h1", "h2"]) == 0
+
+    def test_garbage_event_does_not_keep_replica_fresh(self):
+        # M4: freshness must be stamped only after a valid apply — a rejected
+        # event must not reset the staleness clock and mask a dead feed.
+        clock = {"t": 0.0}
+        index = KvEventIndex(staleness_s=0.5, now=lambda: clock["t"])
+        index.apply("r1", {"type": "BlockStored", "block_hashes": ["h1"]})
+        clock["t"] = 1.0  # > 500 ms since the last VALID event
+        with pytest.raises(ValueError):
+            index.apply("r1", {"type": "Mystery"})  # rejected, must not refresh
+        assert index.overlap("r1", ["h1"]) is None  # still stale -> trie fallback
 
 
 class TestZmqTransport:

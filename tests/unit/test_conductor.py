@@ -55,6 +55,31 @@ async def test_linear_dag_passes_upstream_output_downstream():
     assert result.final_text == result.outputs["worker"]
 
 
+async def test_unit_backend_failure_does_not_destroy_the_run():
+    # O4: a transient backend error on one unit must not raise out of run() and
+    # discard every completed output — the Conductor returns best-so-far.
+    class _FlakyWorker:
+        async def generate(self, request):
+            if "planner" in request.prompt:
+                return GenerationResult(
+                    request_id=request.request_id, prompt=request.prompt,
+                    completions=(CompletionOutput(index=0, text="a plan", token_ids=()),),
+                )
+            raise RuntimeError("worker backend down")
+
+        async def stream(self, request):  # pragma: no cover
+            yield await self.generate(request)
+
+        async def shutdown(self):
+            return None
+
+    conductor = Conductor(roles=_linear_roles(), workers={"w": _FlakyWorker()})
+    result = await conductor.run("build a cli")  # must not raise
+    assert result.outputs["planner"] == "a plan"  # completed work survives
+    assert "worker" not in result.outputs  # the failed unit produced nothing
+    assert any(event.kind == "failed" for event in result.trace)
+
+
 async def test_diamond_dag_runs_middle_wave_concurrently():
     latency = 0.05
     backend = MockBackend(latency_s=latency)
@@ -77,6 +102,23 @@ async def test_diamond_dag_runs_middle_wave_concurrently():
     assert elapsed < latency * 4  # a and b overlapped: 3 waves, not 4 sequential calls
     assert result.outputs["root"][-10:] in result.outputs["a"]
     assert result.final_text == result.outputs["synth"]
+
+
+def test_verifier_with_unavailable_dependency_rejected_at_init():
+    # M1: a verifier runs inline after its target, so a dependency the target
+    # doesn't have (here "planner", scheduled in a parallel wave) would render
+    # as "" at verify time — reject it loudly instead of a silent wrong verdict.
+    roles = (
+        RoleSpec(name="planner", worker="w", prompt="plan: {query}"),
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="checker", worker="w", role_type="verifier", verifies="worker",
+            prompt="check {worker} against {planner}",
+            depends_on=("worker", "planner"),  # planner is NOT a dep of worker
+        ),
+    )
+    with pytest.raises(ValueError, match="not.*available when it runs inline"):
+        Conductor(roles=roles, workers={"w": MockBackend()})
 
 
 def test_cycle_is_rejected_at_init():

@@ -18,15 +18,27 @@ def _pair(benchmark, target, status="completed", score=0.5, reason=None, annotat
     )
 
 
-def _board(pairs, targets):
+def _board(pairs, targets, config=None):
     return build_scoreboard(
         run_id="run-1",
         suite="fugu",
-        config={},
+        config=config or {},
         environment={},
         pairs=pairs,
         targets=targets,
     )
+
+
+def test_self_judged_target_is_flagged():
+    # a target graded by a judge that IS that target is flagged as biased.
+    board = _board(
+        [_pair("gpqa-diamond", "kairyu-auto")],
+        targets=["kairyu-auto", "gpt-5"],
+        config={"judge": {"model": "kairyu-auto"}},
+    )
+    assert board["self_judged_targets"] == ["kairyu-auto"]
+    cell = board["cells"]["gpqa-diamond"]["kairyu-auto"]
+    assert any("self-judged" in board["footnotes"][n - 1] for n in cell["footnotes"])
 
 
 def test_rows_follow_fugu_order_and_only_present_benchmarks():

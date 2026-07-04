@@ -37,3 +37,12 @@ def test_double_free_rejected():
 def test_zero_allocation_is_empty():
     pool = PagePool(num_pages=1)
     assert pool.allocate(0) == ()
+
+
+def test_duplicate_ids_in_free_batch_rejected():
+    # freeing the same page twice in one batch would double-append it to the
+    # free list and hand one physical page to two requests.
+    pool = PagePool(num_pages=4)
+    page = pool.allocate(1)[0]
+    with pytest.raises(ValueError, match="duplicate"):
+        pool.free([page, page])

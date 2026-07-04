@@ -75,7 +75,8 @@ async def test_metrics_exposes_request_and_pool_series():
     assert metrics.status_code == 200
     text = metrics.text
     assert 'kairyu_requests_total{code="200",model="pooled"} 1.0' in text
-    assert 'kairyu_requests_total{code="404",model="nope"} 1.0' in text
+    # M1: an unknown model collapses to "unknown" (bounded cardinality)
+    assert 'kairyu_requests_total{code="404",model="unknown"} 1.0' in text
     assert "kairyu_request_duration_seconds_bucket" in text
     assert 'kairyu_replica_healthy{pool="pooled",replica="0"} 1.0' in text
     assert 'kairyu_replica_outstanding{pool="pooled",replica="0"} 0.0' in text
@@ -120,3 +121,32 @@ def test_admin_drain_requires_auth_and_flips_readyz(monkeypatch):
         )
         assert ok.status_code == 200
         assert client.get("/readyz").status_code == 503  # draining
+
+
+def test_admin_drain_requires_admin_key_and_undrain_recovers(monkeypatch):
+    # S5: with admin keys configured, an ordinary data-plane key cannot drain
+    # the node, and /admin/undrain restores readiness (no restart needed).
+    from fastapi.testclient import TestClient
+
+    from kairyu.engine.registry import create_backend
+    from kairyu.entrypoints.server.app import create_app
+    from kairyu.entrypoints.server.settings import ServerSettings
+
+    monkeypatch.setenv("KAIRYU_TEST_KEYS", "sk-user,sk-admin")
+    monkeypatch.setenv("KAIRYU_TEST_ADMIN", "sk-admin")
+    app = create_app(
+        {"m": create_backend("mock")},
+        settings=ServerSettings(
+            api_keys_env="KAIRYU_TEST_KEYS", admin_keys_env="KAIRYU_TEST_ADMIN"
+        ),
+    )
+    with TestClient(app) as client:
+        user = {"Authorization": "Bearer sk-user"}
+        admin = {"Authorization": "Bearer sk-admin"}
+        assert client.post("/admin/drain", headers=user).status_code == 403  # data-plane key
+        assert client.get("/readyz").status_code == 200  # still ready
+        assert client.post("/admin/drain", headers=admin).status_code == 200
+        assert client.get("/readyz").status_code == 503  # draining
+        assert client.post("/admin/undrain", headers=user).status_code == 403
+        assert client.post("/admin/undrain", headers=admin).status_code == 200
+        assert client.get("/readyz").status_code == 200  # recovered

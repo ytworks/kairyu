@@ -33,6 +33,12 @@ def build_scoreboard(
             footnotes.append(text)
         return footnotes.index(text) + 1
 
+    # self-judging: a target graded by an LLM judge that IS that target biases the
+    # score in its own favor — flag those columns so the number is not read as
+    # independent (judge==target detection)
+    judge_model = (config.get("judge") or {}).get("model")
+    self_judged = [target for target in targets if judge_model and target == judge_model]
+
     cells: dict[str, dict[str, dict]] = {}
     for benchmark in benchmarks:
         cells[benchmark] = {}
@@ -50,6 +56,8 @@ def build_scoreboard(
             notes = [footnote(f"{benchmark}: {text}") for text in pair.annotations]
             if pair.status in ("skipped", "partial", "failed") and pair.reason:
                 notes.append(footnote(f"{benchmark}/{target}: {pair.status} — {pair.reason}"))
+            if target in self_judged:
+                notes.append(footnote(f"{target}: self-judged (judge model == target)"))
             cells[benchmark][target] = {
                 "status": pair.status,
                 "score": pair.score,
@@ -67,6 +75,7 @@ def build_scoreboard(
         "benchmarks": benchmarks,
         "display_names": {name: display_names.get(name, name) for name in benchmarks},
         "targets": targets,
+        "self_judged_targets": self_judged,  # judge model == target (biased) — flag it
         "cells": cells,
         "footnotes": footnotes,
     }

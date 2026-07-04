@@ -19,9 +19,23 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
+from kairyu.engine.backend import (
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+    UpstreamClientError,
+)
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput
+
+
+def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
+    """4xx is a client-request error (not a replica health signal, O1); 5xx and
+    everything else is a transport/server failure the pool should count."""
+    message = f"backend {base_url} returned HTTP {status_code}: {body[:500]}"
+    if 400 <= status_code < 500:
+        raise UpstreamClientError(message, status_code)
+    raise RuntimeError(message)
 
 _DEFAULT_TIMEOUT_S = 60.0
 _SSE_DATA_PREFIX = "data:"
@@ -106,10 +120,7 @@ class OpenAICompatBackend:
             headers=self._headers(),
         )
         if response.status_code != 200:
-            raise RuntimeError(
-                f"backend {self._base_url} returned HTTP {response.status_code}: "
-                f"{response.text[:500]}"
-            )
+            _raise_for_status(self._base_url, response.status_code, response.text)
         data = response.json()
         choices = data.get("choices", [])
         completion_tokens = (data.get("usage") or {}).get("completion_tokens")
@@ -174,10 +185,8 @@ class OpenAICompatBackend:
             headers=self._headers(),
         ) as response:
             if response.status_code != 200:
-                body = (await response.aread())[:500]
-                raise RuntimeError(
-                    f"backend {self._base_url} returned HTTP {response.status_code}: {body!r}"
-                )
+                body = (await response.aread()).decode(errors="replace")
+                _raise_for_status(self._base_url, response.status_code, body)
             texts: dict[int, str] = {}
             finish: dict[int, str] = {}
             deltas_seen: dict[int, int] = {}

@@ -24,13 +24,20 @@ FP4_MAX = 6.0
 
 
 def _cast_to_fp4_indices(values: torch.Tensor) -> torch.Tensor:
-    """fp32 magnitudes (clamped to [0, 6]) -> LUT indices, round-to-nearest-even
-    at the boundaries (0.25 -> 0, 0.75 -> 1, 2.5 -> 2, 3.5 -> 4, 5.0 -> 4)."""
+    """fp32 magnitudes (clamped to [0, 6]) -> LUT indices, round-to-nearest-even.
+
+    Each boundary is the midpoint between two adjacent LUT levels; a value that
+    lands exactly on one resolves to the neighbor with the EVEN LUT INDEX (M1).
+    e.g. 0.75 = mid(0.5@1, 1.0@2) -> index 2 (=1.0); 2.5 = mid(2.0@4, 3.0@5) ->
+    index 4 (=2.0). (The prior table applied LUT *values* as indices and dropped
+    two boundaries, corrupting the packing oracle by up to 60%.)
+    """
     boundaries = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
     indices = torch.bucketize(values, boundaries, right=False)
-    # bucketize(right=False) puts boundary values in the HIGHER bucket; RNE
-    # boundary cases resolve to the EVEN LUT index — fix the five boundaries
-    for boundary, even_index in ((0.25, 0), (0.75, 1), (2.5, 2), (3.5, 4), (5.0, 4)):
+    # override every exact-boundary value to its even LUT index (idempotent where
+    # bucketize already lands even; corrective where it lands odd)
+    ties = ((0.25, 0), (0.75, 2), (1.25, 2), (1.75, 4), (2.5, 4), (3.5, 6), (5.0, 6))
+    for boundary, even_index in ties:
         indices = torch.where(values == boundary, torch.tensor(even_index), indices)
     return indices
 
