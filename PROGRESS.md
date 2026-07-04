@@ -62,6 +62,31 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-04 — [progress] Review remediation Phase 5: bench scoring correctness + security
+- What: Fixed the scoring-integrity and security defects in the Fugu bench suite.
+  **B1**: the MCQ answer-extraction regex matched "answer" + the first letter of
+  the following word (so "Answer: B, because the answer depends…" extracted D)
+  and the fallback picked lone lowercase articles/pronouns — tightened to a
+  bounded letter after the marker and an uppercase-only fallback. **B2**: an
+  un-typed `normalize()` error (schema drift KeyError, image/codec, unpickling)
+  crashed the whole suite run; it now degrades THAT dataset to `unavailable`
+  ("degradation is data, not control flow"). **M6**: the dataset cache is now
+  invalidated when the pinned dataset/revision changes, so bumping `hf_revision`
+  re-downloads instead of scoring stale rows. **M7**: private-test blobs unpickle
+  through a `_RestrictedUnpickler` that blocks class/global loading (was a
+  download-time arbitrary-code vector); the judge response fed into the prompt is
+  length-capped. **M8**: LCB solutions that start with `from __future__ import`
+  no longer become a SyntaxError when the import header is prepended (the future
+  import is hoisted). **M10**: the judge verdict regex accepts markdown-emphasized
+  labels (`**correct:** yes`) and the judge token budget was raised so a reasoning
+  judge is not truncated before its verdict.
+- Why: Each silently corrupts the scoreboard (wrong scores, crashed runs, stale
+  data) or is a security hole (ACE at download time).
+- Refs: review report; `kairyu/bench/{adapters/base,adapters/livecodebench,cache,judge}.py`;
+  tests under `tests/bench/`. **Deferred follow-up (design/policy):** B3 (resume
+  per-pair config hash), B4 + denominator policy (skipped/unjudged as 0 or n/a,
+  show per-target n_scored), LCB per-line/tolerant scoring, sandbox NPROC/session
+  hardening, self-judge (judge==target) scoreboard flag, judge prompt delimiters.
 ### 2026-07-04 — [progress] Review remediation Phase 4: model + quant parity
 - What: Fixed the parity-affecting model/quant defects from the full-repo review.
   **M3 (rope)**: unsupported `rope_scaling` kinds (linear/dynamic/longrope) now

@@ -64,6 +64,29 @@ def test_decode_private_tests_both_encodings():
     assert decode_private_tests(blob) == tests
 
 
+def test_decode_private_tests_blocks_arbitrary_code(tmp_path):
+    # M7: a hostile blob that pickles a global (arbitrary-code vector) must be
+    # rejected, not unpickled at download time.
+    import os
+
+    import pytest
+
+    evil = base64.b64encode(zlib.compress(pickle.dumps(os.system))).decode()
+    with pytest.raises(pickle.UnpicklingError, match="blocked global"):
+        decode_private_tests(evil)
+
+
+def test_compose_solution_hoists_future_imports():
+    # M8: a model solution starting with `from __future__ import ...` must keep
+    # it as the first statement even after the import header is prepended.
+    from kairyu.bench.adapters.livecodebench import _compose_solution
+
+    composed = _compose_solution("from __future__ import annotations\nx = 1\n")
+    assert composed.startswith("from __future__ import annotations\n")
+    # it must be a valid module (no "future import must be first" SyntaxError)
+    compile(composed, "<solution>", "exec")
+
+
 async def test_livecodebench_end_to_end_with_correct_model(tmp_path):
     """A canned 'model' that answers the fixture problems correctly scores 1.0."""
 

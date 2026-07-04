@@ -38,8 +38,22 @@ class BenchCache:
     def manifest_path(self, adapter: str) -> Path:
         return self.adapter_dir(adapter) / "manifest.json"
 
-    def is_ready(self, adapter: str) -> bool:
-        return self.manifest_path(adapter).exists() and self.data_path(adapter).exists()
+    def is_ready(
+        self, adapter: str, dataset: str | None = None, revision: str | None = None
+    ) -> bool:
+        """Both files present, and (when given) the cached dataset/revision still
+        match the adapter's current pin — so bumping ``hf_revision`` re-downloads
+        instead of silently scoring against stale rows (M6)."""
+        if not (self.manifest_path(adapter).exists() and self.data_path(adapter).exists()):
+            return False
+        if dataset is None and revision is None:
+            return True
+        manifest = self.read_manifest(adapter)
+        if dataset is not None and manifest.get("dataset") != dataset:
+            return False
+        if revision is not None and manifest.get("revision") != revision:
+            return False
+        return True
 
     def read_manifest(self, adapter: str) -> dict:
         return json.loads(self.manifest_path(adapter).read_text(encoding="utf-8"))
