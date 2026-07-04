@@ -51,6 +51,14 @@ def _generation_defaults(directory: Path, config: dict) -> GenerationDefaults:
     return GenerationDefaults(eos_token_id=int(eos))
 
 
+def load_generation_defaults(model_dir: str) -> GenerationDefaults:
+    """Public: eos/stop-token defaults from a checkpoint dir (used by the TP
+    serve path, which shards the model but still needs the stop config)."""
+    directory = Path(model_dir)
+    config = json.loads((directory / "config.json").read_text())
+    return _generation_defaults(directory, config)
+
+
 def build_model(
     config: ModelConfig, attention_backend=None, linear_factory=None
 ) -> DenseDecoder:

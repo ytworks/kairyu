@@ -62,6 +62,21 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
+- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
+  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
+  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
+  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
+  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
+  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
+- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
+  from the serve entrypoint — so real tensor-parallel models could not be
+  deployed. Now `kairyu serve --tp 2` runs end to end.
+- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
+  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
+  `kairyu/models/loader.py`, test
+  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
+
 ### 2026-07-04 — [progress] Review remediation Phase 8: packaging + doc accuracy
 - What: Fixed the cross-cutting packaging/doc defects from the full-repo review.
   Added an **`[engine]` extra** (torch + xgrammar + tokenizers + safetensors) so
