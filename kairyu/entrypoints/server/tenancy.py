@@ -149,11 +149,21 @@ class TenantLimitMiddleware:
 
 
 class UsageLedger:
-    """O_APPEND single-writer JSONL (A7): one line per completed request."""
+    """O_APPEND single-writer JSONL (A7): one line per completed request.
+
+    Keeps ONE append handle open (P4): the old open()/write()/close() per request
+    ran three syscalls synchronously on the event loop, stalling in-flight SSE
+    streams; a persistent append handle drops that to a buffered write+flush."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = None
+
+    def _get_handle(self):
+        if self._handle is None or self._handle.closed:
+            self._handle = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
+        return self._handle
 
     def record(
         self, tenant: str, model: str, prompt_tokens: int, completion_tokens: int
@@ -167,8 +177,13 @@ class UsageLedger:
                 "ts": time.time(),
             }
         )
-        with open(self._path, "a", encoding="utf-8") as handle:  # O_APPEND
-            handle.write(line + "\n")
+        handle = self._get_handle()
+        handle.write(line + "\n")
+        handle.flush()  # O_APPEND write is atomic; totals() readers see it at once
+
+    def close(self) -> None:
+        if self._handle is not None and not self._handle.closed:
+            self._handle.close()
 
     def totals(self, tenant: str | None = None) -> dict[str, dict[str, int]]:
         """Aggregate by tenant (optionally filtered) for /admin/usage."""
