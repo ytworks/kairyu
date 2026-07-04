@@ -104,6 +104,23 @@ async def test_diamond_dag_runs_middle_wave_concurrently():
     assert result.final_text == result.outputs["synth"]
 
 
+def test_verifier_with_unavailable_dependency_rejected_at_init():
+    # M1: a verifier runs inline after its target, so a dependency the target
+    # doesn't have (here "planner", scheduled in a parallel wave) would render
+    # as "" at verify time — reject it loudly instead of a silent wrong verdict.
+    roles = (
+        RoleSpec(name="planner", worker="w", prompt="plan: {query}"),
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="checker", worker="w", role_type="verifier", verifies="worker",
+            prompt="check {worker} against {planner}",
+            depends_on=("worker", "planner"),  # planner is NOT a dep of worker
+        ),
+    )
+    with pytest.raises(ValueError, match="not.*available when it runs inline"):
+        Conductor(roles=roles, workers={"w": MockBackend()})
+
+
 def test_cycle_is_rejected_at_init():
     roles = (
         RoleSpec(name="a", worker="w", prompt="{b}", depends_on=("b",)),

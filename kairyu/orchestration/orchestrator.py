@@ -7,11 +7,19 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from kairyu.engine.backend import EngineBackend, GenerationRequest
-from kairyu.orchestration.budget import Budget
+from kairyu.engine.backend import (
+    EngineBackend,
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+)
+from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, CostModel, RoleSpec, zero_cost
 from kairyu.orchestration.router import RouteDecision, Router, RuleRouter
+from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
+
+_KEEPALIVE_INTERVAL_S = 15.0  # SSE keep-alive cadence for long multi-stage runs (M8)
 
 _DEFAULT_ROLES = (
     RoleSpec(
@@ -139,7 +147,34 @@ class Orchestrator:
                     synthesizer=self._resolve_engine("tier2", notes),
                     shared_prefix=self._shared_prefix,
                 )
-                notes.append(f"moa: {len(moa.proposals)} proposals synthesized")
+                # M3: the deep MoA tier was invisible to the cost model / budget.
+                # Charge it (steps = proposals + synthesis) and surface whether it
+                # exceeded max_cost_usd in the trace (budget overrun is queryable,
+                # not a raise — matching the Budget philosophy).
+                moa_cost = self._cost_model(
+                    GenerationRequest(
+                        request_id="moa", prompt=query,
+                        sampling_params=self._sampling_params,
+                    ),
+                    GenerationResult(
+                        request_id="moa", prompt=query,
+                        completions=(
+                            CompletionOutput(index=0, text=moa.final_text, token_ids=()),
+                        ),
+                        usage=GenerationUsage(
+                            prompt_tokens=moa.usage[0], completion_tokens=moa.usage[1]
+                        ),
+                    ),
+                )
+                budget_state = BudgetState(budget=self._budget).charge(
+                    steps=self._moa_samples + 1, cost=moa_cost
+                )
+                notes.append(
+                    f"moa: {len(moa.proposals)} proposals synthesized "
+                    f"(cost={moa_cost:.4f})"
+                )
+                if budget_state.is_exhausted:
+                    notes.append("moa: budget exceeded")
                 return OrchestratorResult(
                     text=moa.final_text,
                     route=decision,
@@ -220,9 +255,20 @@ class Orchestrator:
                 ),
             )
             return
-        # multi-stage routes: keep-alive, then buffered final (A5)
+        # multi-stage routes: PERIODIC keep-alives while the (possibly minutes-
+        # long) run executes, then the buffered final (A5). Without the periodic
+        # emit a proxy/LB idle timeout would sever the SSE connection (M8).
         yield OrchestratorEvent(kind="status", text=f"routing: {decision.target}")
-        result = await self.run(prompt)
+        run_task = asyncio.ensure_future(self.run(prompt))
+        try:
+            while not run_task.done():
+                done, _ = await asyncio.wait({run_task}, timeout=_KEEPALIVE_INTERVAL_S)
+                if not done:
+                    yield OrchestratorEvent(kind="status", text="working")
+            result = run_task.result()
+        finally:
+            if not run_task.done():
+                run_task.cancel()
         yield OrchestratorEvent(kind="delta", text=result.text)
         yield OrchestratorEvent(kind="result", result=result)
 

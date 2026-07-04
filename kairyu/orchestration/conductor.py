@@ -136,6 +136,19 @@ class Conductor:
                     raise ValueError(
                         f"verifier {role.name!r} must depend on its target {role.verifies!r}"
                     )
+                # a verifier runs INLINE right after its target, so any OTHER
+                # dependency must also be the target's dependency (else it may not
+                # have run yet and _SafeDict would render it as "" → a silent
+                # wrong PASS/FAIL). Catch the misconfiguration loudly (M1).
+                target = self._by_name[role.verifies]
+                available = set(target.depends_on) | {role.verifies}
+                for dep in role.depends_on:
+                    if dep != role.verifies and dep not in available:
+                        raise ValueError(
+                            f"verifier {role.name!r} depends on {dep!r}, which is not "
+                            f"available when it runs inline after {role.verifies!r}; "
+                            f"add {dep!r} to {role.verifies!r}'s depends_on"
+                        )
         self._check_acyclic()
 
     def _check_acyclic(self) -> None:
