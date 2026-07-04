@@ -59,6 +59,28 @@ def test_overlap_outputs_equal_serial_engine_outputs():
     assert overlap.run_to_completion() == serial.run_to_completion()
 
 
+def test_runner_receives_frozen_snapshot_not_live_state():
+    # E3: the overlap loop must hand the runner a torn-free snapshot, not the
+    # live scheduler state a concurrent update() mutates. RequestSnapshot is
+    # frozen, so seeing it proves the freeze happened before dispatch.
+    from kairyu.engine.core.step_input import RequestSnapshot
+
+    seen_types: list[type] = []
+
+    class TypeCapturingRunner(PositionRunner):
+        def execute(self, scheduled, states):
+            for chunk in scheduled:
+                seen_types.append(type(states[chunk.request_id]))
+            return super().execute(scheduled, states)
+
+    engine = _build(OverlapEngineCore, TypeCapturingRunner())
+    for request in _requests(2):
+        engine.add_request(request)
+    engine.run_to_completion()
+    assert seen_types  # ran
+    assert all(t is RequestSnapshot for t in seen_types)
+
+
 def test_next_step_is_scheduled_while_previous_executes():
     events: list[str] = []
     runner = PositionRunner(latency_s=0.02, events=events)

@@ -19,6 +19,7 @@ from typing import Protocol
 
 from kairyu.engine.core.engine_core import ModelRunner, StepOutput, token_ids
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
+from kairyu.engine.core.step_input import snapshot_step
 
 
 class StepHandle(Protocol):
@@ -184,8 +185,12 @@ class PipelinedEngineCore:
                 for request_id in self._scheduler.drain_rejected():
                     self._outputs[request_id] = self._scheduler.output_tokens(request_id)
                 if plan.scheduled:
+                    # E3: a step lives across multiple ticks while update()
+                    # mutates live state on this loop — freeze it (torn-free
+                    # snapshot) so every stage reads a consistent view.
+                    step = snapshot_step(plan.scheduled, self._scheduler.states)
                     pending.append(
-                        self._runner.submit(step_index, plan.scheduled, self._scheduler.states)
+                        self._runner.submit(step_index, step.chunks, step.states_view())
                     )
                     step_index += 1
                     continue

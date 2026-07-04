@@ -19,6 +19,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from kairyu.engine.core.engine_core import ModelRunner, token_ids
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+from kairyu.engine.core.step_input import snapshot_step
 
 _DEFAULT_PIPELINE_DEPTH = 2
 
@@ -62,9 +63,16 @@ class OverlapEngineCore:
                         self._outputs[request_id] = self._scheduler.output_tokens(request_id)
                     if plan.scheduled:
                         self.events.append(f"scheduled:{step_index}")
+                        # E3: freeze the step BEFORE handing it to the device
+                        # thread. Passing live self._scheduler.states let the
+                        # concurrent update()/preemption on THIS thread mutate
+                        # outputs/decode_pages under the running execute (torn
+                        # reads: chunked-prefill range drift, decode-ahead
+                        # IndexError). The snapshot is the torn-free contract.
+                        step = snapshot_step(plan.scheduled, self._scheduler.states)
                         pending.append(
                             device.submit(
-                                self._runner.execute, plan.scheduled, self._scheduler.states
+                                self._runner.execute, step.chunks, step.states_view()
                             )
                         )
                         step_index += 1
