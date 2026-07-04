@@ -64,9 +64,10 @@ def build_engine_loop(
 
     ``model_path`` loads a real checkpoint (m12 D5): DenseDecoder +
     PagedKVPool + PagedModelRunner + Sampler, tokenizer from the same dir
-    unless overridden. Mutually exclusive with ``runner``; TP > 1 with a real
-    model arrives in M16 (the CPU TP path duplicates one runner instance
-    across ranks — incompatible with a stateful pool/sampler runner).
+    unless overridden. Mutually exclusive with ``runner``. Real-model TP > 1
+    exists as the multi-process ``DistTPModelRunner`` (m16, spawn-tested in
+    ``tests/dist``) but is NOT yet wired into this single-process assembly path
+    — that needs a rank process-group the serve entrypoint does not set up.
     """
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
@@ -75,7 +76,11 @@ def build_engine_loop(
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
     if model_path is not None and tensor_parallel_size > 1:
-        raise ValueError("model_path with tensor_parallel_size > 1 arrives in M16")
+        raise ValueError(
+            "real-model tensor_parallel_size > 1 runs via the multi-process "
+            "DistTPModelRunner (tests/dist); it is not yet wired into this "
+            "single-process serve path"
+        )
 
     default_eos: int | None = None
     default_stop_ids: tuple[int, ...] = ()

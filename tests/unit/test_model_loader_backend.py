@@ -116,7 +116,7 @@ def test_model_path_mutual_exclusions(checkpoint):
     path, _ = checkpoint
     with pytest.raises(ValueError, match="mutually exclusive"):
         build_engine_loop(model_path=str(path), runner=object())
-    with pytest.raises(ValueError, match="M16"):
+    with pytest.raises(ValueError, match="tensor_parallel_size"):
         build_engine_loop(model_path=str(path), tensor_parallel_size=2)
 
 

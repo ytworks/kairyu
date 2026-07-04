@@ -62,6 +62,30 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-04 — [progress] Review remediation Phase 8: packaging + doc accuracy
+- What: Fixed the cross-cutting packaging/doc defects from the full-repo review.
+  Added an **`[engine]` extra** (torch + xgrammar + tokenizers + safetensors) so
+  real models run WITHOUT the dev group, and pointed **`Dockerfile.cuda`** at it
+  (`--extra engine` replaces `--extra hf`) so the production GPU image ships
+  xgrammar and can serve `response_format: json_schema` (was missing). Fixed the
+  misplaced comment above the `otel` extra (it described the fleet transports).
+  `build_engine_loop`'s TP>1 error/docstring now state the truth — the
+  multi-process `DistTPModelRunner` exists (m16, tests/dist) but is not yet wired
+  into the single-process serve path — instead of "arrives in M16". Refreshed
+  `docs/gpu-runbook.md` §0/§1: corrected the stale "177 tests" count, the
+  `--group gpu`/`uv sync --dev` command errors (now `--extra gpu`/`--group dev`),
+  and the "replace KairyuBackend._tokenize / TorchPagedRunner" instructions that
+  M8/M12/M13 already delivered, with a note that the seams exist and GPU-day is
+  enabling/tuning them.
+- Why: The GPU image couldn't serve structured outputs, there was no non-dev
+  install path for real models, and the runbook (the artifact GPU day executes
+  from) contradicted the codebase.
+- Refs: review report; `pyproject.toml`, `uv.lock`, `Dockerfile.cuda`,
+  `kairyu/engine/kairyu_backend.py`, `docs/gpu-runbook.md`.
+  **Deferred follow-up:** `kairyu validate` cross-artifact command, typed
+  `GenerationRequest.prompt` (token-ids/multimodal), `deploy/spec.py`
+  ServerSection compose-not-inherit, and the `kairyu/bench/` package boundary.
+
 ### 2026-07-03 — [progress] Fugu benchmark suite: one-command quality scoreboard (G6 P-C1)
 - What: 646 → 730+ tests. New `kairyu/bench/` package + `kairyu bench
   run/download/report/list` CLI. All 11 rows of the Fugu release table

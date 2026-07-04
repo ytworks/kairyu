@@ -22,7 +22,16 @@ hf = [
     "tokenizers>=0.20",
     "safetensors>=0.5",
 ]
-# Process-split engine service and fleet transports (m8 D6, G5).
+# Real-model engine runtime: torch + structured-output + tokenizer/weights.
+# Platform-independent (torch resolves via flashinfer on the gpu image); this
+# is the install path for running real models WITHOUT the dev group.
+engine = [
+    "torch>=2.6",
+    "xgrammar>=0.2.3",
+    "tokenizers>=0.20",
+    "safetensors>=0.5",
+]
+# OpenTelemetry span export (L2-safe no-op without it).
 otel = ["opentelemetry-sdk>=1.27"]
 # GPU kernels/fabric: linux-only markers so macOS `uv sync` ignores them.
 gpu = [
@@ -30,6 +39,7 @@ gpu = [
     "triton>=3.0; sys_platform == 'linux'",
     "nixl>=0.2; sys_platform == 'linux'",
 ]
+# Process-split engine service and fleet transports (m8 D6, G5).
 fleet = [
     "pyzmq>=26",
     "msgpack>=1.0",
