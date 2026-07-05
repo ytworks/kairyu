@@ -1,26 +1,50 @@
 # Kairyu
 
+**English** | [日本語](README.ja.md)
+
 **vLLM-compatible LLM inference framework with native orchestration.**
 
 Kairyu (海流, "ocean current") combines a vLLM drop-in inference API with a first-class
-orchestration layer: a learned-router-ready **Router**, a Planner/Worker/Verifier/Synthesizer
+orchestration layer — a learned-router-ready **Router**, a Planner/Worker/Verifier/Synthesizer
 **Conductor** (role DAG), and **Mixture-of-Agents** — all behind one Python API and one
-OpenAI-compatible endpoint. Under the hood, a custom engine core (Radix-Paged KV cache,
-chunked-prefill scheduler, speculative decoding, xgrammar structured output) is being built
-against the same pluggable backend seam, along with multi-GPU serving — tensor parallelism,
-DP replicas, prefill-decode separation, inter-node KV transfer, pipeline parallelism —
-developed CPU-first against the same protocols.
+OpenAI-compatible endpoint. Underneath, a custom engine core (Radix-Paged KV cache,
+chunked-prefill scheduler, speculative decoding, xgrammar structured output, TP/EP/PP,
+FP8/INT8/AWQ/GPTQ/NVFP4 quantization) serves real checkpoints through the same pluggable
+backend seam.
 
-- **Python**: 3.11+ &nbsp;|&nbsp; **License**: MIT &nbsp;|&nbsp; **Tests**: 640+ (coverage gate 80%, currently 92%)
+- **Python**: 3.11+ &nbsp;|&nbsp; **License**: MIT &nbsp;|&nbsp; **Tests**: 800+ (coverage gate 80%, currently ~92%)
 
-## Why Kairyu
+---
+
+## Table of contents
+
+1. [Why Kairyu](#1-why-kairyu)
+2. [Architecture](#2-architecture)
+   - [2.1 Layered architecture](#21-layered-architecture)
+   - [2.2 Request data flow](#22-request-data-flow)
+   - [2.3 How orchestration works](#23-how-orchestration-works)
+   - [2.4 Engine core internals (L1)](#24-engine-core-internals-l1)
+   - [2.5 Fleet / gateway layer](#25-fleet--gateway-layer)
+3. [Installation](#3-installation)
+4. [Quick start](#4-quick-start)
+5. [Single-model setup & usage](#5-single-model-setup--usage)
+6. [Orchestration setup & usage](#6-orchestration-setup--usage)
+7. [Configuration reference](#7-configuration-reference)
+8. [Benchmarks](#8-benchmarks)
+9. [Development](#9-development)
+10. [Documentation index](#10-documentation-index)
+11. [License](#11-license)
+
+---
+
+## 1. Why Kairyu
 
 Most serving stacks treat orchestration (routing, multi-agent pipelines, budgets) as an
 application-side afterthought bolted onto a raw completion endpoint. Kairyu makes it native:
 
 - **One import away from vLLM** — `from kairyu import LLM, SamplingParams` runs existing
-  vLLM offline examples unchanged, verified by contract tests.
-- **Orchestration below the API line** — the Router sees engine-level signals and the
+  vLLM offline examples unchanged, verified by contract tests (`tests/compat/`).
+- **Orchestration below the API line** — the Router sees engine-level signals, and the
   Conductor's steps hit warm KV prefixes (`cache_hint` plumbing), which pure API-level
   frameworks cannot do.
 - **Pluggable backends** — every layer talks to a small async `EngineBackend` protocol, so
@@ -29,114 +53,238 @@ application-side afterthought bolted onto a raw completion endpoint. Kairyu make
 - **Routers that learn** — serving logs feed a distillation + contextual-bandit pipeline
   that upgrades the rule router into a `LearnedRouter` without an API change.
 
-## Architecture
+The whole stack is implemented and CPU-verified end to end; GPU performance gates and kernel
+tuning are the remaining hardware-bound work, tracked in
+[`docs/gpu-runbook.md`](docs/gpu-runbook.md) and [`PROGRESS.md`](PROGRESS.md).
+
+## 2. Architecture
+
+### 2.1 Layered architecture
+
+Kairyu is layered as **L3 Interface / L2 Orchestration / L1 Engines**. Everything above L1
+depends only on the `EngineBackend` protocol (`kairyu/engine/backend.py`), so the custom
+engine is "one more backend", not a rewrite:
 
 ```
 L3  Interface       kairyu.entrypoints   LLM / AsyncLLMEngine (vLLM drop-in),
-                                         OpenAI-compatible FastAPI server (SSE, tools)
+                                         OpenAI-compatible FastAPI server (SSE, tools,
+                                         batch, embeddings, responses), kairyu CLI
 L2  Orchestration   kairyu.orchestration Router → Conductor (role DAG) / MoA,
                                          Budget, JSONL decision logs, learning pipeline,
-                                         ReplicaPool (DP replicas), ClusterSpec (2-node)
-L1  Engines         kairyu.engine        EngineBackend protocol:
-                                         mock | vllm | openai | kairyu (custom core)
+                                         ReplicaPool (session/prefix/KV-aware routing)
+                    kairyu.deploy        DeploymentSpec, registry/reconciler, prober
+L1  Engines         kairyu.engine        EngineBackend protocol + registry:
+                                         mock | kairyu | kairyu-proc | openai | vllm
                     kairyu.engine.core   Radix-Paged KV, chunked-prefill scheduler,
-                                         EngineCore step loop, n-gram spec decode,
-                                         xgrammar structured output, FP8 quant config,
-                                         TP runner, P-D coordinator, KV transport,
-                                         PP inter-step pipelining
+                                         paged model runner + sampler, spec decode,
+                                         attention backends, CUDA-graph seam,
+                                         TP/EP/PP, P-D separation, KV transport
+                    kairyu.models        Llama-3.x / Qwen2 / Qwen3 / Qwen3-MoE /
+                                         DeepSeek-V3 (+ EAGLE-3 / MTP draft heads)
+                    kairyu.quant         FP8 / INT8 / AWQ / GPTQ / NVFP4
 ```
 
-Everything above L1 is engine-agnostic: the custom M2 engine is "a fourth backend", not a
-rewrite.
+A design theme runs through every layer: **each seam is a small protocol with a
+deterministic CPU implementation**. The Router, Conductor, and ReplicaPool depend only on
+`EngineBackend`; inside the engine, `ModelRunner`, `AttentionBackend`, `Communicator`,
+`KVHandoff`, `DraftSource`, and the CUDA-graph `StepExecutor` are all protocols with CPU
+fakes pinned by tests — GPU and multi-process implementations swap in behind them unchanged.
 
-## Status & roadmap
+### 2.2 Request data flow
 
-| Milestone | Scope | Status |
+What happens when a request hits `POST /v1/chat/completions`
+(`kairyu/entrypoints/server/app.py`):
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as FastAPI server (L3)
+    participant O as Orchestrator (L2)
+    participant P as ReplicaPool (L2)
+    participant E as EngineBackend (L1)
+
+    C->>S: POST /v1/chat/completions {model, messages}
+    S->>S: auth, tenant limits, render chat template
+    alt model is an auto model (kairyu-auto, ...)
+        S->>O: run(prompt) / run_chat(stream)
+        O->>O: Router: features -> tier1 | tier2 | multi_agent
+        O->>E: direct call, Conductor role DAG, or MoA
+        E-->>O: text + usage (summed across steps)
+        O-->>S: result + optional kairyu_trace
+    else model is a served engine or pool
+        S->>P: generate(GenerationRequest + CacheHint)
+        P->>P: place: session affinity -> prefix score -> least-outstanding
+        P->>E: replica.generate(...)
+        E-->>S: StreamUpdates / GenerationResult
+    end
+    S-->>C: JSON or SSE stream (+ usage chunk)
+```
+
+Inside the `kairyu` backend (`kairyu/engine/kairyu_backend.py`), each request flows through
+a synchronous step loop that owns all engine state on one thread
+(`kairyu/engine/engine_loop.py`):
+
+```
+submit -> tokenize -> Scheduler.schedule()        # chunked-prefill plan, radix-KV admission
+       -> ModelRunner.execute()                   # paged forward + Sampler (fixed op order)
+       -> Scheduler.update()                      # commit sampled tokens to the radix tree
+       -> IncrementalDetokenizer -> StreamUpdate  # SSE-safe stop-string holdback
+```
+
+The `kairyu-proc` backend (`kairyu/engine/zmq_backend.py`) drives the *same* `EngineLoop`
+in a child process over ZMQ/msgpack for crash isolation — the API process survives an
+engine crash and respawns it.
+
+### 2.3 How orchestration works
+
+The L2 pipeline behind the reserved model name `kairyu-auto`
+(`kairyu/orchestration/orchestrator.py`):
+
+```mermaid
+flowchart LR
+    Q[Query] --> R{Router}
+    R -->|simple| T1[tier1 engine]
+    R -->|hard| T2[tier2 engine]
+    R -->|multi-step| MA{multi_agent}
+    MA -->|default| CO[Conductor role DAG]
+    MA -->|"moa_samples > 0"| MOA[Mixture-of-Agents]
+    CO --> RES[Result + trace + usage]
+    MOA --> RES
+    T1 --> RES
+    T2 --> RES
+```
+
+**Router** (`kairyu/orchestration/router.py`, `features.py`). Routing is model-free and
+runs in well under 10 ms: `extract_features` computes `char_len`, `word_count`,
+`has_code_fence`, `math_symbol_count`, `reasoning_keyword_count`,
+`multi_step_marker_count`, and `question_count`. The default `RuleRouter` applies
+thresholds (tunable via `RouteThresholds`): ≥3 multi-step markers or ≥2000 chars →
+`multi_agent`; a code fence, ≥2 reasoning keywords, ≥3 math symbols, or ≥600 chars →
+`tier2`; everything else → `tier1`. The same feature vector doubles as the training schema
+for the learned router.
+
+**Conductor — role DAG** (`kairyu/orchestration/conductor.py`). The default DAG is
+**planner** (tier2) → **worker** (tier1) → **verifier** (tier2) → **synthesizer** (tier2).
+Roles whose dependencies are satisfied run concurrently in asyncio "waves". A verifier runs
+inline after its target: if the verdict is not `PASS` and the budget allows, the Conductor
+builds a refine prompt from the previous attempt plus the verifier's feedback and
+regenerates (up to `max_refine_depth`). All prompts render as `shared_prefix + role_suffix`
+with a `CacheHint`, so successive steps land on the replica holding the warm KV prefix. A
+failing unit is recorded in the trace and the run returns best-so-far — one backend error
+never discards completed work.
+
+**Mixture-of-Agents** (`kairyu/orchestration/moa.py`). `n` proposers sample in parallel
+(temperature 0.9, distinct seeds), then one synthesis pass (temperature 0.3) merges the
+numbered candidates. Proposers and the synthesizer can be different backends (e.g. cheap
+tier1 proposers, frontier tier2 synthesizer). This is the mechanism behind the
+`kairyu-auto-max` tier.
+
+**Budget** (`kairyu/orchestration/budget.py`). `Budget(max_steps, max_refine_depth,
+max_cost_usd)` is charged by every unit through a pluggable `CostModel`. Exhaustion is
+queryable, not raised: the Conductor stops refining and returns the best result so far.
+
+**Router learning** (`kairyu/orchestration/learning/`). `JsonlRouterLog` records routing
+decisions and outcomes as JSONL — queries are stored as SHA-256 hashes, never raw text.
+From there: (1) `build_dataset` joins decisions with outcomes and labels each query with
+the highest mean-utility target (`utility = quality − cost_weight · cost_usd`);
+(2) a distilled logistic-regression classifier warm-starts `LearnedRouter` on the same
+`Router` protocol, falling back to the rule router below a confidence threshold;
+(3) `BanditRouter` (epsilon-greedy contextual bandit) refines the policy online, deferring
+to its base router until every arm has enough observations. See
+[`docs/design/m4-router-learning.md`](docs/design/m4-router-learning.md).
+
+### 2.4 Engine core internals (L1)
+
+The custom engine behind backend name `kairyu` (`kairyu/engine/core/`):
+
+| Component | Files | What it does |
 |---|---|---|
-| **M1** | L2 orchestration + L3 interface on pluggable backends, vLLM drop-in `LLM` / `AsyncLLMEngine`, OpenAI-compatible server, YAML/decorator DSL | ✅ Complete |
-| **M2** | Custom engine core: Radix-Paged KV manager, chunked-prefill scheduler, EngineCore step loop, torch CPU runner with greedy-equivalence proof | ✅ CPU half done — FlashInfer runner / FP8 / overlap pipelining need H100/A100 |
-| **M3** | Speculative decoding: n-gram draft policy with tested greedy-equivalence invariant | ✅ CPU half done — EAGLE / CUDA graphs / P-D separation are GPU-phase |
-| **M4** | Router learning: JSONL serving logs → labeled dataset → distilled classifier (`LearnedRouter`) → contextual-bandit online refinement | ✅ Complete (CPU-only) |
-| **M5** | Intra-node multi-GPU: tensor parallelism (Communicator + TPModelRunner, TP=2 greedy-equivalent to TP=1 on CPU), DP replicas (ReplicaPool with session affinity), intra-node P-D separation (PDCoordinator + `resume_with_kv`) | ✅ CPU half done — GPU phase is runbook §6, gated on M2 |
-| **M6** | Inter-node multi-GPU: static 2-node ClusterSpec, page-granular KV transfer plane (KVTransport, TCP loopback), inter-node P-D, PP=2 via inter-step pipelining | ✅ CPU half done — GPU phase is runbook §7, gated on M5 |
-| **M7** | Productionization: `kairyu serve` CLI + DeploymentSpec, health/metrics/auth/concurrency guard, ReplicaPool gateway wiring + background health prober, HTTP session affinity, OpenAI-compatible batch API, Docker/compose topology with CI smoke drill | ✅ CPU half done — GPU bring-up is runbook §9 |
-| **M8** | Engine core on real tokens: HF tokenizer seam, full sampler (temp/top-k/top-p/min-p/penalties/seed/logprobs), multi-token scheduler commits, n-gram speculative pipeline, ZMQ process-split engine (`kairyu-proc`) | ✅ Complete |
-| **M9** | Truthful API: token-accurate usage + `cached_tokens`, HF Jinja chat templates (byte-matched), logprobs, `/v1/completions`, `n>1`, `json_schema` structured output | ✅ Complete |
-| **M12** | Real model zoo: Llama-3.x / Qwen2 / Qwen3 from safetensors; full-engine greedy == `transformers.generate`; fp32 logits < 1e-4 | ✅ Complete |
-| **M13** | AttentionBackend seam: torch backend, FlashInfer adapter (contract-pinned), MLA reference math (≡ DeepseekV3Attention to 3.7e-9) | ✅ Complete — kernels verified on deploy day |
-| **M14** | Quantization compute: FP8/INT8/AWQ/GPTQ/NVFP4 — all five load and RUN through the full engine on CPU; Triton kernel seams | ✅ Complete |
-| **M15** | MoE + MLA architectures: Qwen3-MoE and DeepSeek-V3 (yarn incl.) with full `hf.generate` parity; latent MLA KV pool | ✅ Complete |
-| **M16** | Distributed execution over real collectives (gloo): TP=2/EP=2/PP=2 spawn parity gates in the default suite; NCCL is a constructor arg | ✅ Complete — NCCL run on deploy day |
-| **M17** | StepExecutor (CUDA-graph seam, fake-graph pinned) + DraftSource + EAGLE-3/MTP heads with checkpoint loaders | ✅ Complete — capture on deploy day |
-| **M18** | KV transport: serde, remote P-D handoff, NIXL adapter; two-REAL-process P-D over TCP with byte-parity gates | ✅ Complete — RDMA on deploy day |
-| **M10a/b** | Fleet: dynamic ReplicaPool membership, registry/reconciler, OTel tracing, Helm+kind; KV-aware routing (prefix trie + radix KV events + staleness fallback) | ✅ Complete |
-| **M11** | Product surface: streaming `kairyu-auto` tiers with honest usage, tenancy v1 (limits/ledger), `/v1/responses`, `/v1/embeddings`, vision wire format, F5 SLO/priority/autoscale logic | ✅ Complete |
-| **M19** | Deploy packaging: `Dockerfile.cuda`, GPU compose/Helm, `scripts/gpu_gates/` (runbook §0–§9 + G4/G5, all `--dry-run` pinned) | ✅ Complete — **deploy-ready** |
+| Radix-Paged KV cache | `radix_kv.py`, `pages.py`, `kv_pool.py` | Radix-tree prefix sharing over paged KV blocks (refcounted, LRU eviction, session pins); `PagePool` free list; `PagedKVPool` holds K/V tensors layer-major so KV transport slices contiguously. Emits vLLM-compatible KV events for fleet routing. |
+| Scheduler | `scheduler.py` | Pure policy, no GPU: chunked-prefill token budgets, page-granularity admission through the radix cache, multi-token (speculative) commit, preemption, oversized-prompt rejection. |
+| Step loop | `engine_core.py`, `overlap.py`, `pipeline.py` | `ModelRunner` protocol + `StepOutput` contract; `OverlapEngineCore` plans step N+1 while the device runs step N; `PipelinedEngineCore` adds inter-step pipeline parallelism. |
+| Model runner + sampler | `model_runner.py`, `sampler.py` | Paged forward over real checkpoints; sampler with a fixed op order (logprobs → xgrammar grammar mask → penalties → temperature → min-p/top-k/top-p → seeded sample) and deterministic splitmix64 seeding so TP ranks sample identically. |
+| Speculative decoding | `spec_runner.py`, `draft.py` | `SpeculativeRunner` wraps any `ModelRunner`: n-gram prompt-lookup drafts by default, `ModelDraftSource` for EAGLE-3 / MTP heads (`kairyu/models/eagle.py`, `mtp.py`); greedy verification with a tested output-identical invariant. |
+| Attention backends | `attention/` | `AttentionBackend` protocol: `torch` (device-agnostic paged attention), FlashInfer adapter (contract-pinned), MLA reference math for DeepSeek; selected from the hardware profile or `KAIRYU_ATTENTION_BACKEND`. |
+| CUDA-graph seam | `step_executor.py`, `graph_buckets.py` | Capture-once-per-bucket replay with static device buffers, pinned on CPU against a fake graph backend; only `cuda_graph_gpu.py` touches CUDA. |
+| Distributed | `worker.py`, `dist_comm.py`, `pp_worker.py` | TP (rank 0 drives the scheduler, snapshot broadcast, per-rank sharded safetensors loading), EP (MoE all-to-all), PP (stage slices) — parity-gated with gloo in the default test suite; NCCL is a constructor argument. |
+| P-D separation + KV transport | `pd.py`, `pd_remote.py`, `kv_serde.py`, `kv_transport*.py` | Prefill/decode disaggregation in-process or across two real processes with byte-parity KV transfer over TCP; NIXL/RDMA adapter ready. |
+| Structured output | `structured.py` | xgrammar-compiled JSON-schema grammars applied as per-step token bitmasks. |
 
-**Current state: every planned milestone is implemented and CPU-verified. The remaining work is strictly GPU execution — performance gates, kernel tuning, fabric bring-up, `pytest -m gpu`, `scripts/gpu_gates/` — with no code left to write first.** See [`PROGRESS.md`](PROGRESS.md).
+**Models** (`kairyu/models/`): Llama-3.x, Qwen2, Qwen3 (dense), Qwen3-MoE, DeepSeek-V3
+(MLA + sigmoid-routed MoE, yarn rope) — all pinned to `transformers.generate` greedy parity
+through the full engine. **Quantization** (`kairyu/quant/`): FP8, INT8 W8A8, AWQ, GPTQ,
+NVFP4 checkpoints auto-detected at load; all five load and run through the full engine on
+CPU, with Triton kernel seams for GPU.
 
-Per-milestone design docs (goals, decisions, review amendments) live in
-[`docs/design/`](docs/design/); the multi-GPU acceptance contract is
-[`docs/goals/g2-multi-gpu.md`](docs/goals/g2-multi-gpu.md); the GPU-phase execution plan is
-in [`docs/gpu-runbook.md`](docs/gpu-runbook.md); production deployment (DC topology,
-cloud front, rolling updates) is [`docs/deployment.md`](docs/deployment.md).
+### 2.5 Fleet / gateway layer
 
-## Installation
+A gateway node serves a `ReplicaPool` (`kairyu/orchestration/replica.py`) — itself an
+`EngineBackend`, so it slots in anywhere an engine is expected. Placement order per request:
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/):
+1. **Session affinity** — `session_id` (from `X-Session-ID` or the OpenAI `user` field)
+   maps to a replica by rendezvous (HRW) hashing over eligible (healthy ∧ not draining)
+   replicas, so multi-turn sessions keep hitting their warm radix-KV prefix.
+2. **Load valve** — if the affine replica's outstanding depth exceeds
+   `queue_depth_threshold`, fall back to least-outstanding.
+3. **Prefix/KV-aware scoring** (opt-in) — score replicas by
+   `α · prefix_overlap − β · outstanding`, using two indexes: `PrefixIndex`
+   (approximate, gateway-side chained-hash text chunks) and `KvEventIndex` (precise
+   per-replica KV block hashes fed by engine `BlockStored`/`BlockRemoved` events over ZMQ;
+   a stale feed gracefully falls back to the approximate trie).
+4. **Least outstanding** for session-less traffic.
+
+Health: `unhealthy_after` consecutive failures ejects a replica (client 4xx errors are
+*not* counted); a background `HealthProber` (`kairyu/deploy/prober.py`) probes ejected
+replicas' `/readyz` and restores them. Membership is dynamic
+(`add_replica`/`drain`/`remove_replica`) and can be driven by a TTL-heartbeat
+`ReplicaRegistry` + `PoolReconciler` (`kairyu/deploy/registry.py`).
+
+## 3. Installation
+
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Kairyu is not on PyPI yet —
+install from source:
 
 ```bash
 git clone https://github.com/ytworks/kairyu.git && cd kairyu
-uv sync
+uv sync                       # core only (lightweight)
+uv sync --extra engine        # + torch/xgrammar/tokenizers/safetensors (real models)
+uv sync --group dev           # + test/lint toolchain
 ```
 
-Core dependencies are lightweight (pydantic, fastapi, httpx, pyyaml, uvicorn). torch and
-xgrammar are dev-group extras used by the engine-core tests; vLLM is only needed for the
-`vllm` backend on a Linux GPU host.
+Core dependencies are lightweight (pydantic, fastapi, httpx, pyyaml, uvicorn, jinja2).
+Everything heavier is opt-in:
 
-## Quick start
+| extra | contents | enables |
+|---|---|---|
+| `--extra engine` | torch, xgrammar, tokenizers, safetensors | real checkpoints through the `kairyu` backend, `json_schema` structured output |
+| `--extra hf` | tokenizers, safetensors | HF tokenizer/weights only (no torch) |
+| `--extra fleet` | pyzmq, msgpack | `kairyu-proc` process-split engine, KV event transport |
+| `--extra otel` | opentelemetry-sdk | tracing spans (no-op without it) |
+| `--extra gpu` | flashinfer, triton, nixl | GPU kernels/fabric (Linux-only markers; macOS `uv sync` skips them) |
+| `--extra bench` | datasets, huggingface_hub, pillow, h5py | `kairyu bench download` dataset fetching |
+| `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker-based agentic benchmarks |
+| `--group dev` | pytest, ruff, transformers, openai, … | test suite + parity goldens |
+
+vLLM is only needed for the `vllm` backend on a Linux GPU host (install it in the same
+environment).
+
+## 4. Quick start
 
 ```bash
 uv run pytest                                        # full suite, coverage gate 80%
-uv run python examples/basic_offline_inference.py    # LLM API on the mock backend
-uv run python examples/run_yaml_pool.py              # declarative agent pool
+uv run python examples/basic_offline_inference.py    # vLLM-style LLM API (mock backend)
+uv run python examples/run_yaml_pool.py              # declarative multi-agent pool
 uv run python examples/serve.py                      # OpenAI-compatible server on :8000
 ```
 
-### Serving (production)
+Then pick your path: [single model](#5-single-model-setup--usage) or
+[orchestration](#6-orchestration-setup--usage).
 
-One config file declares the node's role — a gateway (ReplicaPool over remote
-replicas, auth, metrics, batch API) or a replica (local engine):
+## 5. Single-model setup & usage
 
-```bash
-uv run kairyu serve deploy/compose/gateway.yaml      # or your own DeploymentSpec
-./scripts/compose_smoke.sh                           # 1 gateway + 3 replicas via Docker
-```
+### 5.1 Python API (vLLM drop-in)
 
-Endpoints: `/v1/chat/completions` (SSE, tools), `/v1/models`, `/v1/files` +
-`/v1/batches`, `/health`, `/readyz`, `/metrics` (Prometheus). Requests carrying
-the OpenAI `user` field (or `X-Session-ID`) stick to the replica holding their
-warm radix-KV prefix. See [`docs/deployment.md`](docs/deployment.md).
-
-### Benchmarks (Fugu suite)
-
-One command runs every benchmark from the
-[Fugu release table](https://sakana.ai/fugu-release/) against a deployed
-gateway — single models and orchestration tiers as scoreboard columns — and
-prints a dated, footnoted scoreboard (goal G6 P-C1):
-
-```bash
-kairyu serve examples/deploy_multi_orchestrator.yaml &
-kairyu bench run --base-url http://localhost:8000/v1 \
-    --model m1 --model kairyu-auto --model kairyu-auto-max
-```
-
-Datasets are downloaded to `~/.cache/kairyu/benchmarks` (never committed);
-unmet preconditions (no docker, gated dataset, no judge) become annotated
-`skipped` cells, so the run always completes. See
-[`docs/benchmarks.md`](docs/benchmarks.md).
-
-### vLLM drop-in
+`kairyu` replicates the vLLM offline surface — change one import:
 
 ```python
 from kairyu import LLM, SamplingParams   # was: from vllm import ...
@@ -146,100 +294,53 @@ outputs = llm.generate(["Hello, my name is"], SamplingParams(temperature=0.8))
 print(outputs[0].outputs[0].text)
 ```
 
-`SamplingParams`, `RequestOutput`, `CompletionOutput`, and `AsyncLLMEngine` replicate vLLM's
-public surface (the subset exercised by vLLM's own examples), verified by the contract tests
-in `tests/compat/`.
-
-### Orchestration (programmatic)
+`SamplingParams`, `RequestOutput`, `CompletionOutput`, `AsyncEngineArgs`, and
+`AsyncLLMEngine` replicate vLLM's public surface (the subset exercised by vLLM's own
+examples), verified by the contract tests in `tests/compat/`. The async engine:
 
 ```python
-from kairyu import Orchestrator
-from kairyu.engine.mock import MockBackend
+from kairyu import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 
-orchestrator = Orchestrator(engines={"tier1": MockBackend(), "tier2": MockBackend()})
-result = orchestrator.run_sync("First, plan X. Then do Y. Finally, verify.")
-print(result.route.target, result.text)
+engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(model="Qwen/Qwen2.5-7B-Instruct"))
+async for out in engine.generate("Hello", SamplingParams(max_tokens=32), request_id="r1"):
+    ...
 ```
 
-The Router picks a target (`tier1` / `tier2` / multi-agent) from query features; multi-agent
-routes dispatch to the Conductor (async role DAG with budget-bounded refinement) or MoA
-(parallel sampling + synthesis).
+### 5.2 Choosing a backend
 
-### Declarative agent pools
+Every model runs behind one of five `EngineBackend` implementations
+(`kairyu/engine/registry.py`), chosen per worker/engine:
 
-Workers, a role DAG, and a budget in YAML — see
-[`examples/agent_pool.yaml`](examples/agent_pool.yaml) for the full file:
+| backend | runs | when to use |
+|---|---|---|
+| `kairyu` | Kairyu's own engine core, in-process | local safetensors checkpoints; the native path (radix KV, spec decode, structured output) |
+| `kairyu-proc` | same engine in a child process (ZMQ/msgpack) | crash isolation between the API server and the engine |
+| `vllm` | `vllm.AsyncLLMEngine` on a local GPU | you already run vLLM and want Kairyu's orchestration on top |
+| `openai` | any OpenAI-compatible HTTP endpoint | hosted APIs (Together, Fireworks, Groq, Moonshot, …) or your own `vllm serve` / SGLang / Ollama box |
+| `mock` | deterministic canned responses | CI and tests — the entire default test suite runs on it |
 
-```yaml
-workers:
-  - name: tier1
-    backend: mock            # swap for: vllm (local GPU) or openai (external API)
-  - name: tier2
-    backend: mock
+### 5.3 Running a local checkpoint (`kairyu` backend)
 
-roles:
-  - name: planner
-    worker: tier2
-    role_type: planner
-    prompt: "[planner] Break the task into a short plan.\nTask: {query}"
-  - name: worker
-    worker: tier1
-    prompt: "[worker] Execute the plan.\nPlan: {planner}\nTask: {query}"
-    depends_on: [planner]
-
-budget:
-  max_steps: 12
-  max_refine_depth: 2
-```
-
-The same spec is available as a decorator front-end via `kairyu.dsl.decorators.AgentPool`.
-
-### OpenAI-compatible server
-
-```bash
-uv run python examples/serve.py
-curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model": "kairyu-auto", "messages": [{"role": "user", "content": "hi"}]}'
-```
-
-Endpoints: `GET /v1/models`, `POST /v1/chat/completions` — with SSE streaming
-(`"stream": true`), tool calling, and JSON-schema `response_format` (structured output
-enforced by an xgrammar token bitmask on the `kairyu` backend). The reserved model name
-`kairyu-auto` routes through the Orchestrator; concrete engine names bypass L2.
-
-## Using open models (Kimi, Qwen, Llama, …)
-
-Open-weight models plug in through two backends, chosen per worker:
-
-- **`vllm`** — weights run on a local GPU via `vllm.AsyncLLMEngine` (prefix caching on by
-  default).
-- **`openai`** — any OpenAI-compatible endpoint: hosted APIs (Moonshot for Kimi, Together,
-  Fireworks, Groq, OpenRouter, …) or a server you run yourself (`vllm serve`, SGLang,
-  Ollama).
-
-Model names below are illustrative — check your provider's docs for current identifiers.
-
-### Single model
-
-**Local GPU (vLLM backend).** With vLLM installed, `LLM` auto-selects it; construct
-`VLLMBackend` explicitly to pass extra `AsyncEngineArgs` (tensor parallelism etc.):
+The native engine loads HF-format safetensors directories directly:
 
 ```python
 from kairyu import LLM, SamplingParams
-from kairyu.engine.vllm_backend import VLLMBackend
+from kairyu.engine.kairyu_backend import KairyuBackend
 
-# simplest — vLLM auto-detected when installed
-llm = LLM(model="Qwen/Qwen2.5-7B-Instruct")
-
-# explicit backend for engine args (e.g. a large MoE across GPUs)
-backend = VLLMBackend(model="moonshotai/Kimi-K2-Instruct",
-                      tensor_parallel_size=8, trust_remote_code=True)
-llm = LLM(model="moonshotai/Kimi-K2-Instruct", backend=backend)
+backend = KairyuBackend(model_path="/models/qwen2.5-0.5b-instruct")
+llm = LLM(model="qwen", backend=backend)
+print(llm.generate(["What is paged attention?"], SamplingParams(max_tokens=64)))
 ```
 
-**Hosted API (OpenAI-compatible backend).** Kimi K2 is a ~1T-parameter MoE, so most setups
-use Moonshot's API (or another provider) instead of local weights. The API key is read
-from the environment variable named by `api_key_env` — never hardcoded:
+Supported architectures: **Llama-3.x, Qwen2, Qwen3, Qwen3-MoE, DeepSeek-V3**. Quantized
+checkpoints (**FP8 / INT8 / AWQ / GPTQ / NVFP4**) are auto-detected from the checkpoint
+config. Key constructor options (also available as `options:` in a DeploymentSpec — see
+the [backend options table](#backend-options-enginesoptions)): `tokenizer`, `num_pages`,
+`page_size`, `max_num_batched_tokens`, `speculative="ngram"`, `tensor_parallel_size`.
+
+**Hosted API instead of local weights** — the `openai` backend points at any
+OpenAI-compatible endpoint; the API key is read from the environment variable named by
+`api_key_env`, never hardcoded:
 
 ```bash
 export MOONSHOT_API_KEY=sk-...
@@ -251,48 +352,102 @@ from kairyu.engine.openai_backend import OpenAICompatBackend
 
 backend = OpenAICompatBackend(
     base_url="https://api.moonshot.ai/v1",
-    model="kimi-k2-0905-preview",
+    model="kimi-k2-0905-preview",           # model names are illustrative
     api_key_env="MOONSHOT_API_KEY",
 )
 llm = LLM(model="kimi-k2", backend=backend)
-outputs = llm.generate(["Explain paged KV caching in two sentences."],
-                       SamplingParams(max_tokens=128))
-print(outputs[0].outputs[0].text)
 ```
 
-**Your own server.** The same backend points at any self-hosted OpenAI-compatible server —
-useful when Kairyu runs on a laptop and the GPU box lives elsewhere:
+The same backend reaches a server you run yourself (`vllm serve`, SGLang, Ollama) — set
+`base_url="http://gpu-box:8000/v1"` and point `api_key_env` at any set variable
+(the variable must exist even if the server ignores auth).
+
+### 5.4 Serving a single model over HTTP
+
+`kairyu serve <config.yaml>` starts the hardened OpenAI-compatible server from a
+**DeploymentSpec** YAML. Minimal single-model config:
+
+```yaml
+# single_model.yaml
+server:
+  host: 0.0.0.0
+  port: 8000
+
+engines:
+  qwen:                          # served model name
+    backend: kairyu              # or: kairyu-proc | vllm | openai | mock
+    options:
+      model_path: /models/qwen2.5-0.5b-instruct
+```
 
 ```bash
-# on the GPU box
-vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000
-# on the Kairyu side — the env var must exist even if the server ignores auth
-export LOCAL_LLM_API_KEY=unused
+uv run kairyu serve single_model.yaml          # --host/--port override the YAML
+curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "qwen", "messages": [{"role": "user", "content": "hi"}], "stream": true}'
 ```
+
+Tensor parallelism is configured per engine in the YAML
+(`options: {tensor_parallel_size: 2}`) — the serve process spawns a multi-process TP
+worker group (gloo on CPU, NCCL on GPU). There is no CLI flag for it.
+
+Endpoints served: `/v1/chat/completions` (SSE streaming, tools, logprobs, `n>1`,
+`response_format: json_schema`, vision content parts), `/v1/completions`, `/v1/models`,
+`/v1/embeddings`, `/v1/responses` (subset), `/v1/files` + `/v1/batches`, `/health`,
+`/readyz`, `/metrics` (Prometheus), `/admin/*`. Full list in the
+[configuration reference](#http-surface).
+
+## 6. Orchestration setup & usage
+
+### 6.1 Programmatic
+
+An `Orchestrator` wraps a dict of engines keyed by tier name. The Router picks a target
+per query; `multi_agent` routes dispatch to the Conductor or MoA:
 
 ```python
-backend = OpenAICompatBackend(
-    base_url="http://gpu-box:8000/v1",
-    model="Qwen/Qwen2.5-7B-Instruct",
-    api_key_env="LOCAL_LLM_API_KEY",
-)
+from kairyu import Orchestrator
+from kairyu.engine.mock import MockBackend
+
+orchestrator = Orchestrator(engines={"tier1": MockBackend(), "tier2": MockBackend()})
+result = orchestrator.run_sync("First, plan X. Then do Y. Finally, verify.")
+print(result.route.target, result.text)     # -> multi_agent, <synthesized answer>
 ```
 
-### Multi-model orchestration
+Mix real backends freely — a typical pool puts a small local model on `tier1` and a
+frontier API on `tier2`:
 
-The Router's targets are the worker names `tier1` (light/cheap) and `tier2`
-(frontier/strong), plus `multi_agent` for role-DAG dispatch — so a typical mixed pool puts
-a small local open model on `tier1` and Kimi on `tier2`. Declaratively:
+```python
+from kairyu import Orchestrator
+from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.engine.vllm_backend import VLLMBackend
+
+orchestrator = Orchestrator(engines={
+    "tier1": VLLMBackend(model="Qwen/Qwen2.5-7B-Instruct"),
+    "tier2": OpenAICompatBackend(
+        base_url="https://api.moonshot.ai/v1",
+        model="kimi-k2-0905-preview",
+        api_key_env="MOONSHOT_API_KEY",
+    ),
+})
+```
+
+Routing thresholds are tunable via `RouteThresholds`
+(`kairyu/orchestration/router.py`); pass `moa_samples=4` to route `multi_agent` through
+Mixture-of-Agents instead of the Conductor.
+
+### 6.2 Declarative agent pools (YAML / decorators)
+
+Workers, a role DAG, and a budget in one file
+([`examples/agent_pool.yaml`](examples/agent_pool.yaml) is the complete version):
 
 ```yaml
 # pool.yaml
 workers:
-  - name: tier1                      # easy queries: local open model on your GPU
+  - name: tier1                      # easy queries: local open model
     backend: vllm
     model: Qwen/Qwen2.5-7B-Instruct
     options:                         # extra kwargs forwarded to the backend constructor
       gpu_memory_utilization: 0.85
-  - name: tier2                      # hard queries + planner/verifier roles: Kimi K2
+  - name: tier2                      # hard queries + planner/verifier roles: frontier API
     backend: openai
     model: kimi-k2-0905-preview
     base_url: https://api.moonshot.ai/v1
@@ -315,6 +470,7 @@ roles:
 
 budget:
   max_steps: 12
+  max_refine_depth: 2
   max_cost_usd: 0.50                 # hard cap for one orchestrated request
   cost_per_1k_chars_usd: 0.002
 ```
@@ -327,98 +483,76 @@ result = orchestrator.run_sync("Compare radix-tree and hash-based KV prefix shar
 print(result.route.target, result.text)
 ```
 
-Or programmatically, mixing backends freely:
+Role prompts are templates: `{query}` is the user query, `{<role_name>}` interpolates an
+upstream role's output, `depends_on` defines the DAG edges, and `verifies` marks a role as
+the verifier of another (triggering the refine loop on a non-`PASS` verdict). The same
+spec is available as a decorator front-end via `kairyu.dsl.decorators.AgentPool`.
 
-```python
-from kairyu import Orchestrator
-from kairyu.engine.openai_backend import OpenAICompatBackend
-from kairyu.engine.vllm_backend import VLLMBackend
+### 6.3 Serving orchestration (`kairyu-auto`)
 
-orchestrator = Orchestrator(engines={
-    "tier1": VLLMBackend(model="Qwen/Qwen2.5-7B-Instruct"),
-    "tier2": OpenAICompatBackend(
-        base_url="https://api.moonshot.ai/v1",
-        model="kimi-k2-0905-preview",
-        api_key_env="MOONSHOT_API_KEY",
-    ),
-})
+A DeploymentSpec can serve any number of **named orchestrations alongside plain models** —
+clients just pick a model name
+([`examples/deploy_multi_orchestrator.yaml`](examples/deploy_multi_orchestrator.yaml)):
+
+```yaml
+engines:
+  m1: {backend: mock}                # swap for kairyu/vllm/openai in production
+  m2: {backend: mock}
+
+orchestrators:
+  kairyu-auto:                       # standard tier: Router -> direct / Conductor
+    spec: agent_pool.yaml
+  kairyu-auto-max:                   # deep tier: multi_agent routes through MoA
+    spec: agent_pool_max.yaml
 ```
 
-Short queries route to the local Qwen worker; long or multi-step queries escalate to Kimi
-or the role DAG (thresholds are configurable via `RouteThresholds` in
-`kairyu/orchestration/router.py`). To serve the pool over HTTP, pass the orchestrator to
-`create_app` as in [`examples/serve.py`](examples/serve.py) and call model `kairyu-auto`.
-
-## Engine core (`kairyu.engine.core`)
-
-The custom engine behind backend name `kairyu`, developed CPU-first so every component is
-unit-tested before GPU time is spent:
-
-- **Radix-Paged KV manager** (`radix_kv.py`, `pages.py`) — radix-tree prefix sharing over
-  paged KV blocks; targets >80% cache hit rate on shared-prefix workloads.
-- **Chunked-prefill scheduler** (`scheduler.py`) — token-budget scheduling with
-  robustness tests for preemption and capacity edges.
-- **EngineCore step loop** (`engine_core.py`, `overlap.py`) — vLLM-V1-style API/core split;
-  overlap pipelining lands with the GPU runner.
-- **Speculative decoding policy** (`spec_decode.py`) — n-gram prompt-lookup drafting +
-  greedy verification, with a tested invariant: identical output to plain autoregressive
-  greedy decoding given identical target logits.
-- **Structured output** (`structured.py`) — xgrammar-compiled JSON-schema grammars applied
-  as per-step token bitmasks.
-- **Torch CPU runner** (`torch_runner.py`) — proves engine greedy-equivalence with real
-  tensors, paged-KV attention included.
-- **Tensor parallelism** (`comm.py`, `step_input.py`, `tp_runner.py`) — `Communicator`
-  protocol (with a `FakeCommunicator` for tests) and a divergence-checked TP driver;
-  TP=2 is proven greedy-equivalent to TP=1 on CPU (`bench/parity_tp.py`).
-- **P-D separation** (`pd.py`) — `PDCoordinator` + `LocalKVHandoff` with copy-before-commit
-  KV handoff into `Scheduler.resume_with_kv`; mixed prefill/decode harness in
-  `bench/pd_mixed.py`.
-- **KV transfer plane** (`kv_transport.py`) — `KVTransport` protocol with in-process and
-  TCP-loopback transports for inter-node P-D; benched by `bench/kv_transfer_bench.py`.
-- **Pipeline parallelism** (`pipeline.py`) — async submit/handle runner contract and
-  `PipelinedEngineCore` inter-step pipelining, with bubble accounting pinned by tests.
-
-GPU acceptance criteria (vs vLLM / SGLang on identical hardware) and the step-by-step
-execution plan are in [`docs/gpu-runbook.md`](docs/gpu-runbook.md).
-
-## Router learning (M4)
-
-`JsonlRouterLog` records routing decisions (`query_sha256`, target, features, confidence);
-outcome records join on the query hash — raw text is never stored. From there:
-
-1. `build_dataset` labels queries with the highest mean-utility target
-   (`utility = quality − cost_weight · cost_usd`).
-2. A distilled classifier warm-starts `LearnedRouter` on the same pluggable `Router`
-   protocol as the rule router.
-3. A contextual bandit refines the policy online (distillation alone inherits
-   logging-policy bias — see `docs/design/m4-router-learning.md` §2.2).
-
-Acceptance target: ≥97% of tier2-only quality at ≥40% lower inference cost.
-
-## Project layout
-
-```
-kairyu/
-  engine/            EngineBackend protocol, registry, mock/vllm/openai backends
-    core/            custom engine: radix KV, scheduler, spec decode, structured output,
-                     TP runner, P-D coordinator, KV transport, PP pipelining
-  orchestration/     Router, Conductor, MoA, Budget, Orchestrator, feature extraction,
-                     ReplicaPool (DP replicas), ClusterSpec (2-node topology)
-    learning/        dataset builder, distilled classifier, contextual bandit
-  dsl/               YAML / decorator agent-pool spec + loader
-  entrypoints/       LLM, AsyncLLMEngine, chat templating
-    server/          OpenAI-compatible FastAPI app + protocol models
-examples/            offline inference, YAML pool, serving
-bench/               router latency, orchestration overhead, serving, multi-turn prefix,
-                     TP parity, mixed P-D, KV transfer
-tests/               unit / compat (vLLM surface) / server suites
-docs/design/         one reviewed design doc per milestone (M1–M6)
-docs/goals/          evidence-first goal contracts (G2 multi-GPU)
-docs/gpu-runbook.md  consolidated GPU-day execution plan
+```bash
+uv run kairyu serve examples/deploy_multi_orchestrator.yaml
+curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "kairyu-auto", "messages": [{"role": "user", "content": "hi"}]}'
 ```
 
+- Usage in the response is the **real sum across all orchestration steps** — no made-up
+  token counts.
+- Streaming works with any OpenAI SDK: direct routes stream live token deltas; multi-stage
+  routes emit SSE comment keep-alives between stages, then the final answer.
+- Send `X-Kairyu-Trace: 1` to get a `kairyu_trace` block (route decision, per-role events,
+  budget state) in the response.
+- The legacy single `orchestrator:` key still works and is served as `kairyu-auto`.
 
-## Configuration reference
+### 6.4 Multi-replica fleets (gateway + replicas)
+
+One binary, two roles, decided by the config file. A **replica** node serves a local
+engine; a **gateway** node serves a `ReplicaPool` over remote replicas with auth, metrics,
+health probing, and the batch API:
+
+```yaml
+# gateway.yaml (see deploy/compose/gateway.yaml)
+pools:
+  fleet:
+    replicas:
+      - {backend: openai, options: {base_url: "http://replica-a:8000/v1"}}
+      - {backend: openai, options: {base_url: "http://replica-b:8000/v1"}}
+      - {backend: openai, options: {base_url: "http://replica-c:8000/v1"}}
+    unhealthy_after: 3
+    queue_depth_threshold: 8
+    probe_interval_s: 5.0
+```
+
+Requests carrying a session id (`X-Session-ID` header or the OpenAI `user` field) stick to
+the replica holding their warm radix-KV prefix; prefix/KV-aware placement is described in
+[§2.5](#25-fleet--gateway-layer). Ready-made topologies:
+
+```bash
+./scripts/compose_smoke.sh                     # 1 gateway + 3 replicas via Docker compose
+docker compose -f deploy/compose/docker-compose.gpu.yaml up    # gateway + GPU replica
+helm install kairyu deploy/helm/kairyu         # k8s chart (+ values-gpu.yaml)
+```
+
+Full production guidance (DC topology, systemd, rolling model updates, observability) is
+in [`docs/deployment.md`](docs/deployment.md).
+
+## 7. Configuration reference
 
 Everything a deployment can set, in one place. The single source of truth is the
 **DeploymentSpec YAML** passed to `kairyu serve <config.yaml>` (also mounted at
@@ -465,7 +599,7 @@ orchestrator:                  # optional kairyu-auto (OrchestratorSpec YAML)
   spec: orchestrator.yaml
 
 orchestrators:                 # optional NAMED auto models (any number; each an
-  kairyu-auto-max:             #   arbitrary worker/role DAG — arbitrary composition)
+  kairyu-auto-max:             #   arbitrary worker/role DAG)
     spec: agent_pool_max.yaml
 
 batch:                         # optional OpenAI-compatible /v1/files + /v1/batches
@@ -484,7 +618,7 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
 | | `max_num_batched_tokens` | 2048 | chunked-prefill budget per step |
 | | `speculative` | null | `"ngram"` enables speculative decoding |
 | | `speculative_tokens` | 4 | draft length k |
-| | `tensor_parallel_size` | 1 | TP degree (CPU toy path; real-model TP runs through `kairyu/engine/core/worker.py`) |
+| | `tensor_parallel_size` | 1 | TP degree; >1 spawns a multi-process TP worker group from the serve process (gloo on CPU, NCCL on GPU) |
 | `kairyu-proc` | same as `kairyu` | — | runs the engine in a separate process over ZMQ/msgpack (crash isolation) |
 | `openai` | `base_url`, `api_key`, `model` | — | any OpenAI-compatible endpoint |
 | `vllm` | vLLM engine kwargs | — | needs a Linux GPU host with vllm installed |
@@ -496,6 +630,7 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
 |---|---|
 | `KAIRYU_ATTENTION_BACKEND` | `torch` \| `flashinfer` — overrides the hw-profile kernel selection (invalid values fail loudly) |
 | value of `server.api_keys_env` | comma-separated API keys |
+| `KAIRYU_BENCH_CACHE` | benchmark dataset cache dir (default `~/.cache/kairyu/benchmarks`) |
 | `KAIRYU_MODEL_DIR` | model volume for `docker-compose.gpu.yaml` |
 | `GLOO_SOCKET_IFNAME` | set `lo0` on macOS if gloo rendezvous fails (dist tests) |
 
@@ -505,8 +640,8 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
 vision content-parts wire format), `/v1/completions`, `/v1/embeddings`
 (float + base64), `/v1/responses` (subset: `input`, `instructions`,
 `previous_response_id`), `/v1/models`, `/v1/files` + `/v1/batches`, `/health`,
-`/readyz`, `/metrics`, `POST /admin/drain` (auth-protected; flips readyz to 503),
-`GET /admin/usage?tenant=` (when the ledger is enabled).
+`/readyz`, `/metrics`, `POST /admin/drain` / `POST /admin/undrain` (auth-protected;
+drain flips readyz to 503), `GET /admin/usage?tenant=` (when the ledger is enabled).
 
 Request extras: `X-Session-ID` (or the OpenAI `user` field) pins a session to the
 replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds a `kairyu_trace`
@@ -520,41 +655,6 @@ TenantLimits(requests_per_minute=600, tokens_per_minute=200_000)}))` — per-ten
 token buckets run inside auth (401 wins over 429); usage lands in the JSONL
 ledger (`server.usage_ledger_path`).
 
-### Tiered auto models
-
-`create_app(..., orchestrators={"kairyu-auto": Orchestrator(...), "kairyu-auto-max":
-Orchestrator(..., moa_samples=4)})` — the max tier routes heavy queries through
-Mixture-of-Agents. Streaming emits SSE comment keep-alives between stages, so any
-OpenAI SDK client works unchanged. The same tiers are declarable in a
-DeploymentSpec via the `orchestrators:` map (see the YAML reference above).
-
-### Distributed serving
-
-- **TP** (tensor parallel): `kairyu/engine/core/worker.py` — rank 0 drives the
-  scheduler and broadcasts frozen step snapshots; per-rank sharded weights load
-  via safetensors slicing. gloo on CPU, `backend="nccl"` on GPUs (constructor arg).
-- **EP** (expert parallel): `EpMoeBlock` over `all_to_all` — wraps the MoE blocks.
-- **PP** (pipeline parallel): `PpStageModel` stage slices over send/recv.
-- **P-D separation**: same-process `PDCoordinator`, or two processes with real
-  KV byte transfer over TCP (`RemoteKVHandoff`/`RemoteKVReceiver`; NIXL/RDMA
-  adapter ready for deploy day).
-
-### Installation extras & test markers
-
-| extra / marker | contents |
-|---|---|
-| `uv sync` | core (pydantic, fastapi, httpx, pyyaml, uvicorn, jinja2) |
-| `--extra hf` | tokenizers, safetensors (real checkpoints) |
-| `--extra fleet` | pyzmq, msgpack (process-split engine, KV events) |
-| `--extra otel` | opentelemetry-sdk (tracing) |
-| `--extra gpu` | flashinfer / triton / nixl (linux-only markers; macOS ignores) |
-| `--extra bench` | datasets / huggingface_hub / pillow / h5py (`kairyu bench download`) |
-| `--extra bench-agentic` | mini-swe-agent / swebench / harbor (docker-based benchmarks) |
-| `pytest` (default) | everything except `gpu` and `hf_hub` |
-| `pytest -m gpu` | deploy-day kernel/graph tests (`tests/gpu/`) |
-| `pytest -m hf_hub` | opt-in real-checkpoint downloads |
-| `pytest -m dist` | multi-process gloo tests (included in the default run) |
-
 ### Deployment artifacts
 
 | artifact | purpose |
@@ -565,10 +665,27 @@ DeploymentSpec via the `orchestrators:` map (see the YAML reference above).
 | `deploy/compose/docker-compose.webui.yaml` | Open WebUI chat surface on the gateway |
 | `deploy/helm/kairyu/` (+ `values-gpu.yaml`) | k8s chart; readiness `/readyz`, per-GPU-profile nodeSelector |
 | `scripts/kind_smoke.sh` | end-to-end kind cluster smoke (CI job) |
-| `scripts/gpu_gates/*.sh` | GPU-day gate scripts (runbook §0–§9 + G4/G5); all support `--dry-run` |
+| `scripts/gpu_gates/*.sh` | GPU-day gate scripts (runbook §0–§9); all support `--dry-run` |
 | `bench/serving_bench.py`, `bench/frontier_compare.py`, `bench/kv_transfer_bench.py` | latency/goodput/transfer benches |
 
-## Development
+## 8. Benchmarks
+
+`kairyu bench` runs the 11-benchmark Fugu-release quality suite against any deployed
+gateway — single models and orchestration tiers as scoreboard columns — and writes a
+dated, footnoted scoreboard:
+
+```bash
+uv run kairyu serve examples/deploy_multi_orchestrator.yaml &
+uv run kairyu bench run --base-url http://localhost:8000/v1 \
+    --model m1 --model kairyu-auto --model kairyu-auto-max
+```
+
+Datasets download to `~/.cache/kairyu/benchmarks` (never committed); unmet preconditions
+(no docker, gated dataset, no judge) become annotated `skipped` cells, so the run always
+completes. Subcommands: `bench run`, `bench download`, `bench report <run>`, `bench list`.
+Full guide: [`docs/benchmarks.md`](docs/benchmarks.md).
+
+## 9. Development
 
 ```bash
 uv run pytest                        # tests + coverage (gate: 80%, enforced via addopts)
@@ -577,10 +694,28 @@ uv run python bench/router_latency.py
 uv run python bench/orchestration_mock_bench.py
 ```
 
+| pytest invocation | scope |
+|---|---|
+| `pytest` (default) | everything except `gpu` and `hf_hub` markers — runs on any machine, no GPU |
+| `pytest -m gpu` | deploy-day kernel/graph tests (`tests/gpu/`) |
+| `pytest -m hf_hub` | opt-in real-checkpoint downloads |
+| `pytest -m dist` | multi-process gloo tests (included in the default run) |
+
 Conventions: all CI-facing tests run against `MockBackend` (deterministic,
 dependency-free); GPU-dependent claims are never reported without a `bench/` reproduction
 script.
 
-## License
+## 10. Documentation index
+
+| document | contents |
+|---|---|
+| [`PROGRESS.md`](PROGRESS.md) | cross-session change log: design decisions, milestone status, blockers |
+| [`docs/design/`](docs/design/) | one reviewed design doc per milestone (m1–m19, GPU-day seams) |
+| [`docs/goals/`](docs/goals/) | evidence-first goal contracts (multi-GPU, MoE engine, fleet scale, product surface) |
+| [`docs/deployment.md`](docs/deployment.md) | production deployment: DC topology, systemd, rolling updates, observability |
+| [`docs/gpu-runbook.md`](docs/gpu-runbook.md) | consolidated GPU-day execution plan (performance gates, kernel tuning, fabric bring-up) |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | Fugu benchmark suite guide |
+
+## 11. License
 
 MIT — see [LICENSE](LICENSE).
