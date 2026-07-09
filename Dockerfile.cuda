@@ -1,7 +1,7 @@
 # GPU image (m19 D1): CUDA runtime + uv sync with the gpu extra.
 # Same one-image-per-role model as the CPU Dockerfile; the mounted
 # DeploymentSpec decides gateway vs replica.
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04 AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*

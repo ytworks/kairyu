@@ -62,6 +62,18 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-09 — [progress] GPU image base bumped to CUDA 12.8.1 / Ubuntu 24.04
+- What: `Dockerfile.cuda` base image `nvidia/cuda:12.4.1-runtime-ubuntu22.04`
+  → `nvidia/cuda:12.8.1-runtime-ubuntu24.04`. Ubuntu 24.04 ships `python3.12`
+  in its default repos, so the existing `apt-get install python3.12` line now
+  resolves natively; nothing else in the image changed.
+- Why: The GPU execution host runs Ubuntu 24.04, so the deployment image should
+  match the host OS. The CUDA 12.8 runtime also adds SM120 (Blackwell /
+  RTX PRO 6000) support that the roadmap's PCIe fleet targets and that the 12.4
+  runtime lacked.
+- Refs: `Dockerfile.cuda`; supersedes the base image recorded in the
+  2026-07-03 M19 deploy-packaging entry (m19 D1).
+
 ### 2026-07-04 — [design] Review remediation Phase 6: GPU-day seam changes (CPU design + C5 contract test)
 - What: Captured the five GPU-day seam changes from the full-repo review in
   `docs/design/gpu-day-seams.md` (C5 CUDA-graph static buffers, C4 batched
