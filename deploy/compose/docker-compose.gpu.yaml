@@ -7,13 +7,17 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./gateway.yaml:/etc/kairyu/config.yaml:ro
+      - ./gateway-gpu.yaml:/etc/kairyu/config.yaml:ro
     depends_on:
       - replica
   replica:
     build:
       context: ../..
       dockerfile: Dockerfile.cuda
+    environment:
+      # flashinfer (the default GPU attention backend) has no Blackwell/sm_120
+      # kernels yet, so the deployment can pin "torch". Empty -> auto-select.
+      - KAIRYU_ATTENTION_BACKEND=${KAIRYU_ATTENTION_BACKEND:-}
     volumes:
       - ./gpu-replica.yaml:/etc/kairyu/config.yaml:ro
       - ${KAIRYU_MODEL_DIR:-/models}:/models:ro
