@@ -7,7 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON=python3.12
+# Bytecode compilation is disabled: with the full GPU dep set (torch + CUDA
+# libs) uv's parallel compile exhausts file descriptors (EMFILE / os error 24).
+ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON=python3.12
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project --no-dev --extra gpu --extra engine --extra fleet
 COPY kairyu ./kairyu
