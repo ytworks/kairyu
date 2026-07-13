@@ -573,6 +573,15 @@ server:                        # ServerSection = bind address + ServerSettings
   tracing: false               # OTel spans (needs the otel extra; no-op without)
   usage_ledger_path: null      # JSONL usage ledger; enables GET /admin/usage
 
+tenants:                       # optional authenticated API-key -> tenant mapping
+  default_tenant: default      # resolved keys omitted below use this tenant
+  key_tenants:                 # every key must occur in comma-separated $KAIRYU_KEYS
+    key-a: team-a
+    key-b: team-b
+  limits:                      # optional independent buckets per known tenant
+    team-a: {requests_per_minute: 60, tokens_per_minute: 10000}
+    team-b: {requests_per_minute: 120, tokens_per_minute: 20000}
+
 engines:                       # served model name -> one backend
   qwen:
     backend: kairyu            # mock | kairyu | kairyu-proc | openai | vllm
@@ -648,12 +657,27 @@ replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds a `kairyu_trace`
 block to `kairyu-auto` responses; `stream_options: {include_usage: true}` appends
 the final usage chunk.
 
-### Multi-tenancy (programmatic)
+### Multi-tenancy
 
-`create_app(..., tenant_config=TenantConfig(key_tenants={...}, limits={"team-a":
-TenantLimits(requests_per_minute=600, tokens_per_minute=200_000)}))` — per-tenant
-token buckets run inside auth (401 wins over 429); usage lands in the JSONL
-ledger (`server.usage_ledger_path`).
+For `kairyu serve`, the primary configuration path is the optional `tenants:` block in
+the DeploymentSpec above. In that example, `KAIRYU_KEYS` must resolve to a
+comma-separated value containing `key-a,key-b`: every `key_tenants` key must be a member
+of the resolved data-plane API-key set, while a resolved key omitted from the mapping uses
+`default_tenant`. Unknown keys and limits for unknown tenants fail during deployment
+preflight, before owned backends are constructed. The mapping keys are actual API-key
+values rather than environment-variable names, so protect the deployment file as
+secret-bearing configuration.
+
+Each tenant gets independent request-per-minute and token-per-minute buckets; a tenant
+without an explicit profile uses the defaults (600 requests and 200,000 tokens per
+minute). Authentication runs before tenant limiting, so a rejected credential does not
+consume a bucket. When `server.usage_ledger_path` is configured, successful request usage
+is grouped under the mapped tenant name in the JSONL ledger and `/admin/usage` totals.
+
+Programmatic callers can still pass the existing runtime configuration directly:
+`create_app(..., tenant_config=TenantConfig(key_tenants={"key-a": "team-a"},
+limits={"team-a": TenantLimits(requests_per_minute=600,
+tokens_per_minute=200_000)}))`.
 
 ### Deployment artifacts
 
