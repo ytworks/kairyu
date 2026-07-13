@@ -8,6 +8,17 @@ import pytest
 from kairyu.batch.store import BatchStore
 
 
+class _CloseFailingHandle:
+    """Delegate a real handle, then report its flush-on-close failure."""
+
+    def __init__(self, handle):
+        self._handle = handle
+
+    def close(self):
+        self._handle.close()
+        raise OSError("simulated flush-on-close failure")
+
+
 def _input_file(store: BatchStore, owner: str):
     return store.save_file(
         b'{"custom_id": "a"}\n', filename="in.jsonl", purpose="batch", owner=owner
@@ -204,6 +215,92 @@ def test_jsonl_writer_abort_removes_temporary_data_and_metadata(tmp_path):
 
     assert writer.state == "aborted"
     assert list((tmp_path / "files").iterdir()) == []
+
+
+def test_jsonl_writer_abort_cleans_up_when_close_flush_fails(tmp_path):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="errors.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+    writer.append({"error": "partial"})
+    handle = writer._handle
+    writer._handle = _CloseFailingHandle(handle)
+
+    with pytest.raises(OSError, match="flush-on-close"):
+        writer.abort()
+
+    assert handle.closed
+    assert writer._handle is None
+    assert writer.state == "aborted"
+    assert list((tmp_path / "files").iterdir()) == []
+
+
+def test_jsonl_writer_commit_close_failure_aborts_without_visibility(tmp_path):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="output.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+    writer.append({"custom_id": "partial"})
+    handle = writer._handle
+    writer._handle = _CloseFailingHandle(handle)
+
+    with pytest.raises(OSError, match="flush-on-close"):
+        writer.commit()
+
+    assert handle.closed
+    assert writer._handle is None
+    assert writer.state == "aborted"
+    assert list((tmp_path / "files").iterdir()) == []
+    with pytest.raises(KeyError):
+        store.get_file(writer._file_id, owner="tenant-a")
+
+
+def test_jsonl_writer_publish_failure_aborts_without_visibility(tmp_path, monkeypatch):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="output.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+    writer.append({"custom_id": "partial"})
+    real_replace = Path.replace
+
+    def fail_content_publish(path, target):
+        if path.name.endswith(".bin.tmp"):
+            raise OSError("simulated content publish failure")
+        return real_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_content_publish)
+
+    with pytest.raises(OSError, match="content publish"):
+        writer.commit()
+
+    assert writer._handle is None
+    assert writer.state == "aborted"
+    assert list((tmp_path / "files").iterdir()) == []
+    with pytest.raises(KeyError):
+        store.get_file(writer._file_id, owner="tenant-a")
+
+
+def test_jsonl_writer_metadata_failure_aborts_without_visibility(tmp_path, monkeypatch):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="output.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+    writer.append({"custom_id": "partial"})
+
+    def fail_metadata_publish(path, payload):
+        path.with_suffix(".tmp").write_text(json.dumps(payload), encoding="utf-8")
+        raise OSError("simulated metadata publish failure")
+
+    monkeypatch.setattr(store, "_write_json", fail_metadata_publish)
+
+    with pytest.raises(OSError, match="metadata publish"):
+        writer.commit()
+
+    assert writer._handle is None
+    assert writer.state == "aborted"
+    assert list((tmp_path / "files").iterdir()) == []
+    with pytest.raises(KeyError):
+        store.get_file(writer._file_id, owner="tenant-a")
 
 
 def test_jsonl_writer_context_exception_aborts_transaction(tmp_path):

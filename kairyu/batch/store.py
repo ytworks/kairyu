@@ -77,9 +77,8 @@ class JsonlFileWriter:
         if self._state != "open":
             raise RuntimeError(f"JSONL writer is already {self._state}")
         assert self._handle is not None
-        self._handle.close()
-        self._handle = None
         try:
+            self._close_handle()
             file = self._store._commit_file(
                 self._temporary_path,
                 file_id=self._file_id,
@@ -89,7 +88,7 @@ class JsonlFileWriter:
                 owner=self._owner,
             )
         except Exception:
-            self._state = "aborted"
+            self._discard_temporary()
             raise
         self._state = "committed"
         return file
@@ -99,11 +98,10 @@ class JsonlFileWriter:
             raise RuntimeError("JSONL writer is already committed")
         if self._state == "aborted":
             return
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
-        self._temporary_path.unlink(missing_ok=True)
-        self._state = "aborted"
+        try:
+            self._close_handle()
+        finally:
+            self._discard_temporary()
 
     def __enter__(self) -> Self:
         return self
@@ -121,6 +119,16 @@ class JsonlFileWriter:
     def _require_writable(self) -> None:
         if self._state not in ("new", "open"):
             raise RuntimeError(f"JSONL writer is already {self._state}")
+
+    def _close_handle(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is not None:
+            handle.close()
+
+    def _discard_temporary(self) -> None:
+        self._state = "aborted"
+        self._temporary_path.unlink(missing_ok=True)
 
 
 class RequestCounts(BaseModel):

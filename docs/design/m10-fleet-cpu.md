@@ -43,7 +43,7 @@ add_replica/drain+remove; removal only via drain-then-remove (never drops
 in-flight). Server: `POST /admin/drain` marks the pool replica draining and
 flips `/readyz` to 503 (existing prober contract).
 
-### D3 — `BatchStoreProtocol` (pure refactor)
+### D3 — `BatchStoreProtocol` and streaming file storage
 
 The file-backed batch store's surface (`create/get/update/list`) is extracted
 to a Protocol so M11 tenancy ledgers and tests can fake it. The surface also
