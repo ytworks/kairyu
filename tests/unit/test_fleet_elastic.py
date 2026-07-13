@@ -6,6 +6,7 @@ import subprocess
 
 import pytest
 
+from kairyu.deploy import registry as registry_module
 from kairyu.deploy.registry import (
     PoolReconciler,
     RegistryDiscovery,
@@ -18,6 +19,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     SamplingParams,
 )
+from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.orchestration.replica import ReplicaPool
 
 pytestmark = pytest.mark.asyncio
@@ -131,11 +133,15 @@ class TestRegistryAndReconciler:
         clock = {"t": 0.0}
         registry = ReplicaRegistry(now=lambda: clock["t"])
         registry.register("r1", "http://r1/v1", ttl_s=10)
-        assert registry.alive() == {"r1": "http://r1/v1"}
+        assert registry.alive() == {
+            "r1": registry_module.ReplicaConfig(address="http://r1/v1")
+        }
         clock["t"] = 9.0
         registry.heartbeat("r1")
         clock["t"] = 18.0
-        assert registry.alive() == {"r1": "http://r1/v1"}
+        assert registry.alive() == {
+            "r1": registry_module.ReplicaConfig(address="http://r1/v1")
+        }
         clock["t"] = 30.0
         assert registry.alive() == {}
         with pytest.raises(KeyError):
@@ -146,7 +152,13 @@ class TestRegistryAndReconciler:
         members = {"old": "http://old/v1", "new": "http://new/v1"}
         source = StaticDiscovery(members)
         reconciler = PoolReconciler(
-            pool, source, factory=lambda addr: (MockBackend(), f"{addr}/health")
+            pool,
+            source,
+            default_model="llama",
+            factory=lambda identity: (
+                MockBackend(),
+                f"{identity.address}/health",
+            ),
         )
         result = await reconciler.reconcile()
         assert result["added"] == ["new"]
@@ -162,7 +174,12 @@ class TestRegistryAndReconciler:
         pool = ReplicaPool({"busy": MockBackend(), "idle": MockBackend()})
         pool._entries["busy"].outstanding = 1  # simulate in-flight
         source = StaticDiscovery({"idle": "http://idle/v1"})
-        reconciler = PoolReconciler(pool, source, factory=lambda a: (MockBackend(), None))
+        reconciler = PoolReconciler(
+            pool,
+            source,
+            default_model="llama",
+            factory=lambda identity: (MockBackend(), None),
+        )
         result = await reconciler.reconcile()
         assert result["removed"] == []
         assert "busy" in result["draining"]
@@ -174,8 +191,79 @@ class TestRegistryAndReconciler:
     def test_registry_discovery_bridges(self):
         clock = {"t": 0.0}
         registry = ReplicaRegistry(now=lambda: clock["t"])
-        registry.register("r1", "http://r1/v1")
-        assert RegistryDiscovery(registry).poll() == {"r1": "http://r1/v1"}
+        registry.register(
+            "r1",
+            "http://r1/v1",
+            model="llama",
+            api_key_env=None,
+        )
+        assert RegistryDiscovery(registry).poll() == {
+            "r1": registry_module.ReplicaConfig(
+                address="http://r1/v1",
+                model="llama",
+                api_key_env=None,
+            )
+        }
+
+    def test_default_openai_factory_receives_model_and_auth_identity(self):
+        identity = registry_module.ReplicaIdentity(
+            address="http://replica/v1",
+            model="llama",
+            api_key_env=None,
+        )
+
+        backend, health_url = registry_module.openai_replica_factory(identity)
+
+        assert isinstance(backend, OpenAICompatBackend)
+        assert backend._base_url == "http://replica/v1"
+        assert backend._model == "llama"
+        assert backend._api_key_env is None
+        assert health_url == "http://replica/readyz"
+
+    async def test_initial_scale_uses_reconciler_default_model(self):
+        pool = ReplicaPool({"seed": MockBackend()})
+        source = StaticDiscovery({"replica": "http://replica/v1"})
+        reconciler = PoolReconciler(pool, source, default_model="llama")
+
+        result = await reconciler.reconcile()
+
+        assert result["added"] == ["replica"]
+        backend = pool._entries["replica"].backend
+        assert isinstance(backend, OpenAICompatBackend)
+        assert backend._model == "llama"
+
+    async def test_discovery_identity_overrides_reconciler_model_and_auth_default(self):
+        identities = []
+        source_identity = registry_module.ReplicaIdentity(
+            address="http://replica/v1",
+            model="source-model",
+            api_key_env=None,
+        )
+        source = StaticDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address=source_identity.address,
+                    model=source_identity.model,
+                    api_key_env=source_identity.api_key_env,
+                )
+            }
+        )
+        pool = ReplicaPool({"seed": MockBackend()})
+
+        def recording_factory(identity):
+            identities.append(identity)
+            return MockBackend(), None
+
+        reconciler = PoolReconciler(
+            pool,
+            source,
+            factory=recording_factory,
+            default_model="fallback-model",
+        )
+
+        await reconciler.reconcile()
+
+        assert identities == [source_identity]
 
 
 class TestTracing:
