@@ -2,11 +2,15 @@
 embeddings, vision wire, F5 logic, bench schema."""
 
 import base64
+import json
 import struct
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from kairyu.batch.store import BatchStore
+from kairyu.batch.worker import BatchWorker
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
@@ -114,6 +118,99 @@ class TestOrchestratorSurface:
 
 
 class TestTenancy:
+    @pytest.mark.parametrize(
+        ("surface", "model", "stream"),
+        [
+            pytest.param("chat", "m", False, id="sync-chat"),
+            pytest.param("chat", "m", True, id="stream-chat"),
+            pytest.param("completions", "m", False, id="sync-completions"),
+            pytest.param("completions", "m", True, id="stream-completions"),
+            pytest.param("chat", "kairyu-auto", False, id="sync-orchestrator"),
+            pytest.param("chat", "kairyu-auto", True, id="stream-orchestrator"),
+            pytest.param("responses", "m", False, id="responses"),
+            pytest.param("embeddings", "m", False, id="embeddings"),
+            pytest.param("batch", "m", False, id="batch"),
+        ],
+    )
+    async def test_successful_usage_endpoint_matrix_records_exactly_once(
+        self, tmp_path, surface, model, stream
+    ):
+        class RecordingLimiter:
+            def __init__(self):
+                self.charges = []
+
+            def charge_tokens(self, tenant, tokens):
+                self.charges.append((tenant, tokens))
+
+        app = _auto_app(tmp_path)
+        limiter = RecordingLimiter()
+        app.state.tenant_limiter = limiter
+
+        if surface == "batch":
+            store = BatchStore(tmp_path / "batch")
+            worker = BatchWorker(
+                store,
+                {"m": MockBackend()},
+                max_concurrency=1,
+                usage_ledger=app.state.usage_ledger,
+                tenant_limiter=limiter,
+            )
+            content = json.dumps(
+                {
+                    "custom_id": "matrix-batch",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": model,
+                        "messages": [{"role": "user", "content": "matrix prompt"}],
+                    },
+                }
+            ).encode()
+            file = store.save_file(content, "matrix.jsonl", "batch")
+            job = store.create_batch(file.id, "/v1/chat/completions")
+
+            await worker.process(job.id)
+
+            finished = store.get_batch(job.id)
+            assert finished.status == "completed"
+            assert finished.request_counts.completed == 1
+        else:
+            if surface == "chat":
+                path = "/v1/chat/completions"
+                body = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "matrix prompt"}],
+                    "stream": stream,
+                }
+            elif surface == "completions":
+                path = "/v1/completions"
+                body = {"model": model, "prompt": "matrix prompt", "stream": stream}
+            elif surface == "responses":
+                path = "/v1/responses"
+                body = {"model": model, "input": "matrix prompt"}
+            else:
+                path = "/v1/embeddings"
+                body = {"model": model, "input": "matrix prompt"}
+
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                response = await client.post(path, json=body)
+
+            assert response.status_code == 200
+            if stream:
+                assert "data: [DONE]" in response.text
+
+        totals = app.state.usage_ledger.totals()["default"]
+        assert totals["requests"] == 1
+        assert limiter.charges == [
+            (
+                "default",
+                totals["prompt_tokens"] + totals["completion_tokens"],
+            )
+        ]
+
     def test_stream_usage_owner_finalizes_once(self, tmp_path):
         from kairyu.engine.backend import GenerationUsage
         from kairyu.entrypoints.server.metering import StreamUsageOwner
