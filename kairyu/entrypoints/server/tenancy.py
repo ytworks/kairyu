@@ -5,9 +5,10 @@ Identity: AuthMiddleware stores the matched key in scope state (A6);
 bucket on /v1/* — it runs INSIDE auth (401 wins over 429; unauthenticated
 requests never drain buckets). Keyless mode maps everything to "default".
 
-Ledger (A7): O_APPEND single-writer JSONL, one record per request, written
-from the handlers (middleware cannot see token usage); batch-worker
-executions are NOT metered in v1 (recorded in the design).
+Ledger (A7): O_APPEND single-writer JSONL, one record per successful public
+execution, written from handlers or the bounded batch consumer (middleware
+cannot see token usage). Counts use backend usage when present and otherwise
+the same derived approximation returned on the wire.
 """
 
 from __future__ import annotations
@@ -189,7 +190,7 @@ class TenantLimitMiddleware:
 
 
 class UsageLedger:
-    """O_APPEND single-writer JSONL (A7): one line per completed request.
+    """O_APPEND JSONL (A7): one line per successful request or batch line.
 
     Keeps ONE append handle open (P4): the old open()/write()/close() per request
     ran three syscalls synchronously on the event loop, stalling in-flight SSE

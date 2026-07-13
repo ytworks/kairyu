@@ -492,6 +492,132 @@ class TestResponseStore:
 
 
 class TestResponsesApi:
+    def test_responses_and_embeddings_meter_authenticated_tenant_with_wire_counts(
+        self, tmp_path, monkeypatch
+    ):
+        from dataclasses import replace
+
+        from kairyu.engine.backend import GenerationUsage
+
+        class ReportedUsageBackend(MockBackend):
+            async def generate(self, request):
+                result = await super().generate(request)
+                return replace(
+                    result,
+                    usage=GenerationUsage(prompt_tokens=17, completion_tokens=9),
+                )
+
+        class DerivedUsageBackend(MockBackend):
+            async def generate(self, request):
+                return replace(await super().generate(request), usage=None)
+
+        monkeypatch.setenv("KAIRYU_EXTRA_ROUTE_KEYS", "key-a")
+        ledger_path = tmp_path / "usage.jsonl"
+        app = create_app(
+            {"reported": ReportedUsageBackend(), "derived": DerivedUsageBackend()},
+            settings=ServerSettings(
+                api_keys_env="KAIRYU_EXTRA_ROUTE_KEYS",
+                usage_ledger_path=str(ledger_path),
+            ),
+            tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
+            embedding_backend=MockEmbeddingBackend(dimensions=8),
+        )
+        headers = {"Authorization": "Bearer key-a"}
+
+        with TestClient(app) as client:
+            reported = client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": "reported", "input": "reported input"},
+            )
+            derived = client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": "derived", "input": "derived input"},
+            )
+            embedding = client.post(
+                "/v1/embeddings",
+                headers=headers,
+                json={
+                    "model": "embedding-model",
+                    "input": ["two words", "one"],
+                    "encoding_format": "float",
+                },
+            )
+
+        assert reported.status_code == 200
+        assert reported.json()["usage"] == {
+            "input_tokens": 17,
+            "output_tokens": 9,
+            "total_tokens": 26,
+        }
+        assert derived.status_code == 200
+        derived_usage = derived.json()["usage"]
+        assert derived_usage["input_tokens"] > 0
+        assert derived_usage["output_tokens"] > 0
+        assert embedding.status_code == 200
+        assert embedding.json()["usage"] == {"prompt_tokens": 3, "total_tokens": 3}
+
+        totals = UsageLedger(ledger_path).totals()
+        assert set(totals) == {"tenant-a"}
+        assert totals["tenant-a"] == {
+            "requests": 3,
+            "prompt_tokens": 17 + derived_usage["input_tokens"] + 3,
+            "completion_tokens": 9 + derived_usage["output_tokens"],
+        }
+
+    def test_extra_route_failures_before_usable_results_are_unmetered(
+        self, tmp_path, monkeypatch
+    ):
+        class FailingBackend(MockBackend):
+            async def generate(self, request):
+                raise RuntimeError("backend unavailable")
+
+        class FailingEmbeddingBackend(MockEmbeddingBackend):
+            async def embed(self, texts):
+                raise RuntimeError("embedding backend unavailable")
+
+        monkeypatch.setenv("KAIRYU_EXTRA_ROUTE_KEYS", "key-a")
+        ledger_path = tmp_path / "usage.jsonl"
+        app = create_app(
+            {"m": FailingBackend()},
+            settings=ServerSettings(
+                api_keys_env="KAIRYU_EXTRA_ROUTE_KEYS",
+                usage_ledger_path=str(ledger_path),
+            ),
+            tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
+            embedding_backend=FailingEmbeddingBackend(dimensions=8),
+        )
+        headers = {"Authorization": "Bearer key-a"}
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            invalid_response = client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": "m", "input": "x", "stream": True},
+            )
+            failed_response = client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": "m", "input": "x"},
+            )
+            invalid_embedding = client.post(
+                "/v1/embeddings",
+                headers=headers,
+                json={"model": "m", "input": []},
+            )
+            failed_embedding = client.post(
+                "/v1/embeddings",
+                headers=headers,
+                json={"model": "m", "input": "x"},
+            )
+
+        assert invalid_response.status_code == 400
+        assert failed_response.status_code == 502
+        assert invalid_embedding.status_code == 400
+        assert failed_embedding.status_code == 500
+        assert not ledger_path.exists()
+
     def test_sdk_round_trip_with_previous_response_id(self, tmp_path):
         import openai
 

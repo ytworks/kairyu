@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from kairyu.entrypoints.server.errors import invalid_request
+from kairyu.entrypoints.server.metering import record_state_usage, resolve_usage_counts
 
 _MAX_EMBEDDING_INPUTS = 2048  # cap the embeddings batch (M6)
 
@@ -128,7 +129,7 @@ def add_extra_routes(
     if embedding_backend is not None:
 
         @app.post("/v1/embeddings")
-        async def embeddings(request: EmbeddingsRequest):
+        async def embeddings(request: EmbeddingsRequest, http_request: Request):
             texts = [request.input] if isinstance(request.input, str) else request.input
             if not texts:
                 return JSONResponse(
@@ -160,12 +161,21 @@ def add_extra_routes(
                     payload = vector
                 data.append({"object": "embedding", "index": index, "embedding": payload})
             prompt_tokens = sum(len(text.split()) for text in texts)
-            return {
+            response = {
                 "object": "list",
                 "data": data,
                 "model": request.model,
                 "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
             }
+            owner = getattr(http_request.state, "tenant", None) or "default"
+            record_state_usage(
+                http_request.app.state,
+                tenant=owner,
+                model=request.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=0,
+            )
+            return response
 
     @app.post("/v1/responses")
     async def responses(request: ResponsesRequest, http_request: Request):
@@ -245,8 +255,12 @@ def add_extra_routes(
                 context + [{"type": "message", "role": "assistant", "content": result.text}],
                 owner=owner,
             )
-        usage = result.usage
-        return {
+        prompt_tokens, completion_tokens = resolve_usage_counts(
+            result.usage,
+            prompt=prompt,
+            completions=result.completions,
+        )
+        response = {
             "id": response_id,
             "object": "response",
             "created_at": int(time.time()),
@@ -257,8 +271,16 @@ def add_extra_routes(
             "metadata": request.metadata,
             # A8: Responses usage names differ from chat completions
             "usage": {
-                "input_tokens": usage.prompt_tokens if usage else 0,
-                "output_tokens": usage.completion_tokens if usage else 0,
-                "total_tokens": (usage.prompt_tokens + usage.completion_tokens) if usage else 0,
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
             },
         }
+        record_state_usage(
+            http_request.app.state,
+            tenant=owner,
+            model=request.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        return response

@@ -155,6 +155,8 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             max_concurrency=spec.batch.max_concurrency,
             metrics=app.state.metrics,
             chat_templates=chat_templates,  # batch and HTTP must render identically
+            usage_ledger=getattr(app.state, "usage_ledger", None),
+            tenant_limiter=getattr(app.state, "tenant_limiter", None),
         )
         workers.append(worker)
         add_batch_routes(app, store, worker)

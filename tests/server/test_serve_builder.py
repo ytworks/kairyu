@@ -238,6 +238,27 @@ tenants:
     )
 
 
+def test_builder_injects_usage_sinks_into_batch_worker(tmp_path):
+    spec = load_deployment_spec(
+        f"""
+server:
+  usage_ledger_path: {tmp_path / "usage.jsonl"}
+engines:
+  m: {{ backend: mock }}
+tenants:
+  default_tenant: tenant-a
+batch:
+  data_dir: {tmp_path / "batch-data"}
+  max_concurrency: 1
+"""
+    )
+
+    app = build_app_from_spec(spec)
+
+    assert app.state.batch_worker._usage_ledger is app.state.usage_ledger
+    assert app.state.batch_worker._tenant_limiter is app.state.tenant_limiter
+
+
 async def test_tenant_auth_uses_the_preflight_key_snapshots(monkeypatch):
     monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a,key-b")
     monkeypatch.setenv("KAIRYU_DEPLOYMENT_ADMIN_KEYS", "admin-a,admin-b")

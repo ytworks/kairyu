@@ -11,7 +11,7 @@ remaining work is GPU execution: performance gates, kernel tuning, fabric
 bring-up, `pytest -m gpu`, and `scripts/gpu_gates/` (all pre-written and
 dry-run pinned).**
 
-_Last updated: 2026-07-13_
+_Last updated: 2026-07-14_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -53,6 +53,10 @@ replicas, auth, metrics, batch) or a replica node, and the compose topology
 JSONL writers; the batch worker streams input through a bounded queue and fixed consumer
 pool, spools results incrementally, and persists controlled terminal failure while rolling
 back partial result publications after ordinary processing or storage exceptions.
+Tenant usage accounting now covers synchronous and streaming generation, Responses,
+embeddings, and successful batch lines with authenticated ownership and backend-or-derived
+wire-count parity; each dispatched execution records exactly once even when a stream closes
+early or a completed batch line is later rolled back by cancellation or spool failure.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
 deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
@@ -65,6 +69,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [progress] Responses, embeddings, and batches complete usage accounting
+- What: successful `/v1/responses` and `/v1/embeddings` calls now record one usage
+  event for the authenticated tenant using the same counts returned on the wire.
+  The bounded batch worker receives optional ledger/limiter sinks from the deployment
+  builder and records each successful backend line for its persisted owner immediately
+  after execution, independently of later spool, finalization, or cancellation outcomes.
+  Backend usage wins when present; Responses and batch fall back to the shared derived
+  approximation, while embeddings charge input tokens with zero output tokens.
+- Why: these three surfaces bypassed the shared tenant recorder, leaving successful work
+  unaccounted; delaying batch accounting until file publication would also lose already
+  executed calls whenever transactional output was rolled back.
+- Refs: Issue #45 Task 3; `kairyu/{batch/worker,deploy/builder}.py`;
+  `kairyu/entrypoints/server/{extra_routes,tenancy}.py`;
+  `tests/server/{test_batches,test_m11_product,test_serve_builder}.py`.
 
 ### 2026-07-14 — [progress] Stream metering survives completion, failure, and disconnect
 - What: engine chat, orchestrated chat, and legacy completions streams now share one
