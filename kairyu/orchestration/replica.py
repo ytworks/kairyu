@@ -34,6 +34,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     UpstreamClientError,
+    shutdown_all,
 )
 from kairyu.orchestration.router import JsonlRouterLog
 
@@ -120,7 +121,7 @@ class ReplicaPool:
     def is_draining(self, replica_id: str) -> bool:
         return self._entry(replica_id).draining
 
-    def remove_replica(self, replica_id: str, force: bool = False) -> None:
+    async def remove_replica(self, replica_id: str, force: bool = False) -> None:
         entry = self._entry(replica_id)
         if entry.outstanding > 0 and not force:
             raise RuntimeError(
@@ -133,6 +134,7 @@ class ReplicaPool:
         # must not inherit phantom prefixes and route shared traffic to a cold cache
         if self._prefix_index is not None:
             self._prefix_index.forget_replica(replica_id)
+        await shutdown_all((entry.backend,), f"replica {replica_id!r}")
 
     def health_url(self, replica_id: str) -> str | None:
         return self._entry(replica_id).health_url
@@ -226,9 +228,16 @@ class ReplicaPool:
     def _prefix_select(self, eligible: tuple[str, ...], prompt: str) -> str | None:
         """alpha*overlap - beta*outstanding; None when no candidate has overlap
         (fall through to least-outstanding rather than pay a random placement)."""
+        chunk_keys = getattr(self._prefix_index, "chunk_keys", None)
+        overlap_keys = getattr(self._prefix_index, "overlap_keys", None)
+        use_precomputed = callable(chunk_keys) and callable(overlap_keys)
+        keys = chunk_keys(prompt) if use_precomputed else None
         scored = []
         for rid in eligible:
-            overlap = self._prefix_index.overlap(rid, prompt)  # compute once per replica (P5)
+            if use_precomputed:
+                overlap = overlap_keys(rid, keys)
+            else:
+                overlap = self._prefix_index.overlap(rid, prompt)
             score = (
                 self._prefix_alpha * overlap
                 - self._prefix_beta * self._entries[rid].outstanding
@@ -298,5 +307,6 @@ class ReplicaPool:
             self._finish(entry)
 
     async def shutdown(self) -> None:
-        for entry in self._entries.values():
-            await entry.backend.shutdown()
+        await shutdown_all(
+            (entry.backend for entry in self._entries.values()), "ReplicaPool"
+        )

@@ -45,6 +45,40 @@ class _ReleaseRecordingRunner:
         self.runner.release(request_id)
 
 
+class _NcclScaleExpert(torch.nn.Module):
+    def __init__(self, scale: float) -> None:
+        super().__init__()
+        self.register_buffer("scale", torch.tensor(scale, dtype=torch.float32))
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return hidden * self.scale
+
+
+class _NcclTinyMoeBlock(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.experts = torch.nn.ModuleList(
+            _NcclScaleExpert(scale) for scale in (0.5, -2.0, 3.0, 1.25)
+        )
+        self.register_buffer("route", torch.tensor([0, 2, 1, 3, 2, 0]))
+
+    def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if hidden.shape[0] != self.route.shape[0]:
+            raise ValueError(f"expected {self.route.shape[0]} tokens, got {hidden.shape[0]}")
+        weights = torch.ones(
+            hidden.shape[0], 1, dtype=hidden.dtype, device=hidden.device
+        )
+        return self.route[:, None], weights
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        expert_ids, _ = self._route(hidden)
+        out = torch.zeros_like(hidden)
+        for expert_id, expert in enumerate(self.experts):
+            mask = expert_ids[:, 0] == expert_id
+            out[mask] = expert(hidden[mask])
+        return out
+
+
 def _setup(rank: int, world_size: int, init_file: str):
     from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
 
@@ -268,6 +302,52 @@ def ep_block_parity(rank: int, world_size: int, init_file: str, out_dir: str,
     out = ep_block(hidden)
     diff = (out - reference).abs().max().item()
     _finish(out_dir, rank, {"maxdiff": diff, "local_experts": len(ep_block.local_experts)})
+
+
+def ep_block_nccl_parity(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """EP=2 dispatch/return parity with CUDA tensors and an NCCL process group."""
+    import torch.distributed as dist
+
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+    from kairyu.models.moe_parallel import EpMoeBlock
+
+    if world_size != 2:
+        raise ValueError(f"NCCL EP parity requires world_size=2, got {world_size}")
+    torch.cuda.set_device(rank)
+    init_distributed(rank, world_size, f"file://{init_file}", backend="nccl")
+    try:
+        comm = TorchDistCommunicator()
+        device = torch.device("cuda", rank)
+        block = _NcclTinyMoeBlock().to(device)
+        hidden = torch.tensor(
+            [
+                [1.0, 2.0, -1.0],
+                [0.5, -3.0, 4.0],
+                [-2.0, 1.5, 3.0],
+                [4.0, -0.5, 2.0],
+                [3.0, 2.5, -4.0],
+                [-1.0, 0.25, 5.0],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        reference = block(hidden)
+        ep_block = EpMoeBlock(block, comm, ep_rank=rank, ep_size=world_size)
+        out = ep_block(hidden)
+        result = {
+            "max_error": (out - reference).abs().max().item(),
+            "device": str(out.device),
+            "local_experts": len(ep_block.local_experts),
+        }
+        Path(out_dir, f"rank{rank}.json").write_text(json.dumps(result))
+    finally:
+        if dist.is_initialized():
+            try:
+                dist.barrier()
+            finally:
+                dist.destroy_process_group()
 
 
 def pp_greedy_parity(rank: int, world_size: int, init_file: str, out_dir: str,

@@ -57,6 +57,32 @@ def test_non_ascii_bearer_token_is_rejected_not_crash():
     assert auth._authorized(scope) is False  # no TypeError
 
 
+def test_role_auth_compares_every_configured_key(monkeypatch):
+    from kairyu.entrypoints.server.middleware import AuthMiddleware
+
+    compared = []
+
+    def compare(left: str, right: str) -> bool:
+        compared.append(right)
+        return left == right
+
+    monkeypatch.setattr(
+        "kairyu.entrypoints.server.middleware.hmac.compare_digest", compare
+    )
+    auth = AuthMiddleware(
+        app=None,
+        api_keys=("data", "other-data"),
+        admin_keys=("admin", "other-admin"),
+    )
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer data")],
+    }
+
+    assert auth._authorized(scope) is True
+    assert compared == ["data", "other-data", "admin", "other-admin"]
+
+
 async def test_valid_keys_are_admitted(app):
     async with _client(app) as client:
         for key in ("secret-1", "secret-2"):
@@ -94,3 +120,52 @@ async def test_empty_key_env_fails_loud(monkeypatch):
             engines={"m": MockBackend()},
             settings=ServerSettings(api_keys_env="KAIRYU_API_KEYS"),
         )
+
+
+async def test_admin_and_data_plane_role_matrix(monkeypatch):
+    monkeypatch.setenv("KAIRYU_DATA_KEYS", "data,dual")
+    monkeypatch.setenv("KAIRYU_ADMIN_KEYS", "admin,dual")
+    app = create_app(
+        {"m": MockBackend()},
+        settings=ServerSettings(
+            api_keys_env="KAIRYU_DATA_KEYS",
+            admin_keys_env="KAIRYU_ADMIN_KEYS",
+        ),
+    )
+    payload = _chat_body("hi")
+    async with _client(app) as client:
+        admin = {"Authorization": "Bearer admin"}
+        data = {"Authorization": "Bearer data"}
+        dual = {"Authorization": "Bearer dual"}
+        invalid = {"Authorization": "Bearer invalid"}
+
+        assert (await client.post("/admin/drain", headers=admin)).status_code == 200
+        assert (await client.post("/admin/undrain", headers=admin)).status_code == 200
+        denied = await client.post("/v1/chat/completions", json=payload, headers=admin)
+        assert denied.status_code == 403
+        assert denied.json()["error"]["code"] == "data_plane_required"
+        assert (
+            await client.post("/v1/chat/completions", json=payload, headers=data)
+        ).status_code == 200
+        assert (await client.post("/admin/drain", headers=data)).status_code == 403
+        assert (
+            await client.post("/v1/chat/completions", json=payload, headers=dual)
+        ).status_code == 200
+        assert (await client.post("/admin/drain", headers=dual)).status_code == 200
+        assert (await client.post("/admin/undrain", headers=dual)).status_code == 200
+        assert (await client.post("/admin/drain", headers=invalid)).status_code == 401
+
+
+async def test_admin_only_configuration_installs_auth(monkeypatch):
+    monkeypatch.setenv("KAIRYU_ADMIN_KEYS", "admin")
+    app = create_app(
+        {"m": MockBackend()},
+        settings=ServerSettings(admin_keys_env="KAIRYU_ADMIN_KEYS"),
+    )
+    async with _client(app) as client:
+        assert (await client.post("/admin/drain")).status_code == 401
+        assert (
+            await client.post(
+                "/admin/drain", headers={"Authorization": "Bearer admin"}
+            )
+        ).status_code == 200

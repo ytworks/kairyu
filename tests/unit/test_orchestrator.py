@@ -10,6 +10,15 @@ COMPLEX = (
 )
 
 
+class _ShutdownBackend(MockBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_count = 0
+
+    async def shutdown(self) -> None:
+        self.shutdown_count += 1
+
+
 def _orchestrator(**kwargs) -> Orchestrator:
     engines = kwargs.pop(
         "engines",
@@ -78,6 +87,13 @@ async def test_missing_tier_falls_back_with_trace_note():
     assert result.route.target == "tier2"
     assert result.text
     assert any("fallback" in note for note in result.trace)
+
+
+async def test_shutdown_closes_each_owned_engine_once():
+    shared = _ShutdownBackend()
+    orchestrator = Orchestrator(engines={"tier1": shared, "tier2": shared})
+    await orchestrator.shutdown()
+    assert shared.shutdown_count == 1
 
 
 def test_run_sync_wrapper():

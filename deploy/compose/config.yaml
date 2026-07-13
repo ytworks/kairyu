@@ -1,0 +1,4 @@
+# Standalone CPU-safe deployment for docker-compose.webui.yaml.
+engines:
+  default:
+    backend: mock

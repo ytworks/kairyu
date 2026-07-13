@@ -3,10 +3,12 @@ embeddings, vision wire, F5 logic, bench schema."""
 
 import base64
 import struct
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.extra_routes import MockEmbeddingBackend
@@ -113,6 +115,37 @@ class TestOrchestratorSurface:
 
 
 class TestTenancy:
+    def test_admin_only_usage_is_not_mapped_to_default_tenant(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("KAIRYU_DATA_KEYS", "data")
+        monkeypatch.setenv("KAIRYU_ADMIN_KEYS", "admin")
+        app = create_app(
+            {"m": MockBackend()},
+            settings=ServerSettings(
+                api_keys_env="KAIRYU_DATA_KEYS",
+                admin_keys_env="KAIRYU_ADMIN_KEYS",
+                usage_ledger_path=str(tmp_path / "usage.jsonl"),
+            ),
+            tenant_config=TenantConfig(key_tenants={"data": "tenant-a"}),
+        )
+        payload = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        with TestClient(app) as client:
+            data = {"Authorization": "Bearer data"}
+            admin = {"Authorization": "Bearer admin"}
+            assert (
+                client.post("/v1/chat/completions", json=payload, headers=data).status_code
+                == 200
+            )
+            admin_usage = client.get("/admin/usage", headers=admin)
+
+        assert admin_usage.status_code == 200
+        assert "tenant-a" in admin_usage.json()["usage"]
+        assert set(app.state.tenant_limiter._buckets) == {"tenant-a"}
+
     def test_rate_isolation_and_ledger(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KAIRYU_M11_KEYS", "key-a,key-b")
         config = TenantConfig(
@@ -406,7 +439,100 @@ def test_frontier_scoreboard_schema():
     from bench.frontier_compare import TargetReport, TrialResult, build_scoreboard
 
     report = TargetReport(name="kairyu", model="m")
-    report.trials.append(TrialResult(ttft_s=0.05, tpot_s=0.01, output_chars=100))
+    report.trials.append(
+        TrialResult(
+            ttft_s=0.05,
+            tpot_s=0.01,
+            output_chars=100,
+            completion_tokens=3,
+        )
+    )
     scoreboard = build_scoreboard([report])
     assert scoreboard["methodology"]["metric_definitions"]["ttft"]
+    assert "completion_tokens" in scoreboard["methodology"]["metric_definitions"]["tpot"]
     assert scoreboard["results"][0]["ttft_p50_s"] == 0.05
+    assert scoreboard["results"][0]["tpot_missing_usage_trials"] == 0
+
+
+class _FakeFrontierCompletions:
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.kwargs = None
+
+    async def create(self, **kwargs):
+        self.kwargs = kwargs
+
+        async def stream():
+            for chunk in self._chunks:
+                yield chunk
+
+        return stream()
+
+
+class _FakeFrontierClient:
+    def __init__(self, chunks):
+        completions = _FakeFrontierCompletions(chunks)
+        self.chat = SimpleNamespace(completions=completions)
+
+
+def _frontier_chunk(content=None, *, completion_tokens=None):
+    choices = (
+        [SimpleNamespace(delta=SimpleNamespace(content=content))]
+        if content is not None
+        else []
+    )
+    usage = (
+        SimpleNamespace(completion_tokens=completion_tokens)
+        if completion_tokens is not None
+        else None
+    )
+    return SimpleNamespace(choices=choices, usage=usage)
+
+
+async def test_frontier_tpot_uses_final_completion_tokens(monkeypatch):
+    from bench import frontier_compare
+
+    client = _FakeFrontierClient(
+        [
+            _frontier_chunk("three tokens"),
+            _frontier_chunk(" one chunk"),
+            _frontier_chunk(completion_tokens=4),
+        ]
+    )
+    clock = iter([0.0, 1.0, 4.0, 5.0])
+    monkeypatch.setattr(frontier_compare.time, "perf_counter", lambda: next(clock))
+
+    result = await frontier_compare.run_trial(
+        client,
+        frontier_compare.Target("kairyu", "http://localhost/v1", "m"),
+        "prompt",
+    )
+
+    assert client.chat.completions.kwargs["stream_options"] == {"include_usage": True}
+    assert result.ttft_s == 1.0
+    assert result.output_chars == len("three tokens one chunk")
+    assert result.completion_tokens == 4
+    assert result.tpot_s == 1.0  # (last content 4 - first content 1) / (4 - 1)
+
+
+async def test_frontier_missing_usage_never_substitutes_chunk_count(monkeypatch):
+    from bench import frontier_compare
+
+    client = _FakeFrontierClient(
+        [_frontier_chunk("first"), _frontier_chunk("second")]
+    )
+    clock = iter([0.0, 1.0, 4.0, 5.0])
+    monkeypatch.setattr(frontier_compare.time, "perf_counter", lambda: next(clock))
+
+    result = await frontier_compare.run_trial(
+        client,
+        frontier_compare.Target("legacy", "http://legacy/v1", "m"),
+        "prompt",
+    )
+    report = frontier_compare.TargetReport("legacy", "m", trials=[result])
+
+    assert result.ttft_s == 1.0
+    assert result.output_chars == len("firstsecond")
+    assert result.completion_tokens is None
+    assert result.tpot_s is None
+    assert report.summary()["tpot_missing_usage_trials"] == 1

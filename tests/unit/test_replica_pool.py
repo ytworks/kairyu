@@ -30,6 +30,7 @@ class FlakyBackend:
         self.failing = False
         self.client_failing = False  # raises a 4xx-style client error
         self.shutdown_count = 0
+        self.shutdown_error = False
 
     @property
     def prompts_seen(self) -> tuple[str, ...]:
@@ -50,6 +51,8 @@ class FlakyBackend:
 
     async def shutdown(self) -> None:
         self.shutdown_count += 1
+        if self.shutdown_error:
+            raise RuntimeError("shutdown failed")
 
 
 def make_request(prompt: str, session_id: str | None = None) -> GenerationRequest:
@@ -327,3 +330,44 @@ async def test_shutdown_shuts_down_all_members():
     pool = ReplicaPool(backends)
     await pool.shutdown()
     assert [b.shutdown_count for b in backends] == [1, 1, 1]
+
+
+async def test_remove_replica_closes_backend_exactly_once():
+    removed = FlakyBackend()
+    survivor = FlakyBackend()
+    pool = ReplicaPool({"removed": removed, "survivor": survivor})
+
+    await pool.remove_replica("removed")
+
+    assert removed.shutdown_count == 1
+    assert survivor.shutdown_count == 0
+    assert pool.replica_ids == ("survivor",)
+    await pool.shutdown()
+    assert removed.shutdown_count == 1
+    assert survivor.shutdown_count == 1
+
+
+async def test_forced_remove_closes_inflight_backend_immediately():
+    backend = FlakyBackend(latency_s=0.1)
+    pool = ReplicaPool({"busy": backend})
+    task = asyncio.create_task(pool.generate(make_request("busy")))
+    await asyncio.sleep(0.01)
+
+    await pool.remove_replica("busy", force=True)
+
+    assert backend.shutdown_count == 1
+    await task
+
+
+async def test_shutdown_attempts_every_unique_backend_and_aggregates_errors():
+    shared = FlakyBackend()
+    failing = FlakyBackend()
+    failing.shutdown_error = True
+    pool = ReplicaPool({"shared-a": shared, "shared-b": shared, "bad": failing})
+
+    with pytest.raises(ExceptionGroup, match="ReplicaPool shutdown") as caught:
+        await pool.shutdown()
+
+    assert shared.shutdown_count == 1
+    assert failing.shutdown_count == 1
+    assert len(caught.value.exceptions) == 1
