@@ -11,9 +11,9 @@ server:
   port: 8000
   max_concurrency: 64
 pools:
-  # Client-facing pool name stays "llama"; the single GPU replica serves its
+  # Clients request the pool id "default". The single GPU replica also serves
   # DeploymentSpec engine id "default", so the upstream forwards model=default.
-  llama:
+  default:
     replicas:
       - backend: openai
         options: { base_url: "http://replica:8000/v1", model: "default", api_key_env: null }

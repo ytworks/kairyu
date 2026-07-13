@@ -13,6 +13,22 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
+
+
+def compare_greedy_tokens(
+    ours: Sequence[int], reference: Sequence[int]
+) -> tuple[bool, str]:
+    """Require exact, complete deterministic greedy token parity."""
+    if len(ours) != len(reference):
+        return False, f"length mismatch: kairyu={len(ours)}, reference={len(reference)}"
+    for index, (actual, expected) in enumerate(zip(ours, reference, strict=True)):
+        if actual != expected:
+            return (
+                False,
+                f"token mismatch at index {index}: kairyu={actual}, reference={expected}",
+            )
+    return True, f"exact token match: {len(reference)} tokens"
 
 
 def main() -> int:
@@ -74,7 +90,9 @@ def main() -> int:
     print(f"kairyu:    {ours}")
     print(f"reference text: {hf_tokenizer.decode(reference)!r}")
     print(f"kairyu text:    {hf_tokenizer.decode(ours)!r}")
-    if ours == reference[: len(ours)] and len(ours) >= min(len(reference), 1):
+    parity_ok, diagnostic = compare_greedy_tokens(ours, reference)
+    print(diagnostic)
+    if parity_ok:
         print("PARITY OK")
         return 0
     print("PARITY FAILED")

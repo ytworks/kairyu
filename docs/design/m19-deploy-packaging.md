@@ -24,8 +24,42 @@ Date: 2026-07-03
 - **D4 `[gpu]` extra**: flashinfer-python/triton/nixl with
   `sys_platform == 'linux'` markers — macOS `uv sync` ignores them.
 
+### D3 amendment — production benchmark model preflight (2026-07-13)
+
+Gate 09 MUST query the OpenAI-compatible `/v1/models` endpoint after `readyz`
+passes and before starting `serving_bench.py`. The preflight requires a 2xx JSON
+response with valid `data` entries and exact equality between the requested model
+ID and one served ID. It exits nonzero on any failure; an absent-ID error reports
+the requested and served IDs. Diagnostics never echo the request URL,
+credentials, or response body. Both the preflight and benchmark use the same
+`KAIRYU_BENCH_MODEL` value. Unit, source, and dry-run tests pin the response
+contract, command ordering, real helper path, and default/override propagation.
+
 ## Acceptance (plan §final)
 
 (a) macOS `uv sync` clean; (b) default suite green; (c) all gate scripts
 dry-run valid plans; (d) Dockerfile.cuda builds (deploy day — needs the
 CUDA base image); (e) PROGRESS.md Current Status reflects deploy-ready.
+
+## Amendments
+
+### 2026-07-13 — D2/D3: GPU Helm rendering is a mandatory CI gate
+
+- **D2 amendment:** the chart's CPU defaults and checked-in GPU overlay are both
+  schema-linted and template-rendered before the kind cluster is created. The GPU
+  render validates placement, NVIDIA RuntimeClass/resource limits, read-only model
+  storage, and the real `kairyu` backend without requiring a GPU device in CI.
+- **D3 amendment:** `scripts/kind_smoke.sh` is the single source of truth for the
+  four fail-fast Helm commands. Its default path runs them before the existing
+  CPU kind install/HTTP drill, while `--helm-check` runs only the same lint/render
+  gate for an explicit CI step; the workflow does not duplicate Helm semantics.
+- **Verification boundary:** ordinary CI renders and schema-validates the GPU pod
+  but does not schedule or execute it. GPU execution remains a hardware gate.
+
+### 2026-07-13 — D2 clarification: Blackwell attention fallback is explicit
+
+- The chart exposes a strict `attentionBackend` value (`torch`, `flashinfer`, or
+  empty for automatic selection) and renders it as `KAIRYU_ATTENTION_BACKEND`.
+- The checked-in `pcie-gddr` overlay pins `torch` because the current FlashInfer
+  build has no Blackwell/SM120 kernels. Operators may select `flashinfer` only on
+  hardware/builds that support it; CPU defaults omit the environment variable.

@@ -1,6 +1,7 @@
 """DeploymentSpec -> app builder: pool wiring, affinity over HTTP, lifespan (gate C1)."""
 
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
@@ -20,6 +21,8 @@ pools:
       - { backend: mock }
       - { backend: mock }
 """
+
+GATEWAY_GPU_YAML = Path(__file__).parents[2] / "deploy/compose/gateway-gpu.yaml"
 
 
 class _ShutdownBackend(MockBackend):
@@ -61,6 +64,16 @@ async def test_pool_is_served_and_affinity_sticks():
         metrics = (await client.get("/metrics")).text
     assert 'kairyu_pool_decisions_total{pool="pooled",reason="session_affinity"} 4.0' in metrics
     assert 'kairyu_pool_decisions_total{pool="pooled",reason="least_outstanding"} 1.0' in metrics
+
+
+async def test_gpu_gateway_exposes_canonical_default_model():
+    app = build_app_from_config(GATEWAY_GPU_YAML)
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        ids = {model["id"] for model in models.json()["data"]}
+
+    assert "default" in ids
+    assert "llama" not in ids
 
 
 async def test_header_session_takes_precedence_over_user():
