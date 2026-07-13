@@ -69,6 +69,18 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-13 — [amendment] Preflight the production benchmark model
+- What: Amended m19 D3 so gate 09 checks `/v1/models` after `readyz` and before
+  `serving_bench.py`, requires the requested model ID by exact equality, and uses
+  the same `KAIRYU_BENCH_MODEL` value for both steps. Added safe failure handling
+  for absent IDs, malformed responses, and non-2xx responses, plus source and
+  default/override dry-run pins for ordering and propagation.
+- Why: A healthy gateway can pass `readyz` while not serving the model selected
+  for the production benchmark, which otherwise makes the benchmark fail late or
+  exercise the wrong deployment contract.
+- Refs: m19 D3; `scripts/gpu_gates/{09_production.sh,check_served_model.py}`;
+  `tests/unit/test_gpu_gates_scripts.py`.
+
 ### 2026-07-13 — [amendment] Blackwell Helm profile pins the supported attention backend
 - What: Added a strict Helm `attentionBackend` seam that renders
   `KAIRYU_ATTENTION_BACKEND`; CPU defaults omit it, the checked-in

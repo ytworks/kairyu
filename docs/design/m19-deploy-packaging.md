@@ -24,6 +24,17 @@ Date: 2026-07-03
 - **D4 `[gpu]` extra**: flashinfer-python/triton/nixl with
   `sys_platform == 'linux'` markers — macOS `uv sync` ignores them.
 
+### D3 amendment — production benchmark model preflight (2026-07-13)
+
+Gate 09 MUST query the OpenAI-compatible `/v1/models` endpoint after `readyz`
+passes and before starting `serving_bench.py`. The preflight requires a 2xx JSON
+response with valid `data` entries and exact equality between the requested model
+ID and one served ID. It exits nonzero on any failure; an absent-ID error reports
+the requested and served IDs. Diagnostics never echo the request URL,
+credentials, or response body. Both the preflight and benchmark use the same
+`KAIRYU_BENCH_MODEL` value. Unit, source, and dry-run tests pin the response
+contract, command ordering, real helper path, and default/override propagation.
+
 ## Acceptance (plan §final)
 
 (a) macOS `uv sync` clean; (b) default suite green; (c) all gate scripts
