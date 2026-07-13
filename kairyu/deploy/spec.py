@@ -11,11 +11,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+from yaml.resolver import BaseResolver
 
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 
 _DEFAULT_PORT = 8000
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+_MERGE_KEY_IDENTITY = object()
 
 
 class BackendSpec(BaseModel):
@@ -80,8 +86,35 @@ class BatchSection(BaseModel):
     max_concurrency: int = Field(default=4, ge=1)
 
 
+class TenantLimitsSection(BaseModel):
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
+
+    requests_per_minute: int = Field(default=600, ge=1)
+    tokens_per_minute: int = Field(default=200_000, ge=1)
+
+
+class TenantSection(BaseModel):
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
+
+    default_tenant: str = "default"
+    key_tenants: dict[str, str] = Field(
+        default_factory=dict,
+        exclude=True,
+        repr=False,
+    )
+    limits: dict[str, TenantLimitsSection] = Field(default_factory=dict)
+
+
 class DeploymentSpec(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     server: ServerSection = ServerSection()
     engines: dict[str, BackendSpec] = Field(default_factory=dict)
@@ -96,6 +129,7 @@ class DeploymentSpec(BaseModel):
     # legacy single `orchestrator:` key stays and is served as "kairyu-auto".
     orchestrators: dict[str, OrchestratorSection] = Field(default_factory=dict)
     batch: BatchSection | None = None
+    tenants: TenantSection | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> DeploymentSpec:
@@ -129,20 +163,116 @@ class DeploymentSpec(BaseModel):
                 "declare kairyu-auto once (the legacy orchestrator: key is "
                 'served as "kairyu-auto")'
             )
+        if self.tenants is not None:
+            TenantConfig.from_mapping(
+                key_tenants=self.tenants.key_tenants,
+                limits={
+                    tenant: TenantLimits(
+                        requests_per_minute=section.requests_per_minute,
+                        tokens_per_minute=section.tokens_per_minute,
+                    )
+                    for tenant, section in self.tenants.limits.items()
+                },
+                default_tenant=self.tenants.default_tenant,
+                resolved_api_keys=self.server.resolve_api_keys(),
+            )
         return self
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """SafeLoader variant that retains a path for duplicate-key diagnostics."""
+
+    def __init__(self, stream) -> None:
+        super().__init__(stream)
+        self._mapping_paths: dict[int, tuple[str, ...]] = {}
+
+    def get_single_data(self):
+        node = self.get_single_node()
+        if node is None:
+            return None
+        self._index_paths(node, ())
+        return self.construct_document(node)
+
+    def _index_paths(
+        self,
+        node: Node,
+        path: tuple[str, ...],
+        visited: set[int] | None = None,
+    ) -> None:
+        if visited is None:
+            visited = set()
+        identity = id(node)
+        if identity in visited:
+            return
+        visited.add(identity)
+        if isinstance(node, MappingNode):
+            self._mapping_paths[identity] = path
+            scalar_keys: set[object] = set()
+            for key_node, value_node in node.value:
+                if isinstance(key_node, ScalarNode):
+                    if key_node.tag == _MERGE_TAG:
+                        key: object = _MERGE_KEY_IDENTITY
+                        display_key: object = key_node.value
+                    else:
+                        # Use this SafeLoader's constructors so equality matches
+                        # the keys that construct_mapping will actually insert.
+                        key = self.construct_object(key_node)
+                        display_key = key
+                    try:
+                        duplicate = key in scalar_keys
+                        scalar_keys.add(key)
+                    except TypeError:
+                        duplicate = False
+                    if duplicate:
+                        location = ".".join(path) or "<root>"
+                        raise ValueError(
+                            f"duplicate mapping key {display_key!r} at {location}"
+                        )
+                segment = key_node.value if isinstance(key_node, ScalarNode) else "<key>"
+                self._index_paths(value_node, (*path, segment), visited)
+        elif isinstance(node, SequenceNode):
+            for index, value_node in enumerate(node.value):
+                self._index_paths(value_node, (*path, f"[{index}]"), visited)
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: MappingNode,
+    deep: bool = False,
+):
+    seen: set[object] = set()
+    for key_node, _ in node.value:
+        if key_node.tag == _MERGE_TAG:
+            continue
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in seen
+            seen.add(key)
+        except TypeError:
+            continue
+        if duplicate:
+            path = ".".join(loader._mapping_paths.get(id(node), ())) or "<root>"
+            raise ValueError(f"duplicate mapping key {key!r} at {path}")
+    mapping: dict[object, object] = {}
+    yield mapping
+    mapping.update(yaml.SafeLoader.construct_mapping(loader, node, deep=deep))
+
+
+_UniqueKeySafeLoader.add_constructor(
+    BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def load_deployment_spec(source: str | Path) -> DeploymentSpec:
     """Load a DeploymentSpec from a YAML file path or a YAML string."""
-    import yaml
-
     if isinstance(source, Path) or (
         isinstance(source, str) and "\n" not in source.strip() and Path(source).exists()
     ):
         text = Path(source).read_text(encoding="utf-8")
     else:
         text = source
-    data = yaml.safe_load(text)
+    data = yaml.load(text, Loader=_UniqueKeySafeLoader)
     if not isinstance(data, dict):
         raise ValueError("deployment spec YAML must be a mapping at the top level")
     return DeploymentSpec.model_validate(data)

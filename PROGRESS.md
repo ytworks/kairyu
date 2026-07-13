@@ -74,6 +74,32 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-13 — [amendment] Deployment auth shares one preflight key snapshot
+- What: the deployment builder now resolves both data-plane and administrator key
+  sets before constructing owned backends, then passes those immutable snapshots
+  through `create_app`; tenant validation and authentication therefore consume the
+  same data-plane snapshot. Direct programmatic `create_app` calls retain their
+  existing settings-based resolution behavior.
+- Why: the initial Issue #46 Task 3 integration re-read data-plane keys during app
+  construction and deferred administrator-key resolution until after backend
+  ownership, allowing environment changes to desynchronize tenant mapping from
+  authentication or to fail after resources had been created.
+- Refs: Issue #46 Task 3 review; `af6e2fa`; `kairyu/deploy/builder.py`;
+  `kairyu/entrypoints/server/app.py`; `tests/server/test_serve_builder.py`.
+
+### 2026-07-13 — [progress] Deployment YAML tenants wired into runtime isolation
+- What: `build_app_from_spec` now preflights the optional deployment `tenants:`
+  section before constructing owned backends, converts its limit profiles into
+  runtime `TenantLimits`, and passes one validated `TenantConfig` into the server.
+  Two-key end-to-end coverage pins independent request buckets, role-auth scoped
+  `/admin/usage`, and tenant-named ledger records while tenant-less deployments
+  retain their legacy app state.
+- Why: The typed schema and mapping validation from Issue #46 Tasks 1–2 were not
+  yet connected to `kairyu serve`, so deployment files could describe tenants
+  without activating runtime isolation or per-tenant accounting.
+- Refs: Issue #46 Task 3; `kairyu/deploy/builder.py`;
+  `tests/server/test_serve_builder.py`.
+
 ### 2026-07-13 — [design] D4 defines atomic orchestration budget admission
 - What: D4 now requires every Conductor generation to reserve its step synchronously
   before dispatch, gives result-priced work one exclusive unknown-cost admission slot,

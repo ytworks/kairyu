@@ -599,6 +599,15 @@ server:                        # ServerSection = バインドアドレス + Serv
   tracing: false               # OTel スパン (otel extra が必要; なければ no-op)
   usage_ledger_path: null      # JSONL 使用量台帳; GET /admin/usage を有効化
 
+tenants:                       # 任意: 認証済み API キー -> テナントの対応
+  default_tenant: default      # 下にない解決済みキーはこのテナントを使用
+  key_tenants:                 # 各キーはカンマ区切りの $KAIRYU_KEYS に含める
+    key-a: team-a
+    key-b: team-b
+  limits:                      # 任意: 既知テナントごとの独立したバケット
+    team-a: {requests_per_minute: 60, tokens_per_minute: 10000}
+    team-b: {requests_per_minute: 120, tokens_per_minute: 20000}
+
 engines:                       # 提供モデル名 -> バックエンド 1 つ
   qwen:
     backend: kairyu            # mock | kairyu | kairyu-proc | openai | vllm
@@ -674,12 +683,27 @@ readyz を 503 に切り替え)、`GET /admin/usage?tenant=`(台帳有効時)。
 `kairyu-auto` レスポンスに `kairyu_trace` ブロックを追加します。
 `stream_options: {include_usage: true}` は最後に usage チャンクを付加します。
 
-### マルチテナンシー(プログラマティック)
+### マルチテナンシー
 
-`create_app(..., tenant_config=TenantConfig(key_tenants={...}, limits={"team-a":
-TenantLimits(requests_per_minute=600, tokens_per_minute=200_000)}))` — テナントごとの
-トークンバケットが認証の内側で動作します(401 が 429 に優先)。使用量は JSONL 台帳
-(`server.usage_ledger_path`)に記録されます。
+`kairyu serve` では、上の DeploymentSpec にある任意の `tenants:` ブロックが主要な設定
+経路です。この例では `KAIRYU_KEYS` のカンマ区切り値に `key-a,key-b` を含める必要が
+あります。`key_tenants` の各キーは解決済みの data-plane API キー集合のメンバーで
+なければならず、対応表にない解決済みキーは `default_tenant` を使用します。未知の
+キーや未知のテナントに対する limits は、所有バックエンドを構築する前の deployment
+preflight で拒否されます。対応表のキーは環境変数名ではなく実際の API キー値なので、
+deployment file は secret を含む設定として保護してください。
+
+各テナントには、1 分あたりのリクエスト数とトークン数について独立したバケットが
+作られます。明示的な profile がないテナントにはデフォルト値(600 requests/min、
+200,000 tokens/min)が適用されます。認証はテナント制限より先に実行されるため、拒否
+された認証情報はバケットを消費しません。`server.usage_ledger_path` を設定すると、成功
+したリクエストの使用量は JSONL 台帳と `/admin/usage` の集計で、対応するテナント名の
+下にグループ化されます。
+
+プログラマティックな呼び出しでは、従来どおり runtime 設定を直接渡せます:
+`create_app(..., tenant_config=TenantConfig(key_tenants={"key-a": "team-a"},
+limits={"team-a": TenantLimits(requests_per_minute=600,
+tokens_per_minute=200_000)}))`。
 
 ### デプロイ成果物
 

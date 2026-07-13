@@ -1,8 +1,16 @@
 """DeploymentSpec parsing and validation (design m7 D3)."""
 
-import pytest
+from textwrap import indent
 
-from kairyu.deploy.spec import BackendSpec, load_deployment_spec
+import pytest
+import yaml
+from pydantic import ValidationError
+
+from kairyu.deploy.spec import (
+    BackendSpec,
+    _UniqueKeySafeLoader,
+    load_deployment_spec,
+)
 
 GATEWAY_YAML = """
 server:
@@ -45,6 +53,335 @@ def test_defaults():
     assert spec.server.metrics is True
     assert spec.orchestrator is None
     assert spec.batch is None
+    assert spec.tenants is None
+
+
+def _deployment_with_tenants(tenants: str) -> str:
+    return (
+        "server:\n"
+        "  api_keys_env: KAIRYU_TENANT_KEYS\n"
+        "engines:\n"
+        "  m: { backend: mock }\n"
+        "tenants:\n"
+        f"{indent(tenants, '  ')}\n"
+    )
+
+
+def test_tenant_section_parses_two_tenants(monkeypatch):
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", "key-a,key-b")
+    spec = load_deployment_spec(
+        _deployment_with_tenants(
+            """default_tenant: default
+key_tenants:
+  key-a: team-a
+  key-b: team-b
+limits:
+  team-a: {requests_per_minute: 60, tokens_per_minute: 10000}
+  team-b: {requests_per_minute: 120, tokens_per_minute: 20000}"""
+        )
+    )
+
+    assert spec.tenants is not None
+    assert spec.tenants.default_tenant == "default"
+    assert spec.tenants.key_tenants == {"key-a": "team-a", "key-b": "team-b"}
+    assert spec.tenants.limits["team-a"].requests_per_minute == 60
+    assert spec.tenants.limits["team-b"].tokens_per_minute == 20_000
+    assert "key-a" not in repr(spec.tenants)
+    with pytest.raises(ValidationError, match="frozen"):
+        spec.tenants.default_tenant = "changed"
+    with pytest.raises(ValidationError, match="frozen"):
+        spec.tenants.limits["team-a"].requests_per_minute = 1
+
+
+def test_tenant_api_keys_are_internal_but_excluded_from_repr_and_dumps(monkeypatch):
+    api_secret = "deployment-api-secret"
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", api_secret)
+    spec = load_deployment_spec(
+        _deployment_with_tenants(
+            f"""key_tenants: {{{api_secret}: team-a}}
+limits:
+  team-a: {{requests_per_minute: 60}}"""
+        )
+    )
+
+    assert spec.tenants is not None
+    assert spec.tenants.key_tenants == {api_secret: "team-a"}
+    assert "key_tenants" not in spec.tenants.model_dump()
+    assert "key_tenants" not in spec.model_dump()["tenants"]
+    for external_form in (repr(spec.tenants), repr(spec), spec.model_dump_json()):
+        assert api_secret not in external_form
+
+
+def test_tenant_section_rejects_unknown_mapping_without_leaking_resolved_keys(
+    monkeypatch,
+):
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", "valid-secret")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_deployment_spec(
+            _deployment_with_tenants(
+                """key_tenants:
+  valid-secret: team-valid
+  unknown-key: team-a"""
+            )
+        )
+
+    message = str(exc_info.value)
+    assert "unknown API key 'unknown-key'" in message
+    assert "valid-secret" not in message
+
+
+@pytest.mark.parametrize(
+    "tenants",
+    [
+        'default_tenant: ""\nkey_tenants: {key-a: team-a}',
+        'key_tenants: {"": team-a}',
+        'key_tenants: {key-a: ""}',
+    ],
+)
+def test_tenant_section_rejects_empty_names(monkeypatch, tenants):
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", "key-a")
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        load_deployment_spec(_deployment_with_tenants(tenants))
+
+
+def test_tenant_section_rejects_orphan_limits(monkeypatch):
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", "key-a")
+
+    with pytest.raises(ValueError, match="limits reference unknown tenant 'orphan'"):
+        load_deployment_spec(
+            _deployment_with_tenants(
+                """key_tenants: {key-a: team-a}
+limits:
+  orphan: {requests_per_minute: 60}"""
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("requests_per_minute", 0), ("tokens_per_minute", -1)],
+)
+def test_tenant_section_rejects_nonpositive_limits(monkeypatch, field, value):
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", "key-a")
+
+    with pytest.raises(ValueError, match=field):
+        load_deployment_spec(
+            _deployment_with_tenants(
+                f"""key_tenants: {{key-a: team-a}}
+limits:
+  team-a: {{{field}: {value}}}"""
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("tenants", "unknown_field", "input_secret"),
+    [
+        (
+            "key_tenant: {leaked-input-secret: team-a}",
+            "key_tenant",
+            "leaked-input-secret",
+        ),
+        (
+            """key_tenants: {valid-secret: team-a}
+limits:
+  team-a: {requests_per_mintue: 60}""",
+            "requests_per_mintue",
+            "valid-secret",
+        ),
+    ],
+)
+def test_tenant_section_rejects_unknown_fields_without_leaking_input(
+    monkeypatch,
+    tenants,
+    unknown_field,
+    input_secret,
+):
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", "valid-secret")
+
+    with pytest.raises(ValidationError) as exc_info:
+        load_deployment_spec(_deployment_with_tenants(tenants))
+
+    message = str(exc_info.value)
+    assert unknown_field in message
+    assert input_secret not in message
+
+
+def test_duplicate_nested_tenant_mapping_key_is_rejected(monkeypatch):
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", "key-a")
+    yaml_text = _deployment_with_tenants(
+        """key_tenants:
+  key-a: team-a
+  key-a: team-b"""
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_deployment_spec(yaml_text)
+
+    message = str(exc_info.value)
+    assert "duplicate mapping key 'key-a'" in message
+    assert "tenants.key_tenants" in message
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "duplicate_key", "mapping_path"),
+    [
+        pytest.param(
+            """engines:
+  m:
+    backend: mock
+    backend: openai
+""",
+            "backend",
+            "engines.m",
+            id="regular-mapping",
+        ),
+        pytest.param(
+            """engines:
+  m:
+    <<: &backend_defaults
+      backend: mock
+      backend: openai
+""",
+            "backend",
+            "engines.m.<<",
+            id="inline-merge-source",
+        ),
+        pytest.param(
+            """mock_defaults: &mock_defaults
+  backend: mock
+openai_defaults: &openai_defaults
+  backend: openai
+engines:
+  m:
+    <<: *mock_defaults
+    <<: *openai_defaults
+""",
+            "<<",
+            "engines.m",
+            id="repeated-merge-key",
+        ),
+    ],
+)
+def test_duplicate_key_loader_rejects_duplicates_before_merge_flattening(
+    yaml_text,
+    duplicate_key,
+    mapping_path,
+):
+    with pytest.raises(ValueError) as exc_info:
+        load_deployment_spec(yaml_text)
+
+    message = str(exc_info.value)
+    assert f"duplicate mapping key {duplicate_key!r}" in message
+    assert f"at {mapping_path}" in message
+
+
+@pytest.mark.parametrize(
+    ("first_key", "second_key", "constructed_key"),
+    [
+        pytest.param("1", "01", 1, id="equivalent-integers"),
+        pytest.param("true", "TRUE", True, id="equivalent-booleans"),
+        pytest.param("null", "~", None, id="equivalent-nulls"),
+        pytest.param("true", "1", 1, id="equal-boolean-and-integer"),
+    ],
+)
+def test_duplicate_key_loader_normalizes_merge_source_scalar_keys(
+    first_key,
+    second_key,
+    constructed_key,
+):
+    yaml_text = f"""engines:
+  m:
+    backend: mock
+    options:
+      <<: &defaults
+        {first_key}: first
+        {second_key}: second
+"""
+
+    with pytest.raises(ValueError) as exc_info:
+        load_deployment_spec(yaml_text)
+
+    message = str(exc_info.value)
+    assert f"duplicate mapping key {constructed_key!r}" in message
+    assert "at engines.m.options.<<" in message
+
+
+def test_duplicate_key_loader_keeps_safe_scalar_constructor_boundary():
+    yaml_text = """engines:
+  m:
+    backend: mock
+    options:
+      <<: &defaults
+        ? !!python/name:os.system ''
+        : forbidden
+"""
+
+    with pytest.raises(
+        yaml.constructor.ConstructorError,
+        match="could not determine a constructor",
+    ):
+        load_deployment_spec(yaml_text)
+
+
+def test_duplicate_key_loader_distinguishes_merge_from_quoted_string_key():
+    loaded = yaml.load(
+        """defaults: &defaults
+  backend: mock
+merged:
+  <<: *defaults
+  "<<": literal
+""",
+        Loader=_UniqueKeySafeLoader,
+    )
+
+    assert loaded["merged"] == {"backend": "mock", "<<": "literal"}
+
+
+def test_duplicate_key_loader_preserves_safe_yaml_merge_behavior():
+    spec = load_deployment_spec(
+        """backend_defaults: &backend_defaults
+  backend: mock
+  health_url: http://default/readyz
+engines:
+  m:
+    <<: *backend_defaults
+    health_url: http://override/readyz
+"""
+    )
+
+    assert spec.engines["m"].backend == "mock"
+    assert spec.engines["m"].health_url == "http://override/readyz"
+
+
+def test_duplicate_key_loader_preserves_recursive_alias_identity():
+    yaml_text = """recursive: &recursive
+  self: *recursive
+engines:
+  m: {backend: mock}
+"""
+
+    loaded = yaml.load(yaml_text, Loader=_UniqueKeySafeLoader)
+
+    recursive = loaded["recursive"]
+    assert recursive["self"] is recursive
+    spec = load_deployment_spec(yaml_text)
+    assert spec.engines["m"].backend == "mock"
+
+
+def test_tenants_absent_does_not_resolve_api_key_environment(monkeypatch):
+    monkeypatch.delenv("KAIRYU_MISSING_TENANT_KEYS", raising=False)
+    spec = load_deployment_spec(
+        """server:
+  api_keys_env: KAIRYU_MISSING_TENANT_KEYS
+engines:
+  m: {backend: mock}
+"""
+    )
+
+    assert spec.tenants is None
 
 
 def test_health_url_derived_from_base_url():

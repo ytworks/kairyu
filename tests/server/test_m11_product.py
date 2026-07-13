@@ -115,6 +115,113 @@ class TestOrchestratorSurface:
 
 
 class TestTenancy:
+    def test_config_repr_excludes_api_key_mapping(self):
+        api_secret = "tenant-config-api-secret"
+        config = TenantConfig(key_tenants={api_secret: "tenant-a"})
+
+        assert config.tenant_for_key(api_secret) == "tenant-a"
+        assert api_secret not in repr(config)
+        assert "key_tenants" not in repr(config)
+
+    def test_from_mapping_builds_distinct_tenants_and_copies_inputs(self):
+        key_tenants = {"key-a": "tenant-a", "key-b": "tenant-b"}
+        limits = {
+            "tenant-a": TenantLimits(
+                requests_per_minute=10, tokens_per_minute=1_000
+            ),
+            "tenant-b": TenantLimits(
+                requests_per_minute=20, tokens_per_minute=2_000
+            ),
+            "default": TenantLimits(
+                requests_per_minute=30, tokens_per_minute=3_000
+            ),
+        }
+
+        config = TenantConfig.from_mapping(
+            key_tenants=key_tenants,
+            limits=limits,
+            default_tenant="default",
+            resolved_api_keys=frozenset({"key-a", "key-b"}),
+        )
+
+        assert config.tenant_for_key("key-a") == "tenant-a"
+        assert config.tenant_for_key("key-b") == "tenant-b"
+        assert config.limits_for("tenant-a") == limits["tenant-a"]
+        assert config.limits_for("tenant-b") == limits["tenant-b"]
+        assert config.limits_for("default") == limits["default"]
+        key_tenants["key-a"] = "changed"
+        limits.clear()
+        assert config.tenant_for_key("key-a") == "tenant-a"
+        assert config.limits_for("tenant-a") == TenantLimits(
+            requests_per_minute=10, tokens_per_minute=1_000
+        )
+
+    def test_from_mapping_rejects_empty_key(self):
+        with pytest.raises(ValueError, match="mapping key must not be empty"):
+            TenantConfig.from_mapping(
+                key_tenants={"": "tenant-a"},
+                resolved_api_keys=frozenset({"key-a"}),
+            )
+
+    def test_from_mapping_rejects_empty_tenant_name(self):
+        with pytest.raises(ValueError, match="tenant name must not be empty"):
+            TenantConfig.from_mapping(
+                key_tenants={"key-a": ""},
+                resolved_api_keys=frozenset({"key-a"}),
+            )
+
+    def test_from_mapping_rejects_empty_default_tenant(self):
+        with pytest.raises(ValueError, match="default tenant must not be empty"):
+            TenantConfig.from_mapping(
+                key_tenants={},
+                default_tenant="",
+                resolved_api_keys=frozenset(),
+            )
+
+    def test_from_mapping_rejects_key_outside_resolved_api_keys(self):
+        with pytest.raises(ValueError, match="unknown API key 'key-b'") as exc_info:
+            TenantConfig.from_mapping(
+                key_tenants={"key-b": "tenant-b"},
+                resolved_api_keys=frozenset({"valid-secret"}),
+            )
+        assert "valid-secret" not in str(exc_info.value)
+
+    def test_from_mapping_unmapped_resolved_key_uses_default_tenant(self):
+        config = TenantConfig.from_mapping(
+            key_tenants={"key-a": "tenant-a"},
+            default_tenant="fallback",
+            resolved_api_keys=frozenset({"key-a", "unmapped-key"}),
+        )
+
+        assert config.tenant_for_key("unmapped-key") == "fallback"
+
+    def test_from_mapping_rejects_raw_string_resolved_keys(self):
+        with pytest.raises(ValueError, match="must not be a string"):
+            TenantConfig.from_mapping(
+                key_tenants={"key-a": "tenant-a"},
+                resolved_api_keys="key-a",
+            )
+
+    def test_from_mapping_allows_multiple_keys_for_one_tenant(self):
+        config = TenantConfig.from_mapping(
+            key_tenants={"key-a": "shared", "key-b": "shared"},
+            limits={"shared": TenantLimits(requests_per_minute=12)},
+            resolved_api_keys=frozenset({"key-a", "key-b"}),
+        )
+
+        assert config.tenant_for_key("key-a") == "shared"
+        assert config.tenant_for_key("key-b") == "shared"
+        assert config.limits_for("shared").requests_per_minute == 12
+
+    def test_from_mapping_rejects_orphan_limit_tenant(self):
+        with pytest.raises(ValueError, match="limits reference unknown tenant 'orphan'"):
+            TenantConfig.from_mapping(
+                key_tenants={"key-a": "tenant-a"},
+                limits={"orphan": TenantLimits(requests_per_minute=12)},
+                default_tenant="default",
+                resolved_api_keys=frozenset({"key-a"}),
+            )
+
     def test_admin_only_usage_is_not_mapped_to_default_tenant(
         self, tmp_path, monkeypatch
     ):
