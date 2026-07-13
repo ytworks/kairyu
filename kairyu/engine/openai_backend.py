@@ -26,7 +26,7 @@ from kairyu.engine.backend import (
     UpstreamClientError,
 )
 from kairyu.engine.registry import register_backend
-from kairyu.outputs import CompletionOutput
+from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import SamplingParams
 
 
@@ -41,6 +41,8 @@ def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
 _DEFAULT_TIMEOUT_S = 60.0
 _SSE_DATA_PREFIX = "data:"
 _SSE_DONE = "[DONE]"
+# OpenAI exposes token text and bytes in logprobs, but not tokenizer token IDs.
+_UNKNOWN_TOKEN_ID = -1
 
 
 def _usage_from(data: dict | None) -> GenerationUsage | None:
@@ -52,6 +54,17 @@ def _usage_from(data: dict | None) -> GenerationUsage | None:
         prompt_tokens=data.get("prompt_tokens", 0),
         completion_tokens=data.get("completion_tokens", 0),
         cached_tokens=details.get("cached_tokens", 0),
+    )
+
+
+def _token_logprob(raw: dict) -> TokenLogprob:
+    raw_bytes = raw.get("bytes")
+    return TokenLogprob(
+        token=raw["token"],
+        token_id=_UNKNOWN_TOKEN_ID,
+        logprob=float(raw["logprob"]),
+        bytes_=tuple(raw_bytes) if raw_bytes is not None else None,
+        top=tuple(_token_logprob(item) for item in raw.get("top_logprobs") or ()),
     )
 
 
@@ -179,15 +192,29 @@ class OpenAICompatBackend:
             if completion_tokens is not None and len(choices) == 1
             else ()
         )
-        completions = tuple(
-            CompletionOutput(
-                index=choice.get("index", i),
-                text=choice["message"]["content"] or "",
-                token_ids=token_ids,
-                finish_reason=choice.get("finish_reason"),
+        completions_list = []
+        for i, choice in enumerate(choices):
+            raw_content = (choice.get("logprobs") or {}).get("content")
+            logprob_content = (
+                None
+                if raw_content is None
+                else tuple(_token_logprob(item) for item in raw_content)
             )
-            for i, choice in enumerate(choices)
-        )
+            completions_list.append(
+                CompletionOutput(
+                    index=choice.get("index", i),
+                    text=choice["message"]["content"] or "",
+                    token_ids=token_ids,
+                    cumulative_logprob=(
+                        None
+                        if logprob_content is None
+                        else sum((item.logprob for item in logprob_content), 0.0)
+                    ),
+                    finish_reason=choice.get("finish_reason"),
+                    logprob_content=logprob_content,
+                )
+            )
+        completions = tuple(completions_list)
         if not completions:
             raise RuntimeError(f"backend {self._base_url} returned no choices: {data}")
         return GenerationResult(
