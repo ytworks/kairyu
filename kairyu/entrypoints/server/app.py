@@ -139,6 +139,19 @@ def _invalid_request(message: str) -> JSONResponse:
     )
 
 
+def _validate_generation_request(
+    engine: EngineBackend, request: GenerationRequest
+) -> JSONResponse | None:
+    validate = getattr(engine, "validate_request", None)
+    if validate is None:
+        return None
+    try:
+        validate(request)
+    except ValueError as error:
+        return _invalid_request(str(error))
+    return None
+
+
 def render_prompt(
     request: ChatCompletionRequest,
     chat_templates: Mapping[str, ChatTemplate] | None,
@@ -579,7 +592,9 @@ def create_app(
         for name, engine in served_engines.items():
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
-    add_health_routes(app, served_engines, metrics, admin_keys=settings.resolve_admin_keys())
+    api_keys = settings.resolve_api_keys()
+    admin_keys = settings.resolve_admin_keys()
+    add_health_routes(app, served_engines, metrics, admin_keys=admin_keys)
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 
     add_extra_routes(
@@ -608,10 +623,12 @@ def create_app(
             config=tenant_config,
             limiter=limiter,
         )
-    api_keys = settings.resolve_api_keys()
-    if api_keys:
+    if api_keys or admin_keys:
         app.add_middleware(
-            AuthMiddleware, api_keys=api_keys, protect_metrics=settings.protect_metrics
+            AuthMiddleware,
+            api_keys=api_keys,
+            admin_keys=admin_keys,
+            protect_metrics=settings.protect_metrics,
         )
     ledger = None
     if settings.usage_ledger_path:
@@ -625,6 +642,9 @@ def create_app(
             """Scoped to the CALLER's tenant when tenancy is configured
             (security review: no cross-tenant disclosure); single-tenant
             deployments (no tenant_config) see everything behind auth."""
+            state = http_request.scope.get("state", {})
+            if state.get("is_admin"):
+                return {"usage": ledger.totals(tenant)}
             if tenant_config is not None:
                 caller = getattr(http_request.state, "tenant", None)
                 if caller is None:
@@ -742,6 +762,9 @@ def create_app(
             # holding its warm radix-KV prefix.
             cache_hint=CacheHint(session_id=session_id) if session_id else None,
         )
+        validation_error = _validate_generation_request(engine, generation_request)
+        if validation_error is not None:
+            return validation_error
         if request.stream and not request.tools:
             return StreamingResponse(
                 _stream_engine(
@@ -809,9 +832,14 @@ def create_app(
                 sampling_params=sampling,
             )
 
+        generation_requests = [_generation_request(prompt) for prompt in prompts]
+        for generation_request in generation_requests:
+            validation_error = _validate_generation_request(engine, generation_request)
+            if validation_error is not None:
+                return validation_error
         if request.stream:
             return StreamingResponse(
-                _stream_completions(engine, _generation_request(prompts[0]), request),
+                _stream_completions(engine, generation_requests[0], request),
                 media_type="text/event-stream",
             )
         choices: list[CompletionChoice] = []
@@ -820,7 +848,7 @@ def create_app(
             # run the prompt array concurrently (latency = max, not sum); order is
             # restored by prompt_index below so the response is unchanged (P-perf)
             results = await asyncio.gather(
-                *(engine.generate(_generation_request(prompt)) for prompt in prompts)
+                *(engine.generate(item) for item in generation_requests)
             )
         except Exception as error:
             return _upstream_error(error)

@@ -176,11 +176,18 @@ class EngineLoop:
         # deque appends are atomic: producers may enqueue from another thread
         self._ops: deque[tuple[str, object]] = deque()
         self._tracked: dict[str, _RequestTrack] = {}  # step-side only
+        self._active_request_ids: set[str] = set()
+
+    def tokenize_prompt(self, prompt: str) -> tuple[int, ...]:
+        prompt_token_ids = self._tokenizer.encode(prompt)
+        if not prompt_token_ids:
+            raise ValueError("prompt must tokenize to at least one token")
+        return prompt_token_ids
 
     def submit(self, request_id: str, prompt: str, params: SamplingParams) -> None:
         engine_request = EngineRequest(
             request_id=request_id,
-            prompt_token_ids=self._tokenizer.encode(prompt),
+            prompt_token_ids=self.tokenize_prompt(prompt),
             max_new_tokens=params.max_tokens or _DEFAULT_MAX_NEW_TOKENS,
             eos_token_id=self._default_eos,
             stop_token_ids=tuple(params.stop_token_ids or ()) + self._default_stop_ids,
@@ -193,10 +200,35 @@ class EngineLoop:
             stops=tuple(params.stop or ()),
             num_prompt_tokens=len(engine_request.prompt_token_ids),
         )
+        if request_id in self._active_request_ids:
+            raise ValueError(f"duplicate request_id {request_id!r}")
+        self._active_request_ids.add(request_id)
         self._ops.append(("add", (engine_request, track)))
 
     def abort(self, request_id: str) -> None:
-        self._ops.append(("abort", request_id))
+        if request_id in self._active_request_ids:
+            self._ops.append(("abort", request_id))
+
+    def purge(self, request_ids: tuple[str, ...]) -> None:
+        """Abort and forget requests after a fatal runner step.
+
+        Called only when no ``step()`` call is active. Pending adds and aborts
+        for the purged ids are removed before scheduler and runner state is
+        reclaimed.
+        """
+        ids = set(request_ids)
+        # Rotate only the snapshot that existed when purge began. Producers may
+        # append concurrently; keeping the same deque prevents those ops from
+        # being lost behind a replacement assignment.
+        for _ in range(len(self._ops)):
+            op, payload = self._ops.popleft()
+            op_request_id = payload[0].request_id if op == "add" else payload
+            if op_request_id not in ids:
+                self._ops.append((op, payload))
+        for request_id in ids & self._active_request_ids:
+            self._scheduler.abort(request_id)
+            self._tracked.pop(request_id, None)
+            self._forget(request_id)
 
     def has_work(self) -> bool:
         return bool(self._ops) or self._scheduler.has_unfinished()
@@ -206,7 +238,11 @@ class EngineLoop:
             op, payload = self._ops.popleft()
             if op == "add":
                 engine_request, track = payload
-                self._scheduler.add_request(engine_request)
+                try:
+                    self._scheduler.add_request(engine_request)
+                except Exception:
+                    self._active_request_ids.discard(engine_request.request_id)
+                    raise
                 self._tracked[engine_request.request_id] = track
             elif op == "abort":
                 request_id = payload
@@ -252,10 +288,13 @@ class EngineLoop:
 
     def _forget(self, request_id: str) -> None:
         """Reclaim finished per-request state in the scheduler and runner (E2)."""
-        self._scheduler.forget(request_id)
-        release = getattr(self._runner, "release", None)
-        if release is not None:
-            release(request_id)
+        try:
+            self._scheduler.forget(request_id)
+            release = getattr(self._runner, "release", None)
+            if release is not None:
+                release(request_id)
+        finally:
+            self._active_request_ids.discard(request_id)
 
     def _track_update(self, request_id: str, track: _RequestTrack) -> StreamUpdate | None:
         state = self._scheduler.states.get(request_id)
