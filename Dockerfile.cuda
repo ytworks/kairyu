@@ -1,13 +1,15 @@
 # GPU image (m19 D1): CUDA runtime + uv sync with the gpu extra.
 # Same one-image-per-role model as the CPU Dockerfile; the mounted
 # DeploymentSpec decides gateway vs replica.
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04 AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON=python3.12
+# Bytecode compilation is disabled: with the full GPU dep set (torch + CUDA
+# libs) uv's parallel compile exhausts file descriptors (EMFILE / os error 24).
+ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON=python3.12
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project --no-dev --extra gpu --extra engine --extra fleet
 COPY kairyu ./kairyu
