@@ -85,16 +85,21 @@ batch: { data_dir: /var/lib/kairyu/batch, max_concurrency: 4 }  # optional
 ### D4 — Health/readiness/metrics live in the serve layer; the pool stays passive
 
 `/health` = process liveness. `/readyz` = every engine constructed and every
-pool has ≥1 healthy replica. `/metrics` = Prometheus text format
-(`prometheus-client`, pure-Python — D8). The background **prober** is a
-FastAPI-lifespan task in `kairyu/deploy/prober.py`: for each ejected replica
-it GETs the replica's `/health` (replicas run the same server, so the
-endpoint exists by construction) and on 200 calls the existing
-`ReplicaPool.probe(index)`. m5 D4's "no background tasks" is preserved in
-letter and spirit: the pool remains pure hashing; the task lives outside it
-and uses only public accessors. `ReplicaPool` gains read-only accessors
-(`healthy`, `replica_count`, decision counters) — additive, no behavior
-change.
+pool has ≥1 validated, non-ejected replica. `/metrics` = Prometheus text format
+(`prometheus-client`, pure-Python — D8). A replica with a declared readiness
+URL starts unknown and is excluded from placement and readiness until a
+successful probe; backend traffic is never implicit validation. Replicas with
+no readiness URL remain locally trusted for direct/programmatic compatibility.
+
+The background **prober** is a FastAPI-lifespan task in
+`kairyu/deploy/prober.py`. Its first tick runs immediately at startup, then each
+tick snapshots every unknown/ejected replica by stable ID, opaque entry
+generation, and resolved `/readyz` URL. Requests run with bounded concurrency;
+one failure is isolated, and a 200 response calls `ReplicaPool.probe(id)` only
+if that exact generation still exists. This prevents a late response from
+validating a replacement that reused the same ID. m5 D4's "no background
+tasks" is preserved: the pool remains pure hashing and exposes only read-only
+health/validation/generation accessors plus explicit probe state changes.
 
 ### D5 — Auth: managed WAF at the edge; static API keys at the gateway; keyless node-to-node
 

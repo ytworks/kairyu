@@ -615,6 +615,7 @@ class TestRegistryAndReconciler:
         factory = RecordingFactory(pool, "replica", old)
         reconciler = PoolReconciler(pool, source, factory=factory)
         await reconciler.reconcile()  # seed the pre-existing identity baseline
+        old_generation = pool.entry_generation("replica")
         new_config = registry_module.ReplicaConfig(
             address="http://new/v1", model="llama", api_key_env="API_KEY"
         )
@@ -635,6 +636,9 @@ class TestRegistryAndReconciler:
         }
         assert pool._entries["replica"].backend is candidate
         assert pool.health_url("replica") == "http://new/readyz"
+        assert pool.entry_generation("replica") is not old_generation
+        assert pool.validated_by_id() == {"replica": False}
+        assert pool.healthy_by_id() == {"replica": False}
         assert old.shutdown_calls == 1
         assert candidate.shutdown_calls == 0
 

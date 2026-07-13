@@ -74,6 +74,11 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-13 — [amendment] Remote readiness requires generation-safe probes
+- What: Remote replicas with declared readiness URLs now start unknown and stay out of placement and `/readyz` until a successful `/readyz` probe. The serve prober runs immediately at startup, validates unknown/ejected replicas with bounded concurrency, isolates failures, and binds results to the entry generation; URL-less local/programmatic pools remain trusted.
+- Why: Treating a newly constructed remote backend as healthy allowed readiness and request placement before any live endpoint check, while serial or ID-only recovery could multiply startup latency or validate a replacement from a stale response.
+- Refs: issue #52; `docs/design/m7-productionization.md` D4; `docs/design/m10-fleet-cpu.md` D1/D2/A15; `kairyu/orchestration/replica.py`, `kairyu/deploy/prober.py`, `kairyu/deploy/builder.py`
+
 ### 2026-07-13 — [amendment] Elastic ownership follows same-ID entry generations
 - What: `ReplicaPool` now gives every backend entry an opaque generation token, and `PoolReconciler` binds applied identities and drain leases to that generation. An external remove/re-add of the same ID discards old tracking; desired absence acquires a fresh lease on the new entry, while desired presence baselines it without factory, replacement, or shutdown side effects. Fresh-entry manual drains remain authoritative.
 - Why: Comparing only replica ID sets missed a complete entry replacement between reconciliation ticks, so an old lease could suppress draining of the fresh entry and prevent removal from converging.

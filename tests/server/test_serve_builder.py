@@ -1,5 +1,6 @@
 """DeploymentSpec -> app builder: pool wiring, affinity over HTTP, lifespan (gate C1)."""
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -104,6 +105,57 @@ pools:
     async with app.router.lifespan_context(app):
         async with _client(app) as client:
             assert (await client.get("/health")).status_code == 200
+
+
+async def test_lifespan_immediate_probe_validates_only_ready_remote_replicas():
+    yaml_text = """
+pools:
+  remote:
+    replicas:
+      - backend: openai
+        options: { base_url: "http://gpu-0:8000/v1", model: "m", api_key_env: null }
+      - backend: openai
+        options: { base_url: "http://gpu-1:8000/v1", model: "m", api_key_env: null }
+    probe_interval_s: 60
+"""
+    app = build_app_from_spec(load_deployment_spec(yaml_text))
+    prober = app.state.probers[0]
+    pool = prober._pool
+    both_probed = asyncio.Event()
+    requests = 0
+
+    def probe_response(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 2:
+            both_probed.set()
+        if request.url.host == "gpu-0":
+            return httpx.Response(200, json={"status": "ready"})
+        return httpx.Response(503, json={"status": "starting"})
+
+    prober._client = httpx.AsyncClient(transport=httpx.MockTransport(probe_response))
+
+    # Initial URL mappings are applied during construction, before create_app
+    # exposes the routes or any backend request can be used as a health signal.
+    assert pool.healthy == (False, False)
+    async with _client(app) as client:
+        assert (await client.get("/readyz")).status_code == 503
+
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(both_probed.wait(), timeout=1)
+        for _ in range(10):
+            if pool.healthy == (True, False):
+                break
+            await asyncio.sleep(0)
+
+        async with _client(app) as client:
+            ready = await client.get("/readyz")
+            metrics = (await client.get("/metrics")).text
+
+        assert pool.healthy == (True, False)
+        assert ready.status_code == 200
+        assert 'kairyu_replica_healthy{pool="remote",replica="0"} 1.0' in metrics
+        assert 'kairyu_replica_healthy{pool="remote",replica="1"} 0.0' in metrics
 
 
 async def test_build_from_config_resolves_orchestrator_relative_to_file(tmp_path):
