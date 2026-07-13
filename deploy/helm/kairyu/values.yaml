@@ -7,6 +7,10 @@ service:
   type: ClusterIP
   port: 8000
 resources: {}
+nodeSelector: {}
+runtimeClassName: ""
+tolerations: []
+affinity: {}
 # DeploymentSpec YAML mounted at exactly /etc/kairyu/config.yaml (the
 # Dockerfile CMD — m10a A11)
 config: |

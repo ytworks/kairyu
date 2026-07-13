@@ -5,6 +5,7 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 from kairyu.deploy.registry import (
     PoolReconciler,
@@ -220,14 +221,90 @@ def test_helm_chart_renders():
     assert "kind: Deployment" in rendered
     assert "path: /readyz" in rendered
     assert "mountPath: /etc/kairyu" in rendered  # the Dockerfile CMD path (A11)
+    deployment = next(
+        document
+        for document in yaml.safe_load_all(rendered)
+        if document and document.get("kind") == "Deployment"
+    )
+    pod_spec = deployment["spec"]["template"]["spec"]
+    assert "nodeSelector" not in pod_spec
+    assert "runtimeClassName" not in pod_spec
+    assert "tolerations" not in pod_spec
+    assert "affinity" not in pod_spec
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+def test_helm_chart_renders_placement_and_runtime_controls(tmp_path):
+    node_selector = {
+        "kairyu.ai/accelerator": "nvidia",
+        "kubernetes.io/arch": "amd64",
+    }
+    tolerations = [
+        {
+            "key": "nvidia.com/gpu",
+            "operator": "Exists",
+            "effect": "NoSchedule",
+        }
+    ]
+    affinity = {
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [
+                    {
+                        "matchExpressions": [
+                            {
+                                "key": "kairyu.ai/gpu-model",
+                                "operator": "In",
+                                "values": ["RTX-PRO-6000"],
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+    override = tmp_path / "placement.yaml"
+    override.write_text(
+        yaml.safe_dump(
+            {
+                "nodeSelector": node_selector,
+                "runtimeClassName": "nvidia",
+                "tolerations": tolerations,
+                "affinity": affinity,
+            }
+        )
+    )
+
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "kairyu",
+            "deploy/helm/kairyu",
+            "-f",
+            str(override),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    deployment = next(
+        document
+        for document in yaml.safe_load_all(rendered)
+        if document and document.get("kind") == "Deployment"
+    )
+    pod_spec = deployment["spec"]["template"]["spec"]
+
+    assert pod_spec["nodeSelector"] == node_selector
+    assert pod_spec["runtimeClassName"] == "nvidia"
+    assert pod_spec["tolerations"] == tolerations
+    assert pod_spec["affinity"] == affinity
 
 
 def test_helm_chart_config_is_a_valid_deployment_spec():
     """kind-smoke root cause (PR #16): the chart shipped 'models:' which is
     not a DeploymentSpec field — the pod crash-looped at validation. Pin the
     embedded config to the real schema, no helm binary needed."""
-    import yaml
-
     from kairyu.deploy.spec import load_deployment_spec
 
     values = yaml.safe_load(open("deploy/helm/kairyu/values.yaml"))
