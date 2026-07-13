@@ -39,28 +39,35 @@ class RemoteKVReceiver:
         self.injected_pages = 0  # observability: dedup gates assert on this
 
     def adopt(self, frames, meta: SequenceMeta) -> KVAllocation:
+        tokens = tuple(meta.token_ids)
+        if not tokens:
+            raise KVTransportError("remote handoff requires non-empty token_ids")
+        expected_frames = -(-len(tokens) // self._pool.page_size)
+        if len(frames) != expected_frames:
+            raise KVTransportError(
+                f"expected {expected_frames} page frames for {len(tokens)} tokens, "
+                f"received {len(frames)} (invalid non-cached frames count)"
+            )
         try:
-            allocation = self._cache.allocate(tuple(meta.token_ids))
+            allocation = self._cache.allocate(tokens)
         except KVCacheFull as error:
             raise KVHandoffError(f"decode cache full: {error}") from error
         try:
             cached = len(allocation.cached_pages)
             targets = tuple(allocation.new_full_pages) + (allocation.tail_page,)
             incoming = frames[cached:]
-            usable = [t for t in targets if t is not None]
-            if len(incoming) > len(usable):
+            usable = tuple(target for target in targets if target is not None)
+            if len(incoming) != len(usable):
                 raise KVTransportError(
                     f"received {len(incoming)} non-cached frames for {len(usable)} slots"
                 )
-            for frame, local_page in zip(incoming, usable, strict=False):
+            for frame, local_page in zip(incoming, usable, strict=True):
                 inject_page(self._pool, local_page, frame)
                 self.injected_pages += 1
             self._cache.mark_computed(allocation)
             return allocation
         except Exception:
-            # a failed injection must not leak the allocation — it would pin the
-            # matched radix path against eviction forever and leak fresh pages
-            self._cache.free(allocation)
+            self._cache.release_preempted(allocation)
             raise
 
 
