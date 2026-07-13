@@ -95,7 +95,7 @@ def _parse_tool_calls(text: str) -> list[ToolCall]:
     for match in _TOOL_CALL_PATTERN.finditer(text):
         try:
             payload = json.loads(match.group(1))
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(payload, dict):
             continue
@@ -105,14 +105,19 @@ def _parse_tool_calls(text: str) -> list[ToolCall]:
         arguments = payload.get("arguments", {})
         if not isinstance(arguments, (dict, str)):
             continue
+        if isinstance(arguments, dict):
+            try:
+                serialized_arguments = json.dumps(arguments)
+            except (ValueError, RecursionError):
+                continue
+        else:
+            serialized_arguments = arguments
         calls.append(
             ToolCall(
                 id=f"call_{uuid.uuid4().hex[:12]}",
                 function=FunctionCall(
                     name=name,
-                    arguments=(
-                        arguments if isinstance(arguments, str) else json.dumps(arguments)
-                    ),
+                    arguments=serialized_arguments,
                 ),
             )
         )

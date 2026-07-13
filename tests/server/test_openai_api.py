@@ -204,6 +204,18 @@ class StubBackend:
         '{"name": "get_weather", "arguments": []}',
         '{"name": "get_weather", "arguments": 7}',
         '{"name": "get_weather", "arguments": true}',
+        pytest.param(
+            '{"name": "get_weather", "arguments": ' + ("9" * 5000) + "}",
+            id="oversized-json-integer",
+        ),
+        pytest.param(
+            '{"name": "get_weather", "arguments": '
+            + ("[" * 1100)
+            + "0"
+            + ("]" * 1100)
+            + "}",
+            id="excessive-json-nesting",
+        ),
     ],
 )
 async def test_malformed_generated_tool_payload_stays_content(payload):
