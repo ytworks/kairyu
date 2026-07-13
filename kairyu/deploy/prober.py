@@ -8,7 +8,8 @@ background tasks (m5 D4). The prober GETs each ejected replica's readiness URL
 Keyed by replica id plus entry generation, never ordinal (O2): the pool has
 dynamic membership, so an ordinal frozen at construction can restore the wrong
 replica or IndexError after an add/remove. URLs are resolved per id at snapshot
-time, preferring the current entry's ``health_url`` over the initial URL map.
+time, preferring the current entry's ``health_url`` and using an initial URL only
+for the exact entry generation that was present when the prober was constructed.
 """
 
 from __future__ import annotations
@@ -38,10 +39,17 @@ class HealthProber:
         *,
         max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
     ) -> None:
-        if max_concurrency < 1:
-            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency}")
+        if (
+            isinstance(max_concurrency, bool)
+            or not isinstance(max_concurrency, int)
+            or max_concurrency < 1
+        ):
+            raise ValueError(
+                "max_concurrency must be a positive non-bool int, "
+                f"got {max_concurrency!r}"
+            )
         if isinstance(health_urls, Mapping):
-            self._health_urls: dict[str, str | None] = dict(health_urls)
+            configured_urls: dict[str, str | None] = dict(health_urls)
         else:
             health_urls = tuple(health_urls)
             if len(health_urls) != pool.replica_count:
@@ -50,14 +58,22 @@ class HealthProber:
                 )
             # bind positional URLs to the current ids once; dynamically-added
             # replicas resolve their URL from the pool at check time
-            self._health_urls = dict(zip(pool.replica_ids, health_urls, strict=True))
+            configured_urls = dict(zip(pool.replica_ids, health_urls, strict=True))
+        self._initial_health_urls: dict[str, tuple[object, str | None]] = {
+            replica_id: (
+                pool.entry_generation(replica_id),
+                configured_urls.get(replica_id),
+            )
+            for replica_id in pool.replica_ids
+        }
         self._pool_name = pool_name
         self._pool = pool
         self._interval_s = interval_s
         self._client = client
         self._max_concurrency = max_concurrency
         for replica_id in pool.replica_ids:
-            if self._url_for(replica_id) is not None:
+            generation = pool.entry_generation(replica_id)
+            if self._url_for(replica_id, generation) is not None:
                 pool.require_probe(replica_id)
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -65,11 +81,14 @@ class HealthProber:
             self._client = httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S)
         return self._client
 
-    def _url_for(self, replica_id: str) -> str | None:
+    def _url_for(self, replica_id: str, generation: object) -> str | None:
         url = self._pool.health_url(replica_id)
-        if url is None:
-            url = self._health_urls.get(replica_id)
-        return url
+        if url is not None:
+            return url
+        initial = self._initial_health_urls.get(replica_id)
+        if initial is not None and initial[0] is generation:
+            return initial[1]
+        return None
 
     def _candidate_snapshot(self) -> tuple[tuple[str, object, str], ...]:
         candidates = []
@@ -78,7 +97,7 @@ class HealthProber:
                 continue
             try:
                 generation = self._pool.entry_generation(replica_id)
-                url = self._url_for(replica_id)
+                url = self._url_for(replica_id, generation)
             except ValueError:
                 continue  # membership changed while this tick was taking its snapshot
             if url is not None:

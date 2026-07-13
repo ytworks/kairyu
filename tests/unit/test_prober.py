@@ -274,6 +274,41 @@ async def test_removed_probe_result_cannot_validate_a_later_same_id_generation()
     await client.aclose()
 
 
+async def test_initial_url_fallback_does_not_cross_same_id_generation():
+    pool = ReplicaPool({"same": MockBackend()}, unhealthy_after=1)
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(200)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prober = HealthProber(
+        "p",
+        pool,
+        {"same": "http://old/readyz"},
+        interval_s=1.0,
+        client=client,
+    )
+    old_generation = pool.entry_generation("same")
+
+    assert await prober.check_once() == ("same",)
+    assert requested == ["http://old/readyz"]
+
+    await pool.remove_replica("same")
+    pool.add_replica("same", _FailingBackend(), health_url=None)
+    assert pool.entry_generation("same") is not old_generation
+    assert pool.validated_by_id()["same"] is True
+    await _eject_first_replica(pool)
+    assert pool.healthy_by_id()["same"] is False
+
+    requested.clear()
+    assert await prober.check_once() == ()
+    assert requested == []
+    assert pool.healthy_by_id()["same"] is False
+    await client.aclose()
+
+
 async def test_dynamic_remote_replica_is_discovered_on_next_snapshot():
     pool = ReplicaPool({"trusted": MockBackend()})
     client = _mock_client({"http://dynamic/readyz": 200})
@@ -313,6 +348,22 @@ async def test_run_checks_immediately_and_closes_client_when_cancelled():
 
 @pytest.mark.parametrize("max_concurrency", [0, -1])
 def test_max_concurrency_must_be_positive(max_concurrency):
+    pool = ReplicaPool({"trusted": MockBackend()})
+    with pytest.raises(ValueError, match="max_concurrency"):
+        HealthProber(
+            "p",
+            pool,
+            {},
+            interval_s=1.0,
+            max_concurrency=max_concurrency,
+        )
+
+
+@pytest.mark.parametrize(
+    "max_concurrency",
+    [True, False, 1.0, 1.5, float("nan")],
+)
+def test_max_concurrency_must_be_a_non_bool_integer(max_concurrency):
     pool = ReplicaPool({"trusted": MockBackend()})
     with pytest.raises(ValueError, match="max_concurrency"):
         HealthProber(
