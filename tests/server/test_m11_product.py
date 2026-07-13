@@ -114,6 +114,82 @@ class TestOrchestratorSurface:
 
 
 class TestTenancy:
+    @pytest.mark.parametrize(
+        ("with_ledger", "with_limiter"),
+        [(True, True), (True, False), (False, True), (False, False)],
+    )
+    def test_explicit_tenant_metering_keeps_optional_sinks_independent(
+        self, tmp_path, with_ledger, with_limiter
+    ):
+        from kairyu.entrypoints.server.metering import record_tenant_usage
+
+        class RecordingLimiter:
+            def __init__(self):
+                self.charges = []
+
+            def charge_tokens(self, tenant, tokens):
+                self.charges.append((tenant, tokens))
+
+        ledger_path = tmp_path / "usage.jsonl"
+        ledger = UsageLedger(ledger_path) if with_ledger else None
+        limiter = RecordingLimiter() if with_limiter else None
+
+        record_tenant_usage(
+            tenant="tenant-a",
+            model="model-a",
+            prompt_tokens=7,
+            completion_tokens=5,
+            ledger=ledger,
+            limiter=limiter,
+        )
+
+        if ledger is not None:
+            assert ledger.totals()["tenant-a"] == {
+                "requests": 1,
+                "prompt_tokens": 7,
+                "completion_tokens": 5,
+            }
+        else:
+            assert not ledger_path.exists()
+        if limiter is not None:
+            assert limiter.charges == [("tenant-a", 12)]
+
+    def test_usage_counts_prefer_backend_and_openai_usage(self):
+        from kairyu.engine.backend import GenerationUsage
+        from kairyu.entrypoints.server.metering import resolve_usage_counts
+        from kairyu.entrypoints.server.protocol import Usage
+
+        assert resolve_usage_counts(
+            GenerationUsage(prompt_tokens=7, completion_tokens=5),
+            prompt="ignored prompt",
+            completions=(),
+        ) == (7, 5)
+        assert resolve_usage_counts(
+            Usage(prompt_tokens=11, completion_tokens=3, total_tokens=14),
+            prompt="ignored prompt",
+            completions=(),
+        ) == (11, 3)
+
+    def test_usage_counts_derive_multiple_choices_with_wire_approximation(self):
+        from kairyu.entrypoints.server.app import _wire_usage
+        from kairyu.entrypoints.server.metering import resolve_usage_counts
+        from kairyu.outputs import CompletionOutput
+
+        completions = (
+            CompletionOutput(index=0, text="ignored text", token_ids=(101, 102)),
+            CompletionOutput(index=1, text="three more words", token_ids=()),
+        )
+
+        counts = resolve_usage_counts(
+            None,
+            prompt="rendered prompt words",
+            completions=completions,
+        )
+        wire = _wire_usage("rendered prompt words", completions, None)
+
+        assert counts == (3, 5)
+        assert (wire.prompt_tokens, wire.completion_tokens) == counts
+
     def test_config_repr_excludes_api_key_mapping(self):
         api_secret = "tenant-config-api-secret"
         config = TenantConfig(key_tenants={api_secret: "tenant-a"})

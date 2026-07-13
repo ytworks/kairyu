@@ -26,6 +26,10 @@ from kairyu.engine.backend import (
 from kairyu.entrypoints.chat_template import ChatTemplate, render_chat
 from kairyu.entrypoints.server.errors import invalid_request
 from kairyu.entrypoints.server.health import add_health_routes
+from kairyu.entrypoints.server.metering import (
+    record_state_usage,
+    resolve_usage_counts,
+)
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
     AccessLogMiddleware,
@@ -98,10 +102,6 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
         logprobs=logprobs,
         extra_args=extra_args,
     )
-
-
-def _approx_tokens(text: str) -> int:
-    return len(text.split())
 
 
 def _parse_tool_calls(text: str) -> list[ToolCall]:
@@ -301,31 +301,29 @@ def _build_choice(
 
 
 def _wire_usage(
-    prompt: str, completions: Sequence[CompletionOutput], usage: GenerationUsage | None
+    prompt: str,
+    completions: Sequence[CompletionOutput],
+    usage: GenerationUsage | Usage | None,
 ) -> Usage:
-    """Backend-reported counts when present; the word-split approximation
-    survives only for usage=None producers (orchestrator until M11,
-    third-party backends) — m9 D1."""
-    if usage is not None:
+    """Reported counts when present; otherwise use the m9 D1 wire approximation."""
+    prompt_tokens, completion_tokens = resolve_usage_counts(
+        usage, prompt=prompt, completions=completions
+    )
+    if isinstance(usage, GenerationUsage):
         details = (
             PromptTokensDetails(cached_tokens=usage.cached_tokens)
             if usage.cached_tokens
             else None
         )
-        return Usage(
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            total_tokens=usage.prompt_tokens + usage.completion_tokens,
-            prompt_tokens_details=details,
-        )
-    prompt_tokens = _approx_tokens(prompt)
-    completion_tokens = sum(
-        len(c.token_ids) if c.token_ids else _approx_tokens(c.text) for c in completions
-    )
+    elif isinstance(usage, Usage):
+        details = usage.prompt_tokens_details
+    else:
+        details = None
     return Usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
+        prompt_tokens_details=details,
     )
 
 
@@ -453,8 +451,20 @@ async def _stream_engine(
             response_id, created, model,
             _wire_usage(generation_request.prompt, last.completions, last.usage),
         )
-    if http_request is not None and last is not None:  # S3: streaming was never metered
-        _record_usage(http_request, model, last.usage)
+    # Derived partial/failure stream accounting needs the finalization owner
+    # introduced separately; preserve the existing completed-count boundary here.
+    if (
+        http_request is not None
+        and last is not None
+        and last.usage is not None
+    ):
+        _record_usage(
+            http_request,
+            model,
+            last.usage,
+            prompt=generation_request.prompt,
+            completions=last.completions,
+        )
     yield "data: [DONE]\n\n"
 
 
@@ -621,22 +631,26 @@ async def _stream_completions(
     yield "data: [DONE]\n\n"
 
 
-def _ledger_of(http_request: Request):
-    return getattr(http_request.app.state, "usage_ledger", None)
-
-
-def _record_usage(http_request: Request, model: str, usage) -> None:
+def _record_usage(
+    http_request: Request,
+    model: str,
+    usage: GenerationUsage | Usage | None,
+    *,
+    prompt: str,
+    completions: Sequence[CompletionOutput],
+) -> None:
     """m11 D3/A7: metering happens in handlers (middleware can't see tokens)."""
-    if usage is None:
-        return
+    prompt_tokens, completion_tokens = resolve_usage_counts(
+        usage, prompt=prompt, completions=completions
+    )
     tenant = getattr(http_request.state, "tenant", None) or "default"
-    ledger = _ledger_of(http_request)
-    if ledger is not None:
-        ledger.record(tenant, model, usage.prompt_tokens, usage.completion_tokens)
-    # charge the tenant's per-minute token budget so it is actually enforced (S4)
-    limiter = getattr(http_request.app.state, "tenant_limiter", None)
-    if limiter is not None:
-        limiter.charge_tokens(tenant, usage.prompt_tokens + usage.completion_tokens)
+    record_state_usage(
+        http_request.app.state,
+        tenant=tenant,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
 
 
 def _session_id(request: ChatCompletionRequest, http_request: Request) -> str | None:
@@ -847,7 +861,13 @@ def create_app(
             )
             if want_trace:
                 response = response.model_copy(update={"kairyu_trace": list(result.trace)})
-            _record_usage(http_request, request.model, response.usage)
+            _record_usage(
+                http_request,
+                request.model,
+                response.usage,
+                prompt=prompt,
+                completions=completions,
+            )
             return response
 
         engine = served_engines.get(request.model)
@@ -886,7 +906,13 @@ def create_app(
             result.usage,
             normalized_tool_choice=normalized_tool_choice,
         )
-        _record_usage(http_request, request.model, response.usage)
+        _record_usage(
+            http_request,
+            request.model,
+            result.usage,
+            prompt=prompt,
+            completions=result.completions,
+        )
         if not _tool_choice_is_satisfied(response.choices, normalized_tool_choice):
             return _tool_choice_not_satisfied()
         if request.stream:
@@ -978,6 +1004,8 @@ def create_app(
                 prompt_tokens=usage_totals[0], completion_tokens=usage_totals[1],
                 cached_tokens=usage_totals[2],
             ),
+            prompt="",
+            completions=(),
         )
         return CompletionResponse(
             id=f"cmpl-{uuid.uuid4().hex[:16]}",

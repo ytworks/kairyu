@@ -640,6 +640,32 @@ async def test_malformed_auto_tool_output_records_actual_backend_usage(tmp_path)
     }
 
 
+async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
+    ledger_path = tmp_path / "usage.jsonl"
+    engine = StubBackend(text="derived completion words", finish_reason="stop")
+    app = create_app(
+        engines={"stub": engine},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "stub",
+                "messages": [{"role": "user", "content": "rendered prompt words"}],
+            },
+        )
+
+    assert response.status_code == 200
+    wire_usage = response.json()["usage"]
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": wire_usage["prompt_tokens"],
+        "completion_tokens": wire_usage["completion_tokens"],
+    }
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
     ("text", "tool_choice"),
