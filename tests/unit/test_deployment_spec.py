@@ -225,6 +225,59 @@ def test_duplicate_nested_tenant_mapping_key_is_rejected(monkeypatch):
     assert "tenants.key_tenants" in message
 
 
+@pytest.mark.parametrize(
+    ("yaml_text", "duplicate_key", "mapping_path"),
+    [
+        pytest.param(
+            """engines:
+  m:
+    backend: mock
+    backend: openai
+""",
+            "backend",
+            "engines.m",
+            id="regular-mapping",
+        ),
+        pytest.param(
+            """engines:
+  m:
+    <<: &backend_defaults
+      backend: mock
+      backend: openai
+""",
+            "backend",
+            "engines.m.<<",
+            id="inline-merge-source",
+        ),
+        pytest.param(
+            """mock_defaults: &mock_defaults
+  backend: mock
+openai_defaults: &openai_defaults
+  backend: openai
+engines:
+  m:
+    <<: *mock_defaults
+    <<: *openai_defaults
+""",
+            "<<",
+            "engines.m",
+            id="repeated-merge-key",
+        ),
+    ],
+)
+def test_duplicate_key_loader_rejects_duplicates_before_merge_flattening(
+    yaml_text,
+    duplicate_key,
+    mapping_path,
+):
+    with pytest.raises(ValueError) as exc_info:
+        load_deployment_spec(yaml_text)
+
+    message = str(exc_info.value)
+    assert f"duplicate mapping key {duplicate_key!r}" in message
+    assert f"at {mapping_path}" in message
+
+
 def test_duplicate_key_loader_preserves_safe_yaml_merge_behavior():
     spec = load_deployment_spec(
         """backend_defaults: &backend_defaults

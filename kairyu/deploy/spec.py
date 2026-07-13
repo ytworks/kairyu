@@ -205,7 +205,16 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
         visited.add(identity)
         if isinstance(node, MappingNode):
             self._mapping_paths[identity] = path
+            scalar_keys: set[tuple[str, str]] = set()
             for key_node, value_node in node.value:
+                if isinstance(key_node, ScalarNode):
+                    key = (key_node.tag, key_node.value)
+                    if key in scalar_keys:
+                        location = ".".join(path) or "<root>"
+                        raise ValueError(
+                            f"duplicate mapping key {key_node.value!r} at {location}"
+                        )
+                    scalar_keys.add(key)
                 segment = key_node.value if isinstance(key_node, ScalarNode) else "<key>"
                 self._index_paths(value_node, (*path, segment), visited)
         elif isinstance(node, SequenceNode):
