@@ -40,6 +40,57 @@ class MockBackend:
         return None
 
 
+class ShutdownRecordingBackend(MockBackend):
+    def __init__(self, name: str, *, fail_shutdown: bool = False) -> None:
+        super().__init__()
+        self.name = name
+        self.shutdown_calls = 0
+        self.fail_shutdown = fail_shutdown
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        if self.fail_shutdown:
+            raise RuntimeError(f"{self.name} shutdown failed")
+
+
+class MutableDiscovery:
+    def __init__(self, members) -> None:
+        self.members = dict(members)
+
+    def poll(self):
+        return dict(self.members)
+
+
+class RecordingFactory:
+    def __init__(
+        self,
+        pool: ReplicaPool,
+        replica_id: str,
+        old_backend: ShutdownRecordingBackend,
+        *,
+        fail: bool = False,
+    ) -> None:
+        self.pool = pool
+        self.replica_id = replica_id
+        self.old_backend = old_backend
+        self.fail = fail
+        self.identities = []
+        self.candidates = []
+
+    def __call__(self, identity):
+        self.identities.append(identity)
+        assert self.pool._entries[self.replica_id].backend is self.old_backend
+        if not self.candidates:
+            assert self.pool.is_draining(self.replica_id) is False
+        if self.fail:
+            raise RuntimeError("candidate factory failed")
+        candidate = ShutdownRecordingBackend(
+            f"candidate-{self.replica_id}-{len(self.candidates) + 1}"
+        )
+        self.candidates.append(candidate)
+        return candidate, f"{identity.address.removesuffix('/v1')}/readyz"
+
+
 def _request(session: str | None = None) -> GenerationRequest:
     hint = CacheHint(session_id=session) if session else None
     return GenerationRequest(
@@ -264,6 +315,330 @@ class TestRegistryAndReconciler:
         await reconciler.reconcile()
 
         assert identities == [source_identity]
+
+    async def test_unchanged_identity_is_a_complete_noop_on_second_reconcile(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://old/v1",
+                    model="llama",
+                    api_key_env="OLD_API_KEY",
+                )
+            }
+        )
+        factory = RecordingFactory(pool, "replica", old)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+
+        assert await reconciler.reconcile() == {
+            "added": [],
+            "draining": [],
+            "removed": [],
+        }
+        result = await reconciler.reconcile()
+
+        assert result == {"added": [], "draining": [], "removed": []}
+        assert factory.identities == []
+        assert pool._entries["replica"].backend is old
+        assert pool.is_draining("replica") is False
+        assert old.shutdown_calls == 0
+
+    async def test_address_change_replacement_constructs_before_drain(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        old_config = registry_module.ReplicaConfig(
+            address="http://old/v1", model="llama", api_key_env="API_KEY"
+        )
+        source = MutableDiscovery({"replica": old_config})
+        factory = RecordingFactory(pool, "replica", old)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()  # seed the pre-existing identity baseline
+        new_config = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama", api_key_env="API_KEY"
+        )
+        source.members["replica"] = new_config
+
+        result = await reconciler.reconcile()
+
+        candidate = factory.candidates[0]
+        assert factory.identities == [
+            registry_module.ReplicaIdentity(
+                address="http://new/v1", model="llama", api_key_env="API_KEY"
+            )
+        ]
+        assert result == {
+            "added": ["replica"],
+            "draining": [],
+            "removed": ["replica"],
+        }
+        assert pool._entries["replica"].backend is candidate
+        assert pool.health_url("replica") == "http://new/readyz"
+        assert old.shutdown_calls == 1
+        assert candidate.shutdown_calls == 0
+
+    async def test_model_change_triggers_replacement(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://replica/v1", model="old-model"
+                )
+            }
+        )
+        factory = RecordingFactory(pool, "replica", old)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://replica/v1", model="new-model"
+        )
+
+        result = await reconciler.reconcile()
+
+        assert result["removed"] == ["replica"]
+        assert result["added"] == ["replica"]
+        assert factory.identities[0].model == "new-model"
+        assert pool._entries["replica"].backend is factory.candidates[0]
+        assert old.shutdown_calls == 1
+
+    async def test_auth_change_triggers_replacement(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://replica/v1",
+                    model="llama",
+                    api_key_env="OLD_API_KEY",
+                )
+            }
+        )
+        factory = RecordingFactory(pool, "replica", old)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://replica/v1",
+            model="llama",
+            api_key_env="NEW_API_KEY",
+        )
+
+        result = await reconciler.reconcile()
+
+        assert result["removed"] == ["replica"]
+        assert result["added"] == ["replica"]
+        assert factory.identities[0].api_key_env == "NEW_API_KEY"
+        assert pool._entries["replica"].backend is factory.candidates[0]
+        assert old.shutdown_calls == 1
+
+    async def test_replacement_factory_failure_keeps_old_replica_eligible(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://old/v1", model="llama"
+                )
+            }
+        )
+        factory = RecordingFactory(pool, "replica", old, fail=True)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+
+        result = await reconciler.reconcile()
+
+        assert result == {
+            "added": [],
+            "draining": ["replica"],
+            "removed": [],
+        }
+        assert pool._entries["replica"].backend is old
+        assert pool.is_draining("replica") is False
+        assert pool._select(_request())[0] == "replica"
+        assert old.shutdown_calls == 0
+
+    async def test_inflight_replacement_cleans_candidate_then_retries(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://old/v1", model="llama"
+                )
+            }
+        )
+        factory = RecordingFactory(pool, "replica", old)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+        pool._entries["replica"].outstanding = 1
+
+        blocked = await reconciler.reconcile()
+
+        first_candidate = factory.candidates[0]
+        assert blocked == {
+            "added": [],
+            "draining": ["replica"],
+            "removed": [],
+        }
+        assert pool._entries["replica"].backend is old
+        assert pool.is_draining("replica") is True
+        assert first_candidate.shutdown_calls == 1
+        assert old.shutdown_calls == 0
+
+        pool._entries["replica"].outstanding = 0
+        completed = await reconciler.reconcile()
+
+        second_candidate = factory.candidates[1]
+        assert completed == {
+            "added": ["replica"],
+            "draining": [],
+            "removed": ["replica"],
+        }
+        assert pool._entries["replica"].backend is second_candidate
+        assert first_candidate.shutdown_calls == 1
+        assert second_candidate.shutdown_calls == 0
+        assert old.shutdown_calls == 1
+
+    async def test_replacement_add_failure_cleans_candidate_and_applied_identity(
+        self, monkeypatch
+    ):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://old/v1", model="llama"
+                )
+            }
+        )
+        factory = RecordingFactory(pool, "replica", old)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+
+        def reject_add(replica_id, backend, health_url=None):
+            raise ValueError("replacement add failed")
+
+        monkeypatch.setattr(pool, "add_replica", reject_add)
+
+        with pytest.raises(ValueError, match="replacement add failed"):
+            await reconciler.reconcile()
+
+        candidate = factory.candidates[0]
+        assert pool.replica_ids == ()
+        assert reconciler._applied == {}
+        assert old.shutdown_calls == 1
+        assert candidate.shutdown_calls == 1
+
+    async def test_desired_removal_drains_and_shuts_down_backend_once(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://replica/v1", model="llama"
+                )
+            }
+        )
+        reconciler = PoolReconciler(pool, source)
+        await reconciler.reconcile()
+        source.members.clear()
+
+        result = await reconciler.reconcile()
+
+        assert result == {
+            "added": [],
+            "draining": ["replica"],
+            "removed": ["replica"],
+        }
+        assert "replica" not in pool.replica_ids
+        assert old.shutdown_calls == 1
+
+    async def test_missing_model_validation_precedes_all_pool_mutation(self):
+        seed = ShutdownRecordingBackend("seed")
+        pool = ReplicaPool({"seed": seed})
+        source = MutableDiscovery(
+            {
+                "valid": registry_module.ReplicaConfig(
+                    address="http://valid/v1", model="llama"
+                ),
+                "invalid": registry_module.ReplicaConfig(
+                    address="http://invalid/v1", model=None
+                ),
+            }
+        )
+        factory_calls = []
+        reconciler = PoolReconciler(
+            pool,
+            source,
+            factory=lambda identity: (factory_calls.append(identity) or MockBackend(), None),
+        )
+
+        with pytest.raises(ValueError, match="'invalid' requires a model"):
+            await reconciler.reconcile()
+
+        assert pool.replica_ids == ("seed",)
+        assert pool.is_draining("seed") is False
+        assert factory_calls == []
+        assert reconciler._applied == {}
+
+    async def test_add_failure_cleans_unused_candidate_and_does_not_record_identity(
+        self, monkeypatch
+    ):
+        seed = ShutdownRecordingBackend("seed")
+        candidate = ShutdownRecordingBackend("candidate")
+        pool = ReplicaPool({"seed": seed})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://replica/v1", model="llama"
+                )
+            }
+        )
+        reconciler = PoolReconciler(
+            pool, source, factory=lambda identity: (candidate, None)
+        )
+
+        def reject_add(replica_id, backend, health_url=None):
+            raise ValueError("add failed")
+
+        monkeypatch.setattr(pool, "add_replica", reject_add)
+
+        with pytest.raises(ValueError, match="add failed"):
+            await reconciler.reconcile()
+
+        assert pool.replica_ids == ("seed",)
+        assert reconciler._applied == {}
+        assert candidate.shutdown_calls == 1
+
+    async def test_removal_shutdown_failure_does_not_leave_stale_applied_identity(self):
+        old = ShutdownRecordingBackend("old", fail_shutdown=True)
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://replica/v1", model="llama"
+                )
+            }
+        )
+        reconciler = PoolReconciler(pool, source)
+        await reconciler.reconcile()
+        source.members.clear()
+
+        with pytest.raises(ExceptionGroup, match="replica 'replica' shutdown failed"):
+            await reconciler.reconcile()
+
+        assert "replica" not in pool.replica_ids
+        assert "replica" not in reconciler._applied
+        assert old.shutdown_calls == 1
 
 
 class TestTracing:

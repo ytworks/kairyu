@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from kairyu.engine.backend import EngineBackend
+from kairyu.engine.backend import EngineBackend, shutdown_all
 from kairyu.orchestration.replica import ReplicaPool
 
 
@@ -178,29 +178,87 @@ class PoolReconciler:
             replica_id: self._resolve_identity(replica_id, config)
             for replica_id, config in self._source.poll().items()
         }
-        current = set(self._pool.replica_ids)
-        for replica_id in current & desired.keys():
+        current_ids = self._pool.replica_ids
+        current = set(current_ids)
+        for replica_id in current_ids:
+            if replica_id not in desired:
+                continue
             self._applied.setdefault(replica_id, desired[replica_id])
 
         added: list[str] = []
         draining: list[str] = []
         removed: list[str] = []
+
         for replica_id, identity in desired.items():
             if replica_id not in current:
                 backend, health_url = self._factory(identity)
-                self._pool.add_replica(replica_id, backend, health_url=health_url)
+                try:
+                    self._pool.add_replica(
+                        replica_id, backend, health_url=health_url
+                    )
+                except BaseException:
+                    await shutdown_all((backend,), f"replica candidate {replica_id!r}")
+                    raise
                 self._applied[replica_id] = identity
                 added.append(replica_id)
-        for replica_id in current - set(desired):
+
+        for replica_id, identity in desired.items():
+            if replica_id not in current or self._applied[replica_id] == identity:
+                continue
+            try:
+                candidate, health_url = self._factory(identity)
+            except Exception:
+                draining.append(replica_id)
+                continue
+
+            self._pool.drain(replica_id)
+            try:
+                await self._pool.remove_replica(replica_id)
+            except RuntimeError:
+                await shutdown_all(
+                    (candidate,), f"replacement candidate {replica_id!r}"
+                )
+                draining.append(replica_id)
+                continue
+            except BaseException:
+                await shutdown_all(
+                    (candidate,), f"replacement candidate {replica_id!r}"
+                )
+                if replica_id not in self._pool.replica_ids:
+                    self._applied.pop(replica_id, None)
+                raise
+
+            self._applied.pop(replica_id, None)
+            try:
+                self._pool.add_replica(
+                    replica_id, candidate, health_url=health_url
+                )
+            except BaseException:
+                await shutdown_all(
+                    (candidate,), f"replacement candidate {replica_id!r}"
+                )
+                raise
+            self._applied[replica_id] = identity
+            removed.append(replica_id)
+            added.append(replica_id)
+
+        for replica_id in current_ids:
+            if replica_id in desired:
+                continue
             if not self._pool.is_draining(replica_id):
                 self._pool.drain(replica_id)
                 draining.append(replica_id)
             try:
                 await self._pool.remove_replica(replica_id)
-                self._applied.pop(replica_id, None)
-                removed.append(replica_id)
             except RuntimeError:
                 # in-flight work: drain holds, removal retries next tick (A6)
                 if replica_id not in draining:
                     draining.append(replica_id)
+            except BaseException:
+                if replica_id not in self._pool.replica_ids:
+                    self._applied.pop(replica_id, None)
+                raise
+            else:
+                self._applied.pop(replica_id, None)
+                removed.append(replica_id)
         return {"added": added, "draining": draining, "removed": removed}
