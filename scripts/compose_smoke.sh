@@ -3,12 +3,14 @@
 # session affinity via metrics, replica kill -> eject -> prober recovery.
 set -euo pipefail
 
-COMPOSE_FILE="$(dirname "$0")/../deploy/compose/docker-compose.yaml"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+COMPOSE_FILE="$REPO_ROOT/deploy/compose/docker-compose.yaml"
+COMPOSE_VALIDATOR="$REPO_ROOT/scripts/validate_compose_binds.py"
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
 
 cleanup() { compose down --volumes --remove-orphans >/dev/null 2>&1 || true; }
-trap cleanup EXIT
 
 fail() { echo "SMOKE FAIL: $1" >&2; compose logs --tail 30 gateway >&2 || true; exit 1; }
 
@@ -28,6 +30,10 @@ chat() { # chat <user> -> http status
 }
 
 metric() { curl -s "$BASE_URL/metrics" | grep -F "$1" | awk '{print $NF}' | head -1; }
+
+echo "== validate compose binds =="
+uv run --project "$REPO_ROOT" --no-dev python "$COMPOSE_VALIDATOR" "$COMPOSE_FILE"
+trap cleanup EXIT
 
 echo "== up =="
 compose up -d --build --quiet-pull

@@ -117,6 +117,19 @@ def test_unadmittable_head_does_not_stall_scheduler():
     assert scheduler.has_unfinished() is False
 
 
+def test_empty_prompt_is_rejected_without_prefill_work():
+    scheduler, _ = _setup()
+    scheduler.add_request(_request("empty", prompt_len=0))
+
+    step = scheduler.schedule()
+
+    assert step.scheduled == ()
+    assert scheduler.has_unfinished() is False
+    assert scheduler.finish_reason("empty") == "length"
+    assert scheduler.output_tokens("empty") == ()
+    assert scheduler.drain_rejected() == ("empty",)
+
+
 def test_kv_pressure_keeps_request_waiting_then_admits():
     scheduler, _ = _setup(num_pages=2, budget=64, max_seqs=4)
     scheduler.add_request(

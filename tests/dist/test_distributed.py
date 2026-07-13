@@ -9,6 +9,9 @@ transformers = pytest.importorskip("transformers")
 
 pytestmark = pytest.mark.dist
 
+JSON_VOCAB = ["{", "}", "[", "]", '"', "a", "1", ":", ",", " ", "true", "null", "<eos>"]
+TP_VOCAB = JSON_VOCAB + [f"unused-{i}" for i in range(256 - len(JSON_VOCAB))]
+
 TINY_LLAMA = dict(
     vocab_size=256, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
     num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512,
@@ -95,9 +98,20 @@ def test_tp2_engine_greedy_matches_single_process(spawn2, fixture_name, request)
     torch.manual_seed(83)
     prompt = torch.randint(0, 256, (11,)).tolist()
     reference = _single_process_greedy(model_dir, prompt, max_new=12)
-    results = spawn2(dist_targets.tp_engine_parity, model_dir, prompt, 12)
+    results = spawn2(dist_targets.tp_engine_parity, model_dir, prompt, 12, TP_VOCAB)
     assert results[0]["outputs"] == reference
     assert results[1]["steps"] > 0  # the worker actually executed the steps
+
+
+def test_tp_structured_sampling_and_release_on_every_rank(spawn2, llama_dir):
+    results = spawn2(dist_targets.tp_structured_release, llama_dir, TP_VOCAB)
+    for rank, result in enumerate(results):
+        assert "error" not in result, f"rank {rank} failed: {result.get('error')}"
+    assert results[0]["structured_completed"] is True
+    assert results[0]["sampler_states"] == 0
+    assert results[1]["sampler_states"] == 0
+    assert results[0]["released_requests"] == 34
+    assert results[1]["released_requests"] == 34
 
 
 def test_dist_tp_launcher_serve_path_matches_single_process(llama_dir):
@@ -114,7 +128,9 @@ def test_dist_tp_launcher_serve_path_matches_single_process(llama_dir):
     prompt = torch.randint(0, 256, (11,)).tolist()
     reference = _single_process_greedy(llama_dir, prompt, max_new=12)
 
-    launcher = DistTPLauncher(llama_dir, tp=2, num_pages=64, page_size=4)
+    launcher = DistTPLauncher(
+        llama_dir, tp=2, num_pages=64, page_size=4, vocab=TP_VOCAB
+    )
     try:
         scheduler = Scheduler(
             RadixKVCache(num_pages=64, page_size=4), max_num_batched_tokens=6, page_size=4
