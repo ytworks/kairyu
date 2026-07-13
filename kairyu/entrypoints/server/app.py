@@ -12,6 +12,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -63,6 +64,13 @@ from kairyu.sampling_params import SamplingParams
 
 AUTO_MODEL = "kairyu-auto"
 _TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class _NormalizedToolChoice:
+    mode: str
+    allowed_names: frozenset[str]
+    named: str | None = None
 
 
 def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
@@ -138,6 +146,43 @@ def _validate_response_format(response_format: dict | None) -> str | None:
     return None
 
 
+def _normalize_tool_choice(
+    request: ChatCompletionRequest,
+) -> tuple[_NormalizedToolChoice | None, str | None]:
+    allowed_names: set[str] = set()
+    for index, tool in enumerate(request.tools or []):
+        if tool.get("type") != "function":
+            return None, f"tools[{index}].type must be 'function'"
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            return None, f"tools[{index}].function must be an object"
+        name = function.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return None, f"tools[{index}].function.name must be a non-empty string"
+        allowed_names.add(name)
+
+    choice = request.tool_choice
+    if choice is None:
+        return _NormalizedToolChoice("auto", frozenset(allowed_names)), None
+    if isinstance(choice, str):
+        if choice not in {"auto", "none", "required"}:
+            return None, "tool_choice must be 'auto', 'none', 'required', or a function"
+        if choice == "required" and not allowed_names:
+            return None, "tool_choice 'required' requires at least one tool"
+        return _NormalizedToolChoice(choice, frozenset(allowed_names)), None
+    if choice.get("type") != "function":
+        return None, "named tool_choice.type must be 'function'"
+    function = choice.get("function")
+    if not isinstance(function, dict):
+        return None, "named tool_choice.function must be an object"
+    name = function.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None, "named tool_choice.function.name must be a non-empty string"
+    if name not in allowed_names:
+        return None, f"named tool_choice function {name!r} is not declared in tools"
+    return _NormalizedToolChoice("named", frozenset(allowed_names), named=name), None
+
+
 def _invalid_request(message: str) -> JSONResponse:
     return JSONResponse(
         status_code=400,
@@ -194,6 +239,19 @@ def _upstream_error(error: Exception) -> JSONResponse:
     )
 
 
+def _tool_choice_not_satisfied() -> JSONResponse:
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": {
+                "message": "upstream model did not satisfy tool_choice",
+                "type": "upstream_error",
+                "code": "tool_choice_not_satisfied",
+            }
+        },
+    )
+
+
 def _logprob_entries(content: tuple[TokenLogprob, ...]) -> list[LogprobEntry]:
     return [
         LogprobEntry(
@@ -222,11 +280,18 @@ def _choice_logprobs(completion: CompletionOutput) -> ChoiceLogprobs | None:
 def _build_choice(
     index: int,
     text: str,
-    request: ChatCompletionRequest,
+    tool_choice: _NormalizedToolChoice,
     finish_reason: str | None,
     logprobs: ChoiceLogprobs | None = None,
 ) -> Choice:
-    tool_calls = _parse_tool_calls(text) if request.tools else []
+    tool_calls = []
+    if tool_choice.mode != "none":
+        tool_calls = [
+            call
+            for call in _parse_tool_calls(text)
+            if call.function.name in tool_choice.allowed_names
+            and (tool_choice.named is None or call.function.name == tool_choice.named)
+        ]
     if tool_calls:
         message = ResponseMessage(content=None, tool_calls=tool_calls)
         return Choice(
@@ -274,9 +339,21 @@ def completion_response(
     prompt: str,
     completions: Sequence[CompletionOutput],
     usage: GenerationUsage | None = None,
+    normalized_tool_choice: _NormalizedToolChoice | None = None,
 ) -> ChatCompletionResponse:
+    if normalized_tool_choice is None:
+        normalized_tool_choice, error = _normalize_tool_choice(request)
+        if error is not None:
+            raise ValueError(error)
+    assert normalized_tool_choice is not None
     choices = [
-        _build_choice(c.index, c.text, request, c.finish_reason, _choice_logprobs(c))
+        _build_choice(
+            c.index,
+            c.text,
+            normalized_tool_choice,
+            c.finish_reason,
+            _choice_logprobs(c),
+        )
         for c in completions
     ]
     return ChatCompletionResponse(
@@ -286,6 +363,14 @@ def completion_response(
         choices=choices,
         usage=_wire_usage(prompt, completions, usage),
     )
+
+
+def _tool_choice_is_satisfied(
+    choices: Sequence[Choice], tool_choice: _NormalizedToolChoice
+) -> bool:
+    if tool_choice.mode not in {"required", "named"}:
+        return True
+    return any(choice.message.tool_calls for choice in choices)
 
 
 def _sse_chunk(
@@ -687,6 +772,10 @@ def create_app(
     @app.post("/v1/chat/completions")
     async def chat_completions(request: ChatCompletionRequest, http_request: Request):
         http_request.state.model = request.model  # label for the metrics middleware
+        normalized_tool_choice, tool_choice_error = _normalize_tool_choice(request)
+        if tool_choice_error is not None:
+            return _invalid_request(tool_choice_error)
+        assert normalized_tool_choice is not None
         if request.stream_options is not None and not request.stream:
             return _invalid_request("stream_options is only allowed when stream is true")
         if request.top_logprobs is not None and not request.logprobs:
@@ -747,7 +836,13 @@ def create_app(
                 prompt_tokens=result.prompt_tokens,
                 completion_tokens=result.completion_tokens,
             )
-            response = completion_response(request, prompt, completions, usage=usage)
+            response = completion_response(
+                request,
+                prompt,
+                completions,
+                usage=usage,
+                normalized_tool_choice=normalized_tool_choice,
+            )
             if want_trace:
                 response = response.model_copy(update={"kairyu_trace": list(result.trace)})
             _record_usage(http_request, request.model, response.usage)
@@ -782,7 +877,16 @@ def create_app(
             result = await engine.generate(generation_request)
         except Exception as error:
             return _upstream_error(error)
-        response = completion_response(request, prompt, result.completions, result.usage)
+        response = completion_response(
+            request,
+            prompt,
+            result.completions,
+            result.usage,
+            normalized_tool_choice=normalized_tool_choice,
+        )
+        if not _tool_choice_is_satisfied(response.choices, normalized_tool_choice):
+            # Task 3 moves usage recording ahead of this controlled failure.
+            return _tool_choice_not_satisfied()
         _record_usage(http_request, request.model, response.usage)
         if request.stream:
             # Tool calling + streaming: generate fully, then emit structured chunks so
