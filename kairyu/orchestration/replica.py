@@ -18,8 +18,9 @@ index era (review A1). ``add_replica``/``drain``/``remove_replica`` never drop
 in-flight work: drain stops NEW placements, completion on a removed id is a
 no-op (A2), and remove refuses while outstanding > 0 unless forced.
 
-Health: ``unhealthy_after`` consecutive failures removes a replica from the
-ring until ``probe()`` (which resets failures but NEVER clears draining — A4).
+Health: replicas with a declared readiness URL stay off the ring until ``probe()``
+validates them. ``unhealthy_after`` consecutive failures eject a validated replica
+until another probe (which resets failures but NEVER clears draining — A4).
 Placement is pure hashing plus one optional JSONL append. No background tasks.
 """
 
@@ -51,6 +52,7 @@ def _rendezvous_score(session_id: str, replica_id: str) -> bytes:
 class _ReplicaEntry:
     backend: EngineBackend
     health_url: str | None = None
+    validated: bool = True
     generation: object = field(default_factory=object, compare=False)
     outstanding: int = 0
     consecutive_failures: int = 0
@@ -124,7 +126,11 @@ class ReplicaPool:
     ) -> None:
         if replica_id in self._entries:
             raise ValueError(f"replica {replica_id!r} already in the pool")
-        self._entries[replica_id] = _ReplicaEntry(backend=backend, health_url=health_url)
+        self._entries[replica_id] = _ReplicaEntry(
+            backend=backend,
+            health_url=health_url,
+            validated=health_url is None,
+        )
 
     def drain(self, replica_id: str) -> None:
         """Acquire the manual drain owner; in-flight requests complete normally."""
@@ -170,6 +176,10 @@ class ReplicaPool:
     def health_url(self, replica_id: str) -> str | None:
         return self._entry(replica_id).health_url
 
+    def require_probe(self, replica_id: str) -> None:
+        """Mark an existing id unknown until a readiness probe succeeds."""
+        self._entry(replica_id).validated = False
+
     def entry_generation(self, replica_id: str) -> object:
         """Opaque token that changes whenever a replica ID is re-added."""
         return self._entry(replica_id).generation
@@ -202,13 +212,14 @@ class ReplicaPool:
     @property
     def healthy(self) -> tuple[bool, ...]:
         """Per-replica health (read-only; consumed by /readyz, /metrics, the prober)."""
-        return tuple(
-            entry.consecutive_failures < self._unhealthy_after
-            for entry in self._entries.values()
-        )
+        return tuple(self._is_healthy(entry) for entry in self._entries.values())
 
     def healthy_by_id(self) -> dict[str, bool]:
         return dict(zip(self._entries, self.healthy, strict=True))
+
+    def validated_by_id(self) -> dict[str, bool]:
+        """Read-only probe-validation state keyed by stable replica id."""
+        return {rid: entry.validated for rid, entry in self._entries.items()}
 
     def outstanding_by_id(self) -> dict[str, int]:
         return {rid: entry.outstanding for rid, entry in self._entries.items()}
@@ -221,18 +232,23 @@ class ReplicaPool:
     async def probe(self, key: int | str) -> None:
         """Declare a replica healthy again, returning it to the hash ring.
 
-        Accepts the legacy ordinal or the replica id (A1). Resets the failure
-        count only — a probe NEVER clears draining (A4).
+        Accepts the legacy ordinal or the replica id (A1). Validates the entry
+        and resets its failure count — a probe NEVER clears draining (A4).
         """
-        self._entry(self._resolve_id(key)).consecutive_failures = 0
+        entry = self._entry(self._resolve_id(key))
+        entry.validated = True
+        entry.consecutive_failures = 0
 
     # -- placement -------------------------------------------------------------
+
+    def _is_healthy(self, entry: _ReplicaEntry) -> bool:
+        return entry.validated and entry.consecutive_failures < self._unhealthy_after
 
     def _eligible_ids(self) -> tuple[str, ...]:
         return tuple(
             rid
             for rid, entry in self._entries.items()
-            if entry.consecutive_failures < self._unhealthy_after and not entry.draining
+            if self._is_healthy(entry) and not entry.draining
         )
 
     def _least_outstanding(self, candidates: Sequence[str]) -> str:
@@ -245,8 +261,8 @@ class ReplicaPool:
         if not eligible:
             raise RuntimeError(
                 f"ReplicaPool: none of the {len(self._entries)} replicas are eligible "
-                f"(unhealthy after >= {self._unhealthy_after} consecutive failures, "
-                "or draining); call probe() once a replica recovers"
+                f"(unvalidated, unhealthy after >= {self._unhealthy_after} consecutive "
+                "failures, or draining); call probe() once a replica recovers"
             )
         session_id = request.cache_hint.session_id if request.cache_hint else None
         if session_id:
