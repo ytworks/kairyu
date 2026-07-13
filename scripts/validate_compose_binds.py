@@ -85,6 +85,8 @@ def _is_tracked(path: Path, root: Path, tracked: frozenset[str]) -> bool:
     relative = _relative_git_path(path, root)
     if relative is None:
         return False
+    if relative == ".":
+        return bool(tracked)
     prefix = relative.rstrip("/") + "/"
     return relative in tracked or any(item.startswith(prefix) for item in tracked)
 

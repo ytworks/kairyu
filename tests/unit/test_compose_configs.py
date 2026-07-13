@@ -1,5 +1,6 @@
 """Checked-in Compose files must resolve their deployment contracts locally."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -272,6 +273,60 @@ def test_validator_rejects_untracked_source_for_tracked_compose(tmp_path):
     subprocess.run(["git", "-C", str(repo), "add", "config.yaml"], check=True)
     tracked = _run_validator(compose_file, cwd=tmp_path)
     assert tracked.returncode == 0, tracked.stderr
+
+
+def test_validator_accepts_relative_bind_that_resolves_to_tracked_repo_root(tmp_path):
+    repo = tmp_path / "repo"
+    compose_dir = repo / "deploy" / "compose"
+    compose_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    compose_file = compose_dir / "docker-compose.yaml"
+    compose_file.write_text(
+        "services:\n"
+        "  workspace:\n"
+        "    volumes:\n"
+        "      - ../..:/workspace:ro\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "deploy/compose/docker-compose.yaml"],
+        check=True,
+    )
+
+    result = _run_validator(compose_file, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_smoke_validation_failure_never_invokes_docker_cleanup(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text("#!/bin/sh\nexit 23\n", encoding="utf-8")
+    fake_uv.chmod(0o755)
+    docker_marker = tmp_path / "docker-called"
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        '#!/bin/sh\ntouch "$DOCKER_MARKER"\n', encoding="utf-8"
+    )
+    fake_docker.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "DOCKER_MARKER": str(docker_marker),
+    }
+
+    result = subprocess.run(
+        ["/bin/bash", str(COMPOSE_SMOKE.resolve())],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 23
+    assert not docker_marker.exists()
 
 
 def test_ci_and_default_smoke_fail_fast_through_validator():
