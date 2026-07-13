@@ -224,6 +224,7 @@ class KairyuBackend:
         self._pump_task: asyncio.Task | None = None
 
     async def _pump(self) -> None:
+        restart_after_exit = False
         try:
             while self._loop.has_work():
                 updates = await asyncio.to_thread(self._loop.step)
@@ -232,11 +233,37 @@ class KairyuBackend:
                     if queue is not None:
                         queue.put_nowait(update)
         except Exception as error:
+            request_ids = tuple(self._queues)
+            await asyncio.to_thread(self._loop.purge, request_ids)
             failure = StreamUpdate((), "", True, None, error)
-            for queue in self._queues.values():
-                queue.put_nowait(failure)
+            for request_id in request_ids:
+                queue = self._queues.get(request_id)
+                if queue is not None:
+                    queue.put_nowait(failure)
+            restart_after_exit = self._loop.has_work()
         finally:
             self._pump_task = None
+            if restart_after_exit:
+                self._ensure_pump()
+
+    def _ensure_pump(self) -> None:
+        if not self._loop.has_work():
+            return
+        if self._pump_task is None or self._pump_task.done():
+            self._pump_task = asyncio.get_running_loop().create_task(self._pump())
+
+    def _abort(self, *request_ids: str) -> None:
+        for request_id in request_ids:
+            self._loop.abort(request_id)
+        if not request_ids:
+            return
+        task = self._pump_task
+        if task is None or task.done():
+            self._ensure_pump()
+        else:
+            # The task may have evaluated has_work() just before the abort was
+            # enqueued. Re-check after it exits so the op cannot be stranded.
+            task.add_done_callback(lambda _task: self._ensure_pump())
 
     def _submit(self, request: GenerationRequest) -> asyncio.Queue:
         self._loop.submit(request.request_id, request.prompt, request.sampling_params)
@@ -326,26 +353,27 @@ class KairyuBackend:
 
     async def _generate_one(self, request: GenerationRequest) -> GenerationResult:
         queue = self._submit(request)
+        finished_cleanly = False
+        pump_failed = False
         try:
             while True:
                 update: StreamUpdate = await queue.get()
                 if update.error is not None:
+                    pump_failed = True
                     raise update.error
                 if update.finished:
+                    finished_cleanly = True
                     return self._result(request, update)
         finally:
+            if not finished_cleanly and not pump_failed:
+                self._abort(request.request_id)
             self._queues.pop(request.request_id, None)
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         if request.sampling_params.n <= 1:
             return await self._generate_one(request)
         subs = self._sub_requests(request)
-        try:
-            results = await asyncio.gather(*(self._generate_one(sub) for sub in subs))
-        except Exception:
-            for sub in subs:  # abort surviving siblings on any failure
-                self._loop.abort(sub.request_id)
-            raise
+        results = await asyncio.gather(*(self._generate_one(sub) for sub in subs))
         latest = {
             index: StreamUpdate(
                 outputs=result.completions[0].token_ids,
@@ -365,17 +393,24 @@ class KairyuBackend:
     async def _stream_one(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         queue = self._submit(request)
         emitted = -1
+        finished_cleanly = False
+        pump_failed = False
         try:
             while True:
                 update: StreamUpdate = await queue.get()
                 if update.error is not None:
+                    pump_failed = True
                     raise update.error
+                if update.finished:
+                    finished_cleanly = True
                 if len(update.outputs) > emitted or update.finished:
                     emitted = len(update.outputs)
                     yield self._result(request, update)
                 if update.finished:
                     return
         finally:
+            if not finished_cleanly and not pump_failed:
+                self._abort(request.request_id)
             self._queues.pop(request.request_id, None)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
@@ -393,6 +428,7 @@ class KairyuBackend:
         }
         latest: dict[int, StreamUpdate] = {}
         finished: set[int] = set()
+        pump_failed = False
         try:
             while len(finished) < len(subs):
                 done, _ = await asyncio.wait(
@@ -404,6 +440,7 @@ class KairyuBackend:
                         continue
                     update: StreamUpdate = task.result()
                     if update.error is not None:
+                        pump_failed = True
                         raise update.error
                     latest[index] = update
                     if update.finished:
@@ -413,8 +450,8 @@ class KairyuBackend:
                         pending[index] = asyncio.ensure_future(queues[index].get())
                 yield self._merged(request, latest, finished=len(finished) == len(subs))
         except BaseException:
-            for sub in subs:  # abandonment/failure aborts siblings
-                self._loop.abort(sub.request_id)
+            if not pump_failed:
+                self._abort(*(sub.request_id for sub in subs))
             raise
         finally:
             for task in pending.values():

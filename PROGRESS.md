@@ -11,7 +11,7 @@ remaining work is GPU execution: performance gates, kernel tuning, fabric
 bring-up, `pytest -m gpu`, and `scripts/gpu_gates/` (all pre-written and
 dry-run pinned).**
 
-_Last updated: 2026-07-03_
+_Last updated: 2026-07-13_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -49,6 +49,13 @@ OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benc
 in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
+The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
+GPU, selects the configured runtime/node profile, mounts an existing host path or
+PVC read-only, and starts the real Kairyu engine from `/models/checkpoint`.
+The checked-in SM120/`pcie-gddr` profile pins the torch attention fallback while
+the strict chart value also permits FlashInfer on supported hardware.
+CI now schema-lints and template-renders both the CPU defaults and GPU overlay
+before the kind CPU deployment/HTTP drill; it does not schedule the GPU pod.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
 deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
@@ -73,6 +80,50 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   exercise the wrong deployment contract.
 - Refs: m19 D3; `scripts/gpu_gates/{09_production.sh,check_served_model.py}`;
   `tests/unit/test_gpu_gates_scripts.py`.
+
+### 2026-07-13 — [amendment] Blackwell Helm profile pins the supported attention backend
+- What: Added a strict Helm `attentionBackend` seam that renders
+  `KAIRYU_ATTENTION_BACKEND`; CPU defaults omit it, the checked-in
+  `pcie-gddr`/SM120 overlay pins `torch`, and operators can select `flashinfer`
+  on supported hardware. Extended static and render contracts plus chart docs.
+- Why: The automatic SM120 `fa2` tier selects FlashInfer, but the current build
+  has no Blackwell kernels. Without an environment seam, the documented overlay
+  could render successfully yet fail when starting the real backend.
+- Refs: Issue #49 final independent review; `deploy/helm/kairyu/{values.yaml,
+  values-gpu.yaml,values.schema.json,templates/deployment.yaml,README.md}`;
+  `docs/design/m19-deploy-packaging.md` D2 clarification.
+
+### 2026-07-13 — [amendment] GPU Helm overlay becomes a mandatory CI render gate
+- What: `scripts/kind_smoke.sh` now runs fail-fast default/GPU `helm lint` and
+  `helm template` gates before cluster creation, with a `--helm-check` mode used
+  by an explicit CI schema/GPU-template step. The script remains the single
+  command source; CI does not duplicate the four Helm invocations. Appended an
+  M19 D2/D3 amendment recording the placement/runtime/storage/real-backend gate
+  and its template-only, no-GPU execution boundary.
+- Why: The GPU overlay was statically covered but not a mandatory CI input, so
+  schema or rendering regressions could merge while the CPU kind smoke remained
+  green. Fail-fast rendering makes both chart profiles release-gating without
+  pretending ordinary CI can run a GPU workload.
+- Refs: Issue #49 Task 3; `scripts/kind_smoke.sh`, `.github/workflows/ci.yml`,
+  `tests/unit/test_fleet_elastic.py`, `docs/design/m19-deploy-packaging.md` D2/D3
+  amendment.
+
+### 2026-07-13 — [progress] Helm GPU overlay wires real model storage and engine
+- What: Added strict chart values schema and a conditional, read-only model volume
+  backed by exactly one absolute host path or existing PVC. The checked-in GPU
+  values request one NVIDIA GPU, preserve runtime/node placement, mount `/models`,
+  and replace the mock DeploymentSpec with backend `kairyu` at
+  `/models/checkpoint`; CPU defaults keep model storage disabled. Added semantic
+  render/schema regressions and operator documentation for hostPath/PVC use.
+- Refs: Issue #49 Task 2; `deploy/helm/kairyu/values.yaml`,
+  `values-gpu.yaml`, `values.schema.json`, `README.md`, `templates/deployment.yaml`,
+  `tests/unit/test_fleet_elastic.py`. Helm-backed render/lint execution remains
+  pending on a Helm-enabled host; local pure/static gates pass.
+
+### 2026-07-13 — [progress] Backend ownership closes across replica and app lifecycles
+- What: Replica removal is now an async ownership boundary that closes the removed backend exactly once. Shared shutdown aggregation attempts every unique backend, and orchestrator/application lifespan teardown cascades through separately owned workers even when another shutdown fails.
+- Why: Removed/replaced replicas and DSL-built orchestrators leaked clients and worker tasks; one shutdown exception also skipped every later resource.
+- Refs: issue #42; `kairyu/engine/backend.py`, `kairyu/orchestration/{replica,orchestrator}.py`, `kairyu/deploy/{registry,builder}.py`
 
 ### 2026-07-09 — [progress] Single-node GPU compose: dedicated gateway config + attention-backend env
 - What: `docker-compose.gpu.yaml` now mounts a new `deploy/compose/gateway-gpu.yaml`

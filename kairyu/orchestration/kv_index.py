@@ -26,6 +26,36 @@ class _ReplicaBlocks:
     last_event: float = 0.0
 
 
+def _validate_event(event: object) -> tuple[str, tuple[str, ...]]:
+    if not isinstance(event, dict):
+        raise ValueError("KV event must be a JSON object")
+
+    kind = event.get("type")
+    if not isinstance(kind, str):
+        raise ValueError("KV event type must be a string")
+    if kind not in ("BlockStored", "BlockRemoved", "AllBlocksCleared"):
+        raise ValueError(f"unknown KV event type {kind!r}")
+
+    if "block_size" in event:
+        block_size = event["block_size"]
+        if (
+            isinstance(block_size, bool)
+            or not isinstance(block_size, int)
+            or block_size <= 0
+        ):
+            raise ValueError("KV event block_size must be a positive integer")
+
+    if kind == "AllBlocksCleared" and "block_hashes" not in event:
+        return kind, ()
+
+    block_hashes = event.get("block_hashes")
+    if not isinstance(block_hashes, list):
+        raise ValueError(f"{kind} block_hashes must be a list")
+    if any(not isinstance(block_hash, str) for block_hash in block_hashes):
+        raise ValueError(f"{kind} block_hashes members must be strings")
+    return kind, tuple(block_hashes)
+
+
 class KvEventIndex:
     def __init__(
         self,
@@ -36,18 +66,15 @@ class KvEventIndex:
         self._now = now
         self._replicas: dict[str, _ReplicaBlocks] = {}
 
-    def apply(self, replica_id: str, event: dict) -> None:
+    def apply(self, replica_id: str, event: object) -> None:
+        kind, hashes = _validate_event(event)
         entry = self._replicas.setdefault(replica_id, _ReplicaBlocks())
-        kind = event.get("type")
-        hashes = event.get("block_hashes") or []
         if kind == "BlockStored":
             entry.hashes.update(hashes)
         elif kind == "BlockRemoved":
             entry.hashes.difference_update(hashes)
-        elif kind == "AllBlocksCleared":
-            entry.hashes.clear()  # vLLM emits this on a cache reset
         else:
-            raise ValueError(f"unknown KV event type {kind!r}")
+            entry.hashes.clear()  # vLLM emits this on a cache reset
         # stamp freshness only AFTER a valid apply (M4): a stream of garbage
         # events must NOT keep the replica "fresh" while its index rots — an
         # unrecognized event lets staleness fall back to the trie instead
@@ -121,20 +148,27 @@ class ZmqKvEventSubscriber:
         import zmq
 
         drained = 0
+        logger = logging.getLogger("kairyu.kv_index")
         while drained < max_events:
             try:
-                replica_id, payload = self._socket.recv_multipart(flags=zmq.NOBLOCK)
+                frames = self._socket.recv_multipart(flags=zmq.NOBLOCK)
             except zmq.Again:
                 break
+            drained += 1
             # a single malformed frame or unknown event type must not abort the
             # drain mid-queue and desync the whole index (M4): drop it and continue
             try:
-                self._index.apply(replica_id.decode(), json.loads(payload))
-            except (ValueError, KeyError, UnicodeDecodeError) as error:
-                logging.getLogger("kairyu.kv_index").warning(
-                    "dropped a malformed KV event: %r", error
+                if len(frames) != 2:
+                    logger.warning(
+                        "dropped a malformed KV event (frame_count=%d)", len(frames)
+                    )
+                    continue
+                replica_id, payload = frames
+                self._index.apply(replica_id.decode(), json.loads(payload.decode()))
+            except (UnicodeDecodeError, ValueError) as error:
+                logger.warning(
+                    "dropped a malformed KV event (%s)", type(error).__name__
                 )
-            drained += 1
         return drained
 
     def close(self) -> None:

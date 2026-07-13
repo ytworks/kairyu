@@ -16,6 +16,19 @@ import torch
 from torch import nn
 
 
+def _assert_collective_device(
+    expected: torch.device,
+    **tensors: torch.Tensor,
+) -> None:
+    if any(tensor.device != expected for tensor in tensors.values()):
+        details = ", ".join(
+            f"{name}={tensor.device}" for name, tensor in tensors.items()
+        )
+        raise ValueError(
+            f"expert-parallel collective device mismatch: expected {expected}; {details}"
+        )
+
+
 class EpMoeBlock(nn.Module):
     """Wraps an m15 MoE block: local experts + all_to_all token exchange."""
 
@@ -38,6 +51,7 @@ class EpMoeBlock(nn.Module):
         block.experts = nn.ModuleList()  # weights now owned by local_experts
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        device = hidden.device
         topk_indices, topk_weights = self._route(hidden)
         tokens, k = topk_indices.shape
         flat_expert = topk_indices.reshape(-1)  # [tokens*k]
@@ -46,12 +60,20 @@ class EpMoeBlock(nn.Module):
         send_counts = torch.bincount(owner, minlength=self.ep_size)
         payload = hidden.repeat_interleave(k, dim=0)[order]
 
-        recv_counts = torch.empty(self.ep_size, dtype=send_counts.dtype)
+        recv_counts = torch.empty(
+            self.ep_size, dtype=send_counts.dtype, device=device
+        )
+        _assert_collective_device(
+            device, send_counts=send_counts, recv_counts=recv_counts
+        )
         self._comm.tensor_all_to_all_single(
             recv_counts, send_counts.contiguous(), [1] * self.ep_size, [1] * self.ep_size
         )
         recv_total = int(recv_counts.sum().item())
-        received = torch.empty(recv_total, hidden.shape[-1], dtype=hidden.dtype)
+        received = torch.empty(
+            recv_total, hidden.shape[-1], dtype=hidden.dtype, device=device
+        )
+        _assert_collective_device(device, payload=payload, received=received)
         self._comm.tensor_all_to_all_single(
             received,
             payload.contiguous(),
@@ -60,7 +82,10 @@ class EpMoeBlock(nn.Module):
         )
         # which local expert each received row wants: exchange expert ids too
         expert_ids_out = flat_expert[order].to(torch.int64)
-        expert_ids_in = torch.empty(recv_total, dtype=torch.int64)
+        expert_ids_in = torch.empty(recv_total, dtype=torch.int64, device=device)
+        _assert_collective_device(
+            device, expert_ids_out=expert_ids_out, expert_ids_in=expert_ids_in
+        )
         self._comm.tensor_all_to_all_single(
             expert_ids_in,
             expert_ids_out.contiguous(),
@@ -74,7 +99,10 @@ class EpMoeBlock(nn.Module):
             mask = local_ids == local_index
             computed[mask] = self.local_experts[int(local_index)](received[mask])
 
-        returned = torch.empty(tokens * k, hidden.shape[-1], dtype=hidden.dtype)
+        returned = torch.empty(
+            tokens * k, hidden.shape[-1], dtype=hidden.dtype, device=device
+        )
+        _assert_collective_device(device, computed=computed, returned=returned)
         self._comm.tensor_all_to_all_single(
             returned,
             computed.contiguous(),
