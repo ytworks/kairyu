@@ -34,7 +34,7 @@ def test_flashinfer_matches_torch_backend(cuda, dtype, seq_len, chunk_len):
     keys = torch.randn(seq_len, kv_heads, head_dim, dtype=dtype, device=cuda)
     values = torch.randn(seq_len, kv_heads, head_dim, dtype=dtype, device=cuda)
     page_table = list(range(-(-seq_len // PAGE)))
-    pool.write(0, page_table, torch.arange(seq_len, device=cuda), keys, values)
+    pool.write(0, page_table, torch.arange(seq_len), keys, values)
     chunk_start = seq_len - chunk_len
     query = torch.randn(chunk_len, heads, head_dim, dtype=dtype, device=cuda)
 
