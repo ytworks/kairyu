@@ -56,6 +56,42 @@ class _FailOnceRunner:
         }
 
 
+class _ToggleTokenizer:
+    eos_token_id = None
+
+    def __init__(self) -> None:
+        self.return_token = False
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return (1,) if self.return_token else ()
+
+    def decode(self, token_ids) -> str:
+        return " ".join(f"tok{token_id}" for token_id in token_ids)
+
+    def vocab(self) -> list[str]:
+        return ["<empty>", "token"]
+
+
+async def test_zero_token_prompt_is_rejected_before_backend_state():
+    tokenizer = _ToggleTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer)
+    request = _request("empty", "normal-looking input")
+
+    with pytest.raises(ValueError, match="at least one token"):
+        backend.validate_request(request)
+    with pytest.raises(ValueError, match="at least one token"):
+        await backend.generate(request)
+
+    assert backend._active_request_ids == set()
+    assert backend._loop._active_request_ids == set()
+    assert backend._queues == {}
+    assert backend._scheduler.states == {}
+
+    tokenizer.return_token = True
+    result = await backend.generate(request)
+    assert result.finished is True
+
+
 async def test_generate_runs_through_engine_core():
     backend = KairyuBackend(num_pages=256)
     result = await backend.generate(_request("r1", "hello world from kairyu"))

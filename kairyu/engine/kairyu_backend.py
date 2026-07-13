@@ -234,6 +234,9 @@ class KairyuBackend:
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
 
+    def validate_request(self, request: GenerationRequest) -> None:
+        self._loop.tokenize_prompt(request.prompt)
+
     async def _pump(self) -> None:
         restart_after_exit = False
         try:
