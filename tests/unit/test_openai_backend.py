@@ -8,11 +8,14 @@ from kairyu.engine.backend import GenerationRequest, UpstreamClientError
 from kairyu.engine.openai_backend import OpenAICompatBackend
 
 
-def _request(prompt: str = "hi") -> GenerationRequest:
+def _request(
+    prompt: str = "hi", sampling_params: SamplingParams | None = None
+) -> GenerationRequest:
     return GenerationRequest(
         request_id="r1",
         prompt=prompt,
-        sampling_params=SamplingParams(temperature=0.2, max_tokens=64),
+        sampling_params=sampling_params
+        or SamplingParams(temperature=0.2, max_tokens=64),
     )
 
 
@@ -56,6 +59,144 @@ async def test_generate_maps_openai_response(monkeypatch):
     assert captured["body"]["temperature"] == 0.2
     assert captured["body"]["max_tokens"] == 64
     assert captured["body"]["messages"][-1]["content"] == "say hello"
+
+
+async def test_generate_forwards_representable_sampling_payload():
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+    )
+    params = SamplingParams(
+        presence_penalty=0.4,
+        frequency_penalty=-0.3,
+        top_k=8,
+        min_p=0.15,
+        logprobs=3,
+        extra_args={"response_format": {"type": "json_object"}},
+    )
+
+    await backend.generate(_request(sampling_params=params))
+
+    assert captured["body"]["presence_penalty"] == 0.4
+    assert captured["body"]["frequency_penalty"] == -0.3
+    assert captured["body"]["top_k"] == 8
+    assert captured["body"]["min_p"] == 0.15
+    assert captured["body"]["logprobs"] is True
+    assert captured["body"]["top_logprobs"] == 3
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+    await backend.shutdown()
+
+
+async def test_generate_forwards_logprobs_zero():
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+    )
+
+    await backend.generate(
+        _request(sampling_params=SamplingParams(logprobs=0))
+    )
+
+    assert captured["body"]["logprobs"] is True
+    assert captured["body"]["top_logprobs"] == 0
+    await backend.shutdown()
+
+
+async def test_generate_default_payload_omits_unrequested_controls():
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+    )
+
+    await backend.generate(_request(sampling_params=SamplingParams()))
+
+    assert captured["body"]["presence_penalty"] == 0.0
+    assert captured["body"]["frequency_penalty"] == 0.0
+    for field in (
+        "top_k",
+        "min_p",
+        "logprobs",
+        "top_logprobs",
+        "response_format",
+    ):
+        assert field not in captured["body"]
+    await backend.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("field", "params"),
+    [
+        ("best_of", SamplingParams(best_of=2)),
+        ("repetition_penalty", SamplingParams(repetition_penalty=1.1)),
+        ("stop_token_ids", SamplingParams(stop_token_ids=[7])),
+        ("min_tokens", SamplingParams(min_tokens=1)),
+        ("prompt_logprobs", SamplingParams(prompt_logprobs=1)),
+        ("ignore_eos", SamplingParams(ignore_eos=True)),
+        ("skip_special_tokens", SamplingParams(skip_special_tokens=False)),
+        (
+            "extra_args.unknown_control",
+            SamplingParams(extra_args={"unknown_control": True}),
+        ),
+        ("logprobs", SamplingParams(logprobs=-1)),
+        ("extra_args", SamplingParams(extra_args=[])),
+    ],
+)
+async def test_generate_rejects_unsupported_intent_before_client_or_transport(
+    field, params
+):
+    transport_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        transport_calls.append(request)
+        return httpx.Response(200, json={"choices": []})
+
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(UpstreamClientError) as exc_info:
+        await backend.generate(_request(sampling_params=params))
+
+    assert exc_info.value.status_code == 400
+    assert field in str(exc_info.value)
+    assert transport_calls == []
+    assert backend._client is None
+
+
+async def test_stream_rejects_unsupported_intent_before_client_or_transport():
+    transport_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        transport_calls.append(request)
+        return httpx.Response(200, content=_SSE_BODY)
+
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(UpstreamClientError, match="best_of"):
+        async for _ in backend.stream(
+            _request(sampling_params=SamplingParams(best_of=2))
+        ):
+            pass
+
+    assert transport_calls == []
+    assert backend._client is None
 
 
 async def test_missing_api_key_raises_clear_error(monkeypatch):

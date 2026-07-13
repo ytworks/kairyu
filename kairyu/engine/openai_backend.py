@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 import httpx
 
@@ -27,6 +27,7 @@ from kairyu.engine.backend import (
 )
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput
+from kairyu.sampling_params import SamplingParams
 
 
 def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
@@ -52,6 +53,42 @@ def _usage_from(data: dict | None) -> GenerationUsage | None:
         completion_tokens=data.get("completion_tokens", 0),
         cached_tokens=details.get("cached_tokens", 0),
     )
+
+
+def _validated_extra_args(params: SamplingParams) -> Mapping[str, object]:
+    unsupported: list[str] = []
+    if params.best_of is not None:
+        unsupported.append("best_of")
+    if params.repetition_penalty != 1.0:
+        unsupported.append("repetition_penalty")
+    if params.stop_token_ids:
+        unsupported.append("stop_token_ids")
+    if params.min_tokens != 0:
+        unsupported.append("min_tokens")
+    if params.prompt_logprobs is not None:
+        unsupported.append("prompt_logprobs")
+    if params.ignore_eos:
+        unsupported.append("ignore_eos")
+    if not params.skip_special_tokens:
+        unsupported.append("skip_special_tokens")
+    if params.logprobs is not None and params.logprobs < 0:
+        unsupported.append("logprobs")
+
+    extra_args = params.extra_args
+    if not isinstance(extra_args, Mapping):
+        unsupported.append("extra_args")
+        extra_args = {}
+    else:
+        unsupported.extend(
+            f"extra_args.{key}" for key in extra_args if key != "response_format"
+        )
+    if unsupported:
+        fields = ", ".join(unsupported)
+        raise UpstreamClientError(
+            f"OpenAI-compatible backend does not support fields: {fields}",
+            status_code=400,
+        )
+    return extra_args
 
 
 class OpenAICompatBackend:
@@ -98,12 +135,15 @@ class OpenAICompatBackend:
 
     def _payload(self, request: GenerationRequest) -> dict:
         params = request.sampling_params
+        extra_args = _validated_extra_args(params)
         payload: dict = {
             "model": self._model,
             "messages": [{"role": "user", "content": request.prompt}],
             "temperature": params.temperature,
             "top_p": params.top_p,
             "n": params.n,
+            "presence_penalty": params.presence_penalty,
+            "frequency_penalty": params.frequency_penalty,
         }
         if params.max_tokens is not None:
             payload["max_tokens"] = params.max_tokens
@@ -111,12 +151,22 @@ class OpenAICompatBackend:
             payload["stop"] = list(params.stop)
         if params.seed is not None:
             payload["seed"] = params.seed
+        if params.top_k != -1:
+            payload["top_k"] = params.top_k
+        if params.min_p != 0.0:
+            payload["min_p"] = params.min_p
+        if params.logprobs is not None:
+            payload["logprobs"] = True
+            payload["top_logprobs"] = params.logprobs
+        if "response_format" in extra_args:
+            payload["response_format"] = extra_args["response_format"]
         return payload
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
+        payload = self._payload(request)
         response = await self._get_client().post(
             f"{self._base_url}/chat/completions",
-            json=self._payload(request),
+            json=payload,
             headers=self._headers(),
         )
         if response.status_code != 200:
