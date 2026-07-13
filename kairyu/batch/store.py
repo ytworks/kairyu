@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Protocol
+from types import TracebackType
+from typing import BinaryIO, Literal, Protocol, Self
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +31,96 @@ class FileObject(BaseModel):
     # owning tenant (C3): reads/lists are scoped to it so one tenant can never
     # see another's files; "default" is the keyless / single-tenant owner
     owner: str = "default"
+
+
+class JsonlFileWriter:
+    """Lazy transactional writer for one store-owned JSONL file."""
+
+    def __init__(
+        self,
+        store: BatchStore,
+        filename: str,
+        purpose: str,
+        owner: str,
+    ) -> None:
+        self._store = store
+        self._filename = filename
+        self._purpose = purpose
+        self._owner = owner
+        self._file_id = f"file-{uuid.uuid4().hex[:24]}"
+        self._temporary_path = store._files_dir / f"{self._file_id}.bin.tmp"
+        self._handle: BinaryIO | None = None
+        self._bytes_written = 0
+        self._state: Literal["new", "open", "committed", "aborted"] = "new"
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def has_content(self) -> bool:
+        return self._bytes_written > 0
+
+    def append(self, payload: dict) -> None:
+        self._require_writable()
+        encoded = json.dumps(payload).encode("utf-8") + b"\n"
+        if self._handle is None:
+            self._handle = self._temporary_path.open("xb")
+            self._state = "open"
+        self._handle.write(encoded)
+        self._handle.flush()
+        self._bytes_written += len(encoded)
+
+    def commit(self) -> FileObject:
+        if self._state == "new":
+            raise RuntimeError("cannot commit an empty JSONL writer")
+        if self._state != "open":
+            raise RuntimeError(f"JSONL writer is already {self._state}")
+        assert self._handle is not None
+        self._handle.close()
+        self._handle = None
+        try:
+            file = self._store._commit_file(
+                self._temporary_path,
+                file_id=self._file_id,
+                bytes_written=self._bytes_written,
+                filename=self._filename,
+                purpose=self._purpose,
+                owner=self._owner,
+            )
+        except Exception:
+            self._state = "aborted"
+            raise
+        self._state = "committed"
+        return file
+
+    def abort(self) -> None:
+        if self._state == "committed":
+            raise RuntimeError("JSONL writer is already committed")
+        if self._state == "aborted":
+            return
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+        self._temporary_path.unlink(missing_ok=True)
+        self._state = "aborted"
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        if self._state != "committed":
+            self.abort()
+        return False
+
+    def _require_writable(self) -> None:
+        if self._state not in ("new", "open"):
+            raise RuntimeError(f"JSONL writer is already {self._state}")
 
 
 class RequestCounts(BaseModel):
@@ -59,7 +151,7 @@ class BatchJob(BaseModel):
 
 class BatchStoreProtocol(Protocol):
     """The full store surface (m10a D3/A8) — worker, routes and builder use
-    exactly these eight methods; M11 tenancy ledgers fake this."""
+    exactly these ten methods; M11 tenancy ledgers fake this."""
 
     def save_file(
         self, content: bytes, filename: str, purpose: str, owner: str = "default"
@@ -68,6 +160,14 @@ class BatchStoreProtocol(Protocol):
     def get_file(self, file_id: str, owner: str | None = None) -> FileObject: ...
 
     def read_file_content(self, file_id: str, owner: str | None = None) -> bytes: ...
+
+    def iter_file_lines(
+        self, file_id: str, owner: str | None = None
+    ) -> Iterator[bytes]: ...
+
+    def create_jsonl_writer(
+        self, filename: str, purpose: str, owner: str = "default"
+    ) -> JsonlFileWriter: ...
 
     def create_batch(
         self, input_file_id: str, endpoint: str, completion_window: str,
@@ -95,17 +195,21 @@ class BatchStore:
     def save_file(
         self, content: bytes, filename: str, purpose: str, owner: str = "default"
     ) -> FileObject:
-        file = FileObject(
-            id=f"file-{uuid.uuid4().hex[:24]}",
-            bytes=len(content),
-            created_at=int(time.time()),
-            filename=filename,
-            purpose=purpose,
-            owner=owner,
-        )
-        (self._files_dir / f"{file.id}.bin").write_bytes(content)
-        self._write_json(self._files_dir / f"{file.id}.json", file.model_dump())
-        return file
+        file_id = f"file-{uuid.uuid4().hex[:24]}"
+        temporary_path = self._files_dir / f"{file_id}.bin.tmp"
+        try:
+            temporary_path.write_bytes(content)
+            return self._commit_file(
+                temporary_path,
+                file_id=file_id,
+                bytes_written=len(content),
+                filename=filename,
+                purpose=purpose,
+                owner=owner,
+            )
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
 
     def get_file(self, file_id: str, owner: str | None = None) -> FileObject:
         path = self._files_dir / f"{file_id}.json"
@@ -121,6 +225,52 @@ class BatchStore:
     def read_file_content(self, file_id: str, owner: str | None = None) -> bytes:
         self.get_file(file_id, owner)  # KeyError on missing OR cross-tenant
         return (self._files_dir / f"{file_id}.bin").read_bytes()
+
+    def iter_file_lines(
+        self, file_id: str, owner: str | None = None
+    ) -> Iterator[bytes]:
+        self.get_file(file_id, owner)  # validate before opening content
+        content_path = self._files_dir / f"{file_id}.bin"
+
+        def lines() -> Iterator[bytes]:
+            with content_path.open("rb") as handle:
+                yield from handle
+
+        return lines()
+
+    def create_jsonl_writer(
+        self, filename: str, purpose: str, owner: str = "default"
+    ) -> JsonlFileWriter:
+        return JsonlFileWriter(self, filename, purpose, owner)
+
+    def _commit_file(
+        self,
+        temporary_path: Path,
+        *,
+        file_id: str,
+        bytes_written: int,
+        filename: str,
+        purpose: str,
+        owner: str,
+    ) -> FileObject:
+        file = FileObject(
+            id=file_id,
+            bytes=bytes_written,
+            created_at=int(time.time()),
+            filename=filename,
+            purpose=purpose,
+            owner=owner,
+        )
+        content_path = self._files_dir / f"{file.id}.bin"
+        metadata_path = self._files_dir / f"{file.id}.json"
+        temporary_path.replace(content_path)
+        try:
+            self._write_json(metadata_path, file.model_dump())
+        except Exception:
+            content_path.unlink(missing_ok=True)
+            metadata_path.with_suffix(".tmp").unlink(missing_ok=True)
+            raise
+        return file
 
     # -- batches ----------------------------------------------------------
 

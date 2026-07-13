@@ -1,5 +1,8 @@
 """C3: batch/file store tenant isolation — one tenant can never see another's."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from kairyu.batch.store import BatchStore
@@ -62,3 +65,196 @@ def test_default_owner_preserves_single_tenant_behavior(tmp_path):
     assert store.get_file(f.id, owner="default").id == f.id
     assert store.get_batch(job.id, owner="default").id == job.id
     assert [j.id for j in store.list_batches(owner="default")] == [job.id]
+
+
+def test_iter_file_lines_streams_binary_lines_without_bulk_read(tmp_path, monkeypatch):
+    store = BatchStore(tmp_path)
+    file = store.save_file(
+        b"first\nsecond\nlast",
+        filename="input.jsonl",
+        purpose="batch",
+        owner="tenant-a",
+    )
+
+    def fail_bulk_read(*args, **kwargs):
+        raise AssertionError("streaming iteration must not bulk-read file content")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_bulk_read)
+    monkeypatch.setattr(store, "read_file_content", fail_bulk_read)
+
+    lines = store.iter_file_lines(file.id, owner="tenant-a")
+
+    assert iter(lines) is lines
+    assert list(lines) == [b"first\n", b"second\n", b"last"]
+
+
+def test_iter_file_lines_checks_owner_before_opening_content(tmp_path, monkeypatch):
+    store = BatchStore(tmp_path)
+    file = store.save_file(
+        b"secret\n", filename="input.jsonl", purpose="batch", owner="tenant-a"
+    )
+    opened_content = []
+    real_open = Path.open
+
+    def tracking_open(path, *args, **kwargs):
+        if path.name == f"{file.id}.bin":
+            opened_content.append(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    with pytest.raises(KeyError):
+        store.iter_file_lines(file.id, owner="tenant-b")
+    with pytest.raises(KeyError):
+        store.iter_file_lines("file-missing", owner="tenant-a")
+
+    assert opened_content == []
+
+
+def test_iter_file_lines_closes_handle_when_iteration_stops_early(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    file = store.save_file(
+        b"first\nsecond\n", filename="input.jsonl", purpose="batch"
+    )
+    content_handles = []
+    real_open = Path.open
+
+    def tracking_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if path.name == f"{file.id}.bin":
+            content_handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    lines = store.iter_file_lines(file.id)
+
+    assert next(lines) == b"first\n"
+    assert len(content_handles) == 1
+    assert not content_handles[0].closed
+
+    lines.close()
+
+    assert content_handles[0].closed
+
+
+def test_jsonl_writer_is_lazy_and_appends_each_line_immediately(tmp_path):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="output.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+    files_dir = tmp_path / "files"
+
+    assert writer.state == "new"
+    assert writer.has_content is False
+    assert list(files_dir.iterdir()) == []
+
+    writer.append({"custom_id": "a", "ok": True})
+
+    expected = json.dumps({"custom_id": "a", "ok": True}).encode("utf-8") + b"\n"
+    temporary_files = list(files_dir.glob("*.tmp"))
+    assert writer.state == "open"
+    assert writer.has_content is True
+    assert list(files_dir.glob("*.bin")) == []
+    assert list(files_dir.glob("*.json")) == []
+    assert len(temporary_files) == 1
+    assert temporary_files[0].read_bytes() == expected
+
+    writer.append({"custom_id": "b", "ok": False})
+    expected += json.dumps({"custom_id": "b", "ok": False}).encode("utf-8") + b"\n"
+    assert temporary_files[0].read_bytes() == expected
+
+    writer.abort()
+
+
+def test_jsonl_writer_commit_publishes_exact_owner_scoped_file(tmp_path):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="output.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+    rows = [{"custom_id": "a", "value": "雪"}, {"custom_id": "b", "value": 2}]
+    expected = b""
+    for row in rows:
+        writer.append(row)
+        expected += json.dumps(row).encode("utf-8") + b"\n"
+
+    file = writer.commit()
+
+    assert writer.state == "committed"
+    assert file.filename == "output.jsonl"
+    assert file.purpose == "batch_output"
+    assert file.owner == "tenant-a"
+    assert file.bytes == len(expected)
+    assert store.get_file(file.id, owner="tenant-a") == file
+    assert store.read_file_content(file.id, owner="tenant-a") == expected
+    with pytest.raises(KeyError):
+        store.get_file(file.id, owner="tenant-b")
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+def test_jsonl_writer_abort_removes_temporary_data_and_metadata(tmp_path):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="errors.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+    writer.append({"error": "bad"})
+
+    writer.abort()
+
+    assert writer.state == "aborted"
+    assert list((tmp_path / "files").iterdir()) == []
+
+
+def test_jsonl_writer_context_exception_aborts_transaction(tmp_path):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="errors.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+
+    with pytest.raises(RuntimeError, match="stop"):
+        with writer:
+            writer.append({"error": "partial"})
+            raise RuntimeError("stop")
+
+    assert writer.state == "aborted"
+    assert list((tmp_path / "files").iterdir()) == []
+
+
+def test_jsonl_writer_rejects_empty_commit_and_closed_state_operations(tmp_path):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer("output.jsonl", "batch_output")
+
+    with pytest.raises(RuntimeError, match="empty"):
+        writer.commit()
+
+    writer.append({"ok": True})
+    writer.commit()
+    with pytest.raises(RuntimeError, match="committed"):
+        writer.append({"late": True})
+    with pytest.raises(RuntimeError, match="committed"):
+        writer.commit()
+
+    aborted = store.create_jsonl_writer("errors.jsonl", "batch_output")
+    aborted.append({"error": "bad"})
+    aborted.abort()
+    with pytest.raises(RuntimeError, match="aborted"):
+        aborted.append({"late": True})
+    with pytest.raises(RuntimeError, match="aborted"):
+        aborted.commit()
+
+
+def test_save_and_read_file_content_remain_byte_compatible(tmp_path):
+    store = BatchStore(tmp_path)
+    content = b"\x00binary\xff\n"
+
+    file = store.save_file(
+        content,
+        filename="upload.bin",
+        purpose="batch",
+        owner="tenant-a",
+    )
+
+    assert file.bytes == len(content)
+    assert file.owner == "tenant-a"
+    assert store.read_file_content(file.id, owner="tenant-a") == content

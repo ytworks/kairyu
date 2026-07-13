@@ -11,7 +11,7 @@ remaining work is GPU execution: performance gates, kernel tuning, fabric
 bring-up, `pytest -m gpu`, and `scripts/gpu_gates/` (all pre-written and
 dry-run pinned).**
 
-_Last updated: 2026-07-03_
+_Last updated: 2026-07-13_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -49,6 +49,9 @@ OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benc
 in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
+`BatchStore` exposes owner-scoped lazy binary-line iteration and transactional lazy
+JSONL writers; the batch worker still uses the legacy whole-file path until Issue #44
+Task 2 switches it to the bounded producer/consumer pipeline.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
 deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
@@ -61,6 +64,17 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-13 — [amendment] Batch storage adds streaming transaction seams (m10a D3/A8)
+- What: `BatchStoreProtocol` expands from eight to ten methods with owner-scoped
+  `iter_file_lines` and `create_jsonl_writer`. The store now supports lazy binary-line
+  input and a lazy JSONL transaction that writes one flushed line at a time, publishes
+  owner-scoped metadata only on commit, and removes partial data on abort.
+- Why: the existing batch worker materializes the full accepted upload and all output
+  rows, so Issue #44 needs bounded storage primitives before Task 2 can replace that
+  worker path without exposing partial result files or weakening tenant isolation.
+- Refs: Issue #44 Task 1; m10a D3/A8; `kairyu/batch/store.py`;
+  `tests/unit/test_batch_store_tenancy.py`.
 
 ### 2026-07-13 — [amendment] Deployment auth shares one preflight key snapshot
 - What: the deployment builder now resolves both data-plane and administrator key
