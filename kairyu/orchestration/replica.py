@@ -34,6 +34,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     UpstreamClientError,
+    shutdown_all,
 )
 from kairyu.orchestration.router import JsonlRouterLog
 
@@ -120,7 +121,7 @@ class ReplicaPool:
     def is_draining(self, replica_id: str) -> bool:
         return self._entry(replica_id).draining
 
-    def remove_replica(self, replica_id: str, force: bool = False) -> None:
+    async def remove_replica(self, replica_id: str, force: bool = False) -> None:
         entry = self._entry(replica_id)
         if entry.outstanding > 0 and not force:
             raise RuntimeError(
@@ -133,6 +134,7 @@ class ReplicaPool:
         # must not inherit phantom prefixes and route shared traffic to a cold cache
         if self._prefix_index is not None:
             self._prefix_index.forget_replica(replica_id)
+        await shutdown_all((entry.backend,), f"replica {replica_id!r}")
 
     def health_url(self, replica_id: str) -> str | None:
         return self._entry(replica_id).health_url
@@ -298,5 +300,6 @@ class ReplicaPool:
             self._finish(entry)
 
     async def shutdown(self) -> None:
-        for entry in self._entries.values():
-            await entry.backend.shutdown()
+        await shutdown_all(
+            (entry.backend for entry in self._entries.values()), "ReplicaPool"
+        )

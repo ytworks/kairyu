@@ -1,9 +1,14 @@
 """DeploymentSpec -> app builder: pool wiring, affinity over HTTP, lifespan (gate C1)."""
 
+from pathlib import Path
+
 import httpx
+import pytest
 
 from kairyu.deploy.builder import build_app_from_config, build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
+from kairyu.engine.mock import MockBackend
+from kairyu.orchestration.orchestrator import Orchestrator
 
 POOLED_YAML = """
 engines:
@@ -15,6 +20,17 @@ pools:
       - { backend: mock }
       - { backend: mock }
 """
+
+GATEWAY_GPU_YAML = Path(__file__).parents[2] / "deploy/compose/gateway-gpu.yaml"
+
+
+class _ShutdownBackend(MockBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_count = 0
+
+    async def shutdown(self) -> None:
+        self.shutdown_count += 1
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -47,6 +63,16 @@ async def test_pool_is_served_and_affinity_sticks():
         metrics = (await client.get("/metrics")).text
     assert 'kairyu_pool_decisions_total{pool="pooled",reason="session_affinity"} 4.0' in metrics
     assert 'kairyu_pool_decisions_total{pool="pooled",reason="least_outstanding"} 1.0' in metrics
+
+
+async def test_gpu_gateway_exposes_canonical_default_model():
+    app = build_app_from_config(GATEWAY_GPU_YAML)
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        ids = {model["id"] for model in models.json()["data"]}
+
+    assert "default" in ids
+    assert "llama" not in ids
 
 
 async def test_header_session_takes_precedence_over_user():
@@ -157,3 +183,45 @@ orchestrators:
         models = await client.get("/v1/models")
         ids = {m["id"] for m in models.json()["data"]}
     assert {"kairyu-auto", "kairyu-auto-max"} <= ids
+
+
+async def test_lifespan_attempts_orchestrator_shutdown_after_engine_failure(
+    tmp_path, monkeypatch
+):
+    class _Resource:
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+            self.shutdown_count = 0
+
+        async def shutdown(self) -> None:
+            self.shutdown_count += 1
+            if self.fail:
+                raise RuntimeError("shutdown failed")
+
+    failing_engine = _Resource(fail=True)
+    owned_backend = _ShutdownBackend()
+    owned_orchestrator = Orchestrator(
+        engines={"tier1": owned_backend, "tier2": owned_backend}
+    )
+    (tmp_path / "auto.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
+    monkeypatch.setattr(
+        "kairyu.deploy.builder.create_backend", lambda *_args, **_kwargs: failing_engine
+    )
+    monkeypatch.setattr(
+        "kairyu.deploy.builder.build_orchestrator", lambda _spec: owned_orchestrator
+    )
+    spec = load_deployment_spec(
+        """
+engines:
+  bad: { backend: mock }
+orchestrator: { spec: auto.yaml }
+"""
+    )
+    app = build_app_from_spec(spec, base_dir=tmp_path)
+
+    with pytest.raises(ExceptionGroup, match="application shutdown"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert failing_engine.shutdown_count == 1
+    assert owned_backend.shutdown_count == 1

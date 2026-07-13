@@ -14,7 +14,12 @@ from kairyu.engine.core.kv_serde import (
     inject_page,
     pool_fingerprint,
 )
-from kairyu.engine.core.kv_transport import KVTransportError, LocalFabric, PageFrame
+from kairyu.engine.core.kv_transport import (
+    KVTransportError,
+    LocalFabric,
+    PageFrame,
+    SequenceMeta,
+)
 from kairyu.engine.core.pd import KVHandoffError
 from kairyu.engine.core.pd_remote import RemoteKVHandoff, RemoteKVReceiver
 from kairyu.engine.core.radix_kv import RadixKVCache
@@ -135,21 +140,96 @@ class TestRemoteHandoff:
         assert second.num_cached_tokens == 8  # 2 full pages radix-hit
         assert receiver.injected_pages == 3 + 1  # only the tail re-injected (A4)
 
-    def test_failed_adopt_does_not_leak_the_allocation(self):
-        # A frame-count mismatch after allocate() must free the allocation, or
-        # it pins the matched radix path against eviction and leaks pages.
+    @pytest.mark.parametrize("frame_count", [0, 1])
+    def test_incomplete_adopt_does_not_publish_cache(self, frame_count):
+        source = _filled_pool()
+        pool = PagedKVPool(2, 16, PAGE, 2, 8)
+        cache = RadixKVCache(num_pages=16, page_size=PAGE)
+        receiver = RemoteKVReceiver(cache, pool)
+        tokens = tuple(range(9))  # two full pages plus one tail page
+        frames = tuple(extract_page(source, page) for page in range(frame_count))
+
+        with pytest.raises(KVTransportError, match="expected 3 page frames"):
+            receiver.adopt(frames, SequenceMeta(token_ids=tokens, first_token=42))
+
+        allocation = cache.allocate(tokens)
+        assert allocation.num_cached_tokens == 0
+        cache.release_preempted(allocation)
+
+    def test_failed_injection_does_not_publish_partial_cache(self):
+        source = _filled_pool()
+        pool = PagedKVPool(2, 16, PAGE, 2, 8)
+        cache = RadixKVCache(num_pages=16, page_size=PAGE)
+        receiver = RemoteKVReceiver(cache, pool)
+        tokens = tuple(range(5))  # one full page plus one tail page
+        good = extract_page(source, 0)
+        bad_source = extract_page(source, 1)
+        bad = PageFrame(
+            page_id=bad_source.page_id,
+            fragments=(b"short",) + bad_source.fragments[1:],
+        )
+
+        with pytest.raises(KVTransportError):
+            receiver.adopt((good, bad), SequenceMeta(token_ids=tokens, first_token=42))
+
+        allocation = cache.allocate(tokens)
+        assert allocation.num_cached_tokens == 0
+        cache.release_preempted(allocation)
+
+    def test_event_sink_failure_does_not_publish_cache(self):
+        source = _filled_pool()
+        pool = PagedKVPool(2, 16, PAGE, 2, 8)
+
+        def fail_event_sink(_event):
+            raise RuntimeError("event sink failed")
+
+        cache = RadixKVCache(
+            num_pages=16, page_size=PAGE, event_sink=fail_event_sink
+        )
+        receiver = RemoteKVReceiver(cache, pool)
+        tokens = tuple(range(5))  # one full page plus one tail page
+        frames = tuple(extract_page(source, page) for page in (0, 1))
+
+        with pytest.raises(RuntimeError, match="event sink failed"):
+            receiver.adopt(frames, SequenceMeta(token_ids=tokens, first_token=42))
+
+        allocation = cache.allocate(tokens)
+        assert allocation.num_cached_tokens == 0
+        cache.release_preempted(allocation)
+
+    def test_empty_token_metadata_is_rejected_before_allocation(self):
+        pool = PagedKVPool(2, 16, PAGE, 2, 8)
+        cache = RadixKVCache(num_pages=16, page_size=PAGE)
+        before = cache.num_free_pages
+
+        with pytest.raises(KVTransportError, match="non-empty token_ids"):
+            RemoteKVReceiver(cache, pool).adopt(
+                (), SequenceMeta(token_ids=(), first_token=None)
+            )
+
+        assert cache.num_free_pages == before
+
+    def test_excess_frames_are_rejected_before_allocation(self, monkeypatch):
         source = _filled_pool()
         decode_pool = PagedKVPool(2, 16, PAGE, 2, 8)
         decode_cache = RadixKVCache(num_pages=16, page_size=PAGE)
         receiver = RemoteKVReceiver(decode_cache, decode_pool)
         before = decode_cache.num_free_pages
-        # two-token prompt needs one page, but hand it three frames -> mismatch
-        too_many = tuple(extract_page(source, page) for page in (0, 1, 2))
-        from kairyu.engine.core.kv_transport import SequenceMeta
+        allocation_calls = 0
+        real_allocate = decode_cache.allocate
 
-        with pytest.raises(KVTransportError, match="non-cached frames"):
+        def recording_allocate(tokens):
+            nonlocal allocation_calls
+            allocation_calls += 1
+            return real_allocate(tokens)
+
+        monkeypatch.setattr(decode_cache, "allocate", recording_allocate)
+        # A two-token prompt needs one page, but the sender provides three.
+        too_many = tuple(extract_page(source, page) for page in (0, 1, 2))
+        with pytest.raises(KVTransportError, match="expected 1 page frames"):
             receiver.adopt(too_many, SequenceMeta(token_ids=(1, 2), first_token=0))
-        assert decode_cache.num_free_pages == before  # allocation reclaimed
+        assert allocation_calls == 0
+        assert decode_cache.num_free_pages == before
 
     def test_missing_pages_is_a_handoff_error(self):
         prefill_transport, decode_transport = self._pair()
