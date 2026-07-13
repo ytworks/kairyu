@@ -170,10 +170,27 @@ class TestTenancy:
             )
 
     def test_from_mapping_rejects_key_outside_resolved_api_keys(self):
-        with pytest.raises(ValueError, match="unknown API key 'key-b'"):
+        with pytest.raises(ValueError, match="unknown API key 'key-b'") as exc_info:
             TenantConfig.from_mapping(
                 key_tenants={"key-b": "tenant-b"},
-                resolved_api_keys=frozenset({"key-a"}),
+                resolved_api_keys=frozenset({"valid-secret"}),
+            )
+        assert "valid-secret" not in str(exc_info.value)
+
+    def test_from_mapping_unmapped_resolved_key_uses_default_tenant(self):
+        config = TenantConfig.from_mapping(
+            key_tenants={"key-a": "tenant-a"},
+            default_tenant="fallback",
+            resolved_api_keys=frozenset({"key-a", "unmapped-key"}),
+        )
+
+        assert config.tenant_for_key("unmapped-key") == "fallback"
+
+    def test_from_mapping_rejects_raw_string_resolved_keys(self):
+        with pytest.raises(ValueError, match="must not be a string"):
+            TenantConfig.from_mapping(
+                key_tenants={"key-a": "tenant-a"},
+                resolved_api_keys="key-a",
             )
 
     def test_from_mapping_allows_multiple_keys_for_one_tenant(self):

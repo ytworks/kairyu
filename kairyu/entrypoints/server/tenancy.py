@@ -45,6 +45,8 @@ class TenantConfig:
         """Validate deployment mappings against already-resolved API keys."""
         copied_key_tenants = dict(key_tenants)
         copied_limits = dict(limits or {})
+        if isinstance(resolved_api_keys, str):
+            raise ValueError("resolved API keys must not be a string")
         resolved_keys = frozenset(resolved_api_keys)
 
         if not default_tenant.strip():
