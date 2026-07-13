@@ -27,11 +27,18 @@ kairyu bench run --config examples/bench_fugu.yaml
 Results land in `bench/results/fugu/<run_id>/`:
 
 ```
-run.json                    # full config + environment (git commit, versions)
-<benchmark>/<target>.json   # one PairResult per scoreboard cell, per-item evidence
-scoreboard.json             # machine-readable table
-scoreboard.md               # the Fugu-layout table (also printed to stdout)
+run.json                                      # fingerprint + identity + config + environment
+<benchmark>--<sha16>/<target>--<sha16>.json   # one PairResult per scoreboard cell
+scoreboard.json                               # machine-readable table
+scoreboard.md                                 # Fugu-layout table (also printed to stdout)
 ```
+
+Benchmark and target components retain a readable sanitized prefix and append
+the first 16 hexadecimal characters of the raw name's SHA-256. Thus names such
+as `org/model` and `org__model`, which otherwise sanitize to the same path, do
+not overwrite one another. A run id must be one non-dot path component;
+absolute paths, separators, Windows drive paths, and symlink escapes outside
+the results or run directory are refused. Result writes are atomic.
 
 Useful subcommands:
 
@@ -93,8 +100,41 @@ pair the status is one of:
 - `failed` — the adapter crashed or most items hard-errored. **Only this
   affects the exit code.**
 
-Re-running with the same `--run-id` resumes: non-failed pairs are reused,
-failed pairs retry, `--rerun` ignores the store.
+### Resume identity
+
+`--run-id` names immutable evidence; it is not a mutable output slot. Before
+the first backend request or pair write, the runner downloads or preflights the
+selected adapters, constructs a canonical JSON identity, and stores its
+SHA-256 fingerprint in `run.json`. The identity contains:
+
+- the selected adapter names and each adapter's pinned dataset id, revision,
+  and validated `data.jsonl` SHA-256 (or an explicit unavailable marker); and
+- the output-affecting `BenchConfig` fields `suite`, `targets`, `judge`, `limit`,
+  `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`, `concurrency`,
+  `request_timeout_s`, and `retries`. `targets` includes every target's name,
+  base URL, model, API-key environment-variable name, context/output limits,
+  and vision capability; `judge` likewise includes its endpoint/model,
+  API-key environment-variable name, concurrency, and retry limit.
+
+Exactly five execution or location controls are excluded: `run_id`,
+`results_dir`, `cache_dir`, `rerun`, and `download`. API-key *environment
+variable names* remain part of the endpoint identity, but resolved secret
+values are never read into or hashed by the fingerprint. Environment metadata
+such as the timestamp, git commit, Python version, and kairyu version remains
+in `run.json` as provenance and does not affect identity equality. Canonical
+JSON uses sorted keys and compact separators before hashing.
+
+Re-running with the same `--run-id` resumes only when `run.json` has the exact
+fingerprint. A missing or different fingerprint—including a legacy run
+directory—or a changed target, dataset bytes/revision, limit, seed, judge, or
+methodology-affecting configuration is refused without overwriting `run.json`
+or pair evidence and before backend HTTP calls. Under a matching run, only a
+non-failed pair carrying the same `run_fingerprint` is reused; failed pairs and
+legacy/mismatched pair files run again.
+
+`--rerun` bypasses matching pair reuse, but it does **not** bypass the
+run-directory fingerprint check. To intentionally change immutable inputs,
+choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
 
 ## Datasets, cache, tokens
 
@@ -102,6 +142,13 @@ failed pairs retry, `--rerun` ignores the store.
   Datasets are normalized to JSONL once at download; nothing is committed to
   the repo (`bench/results/` and `bench/data/` are git-ignored; the committed
   fixtures are tiny synthetic stand-ins for offline testing).
+- A cache entry is ready only when `manifest.json` and `data.jsonl` exist, the
+  manifest contains a well-formed lowercase SHA-256, a streaming hash of the
+  current JSONL bytes matches it, and any requested dataset id/revision pins
+  match. Missing, malformed, unreadable, stale, or modified entries fail closed
+  as not ready; a readiness check never rewrites or deletes them. The same
+  identity is checked again immediately before each pair, so bytes that change
+  after run initialization are skipped rather than scored as valid input.
 - Download deps are an extra: `uv sync --extra bench` (or
   `pip install 'kairyu[bench]'`).
 - **Gated datasets** (GPQA Diamond, HLE): accept the license on the dataset
