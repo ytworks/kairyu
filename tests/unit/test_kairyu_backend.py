@@ -36,6 +36,25 @@ class _SlowRunner:
         }
 
 
+class _FailOnceRunner:
+    def __init__(self) -> None:
+        self.failed = False
+
+    def execute(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("injected runner failure")
+        return {
+            chunk.request_id: (SampledToken(7),)
+            for chunk in scheduled
+            if not chunk.is_prefill or states[chunk.request_id].prefill_done
+        }
+
+
 async def test_generate_runs_through_engine_core():
     backend = KairyuBackend(num_pages=256)
     result = await backend.generate(_request("r1", "hello world from kairyu"))
@@ -76,6 +95,17 @@ async def test_stream_abandonment_aborts_engine_work():
     assert "abandoned" not in backend._scheduler.states
     result = await backend.generate(_request("after-abandon", "still works", 2))
     assert result.finished
+
+
+async def test_pump_failure_purges_requests_and_backend_recovers():
+    backend = KairyuBackend(num_pages=256, runner=_FailOnceRunner())
+    with pytest.raises(RuntimeError, match="injected runner failure"):
+        await backend.generate(_request("failed", "first", 2))
+
+    assert backend._loop.has_work() is False
+    assert "failed" not in backend._scheduler.states
+    recovered = await backend.generate(_request("recovered", "second", 2))
+    assert recovered.finished
 
 
 async def test_concurrent_requests_are_continuously_batched():

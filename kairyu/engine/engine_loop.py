@@ -198,6 +198,26 @@ class EngineLoop:
     def abort(self, request_id: str) -> None:
         self._ops.append(("abort", request_id))
 
+    def purge(self, request_ids: tuple[str, ...]) -> None:
+        """Abort and forget requests after a fatal runner step.
+
+        Called only when no ``step()`` call is active. Pending adds and aborts
+        for the purged ids are removed before scheduler and runner state is
+        reclaimed.
+        """
+        ids = set(request_ids)
+        retained = deque()
+        while self._ops:
+            op, payload = self._ops.popleft()
+            op_request_id = payload[0].request_id if op == "add" else payload
+            if op_request_id not in ids:
+                retained.append((op, payload))
+        self._ops = retained
+        for request_id in ids:
+            self._scheduler.abort(request_id)
+            self._tracked.pop(request_id, None)
+            self._forget(request_id)
+
     def has_work(self) -> bool:
         return bool(self._ops) or self._scheduler.has_unfinished()
 
