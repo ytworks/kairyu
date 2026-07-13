@@ -5,13 +5,13 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 
 ## Current Status
 
-**Deploy-ready (2026-07-03): every milestone of the local-complete plan
-(M8–M19) is implemented and CPU-verified — 646 tests, 92% cov. The only
+**Deploy-ready (2026-07-13): every milestone of the local-complete plan
+(M8–M19) is implemented and CPU-verified — 827 tests, 89% cov. The only
 remaining work is GPU execution: performance gates, kernel tuning, fabric
 bring-up, `pytest -m gpu`, and `scripts/gpu_gates/` (all pre-written and
 dry-run pinned).**
 
-_Last updated: 2026-07-03_
+_Last updated: 2026-07-13_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -21,7 +21,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 
 | Milestone | Status |
 |-----------|--------|
-| M1 — Orchestration (L2) + Interface (L3) | Complete and merged. Router / Conductor / MoA, vLLM-compatible `LLM` + `AsyncLLMEngine`, OpenAI-compatible server, YAML/decorator DSL. |
+| M1 — Orchestration (L2) + Interface (L3) | Complete and merged. Router / Conductor / MoA, vLLM-compatible `LLM` + `AsyncLLMEngine`, OpenAI-compatible server, YAML/decorator DSL. Atomic pre-dispatch reservations enforce strict step admission and serialize result-priced work under configured cost caps without hiding a single admitted generation's actual-cost overrun. |
 | M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done: scheduler, KV manager, EngineCore step loop, overlap pipeline, pre-GPU robustness (EOS, preemption, abort, pin TTL). Paged-KV attention validated with real tensors on CPU (greedy-equivalence). **Blocked on GPU hardware** for the GPU phase. |
 | M3 — Spec decode / CUDA graphs / P-D separation | n-gram draft spec-decode policy and xgrammar structured output implemented CPU-side. CUDA graphs and the rest gated on M2 GPU phase. |
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
@@ -61,6 +61,19 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-13 — [design] D4 defines atomic orchestration budget admission
+- What: D4 now requires every Conductor generation to reserve its step synchronously
+  before dispatch, gives result-priced work one exclusive unknown-cost admission slot,
+  and releases complete reservations on failure or cancellation. MoA reserves all
+  proposal plus synthesis steps as one operation. An admitted generation's eventual
+  actual cost remains fully accounted and queryable even when it crosses the cap.
+- Why: Parallel DAG roots and MoA previously admitted work from stale completed-only
+  state, multiplying strict step/cost limits. Pre-dispatch reservations close that race
+  while preserving the truthful result-priced behavior: an unknowable actual charge is
+  never clamped or hidden after admission.
+- Refs: issue #43; D4 in `docs/design/m1-orchestration-and-interface.md`;
+  `kairyu/orchestration/{budget,conductor,orchestrator}.py`
 
 ### 2026-07-13 — [progress] Backend ownership closes across replica and app lifecycles
 - What: Replica removal is now an async ownership boundary that closes the removed backend exactly once. Shared shutdown aggregation attempts every unique backend, and orchestrator/application lifespan teardown cascades through separately owned workers even when another shutdown fails.
