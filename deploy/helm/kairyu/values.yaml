@@ -11,6 +11,11 @@ nodeSelector: {}
 runtimeClassName: ""
 tolerations: []
 affinity: {}
+modelStorage:
+  enabled: false
+  pvcName: ""
+  hostPath: ""
+  mountPath: /models
 # DeploymentSpec YAML mounted at exactly /etc/kairyu/config.yaml (the
 # Dockerfile CMD — m10a A11)
 config: |

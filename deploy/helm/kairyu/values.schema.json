@@ -1,0 +1,204 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "replicaCount",
+    "image",
+    "service",
+    "resources",
+    "nodeSelector",
+    "runtimeClassName",
+    "tolerations",
+    "affinity",
+    "modelStorage",
+    "config"
+  ],
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "limits": {
+          "$ref": "#/definitions/resourceList"
+        },
+        "requests": {
+          "$ref": "#/definitions/resourceList"
+        }
+      }
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "runtimeClassName": {
+      "type": "string"
+    },
+    "tolerations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "operator": {
+            "type": "string",
+            "enum": ["Exists", "Equal"]
+          },
+          "value": {
+            "type": "string"
+          },
+          "effect": {
+            "type": "string",
+            "enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"]
+          },
+          "tolerationSeconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "affinity": {
+      "type": "object"
+    },
+    "modelStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "pvcName", "hostPath", "mountPath"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "pvcName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "hostPath": {
+          "type": "string",
+          "anyOf": [
+            {
+              "const": ""
+            },
+            {
+              "pattern": "^/"
+            }
+          ]
+        },
+        "mountPath": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "pvcName": {
+                    "minLength": 1
+                  },
+                  "hostPath": {
+                    "const": ""
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "pvcName": {
+                    "const": ""
+                  },
+                  "hostPath": {
+                    "minLength": 1,
+                    "pattern": "^/"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "config": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "definitions": {
+    "resourceList": {
+      "type": "object",
+      "properties": {
+        "nvidia.com/gpu": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        ]
+      }
+    }
+  }
+}

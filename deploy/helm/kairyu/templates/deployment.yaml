@@ -44,9 +44,25 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/kairyu
+          {{- if .Values.modelStorage.enabled }}
+            - name: model-storage
+              mountPath: {{ .Values.modelStorage.mountPath | quote }}
+              readOnly: true
+          {{- end }}
           resources:
 {{ toYaml .Values.resources | indent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "kairyu.fullname" . }}-config
+      {{- if .Values.modelStorage.enabled }}
+        - name: model-storage
+        {{- if .Values.modelStorage.pvcName }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.modelStorage.pvcName | quote }}
+        {{- else }}
+          hostPath:
+            path: {{ .Values.modelStorage.hostPath | quote }}
+            type: Directory
+        {{- end }}
+      {{- end }}

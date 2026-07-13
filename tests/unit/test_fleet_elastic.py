@@ -1,8 +1,10 @@
 """m10a gates: dynamic membership, HRW remap property, drain, registry,
 reconciler, tracing spans, helm render."""
 
+import json
 import shutil
 import subprocess
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -231,6 +233,9 @@ def test_helm_chart_renders():
     assert "runtimeClassName" not in pod_spec
     assert "tolerations" not in pod_spec
     assert "affinity" not in pod_spec
+    container = pod_spec["containers"][0]
+    assert all(mount["name"] != "model-storage" for mount in container["volumeMounts"])
+    assert all(volume["name"] != "model-storage" for volume in pod_spec["volumes"])
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
@@ -310,3 +315,194 @@ def test_helm_chart_config_is_a_valid_deployment_spec():
     values = yaml.safe_load(open("deploy/helm/kairyu/values.yaml"))
     spec = load_deployment_spec(values["config"])
     assert spec.engines, "chart config must declare at least one engine"
+
+
+def test_helm_gpu_values_define_real_engine_and_model_storage():
+    from kairyu.deploy.spec import load_deployment_spec
+
+    chart_dir = Path("deploy/helm/kairyu")
+    defaults = yaml.safe_load((chart_dir / "values.yaml").read_text())
+    gpu_values = yaml.safe_load((chart_dir / "values-gpu.yaml").read_text())
+
+    assert defaults["modelStorage"] == {
+        "enabled": False,
+        "pvcName": "",
+        "hostPath": "",
+        "mountPath": "/models",
+    }
+    assert gpu_values["modelStorage"] == {
+        "enabled": True,
+        "pvcName": "",
+        "hostPath": "/models",
+        "mountPath": "/models",
+    }
+
+    spec = load_deployment_spec(gpu_values["config"])
+    engine = spec.engines["default"]
+    assert engine.backend == "kairyu"
+    assert engine.backend != "mock"
+    model_path = PurePosixPath(engine.options["model_path"])
+    assert model_path.is_relative_to(PurePosixPath(gpu_values["modelStorage"]["mountPath"]))
+
+    template = (chart_dir / "templates/deployment.yaml").read_text()
+    assert template.count("{{- if .Values.modelStorage.enabled }}") == 2
+    assert ".Values.modelStorage.pvcName" in template
+    assert ".Values.modelStorage.hostPath" in template
+    assert ".Values.modelStorage.mountPath" in template
+
+    schema = json.loads((chart_dir / "values.schema.json").read_text())
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == set(defaults)
+    assert set(schema["required"]) == set(defaults)
+    assert schema["properties"]["replicaCount"]["minimum"] == 1
+    gpu_schema = schema["definitions"]["resourceList"]["properties"]["nvidia.com/gpu"]
+    assert gpu_schema == {"type": "integer", "minimum": 1}
+    storage_schema = schema["properties"]["modelStorage"]
+    assert storage_schema["additionalProperties"] is False
+    assert set(storage_schema["required"]) == {
+        "enabled",
+        "pvcName",
+        "hostPath",
+        "mountPath",
+    }
+    enabled_rule = storage_schema["allOf"][0]
+    assert enabled_rule["if"]["properties"]["enabled"]["const"] is True
+    assert len(enabled_rule["then"]["oneOf"]) == 2
+    assert storage_schema["properties"]["mountPath"]["pattern"] == "^/"
+    assert storage_schema["properties"]["hostPath"]["anyOf"] == [
+        {"const": ""},
+        {"pattern": "^/"},
+    ]
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+def test_helm_gpu_values_render_real_engine_and_model_storage():
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "kairyu",
+            "deploy/helm/kairyu",
+            "-f",
+            "deploy/helm/kairyu/values-gpu.yaml",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    documents = [document for document in yaml.safe_load_all(rendered) if document]
+    deployment = next(document for document in documents if document.get("kind") == "Deployment")
+    configmap = next(document for document in documents if document.get("kind") == "ConfigMap")
+
+    pod_spec = deployment["spec"]["template"]["spec"]
+    assert pod_spec["runtimeClassName"] == "nvidia"
+    assert pod_spec["nodeSelector"] == {"kairyu.dev/gpu-profile": "pcie-gddr"}
+
+    container = pod_spec["containers"][0]
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == 1
+    model_mount = next(
+        mount for mount in container["volumeMounts"] if mount["mountPath"] == "/models"
+    )
+    assert model_mount["readOnly"] is True
+    model_volume = next(
+        volume for volume in pod_spec["volumes"] if volume["name"] == model_mount["name"]
+    )
+    assert model_volume["hostPath"]["path"] == "/models"
+    assert "persistentVolumeClaim" not in model_volume
+
+    config = yaml.safe_load(configmap["data"]["config.yaml"])
+    engine = config["engines"]["default"]
+    assert engine["backend"] == "kairyu"
+    assert engine["backend"] != "mock"
+    model_path = PurePosixPath(engine["options"]["model_path"])
+    assert model_path.is_relative_to(PurePosixPath(model_mount["mountPath"]))
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+def test_helm_model_storage_can_render_an_existing_pvc(tmp_path):
+    pvc_values = tmp_path / "pvc-model-storage.yaml"
+    pvc_values.write_text(
+        yaml.safe_dump(
+            {
+                "modelStorage": {
+                    "pvcName": "kairyu-models",
+                    "hostPath": "",
+                }
+            }
+        )
+    )
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "kairyu",
+            "deploy/helm/kairyu",
+            "-f",
+            "deploy/helm/kairyu/values-gpu.yaml",
+            "-f",
+            str(pvc_values),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    deployment = next(
+        document
+        for document in yaml.safe_load_all(rendered)
+        if document and document.get("kind") == "Deployment"
+    )
+    pod_spec = deployment["spec"]["template"]["spec"]
+    model_volume = next(
+        volume for volume in pod_spec["volumes"] if volume["name"] == "model-storage"
+    )
+    assert model_volume["persistentVolumeClaim"]["claimName"] == "kairyu-models"
+    assert "hostPath" not in model_volume
+    model_mount = next(
+        mount
+        for mount in pod_spec["containers"][0]["volumeMounts"]
+        if mount["name"] == "model-storage"
+    )
+    assert model_mount == {
+        "name": "model-storage",
+        "mountPath": "/models",
+        "readOnly": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "model_storage",
+    [
+        {
+            "enabled": True,
+            "pvcName": "",
+            "hostPath": "",
+            "mountPath": "/models",
+        },
+        {
+            "enabled": True,
+            "pvcName": "kairyu-models",
+            "hostPath": "/models",
+            "mountPath": "/models",
+        },
+    ],
+    ids=["without-source", "pvc-and-host-path"],
+)
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+def test_helm_schema_rejects_invalid_model_storage(tmp_path, model_storage):
+    invalid_values = tmp_path / "invalid-model-storage.yaml"
+    invalid_values.write_text(yaml.safe_dump({"modelStorage": model_storage}))
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            "kairyu",
+            "deploy/helm/kairyu",
+            "-f",
+            "deploy/helm/kairyu/values-gpu.yaml",
+            "-f",
+            str(invalid_values),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
