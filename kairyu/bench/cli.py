@@ -159,15 +159,22 @@ def _handle_report(args) -> int:
     raw_judge = config.get("judge")
     judge = None
     if isinstance(raw_judge, dict):
-        base_url = raw_judge.get("base_url")
-        model = raw_judge.get("model")
-        if not isinstance(base_url, str):
-            base_url = None
-        if not isinstance(model, str):
-            model = None
-        if raw_judge and base_url is None and model is None:
-            model = "identity-unavailable"
-        judge = JudgeConfig(base_url=base_url, model=model)
+        explicitly_disabled = (
+            "base_url" in raw_judge
+            and "model" in raw_judge
+            and raw_judge["base_url"] is None
+            and raw_judge["model"] is None
+        )
+        if raw_judge and not explicitly_disabled:
+            base_url = raw_judge.get("base_url")
+            model = raw_judge.get("model")
+            if not isinstance(base_url, str):
+                base_url = None
+            if not isinstance(model, str):
+                model = None
+            if base_url is None and model is None:
+                model = "identity-unavailable"
+            judge = JudgeConfig(base_url=base_url, model=model)
     scoreboard = build_scoreboard(
         run_id=run_meta.get("run_id", run_dir.name),
         suite=config.get("suite", "fugu"),

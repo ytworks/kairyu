@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from kairyu.bench.adapters import FUGU_ROW_ORDER, all_adapters
+from kairyu.bench.adapters.base import normalize_base_url
 from kairyu.bench.types import (
     SCHEMA_VERSION,
     BenchTarget,
@@ -19,7 +20,7 @@ from kairyu.bench.types import (
 
 
 def _resolved_identity(base_url: str, model: str) -> tuple[str, str]:
-    return base_url.rstrip("/"), model
+    return normalize_base_url(base_url), model
 
 
 def build_scoreboard(
