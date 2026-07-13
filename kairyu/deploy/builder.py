@@ -19,6 +19,7 @@ from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
 
@@ -29,8 +30,31 @@ def _server_settings(spec: DeploymentSpec) -> ServerSettings:
     )
 
 
+def _preflight_server(
+    spec: DeploymentSpec,
+) -> tuple[ServerSettings, TenantConfig | None]:
+    settings = _server_settings(spec)
+    section = spec.tenants
+    if section is None:
+        return settings, None
+    tenant_config = TenantConfig.from_mapping(
+        key_tenants=section.key_tenants,
+        limits={
+            tenant: TenantLimits(
+                requests_per_minute=limits.requests_per_minute,
+                tokens_per_minute=limits.tokens_per_minute,
+            )
+            for tenant, limits in section.limits.items()
+        },
+        default_tenant=section.default_tenant,
+        resolved_api_keys=settings.resolve_api_keys(),
+    )
+    return settings, tenant_config
+
+
 def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> FastAPI:
     """Construct engines, pools, orchestrator, and the app with a prober lifespan."""
+    server_settings, tenant_config = _preflight_server(spec)
     engines: dict[str, EngineBackend] = {
         name: create_backend(entry.backend, **entry.options)
         for name, entry in spec.engines.items()
@@ -103,9 +127,10 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         engines=engines,
         orchestrator=orchestrator,
         orchestrators=orchestrators,
-        settings=_server_settings(spec),
+        settings=server_settings,
         lifespan=lifespan,
         chat_templates=chat_templates,
+        tenant_config=tenant_config,
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)

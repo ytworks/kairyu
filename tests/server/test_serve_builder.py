@@ -1,9 +1,12 @@
 """DeploymentSpec -> app builder: pool wiring, affinity over HTTP, lifespan (gate C1)."""
 
 import httpx
+import pytest
 
+import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_config, build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
+from kairyu.entrypoints.server.tenancy import TenantLimits, UsageLedger
 
 POOLED_YAML = """
 engines:
@@ -157,3 +160,154 @@ orchestrators:
         models = await client.get("/v1/models")
         ids = {m["id"] for m in models.json()["data"]}
     assert {"kairyu-auto", "kairyu-auto-max"} <= ids
+
+
+def test_builder_wires_distinct_tenant_identities_and_limits(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a,key-b")
+    spec = load_deployment_spec(
+        f"""
+server:
+  api_keys_env: KAIRYU_DEPLOYMENT_KEYS
+  usage_ledger_path: {tmp_path / "usage.jsonl"}
+engines:
+  m: {{ backend: mock }}
+tenants:
+  default_tenant: fallback
+  key_tenants:
+    key-a: tenant-a
+    key-b: tenant-b
+  limits:
+    tenant-a: {{ requests_per_minute: 1, tokens_per_minute: 1000 }}
+    tenant-b: {{ requests_per_minute: 3, tokens_per_minute: 2000 }}
+"""
+    )
+    settings_calls = 0
+    real_server_settings = builder_module._server_settings
+
+    def recording_server_settings(deployment_spec):
+        nonlocal settings_calls
+        settings_calls += 1
+        return real_server_settings(deployment_spec)
+
+    monkeypatch.setattr(builder_module, "_server_settings", recording_server_settings)
+
+    app = build_app_from_spec(spec)
+
+    config = app.state.tenant_limiter._config
+    assert settings_calls == 1
+    assert config.tenant_for_key("key-a") == "tenant-a"
+    assert config.tenant_for_key("key-b") == "tenant-b"
+    assert config.tenant_for_key("unmapped-key") == "fallback"
+    assert config.limits_for("tenant-a") == TenantLimits(
+        requests_per_minute=1,
+        tokens_per_minute=1000,
+    )
+    assert config.limits_for("tenant-b") == TenantLimits(
+        requests_per_minute=3,
+        tokens_per_minute=2000,
+    )
+
+
+async def test_deployment_tenants_isolate_rate_limits_and_usage_ledger(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a,key-b")
+    ledger_path = tmp_path / "usage.jsonl"
+    app = build_app_from_spec(
+        load_deployment_spec(
+            f"""
+server:
+  api_keys_env: KAIRYU_DEPLOYMENT_KEYS
+  usage_ledger_path: {ledger_path}
+engines:
+  m: {{ backend: mock }}
+tenants:
+  key_tenants:
+    key-a: tenant-a
+    key-b: tenant-b
+  limits:
+    tenant-a: {{ requests_per_minute: 1, tokens_per_minute: 200000 }}
+    tenant-b: {{ requests_per_minute: 3, tokens_per_minute: 200000 }}
+"""
+        )
+    )
+    payload = _chat_body("hi", model="m")
+    tenant_a = {"Authorization": "Bearer key-a"}
+    tenant_b = {"Authorization": "Bearer key-b"}
+
+    async with _client(app) as client:
+        first_a = await client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers=tenant_a,
+        )
+        limited_a = await client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers=tenant_a,
+        )
+        first_b = await client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers=tenant_b,
+        )
+        usage_a = await client.get("/admin/usage", headers=tenant_a)
+        usage_b = await client.get("/admin/usage", headers=tenant_b)
+
+    assert first_a.status_code == 200
+    assert limited_a.status_code == 429
+    assert limited_a.json()["error"]["code"] == "tenant_rate_limited"
+    assert first_b.status_code == 200
+    assert usage_a.status_code == 200
+    assert set(usage_a.json()["usage"]) == {"tenant-a"}
+    assert usage_a.json()["usage"]["tenant-a"]["requests"] == 1
+    assert usage_b.status_code == 200
+    assert set(usage_b.json()["usage"]) == {"tenant-b"}
+    assert usage_b.json()["usage"]["tenant-b"]["requests"] == 1
+
+    totals = UsageLedger(ledger_path).totals()
+    assert set(totals) == {"tenant-a", "tenant-b"}
+    assert totals["tenant-a"]["requests"] == 1
+    assert totals["tenant-b"]["requests"] == 1
+    assert "default" not in totals
+
+
+def test_tenant_preflight_revalidates_before_constructing_owned_backends(monkeypatch):
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a,key-b")
+    spec = load_deployment_spec(
+        """
+server:
+  api_keys_env: KAIRYU_DEPLOYMENT_KEYS
+engines:
+  m: { backend: mock }
+tenants:
+  key_tenants:
+    key-a: tenant-a
+    key-b: tenant-b
+"""
+    )
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a")
+    created_backends = []
+    real_create_backend = builder_module.create_backend
+
+    def recording_create_backend(name, **options):
+        backend = real_create_backend(name, **options)
+        created_backends.append(backend)
+        return backend
+
+    monkeypatch.setattr(builder_module, "create_backend", recording_create_backend)
+
+    with pytest.raises(ValueError, match="unknown API key 'key-b'"):
+        build_app_from_spec(spec)
+
+    assert created_backends == []
+
+
+def test_builder_without_tenant_section_preserves_legacy_app_state():
+    app = build_app_from_spec(load_deployment_spec(POOLED_YAML))
+
+    assert not hasattr(app.state, "tenant_limiter")
