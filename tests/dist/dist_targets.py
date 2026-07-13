@@ -7,9 +7,42 @@ result as JSON to ``out_dir/rank{r}.json`` (crash-safe result transport).
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
+
+
+class _TPTokenizer:
+    def __init__(self, vocab: list[str]) -> None:
+        self._vocab = list(vocab)
+        self.eos_token_id = self._vocab.index("<eos>")
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return (self._vocab.index("a"),)
+
+    def decode(self, token_ids: Sequence[int]) -> str:
+        return "".join(
+            self._vocab[token_id]
+            for token_id in token_ids
+            if token_id != self.eos_token_id
+        )
+
+    def vocab(self) -> list[str]:
+        return list(self._vocab)
+
+
+class _ReleaseRecordingRunner:
+    def __init__(self, runner) -> None:
+        self.runner = runner
+        self.released: list[str] = []
+
+    def execute(self, scheduled, states):
+        return self.runner.execute(scheduled, states)
+
+    def release(self, request_id: str) -> None:
+        self.released.append(request_id)
+        self.runner.release(request_id)
 
 
 def _setup(rank: int, world_size: int, init_file: str):
@@ -54,7 +87,8 @@ def comm_contract(rank: int, world_size: int, init_file: str, out_dir: str) -> N
 
 
 def tp_engine_parity(rank: int, world_size: int, init_file: str, out_dir: str,
-                     model_dir: str, prompt: list[int], max_new: int) -> None:
+                     model_dir: str, prompt: list[int], max_new: int,
+                     vocab: list[str]) -> None:
     """Rank 0 drives EngineCore via DistTPModelRunner; rank 1 runs the worker loop."""
     from kairyu.engine.core.worker import (
         DistTPModelRunner,
@@ -66,7 +100,9 @@ def tp_engine_parity(rank: int, world_size: int, init_file: str, out_dir: str,
 
     comm = _setup(rank, world_size, init_file)
     num_pages, page_size = 64, 4
-    runner, _ = build_tp_runner(model_dir, world_size, rank, comm, num_pages, page_size)
+    runner, _ = build_tp_runner(
+        model_dir, world_size, rank, comm, num_pages, page_size, vocab
+    )
     handshake = comm.broadcast(
         make_handshake(model_dir, num_pages, page_size) if rank == 0 else None, src=0
     )
@@ -92,6 +128,128 @@ def tp_engine_parity(rank: int, world_size: int, init_file: str, out_dir: str,
     else:
         steps = worker_step_loop(comm, runner)
         _finish(out_dir, rank, {"steps": steps})
+
+
+def tp_structured_release(
+    rank: int,
+    world_size: int,
+    init_file: str,
+    out_dir: str,
+    model_dir: str,
+    vocab: list[str],
+) -> None:
+    """Structured TP sampling and explicit release on every owning rank."""
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.scheduler import Scheduler
+    from kairyu.engine.core.worker import (
+        DistTPModelRunner,
+        build_tp_runner,
+        make_handshake,
+        validate_handshake,
+        worker_step_loop,
+    )
+    from kairyu.engine.engine_loop import EngineLoop
+    from kairyu.sampling_params import SamplingParams
+
+    comm = _setup(rank, world_size, init_file)
+    num_pages, page_size = 64, 4
+    runner, _ = build_tp_runner(
+        model_dir, world_size, rank, comm, num_pages, page_size, vocab
+    )
+    recording = _ReleaseRecordingRunner(runner)
+    handshake = comm.broadcast(
+        make_handshake(model_dir, num_pages, page_size) if rank == 0 else None, src=0
+    )
+    validate_handshake(handshake, model_dir, num_pages, page_size)
+    payload: dict = {"structured_completed": False}
+
+    if rank == 0:
+        dist_runner = DistTPModelRunner(comm, recording)
+        loop = EngineLoop(
+            _TPTokenizer(vocab),
+            Scheduler(
+                RadixKVCache(num_pages=num_pages, page_size=page_size),
+                max_num_batched_tokens=6,
+                page_size=page_size,
+            ),
+            dist_runner,
+        )
+
+        def drive_to_terminal(request_id: str):
+            for _ in range(64):
+                for update_id, update in loop.step():
+                    if update_id == request_id and update.finished:
+                        return update
+            raise AssertionError(f"request {request_id!r} did not finish")
+
+        try:
+            loop.submit(
+                "structured",
+                "prompt",
+                SamplingParams(
+                    max_tokens=16,
+                    temperature=0.0,
+                    extra_args={
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"a": {"type": "integer"}},
+                                    "required": ["a"],
+                                    "additionalProperties": False,
+                                }
+                            },
+                        }
+                    },
+                ),
+            )
+            structured = drive_to_terminal("structured")
+            payload["structured_completed"] = (
+                structured.finish_reason == "stop"
+                and json.loads(structured.text) == {"a": 1}
+            )
+
+            for index in range(32):
+                request_id = f"short-{index}"
+                loop.submit(
+                    request_id,
+                    "prompt",
+                    SamplingParams(max_tokens=1, temperature=0.0),
+                )
+                drive_to_terminal(request_id)
+
+            loop.submit(
+                "cancelled",
+                "prompt",
+                SamplingParams(max_tokens=16, temperature=0.0, ignore_eos=True),
+            )
+            loop.step()
+            if "cancelled" not in runner._sampler._states:
+                raise AssertionError("cancellation request was not sampled before abort")
+            loop.abort("cancelled")
+            cancelled = drive_to_terminal("cancelled")
+            if cancelled.finish_reason != "abort":
+                raise AssertionError("cancellation did not finish with abort")
+        except Exception as error:
+            payload["error"] = f"{type(error).__name__}: {error}"
+        finally:
+            dist_runner.shutdown()
+    else:
+        try:
+            payload["steps"] = worker_step_loop(comm, recording)
+        except Exception as error:
+            payload["error"] = f"{type(error).__name__}: {error}"
+            # Rank 0's finally block sends shutdown after its matching local
+            # execute fails. Receive it so both ranks reach _finish().
+            try:
+                comm.broadcast(None, src=0)
+            except Exception:
+                pass
+
+    payload["sampler_states"] = len(runner._sampler._states)
+    payload["released_requests"] = len(recording.released)
+    _finish(out_dir, rank, payload)
 
 
 def ep_block_parity(rank: int, world_size: int, init_file: str, out_dir: str,

@@ -14,7 +14,9 @@ same ``EngineLoop`` from a child process.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
 
 from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
 from kairyu.engine.core.comm import FakeCommunicator
@@ -170,16 +172,24 @@ def _build_dist_tp_loop(
     from kairyu.engine.core.worker import DistTPLauncher
     from kairyu.models.loader import load_generation_defaults
 
-    launcher = DistTPLauncher(model_path, tensor_parallel_size, num_pages, page_size)
-    generation = load_generation_defaults(model_path)
     resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
-    vocab_size = len(resolved.vocab())
-    if vocab_size > launcher.full_config.vocab_size:
-        launcher.shutdown()
+    vocab = list(resolved.vocab())
+    raw_config = json.loads((Path(model_path) / "config.json").read_text())
+    model_vocab_size = int(raw_config["vocab_size"])
+    if len(vocab) > model_vocab_size:
         raise ValueError(
-            f"tokenizer vocab ({vocab_size}) exceeds the model's vocab_size "
-            f"({launcher.full_config.vocab_size})"
+            f"tokenizer vocab ({len(vocab)}) exceeds the model's vocab_size "
+            f"({model_vocab_size})"
         )
+    vocab.extend("" for _ in range(model_vocab_size - len(vocab)))
+    launcher = DistTPLauncher(
+        model_path,
+        tensor_parallel_size,
+        num_pages,
+        page_size,
+        vocab=vocab,
+    )
+    generation = load_generation_defaults(model_path)
     cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(
         cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
