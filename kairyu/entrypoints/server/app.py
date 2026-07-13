@@ -579,7 +579,9 @@ def create_app(
         for name, engine in served_engines.items():
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
-    add_health_routes(app, served_engines, metrics, admin_keys=settings.resolve_admin_keys())
+    api_keys = settings.resolve_api_keys()
+    admin_keys = settings.resolve_admin_keys()
+    add_health_routes(app, served_engines, metrics, admin_keys=admin_keys)
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 
     add_extra_routes(
@@ -608,10 +610,12 @@ def create_app(
             config=tenant_config,
             limiter=limiter,
         )
-    api_keys = settings.resolve_api_keys()
-    if api_keys:
+    if api_keys or admin_keys:
         app.add_middleware(
-            AuthMiddleware, api_keys=api_keys, protect_metrics=settings.protect_metrics
+            AuthMiddleware,
+            api_keys=api_keys,
+            admin_keys=admin_keys,
+            protect_metrics=settings.protect_metrics,
         )
     ledger = None
     if settings.usage_ledger_path:
@@ -625,6 +629,9 @@ def create_app(
             """Scoped to the CALLER's tenant when tenancy is configured
             (security review: no cross-tenant disclosure); single-tenant
             deployments (no tenant_config) see everything behind auth."""
+            state = http_request.scope.get("state", {})
+            if state.get("is_admin"):
+                return {"usage": ledger.totals(tenant)}
             if tenant_config is not None:
                 caller = getattr(http_request.state, "tenant", None)
                 if caller is None:

@@ -7,6 +7,7 @@ import struct
 import pytest
 from fastapi.testclient import TestClient
 
+from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.extra_routes import MockEmbeddingBackend
@@ -113,6 +114,37 @@ class TestOrchestratorSurface:
 
 
 class TestTenancy:
+    def test_admin_only_usage_is_not_mapped_to_default_tenant(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("KAIRYU_DATA_KEYS", "data")
+        monkeypatch.setenv("KAIRYU_ADMIN_KEYS", "admin")
+        app = create_app(
+            {"m": MockBackend()},
+            settings=ServerSettings(
+                api_keys_env="KAIRYU_DATA_KEYS",
+                admin_keys_env="KAIRYU_ADMIN_KEYS",
+                usage_ledger_path=str(tmp_path / "usage.jsonl"),
+            ),
+            tenant_config=TenantConfig(key_tenants={"data": "tenant-a"}),
+        )
+        payload = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        with TestClient(app) as client:
+            data = {"Authorization": "Bearer data"}
+            admin = {"Authorization": "Bearer admin"}
+            assert (
+                client.post("/v1/chat/completions", json=payload, headers=data).status_code
+                == 200
+            )
+            admin_usage = client.get("/admin/usage", headers=admin)
+
+        assert admin_usage.status_code == 200
+        assert "tenant-a" in admin_usage.json()["usage"]
+        assert set(app.state.tenant_limiter._buckets) == {"tenant-a"}
+
     def test_rate_isolation_and_ledger(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KAIRYU_M11_KEYS", "key-a,key-b")
         config = TenantConfig(

@@ -118,6 +118,9 @@ class TenantLimitMiddleware:
             await self.app(scope, receive, send)
             return
         state = scope.setdefault("state", {})
+        if state.get("is_admin") and not state.get("is_data_plane"):
+            await self.app(scope, receive, send)
+            return
         tenant = self._config.tenant_for_key(state.get("api_key"))
         state["tenant"] = tenant
         if not path.startswith("/v1/"):

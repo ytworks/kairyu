@@ -54,10 +54,12 @@ class AuthMiddleware:
         app: _ASGIApp,
         *,
         api_keys: Iterable[str],
+        admin_keys: Iterable[str] = (),
         protect_metrics: bool = False,
     ) -> None:
         self.app = app
         self._api_keys = tuple(api_keys)
+        self._admin_keys = tuple(admin_keys)
         self._protect_metrics = protect_metrics
 
     def _authorized(self, scope: dict) -> bool:
@@ -69,12 +71,19 @@ class AuthMiddleware:
         # non-ASCII token can never match an ASCII key, so 401 not 500 (M5)
         if not token.isascii():
             return False
+        is_data_plane = False
         for key in self._api_keys:
-            if hmac.compare_digest(token, key):
-                # m11 A6: downstream tenant resolution reads this
-                _state(scope)["api_key"] = key
-                return True
-        return False
+            is_data_plane |= hmac.compare_digest(token, key)
+        is_admin = False
+        for key in self._admin_keys:
+            is_admin |= hmac.compare_digest(token, key)
+        if not (is_data_plane or is_admin):
+            return False
+        state = _state(scope)
+        state["api_key"] = token
+        state["is_data_plane"] = is_data_plane
+        state["is_admin"] = is_admin
+        return True
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":
@@ -82,7 +91,24 @@ class AuthMiddleware:
             return
         path = scope["path"]
         exempt = path in _OPEN_PATHS or (path == "/metrics" and not self._protect_metrics)
-        if exempt or self._authorized(scope):
+        if exempt:
+            await self.app(scope, receive, send)
+            return
+        if self._authorized(scope):
+            if path.startswith(_GUARDED_PREFIX) and not _state(scope)["is_data_plane"]:
+                await _send_json(
+                    send,
+                    403,
+                    {
+                        "error": {
+                            "message": "data-plane API key required",
+                            "type": "invalid_request_error",
+                            "code": "data_plane_required",
+                        }
+                    },
+                    {},
+                )
+                return
             await self.app(scope, receive, send)
             return
         await _send_json(
