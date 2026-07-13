@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from kairyu.engine.backend import EngineBackend, shutdown_all
-from kairyu.orchestration.replica import ReplicaPool
+from kairyu.orchestration.replica import DrainLease, ReplicaPool
 
 
 @dataclass(frozen=True)
@@ -159,7 +159,12 @@ class PoolReconciler:
         self._factory = factory
         self._default_model = default_model
         self._applied: dict[str, ReplicaIdentity] = {}
-        self._draining: set[str] = set()
+        self._draining: dict[str, DrainLease] = {}
+
+    def _release_drain(self, replica_id: str) -> None:
+        lease = self._draining.pop(replica_id, None)
+        if lease is not None:
+            self._pool.release_drain(replica_id, lease)
 
     def _resolve_identity(
         self, replica_id: str, config: ReplicaConfig
@@ -181,7 +186,8 @@ class PoolReconciler:
         }
         current_ids = self._pool.replica_ids
         current = set(current_ids)
-        self._draining.intersection_update(current)
+        for replica_id in set(self._draining) - current:
+            self._draining.pop(replica_id)
         for replica_id in current_ids:
             if replica_id not in desired:
                 continue
@@ -197,8 +203,7 @@ class PoolReconciler:
                 and self._applied[replica_id] == identity
                 and replica_id in self._draining
             ):
-                self._pool.cancel_drain(replica_id)
-                self._draining.remove(replica_id)
+                self._release_drain(replica_id)
 
         for replica_id, identity in desired.items():
             if replica_id not in current:
@@ -211,7 +216,7 @@ class PoolReconciler:
                     await shutdown_all((backend,), f"replica candidate {replica_id!r}")
                     raise
                 self._applied[replica_id] = identity
-                self._draining.discard(replica_id)
+                self._draining.pop(replica_id, None)
                 added.append(replica_id)
 
         for replica_id, identity in desired.items():
@@ -221,14 +226,12 @@ class PoolReconciler:
                 candidate, health_url = self._factory(identity)
             except Exception:
                 if replica_id in self._draining:
-                    self._pool.cancel_drain(replica_id)
-                    self._draining.remove(replica_id)
+                    self._release_drain(replica_id)
                 draining.append(replica_id)
                 continue
 
-            if not self._pool.is_draining(replica_id):
-                self._pool.drain(replica_id)
-                self._draining.add(replica_id)
+            if replica_id not in self._draining:
+                self._draining[replica_id] = self._pool.acquire_drain(replica_id)
             try:
                 await self._pool.remove_replica(replica_id)
             except RuntimeError:
@@ -240,14 +243,14 @@ class PoolReconciler:
             except BaseException:
                 if replica_id not in self._pool.replica_ids:
                     self._applied.pop(replica_id, None)
-                    self._draining.discard(replica_id)
+                    self._draining.pop(replica_id, None)
                 await shutdown_all(
                     (candidate,), f"replacement candidate {replica_id!r}"
                 )
                 raise
 
             self._applied.pop(replica_id, None)
-            self._draining.discard(replica_id)
+            self._draining.pop(replica_id, None)
             try:
                 self._pool.add_replica(
                     replica_id, candidate, health_url=health_url
@@ -258,16 +261,17 @@ class PoolReconciler:
                 )
                 raise
             self._applied[replica_id] = identity
-            self._draining.discard(replica_id)
+            self._draining.pop(replica_id, None)
             removed.append(replica_id)
             added.append(replica_id)
 
         for replica_id in current_ids:
             if replica_id in desired:
                 continue
-            if not self._pool.is_draining(replica_id):
-                self._pool.drain(replica_id)
-                self._draining.add(replica_id)
+            was_draining = self._pool.is_draining(replica_id)
+            if replica_id not in self._draining:
+                self._draining[replica_id] = self._pool.acquire_drain(replica_id)
+            if not was_draining:
                 draining.append(replica_id)
             try:
                 await self._pool.remove_replica(replica_id)
@@ -278,10 +282,10 @@ class PoolReconciler:
             except BaseException:
                 if replica_id not in self._pool.replica_ids:
                     self._applied.pop(replica_id, None)
-                    self._draining.discard(replica_id)
+                    self._draining.pop(replica_id, None)
                 raise
             else:
                 self._applied.pop(replica_id, None)
-                self._draining.discard(replica_id)
+                self._draining.pop(replica_id, None)
                 removed.append(replica_id)
         return {"added": added, "draining": draining, "removed": removed}

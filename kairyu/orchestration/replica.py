@@ -53,8 +53,19 @@ class _ReplicaEntry:
     health_url: str | None = None
     outstanding: int = 0
     consecutive_failures: int = 0
-    draining: bool = False
+    manual_draining: bool = False
+    drain_leases: set[DrainLease] = field(default_factory=set)
     removed: bool = field(default=False, compare=False)
+
+    @property
+    def draining(self) -> bool:
+        return self.manual_draining or bool(self.drain_leases)
+
+
+class DrainLease:
+    """Opaque ownership token for one independently reversible pool drain."""
+
+    __slots__ = ()
 
 
 class ReplicaPool:
@@ -115,12 +126,23 @@ class ReplicaPool:
         self._entries[replica_id] = _ReplicaEntry(backend=backend, health_url=health_url)
 
     def drain(self, replica_id: str) -> None:
-        """Stop NEW placements; in-flight requests complete normally."""
-        self._entry(replica_id).draining = True
+        """Acquire the manual drain owner; in-flight requests complete normally."""
+        self._entry(replica_id).manual_draining = True
 
     def cancel_drain(self, replica_id: str) -> None:
-        """Return a draining replica to placement without changing other state."""
-        self._entry(replica_id).draining = False
+        """Release only the manual drain owner without changing other state."""
+        self._entry(replica_id).manual_draining = False
+
+    def acquire_drain(self, replica_id: str) -> DrainLease:
+        """Acquire an independently reversible drain lease."""
+        entry = self._entry(replica_id)
+        lease = DrainLease()
+        entry.drain_leases.add(lease)
+        return lease
+
+    def release_drain(self, replica_id: str, lease: DrainLease) -> None:
+        """Release only *lease*; manual and other lease owners remain active."""
+        self._entry(replica_id).drain_leases.discard(lease)
 
     def is_draining(self, replica_id: str) -> bool:
         return self._entry(replica_id).draining

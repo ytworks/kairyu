@@ -135,6 +135,38 @@ class TestDynamicMembership:
         assert pool.healthy_by_id() == health_before
         assert pool.outstanding_by_id() == outstanding_before
 
+    async def test_manual_cancel_does_not_release_active_drain_lease(self):
+        pool = ReplicaPool({"replica": MockBackend()})
+        lease = pool.acquire_drain("replica")
+        pool.drain("replica")
+
+        pool.cancel_drain("replica")
+
+        assert pool.is_draining("replica") is True
+        with pytest.raises(RuntimeError, match="eligible"):
+            pool._select(_request())
+        pool.release_drain("replica", lease)
+        assert pool.is_draining("replica") is False
+
+    async def test_release_drain_lease_preserves_state_and_restores_eligibility(self):
+        backend = MockBackend()
+        pool = ReplicaPool({"replica": backend}, unhealthy_after=2)
+        entry = pool._entries["replica"]
+        entry.consecutive_failures = 1
+        entry.outstanding = 3
+        health_before = pool.healthy_by_id()
+        outstanding_before = pool.outstanding_by_id()
+        lease = pool.acquire_drain("replica")
+
+        pool.release_drain("replica", lease)
+
+        assert pool._entries["replica"] is entry
+        assert pool._entries["replica"].backend is backend
+        assert pool.is_draining("replica") is False
+        assert pool.healthy_by_id() == health_before
+        assert pool.outstanding_by_id() == outstanding_before
+        assert pool._select(_request())[0] == "replica"
+
     async def test_remove_refuses_inflight_then_force(self):
         import asyncio
 
@@ -379,7 +411,7 @@ class TestRegistryAndReconciler:
 
         assert result == {"added": [], "draining": [], "removed": []}
         assert pool.is_draining("replica") is True
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
 
     async def test_address_change_replacement_constructs_before_drain(self):
         old = ShutdownRecordingBackend("old")
@@ -525,7 +557,7 @@ class TestRegistryAndReconciler:
         }
         assert pool._entries["replica"].backend is old
         assert pool.is_draining("replica") is True
-        assert reconciler._draining == {"replica"}
+        assert set(reconciler._draining) == {"replica"}
         assert first_candidate.shutdown_calls == 1
         assert old.shutdown_calls == 0
 
@@ -542,7 +574,7 @@ class TestRegistryAndReconciler:
         assert first_candidate.shutdown_calls == 1
         assert second_candidate.shutdown_calls == 0
         assert old.shutdown_calls == 1
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
 
     async def test_reverted_replacement_cancels_owned_drain(self):
         old = ShutdownRecordingBackend("old")
@@ -567,7 +599,7 @@ class TestRegistryAndReconciler:
         assert pool._entries["replica"].backend is old
         assert pool.is_draining("replica") is False
         assert pool._select(_request())[0] == "replica"
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
         assert factory.candidates[0].shutdown_calls == 1
         assert old.shutdown_calls == 0
 
@@ -596,7 +628,7 @@ class TestRegistryAndReconciler:
         assert pool._entries["replica"].backend is old
         assert pool.is_draining("replica") is False
         assert pool._select(_request())[0] == "replica"
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
         assert old.shutdown_calls == 0
 
     async def test_retry_factory_failure_cancels_owned_drain(self):
@@ -629,8 +661,71 @@ class TestRegistryAndReconciler:
         assert pool._entries["replica"].backend is old
         assert pool.is_draining("replica") is False
         assert pool._select(_request())[0] == "replica"
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
         assert factory.candidates[0].shutdown_calls == 1
+        assert old.shutdown_calls == 0
+
+    async def test_reverted_replacement_preserves_later_manual_drain(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        applied = registry_module.ReplicaConfig(
+            address="http://old/v1", model="llama"
+        )
+        source = MutableDiscovery({"replica": applied})
+        factory = RecordingFactory(pool, "replica", old)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+        pool._entries["replica"].outstanding = 1
+        await reconciler.reconcile()
+        pool.drain("replica")
+        source.members["replica"] = applied
+
+        result = await reconciler.reconcile()
+
+        assert result == {"added": [], "draining": [], "removed": []}
+        assert pool._entries["replica"].backend is old
+        assert pool.is_draining("replica") is True
+        with pytest.raises(RuntimeError, match="eligible"):
+            pool._select(_request())
+        assert reconciler._draining == {}
+        assert old.shutdown_calls == 0
+
+    async def test_retry_factory_failure_preserves_later_manual_drain(self):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://old/v1", model="llama"
+                )
+            }
+        )
+        factory = RecordingFactory(pool, "replica", old)
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+        pool._entries["replica"].outstanding = 1
+        await reconciler.reconcile()
+        pool.drain("replica")
+        factory.fail = True
+
+        result = await reconciler.reconcile()
+
+        assert result == {
+            "added": [],
+            "draining": ["replica"],
+            "removed": [],
+        }
+        assert pool._entries["replica"].backend is old
+        assert pool.is_draining("replica") is True
+        with pytest.raises(RuntimeError, match="eligible"):
+            pool._select(_request())
+        assert reconciler._draining == {}
         assert old.shutdown_calls == 0
 
     async def test_replacement_add_failure_cleans_candidate_and_applied_identity(
@@ -663,7 +758,7 @@ class TestRegistryAndReconciler:
         candidate = factory.candidates[0]
         assert pool.replica_ids == ()
         assert reconciler._applied == {}
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
         assert old.shutdown_calls == 1
         assert candidate.shutdown_calls == 1
 
@@ -705,7 +800,7 @@ class TestRegistryAndReconciler:
         assert candidate.shutdown_calls == 1
         assert pool.replica_ids == ()
         assert reconciler._applied == {}
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
 
     async def test_reconciliation_result_lists_preserve_phase_order(self):
         remove_z = ShutdownRecordingBackend("remove-z")
@@ -802,7 +897,7 @@ class TestRegistryAndReconciler:
             "removed": ["replica"],
         }
         assert "replica" not in pool.replica_ids
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
         assert old.shutdown_calls == 1
 
     async def test_missing_model_validation_precedes_all_pool_mutation(self):
@@ -881,7 +976,7 @@ class TestRegistryAndReconciler:
 
         assert "replica" not in pool.replica_ids
         assert "replica" not in reconciler._applied
-        assert reconciler._draining == set()
+        assert reconciler._draining == {}
         assert old.shutdown_calls == 1
 
 

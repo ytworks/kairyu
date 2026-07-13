@@ -62,6 +62,11 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-13 — [amendment] Elastic drains preserve overlapping owners
+- What: Corrected the preceding reversible-drain amendment by splitting each pool entry's manual drain owner from opaque drain leases. Reconciliation now records and releases only its own lease, so a manual drain asserted before or after reconciliation remains active, and manual undrain cannot cancel reconciliation work.
+- Why: ID-only ownership over one boolean could not represent overlapping owners and allowed a desired-state revert or retry factory failure to undrain a replica that an operator had drained afterward.
+- Refs: issues #41 and #42; `docs/design/m10-fleet-cpu.md` D1/D2 and A14; `kairyu/orchestration/replica.py`, `kairyu/deploy/registry.py`
+
 ### 2026-07-13 — [amendment] Elastic reconciliation owns reversible drains
 - What: Discovery and applied state now carry complete typed replica identities; same-ID changes replace backends construct-before-drain with async ownership cleanup. The reconciler separately tracks drains it initiated and cancels them when replacement/removal intent reverts or a retry factory fails, without overriding manual drains.
 - Why: Address/model/auth changes were previously invisible, while an in-flight replacement or removal could leave the old replica permanently non-eligible after desired state returned to the applied identity.
