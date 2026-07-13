@@ -230,6 +230,7 @@ class PoolReconciler:
                 draining.append(replica_id)
                 continue
 
+            manual_draining = self._pool.is_manually_draining(replica_id)
             if replica_id not in self._draining:
                 self._draining[replica_id] = self._pool.acquire_drain(replica_id)
             try:
@@ -260,6 +261,8 @@ class PoolReconciler:
                     (candidate,), f"replacement candidate {replica_id!r}"
                 )
                 raise
+            if manual_draining:
+                self._pool.drain(replica_id)
             self._applied[replica_id] = identity
             self._draining.pop(replica_id, None)
             removed.append(replica_id)

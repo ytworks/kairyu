@@ -148,6 +148,20 @@ class TestDynamicMembership:
         pool.release_drain("replica", lease)
         assert pool.is_draining("replica") is False
 
+    async def test_manual_drain_query_ignores_active_lease(self):
+        pool = ReplicaPool({"replica": MockBackend()})
+
+        assert pool.is_manually_draining("replica") is False
+        lease = pool.acquire_drain("replica")
+        assert pool.is_draining("replica") is True
+        assert pool.is_manually_draining("replica") is False
+        pool.drain("replica")
+        assert pool.is_manually_draining("replica") is True
+        pool.cancel_drain("replica")
+        assert pool.is_manually_draining("replica") is False
+        assert pool.is_draining("replica") is True
+        pool.release_drain("replica", lease)
+
     async def test_release_drain_lease_preserves_state_and_restores_eligibility(self):
         backend = MockBackend()
         pool = ReplicaPool({"replica": backend}, unhealthy_after=2)
@@ -443,6 +457,49 @@ class TestRegistryAndReconciler:
         }
         assert pool._entries["replica"].backend is candidate
         assert pool.health_url("replica") == "http://new/readyz"
+        assert old.shutdown_calls == 1
+        assert candidate.shutdown_calls == 0
+
+    async def test_successful_replacement_preserves_manual_drain_on_new_backend(self):
+        old = ShutdownRecordingBackend("old")
+        candidate = ShutdownRecordingBackend("candidate")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://old/v1", model="llama"
+                )
+            }
+        )
+
+        def factory(identity):
+            assert pool._entries["replica"].backend is old
+            assert pool.is_draining("replica") is True
+            return candidate, None
+
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+        pool.drain("replica")
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+
+        result = await reconciler.reconcile()
+
+        assert result == {
+            "added": ["replica"],
+            "draining": [],
+            "removed": ["replica"],
+        }
+        assert pool._entries["replica"].backend is candidate
+        assert pool.is_draining("replica") is True
+        assert pool.is_manually_draining("replica") is True
+        with pytest.raises(RuntimeError, match="eligible"):
+            pool._select(_request())
+        assert pool.healthy_by_id() == {"replica": True}
+        assert pool.outstanding_by_id() == {"replica": 0}
+        assert pool._entries["replica"].drain_leases == set()
+        assert reconciler._draining == {}
         assert old.shutdown_calls == 1
         assert candidate.shutdown_calls == 0
 

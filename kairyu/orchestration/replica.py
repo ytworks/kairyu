@@ -147,6 +147,10 @@ class ReplicaPool:
     def is_draining(self, replica_id: str) -> bool:
         return self._entry(replica_id).draining
 
+    def is_manually_draining(self, replica_id: str) -> bool:
+        """Whether the manual owner is active, independent of drain leases."""
+        return self._entry(replica_id).manual_draining
+
     async def remove_replica(self, replica_id: str, force: bool = False) -> None:
         entry = self._entry(replica_id)
         if entry.outstanding > 0 and not force:

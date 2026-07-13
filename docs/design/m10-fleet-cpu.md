@@ -26,7 +26,8 @@ async `remove_replica(replica_id)` (refuses while outstanding>0 unless force,
 otherwise removes ownership and awaits shared `shutdown_all` exactly once),
 `drain(replica_id)` / `cancel_drain(replica_id)` (acquire/release only the
 manual owner), `acquire_drain(replica_id) -> DrainLease` /
-`release_drain(replica_id, lease)` (opaque independent owners), and
+`release_drain(replica_id, lease)` (opaque independent owners),
+`is_manually_draining(replica_id)` (manual owner only), and
 `probe(replica_id)`. A replica is draining while the manual owner or any lease
 is active. Releasing one owner does not alter other owners, health, or outstanding
 state. HRW hashing keys on `replica_id` STRINGS (not indices)
@@ -61,10 +62,12 @@ keeps the applied identity for retry. The reconciler keeps the opaque lease retu
 for each replacement/removal it initiates: if intent reverts to the applied identity,
 or a retry factory fails, it releases only that lease. Manual/admin drains remain
 active whether acquired before or after the reconciler lease, and manual undrain
-cannot release a reconciler lease. Lease tracking is cleared when a replica
-disappears or a new backend is successfully installed. Server:
-`POST /admin/drain` marks the pool replica draining and flips `/readyz` to 503
-(existing prober contract).
+cannot release a reconciler lease. Successful same-ID replacement transfers only
+the manual owner to the new backend entry; the reconciler lease is not transferred,
+and the new entry starts with default health and outstanding state. Lease tracking
+is cleared when a replica disappears or a new backend is successfully installed.
+Server: `POST /admin/drain` marks the pool replica draining and flips `/readyz`
+to 503 (existing prober contract).
 
 ### D3 — `BatchStoreProtocol` (pure refactor)
 
@@ -182,5 +185,7 @@ over (α, β) (pure function over the dataset; no online learning).
   identity reverting to the applied identity or a retry factory failure releases
   only that lease. Manual/admin drains remain authoritative even when asserted
   after a reconciler lease; manual undrain likewise cannot release that lease.
-  Removal, disappearance, and successful installation clear reconciler tracking.
-  Releasing any owner never changes health or outstanding state.
+  A successful same-ID replacement carries the manual owner to the new entry but
+  not the reconciler lease; health and outstanding state reset with the backend
+  entry. Removal, disappearance, and successful installation clear reconciler
+  tracking. Releasing any owner never changes health or outstanding state.
