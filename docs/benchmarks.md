@@ -10,6 +10,12 @@ methodology, config committed next to every number).
 The perf harnesses in the top-level `bench/` directory (TTFT/TPOT/goodput)
 are separate; this suite measures answer quality.
 
+The manual real-checkpoint gate in `scripts/parity_real_model.py` requires exact,
+deterministic greedy token parity: Kairyu and the Transformers reference must emit
+the same token IDs in the same order and with the same length. Prefix equality,
+early EOS, and any other truncation fail with an explicit length diagnostic; there
+is no tolerance or text-only equivalence.
+
 ## Quick start
 
 ```bash
