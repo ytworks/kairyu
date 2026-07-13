@@ -58,6 +58,25 @@ class TestPrefixIndex:
         assert index.overlap("r1", "XXXXbbbbcccc") == 0
         assert index.overlap("ghost", "aaaa") == 0
 
+    @pytest.mark.parametrize(
+        ("replica_id", "prompt"),
+        [
+            pytest.param("r1", "aaaabbbb", id="warm-prefix"),
+            pytest.param("r1", "zzzz", id="cold-prefix"),
+            pytest.param("ghost", "aaaabbbb", id="missing-replica"),
+            pytest.param("r1", "aaaabbbbcccc", id="full-prefix"),
+            pytest.param("r1", "XXXXbbbbcccc", id="first-miss"),
+        ],
+    )
+    def test_overlap_keys_matches_prompt_overlap(self, replica_id, prompt):
+        index = PrefixIndex(chunk_chars=4)
+        index.observe("r1", "aaaabbbbcccc")
+        keys = index.chunk_keys(prompt)
+        before = tuple(keys)
+
+        assert index.overlap_keys(replica_id, keys) == index.overlap(replica_id, prompt)
+        assert keys == before  # caller-owned immutable key sequence is read-only
+
     def test_lru_cap(self):
         index = PrefixIndex(chunk_chars=1, max_chunks_per_replica=4)
         index.observe("r1", "abcdef")  # 6 chunks -> capped to 4
