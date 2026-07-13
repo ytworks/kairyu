@@ -519,3 +519,13 @@ def test_ci_runs_webui_smoke_after_existing_compose_drill():
     )
     assert default_index < webui_index
     assert compose_steps[webui_index]["run"] == "./scripts/webui_smoke.sh"
+
+
+def test_webui_smoke_bounds_every_http_request():
+    smoke = WEBUI_SMOKE.read_text(encoding="utf-8")
+
+    assert 'curl_bounded() { curl --connect-timeout 2 --max-time 10 "$@"; }' in smoke
+    assert smoke.count("curl_bounded -sf") == 3
+    assert "body=$(curl -sf" not in smoke
+    assert 'models="$(curl -sf' not in smoke
+    assert "curl -sf -o" not in smoke

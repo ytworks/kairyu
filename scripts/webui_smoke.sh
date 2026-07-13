@@ -13,6 +13,7 @@ EXPECTED_MODEL_ID="default"
 response_file=""
 
 compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
+curl_bounded() { curl --connect-timeout 2 --max-time 10 "$@"; }
 
 cleanup() {
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -28,7 +29,9 @@ fail() {
 wait_for() { # wait_for <url> <substring> <attempts>
   local url=$1 want=$2 attempts=$3 body
   for _ in $(seq 1 "$attempts"); do
-    body=$(curl -sf "$url" 2>/dev/null) && [[ "$body" == *"$want"* ]] && return 0
+    body=$(curl_bounded -sf "$url" 2>/dev/null) \
+      && [[ "$body" == *"$want"* ]] \
+      && return 0
     sleep 2
   done
   return 1
@@ -67,7 +70,8 @@ echo "== readiness =="
 wait_for "$BASE_URL/readyz" '"ready"' 60 || fail "Kairyu never became ready"
 
 echo "== exact model discovery =="
-models="$(curl -sf "$BASE_URL/v1/models")" || fail "/v1/models request failed"
+models="$(curl_bounded -sf "$BASE_URL/v1/models")" \
+  || fail "/v1/models request failed"
 if ! printf '%s' "$models" | python3 -c '
 import json
 import sys
@@ -84,7 +88,7 @@ fi
 
 echo "== non-stream completion =="
 response_file="$(mktemp "${TMPDIR:-/tmp}/kairyu-webui-smoke.XXXXXX")"
-curl -sf -o "$response_file" -X POST "$BASE_URL/v1/chat/completions" \
+curl_bounded -sf -o "$response_file" -X POST "$BASE_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{"model":"default","messages":[{"role":"user","content":"hello"}],"stream":false}' \
   || fail "completion request failed"
