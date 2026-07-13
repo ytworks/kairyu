@@ -233,17 +233,20 @@ class Orchestrator:
             )
             emitted = 0
             last = None
+            latest_usage = None
             async for partial in engine.stream(request):
                 last = partial
+                if partial.usage is not None:
+                    latest_usage = partial.usage
                 text = partial.text
                 if len(text) > emitted:
                     yield OrchestratorEvent(kind="delta", text=text[emitted:])
                     emitted = len(text)
             usage = (
-                (last.usage.prompt_tokens, last.usage.completion_tokens)
-                if last is not None and last.usage is not None
+                (latest_usage.prompt_tokens, latest_usage.completion_tokens)
+                if latest_usage is not None
                 else (0, 0)
-            )  # usage read from the LAST partial (m11 A1 contract)
+            )
             yield OrchestratorEvent(
                 kind="result",
                 result=OrchestratorResult(

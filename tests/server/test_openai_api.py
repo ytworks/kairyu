@@ -10,12 +10,7 @@ from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import UsageLedger
-from kairyu.orchestration.orchestrator import (
-    Orchestrator,
-    OrchestratorEvent,
-    OrchestratorResult,
-)
-from kairyu.orchestration.router import RuleRouter
+from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 
 TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
@@ -239,37 +234,6 @@ class CompletionUsageBackend:
 
     async def shutdown(self):
         return None
-
-
-class ReportedThenMissingOrchestrator:
-    """App-boundary stream with reported usage followed by an empty result."""
-
-    async def run_chat(self, prompt, stream=False):
-        assert stream
-
-        async def events():
-            route = RuleRouter().route(prompt)
-            yield OrchestratorEvent(kind="delta", text="partial output")
-            yield OrchestratorEvent(
-                kind="result",
-                result=OrchestratorResult(
-                    text="partial output",
-                    route=route,
-                    trace=(),
-                    prompt_tokens=17,
-                    completion_tokens=9,
-                ),
-            )
-            yield OrchestratorEvent(
-                kind="result",
-                result=OrchestratorResult(
-                    text="partial output final",
-                    route=route,
-                    trace=(),
-                ),
-            )
-
-        return events()
 
 
 class MeteringStreamBackend:
@@ -1033,22 +997,8 @@ async def test_stream_retains_reported_usage_when_final_partial_has_none(
     tmp_path, kind
 ):
     ledger_path = tmp_path / "usage.jsonl"
-    if kind == "orchestrated-chat":
-        app = create_app(
-            engines={},
-            orchestrators={"auto": ReportedThenMissingOrchestrator()},
-            settings=ServerSettings(usage_ledger_path=str(ledger_path)),
-        )
-        path = "/v1/chat/completions"
-        body = {
-            "model": "auto",
-            "messages": [{"role": "user", "content": "metering prompt"}],
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-    else:
-        backend = MeteringStreamBackend("reported-then-none")
-        app, path, body = _metered_stream_app(kind, backend, ledger_path)
+    backend = MeteringStreamBackend("reported-then-none")
+    app, path, body = _metered_stream_app(kind, backend, ledger_path)
 
     async with _client(app) as client:
         response = await client.post(path, json=body)
