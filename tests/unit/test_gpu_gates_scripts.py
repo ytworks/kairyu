@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from kairyu.deploy.spec import load_deployment_spec
+
 SCRIPTS = sorted(Path("scripts/gpu_gates").glob("[0-9g]*.sh"))
+GATEWAY_GPU_CONFIG = Path("deploy/compose/gateway-gpu.yaml")
+GPU_GATE_LIB = Path("scripts/gpu_gates/_lib.sh")
+PRODUCTION_GATE = Path("scripts/gpu_gates/09_production.sh")
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
@@ -37,3 +42,25 @@ def test_gpu_marker_tests_exist_and_are_deselected():
         capture_output=True, text=True,
     )
     assert "deselected" in result.stdout  # addopts excludes gpu by default
+
+
+def test_shared_bench_model_default_matches_gpu_gateway_pool():
+    spec = load_deployment_spec(GATEWAY_GPU_CONFIG)
+    match = re.search(
+        r"^KAIRYU_BENCH_MODEL=\$\{KAIRYU_BENCH_MODEL:-(?P<model>[^}]+)\}$",
+        GPU_GATE_LIB.read_text(),
+        re.MULTILINE,
+    )
+
+    assert match is not None
+    model = match.group("model")
+    assert set(spec.pools) == {model}
+    assert {replica.options["model"] for replica in spec.pools[model].replicas} == {
+        model
+    }
+
+
+def test_production_gate_model_steps_use_shared_variable():
+    model_args = re.findall(r"--model\s+(\S+)", PRODUCTION_GATE.read_text())
+
+    assert model_args == ['"$KAIRYU_BENCH_MODEL"']
