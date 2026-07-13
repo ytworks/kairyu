@@ -111,8 +111,10 @@ class JsonlFileWriter:
         invisible again instead of exposing a half-committed result set.
         """
         if self._state == "committed":
-            self._store._discard_file(self._file_id)
-            self._state = "aborted"
+            try:
+                self._store._discard_file(self._file_id)
+            finally:
+                self._state = "aborted"
             return
         self.abort()
 
@@ -294,8 +296,10 @@ class BatchStore:
         return file
 
     def _discard_file(self, file_id: str) -> None:
-        (self._files_dir / f"{file_id}.bin").unlink(missing_ok=True)
+        # Hide metadata first: even if content cleanup then fails, no FileObject
+        # remains discoverable through the public store surface.
         (self._files_dir / f"{file_id}.json").unlink(missing_ok=True)
+        (self._files_dir / f"{file_id}.bin").unlink(missing_ok=True)
         (self._files_dir / f"{file_id}.tmp").unlink(missing_ok=True)
 
     # -- batches ----------------------------------------------------------
