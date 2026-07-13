@@ -10,6 +10,19 @@ methodology, config committed next to every number).
 The perf harnesses in the top-level `bench/` directory (TTFT/TPOT/goodput)
 are separate; this suite measures answer quality.
 
+`bench/frontier_compare.py` requests OpenAI-compatible streaming usage and defines
+token TPOT as `(last content chunk time - first content chunk time) /
+(completion_tokens - 1)`, using the final streamed `completion_tokens`. It never
+uses SSE chunk count as a token count. If an endpoint omits usage (or reports fewer
+than two completion tokens), TTFT and output characters remain available, TPOT is
+`null`, and the scoreboard reports how many trials omitted usage.
+
+The manual real-checkpoint gate in `scripts/parity_real_model.py` requires exact,
+deterministic greedy token parity: Kairyu and the Transformers reference must emit
+the same token IDs in the same order and with the same length. Prefix equality,
+early EOS, and any other truncation fail with an explicit length diagnostic; there
+is no tolerance or text-only equivalence.
+
 ## Quick start
 
 ```bash
@@ -165,10 +178,15 @@ configurable OpenAI-compatible judge endpoint:
 kairyu bench run ... --judge-base-url http://localhost:8000/v1 --judge-model kairyu-auto
 ```
 
-The judge model is disclosed in every pair's methodology (self-judging bias
-is visible, not hidden). Without a judge, MCQ items still score exact-match;
-free-form items are recorded `unjudged`. Judge verdicts that fail to parse
-degrade the item, never the run.
+The judge model is disclosed in every pair's methodology. Self-judging is
+detected from the resolved endpoint/model identity used for requests: trailing
+slashes are removed and the standard OpenAI `/v1` path is appended when absent,
+while scheme, host, port, any other path, and the exact model remain significant.
+Display aliases therefore cannot hide the bias. Legacy reports that indicate a
+judge but lack either resolved identity are annotated `judge independence unknown`
+instead of being declared independent; an explicitly disabled judge is not.
+Without a judge, MCQ items still score exact-match; free-form items are recorded
+`unjudged`. Judge verdicts that fail to parse degrade the item, never the run.
 
 ## Agentic benchmarks (docker)
 
