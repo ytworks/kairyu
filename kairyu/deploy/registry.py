@@ -105,7 +105,7 @@ class PoolReconciler:
         self._source = source
         self._factory = factory
 
-    def reconcile(self) -> dict[str, list[str]]:
+    async def reconcile(self) -> dict[str, list[str]]:
         """Returns {'added': [...], 'draining': [...], 'removed': [...]}."""
         desired = self._source.poll()
         current = set(self._pool.replica_ids)
@@ -122,7 +122,7 @@ class PoolReconciler:
                 self._pool.drain(replica_id)
                 draining.append(replica_id)
             try:
-                self._pool.remove_replica(replica_id)
+                await self._pool.remove_replica(replica_id)
                 removed.append(replica_id)
             except RuntimeError:
                 # in-flight work: drain holds, removal retries next tick (A6)
