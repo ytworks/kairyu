@@ -21,27 +21,45 @@ lives. All logic CPU-testable; k8s manifests exercised by a kind smoke.
 
 Index-keyed lists → id-keyed `_ReplicaEntry` (backend, outstanding,
 consecutive_failures, draining). API: `add_replica(replica_id, backend)`,
-`remove_replica(replica_id)` (refuses while outstanding>0 unless force),
+async `remove_replica(replica_id)` (refuses while outstanding>0 unless force,
+otherwise removes ownership and awaits shared `shutdown_all` exactly once),
 `drain(replica_id)` (stops NEW placements; in-flight completes),
-`probe(replica_id)`. HRW hashing keys on `replica_id` STRINGS (not indices)
+`cancel_drain(replica_id)` (clears only the draining flag), and
+`probe(replica_id)`. Canceling a drain does not alter health or outstanding
+state. HRW hashing keys on `replica_id` STRINGS (not indices)
 — adding/removing a replica remaps only ~1/N sessions (property test).
 Constructor accepts `dict[str, EngineBackend]` or the legacy sequence
-(auto-ids `"r0".."rN"`, existing tests unchanged). Selection precedence:
+(auto-ids `"0".."N-1"`, existing tests unchanged). Selection precedence:
 healthy ∧ not-draining → session HRW → queue-depth fallback →
 least-outstanding.
 
 ### D2 — Registry + reconciler + discovery (`deploy/registry.py`)
 
-`ReplicaRegistry`: TTL-heartbeat membership (`register(id, address,
-ttl_s)`, `heartbeat(id)`, `alive()` — monotonic-clock injected for tests).
-`DiscoverySource` protocol: `poll() -> dict[id, address]`;
-`StaticDiscovery` (spec list) and `RegistryDiscovery` (the TTL registry);
-k8s-endpoints source is a THIN adapter documented for deploy day (polls the
-Endpoints API — same protocol, not implemented locally beyond a fake).
-`PoolReconciler.reconcile(pool, source, factory)`: diff desired vs current →
-add_replica/drain+remove; removal only via drain-then-remove (never drops
-in-flight). Server: `POST /admin/drain` marks the pool replica draining and
-flips `/readyz` to 503 (existing prober contract).
+Discovery carries frozen `ReplicaConfig(address, model?, api_key_env)` values;
+the reconciler resolves each one to a complete frozen
+`ReplicaIdentity(address, model, api_key_env)` before any pool mutation.
+`ReplicaRegistry` stores typed TTL-heartbeat membership
+(`register(id, address, ttl_s, model?, api_key_env)`, `heartbeat(id)`,
+`alive()` — monotonic-clock injected for tests). `DiscoverySource` protocol:
+`poll() -> dict[id, ReplicaConfig]`; `StaticDiscovery` snapshots either string
+addresses or typed configs and `RegistryDiscovery` exposes registry snapshots.
+The k8s-endpoints source remains a THIN deploy-day adapter behind that protocol.
+
+`PoolReconciler(pool, source, factory, default_model?)` passes only complete
+identities to `Callable[[ReplicaIdentity], (EngineBackend, health_url)]`.
+Discovery's non-empty model wins over the default and its auth value is complete,
+including explicit `None`; a missing model fails before mutation. Reconciliation
+tracks applied identities and runs deterministic phases: add missing IDs in
+desired order, construct-before-drain replacement of changed identities in
+desired order, then drain/remove absent IDs in pool order. Removal is awaited and
+closes the removed backend through `shutdown_all`; unused candidates are also
+closed through that helper, with cleanup failures propagated. In-flight refusal
+keeps the applied identity for retry. The reconciler separately tracks only drains
+it initiated: if replacement/removal intent reverts to the applied identity, or a
+retry factory fails, it uses `cancel_drain` to restore eligibility. External drains
+are never canceled, and ownership tracking is cleared when a replica disappears
+or a new backend is successfully installed. Server: `POST /admin/drain` marks the
+pool replica draining and flips `/readyz` to 503 (existing prober contract).
 
 ### D3 — `BatchStoreProtocol` (pure refactor)
 
@@ -125,10 +143,12 @@ over (α, β) (pure function over the dataset; no online learning).
 - **A5**: /admin/drain semantics split by node role — replica node: sets
   app.state.draining → /readyz 503 (the prober sees it); gateway: drains a
   pool member; only zero-ELIGIBLE replicas 503 the gateway readyz.
-- **A6**: reconciler factory = Callable[[address], (EngineBackend,
-  health_url)] closing over create_backend("openai") + the
-  resolved_health_url /v1-strip rule; reconcile() tolerates remove refusal
-  (outstanding > 0) and retries next tick.
+- **A6**: reconciler factory =
+  `Callable[[ReplicaIdentity], (EngineBackend, health_url)]`; the default closes
+  over `create_backend("openai")` with the identity's address, resolved model,
+  and auth environment plus the readiness URL `/v1`-strip rule. Reconcile
+  tolerates in-flight remove refusal, closes each unused candidate, and retries
+  next tick without changing the applied identity.
 - **A7**: registry takes ``now: Callable[[], float] = time.monotonic``.
 - **A8**: BatchStoreProtocol is the FULL 8-method surface (save_file,
   get_file, read_file_content, create_batch, get_batch, list_batches,
@@ -151,3 +171,9 @@ over (α, β) (pure function over the dataset; no online learning).
   _ensure_free eviction; _split emits nothing; release_preempted emits
   nothing (never stored); vLLM schema fields block_hashes/parent_block_hash/
   token_ids/block_size + ts; replay endpoint out of scope (recorded).
+- **A14**: drain cancellation is ownership-scoped. `PoolReconciler` records only
+  drains it initiated; a desired identity reverting to the applied identity, or
+  a factory failure on a previously drained retry, cancels only that owned drain.
+  Manual/admin drains remain authoritative. Removal, disappearance, and successful
+  installation clear the ownership record. `ReplicaPool.cancel_drain()` changes
+  only the draining flag, never health or outstanding state.

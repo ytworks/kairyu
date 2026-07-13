@@ -62,6 +62,11 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-13 — [amendment] Elastic reconciliation owns reversible drains
+- What: Discovery and applied state now carry complete typed replica identities; same-ID changes replace backends construct-before-drain with async ownership cleanup. The reconciler separately tracks drains it initiated and cancels them when replacement/removal intent reverts or a retry factory fails, without overriding manual drains.
+- Why: Address/model/auth changes were previously invisible, while an in-flight replacement or removal could leave the old replica permanently non-eligible after desired state returned to the applied identity.
+- Refs: issues #41 and #42; `docs/design/m10-fleet-cpu.md` D1/D2, A6, A14; `kairyu/deploy/registry.py`, `kairyu/orchestration/replica.py`
+
 ### 2026-07-13 — [progress] Backend ownership closes across replica and app lifecycles
 - What: Replica removal is now an async ownership boundary that closes the removed backend exactly once. Shared shutdown aggregation attempts every unique backend, and orchestrator/application lifespan teardown cascades through separately owned workers even when another shutdown fails.
 - Why: Removed/replaced replicas and DSL-built orchestrators leaked clients and worker tasks; one shutdown exception also skipped every later resource.

@@ -159,6 +159,7 @@ class PoolReconciler:
         self._factory = factory
         self._default_model = default_model
         self._applied: dict[str, ReplicaIdentity] = {}
+        self._draining: set[str] = set()
 
     def _resolve_identity(
         self, replica_id: str, config: ReplicaConfig
@@ -180,6 +181,7 @@ class PoolReconciler:
         }
         current_ids = self._pool.replica_ids
         current = set(current_ids)
+        self._draining.intersection_update(current)
         for replica_id in current_ids:
             if replica_id not in desired:
                 continue
@@ -188,6 +190,15 @@ class PoolReconciler:
         added: list[str] = []
         draining: list[str] = []
         removed: list[str] = []
+
+        for replica_id, identity in desired.items():
+            if (
+                replica_id in current
+                and self._applied[replica_id] == identity
+                and replica_id in self._draining
+            ):
+                self._pool.cancel_drain(replica_id)
+                self._draining.remove(replica_id)
 
         for replica_id, identity in desired.items():
             if replica_id not in current:
@@ -200,6 +211,7 @@ class PoolReconciler:
                     await shutdown_all((backend,), f"replica candidate {replica_id!r}")
                     raise
                 self._applied[replica_id] = identity
+                self._draining.discard(replica_id)
                 added.append(replica_id)
 
         for replica_id, identity in desired.items():
@@ -208,10 +220,15 @@ class PoolReconciler:
             try:
                 candidate, health_url = self._factory(identity)
             except Exception:
+                if replica_id in self._draining:
+                    self._pool.cancel_drain(replica_id)
+                    self._draining.remove(replica_id)
                 draining.append(replica_id)
                 continue
 
-            self._pool.drain(replica_id)
+            if not self._pool.is_draining(replica_id):
+                self._pool.drain(replica_id)
+                self._draining.add(replica_id)
             try:
                 await self._pool.remove_replica(replica_id)
             except RuntimeError:
@@ -223,12 +240,14 @@ class PoolReconciler:
             except BaseException:
                 if replica_id not in self._pool.replica_ids:
                     self._applied.pop(replica_id, None)
+                    self._draining.discard(replica_id)
                 await shutdown_all(
                     (candidate,), f"replacement candidate {replica_id!r}"
                 )
                 raise
 
             self._applied.pop(replica_id, None)
+            self._draining.discard(replica_id)
             try:
                 self._pool.add_replica(
                     replica_id, candidate, health_url=health_url
@@ -239,6 +258,7 @@ class PoolReconciler:
                 )
                 raise
             self._applied[replica_id] = identity
+            self._draining.discard(replica_id)
             removed.append(replica_id)
             added.append(replica_id)
 
@@ -247,6 +267,7 @@ class PoolReconciler:
                 continue
             if not self._pool.is_draining(replica_id):
                 self._pool.drain(replica_id)
+                self._draining.add(replica_id)
                 draining.append(replica_id)
             try:
                 await self._pool.remove_replica(replica_id)
@@ -257,8 +278,10 @@ class PoolReconciler:
             except BaseException:
                 if replica_id not in self._pool.replica_ids:
                     self._applied.pop(replica_id, None)
+                    self._draining.discard(replica_id)
                 raise
             else:
                 self._applied.pop(replica_id, None)
+                self._draining.discard(replica_id)
                 removed.append(replica_id)
         return {"added": added, "draining": draining, "removed": removed}

@@ -118,6 +118,10 @@ class ReplicaPool:
         """Stop NEW placements; in-flight requests complete normally."""
         self._entry(replica_id).draining = True
 
+    def cancel_drain(self, replica_id: str) -> None:
+        """Return a draining replica to placement without changing other state."""
+        self._entry(replica_id).draining = False
+
     def is_draining(self, replica_id: str) -> bool:
         return self._entry(replica_id).draining
 
