@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from collections.abc import Mapping
 
@@ -97,6 +98,35 @@ async def test_stream_abandonment_aborts_engine_work():
     assert result.finished
 
 
+async def test_multi_completion_abandonment_aborts_all_siblings():
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    request = GenerationRequest(
+        request_id="multi-abandon",
+        prompt="keep generating siblings",
+        sampling_params=SamplingParams(max_tokens=10_000, n=3),
+    )
+    stream = backend.stream(request)
+    await anext(stream)
+    pump = backend._pump_task
+    assert pump is not None
+    pump.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pump
+    assert backend._pump_task is None
+
+    await stream.aclose()
+    for _ in range(100):
+        if not backend._loop.has_work():
+            break
+        await asyncio.sleep(0.01)
+    assert backend._loop.has_work() is False
+    assert not {
+        "multi-abandon#c0",
+        "multi-abandon#c1",
+        "multi-abandon#c2",
+    } & set(backend._scheduler.states)
+
+
 async def test_pump_failure_purges_requests_and_backend_recovers():
     backend = KairyuBackend(num_pages=256, runner=_FailOnceRunner())
     with pytest.raises(RuntimeError, match="injected runner failure"):
@@ -106,6 +136,34 @@ async def test_pump_failure_purges_requests_and_backend_recovers():
     assert "failed" not in backend._scheduler.states
     recovered = await backend.generate(_request("recovered", "second", 2))
     assert recovered.finished
+
+
+async def test_request_submitted_during_failure_purge_is_pumped():
+    backend = KairyuBackend(num_pages=256, runner=_FailOnceRunner())
+    purge_started = threading.Event()
+    allow_purge = threading.Event()
+    original_purge = backend._loop.purge
+
+    def delayed_purge(request_ids: tuple[str, ...]) -> None:
+        purge_started.set()
+        if not allow_purge.wait(timeout=2):
+            raise TimeoutError("test did not release purge")
+        original_purge(request_ids)
+
+    backend._loop.purge = delayed_purge
+    failed = asyncio.create_task(backend.generate(_request("failed", "first", 2)))
+    assert await asyncio.to_thread(purge_started.wait, 2)
+
+    recovered = asyncio.create_task(
+        backend.generate(_request("submitted-during-purge", "second", 2))
+    )
+    await asyncio.sleep(0)
+    allow_purge.set()
+
+    with pytest.raises(RuntimeError, match="injected runner failure"):
+        await failed
+    result = await asyncio.wait_for(recovered, timeout=2)
+    assert result.finished
 
 
 async def test_concurrent_requests_are_continuously_batched():

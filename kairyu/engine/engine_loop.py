@@ -206,13 +206,14 @@ class EngineLoop:
         reclaimed.
         """
         ids = set(request_ids)
-        retained = deque()
-        while self._ops:
+        # Rotate only the snapshot that existed when purge began. Producers may
+        # append concurrently; keeping the same deque prevents those ops from
+        # being lost behind a replacement assignment.
+        for _ in range(len(self._ops)):
             op, payload = self._ops.popleft()
             op_request_id = payload[0].request_id if op == "add" else payload
             if op_request_id not in ids:
-                retained.append((op, payload))
-        self._ops = retained
+                self._ops.append((op, payload))
         for request_id in ids:
             self._scheduler.abort(request_id)
             self._tracked.pop(request_id, None)

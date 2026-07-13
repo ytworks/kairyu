@@ -224,6 +224,7 @@ class KairyuBackend:
         self._pump_task: asyncio.Task | None = None
 
     async def _pump(self) -> None:
+        restart_after_exit = False
         try:
             while self._loop.has_work():
                 updates = await asyncio.to_thread(self._loop.step)
@@ -239,8 +240,11 @@ class KairyuBackend:
                 queue = self._queues.get(request_id)
                 if queue is not None:
                     queue.put_nowait(failure)
+            restart_after_exit = self._loop.has_work()
         finally:
             self._pump_task = None
+            if restart_after_exit:
+                self._ensure_pump()
 
     def _ensure_pump(self) -> None:
         if not self._loop.has_work():
@@ -369,12 +373,7 @@ class KairyuBackend:
         if request.sampling_params.n <= 1:
             return await self._generate_one(request)
         subs = self._sub_requests(request)
-        try:
-            results = await asyncio.gather(*(self._generate_one(sub) for sub in subs))
-        except Exception:
-            for sub in subs:  # abort surviving siblings on any failure
-                self._loop.abort(sub.request_id)
-            raise
+        results = await asyncio.gather(*(self._generate_one(sub) for sub in subs))
         latest = {
             index: StreamUpdate(
                 outputs=result.completions[0].token_ids,
@@ -429,6 +428,7 @@ class KairyuBackend:
         }
         latest: dict[int, StreamUpdate] = {}
         finished: set[int] = set()
+        pump_failed = False
         try:
             while len(finished) < len(subs):
                 done, _ = await asyncio.wait(
@@ -440,6 +440,7 @@ class KairyuBackend:
                         continue
                     update: StreamUpdate = task.result()
                     if update.error is not None:
+                        pump_failed = True
                         raise update.error
                     latest[index] = update
                     if update.finished:
@@ -449,8 +450,8 @@ class KairyuBackend:
                         pending[index] = asyncio.ensure_future(queues[index].get())
                 yield self._merged(request, latest, finished=len(finished) == len(subs))
         except BaseException:
-            for sub in subs:  # abandonment/failure aborts siblings
-                self._loop.abort(sub.request_id)
+            if not pump_failed:
+                self._abort(*(sub.request_id for sub in subs))
             raise
         finally:
             for task in pending.values():
