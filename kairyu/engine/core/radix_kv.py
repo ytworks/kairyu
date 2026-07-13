@@ -300,9 +300,7 @@ class RadixKVCache:
         """Record that the allocation's prefill KV has been written (prefill done)."""
         if allocation._tree_inserted and allocation.new_full_pages:
             if not allocation._node.computed:  # guard the _release double-fire
-                allocation._node.computed = True
                 self._emit_stored(allocation._node)
-            else:
                 allocation._node.computed = True
 
     def _release(self, allocation: KVAllocation) -> None:

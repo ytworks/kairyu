@@ -176,6 +176,27 @@ class TestRemoteHandoff:
         assert allocation.num_cached_tokens == 0
         cache.release_preempted(allocation)
 
+    def test_event_sink_failure_does_not_publish_cache(self):
+        source = _filled_pool()
+        pool = PagedKVPool(2, 16, PAGE, 2, 8)
+
+        def fail_event_sink(_event):
+            raise RuntimeError("event sink failed")
+
+        cache = RadixKVCache(
+            num_pages=16, page_size=PAGE, event_sink=fail_event_sink
+        )
+        receiver = RemoteKVReceiver(cache, pool)
+        tokens = tuple(range(5))  # one full page plus one tail page
+        frames = tuple(extract_page(source, page) for page in (0, 1))
+
+        with pytest.raises(RuntimeError, match="event sink failed"):
+            receiver.adopt(frames, SequenceMeta(token_ids=tokens, first_token=42))
+
+        allocation = cache.allocate(tokens)
+        assert allocation.num_cached_tokens == 0
+        cache.release_preempted(allocation)
+
     def test_empty_token_metadata_is_rejected_before_allocation(self):
         pool = PagedKVPool(2, 16, PAGE, 2, 8)
         cache = RadixKVCache(num_pages=16, page_size=PAGE)
@@ -188,19 +209,27 @@ class TestRemoteHandoff:
 
         assert cache.num_free_pages == before
 
-    def test_failed_adopt_does_not_leak_the_allocation(self):
-        # A frame-count mismatch after allocate() must free the allocation, or
-        # it pins the matched radix path against eviction and leaks pages.
+    def test_excess_frames_are_rejected_before_allocation(self, monkeypatch):
         source = _filled_pool()
         decode_pool = PagedKVPool(2, 16, PAGE, 2, 8)
         decode_cache = RadixKVCache(num_pages=16, page_size=PAGE)
         receiver = RemoteKVReceiver(decode_cache, decode_pool)
         before = decode_cache.num_free_pages
-        # two-token prompt needs one page, but hand it three frames -> mismatch
+        allocation_calls = 0
+        real_allocate = decode_cache.allocate
+
+        def recording_allocate(tokens):
+            nonlocal allocation_calls
+            allocation_calls += 1
+            return real_allocate(tokens)
+
+        monkeypatch.setattr(decode_cache, "allocate", recording_allocate)
+        # A two-token prompt needs one page, but the sender provides three.
         too_many = tuple(extract_page(source, page) for page in (0, 1, 2))
-        with pytest.raises(KVTransportError, match="non-cached frames"):
+        with pytest.raises(KVTransportError, match="expected 1 page frames"):
             receiver.adopt(too_many, SequenceMeta(token_ids=(1, 2), first_token=0))
-        assert decode_cache.num_free_pages == before  # allocation reclaimed
+        assert allocation_calls == 0
+        assert decode_cache.num_free_pages == before
 
     def test_missing_pages_is_a_handoff_error(self):
         prefill_transport, decode_transport = self._pair()
