@@ -319,13 +319,15 @@ class ZmqEngineBackend:
                     finished_cleanly = True
                     return self._result(request, event)
         finally:
-            if queue is not None and self._queues.get(request.request_id) is queue:
-                self._queues.pop(request.request_id, None)
-            self._active_request_ids.discard(request.request_id)
-            if queue is not None and not finished_cleanly:
-                # client disconnect / cancellation: tell the engine to stop
-                # generating, or it keeps burning compute until max_tokens
-                await self._abort(request.request_id)
+            try:
+                if queue is not None and self._queues.get(request.request_id) is queue:
+                    self._queues.pop(request.request_id, None)
+                if queue is not None and not finished_cleanly:
+                    # client disconnect / cancellation: tell the engine to stop
+                    # generating, or it keeps burning compute until max_tokens
+                    await self._abort(request.request_id)
+            finally:
+                self._active_request_ids.discard(request.request_id)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         self._reserve_request_id(request.request_id)
@@ -344,11 +346,13 @@ class ZmqEngineBackend:
                     finished_cleanly = True
                     return
         finally:
-            if queue is not None and self._queues.get(request.request_id) is queue:
-                self._queues.pop(request.request_id, None)
-            self._active_request_ids.discard(request.request_id)
-            if queue is not None and not finished_cleanly:
-                await self._abort(request.request_id)
+            try:
+                if queue is not None and self._queues.get(request.request_id) is queue:
+                    self._queues.pop(request.request_id, None)
+                if queue is not None and not finished_cleanly:
+                    await self._abort(request.request_id)
+            finally:
+                self._active_request_ids.discard(request.request_id)
 
 
 register_backend("kairyu-proc", ZmqEngineBackend)

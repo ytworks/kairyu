@@ -215,3 +215,76 @@ async def test_submit_failure_clears_request_reservation_and_queue(monkeypatch):
 
     assert "send-failure" not in backend._active_request_ids
     assert "send-failure" not in backend._queues
+
+
+@pytest.mark.parametrize("original_api", ["generate", "stream"])
+async def test_duplicate_request_id_stays_reserved_until_abort_finishes(
+    monkeypatch, original_api
+):
+    backend = ZmqEngineBackend(num_pages=64)
+    first_queue = asyncio.Queue()
+    abort_started = asyncio.Event()
+    finish_abort = asyncio.Event()
+
+    async def controlled_submit(request):
+        if request.prompt == "first":
+            backend._queues[request.request_id] = first_queue
+            return first_queue
+        if request.prompt == "reused":
+            queue = asyncio.Queue()
+            backend._queues[request.request_id] = queue
+            queue.put_nowait(
+                {
+                    "text": "done",
+                    "outputs": [1],
+                    "finished": True,
+                    "finish_reason": "length",
+                }
+            )
+            return queue
+        raise AssertionError("duplicate request reached submit")
+
+    async def controlled_abort(_request_id):
+        abort_started.set()
+        await finish_abort.wait()
+
+    monkeypatch.setattr(backend, "_submit", controlled_submit)
+    monkeypatch.setattr(backend, "_abort", controlled_abort)
+
+    request = _request("abort-race", "first", max_tokens=64)
+    if original_api == "generate":
+        original = asyncio.create_task(backend.generate(request))
+    else:
+        original_stream = backend.stream(request)
+        original = asyncio.create_task(anext(original_stream))
+
+    for _ in range(100):
+        if "abort-race" in backend._active_request_ids:
+            break
+        await asyncio.sleep(0.01)
+    assert "abort-race" in backend._active_request_ids
+    original.cancel()
+    await asyncio.wait_for(abort_started.wait(), timeout=1)
+
+    try:
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await backend.generate(
+                _request("abort-race", "duplicate generate", max_tokens=2)
+            )
+        duplicate_stream = backend.stream(
+            _request("abort-race", "duplicate stream", max_tokens=2)
+        )
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await anext(duplicate_stream)
+        assert "abort-race" in backend._active_request_ids
+    finally:
+        finish_abort.set()
+        try:
+            await original
+        except asyncio.CancelledError:
+            pass
+
+    assert original.cancelled()
+    assert "abort-race" not in backend._active_request_ids
+    reused = await backend.generate(_request("abort-race", "reused", max_tokens=2))
+    assert reused.finished is True
