@@ -105,6 +105,8 @@ def test_tp2_engine_greedy_matches_single_process(spawn2, fixture_name, request)
 
 def test_tp_structured_sampling_and_release_on_every_rank(spawn2, llama_dir):
     results = spawn2(dist_targets.tp_structured_release, llama_dir, TP_VOCAB)
+    for rank, result in enumerate(results):
+        assert "error" not in result, f"rank {rank} failed: {result.get('error')}"
     assert results[0]["structured_completed"] is True
     assert results[0]["sampler_states"] == 0
     assert results[1]["sampler_states"] == 0
