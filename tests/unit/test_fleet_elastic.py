@@ -538,6 +538,118 @@ class TestRegistryAndReconciler:
         assert old.shutdown_calls == 1
         assert candidate.shutdown_calls == 1
 
+    async def test_replacement_double_shutdown_failure_clears_applied_identity(self):
+        old = ShutdownRecordingBackend("old", fail_shutdown=True)
+        candidate = ShutdownRecordingBackend("candidate", fail_shutdown=True)
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://old/v1", model="llama"
+                )
+            }
+        )
+
+        def failing_candidate_factory(identity):
+            assert pool._entries["replica"].backend is old
+            assert pool.is_draining("replica") is False
+            return candidate, None
+
+        reconciler = PoolReconciler(
+            pool, source, factory=failing_candidate_factory
+        )
+        await reconciler.reconcile()
+        source.members["replica"] = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+
+        with pytest.raises(ExceptionGroup) as raised:
+            await reconciler.reconcile()
+
+        assert "replacement candidate 'replica' shutdown failed" in str(raised.value)
+        assert str(raised.value.exceptions[0]) == "candidate shutdown failed"
+        old_failure = raised.value.__context__
+        assert isinstance(old_failure, ExceptionGroup)
+        assert "replica 'replica' shutdown failed" in str(old_failure)
+        assert str(old_failure.exceptions[0]) == "old shutdown failed"
+        assert old.shutdown_calls == 1
+        assert candidate.shutdown_calls == 1
+        assert pool.replica_ids == ()
+        assert reconciler._applied == {}
+
+    async def test_reconciliation_result_lists_preserve_phase_order(self):
+        remove_z = ShutdownRecordingBackend("remove-z")
+        replace_b = ShutdownRecordingBackend("replace-b")
+        remove_a = ShutdownRecordingBackend("remove-a")
+        replace_a = ShutdownRecordingBackend("replace-a")
+        keep = ShutdownRecordingBackend("keep")
+        pool = ReplicaPool(
+            {
+                "remove-z": remove_z,
+                "replace-b": replace_b,
+                "remove-a": remove_a,
+                "replace-a": replace_a,
+                "keep": keep,
+            }
+        )
+
+        def config(address):
+            return registry_module.ReplicaConfig(address=address, model="llama")
+
+        source = MutableDiscovery(
+            {
+                "remove-z": config("http://remove-z/v1"),
+                "replace-b": config("http://replace-b-old/v1"),
+                "remove-a": config("http://remove-a/v1"),
+                "replace-a": config("http://replace-a-old/v1"),
+                "keep": config("http://keep/v1"),
+            }
+        )
+        factory_calls = []
+        candidates = {}
+
+        def ordered_factory(identity):
+            factory_calls.append(identity.address)
+            if identity.address == "http://replace-a-new/v1":
+                assert pool._entries["replace-a"].backend is replace_a
+                assert pool.is_draining("replace-a") is False
+            if identity.address == "http://replace-b-new/v1":
+                assert pool._entries["replace-b"].backend is replace_b
+                assert pool.is_draining("replace-b") is False
+            candidate = ShutdownRecordingBackend(identity.address)
+            candidates[identity.address] = candidate
+            return candidate, None
+
+        reconciler = PoolReconciler(pool, source, factory=ordered_factory)
+        await reconciler.reconcile()
+        source.members = {
+            "replace-a": config("http://replace-a-new/v1"),
+            "new-b": config("http://new-b/v1"),
+            "replace-b": config("http://replace-b-new/v1"),
+            "new-a": config("http://new-a/v1"),
+            "keep": config("http://keep/v1"),
+        }
+
+        result = await reconciler.reconcile()
+
+        assert factory_calls == [
+            "http://new-b/v1",
+            "http://new-a/v1",
+            "http://replace-a-new/v1",
+            "http://replace-b-new/v1",
+        ]
+        assert result == {
+            "added": ["new-b", "new-a", "replace-a", "replace-b"],
+            "draining": ["remove-z", "remove-a"],
+            "removed": ["replace-a", "replace-b", "remove-z", "remove-a"],
+        }
+        assert remove_z.shutdown_calls == 1
+        assert replace_b.shutdown_calls == 1
+        assert remove_a.shutdown_calls == 1
+        assert replace_a.shutdown_calls == 1
+        assert keep.shutdown_calls == 0
+        assert all(candidate.shutdown_calls == 0 for candidate in candidates.values())
+
     async def test_desired_removal_drains_and_shuts_down_backend_once(self):
         old = ShutdownRecordingBackend("old")
         pool = ReplicaPool({"replica": old})

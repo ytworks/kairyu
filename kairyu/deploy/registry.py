@@ -221,11 +221,11 @@ class PoolReconciler:
                 draining.append(replica_id)
                 continue
             except BaseException:
+                if replica_id not in self._pool.replica_ids:
+                    self._applied.pop(replica_id, None)
                 await shutdown_all(
                     (candidate,), f"replacement candidate {replica_id!r}"
                 )
-                if replica_id not in self._pool.replica_ids:
-                    self._applied.pop(replica_id, None)
                 raise
 
             self._applied.pop(replica_id, None)
