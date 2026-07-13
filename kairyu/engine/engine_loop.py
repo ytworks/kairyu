@@ -178,10 +178,16 @@ class EngineLoop:
         self._tracked: dict[str, _RequestTrack] = {}  # step-side only
         self._active_request_ids: set[str] = set()
 
+    def tokenize_prompt(self, prompt: str) -> tuple[int, ...]:
+        prompt_token_ids = self._tokenizer.encode(prompt)
+        if not prompt_token_ids:
+            raise ValueError("prompt must tokenize to at least one token")
+        return prompt_token_ids
+
     def submit(self, request_id: str, prompt: str, params: SamplingParams) -> None:
         engine_request = EngineRequest(
             request_id=request_id,
-            prompt_token_ids=self._tokenizer.encode(prompt),
+            prompt_token_ids=self.tokenize_prompt(prompt),
             max_new_tokens=params.max_tokens or _DEFAULT_MAX_NEW_TOKENS,
             eos_token_id=self._default_eos,
             stop_token_ids=tuple(params.stop_token_ids or ()) + self._default_stop_ids,
