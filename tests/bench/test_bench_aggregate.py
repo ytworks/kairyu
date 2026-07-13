@@ -1,7 +1,11 @@
 """Scoreboard aggregation: Fugu row order, cell rendering, footnotes."""
 
+import json
+from argparse import Namespace
+
 from kairyu.bench.aggregate import build_scoreboard, render_markdown
-from kairyu.bench.types import PairResult
+from kairyu.bench.cli import _handle_report
+from kairyu.bench.types import BenchTarget, JudgeConfig, PairResult
 
 
 def _pair(benchmark, target, status="completed", score=0.5, reason=None, annotations=()):
@@ -18,7 +22,7 @@ def _pair(benchmark, target, status="completed", score=0.5, reason=None, annotat
     )
 
 
-def _board(pairs, targets, config=None):
+def _board(pairs, targets, config=None, target_configs=None, judge=None):
     return build_scoreboard(
         run_id="run-1",
         suite="fugu",
@@ -26,19 +30,129 @@ def _board(pairs, targets, config=None):
         environment={},
         pairs=pairs,
         targets=targets,
+        target_configs=target_configs,
+        judge=judge,
     )
 
 
 def test_self_judged_target_is_flagged():
-    # a target graded by a judge that IS that target is flagged as biased.
-    board = _board(
-        [_pair("gpqa-diamond", "kairyu-auto")],
-        targets=["kairyu-auto", "gpt-5"],
-        config={"judge": {"model": "kairyu-auto"}},
+    # Display aliases differ, but resolved URL/model identity is the same.
+    target = BenchTarget(
+        name="friendly-target",
+        base_url="http://gateway.test/v1/",
+        model="shared-model",
     )
-    assert board["self_judged_targets"] == ["kairyu-auto"]
-    cell = board["cells"]["gpqa-diamond"]["kairyu-auto"]
+    judge = JudgeConfig(
+        base_url="http://gateway.test/v1", model="shared-model"
+    )
+    board = _board(
+        [_pair("gpqa-diamond", "friendly-target")],
+        targets=["friendly-target"],
+        config={"judge": judge.model_dump()},
+        target_configs=[target],
+        judge=judge,
+    )
+    assert board["self_judged_targets"] == ["friendly-target"]
+    cell = board["cells"]["gpqa-diamond"]["friendly-target"]
     assert any("self-judged" in board["footnotes"][n - 1] for n in cell["footnotes"])
+
+
+def test_distinct_resolved_judge_identities_are_not_flagged():
+    targets = [
+        BenchTarget(
+            name="different-endpoint",
+            base_url="http://other.test/v1",
+            model="judge-model",
+        ),
+        BenchTarget(
+            name="different-model",
+            base_url="http://judge.test/v1/",
+            model="target-model",
+        ),
+    ]
+    judge = JudgeConfig(base_url="http://judge.test/v1", model="judge-model")
+    labels = [target.label() for target in targets]
+    board = _board(
+        [_pair("gpqa-diamond", label) for label in labels],
+        labels,
+        target_configs=targets,
+        judge=judge,
+    )
+
+    assert board["self_judged_targets"] == []
+    assert board["judge_independence_unknown_targets"] == []
+
+
+def test_missing_legacy_target_identity_is_annotated_unknown():
+    label = "legacy-alias"
+    judge = JudgeConfig(base_url="http://judge.test/v1", model="judge-model")
+    board = _board(
+        [_pair("gpqa-diamond", label)],
+        [label],
+        config={"judge": judge.model_dump()},
+        target_configs=[],
+        judge=judge,
+    )
+
+    assert board["self_judged_targets"] == []
+    assert board["judge_independence_unknown_targets"] == [label]
+    cell = board["cells"]["gpqa-diamond"][label]
+    assert any(
+        "independence unknown" in board["footnotes"][number - 1]
+        for number in cell["footnotes"]
+    )
+
+
+def _write_report_fixture(tmp_path, *, target_config):
+    run_dir = tmp_path / "report-run"
+    pair_dir = run_dir / "pair"
+    pair_dir.mkdir(parents=True)
+    judge = {"base_url": "http://judge.test/v1", "model": "judge-model"}
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "report-run",
+                "config": {
+                    "suite": "fugu",
+                    "targets": [target_config],
+                    "judge": judge,
+                },
+                "environment": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    label = target_config["name"]
+    (pair_dir / "result.json").write_text(
+        _pair("gpqa-diamond", label).model_dump_json(), encoding="utf-8"
+    )
+    args = Namespace(run=str(run_dir), results_dir=str(tmp_path / "unused"))
+    assert _handle_report(args) == 0
+    return json.loads((run_dir / "scoreboard.json").read_text(encoding="utf-8"))
+
+
+def test_report_reconstructs_resolved_target_and_judge_identity(tmp_path):
+    board = _write_report_fixture(
+        tmp_path,
+        target_config={
+            "name": "alias",
+            "base_url": "http://judge.test/v1/",
+            "model": "judge-model",
+        },
+    )
+
+    assert board["self_judged_targets"] == ["alias"]
+    assert board["judge_independence_unknown_targets"] == []
+
+
+def test_legacy_report_without_target_endpoint_fails_closed(tmp_path):
+    board = _write_report_fixture(
+        tmp_path,
+        target_config={"name": "legacy-alias", "model": "judge-model"},
+    )
+
+    assert board["self_judged_targets"] == []
+    assert board["judge_independence_unknown_targets"] == ["legacy-alias"]
 
 
 def test_rows_follow_fugu_order_and_only_present_benchmarks():

@@ -171,10 +171,13 @@ configurable OpenAI-compatible judge endpoint:
 kairyu bench run ... --judge-base-url http://localhost:8000/v1 --judge-model kairyu-auto
 ```
 
-The judge model is disclosed in every pair's methodology (self-judging bias
-is visible, not hidden). Without a judge, MCQ items still score exact-match;
-free-form items are recorded `unjudged`. Judge verdicts that fail to parse
-degrade the item, never the run.
+The judge model is disclosed in every pair's methodology. Self-judging is
+detected from the resolved `(base_url without trailing slashes, exact model)`
+identity, not a target's display label, so aliases cannot hide the bias. Legacy
+reports that lack either resolved identity are annotated `judge independence
+unknown` instead of being declared independent. Without a judge, MCQ items still
+score exact-match; free-form items are recorded `unjudged`. Judge verdicts that
+fail to parse degrade the item, never the run.
 
 ## Agentic benchmarks (docker)
 

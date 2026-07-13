@@ -261,6 +261,8 @@ class SuiteRunner:
             environment=environment,
             pairs=pairs,
             targets=targets,
+            target_configs=config.targets,
+            judge=config.judge,
         )
         markdown = render_markdown(scoreboard)
         path = store.save_scoreboard(scoreboard, markdown)

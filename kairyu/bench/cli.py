@@ -123,7 +123,7 @@ def _handle_download(args) -> int:
 def _handle_report(args) -> int:
     from kairyu.bench.aggregate import build_scoreboard, render_markdown
     from kairyu.bench.store import ResultStore
-    from kairyu.bench.types import PairResult
+    from kairyu.bench.types import BenchTarget, JudgeConfig, PairResult
 
     run_dir = Path(args.run)
     if not run_dir.is_dir():
@@ -142,9 +142,32 @@ def _handle_report(args) -> int:
     ]
     targets = list(dict.fromkeys(pair.target for pair in pairs))
     config = run_meta.get("config", {})
-    configured = [
-        target.get("name") or target["model"] for target in config.get("targets", [])
-    ]
+    configured: list[str] = []
+    target_configs: list[BenchTarget] = []
+    for raw_target in config.get("targets", []):
+        if not isinstance(raw_target, dict):
+            continue
+        label = raw_target.get("name") or raw_target.get("model")
+        if isinstance(label, str) and label:
+            configured.append(label)
+        try:
+            target_configs.append(BenchTarget.model_validate(raw_target))
+        except ValueError:
+            # Legacy/incomplete target records remain displayable, but aggregate
+            # marks their judge-independence identity unknown.
+            continue
+    raw_judge = config.get("judge")
+    judge = None
+    if isinstance(raw_judge, dict):
+        base_url = raw_judge.get("base_url")
+        model = raw_judge.get("model")
+        if not isinstance(base_url, str):
+            base_url = None
+        if not isinstance(model, str):
+            model = None
+        if raw_judge and base_url is None and model is None:
+            model = "identity-unavailable"
+        judge = JudgeConfig(base_url=base_url, model=model)
     scoreboard = build_scoreboard(
         run_id=run_meta.get("run_id", run_dir.name),
         suite=config.get("suite", "fugu"),
@@ -152,6 +175,8 @@ def _handle_report(args) -> int:
         environment=run_meta.get("environment", {}),
         pairs=pairs,
         targets=configured or targets,
+        target_configs=target_configs,
+        judge=judge,
     )
     markdown = render_markdown(scoreboard)
     ResultStore(run_dir.parent, run_dir.name).save_scoreboard(scoreboard, markdown)
