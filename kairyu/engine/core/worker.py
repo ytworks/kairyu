@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from kairyu.engine.core.step_input import StateSync, StepDelta
 
 _SHUTDOWN = None
+
+
+@dataclass(frozen=True)
+class ReleaseRequest:
+    request_id: str
 
 
 def _config_fingerprint(model_dir: str) -> str:
@@ -64,6 +70,14 @@ class DistTPModelRunner:
         view = self._sync.apply(delta)  # reconstructs snapshot_step()'s states exactly
         return self._local.execute(chunks, view)
 
+    def release(self, request_id: str) -> None:
+        try:
+            self._comm.broadcast(ReleaseRequest(request_id), src=0)
+        finally:
+            release = getattr(self._local, "release", None)
+            if release is not None:
+                release(request_id)
+
     def shutdown(self) -> None:
         self._comm.broadcast(_SHUTDOWN, src=0)
 
@@ -79,6 +93,11 @@ def worker_step_loop(comm, local_runner) -> int:
         payload = comm.broadcast(_SHUTDOWN, src=0)
         if payload is _SHUTDOWN or payload is None:
             return steps
+        if isinstance(payload, ReleaseRequest):
+            release = getattr(local_runner, "release", None)
+            if release is not None:
+                release(payload.request_id)
+            continue
         assert isinstance(payload, StepDelta)
         view = sync.apply(payload)  # same delta -> same reconstructed states
         local_runner.execute(payload.chunks, view)
