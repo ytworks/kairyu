@@ -166,6 +166,38 @@ async def test_request_submitted_during_failure_purge_is_pumped():
     assert result.finished
 
 
+async def test_duplicate_request_id_is_rejected_without_disrupting_active_request():
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    first = asyncio.create_task(
+        backend.generate(_request("duplicate", "first", 10_000))
+    )
+    while "duplicate" not in backend._loop._active_request_ids:
+        await asyncio.sleep(0)
+
+    with pytest.raises(ValueError, match="duplicate request_id"):
+        await backend.generate(_request("duplicate", "second"))
+
+    assert not first.done()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    for _ in range(100):
+        if "duplicate" not in backend._loop._active_request_ids:
+            break
+        await asyncio.sleep(0.01)
+    assert "duplicate" not in backend._loop._active_request_ids
+
+    reused = await backend.generate(_request("duplicate", "reused", 2))
+    assert reused.finished is True
+
+
+def test_unknown_abort_does_not_reserve_request_id():
+    backend = KairyuBackend(num_pages=256)
+    backend._loop.abort("unknown")
+    backend._loop.submit("unknown", "prompt", SamplingParams(max_tokens=1))
+    backend._loop.purge(("unknown",))
+
+
 async def test_concurrent_requests_are_continuously_batched():
     backend = KairyuBackend(num_pages=256)
     results = await asyncio.gather(

@@ -176,6 +176,7 @@ class EngineLoop:
         # deque appends are atomic: producers may enqueue from another thread
         self._ops: deque[tuple[str, object]] = deque()
         self._tracked: dict[str, _RequestTrack] = {}  # step-side only
+        self._active_request_ids: set[str] = set()
 
     def submit(self, request_id: str, prompt: str, params: SamplingParams) -> None:
         engine_request = EngineRequest(
@@ -193,10 +194,14 @@ class EngineLoop:
             stops=tuple(params.stop or ()),
             num_prompt_tokens=len(engine_request.prompt_token_ids),
         )
+        if request_id in self._active_request_ids:
+            raise ValueError(f"duplicate request_id {request_id!r}")
+        self._active_request_ids.add(request_id)
         self._ops.append(("add", (engine_request, track)))
 
     def abort(self, request_id: str) -> None:
-        self._ops.append(("abort", request_id))
+        if request_id in self._active_request_ids:
+            self._ops.append(("abort", request_id))
 
     def purge(self, request_ids: tuple[str, ...]) -> None:
         """Abort and forget requests after a fatal runner step.
@@ -214,7 +219,7 @@ class EngineLoop:
             op_request_id = payload[0].request_id if op == "add" else payload
             if op_request_id not in ids:
                 self._ops.append((op, payload))
-        for request_id in ids:
+        for request_id in ids & self._active_request_ids:
             self._scheduler.abort(request_id)
             self._tracked.pop(request_id, None)
             self._forget(request_id)
@@ -227,7 +232,11 @@ class EngineLoop:
             op, payload = self._ops.popleft()
             if op == "add":
                 engine_request, track = payload
-                self._scheduler.add_request(engine_request)
+                try:
+                    self._scheduler.add_request(engine_request)
+                except Exception:
+                    self._active_request_ids.discard(engine_request.request_id)
+                    raise
                 self._tracked[engine_request.request_id] = track
             elif op == "abort":
                 request_id = payload
@@ -273,10 +282,13 @@ class EngineLoop:
 
     def _forget(self, request_id: str) -> None:
         """Reclaim finished per-request state in the scheduler and runner (E2)."""
-        self._scheduler.forget(request_id)
-        release = getattr(self._runner, "release", None)
-        if release is not None:
-            release(request_id)
+        try:
+            self._scheduler.forget(request_id)
+            release = getattr(self._runner, "release", None)
+            if release is not None:
+                release(request_id)
+        finally:
+            self._active_request_ids.discard(request_id)
 
     def _track_update(self, request_id: str, track: _RequestTrack) -> StreamUpdate | None:
         state = self._scheduler.states.get(request_id)
