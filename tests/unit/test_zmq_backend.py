@@ -229,6 +229,11 @@ async def test_cancelled_request_id_can_be_reused_after_queued_abort():
 
         os.kill(process.pid, sigstop)
         stopped = True
+        waited_pid, status = await asyncio.to_thread(
+            os.waitpid, process.pid, os.WUNTRACED
+        )
+        assert waited_pid == process.pid
+        assert os.WIFSTOPPED(status)
         original.cancel()
         with pytest.raises(asyncio.CancelledError):
             await original
@@ -251,16 +256,23 @@ async def test_cancelled_request_id_can_be_reused_after_queued_abort():
         result = await asyncio.wait_for(reused, timeout=15)
         assert result.finished is True
     finally:
-        if stopped and process is not None and process.is_alive():
-            os.kill(process.pid, sigcont)
-        for task in (original, reused):
-            if task is not None and not task.done():
-                task.cancel()
+        try:
+            if stopped and process is not None:
                 try:
-                    await task
-                except asyncio.CancelledError:
+                    os.kill(process.pid, sigcont)
+                except ProcessLookupError:
                     pass
-        await backend.shutdown()
+        finally:
+            try:
+                for task in (original, reused):
+                    if task is not None and not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+            finally:
+                await backend.shutdown()
 
 
 async def test_submit_failure_clears_request_reservation_and_queue(monkeypatch):
