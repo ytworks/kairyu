@@ -3,9 +3,10 @@ import time
 
 import pytest
 
+import kairyu.orchestration.conductor as conductor_module
 from kairyu.engine.backend import GenerationRequest, GenerationResult
 from kairyu.engine.mock import MockBackend
-from kairyu.orchestration.budget import Budget
+from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, RoleSpec
 from kairyu.outputs import CompletionOutput
 
@@ -24,6 +25,33 @@ class ScriptedBackend:
             request_id=request.request_id,
             prompt=request.prompt,
             completions=(CompletionOutput(index=0, text=text, token_ids=()),),
+        )
+
+    async def stream(self, request):  # pragma: no cover - unused
+        yield await self.generate(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+class GateBackend:
+    """Records calls and holds them in flight until the test opens the gate."""
+
+    def __init__(self) -> None:
+        self.calls: list[GenerationRequest] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.calls.append(request)
+        self.started.set()
+        await self.release.wait()
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(index=0, text=f"result: {request.prompt}", token_ids=()),
+            ),
         )
 
     async def stream(self, request):  # pragma: no cover - unused
@@ -231,3 +259,159 @@ async def test_cost_model_charges_budget_and_trips_cost_cap():
     assert result.budget_state.is_exhausted is True
     assert "worker" not in result.outputs
     assert result.final_text == result.outputs["planner"]
+
+
+async def test_parallel_ready_roots_reserve_step_before_backend_dispatch():
+    backend = GateBackend()
+    roles = (
+        RoleSpec(name="a", worker="w", prompt="a: {query}"),
+        RoleSpec(name="b", worker="w", prompt="b: {query}"),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+
+    task = asyncio.create_task(conductor.run("q", budget=Budget(max_steps=1)))
+    await backend.started.wait()
+    await asyncio.sleep(0)
+    backend.release.set()
+    result = await task
+
+    assert len(backend.calls) == 1
+    assert result.budget_state.steps_used == 1
+    assert result.budget_state.steps_reserved == 0
+    assert sum(event.kind == "skipped:budget" for event in result.trace) == 1
+    assert not any(event.kind == "failed" for event in result.trace)
+
+
+async def test_failed_generation_releases_reservation_for_later_unit():
+    class _FailThenSucceedBackend:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(self, request: GenerationRequest) -> GenerationResult:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary backend failure")
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(index=0, text="recovered", token_ids=()),
+                ),
+            )
+
+        async def stream(self, request):  # pragma: no cover - unused
+            yield await self.generate(request)
+
+        async def shutdown(self) -> None:
+            return None
+
+    backend = _FailThenSucceedBackend()
+    roles = (
+        RoleSpec(name="first", worker="w", prompt="first: {query}"),
+        RoleSpec(
+            name="second",
+            worker="w",
+            prompt="second: {first}",
+            depends_on=("first",),
+        ),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"w": backend},
+        cost_model=lambda request, result: 0.25,
+    )
+
+    result = await conductor.run(
+        "q", budget=Budget(max_steps=1, max_cost_usd=1.0)
+    )
+
+    assert backend.calls == 2
+    assert result.outputs["second"] == "recovered"
+    assert result.budget_state.steps_used == 1
+    assert result.budget_state.steps_reserved == 0
+    assert result.budget_state.cost_used == 0.25
+    assert result.budget_state.unknown_cost_reserved is False
+    assert any(
+        event.node == "first" and event.kind == "failed" for event in result.trace
+    )
+
+
+async def test_cancelled_generation_releases_reservation_and_propagates():
+    backend = GateBackend()
+    conductor = Conductor(
+        roles=(RoleSpec(name="worker", worker="w", prompt="{query}"),),
+        workers={"w": backend},
+    )
+    run = conductor_module._RunState(
+        budget=BudgetState(Budget(max_steps=1, max_cost_usd=1.0))
+    )
+
+    task = asyncio.create_task(
+        conductor._generate(run, "session", "worker", "w", "prompt", 0)
+    )
+    await backend.started.wait()
+    reserved = (run.budget.steps_reserved, run.budget.unknown_cost_reserved)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert reserved == (1, True)
+    assert run.budget.steps_used == 0
+    assert run.budget.steps_reserved == 0
+    assert run.budget.unknown_cost_reserved is False
+
+
+async def test_cost_cap_allows_only_one_unknown_cost_dispatch_and_shows_overrun():
+    backend = GateBackend()
+    roles = (
+        RoleSpec(name="a", worker="w", prompt="a: {query}"),
+        RoleSpec(name="b", worker="w", prompt="b: {query}"),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"w": backend},
+        cost_model=lambda request, result: 1.0,
+    )
+
+    task = asyncio.create_task(
+        conductor.run("q", budget=Budget(max_steps=2, max_cost_usd=0.5))
+    )
+    await backend.started.wait()
+    await asyncio.sleep(0)
+    backend.release.set()
+    result = await task
+
+    assert len(backend.calls) == 1
+    assert result.budget_state.steps_used == 1
+    assert result.budget_state.cost_used == 1.0
+    assert result.budget_state.is_exhausted is True
+    assert result.budget_state.unknown_cost_reserved is False
+    assert sum(event.kind == "skipped:budget" for event in result.trace) == 1
+
+
+async def test_verifier_budget_refusal_preserves_completed_target():
+    backend = ScriptedBackend(["best completed draft"])
+    roles = (
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="check",
+            worker="w",
+            prompt="verify: {worker}",
+            role_type="verifier",
+            verifies="worker",
+            depends_on=("worker",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+    run = conductor_module._RunState(budget=BudgetState(Budget(max_steps=1)))
+
+    await conductor._run_unit(run, "session", "task", roles[0])
+
+    assert backend.prompts_seen == ["do: task"]
+    assert run.outputs == {"worker": "best completed draft"}
+    assert run.completion_order == ["worker"]
+    assert run.trace == [
+        conductor_module.TraceEvent("worker", "generated", "attempt=0"),
+        conductor_module.TraceEvent("check", "skipped:budget"),
+    ]
+    assert conductor._final_text(run) == "best completed draft"
