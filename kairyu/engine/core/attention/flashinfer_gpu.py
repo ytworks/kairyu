@@ -60,6 +60,27 @@ class FlashInferBackend:
         )  # host
         return indptr, indices, last_page_len
 
+    def _paged_batch_arrays(
+        self,
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+        page_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        page_counts = [-(-seq_len // page_size) for seq_len in seq_lens]
+        offsets = [0]
+        indices: list[int] = []
+        for page_table, page_count in zip(page_tables, page_counts, strict=True):
+            offsets.append(offsets[-1] + page_count)
+            indices.extend(page_table[:page_count])
+        return (
+            torch.tensor(offsets, dtype=torch.int32),
+            torch.tensor(indices, dtype=torch.int32, device=self._device),
+            torch.tensor(
+                [(seq_len - 1) % page_size + 1 for seq_len in seq_lens],
+                dtype=torch.int32,
+            ),
+        )
+
     def _plan(
         self,
         query: torch.Tensor,
@@ -130,3 +151,80 @@ class FlashInferBackend:
             return out.reshape(1, -1)
         out = wrapper.run(query, paged_kv)  # [T, H, D]
         return out.reshape(query.shape[0], -1)
+
+    def attend_batched(
+        self,
+        queries: list[torch.Tensor],
+        kv_pool: PagedKVPool,
+        layer: int,
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+        chunk_starts: list[int],
+    ) -> list[torch.Tensor]:
+        lengths = {
+            "queries": len(queries),
+            "page_tables": len(page_tables),
+            "seq_lens": len(seq_lens),
+            "chunk_starts": len(chunk_starts),
+        }
+        if len(set(lengths.values())) != 1:
+            details = ", ".join(f"{name}={length}" for name, length in lengths.items())
+            raise ValueError(
+                "FlashInfer parallel batch inputs must have the same length "
+                f"({details})"
+            )
+        if not queries:
+            return []
+        if any(query.shape[0] != 1 for query in queries):
+            return [
+                self.attend(
+                    query,
+                    kv_pool,
+                    layer,
+                    page_table,
+                    seq_len,
+                    chunk_start,
+                )
+                for query, page_table, seq_len, chunk_start in zip(
+                    queries, page_tables, seq_lens, chunk_starts, strict=True
+                )
+            ]
+
+        for query, seq_len, chunk_start in zip(
+            queries, seq_lens, chunk_starts, strict=True
+        ):
+            chunk_len = query.shape[0]
+            assert chunk_start + chunk_len == seq_len, (
+                "FlashInfer causal=True is bottom-right aligned: the chunk must be "
+                f"the tail of the sequence (chunk_start={chunk_start} T={chunk_len} "
+                f"seq_len={seq_len})"
+            )
+
+        key = (
+            "batched_decode",
+            tuple(tuple(page_table) for page_table in page_tables),
+            tuple(seq_lens),
+            tuple(chunk_starts),
+        )
+        if key != self._plan_key or not self._planned_decode:
+            indptr, indices, last_page_len = self._paged_batch_arrays(
+                page_tables, seq_lens, kv_pool.page_size
+            )
+            self._decode.plan(
+                indptr,
+                indices,
+                last_page_len,
+                queries[0].shape[1],
+                kv_pool.num_kv_heads,
+                kv_pool.head_dim,
+                kv_pool.page_size,
+                q_data_type=queries[0].dtype,
+                kv_data_type=kv_pool.k.dtype,
+            )
+            self._plan_key = key
+            self._planned_decode = True
+
+        query_batch = torch.cat(queries, dim=0)
+        paged_kv = (kv_pool.k[layer], kv_pool.v[layer])
+        out = self._decode.run(query_batch, paged_kv)
+        return [row.reshape(1, -1) for row in out.unbind(dim=0)]
