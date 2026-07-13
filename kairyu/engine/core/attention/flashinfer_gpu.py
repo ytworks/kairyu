@@ -3,8 +3,9 @@ on deploy day (`pytest -m gpu`).
 
 API pins (reviewed against docs.flashinfer.ai 0.6.x — the fake-module contract
 tests enforce every one of them):
-- both wrappers take a WORKSPACE buffer first (128 MB uint8), constructed once
-  — the adapter is stateful and must be ONE shared instance across all layers;
+- both wrappers take a zero-initialized WORKSPACE buffer first (128 MB uint8),
+  constructed once — the adapter is stateful and must be ONE shared instance
+  across all layers;
 - prefill ``plan()`` takes ``head_dim_qk`` (NOT ``head_dim`` — that spelling
   is decode-wrapper-only);
 - ``q_data_type``/``kv_data_type`` are passed explicitly (defaults are fp16);
@@ -36,11 +37,13 @@ class FlashInferBackend:
 
         self._flashinfer = flashinfer
         self._device = device
-        workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+        workspace = torch.zeros(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
         self._prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             workspace, kv_layout="NHD"
         )
-        decode_workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+        decode_workspace = torch.zeros(
+            _WORKSPACE_BYTES, dtype=torch.uint8, device=device
+        )
         self._decode = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             decode_workspace, kv_layout="NHD", use_tensor_cores=True
         )

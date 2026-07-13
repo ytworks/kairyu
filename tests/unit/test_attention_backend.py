@@ -83,6 +83,7 @@ class TestMlaEquivalence:
 class _FakeWrapper:
     def __init__(self, workspace, kv_layout=None, use_tensor_cores=None):
         assert workspace.dtype == torch.uint8 and workspace.numel() >= 1
+        self.workspace = workspace
         self.kv_layout = kv_layout
         self.use_tensor_cores = use_tensor_cores
         self.plans: list[dict] = []
@@ -99,10 +100,13 @@ class _FakeWrapper:
 
 @pytest.fixture()
 def fake_flashinfer(monkeypatch):
+    from kairyu.engine.core.attention import flashinfer_gpu
+
     module = types.ModuleType("flashinfer")
     module.BatchPrefillWithPagedKVCacheWrapper = _FakeWrapper
     module.BatchDecodeWithPagedKVCacheWrapper = _FakeWrapper
     monkeypatch.setitem(sys.modules, "flashinfer", module)
+    monkeypatch.setattr(flashinfer_gpu, "_WORKSPACE_BYTES", 64)
     return module
 
 
@@ -111,6 +115,22 @@ class TestFlashInferAdapterContract:
         from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
 
         return FlashInferBackend(device="cpu")
+
+    def test_wrapper_workspaces_are_zero_initialized(
+        self, fake_flashinfer, monkeypatch
+    ):
+        real_empty = torch.empty
+
+        def dirty_empty(*args, **kwargs):
+            return real_empty(*args, **kwargs).fill_(0xA5)
+
+        monkeypatch.setattr(torch, "empty", dirty_empty)
+
+        backend = self._backend()
+
+        for wrapper in (backend._prefill, backend._decode):
+            assert wrapper.workspace.numel() == 64
+            assert torch.count_nonzero(wrapper.workspace).item() == 0
 
     def test_prefill_plan_pins_indptr_math_and_kwargs(self, fake_flashinfer):
         backend = self._backend()
