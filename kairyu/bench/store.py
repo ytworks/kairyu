@@ -21,12 +21,29 @@ def _safe(name: str) -> str:
     return f"{prefix}--{digest}"
 
 
+def _validate_run_id(run_id: str) -> None:
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or run_id in {".", ".."}
+        or Path(run_id).is_absolute()
+        or "/" in run_id
+        or "\\" in run_id
+    ):
+        raise ValueError(
+            f"invalid run id {run_id!r}: expected one non-dot path component"
+        )
+
+
 class ResultStore:
     def __init__(self, results_dir: str | Path, run_id: str) -> None:
-        self.run_dir = Path(results_dir) / run_id
+        _validate_run_id(run_id)
+        self.results_dir = Path(results_dir)
+        self.run_dir = self.results_dir / run_id
         self.run_id = run_id
 
     def ensure(self) -> None:
+        self._require_contained_run_dir()
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
     def write_run_config(self, config: dict) -> None:
@@ -37,13 +54,18 @@ class ResultStore:
         """Create run metadata once, or validate an existing run identity."""
         fingerprint = metadata.get("fingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
-            raise ValueError("run metadata requires a non-empty fingerprint")
+            raise ValueError(
+                f"run id {self.run_id!r} requires a non-empty fingerprint"
+            )
 
         text = json.dumps(metadata, indent=2)
-        self.run_dir.parent.mkdir(parents=True, exist_ok=True)
+        self._require_contained_run_dir()
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        self._require_contained_run_dir()
         try:
             self.run_dir.mkdir()
         except FileExistsError:
+            self._require_contained_run_dir()
             self._require_matching_fingerprint(fingerprint)
             return
 
@@ -57,19 +79,37 @@ class ResultStore:
                 pass
             raise
 
+    def _require_contained_run_dir(self) -> None:
+        try:
+            resolved_results_dir = self.results_dir.resolve(strict=False)
+            resolved_run_dir = self.run_dir.resolve(strict=False)
+        except (OSError, RuntimeError) as error:
+            raise ValueError(
+                f"fingerprint-bound run id {self.run_id!r} cannot be resolved "
+                "within the results directory"
+            ) from error
+        if resolved_run_dir.parent != resolved_results_dir:
+            raise ValueError(
+                f"fingerprint-bound run id {self.run_id!r} resolves outside "
+                "the results directory"
+            )
+
     def _require_matching_fingerprint(self, expected: str) -> None:
         run_config = self.run_dir / "run.json"
         try:
             existing = json.loads(run_config.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError(
-                f"run {self.run_id!r} has no matching fingerprint"
+                f"run id {self.run_id!r} has no matching fingerprint"
             ) from error
 
         if not isinstance(existing, dict) or existing.get("fingerprint") != expected:
-            raise ValueError(f"run {self.run_id!r} has no matching fingerprint")
+            raise ValueError(
+                f"run id {self.run_id!r} has no matching fingerprint"
+            )
 
     def pair_path(self, benchmark: str, target: str) -> Path:
+        self._require_contained_run_dir()
         return self.run_dir / _safe(benchmark) / f"{_safe(target)}.json"
 
     def load_pair(

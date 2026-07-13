@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -41,6 +42,29 @@ def test_pair_round_trip(tmp_path):
 def test_missing_pair_is_none(tmp_path):
     store = ResultStore(tmp_path, "run-1")
     assert store.load_pair("gpqa-diamond", "m") is None
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "",
+        ".",
+        "..",
+        "/absolute/run",
+        "nested/run",
+        "nested\\run",
+        "./run",
+        "run/",
+    ],
+)
+def test_run_id_must_be_one_non_dot_path_component(tmp_path, run_id):
+    with pytest.raises(ValueError) as exc_info:
+        ResultStore(tmp_path, run_id)
+
+    message = str(exc_info.value)
+    assert "run id" in message
+    assert repr(run_id) in message
+    assert not list(tmp_path.iterdir())
 
 
 def test_model_names_with_slashes_are_safe(tmp_path):
@@ -119,6 +143,111 @@ def _run_metadata(fingerprint: str, created_at: str) -> dict:
         "identity": {"config": "canonical"},
         "environment": {"created_at": created_at},
     }
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    ["20260713T123456Z", "experiment_alpha-01", "release.v1"],
+)
+def test_normal_timestamp_and_custom_run_ids_remain_valid(tmp_path, run_id):
+    store = ResultStore(tmp_path, run_id)
+    metadata = _run_metadata("fingerprint-a", "2026-07-13T00:00:00Z")
+    metadata["run_id"] = run_id
+
+    store.initialize_run(metadata)
+
+    assert store.run_dir == tmp_path / run_id
+    assert json.loads((store.run_dir / "run.json").read_bytes()) == metadata
+
+
+def test_initialize_run_refuses_resolved_escape_without_outside_io(
+    tmp_path, monkeypatch
+):
+    results_dir = tmp_path / "results"
+    outside_dir = tmp_path / "outside"
+    results_dir.mkdir()
+    outside_dir.mkdir()
+    metadata = _run_metadata("fingerprint-a", "2026-07-13T00:00:00Z")
+    outside_run_config = outside_dir / "run.json"
+    outside_run_config.write_text(json.dumps(metadata), encoding="utf-8")
+    before = outside_run_config.read_bytes()
+    (results_dir / "run-1").symlink_to(outside_dir, target_is_directory=True)
+    store = ResultStore(results_dir, "run-1")
+
+    reads: list[Path] = []
+    real_read_text = Path.read_text
+
+    def recording_read_text(path: Path, *args, **kwargs):
+        reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", recording_read_text)
+
+    with pytest.raises(ValueError) as exc_info:
+        store.initialize_run(metadata)
+
+    message = str(exc_info.value)
+    assert "run id 'run-1'" in message
+    assert "fingerprint" in message
+    assert reads == []
+    assert outside_run_config.read_bytes() == before
+    assert not (outside_dir / "run.json.tmp").exists()
+
+
+@pytest.mark.parametrize("corrupt", [b"{not-json", b"\xff"])
+def test_initialize_run_refuses_corrupt_metadata_without_overwrite(tmp_path, corrupt):
+    store = ResultStore(tmp_path, "run-1")
+    store.ensure()
+    run_config = store.run_dir / "run.json"
+    run_config.write_bytes(corrupt)
+    before = run_config.read_bytes()
+
+    with pytest.raises(ValueError) as exc_info:
+        store.initialize_run(
+            _run_metadata("fingerprint-a", "2026-07-13T00:00:00Z")
+        )
+
+    message = str(exc_info.value)
+    assert "run id 'run-1'" in message
+    assert "fingerprint" in message
+    assert run_config.read_bytes() == before
+
+
+@pytest.mark.parametrize("metadata", [{}, {"fingerprint": ""}])
+def test_initialize_run_fingerprint_error_includes_run_id(tmp_path, metadata):
+    store = ResultStore(tmp_path, "run-1")
+
+    with pytest.raises(ValueError) as exc_info:
+        store.initialize_run(metadata)
+
+    message = str(exc_info.value)
+    assert "run id 'run-1'" in message
+    assert "fingerprint" in message
+    assert not store.run_dir.exists()
+
+
+def test_initialize_run_cleans_new_directory_after_atomic_write_failure(
+    tmp_path, monkeypatch
+):
+    store = ResultStore(tmp_path, "run-1")
+
+    def fail_after_temporary_write(path: Path, text: str) -> None:
+        path.with_suffix(path.suffix + ".tmp").write_text(text, encoding="utf-8")
+        raise OSError("simulated atomic write failure")
+
+    monkeypatch.setattr(
+        ResultStore,
+        "_atomic_write",
+        staticmethod(fail_after_temporary_write),
+    )
+
+    with pytest.raises(OSError, match="simulated atomic write failure"):
+        store.initialize_run(
+            _run_metadata("fingerprint-a", "2026-07-13T00:00:00Z")
+        )
+
+    assert not store.run_dir.exists()
+    assert not list(tmp_path.rglob("*.tmp"))
 
 
 def test_initialize_run_creates_once_and_keeps_first_environment(tmp_path):
