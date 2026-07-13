@@ -1,10 +1,14 @@
 import asyncio
+import time
+from collections.abc import Mapping
 
 import httpx
 import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.core.sampling_types import SampledToken
+from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
@@ -16,6 +20,20 @@ def _request(request_id: str, prompt: str, max_tokens: int = 4) -> GenerationReq
         prompt=prompt,
         sampling_params=SamplingParams(max_tokens=max_tokens),
     )
+
+
+class _SlowRunner:
+    def execute(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        time.sleep(0.01)
+        return {
+            chunk.request_id: (SampledToken(7),)
+            for chunk in scheduled
+            if not chunk.is_prefill or states[chunk.request_id].prefill_done
+        }
 
 
 async def test_generate_runs_through_engine_core():
@@ -38,6 +56,26 @@ async def test_stream_yields_incremental_partials():
     assert all(p.finished is False for p in partials[:-1])
     lengths = [len(p.completions[0].token_ids) for p in partials]
     assert lengths == sorted(lengths)  # monotonically growing
+
+
+async def test_stream_abandonment_aborts_engine_work():
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    stream = backend.stream(
+        _request("abandoned", "keep generating", max_tokens=10_000)
+    )
+    first = await anext(stream)
+    assert first.finished is False
+
+    await stream.aclose()
+    for _ in range(100):
+        if not backend._loop.has_work():
+            break
+        await asyncio.sleep(0.01)
+
+    assert backend._loop.has_work() is False
+    assert "abandoned" not in backend._scheduler.states
+    result = await backend.generate(_request("after-abandon", "still works", 2))
+    assert result.finished
 
 
 async def test_concurrent_requests_are_continuously_batched():
