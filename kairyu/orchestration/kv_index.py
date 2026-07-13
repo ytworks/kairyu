@@ -148,20 +148,27 @@ class ZmqKvEventSubscriber:
         import zmq
 
         drained = 0
+        logger = logging.getLogger("kairyu.kv_index")
         while drained < max_events:
             try:
-                replica_id, payload = self._socket.recv_multipart(flags=zmq.NOBLOCK)
+                frames = self._socket.recv_multipart(flags=zmq.NOBLOCK)
             except zmq.Again:
                 break
+            drained += 1
             # a single malformed frame or unknown event type must not abort the
             # drain mid-queue and desync the whole index (M4): drop it and continue
             try:
-                self._index.apply(replica_id.decode(), json.loads(payload))
-            except (ValueError, KeyError, UnicodeDecodeError) as error:
-                logging.getLogger("kairyu.kv_index").warning(
-                    "dropped a malformed KV event: %r", error
+                if len(frames) != 2:
+                    logger.warning(
+                        "dropped a malformed KV event (frame_count=%d)", len(frames)
+                    )
+                    continue
+                replica_id, payload = frames
+                self._index.apply(replica_id.decode(), json.loads(payload.decode()))
+            except (UnicodeDecodeError, ValueError) as error:
+                logger.warning(
+                    "dropped a malformed KV event (%s)", type(error).__name__
                 )
-            drained += 1
         return drained
 
     def close(self) -> None:

@@ -1,11 +1,13 @@
 """m10b gates: prefix trie routing, radix KV events, event index staleness,
 zmq pub/sub chaos, offline weight tuning."""
 
+import asyncio
+
 import pytest
 
 from kairyu.engine.backend import GenerationRequest, GenerationResult, SamplingParams
 from kairyu.engine.core.radix_kv import RadixKVCache
-from kairyu.orchestration.kv_index import KvEventIndex
+from kairyu.orchestration.kv_index import KvEventIndex, ZmqKvEventSubscriber
 from kairyu.orchestration.learning.dataset import PlacementRecord, tune_prefix_weights
 from kairyu.orchestration.prefix_index import PrefixIndex, prompt_chunks
 from kairyu.orchestration.replica import ReplicaPool
@@ -385,6 +387,128 @@ class TestKvEventIndex:
 
 
 class TestZmqTransport:
+    def test_drain_quarantines_each_malformed_message_and_respects_boundary(
+        self, caplog
+    ):
+        import json
+        import logging
+
+        zmq = pytest.importorskip("zmq")
+
+        class FakeSocket:
+            def __init__(self, messages):
+                self.messages = list(messages)
+
+            def recv_multipart(self, *, flags):
+                del flags
+                if not self.messages:
+                    raise zmq.Again()
+                return self.messages.pop(0)
+
+        def valid(event):
+            return [b"r1", json.dumps(event).encode()]
+
+        messages = [
+            valid({"type": "BlockStored", "block_hashes": ["a"]}),
+            [b"r1", b'["array-marker"]'],
+            valid({"type": "BlockStored", "block_hashes": ["b"]}),
+            [
+                b"\xffREPLICA_SECRET",
+                json.dumps(
+                    {"type": "BlockStored", "block_hashes": ["not-applied-id"]}
+                ).encode(),
+            ],
+            valid({"type": "BlockRemoved", "block_hashes": ["a"]}),
+            [b"r1", b"\xffPAYLOAD_SECRET"],
+            valid({"type": "BlockStored", "block_hashes": ["c"]}),
+            [b"r1", b"INVALID_JSON_SECRET"],
+            valid({"type": "BlockRemoved", "block_hashes": ["b"]}),
+            [b"ONE_FRAME_SECRET"],
+            valid({"type": "BlockStored", "block_hashes": ["d"]}),
+            [
+                b"r1",
+                json.dumps(
+                    {
+                        "type": "BlockStored",
+                        "block_hashes": ["not-applied-three-frames"],
+                    }
+                ).encode(),
+                b"THREE_FRAME_SECRET",
+            ],
+            valid({"type": "BlockStored", "block_hashes": ["e"]}),
+        ]
+        clock = {"t": 0.0}
+
+        def now():
+            clock["t"] += 1.0
+            return clock["t"]
+
+        index = KvEventIndex(now=now)
+        socket = FakeSocket(messages)
+        subscriber = object.__new__(ZmqKvEventSubscriber)
+        subscriber._socket = socket
+        subscriber._index = index
+
+        with caplog.at_level(logging.WARNING, logger="kairyu.kv_index"):
+            assert subscriber.drain(max_events=6) == 6
+            assert index._replicas["r1"].hashes == {"b"}
+            assert index._replicas["r1"].last_event == 3.0
+            assert len(socket.messages) == 7
+
+            assert subscriber.drain(max_events=100) == 7
+
+        assert index._replicas["r1"].hashes == {"c", "d", "e"}
+        assert index._replicas["r1"].last_event == 7.0
+        assert len(caplog.records) == 6
+        warnings = "\n".join(caplog.messages)
+        assert warnings.count("ValueError") == 1
+        assert warnings.count("UnicodeDecodeError") == 2
+        assert warnings.count("JSONDecodeError") == 1
+        assert "frame_count=1" in warnings
+        assert "frame_count=3" in warnings
+        assert "array-marker" not in warnings
+        assert "REPLICA_SECRET" not in warnings
+        assert "not-applied-id" not in warnings
+        assert "PAYLOAD_SECRET" not in warnings
+        assert "INVALID_JSON_SECRET" not in warnings
+        assert "ONE_FRAME_SECRET" not in warnings
+        assert "not-applied-three-frames" not in warnings
+        assert "THREE_FRAME_SECRET" not in warnings
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [
+            pytest.param(KeyboardInterrupt, id="keyboard-interrupt"),
+            pytest.param(MemoryError, id="memory-error"),
+            pytest.param(asyncio.CancelledError, id="cancelled-error"),
+        ],
+    )
+    def test_drain_does_not_quarantine_process_errors(self, error_type):
+        import json
+
+        pytest.importorskip("zmq")
+
+        class OneMessageSocket:
+            def recv_multipart(self, *, flags):
+                del flags
+                return [
+                    b"r1",
+                    json.dumps(
+                        {"type": "BlockStored", "block_hashes": ["h1"]}
+                    ).encode(),
+                ]
+
+        def raise_process_error():
+            raise error_type()
+
+        index = KvEventIndex(now=raise_process_error)
+        subscriber = object.__new__(ZmqKvEventSubscriber)
+        subscriber._socket = OneMessageSocket()
+        subscriber._index = index
+
+        with pytest.raises(error_type):
+            subscriber.drain()
+
     def test_pub_sub_round_trip_and_chaos_staleness(self):
         zmq = pytest.importorskip("zmq")
         del zmq
@@ -392,7 +516,6 @@ class TestZmqTransport:
 
         from kairyu.orchestration.kv_index import (
             ZmqKvEventPublisher,
-            ZmqKvEventSubscriber,
         )
 
         endpoint = "tcp://127.0.0.1:29471"
