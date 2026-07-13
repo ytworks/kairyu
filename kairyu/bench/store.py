@@ -7,6 +7,7 @@ ignores everything. Filenames sanitize model names (they may contain "/").
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -15,7 +16,9 @@ from kairyu.bench.types import PairResult
 
 
 def _safe(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "__", name)
+    prefix = re.sub(r"[^A-Za-z0-9._-]+", "__", name)[:96] or "value"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}--{digest}"
 
 
 class ResultStore:
@@ -30,14 +33,62 @@ class ResultStore:
         self.ensure()
         self._atomic_write(self.run_dir / "run.json", json.dumps(config, indent=2))
 
+    def initialize_run(self, metadata: dict) -> None:
+        """Create run metadata once, or validate an existing run identity."""
+        fingerprint = metadata.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise ValueError("run metadata requires a non-empty fingerprint")
+
+        text = json.dumps(metadata, indent=2)
+        self.run_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.run_dir.mkdir()
+        except FileExistsError:
+            self._require_matching_fingerprint(fingerprint)
+            return
+
+        try:
+            self._atomic_write(self.run_dir / "run.json", text)
+        except Exception:
+            (self.run_dir / "run.json.tmp").unlink(missing_ok=True)
+            try:
+                self.run_dir.rmdir()
+            except OSError:
+                pass
+            raise
+
+    def _require_matching_fingerprint(self, expected: str) -> None:
+        run_config = self.run_dir / "run.json"
+        try:
+            existing = json.loads(run_config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"run {self.run_id!r} has no matching fingerprint"
+            ) from error
+
+        if not isinstance(existing, dict) or existing.get("fingerprint") != expected:
+            raise ValueError(f"run {self.run_id!r} has no matching fingerprint")
+
     def pair_path(self, benchmark: str, target: str) -> Path:
         return self.run_dir / _safe(benchmark) / f"{_safe(target)}.json"
 
-    def load_pair(self, benchmark: str, target: str) -> PairResult | None:
+    def load_pair(
+        self,
+        benchmark: str,
+        target: str,
+        *,
+        expected_fingerprint: str | None = None,
+    ) -> PairResult | None:
         path = self.pair_path(benchmark, target)
         if not path.exists():
             return None
-        return PairResult.model_validate_json(path.read_text(encoding="utf-8"))
+        result = PairResult.model_validate_json(path.read_text(encoding="utf-8"))
+        if (
+            expected_fingerprint is not None
+            and result.run_fingerprint != expected_fingerprint
+        ):
+            return None
+        return result
 
     def save_pair(self, result: PairResult) -> Path:
         path = self.pair_path(result.benchmark, result.target)
