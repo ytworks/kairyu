@@ -141,6 +141,35 @@ class TestRadixKvEvents:
         assert cache_hit.num_cached_tokens == 8
         cache.release_preempted(cache_hit)
 
+    def test_failed_free_event_is_retryable_and_releases_once(self):
+        events: list[dict] = []
+        attempts = 0
+
+        def fail_once_sink(event):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("event sink failed")
+            events.append(event)
+
+        cache = RadixKVCache(num_pages=4, page_size=4, event_sink=fail_once_sink)
+        allocation = cache.allocate((1, 2, 3, 4, 5))
+
+        with pytest.raises(RuntimeError, match="event sink failed"):
+            cache.free(allocation)
+
+        assert not allocation._freed
+        assert cache.num_free_pages == 2
+        cache.free(allocation)
+
+        assert allocation._freed
+        assert cache.num_free_pages == 3
+        assert attempts == 2
+        assert [event["type"] for event in events] == ["BlockStored"]
+        cache_hit = cache.allocate((1, 2, 3, 4, 5))
+        assert cache_hit.num_cached_tokens == 4
+        cache.release_preempted(cache_hit)
+
     def test_decode_extension_emits_stored(self):
         cache, events = self._cache_with_sink()
         allocation = cache.allocate(tuple(range(8)))
@@ -154,6 +183,54 @@ class TestRadixKvEvents:
         )
         kinds = [e["type"] for e in events]
         assert kinds.count("BlockStored") == 2  # prefill + decode extension
+
+    def test_failed_decode_extension_event_rolls_back_and_retries(self):
+        events: list[dict] = []
+        attempts = 0
+        output_tokens = (100, 101, 102, 103, 104)
+        allocation_holder = []
+        decode_page_holder = []
+
+        def fail_decode_once_sink(event):
+            nonlocal attempts
+            attempts += 1
+            if event["token_ids"] == list(output_tokens[:4]):
+                cache.commit_and_release(
+                    allocation_holder[0],
+                    output_tokens=output_tokens,
+                    decode_pages=(decode_page_holder[0],),
+                )
+            if attempts == 2:
+                raise RuntimeError("event sink failed")
+            events.append(event)
+
+        cache = RadixKVCache(num_pages=8, page_size=4, event_sink=fail_decode_once_sink)
+        allocation = cache.allocate(tuple(range(8)))
+        allocation_holder.append(allocation)
+        cache.mark_computed(allocation)
+        decode_page = cache.allocate_private_page()
+        decode_page_holder.append(decode_page)
+
+        with pytest.raises(RuntimeError, match="event sink failed"):
+            cache.commit_and_release(
+                allocation, output_tokens=output_tokens, decode_pages=(decode_page,)
+        )
+
+        assert not allocation._freed
+        assert allocation._node.children == {}
+
+        cache.commit_and_release(
+            allocation, output_tokens=output_tokens, decode_pages=(decode_page,)
+        )
+
+        assert allocation._freed
+        assert cache.num_free_pages == 5
+        assert attempts == 3
+        assert [event["type"] for event in events] == ["BlockStored", "BlockStored"]
+        cache_hit = cache.allocate(allocation.tokens + output_tokens)
+        assert cache_hit.num_cached_tokens == 12
+        assert decode_page in cache_hit.cached_pages
+        cache.release_preempted(cache_hit)
 
     def test_eviction_emits_removed(self):
         cache, events = self._cache_with_sink()
