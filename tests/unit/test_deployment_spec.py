@@ -278,6 +278,68 @@ def test_duplicate_key_loader_rejects_duplicates_before_merge_flattening(
     assert f"at {mapping_path}" in message
 
 
+@pytest.mark.parametrize(
+    ("first_key", "second_key", "constructed_key"),
+    [
+        pytest.param("1", "01", 1, id="equivalent-integers"),
+        pytest.param("true", "TRUE", True, id="equivalent-booleans"),
+        pytest.param("null", "~", None, id="equivalent-nulls"),
+        pytest.param("true", "1", 1, id="equal-boolean-and-integer"),
+    ],
+)
+def test_duplicate_key_loader_normalizes_merge_source_scalar_keys(
+    first_key,
+    second_key,
+    constructed_key,
+):
+    yaml_text = f"""engines:
+  m:
+    backend: mock
+    options:
+      <<: &defaults
+        {first_key}: first
+        {second_key}: second
+"""
+
+    with pytest.raises(ValueError) as exc_info:
+        load_deployment_spec(yaml_text)
+
+    message = str(exc_info.value)
+    assert f"duplicate mapping key {constructed_key!r}" in message
+    assert "at engines.m.options.<<" in message
+
+
+def test_duplicate_key_loader_keeps_safe_scalar_constructor_boundary():
+    yaml_text = """engines:
+  m:
+    backend: mock
+    options:
+      <<: &defaults
+        ? !!python/name:os.system ''
+        : forbidden
+"""
+
+    with pytest.raises(
+        yaml.constructor.ConstructorError,
+        match="could not determine a constructor",
+    ):
+        load_deployment_spec(yaml_text)
+
+
+def test_duplicate_key_loader_distinguishes_merge_from_quoted_string_key():
+    loaded = yaml.load(
+        """defaults: &defaults
+  backend: mock
+merged:
+  <<: *defaults
+  "<<": literal
+""",
+        Loader=_UniqueKeySafeLoader,
+    )
+
+    assert loaded["merged"] == {"backend": "mock", "<<": "literal"}
+
+
 def test_duplicate_key_loader_preserves_safe_yaml_merge_behavior():
     spec = load_deployment_spec(
         """backend_defaults: &backend_defaults

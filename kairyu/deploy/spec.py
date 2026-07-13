@@ -20,6 +20,8 @@ from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 
 _DEFAULT_PORT = 8000
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+_MERGE_KEY_IDENTITY = object()
 
 
 class BackendSpec(BaseModel):
@@ -205,16 +207,27 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
         visited.add(identity)
         if isinstance(node, MappingNode):
             self._mapping_paths[identity] = path
-            scalar_keys: set[tuple[str, str]] = set()
+            scalar_keys: set[object] = set()
             for key_node, value_node in node.value:
                 if isinstance(key_node, ScalarNode):
-                    key = (key_node.tag, key_node.value)
-                    if key in scalar_keys:
+                    if key_node.tag == _MERGE_TAG:
+                        key: object = _MERGE_KEY_IDENTITY
+                        display_key: object = key_node.value
+                    else:
+                        # Use this SafeLoader's constructors so equality matches
+                        # the keys that construct_mapping will actually insert.
+                        key = self.construct_object(key_node)
+                        display_key = key
+                    try:
+                        duplicate = key in scalar_keys
+                        scalar_keys.add(key)
+                    except TypeError:
+                        duplicate = False
+                    if duplicate:
                         location = ".".join(path) or "<root>"
                         raise ValueError(
-                            f"duplicate mapping key {key_node.value!r} at {location}"
+                            f"duplicate mapping key {display_key!r} at {location}"
                         )
-                    scalar_keys.add(key)
                 segment = key_node.value if isinstance(key_node, ScalarNode) else "<key>"
                 self._index_paths(value_node, (*path, segment), visited)
         elif isinstance(node, SequenceNode):
@@ -229,7 +242,7 @@ def _construct_unique_mapping(
 ):
     seen: set[object] = set()
     for key_node, _ in node.value:
-        if key_node.tag == "tag:yaml.org,2002:merge":
+        if key_node.tag == _MERGE_TAG:
             continue
         key = loader.construct_object(key_node, deep=deep)
         try:
