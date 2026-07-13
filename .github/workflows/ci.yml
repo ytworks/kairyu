@@ -29,8 +29,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Validate Compose bind sources
+        run: uv run --no-dev python scripts/validate_compose_binds.py deploy/compose/docker-compose*.yaml
       - name: Compose smoke drill
         run: ./scripts/compose_smoke.sh
+      - name: WebUI Kairyu smoke
+        run: ./scripts/webui_smoke.sh
 
   kind-smoke:
     runs-on: ubuntu-latest

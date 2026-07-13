@@ -49,6 +49,11 @@ OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benc
 in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
+The Open WebUI Compose topology is clean-checkout runnable with a standalone
+`default` mock DeploymentSpec; CI validates its binds/rendered internal endpoint and
+smokes only Kairyu readiness, exact model discovery, and completion without pulling the
+mutable UI image.
+
 The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
 GPU, selects the configured runtime/node profile, mounts an existing host path or
 PVC read-only, and starts the real Kairyu engine from `/models/checkpoint`.
@@ -68,6 +73,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-13 — [amendment] Open WebUI Compose demo + Kairyu-only CI smoke (m11 D7)
+- What: The checked-in WebUI topology now mounts a standalone valid
+  `deploy/compose/config.yaml` serving keyless mock model `default`; all literal
+  Compose binds and mounted DeploymentSpecs are validated before startup. The new
+  `scripts/webui_smoke.sh` also pins the rendered internal WebUI endpoint, starts only
+  Kairyu, and gates bounded readiness, exact `/v1/models`, and one non-streaming
+  completion after the existing default Compose drill.
+- Why: m11 D7 previously claimed only that the container config rendered while the
+  checked-in bind target did not exist, so a clean checkout could not start the demo.
+  Keeping the smoke Kairyu-only proves the broken startup and API contract without
+  pulling or browser-testing the large mutable third-party Open WebUI image.
+- Refs: m11 D7; `deploy/compose/{docker-compose.webui.yaml,config.yaml}`;
+  `scripts/{validate_compose_binds.py,webui_smoke.sh}`; `.github/workflows/ci.yml`;
+  `tests/unit/test_compose_configs.py`.
 
 ### 2026-07-13 — [amendment] Preflight the production benchmark model
 - What: Amended m19 D3 so gate 09 checks `/v1/models` after `readyz` and before
