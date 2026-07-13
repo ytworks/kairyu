@@ -10,7 +10,12 @@ from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import UsageLedger
-from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.orchestrator import (
+    Orchestrator,
+    OrchestratorEvent,
+    OrchestratorResult,
+)
+from kairyu.orchestration.router import RuleRouter
 from kairyu.outputs import CompletionOutput
 
 TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
@@ -208,6 +213,65 @@ class StubBackend:
         return None
 
 
+class CompletionUsageBackend:
+    """Legacy-completion backend with per-prompt optional usage."""
+
+    def __init__(self, reported_usage):
+        self._reported_usage = reported_usage
+
+    async def generate(self, request):
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text=f"answer for {request.prompt}",
+                    token_ids=(),
+                    finish_reason="stop",
+                ),
+            ),
+            usage=self._reported_usage.get(request.prompt),
+        )
+
+    async def stream(self, request):
+        yield await self.generate(request)
+
+    async def shutdown(self):
+        return None
+
+
+class ReportedThenMissingOrchestrator:
+    """App-boundary stream with reported usage followed by an empty result."""
+
+    async def run_chat(self, prompt, stream=False):
+        assert stream
+
+        async def events():
+            route = RuleRouter().route(prompt)
+            yield OrchestratorEvent(kind="delta", text="partial output")
+            yield OrchestratorEvent(
+                kind="result",
+                result=OrchestratorResult(
+                    text="partial output",
+                    route=route,
+                    trace=(),
+                    prompt_tokens=17,
+                    completion_tokens=9,
+                ),
+            )
+            yield OrchestratorEvent(
+                kind="result",
+                result=OrchestratorResult(
+                    text="partial output final",
+                    route=route,
+                    trace=(),
+                ),
+            )
+
+        return events()
+
+
 class MeteringStreamBackend:
     """Cumulative two-part stream with controllable finalization behavior."""
 
@@ -233,7 +297,11 @@ class MeteringStreamBackend:
                 ),
             ),
             finished=False,
-            usage=None,
+            usage=(
+                GenerationUsage(prompt_tokens=17, completion_tokens=9)
+                if self.case == "reported-then-none"
+                else None
+            ),
         )
         if self.case == "client-close":
             try:
@@ -802,6 +870,96 @@ async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
     }
 
 
+async def test_sync_orchestrator_zero_usage_derives_wire_and_ledger(tmp_path):
+    ledger_path = tmp_path / "usage.jsonl"
+    engine = StubBackend(text="derived orchestrated answer", finish_reason="stop")
+    app = create_app(
+        engines={},
+        orchestrators={"auto": Orchestrator({"tier1": engine})},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "brief prompt"}],
+            },
+        )
+
+    assert response.status_code == 200
+    expected = resolve_usage_counts(
+        None,
+        prompt=engine.requests[0].prompt,
+        completions=(
+            CompletionOutput(
+                index=0,
+                text="derived orchestrated answer",
+                token_ids=(),
+            ),
+        ),
+    )
+    wire_usage = response.json()["usage"]
+    assert wire_usage["prompt_tokens"] == expected[0]
+    assert wire_usage["completion_tokens"] == expected[1]
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": expected[0],
+        "completion_tokens": expected[1],
+    }
+
+
+@pytest.mark.parametrize(
+    ("prompt", "reported_usage", "expected"),
+    [
+        pytest.param("single prompt", {}, (2, 4), id="single-missing"),
+        pytest.param(
+            ["first prompt", "second"],
+            {},
+            (3, 7),
+            id="array-missing",
+        ),
+        pytest.param(
+            ["derived prompt", "reported prompt"],
+            {
+                "reported prompt": GenerationUsage(
+                    prompt_tokens=17,
+                    completion_tokens=9,
+                )
+            },
+            (19, 13),
+            id="array-mixed",
+        ),
+    ],
+)
+async def test_sync_completions_derives_each_missing_usage(
+    tmp_path, prompt, reported_usage, expected
+):
+    ledger_path = tmp_path / "usage.jsonl"
+    app = create_app(
+        engines={"stub": CompletionUsageBackend(reported_usage)},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "stub", "prompt": prompt},
+        )
+
+    assert response.status_code == 200
+    wire_usage = response.json()["usage"]
+    assert wire_usage["prompt_tokens"] == expected[0]
+    assert wire_usage["completion_tokens"] == expected[1]
+    assert wire_usage["total_tokens"] == sum(expected)
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": expected[0],
+        "completion_tokens": expected[1],
+    }
+
+
 @pytest.mark.parametrize(
     "kind", ["engine-chat", "orchestrated-chat", "legacy-completions"]
 )
@@ -866,6 +1024,49 @@ async def test_every_dispatched_stream_is_metered_exactly_once(
         ]
         assert len(error_chunks) == 1
         assert "RuntimeError" in error_chunks[0]["message"]
+
+
+@pytest.mark.parametrize(
+    "kind", ["engine-chat", "orchestrated-chat", "legacy-completions"]
+)
+async def test_stream_retains_reported_usage_when_final_partial_has_none(
+    tmp_path, kind
+):
+    ledger_path = tmp_path / "usage.jsonl"
+    if kind == "orchestrated-chat":
+        app = create_app(
+            engines={},
+            orchestrators={"auto": ReportedThenMissingOrchestrator()},
+            settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+        )
+        path = "/v1/chat/completions"
+        body = {
+            "model": "auto",
+            "messages": [{"role": "user", "content": "metering prompt"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    else:
+        backend = MeteringStreamBackend("reported-then-none")
+        app, path, body = _metered_stream_app(kind, backend, ledger_path)
+
+    async with _client(app) as client:
+        response = await client.post(path, json=body)
+
+    assert response.status_code == 200
+    usage_chunks = [
+        json.loads(line[len("data: "):])["usage"]
+        for line in response.text.splitlines()
+        if line.startswith("data: {")
+        and json.loads(line[len("data: "):]).get("usage") is not None
+    ]
+    assert usage_chunks[-1]["prompt_tokens"] == 17
+    assert usage_chunks[-1]["completion_tokens"] == 9
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": 17,
+        "completion_tokens": 9,
+    }
 
 
 @pytest.mark.parametrize(

@@ -470,7 +470,11 @@ async def _stream_engine(
         if include_usage and last is not None:
             yield _usage_chunk(
                 response_id, created, model,
-                _wire_usage(generation_request.prompt, last.completions, last.usage),
+                _wire_usage(
+                    generation_request.prompt,
+                    last.completions,
+                    owner.latest_usage,
+                ),
             )
         yield "data: [DONE]\n\n"
     finally:
@@ -689,7 +693,9 @@ async def _stream_completions(
             yield _chunk(
                 [],
                 usage=_wire_usage(
-                    generation_request.prompt, last.completions, last.usage
+                    generation_request.prompt,
+                    last.completions,
+                    owner.latest_usage,
                 ),
             )
         yield "data: [DONE]\n\n"
@@ -918,10 +924,15 @@ def create_app(
             completions = (
                 CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
             )
-            # m11 A1/A3: REAL summed usage replaces the m9 usage=None fallback
-            usage = GenerationUsage(
-                prompt_tokens=result.prompt_tokens,
-                completion_tokens=result.completion_tokens,
+            # OrchestratorResult uses 0/0 when its backend did not report usage.
+            # Keep that state missing so the same wire approximation can derive it.
+            usage = (
+                GenerationUsage(
+                    prompt_tokens=result.prompt_tokens,
+                    completion_tokens=result.completion_tokens,
+                )
+                if result.prompt_tokens or result.completion_tokens
+                else None
             )
             response = completion_response(
                 request,
@@ -1060,16 +1071,23 @@ def create_app(
             )
         except Exception as error:
             return _upstream_error(error)
-        for prompt_index, result in enumerate(results):
+        for prompt_index, (prompt, result) in enumerate(
+            zip(prompts, results, strict=True)
+        ):
             for completion in result.completions:
                 choices.append(
                     _completion_choice(
                         prompt_index * request.n + completion.index, completion
                     )
                 )
+            prompt_tokens, completion_tokens = resolve_usage_counts(
+                result.usage,
+                prompt=prompt,
+                completions=result.completions,
+            )
+            usage_totals[0] += prompt_tokens
+            usage_totals[1] += completion_tokens
             if result.usage is not None:
-                usage_totals[0] += result.usage.prompt_tokens
-                usage_totals[1] += result.usage.completion_tokens
                 usage_totals[2] += result.usage.cached_tokens
         details = (
             PromptTokensDetails(cached_tokens=usage_totals[2]) if usage_totals[2] else None

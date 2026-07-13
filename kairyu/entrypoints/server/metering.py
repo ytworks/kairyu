@@ -88,12 +88,17 @@ class StreamUsageOwner:
     def mark_dispatched(self) -> None:
         self._dispatched = True
 
+    @property
+    def latest_usage(self) -> GenerationUsage | Usage | None:
+        return self._usage
+
     def observe(
         self,
         usage: GenerationUsage | Usage | None,
         completions: Sequence[CompletionOutput],
     ) -> None:
-        self._usage = usage
+        if usage is not None:
+            self._usage = usage
         for completion in completions:
             self._completions[completion.index] = completion
 
