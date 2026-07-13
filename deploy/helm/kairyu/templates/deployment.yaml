@@ -12,10 +12,30 @@ spec:
       labels:
         app: {{ include "kairyu.fullname" . }}
     spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: kairyu
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.attentionBackend }}
+          env:
+            - name: KAIRYU_ATTENTION_BACKEND
+              value: {{ . | quote }}
+          {{- end }}
           ports:
             - containerPort: 8000
           readinessProbe:
@@ -29,9 +49,25 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/kairyu
+          {{- if .Values.modelStorage.enabled }}
+            - name: model-storage
+              mountPath: {{ .Values.modelStorage.mountPath | quote }}
+              readOnly: true
+          {{- end }}
           resources:
 {{ toYaml .Values.resources | indent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "kairyu.fullname" . }}-config
+      {{- if .Values.modelStorage.enabled }}
+        - name: model-storage
+        {{- if .Values.modelStorage.pvcName }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.modelStorage.pvcName | quote }}
+        {{- else }}
+          hostPath:
+            path: {{ .Values.modelStorage.hostPath | quote }}
+            type: Directory
+        {{- end }}
+      {{- end }}
