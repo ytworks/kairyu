@@ -24,6 +24,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
 )
 from kairyu.entrypoints.chat_template import ChatTemplate, render_chat
+from kairyu.entrypoints.server.errors import invalid_request
 from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
@@ -80,11 +81,16 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
     logprobs = None
     if request.logprobs:
         logprobs = request.top_logprobs or 0  # 0 = sampled token only
+    max_tokens = (
+        request.max_tokens
+        if request.max_tokens is not None
+        else request.max_completion_tokens
+    )
     return SamplingParams(
         temperature=request.temperature,
         top_p=request.top_p,
         n=request.n,
-        max_tokens=request.max_tokens or request.max_completion_tokens,
+        max_tokens=max_tokens,
         presence_penalty=request.presence_penalty,
         frequency_penalty=request.frequency_penalty,
         stop=request.stop,
@@ -183,19 +189,6 @@ def _normalize_tool_choice(
     if name not in allowed_names:
         return None, f"named tool_choice function {name!r} is not declared in tools"
     return _NormalizedToolChoice("named", frozenset(allowed_names), named=name), None
-
-
-def _invalid_request(message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=400,
-        content={
-            "error": {
-                "message": message,
-                "type": "invalid_request_error",
-                "code": "invalid_request",
-            }
-        },
-    )
 
 
 def render_prompt(
@@ -776,17 +769,17 @@ def create_app(
         http_request.state.model = request.model  # label for the metrics middleware
         normalized_tool_choice, tool_choice_error = _normalize_tool_choice(request)
         if tool_choice_error is not None:
-            return _invalid_request(tool_choice_error)
+            return invalid_request(tool_choice_error)
         assert normalized_tool_choice is not None
         if request.stream_options is not None and not request.stream:
-            return _invalid_request("stream_options is only allowed when stream is true")
+            return invalid_request("stream_options is only allowed when stream is true")
         if request.top_logprobs is not None and not request.logprobs:
-            return _invalid_request("top_logprobs requires logprobs to be true")
+            return invalid_request("top_logprobs requires logprobs to be true")
         if request.top_logprobs is not None and not 0 <= request.top_logprobs <= 20:
-            return _invalid_request("top_logprobs must be between 0 and 20")
+            return invalid_request("top_logprobs must be between 0 and 20")
         format_error = _validate_response_format(request.response_format)
         if format_error is not None:
-            return _invalid_request(format_error)
+            return invalid_request(format_error)
         include_usage = bool(request.stream_options and request.stream_options.include_usage)
         # m11 D5: image parts need a vision engine; wire format only for now
         from kairyu.entrypoints.chat_template import flatten_content
@@ -794,7 +787,7 @@ def create_app(
         for message in request.messages:
             _, has_images = flatten_content(message.content)
             if has_images:
-                return _invalid_request(
+                return invalid_request(
                     f"model {request.model!r} does not support image inputs"
                 )
         # rendered after model resolution: templates are per served model (m9 D2)
@@ -813,7 +806,7 @@ def create_app(
                 if active
             ]
             if unsupported:
-                return _invalid_request(
+                return invalid_request(
                     f"model {request.model!r} (orchestrated) does not support: "
                     + ", ".join(unsupported)
                 )
@@ -854,12 +847,12 @@ def create_app(
         if engine is None:
             return _model_not_found(request.model)
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
-            return _invalid_request(f"model {request.model!r} does not support n > 1")
+            return invalid_request(f"model {request.model!r} does not support n > 1")
         session_id = _session_id(request, http_request)
         try:
             sampling = sampling_params_from(request)  # bad temperature/top_p/n -> 400
         except ValueError as error:
-            return _invalid_request(str(error))
+            return invalid_request(str(error))
         generation_request = GenerationRequest(
             request_id=f"http-{uuid.uuid4().hex[:12]}",
             prompt=prompt,
@@ -908,18 +901,18 @@ def create_app(
         extra = request.model_extra or {}
         for unsupported in ("echo", "suffix", "best_of"):
             if extra.get(unsupported) is not None:
-                return _invalid_request(f"{unsupported} is not supported")
+                return invalid_request(f"{unsupported} is not supported")
         if request.logprobs is not None and not 0 <= request.logprobs <= 5:
-            return _invalid_request("logprobs must be between 0 and 5")
+            return invalid_request("logprobs must be between 0 and 5")
         if request.stream_options is not None and not request.stream:
-            return _invalid_request("stream_options is only allowed when stream is true")
+            return invalid_request("stream_options is only allowed when stream is true")
         if isinstance(request.prompt, list) and request.stream:
-            return _invalid_request("streaming with a prompt array is not supported")
+            return invalid_request("streaming with a prompt array is not supported")
         engine = served_engines.get(request.model)
         if engine is None:
             return _model_not_found(request.model)
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
-            return _invalid_request(f"model {request.model!r} does not support n > 1")
+            return invalid_request(f"model {request.model!r} does not support n > 1")
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
         try:
             sampling = SamplingParams(  # invalid params are a client error, not a 502
@@ -934,7 +927,7 @@ def create_app(
                 logprobs=request.logprobs,
             )
         except ValueError as error:
-            return _invalid_request(str(error))
+            return invalid_request(str(error))
 
         def _generation_request(prompt: str) -> GenerationRequest:
             return GenerationRequest(

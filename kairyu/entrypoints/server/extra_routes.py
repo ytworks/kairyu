@@ -21,6 +21,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from kairyu.entrypoints.server.errors import invalid_request
+
 _MAX_EMBEDDING_INPUTS = 2048  # cap the embeddings batch (M6)
 
 
@@ -205,12 +207,19 @@ def add_extra_routes(
         from kairyu.engine.backend import GenerationRequest
         from kairyu.sampling_params import SamplingParams
 
+        max_tokens = (
+            request.max_output_tokens
+            if request.max_output_tokens is not None
+            else 1024
+        )
+        try:
+            sampling_params = SamplingParams(max_tokens=max_tokens)
+        except ValueError as error:
+            return invalid_request(str(error))
         generation = GenerationRequest(
             request_id=f"resp-{uuid.uuid4().hex[:12]}",
             prompt=prompt,
-            sampling_params=SamplingParams(
-                max_tokens=request.max_output_tokens or 1024
-            ),
+            sampling_params=sampling_params,
         )
         try:
             result = await engine.generate(generation)
