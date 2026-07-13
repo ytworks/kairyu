@@ -6,12 +6,28 @@ on this module, never on a concrete engine. The M2 custom engine plugs in here.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
+
+
+class Shutdownable(Protocol):
+    async def shutdown(self) -> None: ...
+
+
+async def shutdown_all(resources: Iterable[Shutdownable], label: str) -> None:
+    """Shutdown each unique resource, then aggregate ordinary failures."""
+    unique = list({id(resource): resource for resource in resources}.values())
+    results = await asyncio.gather(
+        *(resource.shutdown() for resource in unique), return_exceptions=True
+    )
+    errors = [result for result in results if isinstance(result, Exception)]
+    if errors:
+        raise ExceptionGroup(f"{label} shutdown failed", errors)
 
 
 class UpstreamClientError(Exception):
