@@ -186,8 +186,10 @@ class PoolReconciler:
         }
         current_ids = self._pool.replica_ids
         current = set(current_ids)
-        for replica_id in set(self._draining) - current:
-            self._draining.pop(replica_id)
+        tracked = set(self._applied) | set(self._draining)
+        for replica_id in tracked - current:
+            self._applied.pop(replica_id, None)
+            self._draining.pop(replica_id, None)
         for replica_id in current_ids:
             if replica_id not in desired:
                 continue

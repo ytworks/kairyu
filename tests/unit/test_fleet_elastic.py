@@ -408,6 +408,56 @@ class TestRegistryAndReconciler:
         assert pool.is_draining("replica") is False
         assert old.shutdown_calls == 0
 
+    async def test_external_disappearance_clears_tracking_before_same_id_reappears(
+        self,
+    ):
+        old = ShutdownRecordingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        old_config = registry_module.ReplicaConfig(
+            address="http://old/v1", model="llama"
+        )
+        source = MutableDiscovery({"replica": old_config})
+        factory_calls = []
+
+        def recording_factory(identity):
+            factory_calls.append(identity)
+            return ShutdownRecordingBackend("unexpected-candidate"), None
+
+        reconciler = PoolReconciler(pool, source, factory=recording_factory)
+        await reconciler.reconcile()
+        pool._entries["replica"].outstanding = 1
+        source.members.clear()
+        blocked = await reconciler.reconcile()
+        pool._entries["replica"].outstanding = 0
+
+        await pool.remove_replica("replica")
+        disappeared = await reconciler.reconcile()
+
+        assert blocked == {
+            "added": [],
+            "draining": ["replica"],
+            "removed": [],
+        }
+        assert disappeared == {"added": [], "draining": [], "removed": []}
+        assert reconciler._applied == {}
+        assert reconciler._draining == {}
+        assert old.shutdown_calls == 1
+
+        new = ShutdownRecordingBackend("new")
+        new_config = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+        pool.add_replica("replica", new)
+        source.members["replica"] = new_config
+
+        restored = await reconciler.reconcile()
+
+        assert restored == {"added": [], "draining": [], "removed": []}
+        assert factory_calls == []
+        assert pool._entries["replica"].backend is new
+        assert pool._select(_request())[0] == "replica"
+        assert new.shutdown_calls == 0
+
     async def test_reconciler_does_not_cancel_unowned_drain(self):
         old = ShutdownRecordingBackend("old")
         pool = ReplicaPool({"replica": old})
