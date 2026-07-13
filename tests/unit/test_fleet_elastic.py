@@ -214,6 +214,48 @@ class TestTracing:
             assert span is None
 
 
+async def test_kind_smoke_gates_default_and_gpu_chart_before_cluster_creation():
+    lines = [
+        line.strip()
+        for line in Path("scripts/kind_smoke.sh").read_text(encoding="utf-8").splitlines()
+    ]
+    commands = [
+        "helm lint deploy/helm/kairyu",
+        (
+            "helm lint deploy/helm/kairyu "
+            "-f deploy/helm/kairyu/values-gpu.yaml"
+        ),
+        "helm template kairyu deploy/helm/kairyu >/dev/null",
+        (
+            "helm template kairyu deploy/helm/kairyu "
+            "-f deploy/helm/kairyu/values-gpu.yaml >/dev/null"
+        ),
+    ]
+
+    assert "set -euo pipefail" in lines
+    for command in commands:
+        assert lines.count(command) == 1
+    command_positions = [lines.index(command) for command in commands]
+    gate_call = lines.index("helm_gate")
+    kind_create = lines.index('kind create cluster --name "$CLUSTER" --wait 120s')
+    assert command_positions == sorted(command_positions)
+    assert max(command_positions) < gate_call
+    assert gate_call < kind_create
+    assert 'if [[ "${1:-}" == "--helm-check" ]]; then' in lines[gate_call:kind_create]
+
+
+async def test_ci_has_explicit_single_source_helm_schema_and_gpu_template_gate():
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    helm_install = workflow.index("- uses: helm/kind-action@v1")
+    named_gate = workflow.index("- name: Helm schema and GPU template gate")
+    gate_call = workflow.index("run: bash scripts/kind_smoke.sh --helm-check")
+    kind_smoke = workflow.index("- name: kind smoke (m10a D5)")
+
+    assert helm_install < named_gate < gate_call < kind_smoke
+    assert "helm lint" not in workflow
+    assert "helm template" not in workflow
+
+
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 def test_helm_chart_renders():
     rendered = subprocess.run(

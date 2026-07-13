@@ -52,6 +52,8 @@ replicas, auth, metrics, batch) or a replica node, and the compose topology
 The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
 GPU, selects the configured runtime/node profile, mounts an existing host path or
 PVC read-only, and starts the real Kairyu engine from `/models/checkpoint`.
+CI now schema-lints and template-renders both the CPU defaults and GPU overlay
+before the kind CPU deployment/HTTP drill; it does not schedule the GPU pod.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
 deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
@@ -64,6 +66,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-13 — [amendment] GPU Helm overlay becomes a mandatory CI render gate
+- What: `scripts/kind_smoke.sh` now runs fail-fast default/GPU `helm lint` and
+  `helm template` gates before cluster creation, with a `--helm-check` mode used
+  by an explicit CI schema/GPU-template step. The script remains the single
+  command source; CI does not duplicate the four Helm invocations. Appended an
+  M19 D2/D3 amendment recording the placement/runtime/storage/real-backend gate
+  and its template-only, no-GPU execution boundary.
+- Why: The GPU overlay was statically covered but not a mandatory CI input, so
+  schema or rendering regressions could merge while the CPU kind smoke remained
+  green. Fail-fast rendering makes both chart profiles release-gating without
+  pretending ordinary CI can run a GPU workload.
+- Refs: Issue #49 Task 3; `scripts/kind_smoke.sh`, `.github/workflows/ci.yml`,
+  `tests/unit/test_fleet_elastic.py`, `docs/design/m19-deploy-packaging.md` D2/D3
+  amendment.
 
 ### 2026-07-13 — [progress] Helm GPU overlay wires real model storage and engine
 - What: Added strict chart values schema and a conditional, read-only model volume

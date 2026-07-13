@@ -40,5 +40,7 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           install_only: true
+      - name: Helm schema and GPU template gate
+        run: bash scripts/kind_smoke.sh --helm-check
       - name: kind smoke (m10a D5)
         run: bash scripts/kind_smoke.sh
