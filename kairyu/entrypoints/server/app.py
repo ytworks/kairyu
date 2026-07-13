@@ -97,12 +97,19 @@ def _parse_tool_calls(text: str) -> list[ToolCall]:
             payload = json.loads(match.group(1))
         except json.JSONDecodeError:
             continue
+        if not isinstance(payload, dict):
+            continue
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
         arguments = payload.get("arguments", {})
+        if not isinstance(arguments, (dict, str)):
+            continue
         calls.append(
             ToolCall(
                 id=f"call_{uuid.uuid4().hex[:12]}",
                 function=FunctionCall(
-                    name=payload.get("name", ""),
+                    name=name,
                     arguments=(
                         arguments if isinstance(arguments, str) else json.dumps(arguments)
                     ),

@@ -192,6 +192,90 @@ class StubBackend:
         return None
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json",
+        "[]",
+        "{}",
+        '{"arguments": {}}',
+        '{"name": 7, "arguments": {}}',
+        '{"name": "", "arguments": {}}',
+        '{"name": "get_weather", "arguments": []}',
+        '{"name": "get_weather", "arguments": 7}',
+        '{"name": "get_weather", "arguments": true}',
+    ],
+)
+async def test_malformed_generated_tool_payload_stays_content(payload):
+    text = f"before <tool_call>{payload}</tool_call> after"
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    tools = [
+        {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
+    ]
+    body = _chat_body("weather", tools=tools)
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == text
+    assert choice["message"]["tool_calls"] is None
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ('{"city": "Tokyo"}', '{"city": "Tokyo"}'),
+        ('"{\\"city\\":\\"Tokyo\\"}"', '{"city":"Tokyo"}'),
+    ],
+)
+async def test_generated_tool_arguments_are_serialized_once(arguments, expected):
+    text = (
+        '<tool_call>{"name": "get_weather", "arguments": '
+        f"{arguments}}}</tool_call>"
+    )
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    tools = [
+        {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
+    ]
+    body = _chat_body("weather", tools=tools)
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "get_weather"
+    assert call["function"]["arguments"] == expected
+
+
+async def test_generated_tool_calls_keep_order_while_skipping_only_malformed_entries():
+    text = "".join(
+        (
+            '<tool_call>{"name":"first","arguments":{}}</tool_call>',
+            '<tool_call>{"name":"broken","arguments":[]}</tool_call>',
+            '<tool_call>{"name":"second"}</tool_call>',
+        )
+    )
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    tools = [
+        {"type": "function", "function": {"name": name, "parameters": {}}}
+        for name in ("first", "broken", "second")
+    ]
+    body = _chat_body("tools", tools=tools)
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    calls = response.json()["choices"][0]["message"]["tool_calls"]
+    assert [call["function"]["name"] for call in calls] == ["first", "second"]
+    assert [call["function"]["arguments"] for call in calls] == ["{}", "{}"]
+
+
 async def test_streaming_with_n_gt_1_emits_all_choice_indexes(app):
     async with _client(app) as client:
         full = (
