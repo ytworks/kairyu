@@ -162,3 +162,56 @@ async def test_shutdown_is_clean_and_idempotent():
     assert process is not None and not process.is_alive()
     assert process.exitcode == 0  # clean exit: coverage flushed
     await backend.shutdown()  # idempotent
+
+
+async def test_duplicate_request_id_preserves_original_queue_and_can_be_reused(
+    zmq_backend,
+):
+    original = asyncio.create_task(
+        zmq_backend.generate(_request("same", "first", max_tokens=10_000))
+    )
+    for _ in range(500):
+        if "same" in zmq_backend._active_request_ids and "same" in zmq_backend._queues:
+            break
+        await asyncio.sleep(0.01)
+    assert "same" in zmq_backend._active_request_ids
+    assert "same" in zmq_backend._queues
+    original_queue = zmq_backend._queues["same"]
+
+    with pytest.raises(ValueError, match="duplicate request_id"):
+        await zmq_backend.generate(_request("same", "second", max_tokens=2))
+    duplicate_stream = zmq_backend.stream(
+        _request("same", "second stream", max_tokens=2)
+    )
+    with pytest.raises(ValueError, match="duplicate request_id"):
+        await anext(duplicate_stream)
+    assert zmq_backend._queues["same"] is original_queue
+
+    original.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await original
+    assert "same" not in zmq_backend._active_request_ids
+    assert "same" not in zmq_backend._queues
+
+    reused = await zmq_backend.generate(_request("same", "reused", max_tokens=2))
+    assert reused.finished is True
+
+
+async def test_submit_failure_clears_request_reservation_and_queue(monkeypatch):
+    class FailingSocket:
+        async def send(self, _payload):
+            raise RuntimeError("send failed")
+
+    backend = ZmqEngineBackend(num_pages=64)
+
+    async def already_started():
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_started", already_started)
+    backend._socket = FailingSocket()
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        await backend.generate(_request("send-failure", "prompt", max_tokens=2))
+
+    assert "send-failure" not in backend._active_request_ids
+    assert "send-failure" not in backend._queues
