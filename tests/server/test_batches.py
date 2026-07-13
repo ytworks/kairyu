@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import tracemalloc
 
 import httpx
 import pytest
@@ -195,6 +196,39 @@ async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeyp
     assert max_active == max_concurrency
     assert len(consumer_tasks) == max_concurrency
     assert peak_task_count <= baseline_task_count + max_concurrency + 3
+
+
+async def test_worker_peak_memory_stays_bounded_for_large_batch(
+    tmp_path, monkeypatch
+):
+    line_count = 10_000
+    peak_limit_bytes = 4 * 1024 * 1024
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=4)
+    content = "\n".join(
+        json.dumps({"custom_id": f"r{index}"}) for index in range(line_count)
+    )
+    file = store.save_file(content.encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    async def immediate_result(line):
+        return {"custom_id": line["custom_id"]}, None
+
+    monkeypatch.setattr(worker, "_run_line", immediate_result)
+    tracemalloc.start()
+    try:
+        await worker.process(job.id)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    finished = store.get_batch(job.id)
+    assert finished.status == "completed"
+    assert finished.request_counts.completed == line_count
+    # This fixed budget deliberately does not scale with the input size: the
+    # bounded pipeline should retain only its small queue and consumer pool.
+    assert peak_bytes < peak_limit_bytes
+    assert list((tmp_path / "files").glob("*.tmp")) == []
 
 
 async def test_worker_streams_input_without_bulk_read(tmp_path, monkeypatch):
