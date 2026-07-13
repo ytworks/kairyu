@@ -63,7 +63,7 @@ class TestDynamicMembership:
             await pool.generate(_request())
         assert pool.outstanding_by_id()["a"] == 0
 
-        pool.remove_replica("a")
+        await pool.remove_replica("a")
         assert pool.replica_ids == ("b", "c")
         with pytest.raises(ValueError, match="already"):
             pool.add_replica("b", MockBackend())
@@ -85,8 +85,8 @@ class TestDynamicMembership:
         task = asyncio.create_task(pool.generate(_request()))
         await asyncio.sleep(0.01)
         with pytest.raises(RuntimeError, match="in-flight"):
-            pool.remove_replica("s")
-        pool.remove_replica("s", force=True)
+            await pool.remove_replica("s")
+        await pool.remove_replica("s", force=True)
         slow.release.set()
         await task  # late completion on removed id is a no-op (A2)
 
@@ -114,7 +114,7 @@ class TestHrwRemapProperty:
         pool = ReplicaPool(backends)
         sessions = [f"s{i}" for i in range(400)]
         before = self._mapping(pool, sessions)
-        pool.remove_replica("3")
+        await pool.remove_replica("3")
         after = self._mapping(pool, sessions)
         moved = [s for s in sessions if before[s] != after[s]]
         assert all(before[s] == "3" for s in moved)  # only its own sessions
@@ -145,34 +145,34 @@ class TestRegistryAndReconciler:
         with pytest.raises(KeyError):
             registry.heartbeat("ghost")
 
-    def test_reconciler_adds_and_drain_removes(self):
+    async def test_reconciler_adds_and_drain_removes(self):
         pool = ReplicaPool({"old": MockBackend()})
         members = {"old": "http://old/v1", "new": "http://new/v1"}
         source = StaticDiscovery(members)
         reconciler = PoolReconciler(
             pool, source, factory=lambda addr: (MockBackend(), f"{addr}/health")
         )
-        result = reconciler.reconcile()
+        result = await reconciler.reconcile()
         assert result["added"] == ["new"]
         assert pool.replica_ids == ("old", "new")
 
         members.pop("old")
         source._members.pop("old")
-        result = reconciler.reconcile()
+        result = await reconciler.reconcile()
         assert result["removed"] == ["old"]
         assert pool.replica_ids == ("new",)
 
-    def test_reconciler_retries_inflight_removal(self):
+    async def test_reconciler_retries_inflight_removal(self):
         pool = ReplicaPool({"busy": MockBackend(), "idle": MockBackend()})
         pool._entries["busy"].outstanding = 1  # simulate in-flight
         source = StaticDiscovery({"idle": "http://idle/v1"})
         reconciler = PoolReconciler(pool, source, factory=lambda a: (MockBackend(), None))
-        result = reconciler.reconcile()
+        result = await reconciler.reconcile()
         assert result["removed"] == []
         assert "busy" in result["draining"]
         assert pool.is_draining("busy")
         pool._entries["busy"].outstanding = 0
-        result = reconciler.reconcile()
+        result = await reconciler.reconcile()
         assert result["removed"] == ["busy"]
 
     def test_registry_discovery_bridges(self):

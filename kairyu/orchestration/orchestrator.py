@@ -12,6 +12,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    shutdown_all,
 )
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, CostModel, RoleSpec, zero_cost
@@ -99,6 +100,9 @@ class Orchestrator:
         self._cost_model = cost_model
         # m11 A4: >0 routes multi_agent through MoA (the deep kairyu-auto-max tier)
         self._moa_samples = moa_samples
+
+    async def shutdown(self) -> None:
+        await shutdown_all(self._engines.values(), "Orchestrator")
 
     def _resolve_engine(self, tier: str, notes: list[str]) -> EngineBackend:
         engine = self._engines.get(tier)

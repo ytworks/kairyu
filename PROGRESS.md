@@ -108,6 +108,11 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   `tests/unit/test_fleet_elastic.py`. Helm-backed render/lint execution remains
   pending on a Helm-enabled host; local pure/static gates pass.
 
+### 2026-07-13 — [progress] Backend ownership closes across replica and app lifecycles
+- What: Replica removal is now an async ownership boundary that closes the removed backend exactly once. Shared shutdown aggregation attempts every unique backend, and orchestrator/application lifespan teardown cascades through separately owned workers even when another shutdown fails.
+- Why: Removed/replaced replicas and DSL-built orchestrators leaked clients and worker tasks; one shutdown exception also skipped every later resource.
+- Refs: issue #42; `kairyu/engine/backend.py`, `kairyu/orchestration/{replica,orchestrator}.py`, `kairyu/deploy/{registry,builder}.py`
+
 ### 2026-07-09 — [progress] Single-node GPU compose: dedicated gateway config + attention-backend env
 - What: `docker-compose.gpu.yaml` now mounts a new `deploy/compose/gateway-gpu.yaml`
   (single `replica` upstream, forwards `model: default`) instead of the shared

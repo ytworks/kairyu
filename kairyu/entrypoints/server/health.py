@@ -26,8 +26,7 @@ def add_health_routes(
         # keys set, behavior is unchanged (auth-gated when api keys exist).
         if not admin_key_set:
             return None
-        caller = request.scope.get("state", {}).get("api_key")
-        if caller in admin_key_set:
+        if request.scope.get("state", {}).get("is_admin"):
             return None
         return JSONResponse(
             status_code=403,
