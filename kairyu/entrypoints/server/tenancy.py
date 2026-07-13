@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +32,41 @@ class TenantConfig:
     key_tenants: dict[str, str] = field(default_factory=dict)
     limits: dict[str, TenantLimits] = field(default_factory=dict)
     default_tenant: str = "default"
+
+    @classmethod
+    def from_mapping(
+        cls,
+        *,
+        key_tenants: Mapping[str, str],
+        resolved_api_keys: Collection[str],
+        limits: Mapping[str, TenantLimits] | None = None,
+        default_tenant: str = "default",
+    ) -> TenantConfig:
+        """Validate deployment mappings against already-resolved API keys."""
+        copied_key_tenants = dict(key_tenants)
+        copied_limits = dict(limits or {})
+        resolved_keys = frozenset(resolved_api_keys)
+
+        if not default_tenant.strip():
+            raise ValueError("default tenant must not be empty")
+        for api_key, tenant in copied_key_tenants.items():
+            if not api_key.strip():
+                raise ValueError("tenant mapping key must not be empty")
+            if not tenant.strip():
+                raise ValueError("tenant name must not be empty")
+            if api_key not in resolved_keys:
+                raise ValueError(f"tenant mapping references unknown API key {api_key!r}")
+
+        known_tenants = {*copied_key_tenants.values(), default_tenant}
+        for tenant in copied_limits:
+            if tenant not in known_tenants:
+                raise ValueError(f"limits reference unknown tenant {tenant!r}")
+
+        return cls(
+            key_tenants=copied_key_tenants,
+            limits=copied_limits,
+            default_tenant=default_tenant,
+        )
 
     def tenant_for_key(self, api_key: str | None) -> str:
         if api_key is None:
