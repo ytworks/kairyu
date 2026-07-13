@@ -263,6 +263,7 @@ async def test_coherent_tool_choice_is_accepted(tools, tool_choice):
         ([{"type": "function", "function": {"name": 7}}], "auto"),
         ([{"type": "other", "function": {"name": "get_weather"}}], "auto"),
         ([{"type": "function", "function": "get_weather"}], "auto"),
+        ([_WEATHER_TOOL, _WEATHER_TOOL], "required"),
     ],
 )
 async def test_invalid_tool_choice_returns_400_before_backend_dispatch(
@@ -316,8 +317,14 @@ def _tool_response_contract(response, stream: bool):
 
 
 @pytest.mark.parametrize("stream", [False, True])
-async def test_tool_choice_none_suppresses_calls_and_keeps_content(stream):
-    engine = StubBackend(text=TOOL_CALL_TEXT, finish_reason="stop")
+@pytest.mark.parametrize(
+    ("upstream_finish_reason", "expected_finish_reason"),
+    [("stop", "stop"), ("tool_calls", "stop"), ("length", "length")],
+)
+async def test_tool_choice_none_suppresses_calls_and_keeps_content(
+    stream, upstream_finish_reason, expected_finish_reason
+):
+    engine = StubBackend(text=TOOL_CALL_TEXT, finish_reason=upstream_finish_reason)
     app = create_app(engines={"stub": engine})
     body = _chat_body(
         "weather", tools=[_WEATHER_TOOL], tool_choice="none", stream=stream
@@ -328,7 +335,11 @@ async def test_tool_choice_none_suppresses_calls_and_keeps_content(stream):
         response = await client.post("/v1/chat/completions", json=body)
 
     assert response.status_code == 200
-    assert _tool_response_contract(response, stream) == (TOOL_CALL_TEXT, [], "stop")
+    assert _tool_response_contract(response, stream) == (
+        TOOL_CALL_TEXT,
+        [],
+        expected_finish_reason,
+    )
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -361,7 +372,7 @@ async def test_auto_and_omitted_emit_only_declared_calls(stream, tool_choice):
 @pytest.mark.parametrize("stream", [False, True])
 async def test_auto_suppresses_undeclared_model_function_names(stream):
     text = '<tool_call>{"name":"undeclared","arguments":{}}</tool_call>'
-    engine = StubBackend(text=text, finish_reason="stop")
+    engine = StubBackend(text=text, finish_reason="tool_calls")
     app = create_app(engines={"stub": engine})
     body = _chat_body("weather", tools=[_WEATHER_TOOL], stream=stream)
     body["model"] = "stub"

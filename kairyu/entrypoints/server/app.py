@@ -159,6 +159,8 @@ def _normalize_tool_choice(
         name = function.get("name")
         if not isinstance(name, str) or not name.strip():
             return None, f"tools[{index}].function.name must be a non-empty string"
+        if name in allowed_names:
+            return None, f"tools[{index}].function.name {name!r} is duplicated"
         allowed_names.add(name)
 
     choice = request.tool_choice
@@ -300,7 +302,7 @@ def _build_choice(
     return Choice(
         index=index,
         message=ResponseMessage(content=text),
-        finish_reason=finish_reason or "stop",
+        finish_reason="stop" if finish_reason == "tool_calls" else finish_reason or "stop",
         logprobs=logprobs,
     )
 
