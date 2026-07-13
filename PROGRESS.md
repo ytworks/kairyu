@@ -62,6 +62,24 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-09 — [progress] Single-node GPU compose: dedicated gateway config + attention-backend env
+- What: `docker-compose.gpu.yaml` now mounts a new `deploy/compose/gateway-gpu.yaml`
+  (single `replica` upstream, forwards `model: default`) instead of the shared
+  `gateway.yaml`, and passes `KAIRYU_ATTENTION_BACKEND` through to the replica
+  (empty → auto-select; set `torch` to bypass FlashInfer). `gateway.yaml` is left
+  in its CPU-smoke form (three `replica-1/2/3` upstreams, `model: llama`).
+- Why: `gateway.yaml` was mounted by BOTH `docker-compose.yaml` (CPU smoke: three
+  `replica-N` services serving engine id `llama`) and `docker-compose.gpu.yaml`
+  (single `replica` service serving engine id `default`). The two topologies have
+  different service names and engine ids, so one file cannot serve both — pointing
+  it at the single GPU replica breaks the CPU compose and the CI `compose_smoke.sh`
+  drill. Splitting into `gateway-gpu.yaml` lets each topology stand alone. The
+  attention env exists because FlashInfer has no Blackwell/sm_120 kernels yet, so a
+  Blackwell/RTX PRO 6000 replica can pin `torch` (selector: `KAIRYU_ATTENTION_BACKEND`,
+  honored on the single-process `model_path` engine path).
+- Refs: `deploy/compose/{gateway-gpu.yaml,docker-compose.gpu.yaml,gateway.yaml}`,
+  `kairyu/engine/core/attention/selector.py`, `scripts/compose_smoke.sh` (m19 D2).
+
 ### 2026-07-09 — [progress] GPU image base bumped to CUDA 12.8.1 / Ubuntu 24.04
 - What: `Dockerfile.cuda` base image `nvidia/cuda:12.4.1-runtime-ubuntu22.04`
   → `nvidia/cuda:12.8.1-runtime-ubuntu24.04`. Ubuntu 24.04 ships `python3.12`
