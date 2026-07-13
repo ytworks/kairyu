@@ -28,8 +28,11 @@ otherwise removes ownership and awaits shared `shutdown_all` exactly once),
 manual owner), `acquire_drain(replica_id) -> DrainLease` /
 `release_drain(replica_id, lease)` (opaque independent owners),
 `is_manually_draining(replica_id)` (manual owner only),
-`entry_generation(replica_id)` (opaque identity for one entry lifetime), and
-`probe(replica_id)`. A replica is draining while the manual owner or any lease
+`entry_generation(replica_id)` (opaque identity for one entry lifetime),
+`require_probe(replica_id)`, and `probe(replica_id)`. A remote entry with a
+declared health URL starts unvalidated; only a successful readiness probe makes
+it healthy and eligible. Entries without a readiness URL remain locally trusted.
+A replica is draining while the manual owner or any lease
 is active. Removing and re-adding the same ID creates a new entry generation.
 Releasing one owner does not alter other owners, health, or outstanding state.
 HRW hashing keys on `replica_id` STRINGS (not indices)
@@ -67,7 +70,8 @@ or a retry factory fails, it releases only that lease. Manual/admin drains remai
 active whether acquired before or after the reconciler lease, and manual undrain
 cannot release a reconciler lease. Successful same-ID replacement transfers only
 the manual owner to the new backend entry; the reconciler lease is not transferred,
-and the new entry starts with default health and outstanding state. Lease tracking
+and a new remote entry starts unvalidated with fresh failure and outstanding
+state. Lease tracking
 is cleared when a replica disappears or a new backend is successfully installed.
 If an external caller removes and re-adds the same ID between ticks, the changed
 generation invalidates every applied identity and lease owned for the old entry.
@@ -202,3 +206,11 @@ over (α, β) (pure function over the dataset; no online learning).
   absence acquires a fresh lease, while desired presence baselines the fresh entry
   without replacing it. This never clears a fresh entry's manual owner. Releasing
   any owner never changes health or outstanding state.
+- **A15**: readiness validation is generation-scoped. A declared remote health
+  URL makes a new entry unknown and ineligible until `probe()` succeeds; no URL
+  retains locally trusted compatibility. The serve-layer prober performs its
+  first tick immediately, snapshots unknown/ejected entries by ID, entry
+  generation, and URL, probes them with bounded concurrency, isolates per-entry
+  failures, and applies a 200 response only to the same generation. `/readyz`
+  and placement use the same validated-and-not-ejected predicate, while
+  `probe()` resets failures without clearing any drain owner.
