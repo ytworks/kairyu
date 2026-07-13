@@ -6,6 +6,7 @@ import pytest
 import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_config, build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
+from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantLimits, UsageLedger
 
 POOLED_YAML = """
@@ -185,19 +186,45 @@ tenants:
 """
     )
     settings_calls = 0
+    api_key_resolutions = 0
+    admin_key_resolutions = 0
     real_server_settings = builder_module._server_settings
+    real_resolve_api_keys = ServerSettings.resolve_api_keys
+    real_resolve_admin_keys = ServerSettings.resolve_admin_keys
 
     def recording_server_settings(deployment_spec):
         nonlocal settings_calls
         settings_calls += 1
         return real_server_settings(deployment_spec)
 
+    def recording_resolve_api_keys(settings):
+        nonlocal api_key_resolutions
+        api_key_resolutions += 1
+        return real_resolve_api_keys(settings)
+
+    def recording_resolve_admin_keys(settings):
+        nonlocal admin_key_resolutions
+        admin_key_resolutions += 1
+        return real_resolve_admin_keys(settings)
+
     monkeypatch.setattr(builder_module, "_server_settings", recording_server_settings)
+    monkeypatch.setattr(
+        ServerSettings,
+        "resolve_api_keys",
+        recording_resolve_api_keys,
+    )
+    monkeypatch.setattr(
+        ServerSettings,
+        "resolve_admin_keys",
+        recording_resolve_admin_keys,
+    )
 
     app = build_app_from_spec(spec)
 
     config = app.state.tenant_limiter._config
     assert settings_calls == 1
+    assert api_key_resolutions == 1
+    assert admin_key_resolutions == 1
     assert config.tenant_for_key("key-a") == "tenant-a"
     assert config.tenant_for_key("key-b") == "tenant-b"
     assert config.tenant_for_key("unmapped-key") == "fallback"
@@ -209,6 +236,163 @@ tenants:
         requests_per_minute=3,
         tokens_per_minute=2000,
     )
+
+
+async def test_tenant_auth_uses_the_preflight_key_snapshots(monkeypatch):
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a,key-b")
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_ADMIN_KEYS", "admin-a,admin-b")
+    spec = load_deployment_spec(
+        """
+server:
+  api_keys_env: KAIRYU_DEPLOYMENT_KEYS
+  admin_keys_env: KAIRYU_DEPLOYMENT_ADMIN_KEYS
+engines:
+  m: { backend: mock }
+tenants:
+  key_tenants:
+    key-a: tenant-a
+    key-b: tenant-b
+"""
+    )
+    api_snapshots = iter(
+        (
+            frozenset({"key-a", "key-b"}),
+            frozenset({"key-a", "key-c"}),
+        )
+    )
+    admin_snapshots = iter(
+        (
+            frozenset({"admin-a", "admin-b"}),
+            frozenset({"admin-a", "admin-c"}),
+        )
+    )
+    api_key_resolutions = 0
+    admin_key_resolutions = 0
+
+    def resolve_api_keys(_settings):
+        nonlocal api_key_resolutions
+        api_key_resolutions += 1
+        return next(api_snapshots)
+
+    def resolve_admin_keys(_settings):
+        nonlocal admin_key_resolutions
+        admin_key_resolutions += 1
+        return next(admin_snapshots)
+
+    monkeypatch.setattr(ServerSettings, "resolve_api_keys", resolve_api_keys)
+    monkeypatch.setattr(ServerSettings, "resolve_admin_keys", resolve_admin_keys)
+
+    app = build_app_from_spec(spec)
+    payload = _chat_body("hi", model="m")
+    async with _client(app) as client:
+        mapped_data = await client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers={"Authorization": "Bearer key-b"},
+        )
+        late_data = await client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers={"Authorization": "Bearer key-c"},
+        )
+        mapped_admin = await client.post(
+            "/admin/undrain",
+            headers={"Authorization": "Bearer admin-b"},
+        )
+        late_admin = await client.post(
+            "/admin/undrain",
+            headers={"Authorization": "Bearer admin-c"},
+        )
+
+    assert mapped_data.status_code == 200
+    assert late_data.status_code == 401
+    assert mapped_admin.status_code == 200
+    assert late_admin.status_code == 401
+    assert api_key_resolutions == 1
+    assert admin_key_resolutions == 1
+
+
+@pytest.mark.parametrize("late_failure", ["data", "admin"])
+def test_builder_does_not_attempt_late_key_resolution(monkeypatch, late_failure):
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a")
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_ADMIN_KEYS", "admin-a")
+    spec = load_deployment_spec(
+        """
+server:
+  api_keys_env: KAIRYU_DEPLOYMENT_KEYS
+  admin_keys_env: KAIRYU_DEPLOYMENT_ADMIN_KEYS
+engines:
+  m: { backend: mock }
+tenants:
+  key_tenants:
+    key-a: tenant-a
+"""
+    )
+    resolution_counts = {"data": 0, "admin": 0}
+
+    def resolve_api_keys(_settings):
+        resolution_counts["data"] += 1
+        if late_failure == "data" and resolution_counts["data"] > 1:
+            raise ValueError("synthetic late data-key resolution failure")
+        return frozenset({"key-a"})
+
+    def resolve_admin_keys(_settings):
+        resolution_counts["admin"] += 1
+        if late_failure == "admin" and resolution_counts["admin"] > 1:
+            raise ValueError("synthetic late admin-key resolution failure")
+        return frozenset({"admin-a"})
+
+    monkeypatch.setattr(ServerSettings, "resolve_api_keys", resolve_api_keys)
+    monkeypatch.setattr(ServerSettings, "resolve_admin_keys", resolve_admin_keys)
+
+    app = build_app_from_spec(spec)
+
+    assert app.state.tenant_limiter is not None
+    assert resolution_counts == {"data": 1, "admin": 1}
+
+
+@pytest.mark.parametrize("failing_key_set", ["data", "admin"])
+def test_builder_key_resolution_failure_precedes_owned_backends(
+    monkeypatch,
+    failing_key_set,
+):
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a")
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_ADMIN_KEYS", "admin-a")
+    spec = load_deployment_spec(
+        """
+server:
+  api_keys_env: KAIRYU_DEPLOYMENT_KEYS
+  admin_keys_env: KAIRYU_DEPLOYMENT_ADMIN_KEYS
+engines:
+  m: { backend: mock }
+"""
+    )
+    created_backends = []
+    real_create_backend = builder_module.create_backend
+
+    def resolve_api_keys(_settings):
+        if failing_key_set == "data":
+            raise ValueError("synthetic data-key resolution failure")
+        return frozenset({"key-a"})
+
+    def resolve_admin_keys(_settings):
+        if failing_key_set == "admin":
+            raise ValueError("synthetic admin-key resolution failure")
+        return frozenset({"admin-a"})
+
+    def recording_create_backend(name, **options):
+        backend = real_create_backend(name, **options)
+        created_backends.append(backend)
+        return backend
+
+    monkeypatch.setattr(ServerSettings, "resolve_api_keys", resolve_api_keys)
+    monkeypatch.setattr(ServerSettings, "resolve_admin_keys", resolve_admin_keys)
+    monkeypatch.setattr(builder_module, "create_backend", recording_create_backend)
+
+    with pytest.raises(ValueError, match=f"synthetic {failing_key_set}-key"):
+        build_app_from_spec(spec)
+
+    assert created_backends == []
 
 
 async def test_deployment_tenants_isolate_rate_limits_and_usage_ledger(
@@ -307,7 +491,32 @@ tenants:
     assert created_backends == []
 
 
-def test_builder_without_tenant_section_preserves_legacy_app_state():
-    app = build_app_from_spec(load_deployment_spec(POOLED_YAML))
+def test_builder_without_tenant_section_preserves_legacy_app_state(monkeypatch):
+    spec = load_deployment_spec(POOLED_YAML)
+    resolution_counts = {"data": 0, "admin": 0}
+    real_resolve_api_keys = ServerSettings.resolve_api_keys
+    real_resolve_admin_keys = ServerSettings.resolve_admin_keys
+
+    def recording_resolve_api_keys(settings):
+        resolution_counts["data"] += 1
+        return real_resolve_api_keys(settings)
+
+    def recording_resolve_admin_keys(settings):
+        resolution_counts["admin"] += 1
+        return real_resolve_admin_keys(settings)
+
+    monkeypatch.setattr(
+        ServerSettings,
+        "resolve_api_keys",
+        recording_resolve_api_keys,
+    )
+    monkeypatch.setattr(
+        ServerSettings,
+        "resolve_admin_keys",
+        recording_resolve_admin_keys,
+    )
+
+    app = build_app_from_spec(spec)
 
     assert not hasattr(app.state, "tenant_limiter")
+    assert resolution_counts == {"data": 1, "admin": 1}

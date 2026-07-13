@@ -32,11 +32,18 @@ def _server_settings(spec: DeploymentSpec) -> ServerSettings:
 
 def _preflight_server(
     spec: DeploymentSpec,
-) -> tuple[ServerSettings, TenantConfig | None]:
+) -> tuple[
+    ServerSettings,
+    TenantConfig | None,
+    frozenset[str],
+    frozenset[str],
+]:
     settings = _server_settings(spec)
+    api_keys = settings.resolve_api_keys()
+    admin_keys = settings.resolve_admin_keys()
     section = spec.tenants
     if section is None:
-        return settings, None
+        return settings, None, api_keys, admin_keys
     tenant_config = TenantConfig.from_mapping(
         key_tenants=section.key_tenants,
         limits={
@@ -47,14 +54,14 @@ def _preflight_server(
             for tenant, limits in section.limits.items()
         },
         default_tenant=section.default_tenant,
-        resolved_api_keys=settings.resolve_api_keys(),
+        resolved_api_keys=api_keys,
     )
-    return settings, tenant_config
+    return settings, tenant_config, api_keys, admin_keys
 
 
 def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> FastAPI:
     """Construct engines, pools, orchestrator, and the app with a prober lifespan."""
-    server_settings, tenant_config = _preflight_server(spec)
+    server_settings, tenant_config, api_keys, admin_keys = _preflight_server(spec)
     engines: dict[str, EngineBackend] = {
         name: create_backend(entry.backend, **entry.options)
         for name, entry in spec.engines.items()
@@ -131,6 +138,8 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         lifespan=lifespan,
         chat_templates=chat_templates,
         tenant_config=tenant_config,
+        resolved_api_keys=api_keys,
+        resolved_admin_keys=admin_keys,
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)

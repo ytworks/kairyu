@@ -561,6 +561,8 @@ def create_app(
     orchestrators: Mapping[str, Orchestrator] | None = None,
     tenant_config=None,
     embedding_backend=None,
+    resolved_api_keys: frozenset[str] | None = None,
+    resolved_admin_keys: frozenset[str] | None = None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
     app = FastAPI(title="kairyu", version="0.1.0", lifespan=lifespan)
@@ -579,8 +581,16 @@ def create_app(
         for name, engine in served_engines.items():
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
-    api_keys = settings.resolve_api_keys()
-    admin_keys = settings.resolve_admin_keys()
+    api_keys = (
+        settings.resolve_api_keys()
+        if resolved_api_keys is None
+        else resolved_api_keys
+    )
+    admin_keys = (
+        settings.resolve_admin_keys()
+        if resolved_admin_keys is None
+        else resolved_admin_keys
+    )
     add_health_routes(app, served_engines, metrics, admin_keys=admin_keys)
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 
