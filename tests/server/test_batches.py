@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
@@ -240,6 +241,194 @@ async def test_streaming_parse_error_fails_after_admitted_lines(tmp_path):
     assert failed.request_counts.total == 1
     assert failed.output_file_id is None
     assert failed.error_file_id is None
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+def _stored_file_names(tmp_path):
+    return {path.name for path in (tmp_path / "files").iterdir()}
+
+
+async def test_output_append_failure_persists_failed_and_cleans_spool(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    files_before = _stored_file_names(tmp_path)
+    create_writer = store.create_jsonl_writer
+
+    def create_failing_writer(filename, purpose, owner="default"):
+        writer = create_writer(filename, purpose, owner)
+        if filename.endswith("_output.jsonl"):
+            append = writer.append
+
+            def fail_after_append(payload):
+                append(payload)
+                raise OSError("secret output path must not escape")
+
+            monkeypatch.setattr(writer, "append", fail_after_append)
+        return writer
+
+    monkeypatch.setattr(store, "create_jsonl_writer", create_failing_writer)
+
+    await worker.process(job.id)
+
+    failed = store.get_batch(job.id)
+    assert failed.status == "failed"
+    assert failed.failed_at is not None
+    assert failed.errors == {
+        "message": "batch processing failed (OSError); resubmit"
+    }
+    assert failed.request_counts.model_dump() == {
+        "total": 1,
+        "completed": 0,
+        "failed": 0,
+    }
+    assert failed.output_file_id is None
+    assert failed.error_file_id is None
+    assert _stored_file_names(tmp_path) == files_before
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+async def test_second_writer_commit_failure_rolls_back_first_publication(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    content = "\n".join(
+        [_batch_line("ok", "hello"), _batch_line("bad", "hello", model="missing")]
+    )
+    file = store.save_file(content.encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    files_before = _stored_file_names(tmp_path)
+    create_writer = store.create_jsonl_writer
+
+    def create_failing_writer(filename, purpose, owner="default"):
+        writer = create_writer(filename, purpose, owner)
+        if filename.endswith("_errors.jsonl"):
+
+            def fail_commit():
+                raise OSError("secret finalize path must not escape")
+
+            monkeypatch.setattr(writer, "commit", fail_commit)
+        return writer
+
+    monkeypatch.setattr(store, "create_jsonl_writer", create_failing_writer)
+
+    await worker.process(job.id)
+
+    failed = store.get_batch(job.id)
+    assert failed.status == "failed"
+    assert failed.failed_at is not None
+    assert failed.errors == {
+        "message": "batch processing failed (OSError); resubmit"
+    }
+    assert failed.request_counts.model_dump() == {
+        "total": 2,
+        "completed": 1,
+        "failed": 1,
+    }
+    assert failed.output_file_id is None
+    assert failed.error_file_id is None
+    assert _stored_file_names(tmp_path) == files_before
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+async def test_unexpected_line_failure_is_terminal_and_next_job_still_runs(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    first_file = store.save_file(
+        _batch_line("broken", "hello").encode(), "first.jsonl", "batch"
+    )
+    first = store.create_batch(first_file.id, "/v1/chat/completions")
+    run_line = worker._run_line
+
+    async def fail_line(line):
+        raise RuntimeError("secret backend detail must not escape")
+
+    monkeypatch.setattr(worker, "_run_line", fail_line)
+
+    await worker.process(first.id)
+
+    failed = store.get_batch(first.id)
+    assert failed.status == "failed"
+    assert failed.failed_at is not None
+    assert failed.errors == {
+        "message": "batch processing failed (RuntimeError); resubmit"
+    }
+    assert failed.request_counts.model_dump() == {
+        "total": 1,
+        "completed": 0,
+        "failed": 0,
+    }
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+    monkeypatch.setattr(worker, "_run_line", run_line)
+    second_file = store.save_file(
+        _batch_line("healthy", "hello").encode(), "second.jsonl", "batch"
+    )
+    second = store.create_batch(second_file.id, "/v1/chat/completions")
+    await worker.process(second.id)
+    assert store.get_batch(second.id).status == "completed"
+
+
+async def test_explicit_cancellation_wins_over_concurrent_processing_failure(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fail_after_cancel(line):
+        started.set()
+        await release.wait()
+        raise RuntimeError("processing lost the cancellation race")
+
+    monkeypatch.setattr(worker, "_run_line", fail_after_cancel)
+    task = asyncio.create_task(worker.process(job.id))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    cancelled = store.get_batch(job.id)
+    cancelled.status = "cancelled"
+    store.update_batch(cancelled)
+    release.set()
+    await task
+
+    cancelled = store.get_batch(job.id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.cancelled_at is not None
+    assert cancelled.failed_at is None
+    assert cancelled.errors is None
+    assert cancelled.output_file_id is None
+    assert cancelled.error_file_id is None
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+async def test_task_cancellation_propagates_after_spool_cleanup(tmp_path, monkeypatch):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    started = asyncio.Event()
+
+    async def block_line(line):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker, "_run_line", block_line)
+    task = asyncio.create_task(worker.process(job.id))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert store.get_batch(job.id).status == "in_progress"
     assert list((tmp_path / "files").glob("*.tmp")) == []
 
 

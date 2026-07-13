@@ -204,6 +204,23 @@ def test_jsonl_writer_commit_publishes_exact_owner_scoped_file(tmp_path):
     assert list((tmp_path / "files").glob("*.tmp")) == []
 
 
+def test_jsonl_writer_rollback_hides_an_already_committed_file(tmp_path):
+    store = BatchStore(tmp_path)
+    writer = store.create_jsonl_writer(
+        filename="output.jsonl", purpose="batch_output", owner="tenant-a"
+    )
+    writer.append({"custom_id": "a", "ok": True})
+    file = writer.commit()
+
+    writer.rollback()
+    writer.rollback()
+
+    assert writer.state == "aborted"
+    with pytest.raises(KeyError):
+        store.get_file(file.id, owner="tenant-a")
+    assert list((tmp_path / "files").iterdir()) == []
+
+
 def test_jsonl_writer_abort_removes_temporary_data_and_metadata(tmp_path):
     store = BatchStore(tmp_path)
     writer = store.create_jsonl_writer(

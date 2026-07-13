@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Mapping
 
-from kairyu.batch.store import BatchJob, BatchStore
+from kairyu.batch.store import BatchJob, BatchStore, JsonlFileWriter
 from kairyu.engine.backend import EngineBackend, GenerationRequest
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import (
@@ -109,6 +109,21 @@ class BatchWorker:
                 },
             )
 
+    @staticmethod
+    def _failure_class(error: BaseException) -> str:
+        if isinstance(error, BaseExceptionGroup) and error.exceptions:
+            return BatchWorker._failure_class(error.exceptions[0])
+        return type(error).__name__
+
+    @staticmethod
+    def _rollback_writer(writer: JsonlFileWriter | None) -> None:
+        if writer is None:
+            return
+        try:
+            writer.rollback()
+        except Exception:
+            logger.exception("failed to roll back batch spool")
+
     async def process(self, batch_id: str) -> None:
         job = self._store.get_batch(batch_id)
         if job.status == "cancelled":
@@ -116,69 +131,71 @@ class BatchWorker:
         job.status = "in_progress"
         job.in_progress_at = int(time.time())
         self._store.update_batch(job)
-        input_queue: asyncio.Queue[object] = asyncio.Queue(
-            maxsize=max(1, self._max_concurrency * _INPUT_QUEUE_FACTOR)
-        )
-        input_error: Exception | None = None
-        output_writer = self._store.create_jsonl_writer(
-            filename=f"{batch_id}_output.jsonl",
-            purpose="batch_output",
-            owner=job.owner,
-        )
-        error_writer = self._store.create_jsonl_writer(
-            filename=f"{batch_id}_errors.jsonl",
-            purpose="batch_output",
-            owner=job.owner,
-        )
+        output_writer: JsonlFileWriter | None = None
+        error_writer: JsonlFileWriter | None = None
+        try:
+            input_queue: asyncio.Queue[object] = asyncio.Queue(
+                maxsize=max(1, self._max_concurrency * _INPUT_QUEUE_FACTOR)
+            )
+            input_error: Exception | None = None
+            output_writer = self._store.create_jsonl_writer(
+                filename=f"{batch_id}_output.jsonl",
+                purpose="batch_output",
+                owner=job.owner,
+            )
+            error_writer = self._store.create_jsonl_writer(
+                filename=f"{batch_id}_errors.jsonl",
+                purpose="batch_output",
+                owner=job.owner,
+            )
 
-        async def produce() -> None:
-            nonlocal input_error
-            try:
-                input_lines = self._store.iter_file_lines(
-                    job.input_file_id, owner=job.owner
-                )
-            except KeyError as error:
-                input_error = error
-            else:
+            async def produce() -> None:
+                nonlocal input_error
                 try:
-                    for raw_line in input_lines:
-                        if self._cancelled(batch_id):
-                            break
-                        if not raw_line.strip():
+                    input_lines = self._store.iter_file_lines(
+                        job.input_file_id, owner=job.owner
+                    )
+                except KeyError as error:
+                    input_error = error
+                else:
+                    try:
+                        for raw_line in input_lines:
+                            if self._cancelled(batch_id):
+                                break
+                            if not raw_line.strip():
+                                continue
+                            try:
+                                line = json.loads(raw_line.decode("utf-8"))
+                            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                                input_error = error
+                                break
+                            job.request_counts.total += 1
+                            await input_queue.put(line)
+                    finally:
+                        close = getattr(input_lines, "close", None)
+                        if close is not None:
+                            close()
+                for _ in range(self._max_concurrency):
+                    await input_queue.put(_INPUT_SENTINEL)
+
+            async def consume() -> None:
+                while True:
+                    line = await input_queue.get()
+                    try:
+                        if line is _INPUT_SENTINEL:
+                            return
+                        if input_error is not None or self._cancelled(batch_id):
                             continue
-                        try:
-                            line = json.loads(raw_line.decode("utf-8"))
-                        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                            input_error = error
-                            break
-                        job.request_counts.total += 1
-                        await input_queue.put(line)
-                finally:
-                    close = getattr(input_lines, "close", None)
-                    if close is not None:
-                        close()
-            for _ in range(self._max_concurrency):
-                await input_queue.put(_INPUT_SENTINEL)
+                        output, error = await self._run_line(line)
+                        if output is not None:
+                            output_writer.append(output)
+                            job.request_counts.completed += 1
+                        if error is not None:
+                            error_writer.append(error)
+                            job.request_counts.failed += 1
+                    finally:
+                        input_queue.task_done()
 
-        async def consume() -> None:
-            while True:
-                line = await input_queue.get()
-                try:
-                    if line is _INPUT_SENTINEL:
-                        return
-                    if input_error is not None or self._cancelled(batch_id):
-                        continue
-                    output, error = await self._run_line(line)
-                    if output is not None:
-                        output_writer.append(output)
-                        job.request_counts.completed += 1
-                    if error is not None:
-                        error_writer.append(error)
-                        job.request_counts.failed += 1
-                finally:
-                    input_queue.task_done()
-
-        with output_writer, error_writer:
             async with asyncio.TaskGroup() as task_group:
                 task_group.create_task(produce())
                 for _ in range(self._max_concurrency):
@@ -187,16 +204,16 @@ class BatchWorker:
             current = self._store.get_batch(batch_id)  # cancellation may have landed
             current.request_counts = job.request_counts.model_copy()
             if current.status == "cancelled":
-                output_writer.abort()
-                error_writer.abort()
+                self._rollback_writer(output_writer)
+                self._rollback_writer(error_writer)
                 current.cancelled_at = current.cancelled_at or int(time.time())
                 self._store.update_batch(current)
                 if self._metrics is not None:
                     self._metrics.batch_jobs_total.labels(state="cancelled").inc()
                 return
             if input_error is not None:
-                output_writer.abort()
-                error_writer.abort()
+                self._rollback_writer(output_writer)
+                self._rollback_writer(error_writer)
                 current.errors = {"message": f"invalid input file: {input_error}"}
                 self._finish(current, "failed")
                 return
@@ -210,3 +227,26 @@ class BatchWorker:
             else:
                 error_writer.abort()
             self._finish(current, "completed")
+        except asyncio.CancelledError:
+            self._rollback_writer(output_writer)
+            self._rollback_writer(error_writer)
+            raise
+        except Exception as error:
+            self._rollback_writer(output_writer)
+            self._rollback_writer(error_writer)
+            current = self._store.get_batch(batch_id)
+            current.request_counts = job.request_counts.model_copy()
+            current.output_file_id = None
+            current.error_file_id = None
+            if current.status == "cancelled":
+                current.cancelled_at = current.cancelled_at or int(time.time())
+                self._store.update_batch(current)
+                if self._metrics is not None:
+                    self._metrics.batch_jobs_total.labels(state="cancelled").inc()
+                return
+            current.errors = {
+                "message": (
+                    f"batch processing failed ({self._failure_class(error)}); resubmit"
+                )
+            }
+            self._finish(current, "failed")

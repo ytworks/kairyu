@@ -50,8 +50,9 @@ in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of r
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
 `BatchStore` exposes owner-scoped lazy binary-line iteration and transactional lazy
-JSONL writers; the batch worker still uses the legacy whole-file path until Issue #44
-Task 2 switches it to the bounded producer/consumer pipeline.
+JSONL writers; the batch worker streams input through a bounded queue and fixed consumer
+pool, spools results incrementally, and persists controlled terminal failure while rolling
+back partial result publications after ordinary processing or storage exceptions.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
 deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
@@ -64,6 +65,18 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-13 — [amendment] Batch execution is bounded and failure-terminal (m7 D7)
+- What: batch execution now uses one streaming producer, a bounded input queue, and a
+  fixed consumer pool instead of whole-file materialization and one task per line.
+  Output/error rows spool incrementally; unexpected line, append, or finalization
+  failures roll back every partial file and persist a controlled `failed` state, while
+  explicit cancellation wins and task cancellation still propagates.
+- Why: Issue #44 demonstrated that valid large uploads could multiply into unbounded
+  memory/tasks and that post-admission storage errors could leave jobs `in_progress` or
+  expose half-published result files.
+- Refs: Issue #44 Tasks 2–3; `kairyu/batch/worker.py`; `kairyu/batch/store.py`;
+  `tests/server/test_batches.py`.
 
 ### 2026-07-13 — [amendment] Batch storage adds streaming transaction seams (m10a D3/A8)
 - What: `BatchStoreProtocol` expands from eight to ten methods with owner-scoped
