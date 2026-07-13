@@ -144,35 +144,55 @@ class Orchestrator:
             if self._moa_samples > 0:  # m11 A4: the deep tier's MoA route
                 from kairyu.orchestration.moa import run_moa
 
-                moa = await run_moa(
-                    self._resolve_engine("tier1", notes),
-                    query,
-                    n_samples=self._moa_samples,
-                    synthesizer=self._resolve_engine("tier2", notes),
-                    shared_prefix=self._shared_prefix,
+                moa_steps = self._moa_samples + 1
+                reservation = BudgetState(budget=self._budget).try_reserve(
+                    steps=moa_steps,
+                    unknown_cost=True,
                 )
-                # M3: the deep MoA tier was invisible to the cost model / budget.
-                # Charge it (steps = proposals + synthesis) and surface whether it
-                # exceeded max_cost_usd in the trace (budget overrun is queryable,
-                # not a raise — matching the Budget philosophy).
-                moa_cost = self._cost_model(
-                    GenerationRequest(
-                        request_id="moa", prompt=query,
-                        sampling_params=self._sampling_params,
-                    ),
-                    GenerationResult(
-                        request_id="moa", prompt=query,
-                        completions=(
-                            CompletionOutput(index=0, text=moa.final_text, token_ids=()),
+                if reservation is None:
+                    notes.append("moa: skipped:budget")
+                    return OrchestratorResult(
+                        text="",
+                        route=decision,
+                        trace=tuple(notes),
+                    )
+                try:
+                    moa = await run_moa(
+                        self._resolve_engine("tier1", notes),
+                        query,
+                        n_samples=self._moa_samples,
+                        synthesizer=self._resolve_engine("tier2", notes),
+                        shared_prefix=self._shared_prefix,
+                    )
+                    # M3: the deep MoA tier was invisible to the cost model / budget.
+                    # Reconcile proposals + synthesis with the actual result cost;
+                    # one admitted operation may visibly cross a result-priced cap.
+                    moa_cost = self._cost_model(
+                        GenerationRequest(
+                            request_id="moa", prompt=query,
+                            sampling_params=self._sampling_params,
                         ),
-                        usage=GenerationUsage(
-                            prompt_tokens=moa.usage[0], completion_tokens=moa.usage[1]
+                        GenerationResult(
+                            request_id="moa", prompt=query,
+                            completions=(
+                                CompletionOutput(
+                                    index=0, text=moa.final_text, token_ids=()
+                                ),
+                            ),
+                            usage=GenerationUsage(
+                                prompt_tokens=moa.usage[0],
+                                completion_tokens=moa.usage[1],
+                            ),
                         ),
-                    ),
-                )
-                budget_state = BudgetState(budget=self._budget).charge(
-                    steps=self._moa_samples + 1, cost=moa_cost
-                )
+                    )
+                    budget_state = reservation.reconcile_success(
+                        steps=moa_steps,
+                        cost=moa_cost,
+                        unknown_cost=True,
+                    )
+                except BaseException:
+                    reservation.release(steps=moa_steps, unknown_cost=True)
+                    raise
                 notes.append(
                     f"moa: {len(moa.proposals)} proposals synthesized "
                     f"(cost={moa_cost:.4f})"

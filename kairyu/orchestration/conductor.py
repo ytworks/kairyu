@@ -82,6 +82,10 @@ class _RunState:
     usage: list[int] = field(default_factory=lambda: [0, 0])
 
 
+class _BudgetRefused(Exception):
+    """Internal control flow for a generation that could not reserve budget."""
+
+
 def _is_pass(verdict_text: str) -> bool:
     first_line = verdict_text.strip().splitlines()[0] if verdict_text.strip() else ""
     return first_line.upper().startswith(_PASS_PREFIX)
@@ -180,8 +184,21 @@ class Conductor:
             sampling_params=self._sampling_params,
             cache_hint=self._cache_hint(session),
         )
-        result = await backend.generate(request)
-        run.budget = run.budget.charge(cost=self._cost_model(request, result))
+        unknown_cost = run.budget.budget.max_cost_usd is not None
+        reserved = run.budget.try_reserve(unknown_cost=unknown_cost)
+        if reserved is None:
+            raise _BudgetRefused
+        run.budget = reserved
+        try:
+            result = await backend.generate(request)
+            reconciled = run.budget.reconcile_success(
+                cost=self._cost_model(request, result),
+                unknown_cost=unknown_cost,
+            )
+        except BaseException:
+            run.budget = run.budget.release(unknown_cost=unknown_cost)
+            raise
+        run.budget = reconciled
         if result.usage is not None:  # m11 A1: usage was dropped here
             run.usage[0] += result.usage.prompt_tokens
             run.usage[1] += result.usage.completion_tokens
@@ -196,15 +213,27 @@ class Conductor:
         prompt = base_prompt
         depth = 0
         while True:
-            text = await self._generate(run, session, spec.name, spec.worker, prompt, depth)
+            try:
+                text = await self._generate(
+                    run, session, spec.name, spec.worker, prompt, depth
+                )
+            except _BudgetRefused:
+                run.trace.append(TraceEvent(spec.name, "skipped:budget"))
+                if spec.name not in run.outputs:
+                    return
+                break
             run.outputs[spec.name] = text
             run.trace.append(TraceEvent(spec.name, "generated", f"attempt={depth}"))
             if verifier is None:
                 break
             verifier_prompt = self._render(verifier.prompt, query, run.outputs)
-            verdict = await self._generate(
-                run, session, verifier.name, verifier.worker, verifier_prompt, depth
-            )
+            try:
+                verdict = await self._generate(
+                    run, session, verifier.name, verifier.worker, verifier_prompt, depth
+                )
+            except _BudgetRefused:
+                run.trace.append(TraceEvent(verifier.name, "skipped:budget"))
+                break
             run.outputs[verifier.name] = verdict
             passed = _is_pass(verdict)
             run.trace.append(
