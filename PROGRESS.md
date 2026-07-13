@@ -66,6 +66,18 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-14 — [progress] Stream metering survives completion, failure, and disconnect
+- What: engine chat, orchestrated chat, and legacy completions streams now share one
+  idempotent finalization owner. Each dispatched stream records exactly one tenant usage
+  event on normal completion, missing backend usage, partial client disconnect, or a
+  partial upstream error; backend counts win when present and otherwise the existing wire
+  approximation is derived from the rendered prompt and latest cumulative completions.
+- Why: accounting after the normal stream loop skipped orchestrated/completions streams
+  entirely and bypassed billing whenever a client disconnected or an upstream failed
+  after doing partial backend work.
+- Refs: Issue #45 Task 2; `kairyu/entrypoints/server/{app,metering}.py`;
+  `tests/server/{test_openai_api,test_m11_product}.py`.
+
 ### 2026-07-13 — [amendment] Batch execution is bounded and failure-terminal (m7 D7)
 - What: batch execution now uses one streaming producer, a bounded input queue, and a
   fixed consumer pool instead of whole-file materialization and one task per line.

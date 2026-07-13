@@ -1,14 +1,17 @@
+import asyncio
 import json
 
 import httpx
 import pytest
 
-from kairyu.engine.backend import GenerationUsage
+from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app
+from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.outputs import CompletionOutput
 
 TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
 
@@ -203,6 +206,139 @@ class StubBackend:
 
     async def shutdown(self):
         return None
+
+
+class MeteringStreamBackend:
+    """Cumulative two-part stream with controllable finalization behavior."""
+
+    def __init__(self, case):
+        self.case = case
+        self.requests = []
+        self.cancelled = False
+
+    async def generate(self, request):
+        raise AssertionError("streaming test reached generate")
+
+    async def stream(self, request):
+        self.requests.append(request)
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="partial output",
+                    token_ids=(101, 102),
+                    finish_reason=None,
+                ),
+            ),
+            finished=False,
+            usage=None,
+        )
+        if self.case == "client-close":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+        if self.case == "upstream-error":
+            raise RuntimeError("stream failed after partial output")
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="partial output final",
+                    token_ids=(101, 102, 103),
+                    finish_reason="stop",
+                ),
+            ),
+            usage=(
+                GenerationUsage(prompt_tokens=17, completion_tokens=9)
+                if self.case == "reported"
+                else None
+            ),
+        )
+
+    async def shutdown(self):
+        return None
+
+
+def _metered_stream_app(kind, backend, ledger_path):
+    settings = ServerSettings(usage_ledger_path=str(ledger_path))
+    if kind == "orchestrated-chat":
+        app = create_app(
+            engines={},
+            orchestrators={"auto": Orchestrator({"tier1": backend})},
+            settings=settings,
+        )
+        return app, "/v1/chat/completions", {
+            "model": "auto",
+            "messages": [{"role": "user", "content": "metering prompt"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    app = create_app(engines={"stream": backend}, settings=settings)
+    if kind == "engine-chat":
+        return app, "/v1/chat/completions", {
+            "model": "stream",
+            "messages": [{"role": "user", "content": "metering prompt"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    return app, "/v1/completions", {
+        "model": "stream",
+        "prompt": "metering prompt",
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+
+
+async def _disconnect_after_partial(app, path, body):
+    """Drive the ASGI endpoint until one partial body, then disconnect."""
+    request_sent = False
+    disconnect = asyncio.Event()
+    response_messages = []
+    encoded = json.dumps(body).encode()
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": encoded, "more_body": False}
+        await disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        response_messages.append(message)
+        if (
+            message["type"] == "http.response.body"
+            and b"partial output" in message.get("body", b"")
+        ):
+            disconnect.set()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"test"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(encoded)).encode()),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 80),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=2)
+    assert disconnect.is_set()
+    return response_messages
 
 
 class DispatchCountingOrchestrator:
@@ -663,6 +799,171 @@ async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
         "requests": 1,
         "prompt_tokens": wire_usage["prompt_tokens"],
         "completion_tokens": wire_usage["completion_tokens"],
+    }
+
+
+@pytest.mark.parametrize(
+    "kind", ["engine-chat", "orchestrated-chat", "legacy-completions"]
+)
+@pytest.mark.parametrize(
+    "case", ["reported", "usage-none", "client-close", "upstream-error"]
+)
+async def test_every_dispatched_stream_is_metered_exactly_once(
+    tmp_path, kind, case
+):
+    ledger_path = tmp_path / "usage.jsonl"
+    backend = MeteringStreamBackend(case)
+    app, path, body = _metered_stream_app(kind, backend, ledger_path)
+
+    if case == "client-close":
+        await _disconnect_after_partial(app, path, body)
+        assert backend.cancelled
+        response_text = ""
+    else:
+        async with _client(app) as client:
+            response = await client.post(path, json=body)
+        assert response.status_code == 200
+        response_text = response.text
+        assert "data: [DONE]" in response_text
+
+    assert len(backend.requests) == 1
+    completion_text = (
+        "partial output final" if case in {"reported", "usage-none"}
+        else "partial output"
+    )
+    expected = (
+        (17, 9)
+        if case == "reported"
+        else resolve_usage_counts(
+            None,
+            prompt=backend.requests[0].prompt,
+            completions=(
+                CompletionOutput(index=0, text=completion_text, token_ids=()),
+            ),
+        )
+    )
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": expected[0],
+        "completion_tokens": expected[1],
+    }
+
+    if case in {"reported", "usage-none"}:
+        usage_chunks = [
+            json.loads(line[len("data: "):])["usage"]
+            for line in response_text.splitlines()
+            if line.startswith("data: {")
+            and json.loads(line[len("data: "):]).get("usage") is not None
+        ]
+        assert usage_chunks[-1]["prompt_tokens"] == expected[0]
+        assert usage_chunks[-1]["completion_tokens"] == expected[1]
+    elif case == "upstream-error":
+        error_chunks = [
+            json.loads(line[len("data: "):])["error"]
+            for line in response_text.splitlines()
+            if line.startswith("data: {")
+            and "error" in json.loads(line[len("data: "):])
+        ]
+        assert len(error_chunks) == 1
+        assert "RuntimeError" in error_chunks[0]["message"]
+
+
+@pytest.mark.parametrize(
+    "kind", ["engine-chat", "orchestrated-chat", "legacy-completions"]
+)
+async def test_closing_unstarted_stream_does_not_dispatch_or_meter(
+    tmp_path, kind
+):
+    from starlette.requests import Request
+
+    from kairyu.engine.backend import GenerationRequest
+    from kairyu.entrypoints.server.app import (
+        _stream_completions,
+        _stream_engine,
+        _stream_orchestrator,
+    )
+    from kairyu.entrypoints.server.protocol import (
+        ChatCompletionRequest,
+        CompletionRequest,
+    )
+    from kairyu.sampling_params import SamplingParams
+
+    ledger_path = tmp_path / "usage.jsonl"
+    backend = MeteringStreamBackend("client-close")
+    app, _, _ = _metered_stream_app(kind, backend, ledger_path)
+    http_request = Request({"type": "http", "app": app, "state": {}})
+    generation_request = GenerationRequest(
+        request_id="not-started",
+        prompt="unstarted prompt",
+        sampling_params=SamplingParams(),
+    )
+    if kind == "engine-chat":
+        stream = _stream_engine(
+            backend,
+            generation_request,
+            "stream",
+            ChatCompletionRequest(
+                model="stream",
+                messages=[{"role": "user", "content": "unstarted"}],
+                stream=True,
+            ),
+            http_request,
+        )
+    elif kind == "orchestrated-chat":
+        stream = _stream_orchestrator(
+            Orchestrator({"tier1": backend}),
+            generation_request.prompt,
+            ChatCompletionRequest(
+                model="auto",
+                messages=[{"role": "user", "content": "unstarted"}],
+                stream=True,
+            ),
+            False,
+            False,
+            http_request,
+        )
+    else:
+        stream = _stream_completions(
+            backend,
+            generation_request,
+            CompletionRequest(model="stream", prompt="unstarted", stream=True),
+            http_request,
+        )
+
+    await stream.aclose()
+
+    assert backend.requests == []
+    assert not ledger_path.exists()
+
+
+async def test_generate_fully_tool_stream_keeps_single_sync_metering_owner(tmp_path):
+    ledger_path = tmp_path / "usage.jsonl"
+    engine = StubBackend(
+        text=TOOL_CALL_TEXT,
+        finish_reason="tool_calls",
+        usage=GenerationUsage(prompt_tokens=13, completion_tokens=8),
+    )
+    app = create_app(
+        engines={"stub": engine},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        tool_choice="auto",
+        stream=True,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert "data: [DONE]" in response.text
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": 13,
+        "completion_tokens": 8,
     }
 
 

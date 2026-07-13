@@ -114,6 +114,48 @@ class TestOrchestratorSurface:
 
 
 class TestTenancy:
+    def test_stream_usage_owner_finalizes_once(self, tmp_path):
+        from kairyu.engine.backend import GenerationUsage
+        from kairyu.entrypoints.server.metering import StreamUsageOwner
+        from kairyu.outputs import CompletionOutput
+
+        ledger = UsageLedger(tmp_path / "usage.jsonl")
+        owner = StreamUsageOwner(
+            tenant="tenant-a",
+            model="model-a",
+            prompt="ignored prompt",
+            ledger=ledger,
+        )
+        owner.mark_dispatched()
+        owner.observe(
+            GenerationUsage(prompt_tokens=7, completion_tokens=5),
+            (CompletionOutput(index=0, text="ignored", token_ids=()),),
+        )
+
+        owner.finalize()
+        owner.finalize()
+
+        assert ledger.totals()["tenant-a"] == {
+            "requests": 1,
+            "prompt_tokens": 7,
+            "completion_tokens": 5,
+        }
+
+    def test_stream_usage_owner_skips_undispatched_stream(self, tmp_path):
+        from kairyu.entrypoints.server.metering import StreamUsageOwner
+
+        ledger_path = tmp_path / "usage.jsonl"
+        owner = StreamUsageOwner(
+            tenant="tenant-a",
+            model="model-a",
+            prompt="unstarted prompt",
+            ledger=UsageLedger(ledger_path),
+        )
+
+        owner.finalize()
+
+        assert not ledger_path.exists()
+
     @pytest.mark.parametrize(
         ("with_ledger", "with_limiter"),
         [(True, True), (True, False), (False, True), (False, False)],

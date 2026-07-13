@@ -63,6 +63,80 @@ def record_tenant_usage(
         limiter.charge_tokens(tenant, prompt_tokens + completion_tokens)
 
 
+class StreamUsageOwner:
+    """Accumulate one dispatched stream and finalize its usage at most once."""
+
+    def __init__(
+        self,
+        *,
+        tenant: str,
+        model: str,
+        prompt: str,
+        ledger: UsageLedgerSink | None = None,
+        limiter: TokenLimiterSink | None = None,
+    ) -> None:
+        self._tenant = tenant
+        self._model = model
+        self._prompt = prompt
+        self._ledger = ledger
+        self._limiter = limiter
+        self._dispatched = False
+        self._finalized = False
+        self._usage: GenerationUsage | Usage | None = None
+        self._completions: dict[int, CompletionOutput] = {}
+
+    def mark_dispatched(self) -> None:
+        self._dispatched = True
+
+    def observe(
+        self,
+        usage: GenerationUsage | Usage | None,
+        completions: Sequence[CompletionOutput],
+    ) -> None:
+        self._usage = usage
+        for completion in completions:
+            self._completions[completion.index] = completion
+
+    def finalize(self) -> None:
+        if self._finalized:
+            return
+        self._finalized = True
+        if not self._dispatched:
+            return
+        prompt_tokens, completion_tokens = resolve_usage_counts(
+            self._usage,
+            prompt=self._prompt,
+            completions=tuple(
+                self._completions[index] for index in sorted(self._completions)
+            ),
+        )
+        record_tenant_usage(
+            tenant=self._tenant,
+            model=self._model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            ledger=self._ledger,
+            limiter=self._limiter,
+        )
+
+
+def stream_usage_owner_from_state(
+    state: object,
+    *,
+    tenant: str,
+    model: str,
+    prompt: str,
+) -> StreamUsageOwner:
+    """Build one stream owner from optional HTTP app-state sinks."""
+    return StreamUsageOwner(
+        tenant=tenant,
+        model=model,
+        prompt=prompt,
+        ledger=getattr(state, "usage_ledger", None),
+        limiter=getattr(state, "tenant_limiter", None),
+    )
+
+
 def record_state_usage(
     state: object,
     *,

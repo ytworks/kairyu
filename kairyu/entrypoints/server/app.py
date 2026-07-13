@@ -27,8 +27,10 @@ from kairyu.entrypoints.chat_template import ChatTemplate, render_chat
 from kairyu.entrypoints.server.errors import invalid_request
 from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metering import (
+    StreamUsageOwner,
     record_state_usage,
     resolve_usage_counts,
+    stream_usage_owner_from_state,
 )
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
@@ -327,6 +329,18 @@ def _wire_usage(
     )
 
 
+def _stream_usage_owner(
+    http_request: Request, model: str, prompt: str
+) -> StreamUsageOwner:
+    tenant = getattr(http_request.state, "tenant", None) or "default"
+    return stream_usage_owner_from_state(
+        http_request.app.state,
+        tenant=tenant,
+        model=model,
+        prompt=prompt,
+    )
+
+
 def completion_response(
     request: ChatCompletionRequest,
     prompt: str,
@@ -400,7 +414,7 @@ async def _stream_engine(
     generation_request: GenerationRequest,
     model: str,
     request: ChatCompletionRequest,
-    http_request: Request | None = None,
+    http_request: Request,
 ) -> AsyncIterator[str]:
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
@@ -408,69 +422,64 @@ async def _stream_engine(
     sent: dict[int, int] = {}
     logprobs_sent: dict[int, int] = {}
     last = None
+    owner = _stream_usage_owner(http_request, model, generation_request.prompt)
     try:
-        async for partial in engine.stream(generation_request):
-            last = partial
-            for completion in partial.completions:
-                delta_text = completion.text[sent.get(completion.index, 0):]
-                if not delta_text and not partial.finished:
-                    continue
-                is_first = completion.index not in sent
-                sent[completion.index] = len(completion.text)
-                chunk_logprobs = None
-                if request.logprobs and completion.logprob_content is not None:
-                    seen = logprobs_sent.get(completion.index, 0)
-                    fresh = completion.logprob_content[seen:]
-                    logprobs_sent[completion.index] = len(completion.logprob_content)
-                    if fresh:
-                        chunk_logprobs = ChoiceLogprobs(content=_logprob_entries(fresh))
-                yield _sse_chunk(
-                    response_id, created, model, completion.index,
-                    ChunkDelta(role="assistant" if is_first else None, content=delta_text),
-                    include_usage=include_usage,
-                    logprobs=chunk_logprobs,
-                )
-    except Exception as error:  # surface backend failures inside the SSE stream
-        payload = {  # M3: only the class name, no raw backend message
-            "error": {
-                "message": f"upstream backend error ({type(error).__name__})",
-                "type": "upstream_error",
+        try:
+            owner.mark_dispatched()
+            async for partial in engine.stream(generation_request):
+                last = partial
+                owner.observe(partial.usage, partial.completions)
+                for completion in partial.completions:
+                    delta_text = completion.text[sent.get(completion.index, 0):]
+                    if not delta_text and not partial.finished:
+                        continue
+                    is_first = completion.index not in sent
+                    sent[completion.index] = len(completion.text)
+                    chunk_logprobs = None
+                    if request.logprobs and completion.logprob_content is not None:
+                        seen = logprobs_sent.get(completion.index, 0)
+                        fresh = completion.logprob_content[seen:]
+                        logprobs_sent[completion.index] = len(completion.logprob_content)
+                        if fresh:
+                            chunk_logprobs = ChoiceLogprobs(content=_logprob_entries(fresh))
+                    yield _sse_chunk(
+                        response_id, created, model, completion.index,
+                        ChunkDelta(
+                            role="assistant" if is_first else None,
+                            content=delta_text,
+                        ),
+                        include_usage=include_usage,
+                        logprobs=chunk_logprobs,
+                    )
+        except Exception as error:  # surface backend failures inside the SSE stream
+            payload = {  # M3: only the class name, no raw backend message
+                "error": {
+                    "message": f"upstream backend error ({type(error).__name__})",
+                    "type": "upstream_error",
+                }
             }
-        }
-        yield f"data: {json.dumps(payload)}\n\n"
+            yield f"data: {json.dumps(payload)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        for completion in last.completions if last else ():
+            yield _sse_chunk(
+                response_id, created, model, completion.index, ChunkDelta(),
+                finish_reason=completion.finish_reason or "stop",
+                include_usage=include_usage,
+            )
+        if include_usage and last is not None:
+            yield _usage_chunk(
+                response_id, created, model,
+                _wire_usage(generation_request.prompt, last.completions, last.usage),
+            )
         yield "data: [DONE]\n\n"
-        return
-    for completion in last.completions if last else ():
-        yield _sse_chunk(
-            response_id, created, model, completion.index, ChunkDelta(),
-            finish_reason=completion.finish_reason or "stop",
-            include_usage=include_usage,
-        )
-    if include_usage and last is not None:
-        yield _usage_chunk(
-            response_id, created, model,
-            _wire_usage(generation_request.prompt, last.completions, last.usage),
-        )
-    # Derived partial/failure stream accounting needs the finalization owner
-    # introduced separately; preserve the existing completed-count boundary here.
-    if (
-        http_request is not None
-        and last is not None
-        and last.usage is not None
-    ):
-        _record_usage(
-            http_request,
-            model,
-            last.usage,
-            prompt=generation_request.prompt,
-            completions=last.completions,
-        )
-    yield "data: [DONE]\n\n"
+    finally:
+        owner.finalize()
 
 
 async def _stream_orchestrator(
     orchestrator, prompt: str, request: ChatCompletionRequest,
-    include_usage: bool, want_trace: bool,
+    include_usage: bool, want_trace: bool, http_request: Request,
 ) -> AsyncIterator[str]:
     """AUTO-model SSE (m11 D1/A2): status keep-alives ride SSE COMMENT lines
     (the OpenAI SDK parses every data: payload as a chunk), deltas and the
@@ -479,42 +488,75 @@ async def _stream_orchestrator(
     created = int(time.time())
     first = True
     final_result = None
+    completion_text = ""
+    completions: tuple[CompletionOutput, ...] = ()
+    reported_usage: GenerationUsage | None = None
+    owner = _stream_usage_owner(http_request, request.model, prompt)
     try:
-        stream = await orchestrator.run_chat(prompt, stream=True)
-        async for event in stream:
-            if event.kind == "status":
-                yield f": status {event.text}\n\n"  # SSE comment (A2)
-            elif event.kind == "delta":
-                delta = (
-                    ChunkDelta(role="assistant", content=event.text)
-                    if first
-                    else ChunkDelta(content=event.text)
-                )
-                first = False
-                yield _sse_chunk(
-                    response_id, created, request.model, 0, delta,
-                    include_usage=include_usage,
-                )
-            else:
-                final_result = event.result
-    except Exception as error:  # surface as an SSE error event, then close
-        yield f"data: {{\"error\": {{\"message\": \"{type(error).__name__}\"}}}}\n\n"
-        yield "data: [DONE]\n\n"
-        return
-    yield _sse_chunk(
-        response_id, created, request.model, 0, ChunkDelta(),
-        finish_reason="stop", include_usage=include_usage,
-    )
-    if include_usage and final_result is not None:
-        usage = Usage(
-            prompt_tokens=final_result.prompt_tokens,
-            completion_tokens=final_result.completion_tokens,
-            total_tokens=final_result.prompt_tokens + final_result.completion_tokens,
+        try:
+            owner.mark_dispatched()
+            stream = await orchestrator.run_chat(prompt, stream=True)
+            async for event in stream:
+                if event.kind == "status":
+                    yield f": status {event.text}\n\n"  # SSE comment (A2)
+                elif event.kind == "delta":
+                    completion_text += event.text
+                    completions = (
+                        CompletionOutput(
+                            index=0,
+                            text=completion_text,
+                            token_ids=(),
+                            finish_reason=None,
+                        ),
+                    )
+                    owner.observe(None, completions)
+                    delta = (
+                        ChunkDelta(role="assistant", content=event.text)
+                        if first
+                        else ChunkDelta(content=event.text)
+                    )
+                    first = False
+                    yield _sse_chunk(
+                        response_id, created, request.model, 0, delta,
+                        include_usage=include_usage,
+                    )
+                else:
+                    final_result = event.result
+                    if final_result is not None:
+                        completion_text = final_result.text or completion_text
+                        completions = (
+                            CompletionOutput(
+                                index=0,
+                                text=completion_text,
+                                token_ids=(),
+                                finish_reason="stop",
+                            ),
+                        )
+                        if (
+                            final_result.prompt_tokens
+                            or final_result.completion_tokens
+                        ):
+                            reported_usage = GenerationUsage(
+                                prompt_tokens=final_result.prompt_tokens,
+                                completion_tokens=final_result.completion_tokens,
+                            )
+                        owner.observe(reported_usage, completions)
+        except Exception as error:  # surface as an SSE error event, then close
+            yield f"data: {{\"error\": {{\"message\": \"{type(error).__name__}\"}}}}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        yield _sse_chunk(
+            response_id, created, request.model, 0, ChunkDelta(),
+            finish_reason="stop", include_usage=include_usage,
         )
-        yield _usage_chunk(response_id, created, request.model, usage)
-    if want_trace and final_result is not None:
-        yield f": trace {' | '.join(final_result.trace)}\n\n"
-    yield "data: [DONE]\n\n"
+        if include_usage and final_result is not None:
+            usage = _wire_usage(prompt, completions, reported_usage)
+            yield _usage_chunk(response_id, created, request.model, usage)
+        if want_trace and final_result is not None:
+            yield f": trace {' | '.join(final_result.trace)}\n\n"
+        yield "data: [DONE]\n\n"
+    finally:
+        owner.finalize()
 
 
 async def _stream_choices(
@@ -587,7 +629,10 @@ def _completion_choice(index: int, completion: CompletionOutput) -> CompletionCh
 
 
 async def _stream_completions(
-    engine: EngineBackend, generation_request: GenerationRequest, request: CompletionRequest
+    engine: EngineBackend,
+    generation_request: GenerationRequest,
+    request: CompletionRequest,
+    http_request: Request,
 ) -> AsyncIterator[str]:
     """Legacy text_completion stream: cumulative text deltas, not delta objects."""
     response_id = f"cmpl-{uuid.uuid4().hex[:16]}"
@@ -595,6 +640,7 @@ async def _stream_completions(
     include_usage = bool(request.stream_options and request.stream_options.include_usage)
     sent: dict[int, int] = {}
     last = None
+    owner = _stream_usage_owner(http_request, request.model, generation_request.prompt)
 
     def _chunk(choices: list[CompletionChoice], usage: Usage | None = None) -> str:
         payload = CompletionChunk(
@@ -605,30 +651,50 @@ async def _stream_completions(
         return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
 
     try:
-        async for partial in engine.stream(generation_request):
-            last = partial
-            for completion in partial.completions:
-                delta = completion.text[sent.get(completion.index, 0):]
-                if not delta and not partial.finished:
-                    continue
-                sent[completion.index] = len(completion.text)
-                finish = (completion.finish_reason or "stop") if partial.finished else None
-                yield _chunk(
-                    [CompletionChoice(index=completion.index, text=delta, finish_reason=finish)]
-                )
-    except Exception as error:
-        payload = {  # M3: only the class name, no raw backend message
-            "error": {
-                "message": f"upstream backend error ({type(error).__name__})",
-                "type": "upstream_error",
+        try:
+            owner.mark_dispatched()
+            async for partial in engine.stream(generation_request):
+                last = partial
+                owner.observe(partial.usage, partial.completions)
+                for completion in partial.completions:
+                    delta = completion.text[sent.get(completion.index, 0):]
+                    if not delta and not partial.finished:
+                        continue
+                    sent[completion.index] = len(completion.text)
+                    finish = (
+                        (completion.finish_reason or "stop")
+                        if partial.finished
+                        else None
+                    )
+                    yield _chunk(
+                        [
+                            CompletionChoice(
+                                index=completion.index,
+                                text=delta,
+                                finish_reason=finish,
+                            )
+                        ]
+                    )
+        except Exception as error:
+            payload = {  # M3: only the class name, no raw backend message
+                "error": {
+                    "message": f"upstream backend error ({type(error).__name__})",
+                    "type": "upstream_error",
+                }
             }
-        }
-        yield f"data: {json.dumps(payload)}\n\n"
+            yield f"data: {json.dumps(payload)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        if include_usage and last is not None:
+            yield _chunk(
+                [],
+                usage=_wire_usage(
+                    generation_request.prompt, last.completions, last.usage
+                ),
+            )
         yield "data: [DONE]\n\n"
-        return
-    if include_usage and last is not None:
-        yield _chunk([], usage=_wire_usage(generation_request.prompt, last.completions, last.usage))
-    yield "data: [DONE]\n\n"
+    finally:
+        owner.finalize()
 
 
 def _record_usage(
@@ -836,7 +902,12 @@ def create_app(
             if request.stream:
                 return StreamingResponse(
                     _stream_orchestrator(
-                        selected, prompt, request, include_usage, want_trace
+                        selected,
+                        prompt,
+                        request,
+                        include_usage,
+                        want_trace,
+                        http_request,
                     ),
                     media_type="text/event-stream",
                 )
@@ -971,7 +1042,12 @@ def create_app(
 
         if request.stream:
             return StreamingResponse(
-                _stream_completions(engine, _generation_request(prompts[0]), request),
+                _stream_completions(
+                    engine,
+                    _generation_request(prompts[0]),
+                    request,
+                    http_request,
+                ),
                 media_type="text/event-stream",
             )
         choices: list[CompletionChoice] = []
