@@ -31,6 +31,11 @@ spec:
         - name: kairyu
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.attentionBackend }}
+          env:
+            - name: KAIRYU_ATTENTION_BACKEND
+              value: {{ . | quote }}
+          {{- end }}
           ports:
             - containerPort: 8000
           readinessProbe:

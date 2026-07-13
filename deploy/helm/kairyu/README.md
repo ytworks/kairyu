@@ -26,6 +26,25 @@ overridden for the cluster).
 Ordinary CI only lints and renders the GPU manifest. It has no GPU node and does not run
 the resulting pod.
 
+### Attention backend
+
+The checked-in `pcie-gddr` overlay targets RTX PRO 6000 Blackwell (SM120) nodes and pins
+`attentionBackend: torch`. Kairyu's automatic `fa2` selection currently reaches
+FlashInfer, which does not yet provide SM120 kernels. The chart renders this value as
+`KAIRYU_ATTENTION_BACKEND=torch` so the documented overlay uses the supported fallback.
+
+Operators on hardware with an appropriate FlashInfer build may select it explicitly:
+
+```console
+helm install kairyu deploy/helm/kairyu \
+  -f deploy/helm/kairyu/values-gpu.yaml \
+  --set-string attentionBackend=flashinfer
+```
+
+The strict chart schema accepts only `torch`, `flashinfer`, or the empty CPU default.
+Leaving it empty omits the environment variable and preserves Kairyu's automatic backend
+selection.
+
 ## Model storage
 
 Model storage is disabled by default. When enabled, configure exactly one source:

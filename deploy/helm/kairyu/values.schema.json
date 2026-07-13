@@ -9,6 +9,7 @@
     "resources",
     "nodeSelector",
     "runtimeClassName",
+    "attentionBackend",
     "tolerations",
     "affinity",
     "modelStorage",
@@ -74,6 +75,10 @@
     },
     "runtimeClassName": {
       "type": "string"
+    },
+    "attentionBackend": {
+      "type": "string",
+      "enum": ["", "torch", "flashinfer"]
     },
     "tolerations": {
       "type": "array",

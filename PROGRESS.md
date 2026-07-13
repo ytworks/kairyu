@@ -52,6 +52,8 @@ replicas, auth, metrics, batch) or a replica node, and the compose topology
 The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
 GPU, selects the configured runtime/node profile, mounts an existing host path or
 PVC read-only, and starts the real Kairyu engine from `/models/checkpoint`.
+The checked-in SM120/`pcie-gddr` profile pins the torch attention fallback while
+the strict chart value also permits FlashInfer on supported hardware.
 CI now schema-lints and template-renders both the CPU defaults and GPU overlay
 before the kind CPU deployment/HTTP drill; it does not schedule the GPU pod.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
@@ -66,6 +68,18 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-13 — [amendment] Blackwell Helm profile pins the supported attention backend
+- What: Added a strict Helm `attentionBackend` seam that renders
+  `KAIRYU_ATTENTION_BACKEND`; CPU defaults omit it, the checked-in
+  `pcie-gddr`/SM120 overlay pins `torch`, and operators can select `flashinfer`
+  on supported hardware. Extended static and render contracts plus chart docs.
+- Why: The automatic SM120 `fa2` tier selects FlashInfer, but the current build
+  has no Blackwell kernels. Without an environment seam, the documented overlay
+  could render successfully yet fail when starting the real backend.
+- Refs: Issue #49 final independent review; `deploy/helm/kairyu/{values.yaml,
+  values-gpu.yaml,values.schema.json,templates/deployment.yaml,README.md}`;
+  `docs/design/m19-deploy-packaging.md` D2 clarification.
 
 ### 2026-07-13 — [amendment] GPU Helm overlay becomes a mandatory CI render gate
 - What: `scripts/kind_smoke.sh` now runs fail-fast default/GPU `helm lint` and

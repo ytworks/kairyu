@@ -326,6 +326,10 @@ def test_helm_chart_renders():
     assert "tolerations" not in pod_spec
     assert "affinity" not in pod_spec
     container = pod_spec["containers"][0]
+    assert all(
+        variable["name"] != "KAIRYU_ATTENTION_BACKEND"
+        for variable in container.get("env", [])
+    )
     assert all(mount["name"] != "model-storage" for mount in container["volumeMounts"])
     assert all(volume["name"] != "model-storage" for volume in pod_spec["volumes"])
 
@@ -398,6 +402,44 @@ def test_helm_chart_renders_placement_and_runtime_controls(tmp_path):
     assert pod_spec["affinity"] == affinity
 
 
+@pytest.mark.parametrize("attention_backend", ["torch", "flashinfer"])
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+async def test_helm_chart_renders_supported_attention_backend(
+    tmp_path, attention_backend
+):
+    override = tmp_path / "attention-backend.yaml"
+    override.write_text(
+        yaml.safe_dump({"attentionBackend": attention_backend}),
+        encoding="utf-8",
+    )
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "kairyu",
+            "deploy/helm/kairyu",
+            "-f",
+            str(override),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    deployment = next(
+        document
+        for document in yaml.safe_load_all(rendered)
+        if document and document.get("kind") == "Deployment"
+    )
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+
+    assert container["env"] == [
+        {
+            "name": "KAIRYU_ATTENTION_BACKEND",
+            "value": attention_backend,
+        }
+    ]
+
+
 def test_helm_chart_config_is_a_valid_deployment_spec():
     """kind-smoke root cause (PR #16): the chart shipped 'models:' which is
     not a DeploymentSpec field — the pod crash-looped at validation. Pin the
@@ -467,6 +509,25 @@ def test_helm_gpu_values_define_real_engine_and_model_storage():
     ]
 
 
+async def test_helm_attention_backend_values_schema_and_template_are_strict():
+    chart_dir = Path("deploy/helm/kairyu")
+    defaults = yaml.safe_load((chart_dir / "values.yaml").read_text())
+    gpu_values = yaml.safe_load((chart_dir / "values-gpu.yaml").read_text())
+    schema = json.loads((chart_dir / "values.schema.json").read_text())
+    template = (chart_dir / "templates/deployment.yaml").read_text()
+
+    assert defaults["attentionBackend"] == ""
+    assert gpu_values["attentionBackend"] == "torch"
+    assert schema["properties"]["attentionBackend"] == {
+        "type": "string",
+        "enum": ["", "torch", "flashinfer"],
+    }
+    assert "attentionBackend" in schema["required"]
+    assert "{{- with .Values.attentionBackend }}" in template
+    assert "name: KAIRYU_ATTENTION_BACKEND" in template
+    assert "value: {{ . | quote }}" in template
+
+
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 def test_helm_gpu_values_render_real_engine_and_model_storage():
     rendered = subprocess.run(
@@ -492,6 +553,12 @@ def test_helm_gpu_values_render_real_engine_and_model_storage():
 
     container = pod_spec["containers"][0]
     assert container["resources"]["limits"]["nvidia.com/gpu"] == 1
+    assert container["env"] == [
+        {
+            "name": "KAIRYU_ATTENTION_BACKEND",
+            "value": "torch",
+        }
+    ]
     model_mount = next(
         mount for mount in container["volumeMounts"] if mount["mountPath"] == "/models"
     )

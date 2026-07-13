@@ -44,3 +44,11 @@ CUDA base image); (e) PROGRESS.md Current Status reflects deploy-ready.
   gate for an explicit CI step; the workflow does not duplicate Helm semantics.
 - **Verification boundary:** ordinary CI renders and schema-validates the GPU pod
   but does not schedule or execute it. GPU execution remains a hardware gate.
+
+### 2026-07-13 — D2 clarification: Blackwell attention fallback is explicit
+
+- The chart exposes a strict `attentionBackend` value (`torch`, `flashinfer`, or
+  empty for automatic selection) and renders it as `KAIRYU_ATTENTION_BACKEND`.
+- The checked-in `pcie-gddr` overlay pins `torch` because the current FlashInfer
+  build has no Blackwell/SM120 kernels. Operators may select `flashinfer` only on
+  hardware/builds that support it; CPU defaults omit the environment variable.
