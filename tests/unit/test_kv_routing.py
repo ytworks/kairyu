@@ -58,6 +58,25 @@ class TestPrefixIndex:
         assert index.overlap("r1", "XXXXbbbbcccc") == 0
         assert index.overlap("ghost", "aaaa") == 0
 
+    @pytest.mark.parametrize(
+        ("replica_id", "prompt"),
+        [
+            pytest.param("r1", "aaaabbbb", id="warm-prefix"),
+            pytest.param("r1", "zzzz", id="cold-prefix"),
+            pytest.param("ghost", "aaaabbbb", id="missing-replica"),
+            pytest.param("r1", "aaaabbbbcccc", id="full-prefix"),
+            pytest.param("r1", "XXXXbbbbcccc", id="first-miss"),
+        ],
+    )
+    def test_overlap_keys_matches_prompt_overlap(self, replica_id, prompt):
+        index = PrefixIndex(chunk_chars=4)
+        index.observe("r1", "aaaabbbbcccc")
+        keys = index.chunk_keys(prompt)
+        before = tuple(keys)
+
+        assert index.overlap_keys(replica_id, keys) == index.overlap(replica_id, prompt)
+        assert keys == before  # caller-owned immutable key sequence is read-only
+
     def test_lru_cap(self):
         index = PrefixIndex(chunk_chars=1, max_chunks_per_replica=4)
         index.observe("r1", "abcdef")  # 6 chunks -> capped to 4
@@ -65,6 +84,101 @@ class TestPrefixIndex:
 
 
 class TestPrefixRouting:
+    def test_prefix_selection_hashes_once_and_reuses_keys_for_every_candidate(
+        self, monkeypatch
+    ):
+        import kairyu.orchestration.prefix_index as prefix_module
+
+        class SpyIndex(PrefixIndex):
+            def __init__(self):
+                super().__init__(chunk_chars=4)
+                self.overlap_key_calls: list[str] = []
+
+            def overlap_keys(self, replica_id, keys):
+                self.overlap_key_calls.append(replica_id)
+                return super().overlap_keys(replica_id, keys)
+
+        index = SpyIndex()
+        replica_ids = tuple(f"r{i}" for i in range(32))
+        pool = ReplicaPool(
+            {replica_id: MockBackend() for replica_id in replica_ids},
+            prefix_index=index,
+        )
+        real_prompt_chunks = prefix_module.prompt_chunks
+        hash_passes = 0
+
+        def counted_prompt_chunks(prompt, chunk_chars=256):
+            nonlocal hash_passes
+            hash_passes += 1
+            return real_prompt_chunks(prompt, chunk_chars)
+
+        monkeypatch.setattr(prefix_module, "prompt_chunks", counted_prompt_chunks)
+
+        assert pool._prefix_select(replica_ids, "long prompt " * 512) is None
+        assert hash_passes == 1
+        assert index.overlap_key_calls == list(replica_ids)
+
+    def test_prefix_selection_preserves_legacy_overlap_only_index(self):
+        class LegacyIndex:
+            def __init__(self):
+                self.calls: list[tuple[str, str]] = []
+
+            def overlap(self, replica_id, prompt):
+                self.calls.append((replica_id, prompt))
+                return {"a": 1, "b": 2}[replica_id]
+
+        index = LegacyIndex()
+        pool = ReplicaPool(
+            {"a": MockBackend(), "b": MockBackend()}, prefix_index=index
+        )
+
+        assert pool._prefix_select(("a", "b"), "prompt") == "b"
+        assert index.calls == [("a", "prompt"), ("b", "prompt")]
+
+    def test_prefix_selection_does_not_mask_advertised_key_api_errors(self):
+        class BrokenIndex:
+            def chunk_keys(self, _prompt):
+                raise RuntimeError("key generation failed")
+
+            def overlap_keys(self, _replica_id, _keys):  # pragma: no cover
+                return 0
+
+        pool = ReplicaPool({"a": MockBackend()}, prefix_index=BrokenIndex())
+
+        with pytest.raises(RuntimeError, match="key generation failed"):
+            pool._prefix_select(("a",), "prompt")
+
+    def test_prefix_selection_keeps_first_candidate_on_score_tie(self):
+        class TiedIndex:
+            def chunk_keys(self, _prompt):
+                return ("key",)
+
+            def overlap_keys(self, _replica_id, _keys):
+                return 2
+
+        pool = ReplicaPool(
+            {"a": MockBackend(), "b": MockBackend()}, prefix_index=TiedIndex()
+        )
+
+        assert pool._prefix_select(("a", "b"), "prompt") == "a"
+
+    def test_prefix_selection_keeps_queue_depth_penalty_semantics(self):
+        class ScoredIndex:
+            def chunk_keys(self, _prompt):
+                return ("key",)
+
+            def overlap_keys(self, replica_id, _keys):
+                return {"a": 3, "b": 2}[replica_id]
+
+        pool = ReplicaPool(
+            {"a": MockBackend(), "b": MockBackend()},
+            prefix_index=ScoredIndex(),
+            prefix_beta=0.25,
+        )
+        pool._entries["a"].outstanding = 8
+
+        assert pool._prefix_select(("a", "b"), "prompt") == "b"
+
     @pytest.mark.asyncio
     async def test_shared_prefix_routes_to_warm_replica(self):
         index = PrefixIndex(chunk_chars=4)
