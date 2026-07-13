@@ -83,6 +83,7 @@ class TestMlaEquivalence:
 class _FakeWrapper:
     def __init__(self, workspace, kv_layout=None, use_tensor_cores=None):
         assert workspace.dtype == torch.uint8 and workspace.numel() >= 1
+        self.workspace = workspace
         self.kv_layout = kv_layout
         self.use_tensor_cores = use_tensor_cores
         self.plans: list[dict] = []
@@ -94,18 +95,18 @@ class _FakeWrapper:
     def run(self, query, paged_kv):
         assert self.plans, "run() before plan() (contract violation)"
         self.runs.append((query, paged_kv))
-        heads_dim = query.shape[-2:] if query.dim() >= 2 else (1, 1)
-        if query.dim() == 2:  # decode [H, D]
-            return torch.zeros(*heads_dim)
-        return torch.zeros(query.shape[0], *heads_dim)
+        return query.clone()
 
 
 @pytest.fixture()
 def fake_flashinfer(monkeypatch):
+    from kairyu.engine.core.attention import flashinfer_gpu
+
     module = types.ModuleType("flashinfer")
     module.BatchPrefillWithPagedKVCacheWrapper = _FakeWrapper
     module.BatchDecodeWithPagedKVCacheWrapper = _FakeWrapper
     monkeypatch.setitem(sys.modules, "flashinfer", module)
+    monkeypatch.setattr(flashinfer_gpu, "_WORKSPACE_BYTES", 64)
     return module
 
 
@@ -114,6 +115,22 @@ class TestFlashInferAdapterContract:
         from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
 
         return FlashInferBackend(device="cpu")
+
+    def test_wrapper_workspaces_are_zero_initialized(
+        self, fake_flashinfer, monkeypatch
+    ):
+        real_empty = torch.empty
+
+        def dirty_empty(*args, **kwargs):
+            return real_empty(*args, **kwargs).fill_(0xA5)
+
+        monkeypatch.setattr(torch, "empty", dirty_empty)
+
+        backend = self._backend()
+
+        for wrapper in (backend._prefill, backend._decode):
+            assert wrapper.workspace.numel() == 64
+            assert torch.count_nonzero(wrapper.workspace).item() == 0
 
     def test_prefill_plan_pins_indptr_math_and_kwargs(self, fake_flashinfer):
         backend = self._backend()
@@ -163,6 +180,159 @@ class TestFlashInferAdapterContract:
         _, paged_kv = backend._prefill.runs[-1]
         assert paged_kv[0].shape == (16, PAGE, 2, 8)  # pool.k[layer] NHD slice
         assert torch.equal(paged_kv[0], pool.k[1])
+
+    def test_batched_decode_plans_and_runs_once_with_csr_pages(
+        self, fake_flashinfer
+    ):
+        backend = self._backend()
+        pool = _pool()
+        queries = [torch.randn(1, 4, 8), torch.randn(1, 4, 8)]
+
+        contexts = backend.attend_batched(
+            queries,
+            pool,
+            0,
+            [[3, 1], [7, 6, 5]],
+            [6, 9],
+            [5, 8],
+        )
+
+        assert len(backend._decode.plans) == 1
+        assert len(backend._decode.runs) == 1
+        plan = backend._decode.plans[0]
+        kv_indptr, kv_indices, last_page_len = plan["args"][:3]
+        assert kv_indptr.tolist() == [0, 2, 5] and kv_indptr.dtype == torch.int32
+        assert kv_indices.tolist() == [3, 1, 7, 6, 5]
+        assert kv_indices.dtype == torch.int32
+        assert last_page_len.tolist() == [2, 1]
+        assert last_page_len.dtype == torch.int32
+        assert plan["args"][3:7] == (4, 2, 8, PAGE)
+        assert plan["kwargs"]["q_data_type"] == queries[0].dtype
+        assert plan["kwargs"]["kv_data_type"] == pool.k.dtype
+        run_query, _ = backend._decode.runs[0]
+        assert run_query.shape == (2, 4, 8)
+        assert [context.shape for context in contexts] == [(1, 32), (1, 32)]
+        assert torch.equal(contexts[0], queries[0].reshape(1, -1))
+        assert torch.equal(contexts[1], queries[1].reshape(1, -1))
+
+    def test_batched_decode_plan_cached_across_layers(self, fake_flashinfer):
+        backend = self._backend()
+        pool = _pool(layers=3)
+        queries = [torch.randn(1, 4, 8), torch.randn(1, 4, 8)]
+        page_tables = [[3, 1], [7, 6, 5]]
+        seq_lens = [6, 9]
+        chunk_starts = [5, 8]
+
+        for layer in range(3):
+            backend.attend_batched(
+                queries, pool, layer, page_tables, seq_lens, chunk_starts
+            )
+
+        assert len(backend._decode.plans) == 1
+        assert len(backend._decode.runs) == 3
+
+    def test_batched_decode_replans_after_prefill(self, fake_flashinfer):
+        backend = self._backend()
+        pool = _pool()
+        backend.attend(
+            torch.randn(2, 4, 8), pool, 0, [3, 1], seq_len=6, chunk_start=4
+        )
+
+        backend.attend_batched(
+            [torch.randn(1, 4, 8)],
+            pool,
+            0,
+            [[3, 1]],
+            [6],
+            [5],
+        )
+
+        assert len(backend._prefill.plans) == 1
+        assert len(backend._decode.plans) == 1
+        assert len(backend._decode.runs) == 1
+
+    def test_single_sequence_batch_equals_single_decode(self, fake_flashinfer):
+        backend = self._backend()
+        pool = _pool()
+        query = torch.randn(1, 4, 8)
+
+        batched = backend.attend_batched(
+            [query], pool, 0, [[3, 1]], [6], [5]
+        )[0]
+        single = backend.attend(query, pool, 0, [3, 1], 6, 5)
+
+        assert torch.equal(batched, single)
+
+    def test_non_decode_batch_falls_back_without_batched_decode_run(
+        self, fake_flashinfer
+    ):
+        backend = self._backend()
+        pool = _pool()
+        queries = [torch.randn(2, 4, 8), torch.randn(1, 4, 8)]
+
+        contexts = backend.attend_batched(
+            queries,
+            pool,
+            0,
+            [[3, 1], [7, 6, 5]],
+            [6, 9],
+            [4, 8],
+        )
+
+        assert len(backend._prefill.runs) == 1
+        assert len(backend._decode.runs) == 1
+        decode_query, _ = backend._decode.runs[0]
+        assert decode_query.shape == (4, 8)
+        assert [context.shape for context in contexts] == [(2, 32), (1, 32)]
+
+    @pytest.mark.parametrize(
+        ("page_tables", "seq_lens", "chunk_starts"),
+        [
+            ([[0]], [1, 1], [0, 0]),
+            ([[0], [1]], [1], [0, 0]),
+            ([[0], [1]], [1, 1], [0]),
+        ],
+    )
+    def test_batched_decode_rejects_parallel_list_length_mismatch(
+        self, fake_flashinfer, page_tables, seq_lens, chunk_starts
+    ):
+        backend = self._backend()
+        queries = [torch.randn(1, 4, 8), torch.randn(1, 4, 8)]
+
+        with pytest.raises(ValueError, match="parallel batch inputs"):
+            backend.attend_batched(
+                queries,
+                _pool(),
+                0,
+                page_tables,
+                seq_lens,
+                chunk_starts,
+            )
+
+        assert backend._decode.plans == []
+        assert backend._decode.runs == []
+
+    def test_batched_decode_empty_batch_is_a_noop(self, fake_flashinfer):
+        backend = self._backend()
+
+        contexts = backend.attend_batched([], _pool(), 0, [], [], [])
+
+        assert contexts == []
+        assert backend._decode.plans == []
+        assert backend._decode.runs == []
+
+    def test_batched_decode_non_tail_query_asserts(self, fake_flashinfer):
+        backend = self._backend()
+
+        with pytest.raises(AssertionError, match="bottom-right"):
+            backend.attend_batched(
+                [torch.randn(1, 4, 8)],
+                _pool(),
+                0,
+                [[0, 1]],
+                [6],
+                [4],
+            )
 
 
 class TestSelector:
