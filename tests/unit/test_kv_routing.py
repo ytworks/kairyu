@@ -146,10 +146,194 @@ class TestKvEventIndex:
     def test_apply_and_overlap(self):
         clock = {"t": 0.0}
         index = KvEventIndex(now=lambda: clock["t"])
-        index.apply("r1", {"type": "BlockStored", "block_hashes": ["h1", "h2"]})
+        index.apply(
+            "r1",
+            {
+                "type": "BlockStored",
+                "block_hashes": ["h1", "h2"],
+                "block_size": 4,
+            },
+        )
         assert index.overlap("r1", ["h1", "h2", "h3"]) == 2
         index.apply("r1", {"type": "BlockRemoved", "block_hashes": ["h2"]})
         assert index.overlap("r1", ["h1", "h2"]) == 1
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            pytest.param([], id="decoded-array"),
+            pytest.param("event", id="decoded-string"),
+            pytest.param(3, id="decoded-number"),
+            pytest.param(True, id="decoded-bool"),
+            pytest.param(None, id="decoded-null"),
+            pytest.param({}, id="missing-type"),
+            pytest.param({"type": 3}, id="number-type"),
+            pytest.param({"type": True}, id="bool-type"),
+            pytest.param({"type": []}, id="array-type"),
+            pytest.param({"type": "Mystery"}, id="unknown-type"),
+            pytest.param({"type": "BlockStored"}, id="stored-missing-hashes"),
+            pytest.param(
+                {"type": "BlockStored", "block_hashes": None},
+                id="stored-null-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockStored", "block_hashes": "h2"},
+                id="stored-string-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockStored", "block_hashes": 3},
+                id="stored-number-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockStored", "block_hashes": True},
+                id="stored-bool-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockStored", "block_hashes": {}},
+                id="stored-object-hashes",
+            ),
+            pytest.param({"type": "BlockRemoved"}, id="removed-missing-hashes"),
+            pytest.param(
+                {"type": "BlockRemoved", "block_hashes": None},
+                id="removed-null-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockRemoved", "block_hashes": "h1"},
+                id="removed-string-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockRemoved", "block_hashes": 3},
+                id="removed-number-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockRemoved", "block_hashes": True},
+                id="removed-bool-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockRemoved", "block_hashes": {}},
+                id="removed-object-hashes",
+            ),
+            pytest.param(
+                {"type": "BlockStored", "block_hashes": ["new", 3]},
+                id="stored-number-hash-member",
+            ),
+            pytest.param(
+                {"type": "BlockStored", "block_hashes": ["new", {}]},
+                id="stored-object-hash-member",
+            ),
+            pytest.param(
+                {"type": "BlockRemoved", "block_hashes": ["h1", 3]},
+                id="removed-number-hash-member",
+            ),
+            pytest.param(
+                {"type": "BlockRemoved", "block_hashes": ["h1", {}]},
+                id="removed-object-hash-member",
+            ),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": None},
+                id="cleared-null-hashes",
+            ),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": "h1"},
+                id="cleared-string-hashes",
+            ),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": 3},
+                id="cleared-number-hashes",
+            ),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": True},
+                id="cleared-bool-hashes",
+            ),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": {}},
+                id="cleared-object-hashes",
+            ),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": ["h1", 3]},
+                id="cleared-number-hash-member",
+            ),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": ["h1", {}]},
+                id="cleared-object-hash-member",
+            ),
+            pytest.param(
+                {"type": "BlockStored", "block_hashes": ["new"], "block_size": 0},
+                id="zero-block-size",
+            ),
+            pytest.param(
+                {
+                    "type": "BlockStored",
+                    "block_hashes": ["new"],
+                    "block_size": -1,
+                },
+                id="negative-block-size",
+            ),
+            pytest.param(
+                {
+                    "type": "BlockStored",
+                    "block_hashes": ["new"],
+                    "block_size": True,
+                },
+                id="true-block-size",
+            ),
+            pytest.param(
+                {
+                    "type": "BlockStored",
+                    "block_hashes": ["new"],
+                    "block_size": False,
+                },
+                id="false-block-size",
+            ),
+            pytest.param(
+                {
+                    "type": "BlockStored",
+                    "block_hashes": ["new"],
+                    "block_size": 1.5,
+                },
+                id="float-block-size",
+            ),
+            pytest.param(
+                {
+                    "type": "BlockStored",
+                    "block_hashes": ["new"],
+                    "block_size": "4",
+                },
+                id="string-block-size",
+            ),
+            pytest.param(
+                {
+                    "type": "BlockStored",
+                    "block_hashes": ["new"],
+                    "block_size": None,
+                },
+                id="null-block-size",
+            ),
+        ],
+    )
+    def test_invalid_event_is_controlled_and_fully_atomic(self, event):
+        clock = {"t": 1.0}
+        index = KvEventIndex(now=lambda: clock["t"])
+        index.apply("existing", {"type": "BlockStored", "block_hashes": ["h1"]})
+        before = {
+            replica_id: (frozenset(entry.hashes), entry.last_event)
+            for replica_id, entry in index._replicas.items()
+        }
+        clock["t"] = 2.0
+
+        with pytest.raises(ValueError):
+            index.apply("existing", event)
+        assert {
+            replica_id: (frozenset(entry.hashes), entry.last_event)
+            for replica_id, entry in index._replicas.items()
+        } == before
+
+        with pytest.raises(ValueError):
+            index.apply("new", event)
+        assert {
+            replica_id: (frozenset(entry.hashes), entry.last_event)
+            for replica_id, entry in index._replicas.items()
+        } == before
 
     def test_staleness_returns_none_for_fallback(self):
         clock = {"t": 0.0}
@@ -166,12 +350,26 @@ class TestKvEventIndex:
         with pytest.raises(ValueError, match="unknown"):
             index.apply("r1", {"type": "Mystery"})
 
-    def test_all_blocks_cleared_is_handled(self):
+    @pytest.mark.parametrize(
+        "clear_event",
+        [
+            pytest.param({"type": "AllBlocksCleared"}, id="hashes-absent"),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": []},
+                id="hashes-empty",
+            ),
+            pytest.param(
+                {"type": "AllBlocksCleared", "block_hashes": ["h1"]},
+                id="hashes-present",
+            ),
+        ],
+    )
+    def test_all_blocks_cleared_is_handled(self, clear_event):
         # M4: vLLM emits AllBlocksCleared on a cache reset; it must clear the
         # replica's blocks, not crash the subscriber.
         index = KvEventIndex()
         index.apply("r1", {"type": "BlockStored", "block_hashes": ["h1", "h2"]})
-        index.apply("r1", {"type": "AllBlocksCleared"})
+        index.apply("r1", clear_event)
         assert index.overlap("r1", ["h1", "h2"]) == 0
 
     def test_garbage_event_does_not_keep_replica_fresh(self):
