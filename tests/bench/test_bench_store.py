@@ -30,6 +30,18 @@ def _pair(
     )
 
 
+def _record_path_reads(monkeypatch) -> list[Path]:
+    reads: list[Path] = []
+    real_read_text = Path.read_text
+
+    def recording_read_text(path: Path, *args, **kwargs):
+        reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", recording_read_text)
+    return reads
+
+
 def test_pair_round_trip(tmp_path):
     store = ResultStore(tmp_path, "run-1")
     saved = _pair()
@@ -37,6 +49,24 @@ def test_pair_round_trip(tmp_path):
     loaded = store.load_pair("gpqa-diamond", "m")
     assert loaded == saved
     assert loaded.score == 0.5
+
+
+def test_relative_results_directory_preserves_normal_artifact_round_trip(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    store = ResultStore("results", "run-1")
+    pair = _pair()
+
+    pair_path = store.save_pair(pair)
+    store.write_run_config({"fingerprint": "fingerprint-a"})
+    scoreboard_path = store.save_scoreboard({"cells": {}}, "# table")
+
+    assert pair_path == store.pair_path(pair.benchmark, pair.target)
+    assert store.load_pair(pair.benchmark, pair.target) == pair
+    assert scoreboard_path == store.run_dir / "scoreboard.md"
+    assert not list(store.run_dir.rglob("*.tmp"))
 
 
 def test_missing_pair_is_none(tmp_path):
@@ -55,6 +85,8 @@ def test_missing_pair_is_none(tmp_path):
         "nested\\run",
         "./run",
         "run/",
+        "C:",
+        "C:run",
     ],
 )
 def test_run_id_must_be_one_non_dot_path_component(tmp_path, run_id):
@@ -308,3 +340,194 @@ def test_no_tmp_files_left_behind(tmp_path):
     store.write_run_config({"a": 1})
     assert not list(store.run_dir.rglob("*.tmp"))
     assert (store.run_dir / "scoreboard.md").read_text(encoding="utf-8") == "# table"
+
+
+def test_save_pair_refuses_symlinked_benchmark_directory_without_external_write(
+    tmp_path,
+):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    pair = _pair()
+    pair_path = store.pair_path(pair.benchmark, pair.target)
+    outside_dir = tmp_path / "outside-pairs"
+    outside_dir.mkdir()
+    outside_pair = outside_dir / pair_path.name
+    outside_pair.write_bytes(b"external-pair-bytes")
+    before = outside_pair.read_bytes()
+    pair_path.parent.symlink_to(outside_dir, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.save_pair(pair)
+
+    assert outside_pair.read_bytes() == before
+    assert pair_path.parent.is_symlink()
+
+
+def test_load_pair_refuses_symlinked_benchmark_directory_before_external_read(
+    tmp_path,
+    monkeypatch,
+):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    pair = _pair()
+    pair_path = store.pair_path(pair.benchmark, pair.target)
+    outside_dir = tmp_path / "outside-pairs"
+    outside_dir.mkdir()
+    outside_pair = outside_dir / pair_path.name
+    outside_pair.write_text(pair.model_dump_json(), encoding="utf-8")
+    before = outside_pair.read_bytes()
+    pair_path.parent.symlink_to(outside_dir, target_is_directory=True)
+    reads = _record_path_reads(monkeypatch)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.load_pair(pair.benchmark, pair.target)
+
+    assert reads == []
+    assert outside_pair.read_bytes() == before
+
+
+def test_save_pair_refuses_symlinked_final_path_without_external_write(tmp_path):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    pair = _pair()
+    pair_path = store.pair_path(pair.benchmark, pair.target)
+    pair_path.parent.mkdir(parents=True)
+    outside_pair = tmp_path / "outside-pair.json"
+    outside_pair.write_bytes(b"external-pair-bytes")
+    before = outside_pair.read_bytes()
+    pair_path.symlink_to(outside_pair)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.save_pair(pair)
+
+    assert outside_pair.read_bytes() == before
+    assert pair_path.is_symlink()
+
+
+def test_load_pair_refuses_symlinked_final_path_before_external_read(
+    tmp_path,
+    monkeypatch,
+):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    pair = _pair()
+    pair_path = store.pair_path(pair.benchmark, pair.target)
+    pair_path.parent.mkdir(parents=True)
+    outside_pair = tmp_path / "outside-pair.json"
+    outside_pair.write_text(pair.model_dump_json(), encoding="utf-8")
+    before = outside_pair.read_bytes()
+    pair_path.symlink_to(outside_pair)
+    reads = _record_path_reads(monkeypatch)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.load_pair(pair.benchmark, pair.target)
+
+    assert reads == []
+    assert outside_pair.read_bytes() == before
+
+
+def test_save_pair_refuses_preexisting_tmp_symlink_without_external_write(tmp_path):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    pair = _pair()
+    pair_path = store.pair_path(pair.benchmark, pair.target)
+    pair_path.parent.mkdir(parents=True)
+    outside_tmp = tmp_path / "outside-pair-tmp"
+    outside_tmp.write_bytes(b"external-tmp-bytes")
+    before = outside_tmp.read_bytes()
+    legacy_tmp = pair_path.with_suffix(pair_path.suffix + ".tmp")
+    legacy_tmp.symlink_to(outside_tmp)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.save_pair(pair)
+
+    assert outside_tmp.read_bytes() == before
+    assert legacy_tmp.is_symlink()
+    assert not pair_path.exists()
+
+
+def test_initialize_run_refuses_symlinked_metadata_before_external_read(
+    tmp_path,
+    monkeypatch,
+):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    metadata = _run_metadata("fingerprint-a", "2026-07-13T00:00:00Z")
+    outside_metadata = tmp_path / "outside-run.json"
+    outside_metadata.write_text(json.dumps(metadata), encoding="utf-8")
+    before = outside_metadata.read_bytes()
+    (store.run_dir / "run.json").symlink_to(outside_metadata)
+    reads = _record_path_reads(monkeypatch)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.initialize_run(metadata)
+
+    assert reads == []
+    assert outside_metadata.read_bytes() == before
+
+
+def test_write_run_config_refuses_symlinked_metadata_without_external_write(tmp_path):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    outside_metadata = tmp_path / "outside-run.json"
+    outside_metadata.write_bytes(b"external-metadata-bytes")
+    before = outside_metadata.read_bytes()
+    run_config = store.run_dir / "run.json"
+    run_config.symlink_to(outside_metadata)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.write_run_config({"fingerprint": "fingerprint-a"})
+
+    assert outside_metadata.read_bytes() == before
+    assert run_config.is_symlink()
+
+
+def test_write_run_config_refuses_preexisting_tmp_symlink_without_external_write(
+    tmp_path,
+):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    outside_tmp = tmp_path / "outside-run-tmp"
+    outside_tmp.write_bytes(b"external-tmp-bytes")
+    before = outside_tmp.read_bytes()
+    legacy_tmp = store.run_dir / "run.json.tmp"
+    legacy_tmp.symlink_to(outside_tmp)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.write_run_config({"fingerprint": "fingerprint-a"})
+
+    assert outside_tmp.read_bytes() == before
+    assert legacy_tmp.is_symlink()
+    assert not (store.run_dir / "run.json").exists()
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    [
+        "scoreboard.json",
+        "scoreboard.md",
+        "scoreboard.json.tmp",
+        "scoreboard.md.tmp",
+    ],
+)
+def test_save_scoreboard_refuses_symlinked_artifact_before_any_write(
+    tmp_path,
+    artifact_name,
+):
+    store = ResultStore(tmp_path / "results", "run-1")
+    store.ensure()
+    outside_artifact = tmp_path / f"outside-{artifact_name.replace('.', '-')}"
+    outside_artifact.write_bytes(b"external-scoreboard-bytes")
+    before = outside_artifact.read_bytes()
+    linked_artifact = store.run_dir / artifact_name
+    linked_artifact.symlink_to(outside_artifact)
+
+    with pytest.raises(ValueError, match="run id 'run-1'"):
+        store.save_scoreboard({"cells": {}}, "# table")
+
+    assert outside_artifact.read_bytes() == before
+    assert linked_artifact.is_symlink()
+    for final_name in ("scoreboard.json", "scoreboard.md"):
+        final_path = store.run_dir / final_name
+        if final_path != linked_artifact:
+            assert not final_path.exists()
