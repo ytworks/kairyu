@@ -2,6 +2,7 @@
 reconciler, tracing spans, helm render."""
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -242,6 +243,55 @@ async def test_kind_smoke_gates_default_and_gpu_chart_before_cluster_creation():
     assert max(command_positions) < gate_call
     assert gate_call < kind_create
     assert 'if [[ "${1:-}" == "--helm-check" ]]; then' in lines[gate_call:kind_create]
+
+
+async def test_helm_check_exits_after_four_helm_commands_without_cluster_side_effects(
+    tmp_path,
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    call_log = tmp_path / "calls.log"
+
+    helm = bin_dir / "helm"
+    helm.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'%s\\n\' "helm $*" >>"$CALL_LOG"\n',
+        encoding="utf-8",
+    )
+    helm.chmod(0o755)
+
+    forbidden_command = (
+        "#!/usr/bin/env bash\n"
+        'name=${0##*/}\n'
+        'printf \'%s\\n\' "$name $*" >>"$CALL_LOG"\n'
+        "exit 97\n"
+    )
+    for name in ("kind", "docker", "kubectl", "curl"):
+        command = bin_dir / name
+        command.write_text(forbidden_command, encoding="utf-8")
+        command.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CALL_LOG"] = str(call_log)
+    env["PATH"] = os.pathsep.join((str(bin_dir), env["PATH"]))
+    result = subprocess.run(
+        ["bash", "scripts/kind_smoke.sh", "--helm-check"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert call_log.read_text(encoding="utf-8").splitlines() == [
+        "helm lint deploy/helm/kairyu",
+        "helm lint deploy/helm/kairyu -f deploy/helm/kairyu/values-gpu.yaml",
+        "helm template kairyu deploy/helm/kairyu",
+        (
+            "helm template kairyu deploy/helm/kairyu "
+            "-f deploy/helm/kairyu/values-gpu.yaml"
+        ),
+    ]
 
 
 async def test_ci_has_explicit_single_source_helm_schema_and_gpu_template_gate():
