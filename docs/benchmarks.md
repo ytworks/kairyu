@@ -10,6 +10,13 @@ methodology, config committed next to every number).
 The perf harnesses in the top-level `bench/` directory (TTFT/TPOT/goodput)
 are separate; this suite measures answer quality.
 
+`bench/frontier_compare.py` requests OpenAI-compatible streaming usage and defines
+token TPOT as `(last content chunk time - first content chunk time) /
+(completion_tokens - 1)`, using the final streamed `completion_tokens`. It never
+uses SSE chunk count as a token count. If an endpoint omits usage (or reports fewer
+than two completion tokens), TTFT and output characters remain available, TPOT is
+`null`, and the scoreboard reports how many trials omitted usage.
+
 The manual real-checkpoint gate in `scripts/parity_real_model.py` requires exact,
 deterministic greedy token parity: Kairyu and the Transformers reference must emit
 the same token IDs in the same order and with the same length. Prefix equality,
