@@ -109,14 +109,24 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
             super().__init__()
             self.active = 0
             self.max_active = 0
+            self.batch_active = 0
+            self.max_batch_active = 0
 
         async def generate(self, request):
             self.active += 1
             self.max_active = max(self.max_active, self.active)
+            is_batch = request.request_id.startswith("batch-")
+            if is_batch:
+                self.batch_active += 1
+                self.max_batch_active = max(
+                    self.max_batch_active, self.batch_active
+                )
             try:
                 await asyncio.sleep(0.02)
                 return await super().generate(request)
             finally:
+                if is_batch:
+                    self.batch_active -= 1
                 self.active -= 1
 
     backend = CountingBackend()
@@ -133,7 +143,104 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
     finished = store.get_batch(job.id)
     assert finished.status == "completed"
     assert finished.request_counts.completed == 8
+    assert backend.max_batch_active == 2
     assert backend.max_active <= 3  # 2 batch slots + the 1 interactive request
+
+
+async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeypatch):
+    max_concurrency = 4
+    line_count = 300
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=max_concurrency)
+    content = "\n".join(
+        _batch_line(f"r{index}", f"prompt {index}") for index in range(line_count)
+    )
+    file = store.save_file(content.encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    release = asyncio.Event()
+    all_consumers_started = asyncio.Event()
+    consumer_tasks = set()
+    active = 0
+    max_active = 0
+    peak_task_count = 0
+    baseline_task_count = len(asyncio.all_tasks())
+
+    async def recording_run_line(line):
+        nonlocal active, max_active, peak_task_count
+        task = asyncio.current_task()
+        assert task is not None
+        consumer_tasks.add(task)
+        active += 1
+        max_active = max(max_active, active)
+        peak_task_count = max(peak_task_count, len(asyncio.all_tasks()))
+        if active == max_concurrency:
+            all_consumers_started.set()
+        try:
+            await release.wait()
+            return {"custom_id": line["custom_id"], "ok": True}, None
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(worker, "_run_line", recording_run_line)
+    process_task = asyncio.create_task(worker.process(job.id))
+    try:
+        await asyncio.wait_for(all_consumers_started.wait(), timeout=1)
+    finally:
+        release.set()
+    await process_task
+
+    finished = store.get_batch(job.id)
+    assert finished.request_counts.completed == line_count
+    assert max_active == max_concurrency
+    assert len(consumer_tasks) == max_concurrency
+    assert peak_task_count <= baseline_task_count + max_concurrency + 3
+
+
+async def test_worker_streams_input_without_bulk_read(tmp_path, monkeypatch):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=2)
+    content = (
+        "\n\n"
+        + _batch_line("a", "first")
+        + "\n   \n"
+        + _batch_line("b", "second")
+        + "\n"
+    ).encode()
+    file = store.save_file(content, "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    def fail_bulk_read(*args, **kwargs):
+        raise AssertionError("batch worker must stream input lines")
+
+    monkeypatch.setattr(store, "read_file_content", fail_bulk_read)
+
+    await worker.process(job.id)
+
+    finished = store.get_batch(job.id)
+    assert finished.status == "completed"
+    assert finished.request_counts.total == 2
+    assert finished.request_counts.completed == 2
+
+
+async def test_streaming_parse_error_fails_after_admitted_lines(tmp_path):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    content = (
+        _batch_line("accepted", "first")
+        + "\nnot-json\n"
+        + _batch_line("never-admitted", "last")
+    ).encode()
+    file = store.save_file(content, "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    await worker.process(job.id)
+
+    failed = store.get_batch(job.id)
+    assert failed.status == "failed"
+    assert failed.request_counts.total == 1
+    assert failed.output_file_id is None
+    assert failed.error_file_id is None
+    assert list((tmp_path / "files").glob("*.tmp")) == []
 
 
 def _interactive_request():
@@ -170,8 +277,12 @@ async def test_cancel_stops_remaining_lines(tmp_path):
     store.update_batch(cancelled)
     await task
 
-    assert store.get_batch(job.id).status == "cancelled"
+    cancelled = store.get_batch(job.id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.output_file_id is None
+    assert cancelled.error_file_id is None
     assert backend.calls < 10  # remaining lines were skipped
+    assert list((tmp_path / "files").glob("*.tmp")) == []
 
 
 async def test_restart_marks_inflight_jobs_failed(tmp_path):
