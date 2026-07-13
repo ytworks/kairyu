@@ -19,6 +19,7 @@ WEBUI_CONFIG = COMPOSE_DIR / "config.yaml"
 CONTAINER_CONFIG = "/etc/kairyu/config.yaml"
 VALIDATOR = Path("scripts/validate_compose_binds.py").resolve()
 COMPOSE_SMOKE = Path("scripts/compose_smoke.sh")
+WEBUI_SMOKE = Path("scripts/webui_smoke.sh")
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
 
 
@@ -40,6 +41,65 @@ def _run_validator(*compose_files: Path, cwd: Path):
         capture_output=True,
         text=True,
         check=False,
+    )
+
+
+def _write_executable(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _webui_smoke_env(
+    tmp_path: Path,
+    *,
+    uv_exit: int = 0,
+    rendered_base_url: str = "http://kairyu:8000/v1",
+    rm_exit: int | None = None,
+) -> tuple[dict[str, str], Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "uv", f"#!/bin/sh\nexit {uv_exit}\n")
+    docker_log = tmp_path / "docker.log"
+    _write_executable(
+        fake_bin / "docker",
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case "$*" in\n'
+        '  *" config --format json")\n'
+        "    printf "
+        "'{\"services\":{\"webui\":{\"environment\":{\"OPENAI_API_BASE_URL\":\"%s\"}}}}' "
+        '"$WEBUI_RENDERED_BASE_URL"\n'
+        "    ;;\n"
+        "esac\n",
+    )
+    _write_executable(
+        fake_bin / "curl",
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  *"/readyz"*) printf \'{\"ready\":true}\' ;;\n'
+        '  *"/v1/models"*) printf \'{\"data\":[{\"id\":\"default\"}]}\' ;;\n'
+        '  *"/v1/chat/completions"*)\n'
+        "    output=\n"
+        '    while [ "$#" -gt 0 ]; do\n'
+        '      if [ "$1" = "-o" ]; then shift; output=$1; fi\n'
+        "      shift\n"
+        "    done\n"
+        "    printf "
+        "'{\"object\":\"chat.completion\",\"model\":\"default\"}' "
+        '> "$output"\n'
+        "    ;;\n"
+        "esac\n",
+    )
+    if rm_exit is not None:
+        _write_executable(fake_bin / "rm", f"#!/bin/sh\nexit {rm_exit}\n")
+    return (
+        {
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "DOCKER_LOG": str(docker_log),
+            "WEBUI_RENDERED_BASE_URL": rendered_base_url,
+        },
+        docker_log,
     )
 
 
@@ -355,3 +415,107 @@ def test_ci_and_default_smoke_fail_fast_through_validator():
         "uv run --no-dev python scripts/validate_compose_binds.py"
     )
     assert "deploy/compose/docker-compose*.yaml" in validation_command
+
+
+def test_webui_smoke_validation_failure_never_invokes_docker(tmp_path):
+    env, docker_log = _webui_smoke_env(tmp_path, uv_exit=23)
+
+    result = subprocess.run(
+        ["/bin/bash", str(WEBUI_SMOKE.resolve())],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 23
+    assert not docker_log.exists()
+
+
+def test_webui_smoke_rejects_wrong_rendered_internal_url_before_startup(tmp_path):
+    env, docker_log = _webui_smoke_env(
+        tmp_path, rendered_base_url="http://wrong.example/v1"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash", str(WEBUI_SMOKE.resolve())],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "http://wrong.example/v1" in result.stderr
+    assert docker_log.read_text(encoding="utf-8").splitlines() == [
+        f"compose -f {WEBUI_COMPOSE.resolve()} config --format json"
+    ]
+
+
+def test_webui_smoke_runs_only_kairyu_contract_and_always_tears_down(tmp_path):
+    env, docker_log = _webui_smoke_env(tmp_path)
+
+    result = subprocess.run(
+        ["/bin/bash", str(WEBUI_SMOKE.resolve())],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    commands = docker_log.read_text(encoding="utf-8").splitlines()
+    assert commands == [
+        f"compose -f {WEBUI_COMPOSE.resolve()} config --format json",
+        f"compose -f {WEBUI_COMPOSE.resolve()} up -d --build kairyu",
+        f"compose -f {WEBUI_COMPOSE.resolve()} down --volumes --remove-orphans",
+    ]
+
+
+def test_webui_smoke_tears_down_even_if_response_cleanup_fails(tmp_path):
+    env, docker_log = _webui_smoke_env(tmp_path, rm_exit=99)
+
+    result = subprocess.run(
+        ["/bin/bash", str(WEBUI_SMOKE.resolve())],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert docker_log.read_text(encoding="utf-8").splitlines()[-1] == (
+        f"compose -f {WEBUI_COMPOSE.resolve()} down --volumes --remove-orphans"
+    )
+
+
+def test_ci_runs_webui_smoke_after_existing_compose_drill():
+    assert WEBUI_SMOKE.is_file(), "WebUI smoke script is missing"
+    assert WEBUI_SMOKE.stat().st_mode & 0o111
+    smoke = WEBUI_SMOKE.read_text(encoding="utf-8")
+    assert smoke.index("validate_compose_binds.py") < smoke.index(
+        "config --format json"
+    )
+    assert "http://kairyu:8000/v1" in smoke
+    assert 'compose up -d --build kairyu' in smoke
+    assert '"$BASE_URL/readyz"' in smoke
+    assert '"$BASE_URL/v1/models"' in smoke
+    assert '"model":"default"' in smoke
+
+    compose_steps = _load_yaml(CI_WORKFLOW)["jobs"]["compose-smoke"]["steps"]
+    default_index = next(
+        index
+        for index, step in enumerate(compose_steps)
+        if step.get("name") == "Compose smoke drill"
+    )
+    webui_index = next(
+        index
+        for index, step in enumerate(compose_steps)
+        if step.get("name") == "WebUI Kairyu smoke"
+    )
+    assert default_index < webui_index
+    assert compose_steps[webui_index]["run"] == "./scripts/webui_smoke.sh"
