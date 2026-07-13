@@ -205,6 +205,22 @@ class StubBackend:
         return None
 
 
+class DispatchCountingOrchestrator:
+    """Failing spy: invalid requests must never reach either dispatch seam."""
+
+    def __init__(self):
+        self.run_calls = 0
+        self.run_chat_calls = 0
+
+    async def run(self, prompt):
+        self.run_calls += 1
+        raise AssertionError("invalid request reached orchestrator.run")
+
+    async def run_chat(self, prompt, *, stream):
+        self.run_chat_calls += 1
+        raise AssertionError("invalid request reached orchestrator.run_chat")
+
+
 _WEATHER_TOOL = {
     "type": "function",
     "function": {"name": "get_weather", "parameters": {"type": "object"}},
@@ -254,6 +270,34 @@ async def test_nonpositive_output_token_limits_are_predispatch_400(
     assert response.json()["error"]["type"] == "invalid_request_error"
     assert response.json()["error"]["code"] == "invalid_request"
     assert engine.calls == 0
+
+
+@pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])
+@pytest.mark.parametrize("limit", [0, -1])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_nonpositive_auto_output_limits_are_predispatch_400(
+    field, limit, stream
+):
+    orchestrator = DispatchCountingOrchestrator()
+    app = create_app(engines={}, orchestrators={"auto": orchestrator})
+    body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": stream,
+        field: limit,
+    }
+
+    async with _client(app, raise_app_exceptions=False) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "message": f"max_tokens must be >= 1, got {limit}",
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+    }
+    assert orchestrator.run_calls == 0
+    assert orchestrator.run_chat_calls == 0
 
 
 @pytest.mark.parametrize(("path", "field", "body"), _OUTPUT_LIMIT_CASES)

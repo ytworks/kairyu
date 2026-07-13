@@ -793,6 +793,13 @@ def create_app(
         # rendered after model resolution: templates are per served model (m9 D2)
         prompt = render_prompt(request, chat_templates)
         if request.model in auto_models:
+            # Orchestrated models do not consume SamplingParams directly, but
+            # the public chat boundary must still enforce the same selected
+            # output-limit semantics before either dispatch seam is entered.
+            try:
+                sampling_params_from(request)
+            except ValueError as error:
+                return invalid_request(str(error))
             # the orchestrator path takes only the prompt; params it cannot honor
             # must be a 400, not silently dropped (M4 — OpenAI-compat by refusal)
             unsupported = [
