@@ -221,6 +221,7 @@ class KairyuBackend:
             model_path=model_path,
         )
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
+        self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
 
     async def _pump(self) -> None:
@@ -265,13 +266,51 @@ class KairyuBackend:
             # enqueued. Re-check after it exits so the op cannot be stranded.
             task.add_done_callback(lambda _task: self._ensure_pump())
 
-    def _submit(self, request: GenerationRequest) -> asyncio.Queue:
-        self._loop.submit(request.request_id, request.prompt, request.sampling_params)
-        queue: asyncio.Queue = asyncio.Queue()
-        self._queues[request.request_id] = queue
-        if self._pump_task is None:
-            self._pump_task = asyncio.get_running_loop().create_task(self._pump())
-        return queue
+    def _reserve_request_ids(self, request_ids: tuple[str, ...]) -> None:
+        reserved: set[str] = set()
+        for request_id in request_ids:
+            if (
+                request_id in reserved
+                or request_id in self._active_request_ids
+                or request_id in self._queues
+            ):
+                raise ValueError(f"duplicate request_id {request_id!r}")
+            reserved.add(request_id)
+        self._active_request_ids.update(reserved)
+
+    def _release_request_ids(self, request_ids: tuple[str, ...]) -> None:
+        self._active_request_ids.difference_update(request_ids)
+
+    def _remove_queue(self, request_id: str, queue: asyncio.Queue) -> None:
+        if self._queues.get(request_id) is queue:
+            del self._queues[request_id]
+
+    def _submit(
+        self, request: GenerationRequest, *, pre_reserved: bool = False
+    ) -> asyncio.Queue:
+        request_id = request.request_id
+        if not pre_reserved:
+            self._reserve_request_ids((request_id,))
+        submitted = False
+        queue: asyncio.Queue | None = None
+        try:
+            self._loop.submit(request_id, request.prompt, request.sampling_params)
+            submitted = True
+            queue = asyncio.Queue()
+            self._queues[request_id] = queue
+            if self._pump_task is None:
+                self._pump_task = asyncio.get_running_loop().create_task(self._pump())
+            return queue
+        except BaseException:
+            try:
+                if submitted:
+                    self._abort(request_id)
+            finally:
+                if queue is not None:
+                    self._remove_queue(request_id, queue)
+                if not pre_reserved:
+                    self._release_request_ids((request_id,))
+            raise
 
     def _result(self, request: GenerationRequest, update: StreamUpdate) -> GenerationResult:
         completion = CompletionOutput(
@@ -351,8 +390,10 @@ class KairyuBackend:
             usage=usage,
         )
 
-    async def _generate_one(self, request: GenerationRequest) -> GenerationResult:
-        queue = self._submit(request)
+    async def _generate_one(
+        self, request: GenerationRequest, *, pre_reserved: bool = False
+    ) -> GenerationResult:
+        queue = self._submit(request, pre_reserved=pre_reserved)
         finished_cleanly = False
         pump_failed = False
         try:
@@ -367,13 +408,31 @@ class KairyuBackend:
         finally:
             if not finished_cleanly and not pump_failed:
                 self._abort(request.request_id)
-            self._queues.pop(request.request_id, None)
+            self._remove_queue(request.request_id, queue)
+            if not pre_reserved:
+                self._release_request_ids((request.request_id,))
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         if request.sampling_params.n <= 1:
             return await self._generate_one(request)
         subs = self._sub_requests(request)
-        results = await asyncio.gather(*(self._generate_one(sub) for sub in subs))
+        request_ids = tuple(sub.request_id for sub in subs)
+        self._reserve_request_ids(request_ids)
+        tasks: list[asyncio.Task] = []
+        try:
+            tasks = [
+                asyncio.create_task(self._generate_one(sub, pre_reserved=True))
+                for sub in subs
+            ]
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            self._release_request_ids(request_ids)
         latest = {
             index: StreamUpdate(
                 outputs=result.completions[0].token_ids,
@@ -390,7 +449,9 @@ class KairyuBackend:
         }
         return self._merged(request, latest, finished=True)
 
-    async def _stream_one(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
+    async def _stream_one(
+        self, request: GenerationRequest
+    ) -> AsyncIterator[GenerationResult]:
         queue = self._submit(request)
         emitted = -1
         finished_cleanly = False
@@ -411,7 +472,8 @@ class KairyuBackend:
         finally:
             if not finished_cleanly and not pump_failed:
                 self._abort(request.request_id)
-            self._queues.pop(request.request_id, None)
+            self._remove_queue(request.request_id, queue)
+            self._release_request_ids((request.request_id,))
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         if request.sampling_params.n <= 1:
@@ -422,14 +484,20 @@ class KairyuBackend:
         # completions seen so far (MockBackend semantics — the SSE layer emits
         # finish chunks from the LAST partial's completions)
         subs = self._sub_requests(request)
-        queues = {index: self._submit(sub) for index, sub in enumerate(subs)}
-        pending = {
-            index: asyncio.ensure_future(queue.get()) for index, queue in queues.items()
-        }
+        request_ids = tuple(sub.request_id for sub in subs)
+        self._reserve_request_ids(request_ids)
+        queues: dict[int, asyncio.Queue] = {}
+        pending: dict[int, asyncio.Future] = {}
         latest: dict[int, StreamUpdate] = {}
         finished: set[int] = set()
         pump_failed = False
         try:
+            for index, sub in enumerate(subs):
+                queues[index] = self._submit(sub, pre_reserved=True)
+            pending = {
+                index: asyncio.ensure_future(queue.get())
+                for index, queue in queues.items()
+            }
             while len(finished) < len(subs):
                 done, _ = await asyncio.wait(
                     pending.values(), return_when=asyncio.FIRST_COMPLETED
@@ -456,8 +524,9 @@ class KairyuBackend:
         finally:
             for task in pending.values():
                 task.cancel()
-            for index in range(len(subs)):
-                self._queues.pop(f"{request.request_id}#c{index}", None)
+            for index, queue in queues.items():
+                self._remove_queue(subs[index].request_id, queue)
+            self._release_request_ids(request_ids)
 
     async def shutdown(self) -> None:
         if self._pump_task is not None:
