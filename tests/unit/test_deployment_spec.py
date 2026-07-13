@@ -3,9 +3,14 @@
 from textwrap import indent
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
-from kairyu.deploy.spec import BackendSpec, load_deployment_spec
+from kairyu.deploy.spec import (
+    BackendSpec,
+    _UniqueKeySafeLoader,
+    load_deployment_spec,
+)
 
 GATEWAY_YAML = """
 server:
@@ -88,6 +93,25 @@ limits:
         spec.tenants.limits["team-a"].requests_per_minute = 1
 
 
+def test_tenant_api_keys_are_internal_but_excluded_from_repr_and_dumps(monkeypatch):
+    api_secret = "deployment-api-secret"
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", api_secret)
+    spec = load_deployment_spec(
+        _deployment_with_tenants(
+            f"""key_tenants: {{{api_secret}: team-a}}
+limits:
+  team-a: {{requests_per_minute: 60}}"""
+        )
+    )
+
+    assert spec.tenants is not None
+    assert spec.tenants.key_tenants == {api_secret: "team-a"}
+    assert "key_tenants" not in spec.tenants.model_dump()
+    assert "key_tenants" not in spec.model_dump()["tenants"]
+    for external_form in (repr(spec.tenants), repr(spec), spec.model_dump_json()):
+        assert api_secret not in external_form
+
+
 def test_tenant_section_rejects_unknown_mapping_without_leaking_resolved_keys(
     monkeypatch,
 ):
@@ -152,6 +176,39 @@ limits:
         )
 
 
+@pytest.mark.parametrize(
+    ("tenants", "unknown_field", "input_secret"),
+    [
+        (
+            "key_tenant: {leaked-input-secret: team-a}",
+            "key_tenant",
+            "leaked-input-secret",
+        ),
+        (
+            """key_tenants: {valid-secret: team-a}
+limits:
+  team-a: {requests_per_mintue: 60}""",
+            "requests_per_mintue",
+            "valid-secret",
+        ),
+    ],
+)
+def test_tenant_section_rejects_unknown_fields_without_leaking_input(
+    monkeypatch,
+    tenants,
+    unknown_field,
+    input_secret,
+):
+    monkeypatch.setenv("KAIRYU_TENANT_KEYS", "valid-secret")
+
+    with pytest.raises(ValidationError) as exc_info:
+        load_deployment_spec(_deployment_with_tenants(tenants))
+
+    message = str(exc_info.value)
+    assert unknown_field in message
+    assert input_secret not in message
+
+
 def test_duplicate_nested_tenant_mapping_key_is_rejected(monkeypatch):
     monkeypatch.setenv("KAIRYU_TENANT_KEYS", "key-a")
     yaml_text = _deployment_with_tenants(
@@ -182,6 +239,21 @@ engines:
 
     assert spec.engines["m"].backend == "mock"
     assert spec.engines["m"].health_url == "http://override/readyz"
+
+
+def test_duplicate_key_loader_preserves_recursive_alias_identity():
+    yaml_text = """recursive: &recursive
+  self: *recursive
+engines:
+  m: {backend: mock}
+"""
+
+    loaded = yaml.load(yaml_text, Loader=_UniqueKeySafeLoader)
+
+    recursive = loaded["recursive"]
+    assert recursive["self"] is recursive
+    spec = load_deployment_spec(yaml_text)
+    assert spec.engines["m"].backend == "mock"
 
 
 def test_tenants_absent_does_not_resolve_api_key_environment(monkeypatch):

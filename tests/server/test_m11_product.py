@@ -114,6 +114,14 @@ class TestOrchestratorSurface:
 
 
 class TestTenancy:
+    def test_config_repr_excludes_api_key_mapping(self):
+        api_secret = "tenant-config-api-secret"
+        config = TenantConfig(key_tenants={api_secret: "tenant-a"})
+
+        assert config.tenant_for_key(api_secret) == "tenant-a"
+        assert api_secret not in repr(config)
+        assert "key_tenants" not in repr(config)
+
     def test_from_mapping_builds_distinct_tenants_and_copies_inputs(self):
         key_tenants = {"key-a": "tenant-a", "key-b": "tenant-b"}
         limits = {

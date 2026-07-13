@@ -85,22 +85,34 @@ class BatchSection(BaseModel):
 
 
 class TenantLimitsSection(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
     requests_per_minute: int = Field(default=600, ge=1)
     tokens_per_minute: int = Field(default=200_000, ge=1)
 
 
 class TenantSection(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
     default_tenant: str = "default"
-    key_tenants: dict[str, str] = Field(default_factory=dict, repr=False)
+    key_tenants: dict[str, str] = Field(
+        default_factory=dict,
+        exclude=True,
+        repr=False,
+    )
     limits: dict[str, TenantLimitsSection] = Field(default_factory=dict)
 
 
 class DeploymentSpec(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     server: ServerSection = ServerSection()
     engines: dict[str, BackendSpec] = Field(default_factory=dict)
@@ -179,15 +191,26 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
         self._index_paths(node, ())
         return self.construct_document(node)
 
-    def _index_paths(self, node: Node, path: tuple[str, ...]) -> None:
+    def _index_paths(
+        self,
+        node: Node,
+        path: tuple[str, ...],
+        visited: set[int] | None = None,
+    ) -> None:
+        if visited is None:
+            visited = set()
+        identity = id(node)
+        if identity in visited:
+            return
+        visited.add(identity)
         if isinstance(node, MappingNode):
-            self._mapping_paths[id(node)] = path
+            self._mapping_paths[identity] = path
             for key_node, value_node in node.value:
                 segment = key_node.value if isinstance(key_node, ScalarNode) else "<key>"
-                self._index_paths(value_node, (*path, segment))
+                self._index_paths(value_node, (*path, segment), visited)
         elif isinstance(node, SequenceNode):
             for index, value_node in enumerate(node.value):
-                self._index_paths(value_node, (*path, f"[{index}]"))
+                self._index_paths(value_node, (*path, f"[{index}]"), visited)
 
 
 def _construct_unique_mapping(
@@ -208,7 +231,9 @@ def _construct_unique_mapping(
         if duplicate:
             path = ".".join(loader._mapping_paths.get(id(node), ())) or "<root>"
             raise ValueError(f"duplicate mapping key {key!r} at {path}")
-    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+    mapping: dict[object, object] = {}
+    yield mapping
+    mapping.update(yaml.SafeLoader.construct_mapping(loader, node, deep=deep))
 
 
 _UniqueKeySafeLoader.add_constructor(

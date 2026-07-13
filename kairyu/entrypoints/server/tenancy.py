@@ -29,7 +29,7 @@ class TenantLimits:
 class TenantConfig:
     """key -> tenant mapping plus per-tenant limits."""
 
-    key_tenants: dict[str, str] = field(default_factory=dict)
+    key_tenants: dict[str, str] = field(default_factory=dict, repr=False)
     limits: dict[str, TenantLimits] = field(default_factory=dict)
     default_tenant: str = "default"
 
