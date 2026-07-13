@@ -113,6 +113,34 @@ class TestRadixKvEvents:
         cache.commit_and_release(allocation, output_tokens=(), decode_pages=())
         assert [e["type"] for e in events] == ["BlockStored"]
 
+    def test_reentrant_block_stored_sink_emits_once_and_publishes_cache(self):
+        events: list[dict] = []
+        allocation_holder = []
+        attempts = 0
+
+        def reentrant_sink(event):
+            nonlocal attempts
+            attempts += 1
+            cache.mark_computed(allocation_holder[0])
+            if attempts == 1:
+                raise RuntimeError("event sink failed")
+            events.append(event)
+
+        cache = RadixKVCache(num_pages=8, page_size=4, event_sink=reentrant_sink)
+        allocation = cache.allocate(tuple(range(8)))
+        allocation_holder.append(allocation)
+
+        with pytest.raises(RuntimeError, match="event sink failed"):
+            cache.mark_computed(allocation)
+        cache.mark_computed(allocation)
+
+        assert attempts == 2
+        assert [event["type"] for event in events] == ["BlockStored"]
+        cache.free(allocation)
+        cache_hit = cache.allocate(tuple(range(8)))
+        assert cache_hit.num_cached_tokens == 8
+        cache.release_preempted(cache_hit)
+
     def test_decode_extension_emits_stored(self):
         cache, events = self._cache_with_sink()
         allocation = cache.allocate(tuple(range(8)))

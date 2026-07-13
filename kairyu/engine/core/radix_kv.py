@@ -22,7 +22,16 @@ class KVCacheFull(MemoryError):
 
 
 class _Node:
-    __slots__ = ("key", "pages", "children", "parent", "ref_count", "last_access", "computed")
+    __slots__ = (
+        "key",
+        "pages",
+        "children",
+        "parent",
+        "ref_count",
+        "last_access",
+        "computed",
+        "publishing",
+    )
 
     def __init__(
         self,
@@ -40,6 +49,9 @@ class _Node:
         # uncomputed nodes so chunked prefill in progress is never shared
         # as if it were valid cache (garbage-KV protection).
         self.computed = False
+        # Suppress same-node reentry while BlockStored is being delivered.
+        # This is reset even when the sink fails so callers can retry.
+        self.publishing = False
 
 
 @dataclass(frozen=True)
@@ -299,9 +311,14 @@ class RadixKVCache:
     def mark_computed(self, allocation: KVAllocation) -> None:
         """Record that the allocation's prefill KV has been written (prefill done)."""
         if allocation._tree_inserted and allocation.new_full_pages:
-            if not allocation._node.computed:  # guard the _release double-fire
-                self._emit_stored(allocation._node)
-                allocation._node.computed = True
+            node = allocation._node
+            if not node.computed and not node.publishing:
+                node.publishing = True
+                try:
+                    self._emit_stored(node)
+                    node.computed = True
+                finally:
+                    node.publishing = False
 
     def _release(self, allocation: KVAllocation) -> None:
         if allocation._freed:
