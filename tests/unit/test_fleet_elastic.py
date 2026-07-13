@@ -1,6 +1,7 @@
 """m10a gates: dynamic membership, HRW remap property, drain, registry,
 reconciler, tracing spans, helm render."""
 
+import asyncio
 import shutil
 import subprocess
 
@@ -51,6 +52,21 @@ class ShutdownRecordingBackend(MockBackend):
         self.shutdown_calls += 1
         if self.fail_shutdown:
             raise RuntimeError(f"{self.name} shutdown failed")
+
+
+class BlockingBackend(ShutdownRecordingBackend):
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate(self, request):
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return GenerationResult(
+            request_id="req", prompt="p", completions=(), finished=True
+        )
 
 
 class MutableDiscovery:
@@ -457,6 +473,114 @@ class TestRegistryAndReconciler:
         assert pool._entries["replica"].backend is new
         assert pool._select(_request())[0] == "replica"
         assert new.shutdown_calls == 0
+
+    async def test_same_id_external_readd_acquires_fresh_removal_drain(self):
+        old = BlockingBackend("old")
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery(
+            {
+                "replica": registry_module.ReplicaConfig(
+                    address="http://replica/v1", model="llama"
+                )
+            }
+        )
+        reconciler = PoolReconciler(pool, source)
+        await reconciler.reconcile()
+
+        old_request = asyncio.create_task(pool.generate(_request()))
+        await old.started.wait()
+        source.members.clear()
+        blocked = await reconciler.reconcile()
+        assert blocked == {
+            "added": [],
+            "draining": ["replica"],
+            "removed": [],
+        }
+        assert pool.is_draining("replica") is True
+
+        old.release.set()
+        await old_request
+        await pool.remove_replica("replica")
+        fresh = BlockingBackend("fresh")
+        pool.add_replica("replica", fresh)
+
+        fresh_request = asyncio.create_task(pool.generate(_request()))
+        await fresh.started.wait()
+        try:
+            retried = await reconciler.reconcile()
+
+            assert retried == {
+                "added": [],
+                "draining": ["replica"],
+                "removed": [],
+            }
+            assert pool.is_draining("replica") is True
+            with pytest.raises(RuntimeError, match="eligible"):
+                await pool.generate(_request())
+        finally:
+            fresh.release.set()
+            await fresh_request
+
+        completed = await reconciler.reconcile()
+        assert completed == {
+            "added": [],
+            "draining": [],
+            "removed": ["replica"],
+        }
+        assert pool.replica_ids == ()
+        assert fresh.shutdown_calls == 1
+
+    async def test_same_id_external_readd_with_desire_baselines_fresh_entry(self):
+        old = BlockingBackend("old")
+        old_config = registry_module.ReplicaConfig(
+            address="http://old/v1", model="llama"
+        )
+        new_config = registry_module.ReplicaConfig(
+            address="http://new/v1", model="llama"
+        )
+        pool = ReplicaPool({"replica": old})
+        source = MutableDiscovery({"replica": old_config})
+        candidates = []
+
+        def factory(identity):
+            candidate = ShutdownRecordingBackend(
+                f"candidate-{len(candidates) + 1}"
+            )
+            candidates.append(candidate)
+            return candidate, None
+
+        reconciler = PoolReconciler(pool, source, factory=factory)
+        await reconciler.reconcile()
+
+        old_request = asyncio.create_task(pool.generate(_request()))
+        await old.started.wait()
+        source.members["replica"] = new_config
+        blocked = await reconciler.reconcile()
+        assert blocked == {
+            "added": [],
+            "draining": ["replica"],
+            "removed": [],
+        }
+        assert len(candidates) == 1
+        assert candidates[0].shutdown_calls == 1
+
+        old.release.set()
+        await old_request
+        await pool.remove_replica("replica")
+        fresh = ShutdownRecordingBackend("fresh")
+        pool.add_replica("replica", fresh)
+        pool.drain("replica")
+
+        restored = await reconciler.reconcile()
+
+        assert restored == {"added": [], "draining": [], "removed": []}
+        assert len(candidates) == 1
+        assert fresh.shutdown_calls == 0
+        assert pool.is_draining("replica") is True
+        assert pool.is_manually_draining("replica") is True
+        pool.cancel_drain("replica")
+        await pool.generate(_request())
+        assert fresh.calls == 1
 
     async def test_reconciler_does_not_cancel_unowned_drain(self):
         old = ShutdownRecordingBackend("old")

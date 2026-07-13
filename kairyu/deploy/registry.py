@@ -160,6 +160,12 @@ class PoolReconciler:
         self._default_model = default_model
         self._applied: dict[str, ReplicaIdentity] = {}
         self._draining: dict[str, DrainLease] = {}
+        self._entry_generations: dict[str, object] = {}
+
+    def _forget_tracking(self, replica_id: str) -> None:
+        self._applied.pop(replica_id, None)
+        self._draining.pop(replica_id, None)
+        self._entry_generations.pop(replica_id, None)
 
     def _release_drain(self, replica_id: str) -> None:
         lease = self._draining.pop(replica_id, None)
@@ -186,11 +192,25 @@ class PoolReconciler:
         }
         current_ids = self._pool.replica_ids
         current = set(current_ids)
-        tracked = set(self._applied) | set(self._draining)
+        current_generations = {
+            replica_id: self._pool.entry_generation(replica_id)
+            for replica_id in current_ids
+        }
+        tracked = (
+            set(self._applied) | set(self._draining) | set(self._entry_generations)
+        )
         for replica_id in tracked - current:
-            self._applied.pop(replica_id, None)
-            self._draining.pop(replica_id, None)
+            self._forget_tracking(replica_id)
         for replica_id in current_ids:
+            generation = current_generations[replica_id]
+            previous_generation = self._entry_generations.get(replica_id)
+            if (
+                previous_generation is not None
+                and previous_generation is not generation
+            ):
+                self._applied.pop(replica_id, None)
+                self._draining.pop(replica_id, None)
+            self._entry_generations[replica_id] = generation
             if replica_id not in desired:
                 continue
             self._applied.setdefault(replica_id, desired[replica_id])
@@ -219,6 +239,9 @@ class PoolReconciler:
                     raise
                 self._applied[replica_id] = identity
                 self._draining.pop(replica_id, None)
+                self._entry_generations[replica_id] = self._pool.entry_generation(
+                    replica_id
+                )
                 added.append(replica_id)
 
         for replica_id, identity in desired.items():
@@ -245,15 +268,13 @@ class PoolReconciler:
                 continue
             except BaseException:
                 if replica_id not in self._pool.replica_ids:
-                    self._applied.pop(replica_id, None)
-                    self._draining.pop(replica_id, None)
+                    self._forget_tracking(replica_id)
                 await shutdown_all(
                     (candidate,), f"replacement candidate {replica_id!r}"
                 )
                 raise
 
-            self._applied.pop(replica_id, None)
-            self._draining.pop(replica_id, None)
+            self._forget_tracking(replica_id)
             try:
                 self._pool.add_replica(
                     replica_id, candidate, health_url=health_url
@@ -267,6 +288,9 @@ class PoolReconciler:
                 self._pool.drain(replica_id)
             self._applied[replica_id] = identity
             self._draining.pop(replica_id, None)
+            self._entry_generations[replica_id] = self._pool.entry_generation(
+                replica_id
+            )
             removed.append(replica_id)
             added.append(replica_id)
 
@@ -286,11 +310,9 @@ class PoolReconciler:
                     draining.append(replica_id)
             except BaseException:
                 if replica_id not in self._pool.replica_ids:
-                    self._applied.pop(replica_id, None)
-                    self._draining.pop(replica_id, None)
+                    self._forget_tracking(replica_id)
                 raise
             else:
-                self._applied.pop(replica_id, None)
-                self._draining.pop(replica_id, None)
+                self._forget_tracking(replica_id)
                 removed.append(replica_id)
         return {"added": added, "draining": draining, "removed": removed}

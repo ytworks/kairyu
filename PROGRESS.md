@@ -62,6 +62,11 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-13 — [amendment] Elastic ownership follows same-ID entry generations
+- What: `ReplicaPool` now gives every backend entry an opaque generation token, and `PoolReconciler` binds applied identities and drain leases to that generation. An external remove/re-add of the same ID discards old tracking; desired absence acquires a fresh lease on the new entry, while desired presence baselines it without factory, replacement, or shutdown side effects. Fresh-entry manual drains remain authoritative.
+- Why: Comparing only replica ID sets missed a complete entry replacement between reconciliation ticks, so an old lease could suppress draining of the fresh entry and prevent removal from converging.
+- Refs: issue #41; `docs/design/m10-fleet-cpu.md` D1/D2 and A14; `kairyu/orchestration/replica.py`, `kairyu/deploy/registry.py`
+
 ### 2026-07-13 — [amendment] Manual drains follow same-ID backend replacement
 - What: A successful identity replacement now carries the manual drain owner from the old pool entry to the new backend entry while discarding the reconciler lease. The pool exposes a manual-only drain query; the replacement backend starts with fresh health and outstanding state but remains non-eligible until manual undrain.
 - Why: Manual ownership was stored on the backend entry, so deleting the old entry and adding the replacement silently made an operator-drained logical replica eligible.

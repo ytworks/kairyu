@@ -27,10 +27,12 @@ otherwise removes ownership and awaits shared `shutdown_all` exactly once),
 `drain(replica_id)` / `cancel_drain(replica_id)` (acquire/release only the
 manual owner), `acquire_drain(replica_id) -> DrainLease` /
 `release_drain(replica_id, lease)` (opaque independent owners),
-`is_manually_draining(replica_id)` (manual owner only), and
+`is_manually_draining(replica_id)` (manual owner only),
+`entry_generation(replica_id)` (opaque identity for one entry lifetime), and
 `probe(replica_id)`. A replica is draining while the manual owner or any lease
-is active. Releasing one owner does not alter other owners, health, or outstanding
-state. HRW hashing keys on `replica_id` STRINGS (not indices)
+is active. Removing and re-adding the same ID creates a new entry generation.
+Releasing one owner does not alter other owners, health, or outstanding state.
+HRW hashing keys on `replica_id` STRINGS (not indices)
 — adding/removing a replica remaps only ~1/N sessions (property test).
 Constructor accepts `dict[str, EngineBackend]` or the legacy sequence
 (auto-ids `"0".."N-1"`, existing tests unchanged). Selection precedence:
@@ -53,7 +55,8 @@ The k8s-endpoints source remains a THIN deploy-day adapter behind that protocol.
 identities to `Callable[[ReplicaIdentity], (EngineBackend, health_url)]`.
 Discovery's non-empty model wins over the default and its auth value is complete,
 including explicit `None`; a missing model fails before mutation. Reconciliation
-tracks applied identities and runs deterministic phases: add missing IDs in
+tracks applied identities together with each pool entry's opaque generation and
+runs deterministic phases: add missing IDs in
 desired order, construct-before-drain replacement of changed identities in
 desired order, then drain/remove absent IDs in pool order. Removal is awaited and
 closes the removed backend through `shutdown_all`; unused candidates are also
@@ -66,6 +69,12 @@ cannot release a reconciler lease. Successful same-ID replacement transfers only
 the manual owner to the new backend entry; the reconciler lease is not transferred,
 and the new entry starts with default health and outstanding state. Lease tracking
 is cleared when a replica disappears or a new backend is successfully installed.
+If an external caller removes and re-adds the same ID between ticks, the changed
+generation invalidates every applied identity and lease owned for the old entry.
+An absent desired ID then receives a fresh lease on the new entry; a present desired
+ID baselines the externally installed entry at the current desired identity without
+factory, replacement, or shutdown side effects. A fresh entry's manual owner is
+never changed by generation reconciliation.
 Server: `POST /admin/drain` marks the pool replica draining and flips `/readyz`
 to 503 (existing prober contract).
 
@@ -188,4 +197,8 @@ over (α, β) (pure function over the dataset; no online learning).
   A successful same-ID replacement carries the manual owner to the new entry but
   not the reconciler lease; health and outstanding state reset with the backend
   entry. Removal, disappearance, and successful installation clear reconciler
-  tracking. Releasing any owner never changes health or outstanding state.
+  tracking. Applied identities and leases are bound to the pool's opaque entry
+  generation, so an external same-ID remove/add also clears old tracking: desired
+  absence acquires a fresh lease, while desired presence baselines the fresh entry
+  without replacing it. This never clears a fresh entry's manual owner. Releasing
+  any owner never changes health or outstanding state.

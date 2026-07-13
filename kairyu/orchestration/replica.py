@@ -51,6 +51,7 @@ def _rendezvous_score(session_id: str, replica_id: str) -> bytes:
 class _ReplicaEntry:
     backend: EngineBackend
     health_url: str | None = None
+    generation: object = field(default_factory=object, compare=False)
     outstanding: int = 0
     consecutive_failures: int = 0
     manual_draining: bool = False
@@ -168,6 +169,10 @@ class ReplicaPool:
 
     def health_url(self, replica_id: str) -> str | None:
         return self._entry(replica_id).health_url
+
+    def entry_generation(self, replica_id: str) -> object:
+        """Opaque token that changes whenever a replica ID is re-added."""
+        return self._entry(replica_id).generation
 
     def _entry(self, replica_id: str) -> _ReplicaEntry:
         entry = self._entries.get(replica_id)
