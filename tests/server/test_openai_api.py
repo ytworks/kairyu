@@ -3,8 +3,11 @@ import json
 import httpx
 import pytest
 
+from kairyu.engine.backend import GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app
+from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
 
 TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
@@ -164,10 +167,13 @@ async def test_completions_invalid_sampling_returns_400(app):
 class StubBackend:
     """Fixed completions / optional failure, for finish_reason and error tests."""
 
-    def __init__(self, text="stub answer", finish_reason="length", error=None):
+    def __init__(
+        self, text="stub answer", finish_reason="length", error=None, usage=None
+    ):
         self._text = text
         self._finish_reason = finish_reason
         self._error = error
+        self._usage = usage
         self.calls = 0
 
     async def generate(self, request):
@@ -185,6 +191,7 @@ class StubBackend:
                     index=0, text=self._text, token_ids=(), finish_reason=self._finish_reason
                 ),
             ),
+            usage=self._usage,
         )
 
     async def stream(self, request):
@@ -468,6 +475,106 @@ async def test_unsatisfied_tool_choice_is_controlled_upstream_failure(
     assert response.json()["error"]["type"] == "upstream_error"
     assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
     assert engine.calls == 1
+
+
+async def test_malformed_auto_tool_output_records_actual_backend_usage(tmp_path):
+    ledger_path = tmp_path / "usage.jsonl"
+    text = "before <tool_call>[]</tool_call> after"
+    engine = StubBackend(
+        text=text,
+        finish_reason="stop",
+        usage=GenerationUsage(prompt_tokens=7, completion_tokens=3),
+    )
+    app = create_app(
+        engines={"stub": engine},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+    body = _chat_body("weather", tools=[_WEATHER_TOOL], tool_choice="auto")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["tool_calls"] is None
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": 7,
+        "completion_tokens": 3,
+    }
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("text", "tool_choice"),
+    [
+        ("no tool call", "required"),
+        (
+            '<tool_call>{"name":"other","arguments":{}}</tool_call>',
+            {"type": "function", "function": {"name": "get_weather"}},
+        ),
+    ],
+)
+async def test_unsatisfied_tool_choice_is_metered_once(
+    tmp_path, stream, text, tool_choice
+):
+    ledger_path = tmp_path / "usage.jsonl"
+    engine = StubBackend(
+        text=text,
+        finish_reason="stop",
+        usage=GenerationUsage(prompt_tokens=11, completion_tokens=5),
+    )
+    app = create_app(
+        engines={"stub": engine},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        tool_choice=tool_choice,
+        stream=stream,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+    assert engine.calls == 1
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": 11,
+        "completion_tokens": 5,
+    }
+
+
+async def test_named_tool_stream_includes_per_call_index():
+    text = '<tool_call>{"name":"get_weather","arguments":{}}</tool_call>'
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+        stream=True,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    chunks = [
+        json.loads(line[len("data: "):])
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    calls = [
+        call
+        for chunk in chunks
+        for choice in chunk["choices"]
+        for call in choice["delta"].get("tool_calls") or []
+    ]
+    assert [call["index"] for call in calls] == [0]
 
 
 @pytest.mark.parametrize(

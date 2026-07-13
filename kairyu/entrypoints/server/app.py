@@ -886,10 +886,9 @@ def create_app(
             result.usage,
             normalized_tool_choice=normalized_tool_choice,
         )
-        if not _tool_choice_is_satisfied(response.choices, normalized_tool_choice):
-            # Task 3 moves usage recording ahead of this controlled failure.
-            return _tool_choice_not_satisfied()
         _record_usage(http_request, request.model, response.usage)
+        if not _tool_choice_is_satisfied(response.choices, normalized_tool_choice):
+            return _tool_choice_not_satisfied()
         if request.stream:
             # Tool calling + streaming: generate fully, then emit structured chunks so
             # tool_calls and finish_reason stay correct.
