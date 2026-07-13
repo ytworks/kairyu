@@ -20,6 +20,10 @@ class _DeterministicRunner:
     def __init__(self, offset: int = 0) -> None:
         self.offset = offset
         self.states_seen: list[dict] = []
+        self.released: list[str] = []
+
+    def release(self, request_id: str) -> None:
+        self.released.append(request_id)
 
     def execute(self, scheduled, states) -> dict[str, tuple[SampledToken, ...]]:
         self.states_seen.append(dict(states))
@@ -124,3 +128,13 @@ def test_rank_divergence_raises_runtime_error():
 def test_empty_schedule_returns_empty_sampled_dict():
     runner = _tp_runner(2)
     assert runner.execute((), {}) == {}
+
+
+def test_release_is_forwarded_to_every_rank_runner():
+    runner = _tp_runner(3)
+    runner.release("finished")
+    assert [rank.released for rank in runner._rank_runners] == [
+        ["finished"],
+        ["finished"],
+        ["finished"],
+    ]

@@ -26,8 +26,7 @@ def add_health_routes(
         # keys set, behavior is unchanged (auth-gated when api keys exist).
         if not admin_key_set:
             return None
-        caller = request.scope.get("state", {}).get("api_key")
-        if caller in admin_key_set:
+        if request.scope.get("state", {}).get("is_admin"):
             return None
         return JSONResponse(
             status_code=403,
@@ -77,7 +76,9 @@ def add_health_routes(
                 status_code=503, content={"status": "draining"}
             )
         # Engines are constructed by the time the app exists; pools additionally
-        # need >=1 healthy replica or every request would fail.
+        # need >=1 validated, non-ejected replica or every request would fail.
+        # Declared remote readiness URLs therefore remain false here until the
+        # startup prober succeeds; backend traffic is never implicit validation.
         degraded = {
             name: engine.healthy
             for name, engine in engines.items()

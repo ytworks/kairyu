@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from kairyu.engine.core.step_input import StateSync, StepDelta
 
 _SHUTDOWN = None
+
+
+@dataclass(frozen=True)
+class ReleaseRequest:
+    request_id: str
 
 
 def _config_fingerprint(model_dir: str) -> str:
@@ -64,6 +70,14 @@ class DistTPModelRunner:
         view = self._sync.apply(delta)  # reconstructs snapshot_step()'s states exactly
         return self._local.execute(chunks, view)
 
+    def release(self, request_id: str) -> None:
+        try:
+            self._comm.broadcast(ReleaseRequest(request_id), src=0)
+        finally:
+            release = getattr(self._local, "release", None)
+            if release is not None:
+                release(request_id)
+
     def shutdown(self) -> None:
         self._comm.broadcast(_SHUTDOWN, src=0)
 
@@ -79,13 +93,26 @@ def worker_step_loop(comm, local_runner) -> int:
         payload = comm.broadcast(_SHUTDOWN, src=0)
         if payload is _SHUTDOWN or payload is None:
             return steps
+        if isinstance(payload, ReleaseRequest):
+            release = getattr(local_runner, "release", None)
+            if release is not None:
+                release(payload.request_id)
+            continue
         assert isinstance(payload, StepDelta)
         view = sync.apply(payload)  # same delta -> same reconstructed states
         local_runner.execute(payload.chunks, view)
         steps += 1
 
 
-def build_tp_runner(model_dir: str, tp: int, rank: int, comm, num_pages: int, page_size: int):
+def build_tp_runner(
+    model_dir: str,
+    tp: int,
+    rank: int,
+    comm,
+    num_pages: int,
+    page_size: int,
+    vocab: list[str],
+):
     """The per-rank sharded PagedModelRunner (pool sized from the tp_view config)."""
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
@@ -100,13 +127,18 @@ def build_tp_runner(model_dir: str, tp: int, rank: int, comm, num_pages: int, pa
         num_kv_heads=local_config.kv_cache_num_heads,
         head_dim=local_config.kv_cache_head_dim,
     )
-    runner = PagedModelRunner(model, pool, sampler=Sampler())
+    vocab_table = list(vocab)
+    runner = PagedModelRunner(
+        model,
+        pool,
+        sampler=Sampler(vocab_provider=lambda: vocab_table),
+    )
     return runner, full_config
 
 
 def _tp_worker_entry(
     spawn_index: int, world_size: int, init_file: str,
-    model_dir: str, num_pages: int, page_size: int,
+    model_dir: str, num_pages: int, page_size: int, vocab: list[str],
 ) -> None:
     """Spawned worker (rank = spawn_index + 1; rank 0 is the driver process).
 
@@ -121,7 +153,9 @@ def _tp_worker_entry(
     torch.set_num_threads(1)
     init_distributed(rank, world_size, f"file://{init_file}")
     comm = TorchDistCommunicator()
-    runner, _ = build_tp_runner(model_dir, world_size, rank, comm, num_pages, page_size)
+    runner, _ = build_tp_runner(
+        model_dir, world_size, rank, comm, num_pages, page_size, vocab
+    )
     handshake = comm.broadcast(None, src=0)
     validate_handshake(handshake, model_dir, num_pages, page_size)
     try:
@@ -140,7 +174,14 @@ class DistTPLauncher:
     terminating None (worker_step_loop returns), joins the workers, and destroys
     the rank-0 group — so ``kairyu serve --tp N`` starts and stops cleanly."""
 
-    def __init__(self, model_dir: str, tp: int, num_pages: int, page_size: int) -> None:
+    def __init__(
+        self,
+        model_dir: str,
+        tp: int,
+        num_pages: int,
+        page_size: int,
+        vocab: list[str],
+    ) -> None:
         import tempfile
 
         import torch.multiprocessing as mp
@@ -151,14 +192,14 @@ class DistTPLauncher:
         self._init_file = tempfile.mktemp(prefix="kairyu-tp-")  # noqa: S306
         self._ctx = mp.spawn(
             _tp_worker_entry,
-            args=(tp, self._init_file, model_dir, num_pages, page_size),
+            args=(tp, self._init_file, model_dir, num_pages, page_size, vocab),
             nprocs=tp - 1,
             join=False,
         )
         init_distributed(0, tp, f"file://{self._init_file}")
         self._comm = TorchDistCommunicator()
         runner, self.full_config = build_tp_runner(
-            model_dir, tp, 0, self._comm, num_pages, page_size
+            model_dir, tp, 0, self._comm, num_pages, page_size, vocab
         )
         self._comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
         self.runner = DistTPModelRunner(self._comm, runner)

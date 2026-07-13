@@ -1,5 +1,8 @@
 """DeploymentSpec -> app builder: pool wiring, affinity over HTTP, lifespan (gate C1)."""
 
+import asyncio
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -18,6 +21,8 @@ pools:
       - { backend: mock }
       - { backend: mock }
 """
+
+GATEWAY_GPU_YAML = Path(__file__).parents[2] / "deploy/compose/gateway-gpu.yaml"
 
 
 class _ShutdownBackend(MockBackend):
@@ -61,6 +66,16 @@ async def test_pool_is_served_and_affinity_sticks():
     assert 'kairyu_pool_decisions_total{pool="pooled",reason="least_outstanding"} 1.0' in metrics
 
 
+async def test_gpu_gateway_exposes_canonical_default_model():
+    app = build_app_from_config(GATEWAY_GPU_YAML)
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        ids = {model["id"] for model in models.json()["data"]}
+
+    assert "default" in ids
+    assert "llama" not in ids
+
+
 async def test_header_session_takes_precedence_over_user():
     app = build_app_from_spec(load_deployment_spec(POOLED_YAML))
     async with _client(app) as client:
@@ -90,6 +105,57 @@ pools:
     async with app.router.lifespan_context(app):
         async with _client(app) as client:
             assert (await client.get("/health")).status_code == 200
+
+
+async def test_lifespan_immediate_probe_validates_only_ready_remote_replicas():
+    yaml_text = """
+pools:
+  remote:
+    replicas:
+      - backend: openai
+        options: { base_url: "http://gpu-0:8000/v1", model: "m", api_key_env: null }
+      - backend: openai
+        options: { base_url: "http://gpu-1:8000/v1", model: "m", api_key_env: null }
+    probe_interval_s: 60
+"""
+    app = build_app_from_spec(load_deployment_spec(yaml_text))
+    prober = app.state.probers[0]
+    pool = prober._pool
+    both_probed = asyncio.Event()
+    requests = 0
+
+    def probe_response(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 2:
+            both_probed.set()
+        if request.url.host == "gpu-0":
+            return httpx.Response(200, json={"status": "ready"})
+        return httpx.Response(503, json={"status": "starting"})
+
+    prober._client = httpx.AsyncClient(transport=httpx.MockTransport(probe_response))
+
+    # Initial URL mappings are applied during construction, before create_app
+    # exposes the routes or any backend request can be used as a health signal.
+    assert pool.healthy == (False, False)
+    async with _client(app) as client:
+        assert (await client.get("/readyz")).status_code == 503
+
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(both_probed.wait(), timeout=1)
+        for _ in range(10):
+            if pool.healthy == (True, False):
+                break
+            await asyncio.sleep(0)
+
+        async with _client(app) as client:
+            ready = await client.get("/readyz")
+            metrics = (await client.get("/metrics")).text
+
+        assert pool.healthy == (True, False)
+        assert ready.status_code == 200
+        assert 'kairyu_replica_healthy{pool="remote",replica="0"} 1.0' in metrics
+        assert 'kairyu_replica_healthy{pool="remote",replica="1"} 0.0' in metrics
 
 
 async def test_build_from_config_resolves_orchestrator_relative_to_file(tmp_path):

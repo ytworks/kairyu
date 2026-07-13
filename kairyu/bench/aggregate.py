@@ -7,8 +7,20 @@ partial/skip reasons so a degraded run is still an honest artifact.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from kairyu.bench.adapters import FUGU_ROW_ORDER, all_adapters
-from kairyu.bench.types import SCHEMA_VERSION, PairResult
+from kairyu.bench.adapters.base import normalize_base_url
+from kairyu.bench.types import (
+    SCHEMA_VERSION,
+    BenchTarget,
+    JudgeConfig,
+    PairResult,
+)
+
+
+def _resolved_identity(base_url: str, model: str) -> tuple[str, str]:
+    return normalize_base_url(base_url), model
 
 
 def build_scoreboard(
@@ -19,6 +31,8 @@ def build_scoreboard(
     environment: dict,
     pairs: list[PairResult],
     targets: list[str],
+    target_configs: Sequence[BenchTarget] | None = None,
+    judge: JudgeConfig | None = None,
 ) -> dict:
     display_names = {
         name: adapter.info.display_name for name, adapter in all_adapters().items()
@@ -33,11 +47,29 @@ def build_scoreboard(
             footnotes.append(text)
         return footnotes.index(text) + 1
 
-    # self-judging: a target graded by an LLM judge that IS that target biases the
-    # score in its own favor — flag those columns so the number is not read as
-    # independent (judge==target detection)
-    judge_model = (config.get("judge") or {}).get("model")
-    self_judged = [target for target in targets if judge_model and target == judge_model]
+    # Self-judging is an endpoint/model identity question, never a display-label
+    # comparison. Legacy artifacts without enough identity data fail closed as
+    # "independence unknown" instead of being declared independent.
+    configured_by_label = {
+        target.label(): target for target in (target_configs or ())
+    }
+    judge_requested = judge is not None and (
+        judge.base_url is not None or judge.model is not None
+    )
+    judge_identity = (
+        _resolved_identity(judge.base_url, judge.model)
+        if judge is not None and judge.enabled
+        else None
+    )
+    self_judged: list[str] = []
+    identity_unknown: list[str] = []
+    if judge_requested:
+        for label in targets:
+            target = configured_by_label.get(label)
+            if judge_identity is None or target is None:
+                identity_unknown.append(label)
+            elif _resolved_identity(target.base_url, target.model) == judge_identity:
+                self_judged.append(label)
 
     cells: dict[str, dict[str, dict]] = {}
     for benchmark in benchmarks:
@@ -57,7 +89,19 @@ def build_scoreboard(
             if pair.status in ("skipped", "partial", "failed") and pair.reason:
                 notes.append(footnote(f"{benchmark}/{target}: {pair.status} — {pair.reason}"))
             if target in self_judged:
-                notes.append(footnote(f"{target}: self-judged (judge model == target)"))
+                notes.append(
+                    footnote(
+                        f"{target}: self-judged "
+                        "(resolved judge endpoint/model == target)"
+                    )
+                )
+            if target in identity_unknown:
+                notes.append(
+                    footnote(
+                        f"{target}: judge independence unknown "
+                        "(resolved target or judge identity unavailable)"
+                    )
+                )
             cells[benchmark][target] = {
                 "status": pair.status,
                 "score": pair.score,
@@ -75,7 +119,8 @@ def build_scoreboard(
         "benchmarks": benchmarks,
         "display_names": {name: display_names.get(name, name) for name in benchmarks},
         "targets": targets,
-        "self_judged_targets": self_judged,  # judge model == target (biased) — flag it
+        "self_judged_targets": self_judged,
+        "judge_independence_unknown_targets": identity_unknown,
         "cells": cells,
         "footnotes": footnotes,
     }

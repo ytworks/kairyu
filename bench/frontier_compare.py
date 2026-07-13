@@ -2,9 +2,11 @@
 
 Methodology block (printed into the scoreboard): identical prompt set, N
 trials per prompt per target, streaming TTFT = first content chunk, TPOT =
-(last-first)/(tokens-1); quality proxy = response length + refusal rate
-only (real quality evals are out of scope). Targets are OpenAI-protocol
-endpoints — kairyu, OpenAI, or any proxy — configured by URL+key+model.
+(last content chunk-first content chunk)/(final streamed usage completion_tokens-1);
+quality proxy = response length + refusal rate only (real quality evals are out
+of scope). Targets are OpenAI-protocol endpoints — kairyu, OpenAI, or any proxy
+— configured by URL+key+model. Endpoints that omit usage retain TTFT/output
+characters but do not publish a TPOT value.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ class TrialResult:
     ttft_s: float
     tpot_s: float | None
     output_chars: int
+    completion_tokens: int | None = None
 
 
 @dataclass
@@ -63,6 +66,9 @@ class TargetReport:
             "ttft_p50_s": pct(ttfts, 0.5),
             "ttft_p95_s": pct(ttfts, 0.95),
             "tpot_p50_s": pct(tpots, 0.5),
+            "tpot_missing_usage_trials": sum(
+                trial.completion_tokens is None for trial in self.trials
+            ),
             "mean_output_chars": (
                 statistics.mean(t.output_chars for t in self.trials)
                 if self.trials
@@ -73,26 +79,49 @@ class TargetReport:
 
 async def run_trial(client, target: Target, prompt: str) -> TrialResult:
     start = time.perf_counter()
-    first = None
-    chunks = 0
+    first_content_time = None
+    last_content_time = None
     chars = 0
+    completion_tokens = None
     stream = await client.chat.completions.create(
         model=target.model,
         messages=[{"role": "user", "content": prompt}],
         stream=True,
+        stream_options={"include_usage": True},
         max_tokens=128,
     )
     async for chunk in stream:
+        usage = getattr(chunk, "usage", None)
+        reported_tokens = getattr(usage, "completion_tokens", None)
+        if (
+            isinstance(reported_tokens, int)
+            and not isinstance(reported_tokens, bool)
+            and reported_tokens >= 0
+        ):
+            completion_tokens = reported_tokens
         delta = chunk.choices[0].delta.content if chunk.choices else None
         if delta:
-            if first is None:
-                first = time.perf_counter()
-            chunks += 1
+            content_time = time.perf_counter()
+            if first_content_time is None:
+                first_content_time = content_time
+            last_content_time = content_time
             chars += len(delta)
     end = time.perf_counter()
-    ttft = (first or end) - start
-    tpot = (end - first) / (chunks - 1) if first and chunks > 1 else None
-    return TrialResult(ttft_s=ttft, tpot_s=tpot, output_chars=chars)
+    ttft = (first_content_time if first_content_time is not None else end) - start
+    tpot = None
+    if (
+        first_content_time is not None
+        and last_content_time is not None
+        and completion_tokens is not None
+        and completion_tokens >= 2
+    ):
+        tpot = (last_content_time - first_content_time) / (completion_tokens - 1)
+    return TrialResult(
+        ttft_s=ttft,
+        tpot_s=tpot,
+        output_chars=chars,
+        completion_tokens=completion_tokens,
+    )
 
 
 async def run_target(target: Target, prompts, trials: int) -> TargetReport:
@@ -115,9 +144,16 @@ def build_scoreboard(reports: list[TargetReport]) -> dict:
             "prompts": len(DEFAULT_PROMPTS),
             "metric_definitions": {
                 "ttft": "request start -> first content chunk (streaming)",
-                "tpot": "(last chunk - first chunk) / (chunks - 1)",
+                "tpot": (
+                    "(last content chunk - first content chunk) / "
+                    "(final streamed usage completion_tokens - 1); null when usage "
+                    "is missing or completion_tokens < 2"
+                ),
             },
-            "notes": "identical prompt set per target; quality proxy only",
+            "notes": (
+                "identical prompt set per target; quality proxy only; missing "
+                "streamed usage is counted and never replaced with SSE chunk count"
+            ),
         },
         "results": [report.summary() for report in reports],
     }
@@ -127,13 +163,17 @@ def render_markdown(scoreboard: dict) -> str:
     lines = [
         "# Frontier comparison",
         "",
-        "| target | model | trials | ttft p50 | ttft p95 | tpot p50 |",
-        "|---|---|---|---|---|---|",
+        (
+            "| target | model | trials | ttft p50 | ttft p95 | "
+            "token tpot p50 | tpot missing usage |"
+        ),
+        "|---|---|---|---|---|---|---|",
     ]
     for row in scoreboard["results"]:
         lines.append(
             f"| {row['target']} | {row['model']} | {row['trials']} "
-            f"| {row['ttft_p50_s']} | {row['ttft_p95_s']} | {row['tpot_p50_s']} |"
+            f"| {row['ttft_p50_s']} | {row['ttft_p95_s']} | {row['tpot_p50_s']} "
+            f"| {row['tpot_missing_usage_trials']} |"
         )
     return "\n".join(lines)
 

@@ -11,30 +11,63 @@ drain-then-remove and TOLERATE in-flight refusal (retried next tick — A6).
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from kairyu.orchestration.replica import ReplicaPool
+from kairyu.engine.backend import EngineBackend, shutdown_all
+from kairyu.orchestration.replica import DrainLease, ReplicaPool
+
+
+@dataclass(frozen=True)
+class ReplicaConfig:
+    address: str
+    model: str | None = None
+    api_key_env: str | None = "OPENAI_API_KEY"
+
+
+@dataclass(frozen=True)
+class ReplicaIdentity:
+    address: str
+    model: str
+    api_key_env: str | None
+
+
+def _copy_config(config: ReplicaConfig) -> ReplicaConfig:
+    return ReplicaConfig(
+        address=config.address,
+        model=config.model,
+        api_key_env=config.api_key_env,
+    )
 
 
 class DiscoverySource(Protocol):
-    def poll(self) -> dict[str, str]:
-        """Current desired membership: replica_id -> address."""
+    def poll(self) -> dict[str, ReplicaConfig]:
+        """Current desired membership: replica_id -> backend configuration."""
         ...
 
 
 class StaticDiscovery:
-    def __init__(self, members: dict[str, str]) -> None:
-        self._members = dict(members)
+    def __init__(self, members: Mapping[str, str | ReplicaConfig]) -> None:
+        self._members = {
+            replica_id: (
+                ReplicaConfig(address=config)
+                if isinstance(config, str)
+                else _copy_config(config)
+            )
+            for replica_id, config in members.items()
+        }
 
-    def poll(self) -> dict[str, str]:
-        return dict(self._members)
+    def poll(self) -> dict[str, ReplicaConfig]:
+        return {
+            replica_id: _copy_config(config)
+            for replica_id, config in self._members.items()
+        }
 
 
 @dataclass
 class _Registration:
-    address: str
+    config: ReplicaConfig
     ttl_s: float
     last_heartbeat: float
 
@@ -46,10 +79,22 @@ class ReplicaRegistry:
         self._now = now
         self._members: dict[str, _Registration] = {}
 
-    def register(self, replica_id: str, address: str, ttl_s: float = 15.0) -> None:
+    def register(
+        self,
+        replica_id: str,
+        address: str,
+        ttl_s: float = 15.0,
+        model: str | None = None,
+        api_key_env: str | None = "OPENAI_API_KEY",
+    ) -> None:
         if ttl_s <= 0:
             raise ValueError(f"ttl_s must be > 0, got {ttl_s}")
-        self._members[replica_id] = _Registration(address, ttl_s, self._now())
+        config = ReplicaConfig(
+            address=address,
+            model=model,
+            api_key_env=api_key_env,
+        )
+        self._members[replica_id] = _Registration(config, ttl_s, self._now())
 
     def heartbeat(self, replica_id: str) -> None:
         member = self._members.get(replica_id)
@@ -60,10 +105,10 @@ class ReplicaRegistry:
     def deregister(self, replica_id: str) -> None:
         self._members.pop(replica_id, None)
 
-    def alive(self) -> dict[str, str]:
+    def alive(self) -> dict[str, ReplicaConfig]:
         current = self._now()
         return {
-            replica_id: member.address
+            replica_id: _copy_config(member.config)
             for replica_id, member in self._members.items()
             if current - member.last_heartbeat <= member.ttl_s
         }
@@ -73,21 +118,28 @@ class RegistryDiscovery:
     def __init__(self, registry: ReplicaRegistry) -> None:
         self._registry = registry
 
-    def poll(self) -> dict[str, str]:
+    def poll(self) -> dict[str, ReplicaConfig]:
         return self._registry.alive()
 
 
-# factory: address -> (backend, readiness_url) — closes over create_backend and
-# the resolved_health_url /v1-strip rule (m10a A6)
-ReplicaFactory = Callable[[str], tuple[object, str | None]]
+# factory: complete identity -> (backend, readiness_url) — closes over
+# create_backend and the resolved_health_url /v1-strip rule (m10a A6)
+ReplicaFactory = Callable[[ReplicaIdentity], tuple[EngineBackend, str | None]]
 
 
-def openai_replica_factory(address: str) -> tuple[object, str | None]:
-    """Default factory: an OpenAI-protocol replica at ``address`` (…/v1)."""
+def openai_replica_factory(
+    identity: ReplicaIdentity,
+) -> tuple[EngineBackend, str | None]:
+    """Default factory for a fully identified OpenAI-protocol replica."""
     from kairyu.engine.registry import create_backend
 
-    backend = create_backend("openai", base_url=address)
-    base = address[: -len("/v1")] if address.endswith("/v1") else address
+    backend = create_backend(
+        "openai",
+        base_url=identity.address,
+        model=identity.model,
+        api_key_env=identity.api_key_env,
+    )
+    base = identity.address.removesuffix("/v1")
     # readiness, not liveness: a drained/wedged replica must stay ejected (O3)
     return backend, f"{base}/readyz"
 
@@ -100,32 +152,167 @@ class PoolReconciler:
         pool: ReplicaPool,
         source: DiscoverySource,
         factory: ReplicaFactory = openai_replica_factory,
+        default_model: str | None = None,
     ) -> None:
         self._pool = pool
         self._source = source
         self._factory = factory
+        self._default_model = default_model
+        self._applied: dict[str, ReplicaIdentity] = {}
+        self._draining: dict[str, DrainLease] = {}
+        self._entry_generations: dict[str, object] = {}
+
+    def _forget_tracking(self, replica_id: str) -> None:
+        self._applied.pop(replica_id, None)
+        self._draining.pop(replica_id, None)
+        self._entry_generations.pop(replica_id, None)
+
+    def _release_drain(self, replica_id: str) -> None:
+        lease = self._draining.pop(replica_id, None)
+        if lease is not None:
+            self._pool.release_drain(replica_id, lease)
+
+    def _resolve_identity(
+        self, replica_id: str, config: ReplicaConfig
+    ) -> ReplicaIdentity:
+        model = config.model or self._default_model
+        if not model:
+            raise ValueError(f"replica {replica_id!r} requires a model")
+        return ReplicaIdentity(
+            address=config.address,
+            model=model,
+            api_key_env=config.api_key_env,
+        )
 
     async def reconcile(self) -> dict[str, list[str]]:
         """Returns {'added': [...], 'draining': [...], 'removed': [...]}."""
-        desired = self._source.poll()
-        current = set(self._pool.replica_ids)
+        desired = {
+            replica_id: self._resolve_identity(replica_id, config)
+            for replica_id, config in self._source.poll().items()
+        }
+        current_ids = self._pool.replica_ids
+        current = set(current_ids)
+        current_generations = {
+            replica_id: self._pool.entry_generation(replica_id)
+            for replica_id in current_ids
+        }
+        tracked = (
+            set(self._applied) | set(self._draining) | set(self._entry_generations)
+        )
+        for replica_id in tracked - current:
+            self._forget_tracking(replica_id)
+        for replica_id in current_ids:
+            generation = current_generations[replica_id]
+            previous_generation = self._entry_generations.get(replica_id)
+            if (
+                previous_generation is not None
+                and previous_generation is not generation
+            ):
+                self._applied.pop(replica_id, None)
+                self._draining.pop(replica_id, None)
+            self._entry_generations[replica_id] = generation
+            if replica_id not in desired:
+                continue
+            self._applied.setdefault(replica_id, desired[replica_id])
+
         added: list[str] = []
         draining: list[str] = []
         removed: list[str] = []
-        for replica_id, address in desired.items():
+
+        for replica_id, identity in desired.items():
+            if (
+                replica_id in current
+                and self._applied[replica_id] == identity
+                and replica_id in self._draining
+            ):
+                self._release_drain(replica_id)
+
+        for replica_id, identity in desired.items():
             if replica_id not in current:
-                backend, health_url = self._factory(address)
-                self._pool.add_replica(replica_id, backend, health_url=health_url)
+                backend, health_url = self._factory(identity)
+                try:
+                    self._pool.add_replica(
+                        replica_id, backend, health_url=health_url
+                    )
+                except BaseException:
+                    await shutdown_all((backend,), f"replica candidate {replica_id!r}")
+                    raise
+                self._applied[replica_id] = identity
+                self._draining.pop(replica_id, None)
+                self._entry_generations[replica_id] = self._pool.entry_generation(
+                    replica_id
+                )
                 added.append(replica_id)
-        for replica_id in current - set(desired):
-            if not self._pool.is_draining(replica_id):
+
+        for replica_id, identity in desired.items():
+            if replica_id not in current or self._applied[replica_id] == identity:
+                continue
+            try:
+                candidate, health_url = self._factory(identity)
+            except Exception:
+                if replica_id in self._draining:
+                    self._release_drain(replica_id)
+                draining.append(replica_id)
+                continue
+
+            manual_draining = self._pool.is_manually_draining(replica_id)
+            if replica_id not in self._draining:
+                self._draining[replica_id] = self._pool.acquire_drain(replica_id)
+            try:
+                await self._pool.remove_replica(replica_id)
+            except RuntimeError:
+                await shutdown_all(
+                    (candidate,), f"replacement candidate {replica_id!r}"
+                )
+                draining.append(replica_id)
+                continue
+            except BaseException:
+                if replica_id not in self._pool.replica_ids:
+                    self._forget_tracking(replica_id)
+                await shutdown_all(
+                    (candidate,), f"replacement candidate {replica_id!r}"
+                )
+                raise
+
+            self._forget_tracking(replica_id)
+            try:
+                self._pool.add_replica(
+                    replica_id, candidate, health_url=health_url
+                )
+            except BaseException:
+                await shutdown_all(
+                    (candidate,), f"replacement candidate {replica_id!r}"
+                )
+                raise
+            if manual_draining:
                 self._pool.drain(replica_id)
+            self._applied[replica_id] = identity
+            self._draining.pop(replica_id, None)
+            self._entry_generations[replica_id] = self._pool.entry_generation(
+                replica_id
+            )
+            removed.append(replica_id)
+            added.append(replica_id)
+
+        for replica_id in current_ids:
+            if replica_id in desired:
+                continue
+            was_draining = self._pool.is_draining(replica_id)
+            if replica_id not in self._draining:
+                self._draining[replica_id] = self._pool.acquire_drain(replica_id)
+            if not was_draining:
                 draining.append(replica_id)
             try:
                 await self._pool.remove_replica(replica_id)
-                removed.append(replica_id)
             except RuntimeError:
                 # in-flight work: drain holds, removal retries next tick (A6)
                 if replica_id not in draining:
                     draining.append(replica_id)
+            except BaseException:
+                if replica_id not in self._pool.replica_ids:
+                    self._forget_tracking(replica_id)
+                raise
+            else:
+                self._forget_tracking(replica_id)
+                removed.append(replica_id)
         return {"added": added, "draining": draining, "removed": removed}

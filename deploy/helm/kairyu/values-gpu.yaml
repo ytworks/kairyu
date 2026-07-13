@@ -12,3 +12,16 @@ resources:
 nodeSelector:
   kairyu.dev/gpu-profile: pcie-gddr
 runtimeClassName: nvidia
+# FlashInfer has no Blackwell/sm_120 kernels yet; pin the supported fallback.
+attentionBackend: torch
+modelStorage:
+  enabled: true
+  pvcName: ""
+  hostPath: /models
+  mountPath: /models
+config: |
+  engines:
+    default:
+      backend: kairyu
+      options:
+        model_path: /models/checkpoint
