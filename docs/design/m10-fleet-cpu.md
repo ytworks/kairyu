@@ -20,28 +20,63 @@ lives. All logic CPU-testable; k8s manifests exercised by a kind smoke.
 ### D1 — Dynamic ReplicaPool membership (`orchestration/replica.py` rework)
 
 Index-keyed lists → id-keyed `_ReplicaEntry` (backend, outstanding,
-consecutive_failures, draining). API: `add_replica(replica_id, backend)`,
-`remove_replica(replica_id)` (refuses while outstanding>0 unless force),
-`drain(replica_id)` (stops NEW placements; in-flight completes),
-`probe(replica_id)`. HRW hashing keys on `replica_id` STRINGS (not indices)
+consecutive_failures, manual drain owner, drain-lease set). API:
+`add_replica(replica_id, backend)`,
+async `remove_replica(replica_id)` (refuses while outstanding>0 unless force,
+otherwise removes ownership and awaits shared `shutdown_all` exactly once),
+`drain(replica_id)` / `cancel_drain(replica_id)` (acquire/release only the
+manual owner), `acquire_drain(replica_id) -> DrainLease` /
+`release_drain(replica_id, lease)` (opaque independent owners),
+`is_manually_draining(replica_id)` (manual owner only),
+`entry_generation(replica_id)` (opaque identity for one entry lifetime), and
+`probe(replica_id)`. A replica is draining while the manual owner or any lease
+is active. Removing and re-adding the same ID creates a new entry generation.
+Releasing one owner does not alter other owners, health, or outstanding state.
+HRW hashing keys on `replica_id` STRINGS (not indices)
 — adding/removing a replica remaps only ~1/N sessions (property test).
 Constructor accepts `dict[str, EngineBackend]` or the legacy sequence
-(auto-ids `"r0".."rN"`, existing tests unchanged). Selection precedence:
+(auto-ids `"0".."N-1"`, existing tests unchanged). Selection precedence:
 healthy ∧ not-draining → session HRW → queue-depth fallback →
 least-outstanding.
 
 ### D2 — Registry + reconciler + discovery (`deploy/registry.py`)
 
-`ReplicaRegistry`: TTL-heartbeat membership (`register(id, address,
-ttl_s)`, `heartbeat(id)`, `alive()` — monotonic-clock injected for tests).
-`DiscoverySource` protocol: `poll() -> dict[id, address]`;
-`StaticDiscovery` (spec list) and `RegistryDiscovery` (the TTL registry);
-k8s-endpoints source is a THIN adapter documented for deploy day (polls the
-Endpoints API — same protocol, not implemented locally beyond a fake).
-`PoolReconciler.reconcile(pool, source, factory)`: diff desired vs current →
-add_replica/drain+remove; removal only via drain-then-remove (never drops
-in-flight). Server: `POST /admin/drain` marks the pool replica draining and
-flips `/readyz` to 503 (existing prober contract).
+Discovery carries frozen `ReplicaConfig(address, model?, api_key_env)` values;
+the reconciler resolves each one to a complete frozen
+`ReplicaIdentity(address, model, api_key_env)` before any pool mutation.
+`ReplicaRegistry` stores typed TTL-heartbeat membership
+(`register(id, address, ttl_s, model?, api_key_env)`, `heartbeat(id)`,
+`alive()` — monotonic-clock injected for tests). `DiscoverySource` protocol:
+`poll() -> dict[id, ReplicaConfig]`; `StaticDiscovery` snapshots either string
+addresses or typed configs and `RegistryDiscovery` exposes registry snapshots.
+The k8s-endpoints source remains a THIN deploy-day adapter behind that protocol.
+
+`PoolReconciler(pool, source, factory, default_model?)` passes only complete
+identities to `Callable[[ReplicaIdentity], (EngineBackend, health_url)]`.
+Discovery's non-empty model wins over the default and its auth value is complete,
+including explicit `None`; a missing model fails before mutation. Reconciliation
+tracks applied identities together with each pool entry's opaque generation and
+runs deterministic phases: add missing IDs in
+desired order, construct-before-drain replacement of changed identities in
+desired order, then drain/remove absent IDs in pool order. Removal is awaited and
+closes the removed backend through `shutdown_all`; unused candidates are also
+closed through that helper, with cleanup failures propagated. In-flight refusal
+keeps the applied identity for retry. The reconciler keeps the opaque lease returned
+for each replacement/removal it initiates: if intent reverts to the applied identity,
+or a retry factory fails, it releases only that lease. Manual/admin drains remain
+active whether acquired before or after the reconciler lease, and manual undrain
+cannot release a reconciler lease. Successful same-ID replacement transfers only
+the manual owner to the new backend entry; the reconciler lease is not transferred,
+and the new entry starts with default health and outstanding state. Lease tracking
+is cleared when a replica disappears or a new backend is successfully installed.
+If an external caller removes and re-adds the same ID between ticks, the changed
+generation invalidates every applied identity and lease owned for the old entry.
+An absent desired ID then receives a fresh lease on the new entry; a present desired
+ID baselines the externally installed entry at the current desired identity without
+factory, replacement, or shutdown side effects. A fresh entry's manual owner is
+never changed by generation reconciliation.
+Server: `POST /admin/drain` marks the pool replica draining and flips `/readyz`
+to 503 (existing prober contract).
 
 ### D3 — `BatchStoreProtocol` (pure refactor)
 
@@ -125,10 +160,12 @@ over (α, β) (pure function over the dataset; no online learning).
 - **A5**: /admin/drain semantics split by node role — replica node: sets
   app.state.draining → /readyz 503 (the prober sees it); gateway: drains a
   pool member; only zero-ELIGIBLE replicas 503 the gateway readyz.
-- **A6**: reconciler factory = Callable[[address], (EngineBackend,
-  health_url)] closing over create_backend("openai") + the
-  resolved_health_url /v1-strip rule; reconcile() tolerates remove refusal
-  (outstanding > 0) and retries next tick.
+- **A6**: reconciler factory =
+  `Callable[[ReplicaIdentity], (EngineBackend, health_url)]`; the default closes
+  over `create_backend("openai")` with the identity's address, resolved model,
+  and auth environment plus the readiness URL `/v1`-strip rule. Reconcile
+  tolerates in-flight remove refusal, closes each unused candidate, and retries
+  next tick without changing the applied identity.
 - **A7**: registry takes ``now: Callable[[], float] = time.monotonic``.
 - **A8**: BatchStoreProtocol is the FULL 8-method surface (save_file,
   get_file, read_file_content, create_batch, get_batch, list_batches,
@@ -151,3 +188,17 @@ over (α, β) (pure function over the dataset; no online learning).
   _ensure_free eviction; _split emits nothing; release_preempted emits
   nothing (never stored); vLLM schema fields block_hashes/parent_block_hash/
   token_ids/block_size + ts; replay endpoint out of scope (recorded).
+- **A14**: drain cancellation is ownership-scoped. `_ReplicaEntry` separately
+  stores the manual owner and opaque `DrainLease` owners; effective draining is
+  their OR. `PoolReconciler` records the exact lease it acquired, and a desired
+  identity reverting to the applied identity or a retry factory failure releases
+  only that lease. Manual/admin drains remain authoritative even when asserted
+  after a reconciler lease; manual undrain likewise cannot release that lease.
+  A successful same-ID replacement carries the manual owner to the new entry but
+  not the reconciler lease; health and outstanding state reset with the backend
+  entry. Removal, disappearance, and successful installation clear reconciler
+  tracking. Applied identities and leases are bound to the pool's opaque entry
+  generation, so an external same-ID remove/add also clears old tracking: desired
+  absence acquires a fresh lease, while desired presence baselines the fresh entry
+  without replacing it. This never clears a fresh entry's manual owner. Releasing
+  any owner never changes health or outstanding state.
