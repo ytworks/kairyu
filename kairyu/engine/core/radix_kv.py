@@ -61,7 +61,10 @@ class KVAllocation:
     new_full_pages: tuple[int, ...]
     tail_page: int | None
     _node: _Node = field(repr=False)
+    # Publication and release form one allocation lifecycle: event-sink
+    # reentry must not start a nested terminal operation on this allocation.
     _freed: bool = field(default=False, repr=False)
+    _publishing: bool = field(default=False, repr=False)
     _releasing: bool = field(default=False, repr=False)
     _tree_inserted: bool = field(default=True, repr=False)
     _page_size: int = field(default=16, repr=False)
@@ -315,21 +318,20 @@ class RadixKVCache:
             node = allocation._node
             if not node.computed and not node.publishing:
                 node.publishing = True
+                object.__setattr__(allocation, "_publishing", True)
                 try:
                     self._emit_stored(node)
                     node.computed = True
                 finally:
+                    object.__setattr__(allocation, "_publishing", False)
                     node.publishing = False
 
-    def _begin_release(
-        self, allocation: KVAllocation, *, reentrant_noop: bool = False
-    ) -> bool:
+    def _begin_release(self, allocation: KVAllocation) -> bool:
+        """Start a release, suppressing same-stack terminal reentry."""
         if allocation._freed:
             raise ValueError("allocation was already freed")
-        if allocation._releasing:
-            if reentrant_noop:
-                return False
-            raise ValueError("allocation release is already in progress")
+        if allocation._publishing or allocation._releasing:
+            return False
         object.__setattr__(allocation, "_releasing", True)
         return True
 
@@ -349,7 +351,8 @@ class RadixKVCache:
             self._pool.free(allocation.new_full_pages)
 
     def free(self, allocation: KVAllocation) -> None:
-        self._begin_release(allocation)
+        if not self._begin_release(allocation):
+            return
         try:
             self._release(allocation)
             if allocation.tail_page is not None:
@@ -371,7 +374,7 @@ class RadixKVCache:
         so caching generated tokens is what makes multi-turn prefixes hit.
         Partially-filled pages are returned to the pool.
         """
-        if not self._begin_release(allocation, reentrant_noop=True):
+        if not self._begin_release(allocation):
             return
         sequence = allocation.tokens + tuple(output_tokens)
         prompt_full = len(allocation.tokens) // self._page_size
@@ -447,20 +450,22 @@ class RadixKVCache:
         stays unmatched until LRU eviction reclaims it; private pages return
         to the pool immediately.
         """
-        if allocation._freed:
-            raise ValueError("allocation was already freed")
-        if allocation._releasing:
-            raise ValueError("allocation release is already in progress")
-        object.__setattr__(allocation, "_freed", True)
-        self._unlock_path(allocation._node)
-        if not allocation._tree_inserted and allocation.new_full_pages:
-            self._pool.free(allocation.new_full_pages)
-        loose = (
-            ((allocation.tail_page,) if allocation.tail_page is not None else ())
-            + tuple(decode_pages)
-        )
-        if loose:
-            self._pool.free(loose)
+        if not self._begin_release(allocation):
+            return
+        try:
+            self._unlock_path(allocation._node)
+            if not allocation._tree_inserted and allocation.new_full_pages:
+                self._pool.free(allocation.new_full_pages)
+            loose = (
+                ((allocation.tail_page,) if allocation.tail_page is not None else ())
+                + tuple(decode_pages)
+            )
+            if loose:
+                self._pool.free(loose)
+        except Exception:
+            self._abort_release(allocation)
+            raise
+        self._finish_release(allocation)
 
     def pin(
         self,

@@ -170,6 +170,92 @@ class TestRadixKvEvents:
         assert cache_hit.num_cached_tokens == 4
         cache.release_preempted(cache_hit)
 
+    def test_failed_mark_computed_ignores_reentrant_free_until_retry(self):
+        events: list[dict] = []
+        attempts = 0
+        allocation_holder = []
+
+        def fail_once_after_reentrant_free(event):
+            nonlocal attempts
+            attempts += 1
+            cache.free(allocation_holder[0])
+            if attempts == 1:
+                raise RuntimeError("event sink failed")
+            events.append(event)
+
+        cache = RadixKVCache(
+            num_pages=4, page_size=4, event_sink=fail_once_after_reentrant_free
+        )
+        allocation = cache.allocate((1, 2, 3, 4, 5))
+        allocation_holder.append(allocation)
+
+        with pytest.raises(RuntimeError, match="event sink failed"):
+            cache.mark_computed(allocation)
+
+        assert not allocation._freed
+        assert cache.num_free_pages == 2
+        cache.mark_computed(allocation)
+
+        assert not allocation._freed
+        assert cache.num_free_pages == 2
+        cache.free(allocation)
+        assert allocation._freed
+        assert cache.num_free_pages == 3
+        assert attempts == 2
+        assert [event["type"] for event in events] == ["BlockStored"]
+        cache_hit = cache.allocate((1, 2, 3, 4, 5))
+        assert cache_hit.num_cached_tokens == 4
+        cache.release_preempted(cache_hit)
+
+    def test_free_ignores_reentrant_free_from_event_sink(self):
+        events: list[dict] = []
+        allocation_holder = []
+
+        def reentrant_free_sink(event):
+            cache.free(allocation_holder[0])
+            events.append(event)
+
+        cache = RadixKVCache(
+            num_pages=4, page_size=4, event_sink=reentrant_free_sink
+        )
+        allocation = cache.allocate((1, 2, 3, 4, 5))
+        allocation_holder.append(allocation)
+
+        cache.free(allocation)
+
+        assert allocation._freed
+        assert cache.num_free_pages == 3
+        assert [event["type"] for event in events] == ["BlockStored"]
+        cache_hit = cache.allocate((1, 2, 3, 4, 5))
+        assert cache_hit.num_cached_tokens == 4
+        cache.release_preempted(cache_hit)
+
+    def test_mark_computed_ignores_reentrant_preempted_release(self):
+        events: list[dict] = []
+        allocation_holder = []
+
+        def reentrant_preempt_sink(event):
+            cache.release_preempted(allocation_holder[0])
+            events.append(event)
+
+        cache = RadixKVCache(
+            num_pages=4, page_size=4, event_sink=reentrant_preempt_sink
+        )
+        allocation = cache.allocate((1, 2, 3, 4, 5))
+        allocation_holder.append(allocation)
+
+        cache.mark_computed(allocation)
+
+        assert not allocation._freed
+        assert cache.num_free_pages == 2
+        cache.free(allocation)
+        assert allocation._freed
+        assert cache.num_free_pages == 3
+        assert [event["type"] for event in events] == ["BlockStored"]
+        cache_hit = cache.allocate((1, 2, 3, 4, 5))
+        assert cache_hit.num_cached_tokens == 4
+        cache.release_preempted(cache_hit)
+
     def test_decode_extension_emits_stored(self):
         cache, events = self._cache_with_sink()
         allocation = cache.allocate(tuple(range(8)))
