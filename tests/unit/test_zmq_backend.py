@@ -5,6 +5,8 @@ import); tests end via the clean shutdown op so the child flushes coverage.
 """
 
 import asyncio
+import os
+import signal
 
 import pytest
 
@@ -195,6 +197,70 @@ async def test_duplicate_request_id_preserves_original_queue_and_can_be_reused(
 
     reused = await zmq_backend.generate(_request("same", "reused", max_tokens=2))
     assert reused.finished is True
+
+
+async def test_cancelled_request_id_can_be_reused_after_queued_abort():
+    sigstop = getattr(signal, "SIGSTOP", None)
+    sigcont = getattr(signal, "SIGCONT", None)
+    if sigstop is None or sigcont is None:
+        pytest.skip("requires POSIX process stop/continue signals")
+
+    backend = ZmqEngineBackend(num_pages=256)
+    original = None
+    reused = None
+    process = None
+    stopped = False
+    try:
+        original = asyncio.create_task(
+            backend.generate(_request("queued-reuse", "first", max_tokens=10_000))
+        )
+        for _ in range(500):
+            if (
+                "queued-reuse" in backend._active_request_ids
+                and "queued-reuse" in backend._queues
+                and backend._process is not None
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert "queued-reuse" in backend._active_request_ids
+        assert "queued-reuse" in backend._queues
+        process = backend._process
+        assert process is not None and process.is_alive()
+
+        os.kill(process.pid, sigstop)
+        stopped = True
+        original.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await original
+
+        reused = asyncio.create_task(
+            backend.generate(_request("queued-reuse", "reused", max_tokens=2))
+        )
+        for _ in range(500):
+            if (
+                "queued-reuse" in backend._active_request_ids
+                and "queued-reuse" in backend._queues
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert "queued-reuse" in backend._active_request_ids
+        assert "queued-reuse" in backend._queues
+
+        os.kill(process.pid, sigcont)
+        stopped = False
+        result = await asyncio.wait_for(reused, timeout=15)
+        assert result.finished is True
+    finally:
+        if stopped and process is not None and process.is_alive():
+            os.kill(process.pid, sigcont)
+        for task in (original, reused):
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        await backend.shutdown()
 
 
 async def test_submit_failure_clears_request_reservation_and_queue(monkeypatch):
