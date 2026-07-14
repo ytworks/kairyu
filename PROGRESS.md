@@ -52,10 +52,12 @@ replicas, auth, metrics, batch) or a replica node, and the compose topology
 The vLLM-compatible `AsyncLLMEngine` now owns an explicit registry of active
 request IDs: inactive aborts are stateless, while an active abort interrupts and
 closes its backend stream without poisoning later reuse of the same ID.
-`BatchStore` exposes owner-scoped lazy binary-line iteration and transactional lazy
-JSONL writers; the batch worker streams input through a bounded queue and fixed consumer
-pool, spools results incrementally, and persists controlled terminal failure while rolling
-back partial result publications after ordinary processing or storage exceptions.
+`BatchStore` exposes owner-scoped lazy binary-line iteration, metadata-last streaming
+upload transactions, and transactional lazy JSONL writers. The files route reads fixed-size
+chunks, applies its byte limit incrementally, and removes partial uploads on rejection,
+cancellation, or storage failure. The batch worker streams input through a bounded queue and
+fixed consumer pool, spools results incrementally, and persists controlled terminal failure
+while rolling back partial result publications after ordinary processing or storage exceptions.
 Tenant usage accounting now covers synchronous and streaming generation, Responses,
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
@@ -85,6 +87,19 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] Batch uploads use bounded storage transactions (m10a D3/A8)
+- What: `BatchStoreProtocol` expands from ten to eleven methods with
+  `save_file_streaming`. `/v1/files` now supplies fixed 1 MiB chunks, enforces the existing
+  512 MiB limit incrementally before writing an over-limit chunk, and publishes content plus
+  owner metadata only after the stream completes. Rejection, iterator failure, cancellation,
+  close failure, and metadata failure remove partial artifacts.
+- Why: Issue #85 showed that the route read up to the complete 512 MiB allowance into memory
+  per request on top of Starlette's multipart spool, so concurrent accepted uploads could
+  exhaust the gateway even though each individual request obeyed the size cap.
+- Refs: Issue #85; m10a D3/A8; `kairyu/batch/store.py`;
+  `kairyu/entrypoints/server/batch_routes.py`; `tests/unit/test_batch_store_streaming.py`;
+  `tests/server/test_batches.py`.
 
 ### 2026-07-14 — [amendment] Async abort owns active request lifecycles
 - What: `AsyncLLMEngine` replaced persistent abort markers with a registry of active
