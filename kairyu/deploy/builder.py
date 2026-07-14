@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -14,7 +13,7 @@ from kairyu.batch.worker import BatchWorker
 from kairyu.deploy.prober import HealthProber
 from kairyu.deploy.spec import DeploymentSpec, load_deployment_spec
 from kairyu.dsl.loader import build_orchestrator, load_spec
-from kairyu.engine.backend import EngineBackend
+from kairyu.engine.backend import EngineBackend, shutdown_all
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
@@ -124,11 +123,11 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 # cannot skip the remaining awaits AND the engine shutdowns (M7)
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
-            for engine in engines.values():
-                try:
-                    await engine.shutdown()  # each engine shuts down independently
-                except Exception:
-                    logging.getLogger("kairyu.deploy").exception("engine shutdown failed")
+            resources = list(engines.values())
+            if orchestrator is not None:
+                resources.append(orchestrator)
+            resources.extend(orchestrators.values())
+            await shutdown_all(resources, "application")
 
     app = create_app(
         engines=engines,

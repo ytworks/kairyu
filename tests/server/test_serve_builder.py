@@ -1,13 +1,18 @@
 """DeploymentSpec -> app builder: pool wiring, affinity over HTTP, lifespan (gate C1)."""
 
+import asyncio
+from pathlib import Path
+
 import httpx
 import pytest
 
 import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_config, build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
+from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantLimits, UsageLedger
+from kairyu.orchestration.orchestrator import Orchestrator
 
 POOLED_YAML = """
 engines:
@@ -19,6 +24,17 @@ pools:
       - { backend: mock }
       - { backend: mock }
 """
+
+GATEWAY_GPU_YAML = Path(__file__).parents[2] / "deploy/compose/gateway-gpu.yaml"
+
+
+class _ShutdownBackend(MockBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_count = 0
+
+    async def shutdown(self) -> None:
+        self.shutdown_count += 1
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -53,6 +69,16 @@ async def test_pool_is_served_and_affinity_sticks():
     assert 'kairyu_pool_decisions_total{pool="pooled",reason="least_outstanding"} 1.0' in metrics
 
 
+async def test_gpu_gateway_exposes_canonical_default_model():
+    app = build_app_from_config(GATEWAY_GPU_YAML)
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        ids = {model["id"] for model in models.json()["data"]}
+
+    assert "default" in ids
+    assert "llama" not in ids
+
+
 async def test_header_session_takes_precedence_over_user():
     app = build_app_from_spec(load_deployment_spec(POOLED_YAML))
     async with _client(app) as client:
@@ -82,6 +108,57 @@ pools:
     async with app.router.lifespan_context(app):
         async with _client(app) as client:
             assert (await client.get("/health")).status_code == 200
+
+
+async def test_lifespan_immediate_probe_validates_only_ready_remote_replicas():
+    yaml_text = """
+pools:
+  remote:
+    replicas:
+      - backend: openai
+        options: { base_url: "http://gpu-0:8000/v1", model: "m", api_key_env: null }
+      - backend: openai
+        options: { base_url: "http://gpu-1:8000/v1", model: "m", api_key_env: null }
+    probe_interval_s: 60
+"""
+    app = build_app_from_spec(load_deployment_spec(yaml_text))
+    prober = app.state.probers[0]
+    pool = prober._pool
+    both_probed = asyncio.Event()
+    requests = 0
+
+    def probe_response(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 2:
+            both_probed.set()
+        if request.url.host == "gpu-0":
+            return httpx.Response(200, json={"status": "ready"})
+        return httpx.Response(503, json={"status": "starting"})
+
+    prober._client = httpx.AsyncClient(transport=httpx.MockTransport(probe_response))
+
+    # Initial URL mappings are applied during construction, before create_app
+    # exposes the routes or any backend request can be used as a health signal.
+    assert pool.healthy == (False, False)
+    async with _client(app) as client:
+        assert (await client.get("/readyz")).status_code == 503
+
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(both_probed.wait(), timeout=1)
+        for _ in range(10):
+            if pool.healthy == (True, False):
+                break
+            await asyncio.sleep(0)
+
+        async with _client(app) as client:
+            ready = await client.get("/readyz")
+            metrics = (await client.get("/metrics")).text
+
+        assert pool.healthy == (True, False)
+        assert ready.status_code == 200
+        assert 'kairyu_replica_healthy{pool="remote",replica="0"} 1.0' in metrics
+        assert 'kairyu_replica_healthy{pool="remote",replica="1"} 0.0' in metrics
 
 
 async def test_build_from_config_resolves_orchestrator_relative_to_file(tmp_path):
@@ -520,3 +597,45 @@ def test_builder_without_tenant_section_preserves_legacy_app_state(monkeypatch):
 
     assert not hasattr(app.state, "tenant_limiter")
     assert resolution_counts == {"data": 1, "admin": 1}
+
+
+async def test_lifespan_attempts_orchestrator_shutdown_after_engine_failure(
+    tmp_path, monkeypatch
+):
+    class _Resource:
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+            self.shutdown_count = 0
+
+        async def shutdown(self) -> None:
+            self.shutdown_count += 1
+            if self.fail:
+                raise RuntimeError("shutdown failed")
+
+    failing_engine = _Resource(fail=True)
+    owned_backend = _ShutdownBackend()
+    owned_orchestrator = Orchestrator(
+        engines={"tier1": owned_backend, "tier2": owned_backend}
+    )
+    (tmp_path / "auto.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
+    monkeypatch.setattr(
+        "kairyu.deploy.builder.create_backend", lambda *_args, **_kwargs: failing_engine
+    )
+    monkeypatch.setattr(
+        "kairyu.deploy.builder.build_orchestrator", lambda _spec: owned_orchestrator
+    )
+    spec = load_deployment_spec(
+        """
+engines:
+  bad: { backend: mock }
+orchestrator: { spec: auto.yaml }
+"""
+    )
+    app = build_app_from_spec(spec, base_dir=tmp_path)
+
+    with pytest.raises(ExceptionGroup, match="application shutdown"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert failing_engine.shutdown_count == 1
+    assert owned_backend.shutdown_count == 1

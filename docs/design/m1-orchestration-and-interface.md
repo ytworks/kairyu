@@ -63,10 +63,23 @@ in M1 (YAGNI; Ray arrives with multi-node). Recursive self-correction is modeled
 verifier-gated retry loop with depth bounded by `Budget.max_refine_depth`; spend is bounded
 by `Budget.max_cost_usd`, charged per generation via a pluggable `CostModel` (default
 zero-cost; `chars_cost_model` estimates from prompt+completion volume, and the DSL exposes
-`budget.cost_per_1k_chars_usd`). A wall-clock deadline bound is deferred to M2, where the
-engine can enforce it per-step. Exceeding a budget is a normal,
-reported outcome (best result so far is returned), not an exception, matching Fugu's
-"recursion depth as inference-time compute axis" framing.
+`budget.cost_per_1k_chars_usd`). Step admission is strict and happens synchronously before
+dispatch: a generation reserves its step before any `await`, and an operation that cannot
+reserve its complete step requirement is skipped. Result-priced work also claims one
+exclusive unknown-cost admission slot when a cost cap is configured, so parallel waves
+cannot all dispatch against the same stale pre-charge balance. Success reconciles the
+reservation with actual cost exactly once; failure and cancellation release the complete
+reservation before the exception propagates. MoA is one atomic operation and must reserve
+all proposal plus synthesis steps (`moa_samples + 1`) and its cost slot before any proposal
+dispatches.
+
+The dispatch limits are strict, but an admitted generation's exact cost is unknowable until
+its result exists. That one generation may therefore cross `max_cost_usd`; accounting keeps
+the full actual cost (never clamps or hides it) and reports the exhausted/overrun state for
+querying while refusing later work. A wall-clock deadline bound is deferred to M2, where
+the engine can enforce it per-step. Exceeding a budget is a normal, reported outcome (best
+result so far is returned), not an exception, matching Fugu's "recursion depth as
+inference-time compute axis" framing.
 
 ### D5. KV-affinity is designed in now, exploited in M2
 

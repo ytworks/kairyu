@@ -72,6 +72,13 @@ class TPModelRunner:
         self._rank_runners = tuple(rank_runners)
         self._comms = tuple(comms)
 
+    def release(self, request_id: str) -> None:
+        """Forward request-scoped cleanup to every local TP rank."""
+        for runner in self._rank_runners:
+            release = getattr(runner, "release", None)
+            if release is not None:
+                release(request_id)
+
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> dict[str, tuple]:

@@ -68,6 +68,14 @@ def test_oversized_prompt_is_rejected_gracefully_not_stalling():
     assert engine.has_unfinished() is False
 
 
+def test_empty_prompt_never_reaches_model_runner():
+    engine, runner = _engine()
+    engine.add_request(EngineRequest("empty", (), max_new_tokens=1))
+
+    assert engine.run_to_completion() == {"empty": ()}
+    assert runner.steps_executed == 0
+
+
 def test_oversized_prompt_does_not_block_concurrent_requests():
     # C2: an unadmittable request must not wedge a normal request behind it.
     cache = RadixKVCache(num_pages=2, page_size=PAGE)  # capacity = 8 tokens

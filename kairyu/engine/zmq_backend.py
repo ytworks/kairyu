@@ -97,6 +97,7 @@ class ZmqEngineBackend:
         self._context = None
         self._receiver: asyncio.Task | None = None
         self._queues: dict[str, asyncio.Queue] = {}
+        self._active_request_ids: set[str] = set()
         self._start_lock = asyncio.Lock()
         self._atexit_registered = False
 
@@ -203,6 +204,11 @@ class ZmqEngineBackend:
 
     # -- request plumbing ----------------------------------------------------
 
+    def _reserve_request_id(self, request_id: str) -> None:
+        if request_id in self._active_request_ids:
+            raise ValueError(f"duplicate request_id {request_id!r}")
+        self._active_request_ids.add(request_id)
+
     async def _receive_loop(self) -> None:
         assert self._socket is not None
         _, msgpack = _import_deps()
@@ -238,16 +244,21 @@ class ZmqEngineBackend:
         _, msgpack = _import_deps()
         queue: asyncio.Queue = asyncio.Queue()
         self._queues[request.request_id] = queue
-        await self._socket.send(
-            msgpack.packb(
-                {
-                    "op": "add",
-                    "request_id": request.request_id,
-                    "prompt": request.prompt,
-                    "sampling": sampling_params_to_wire(request.sampling_params),
-                }
+        try:
+            await self._socket.send(
+                msgpack.packb(
+                    {
+                        "op": "add",
+                        "request_id": request.request_id,
+                        "prompt": request.prompt,
+                        "sampling": sampling_params_to_wire(request.sampling_params),
+                    }
+                )
             )
-        )
+        except BaseException:
+            if self._queues.get(request.request_id) is queue:
+                self._queues.pop(request.request_id, None)
+            raise
         return queue
 
     async def _abort(self, request_id: str) -> None:
@@ -296,9 +307,11 @@ class ZmqEngineBackend:
             raise EngineServiceError(event["error"])
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
-        queue = await self._submit(request)
+        self._reserve_request_id(request.request_id)
+        queue = None
         finished_cleanly = False
         try:
+            queue = await self._submit(request)
             while True:
                 event = await queue.get()
                 self._raise_on_error(event)
@@ -306,17 +319,23 @@ class ZmqEngineBackend:
                     finished_cleanly = True
                     return self._result(request, event)
         finally:
-            self._queues.pop(request.request_id, None)
-            if not finished_cleanly:
-                # client disconnect / cancellation: tell the engine to stop
-                # generating, or it keeps burning compute until max_tokens
-                await self._abort(request.request_id)
+            try:
+                if queue is not None and self._queues.get(request.request_id) is queue:
+                    self._queues.pop(request.request_id, None)
+                if queue is not None and not finished_cleanly:
+                    # client disconnect / cancellation: tell the engine to stop
+                    # generating, or it keeps burning compute until max_tokens
+                    await self._abort(request.request_id)
+            finally:
+                self._active_request_ids.discard(request.request_id)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
-        queue = await self._submit(request)
+        self._reserve_request_id(request.request_id)
+        queue = None
         emitted = -1
         finished_cleanly = False
         try:
+            queue = await self._submit(request)
             while True:
                 event = await queue.get()
                 self._raise_on_error(event)
@@ -327,9 +346,13 @@ class ZmqEngineBackend:
                     finished_cleanly = True
                     return
         finally:
-            self._queues.pop(request.request_id, None)
-            if not finished_cleanly:
-                await self._abort(request.request_id)
+            try:
+                if queue is not None and self._queues.get(request.request_id) is queue:
+                    self._queues.pop(request.request_id, None)
+                if queue is not None and not finished_cleanly:
+                    await self._abort(request.request_id)
+            finally:
+                self._active_request_ids.discard(request.request_id)
 
 
 register_backend("kairyu-proc", ZmqEngineBackend)

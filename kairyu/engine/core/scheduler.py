@@ -408,6 +408,9 @@ class Scheduler:
         while self._waiting and budget > 0 and len(self._running) < self._max_seqs:
             request_id = self._waiting[0]
             state = self._states[request_id]
+            if state.prompt_len == 0:
+                self._reject_unadmittable(request_id, state)
+                continue
             required_pages = -(-state.prompt_len // self._page_size)  # ceil division
             if required_pages > self._kv.num_pages:
                 # This prompt is larger than the whole KV cache: it can NEVER be
