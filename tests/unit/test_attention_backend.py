@@ -282,7 +282,7 @@ class TestFlashInferAdapterContract:
         assert len(backend._prefill.runs) == 1
         assert len(backend._decode.runs) == 1
         decode_query, _ = backend._decode.runs[0]
-        assert decode_query.shape == (4, 8)
+        assert decode_query.shape == (1, 4, 8)
         assert [context.shape for context in contexts] == [(2, 32), (1, 32)]
 
     @pytest.mark.parametrize(

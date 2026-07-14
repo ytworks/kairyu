@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import httpx
 import pytest
@@ -1435,20 +1436,28 @@ async def test_backend_finish_reason_passes_through():
     assert response.json()["choices"][0]["finish_reason"] == "length"
 
 
-async def test_backend_error_returns_openai_error_envelope():
+async def test_backend_error_returns_openai_error_envelope(caplog):
     app = create_app(
         engines={"stub": StubBackend(error=RuntimeError("secret://host:5432 key missing"))}
     )
-    async with _client(app) as client:
-        body = _chat_body("hi")
-        body["model"] = "stub"
-        response = await client.post("/v1/chat/completions", json=body)
+    with caplog.at_level(logging.ERROR, logger="kairyu.entrypoints.server.app"):
+        async with _client(app) as client:
+            body = _chat_body("hi")
+            body["model"] = "stub"
+            response = await client.post("/v1/chat/completions", json=body)
     assert response.status_code == 502
     error = response.json()["error"]
     assert error["type"] == "upstream_error"
     # M3: the backend's raw message (which may carry secrets/hosts) must NOT leak
     assert "secret://host:5432" not in error["message"]
     assert "RuntimeError" in error["message"]  # only the class name is disclosed
+    # ...but the full traceback IS logged server-side (observability): a replica
+    # backend failure must be diagnosable from the logs even though the client
+    # only sees the exception class name.
+    assert any(
+        record.exc_info and record.levelno == logging.ERROR
+        for record in caplog.records
+    ), "expected the backend traceback to be logged server-side"
 
 
 async def test_response_format_passes_through_to_engine():

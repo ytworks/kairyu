@@ -150,7 +150,11 @@ class FlashInferBackend:
         paged_kv = (kv_pool.k[layer], kv_pool.v[layer])  # NHD tuple form
         wrapper = self._decode if is_decode else self._prefill
         if is_decode:
-            out = wrapper.run(query[0], paged_kv)  # decode: [H, D] query
+            # flashinfer 0.6.x decode.run expects a BATCHED [B, H, D] query;
+            # a 2D [H, D] slice raises IndexError in the tvm_ffi kernel. The
+            # single-sequence decode path has B=1, so pass the [1, H, D] query
+            # as-is (the batched path in attend_batched already does this).
+            out = wrapper.run(query, paged_kv)  # decode: [B=1, H, D] query
             return out.reshape(1, -1)
         out = wrapper.run(query, paged_kv)  # [T, H, D]
         return out.reshape(query.shape[0], -1)
