@@ -9,11 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -24,8 +22,25 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationUsage,
 )
-from kairyu.entrypoints.chat_template import ChatTemplate, render_chat
-from kairyu.entrypoints.server.errors import invalid_request
+from kairyu.entrypoints.chat_template import ChatTemplate
+from kairyu.entrypoints.server.chat_service import (
+    ChatRequestError,
+    _logprob_entries,
+    _wire_usage,
+    completion_response,
+    execute_chat,
+    sampling_params_from,
+    validate_chat_input,
+    validate_chat_request,
+)
+from kairyu.entrypoints.server.chat_service import (
+    render_prompt as render_prompt,
+)
+from kairyu.entrypoints.server.errors import (
+    invalid_request,
+    model_not_found,
+    upstream_error,
+)
 from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metering import (
     StreamUsageOwner,
@@ -43,7 +58,6 @@ from kairyu.entrypoints.server.middleware import (
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionChunk,
     ChatCompletionRequest,
-    ChatCompletionResponse,
     Choice,
     ChoiceLogprobs,
     ChunkChoice,
@@ -54,159 +68,20 @@ from kairyu.entrypoints.server.protocol import (
     CompletionLogprobs,
     CompletionRequest,
     CompletionResponse,
-    FunctionCall,
-    LogprobEntry,
     ModelCard,
     ModelList,
     PromptTokensDetails,
-    ResponseMessage,
-    ToolCall,
-    TopLogprobEntry,
     Usage,
 )
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
-from kairyu.outputs import CompletionOutput, TokenLogprob
+from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 logger = logging.getLogger(__name__)
 
 AUTO_MODEL = "kairyu-auto"
-_TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-
-
-@dataclass(frozen=True)
-class _NormalizedToolChoice:
-    mode: str
-    allowed_names: frozenset[str]
-    named: str | None = None
-
-
-def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
-    extra_args = (
-        {"response_format": request.response_format} if request.response_format else {}
-    )
-    logprobs = None
-    if request.logprobs:
-        logprobs = request.top_logprobs or 0  # 0 = sampled token only
-    max_tokens = (
-        request.max_tokens
-        if request.max_tokens is not None
-        else request.max_completion_tokens
-    )
-    return SamplingParams(
-        temperature=request.temperature,
-        top_p=request.top_p,
-        n=request.n,
-        max_tokens=max_tokens,
-        presence_penalty=request.presence_penalty,
-        frequency_penalty=request.frequency_penalty,
-        stop=request.stop,
-        seed=request.seed,
-        logprobs=logprobs,
-        extra_args=extra_args,
-    )
-
-
-def _parse_tool_calls(text: str) -> list[ToolCall]:
-    calls = []
-    for match in _TOOL_CALL_PATTERN.finditer(text):
-        try:
-            payload = json.loads(match.group(1))
-        except (ValueError, RecursionError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        name = payload.get("name")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        arguments = payload.get("arguments", {})
-        if not isinstance(arguments, (dict, str)):
-            continue
-        if isinstance(arguments, dict):
-            try:
-                serialized_arguments = json.dumps(arguments)
-            except (ValueError, RecursionError):
-                continue
-        else:
-            serialized_arguments = arguments
-        calls.append(
-            ToolCall(
-                id=f"call_{uuid.uuid4().hex[:12]}",
-                function=FunctionCall(
-                    name=name,
-                    arguments=serialized_arguments,
-                ),
-            )
-        )
-    return calls
-
-
-def _validate_response_format(response_format: dict | None) -> str | None:
-    """400 (not an engine crash) for malformed response_format (m9 D4)."""
-    if response_format is None:
-        return None
-    kind = response_format.get("type")
-    if kind not in ("text", "json_object", "json_schema"):
-        return f"response_format.type must be text, json_object or json_schema, got {kind!r}"
-    if kind == "json_schema":
-        schema = (response_format.get("json_schema") or {}).get("schema")
-        if not isinstance(schema, dict):
-            return "response_format.json_schema.schema must be a JSON schema object"
-    return None
-
-
-def _normalize_tool_choice(
-    request: ChatCompletionRequest,
-) -> tuple[_NormalizedToolChoice | None, str | None]:
-    allowed_names: set[str] = set()
-    for index, tool in enumerate(request.tools or []):
-        if tool.get("type") != "function":
-            return None, f"tools[{index}].type must be 'function'"
-        function = tool.get("function")
-        if not isinstance(function, dict):
-            return None, f"tools[{index}].function must be an object"
-        name = function.get("name")
-        if not isinstance(name, str) or not name.strip():
-            return None, f"tools[{index}].function.name must be a non-empty string"
-        if name in allowed_names:
-            return None, f"tools[{index}].function.name {name!r} is duplicated"
-        allowed_names.add(name)
-
-    choice = request.tool_choice
-    if choice is None:
-        return _NormalizedToolChoice("auto", frozenset(allowed_names)), None
-    if isinstance(choice, str):
-        if choice not in {"auto", "none", "required"}:
-            return None, "tool_choice must be 'auto', 'none', 'required', or a function"
-        if choice == "required" and not allowed_names:
-            return None, "tool_choice 'required' requires at least one tool"
-        return _NormalizedToolChoice(choice, frozenset(allowed_names)), None
-    if choice.get("type") != "function":
-        return None, "named tool_choice.type must be 'function'"
-    function = choice.get("function")
-    if not isinstance(function, dict):
-        return None, "named tool_choice.function must be an object"
-    name = function.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return None, "named tool_choice.function.name must be a non-empty string"
-    if name not in allowed_names:
-        return None, f"named tool_choice function {name!r} is not declared in tools"
-    return _NormalizedToolChoice("named", frozenset(allowed_names), named=name), None
-
-
-def _invalid_request(message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=400,
-        content={
-            "error": {
-                "message": message,
-                "type": "invalid_request_error",
-                "code": "invalid_request",
-            }
-        },
-    )
 
 
 def _validate_generation_request(
@@ -218,146 +93,8 @@ def _validate_generation_request(
     try:
         validate(request)
     except ValueError as error:
-        return _invalid_request(str(error))
+        return invalid_request(str(error))
     return None
-
-
-def render_prompt(
-    request: ChatCompletionRequest,
-    chat_templates: Mapping[str, ChatTemplate] | None,
-) -> str:
-    """Per-model HF template when configured, legacy concatenator otherwise
-    (m9 D2). Shared by the HTTP path and the batch worker — the two must
-    render identical prompts for the same model."""
-    template = (chat_templates or {}).get(request.model)
-    messages = [message.model_dump() for message in request.messages]
-    if template is None:
-        return render_chat(messages)
-    return template.render(messages, tools=request.tools)
-
-
-def _model_not_found(model: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=404,
-        content={
-            "error": {
-                "message": f"model {model!r} not found",
-                "type": "invalid_request_error",
-                "code": "model_not_found",
-            }
-        },
-    )
-
-
-def _upstream_error(error: Exception) -> JSONResponse:
-    # only the exception CLASS name leaves the gateway (M3): str(error) can carry
-    # connection strings, internal hostnames/ports, and file paths from arbitrary
-    # backend failures — those must not reach the client. The full traceback IS
-    # logged server-side so replica-level failures are debuggable from the logs.
-    logger.exception("upstream backend error")
-    return JSONResponse(
-        status_code=502,
-        content={
-            "error": {
-                "message": f"upstream backend error ({type(error).__name__})",
-                "type": "upstream_error",
-                "code": "backend_error",
-            }
-        },
-    )
-
-
-def _tool_choice_not_satisfied() -> JSONResponse:
-    return JSONResponse(
-        status_code=502,
-        content={
-            "error": {
-                "message": "upstream model did not satisfy tool_choice",
-                "type": "upstream_error",
-                "code": "tool_choice_not_satisfied",
-            }
-        },
-    )
-
-
-def _logprob_entries(content: tuple[TokenLogprob, ...]) -> list[LogprobEntry]:
-    return [
-        LogprobEntry(
-            token=entry.token,
-            logprob=entry.logprob,
-            bytes=list(entry.bytes_) if entry.bytes_ is not None else None,
-            top_logprobs=[
-                TopLogprobEntry(
-                    token=top.token,
-                    logprob=top.logprob,
-                    bytes=list(top.bytes_) if top.bytes_ is not None else None,
-                )
-                for top in entry.top
-            ],
-        )
-        for entry in content
-    ]
-
-
-def _choice_logprobs(completion: CompletionOutput) -> ChoiceLogprobs | None:
-    if completion.logprob_content is None:
-        return None
-    return ChoiceLogprobs(content=_logprob_entries(completion.logprob_content))
-
-
-def _build_choice(
-    index: int,
-    text: str,
-    tool_choice: _NormalizedToolChoice,
-    finish_reason: str | None,
-    logprobs: ChoiceLogprobs | None = None,
-) -> Choice:
-    tool_calls = []
-    if tool_choice.mode != "none":
-        tool_calls = [
-            call
-            for call in _parse_tool_calls(text)
-            if call.function.name in tool_choice.allowed_names
-            and (tool_choice.named is None or call.function.name == tool_choice.named)
-        ]
-    if tool_calls:
-        message = ResponseMessage(content=None, tool_calls=tool_calls)
-        return Choice(
-            index=index, message=message, finish_reason="tool_calls", logprobs=logprobs
-        )
-    return Choice(
-        index=index,
-        message=ResponseMessage(content=text),
-        finish_reason="stop" if finish_reason == "tool_calls" else finish_reason or "stop",
-        logprobs=logprobs,
-    )
-
-
-def _wire_usage(
-    prompt: str,
-    completions: Sequence[CompletionOutput],
-    usage: GenerationUsage | Usage | None,
-) -> Usage:
-    """Reported counts when present; otherwise use the m9 D1 wire approximation."""
-    prompt_tokens, completion_tokens = resolve_usage_counts(
-        usage, prompt=prompt, completions=completions
-    )
-    if isinstance(usage, GenerationUsage):
-        details = (
-            PromptTokensDetails(cached_tokens=usage.cached_tokens)
-            if usage.cached_tokens
-            else None
-        )
-    elif isinstance(usage, Usage):
-        details = usage.prompt_tokens_details
-    else:
-        details = None
-    return Usage(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        prompt_tokens_details=details,
-    )
 
 
 def _stream_usage_owner(
@@ -370,45 +107,6 @@ def _stream_usage_owner(
         model=model,
         prompt=prompt,
     )
-
-
-def completion_response(
-    request: ChatCompletionRequest,
-    prompt: str,
-    completions: Sequence[CompletionOutput],
-    usage: GenerationUsage | None = None,
-    normalized_tool_choice: _NormalizedToolChoice | None = None,
-) -> ChatCompletionResponse:
-    if normalized_tool_choice is None:
-        normalized_tool_choice, error = _normalize_tool_choice(request)
-        if error is not None:
-            raise ValueError(error)
-    assert normalized_tool_choice is not None
-    choices = [
-        _build_choice(
-            c.index,
-            c.text,
-            normalized_tool_choice,
-            c.finish_reason,
-            _choice_logprobs(c),
-        )
-        for c in completions
-    ]
-    return ChatCompletionResponse(
-        id=f"chatcmpl-{uuid.uuid4().hex[:16]}",
-        created=int(time.time()),
-        model=request.model,
-        choices=choices,
-        usage=_wire_usage(prompt, completions, usage),
-    )
-
-
-def _tool_choice_is_satisfied(
-    choices: Sequence[Choice], tool_choice: _NormalizedToolChoice
-) -> bool:
-    if tool_choice.mode not in {"required", "named"}:
-        return True
-    return any(choice.message.tool_calls for choice in choices)
 
 
 def _sse_chunk(
@@ -887,32 +585,16 @@ def create_app(
     @app.post("/v1/chat/completions")
     async def chat_completions(request: ChatCompletionRequest, http_request: Request):
         http_request.state.model = request.model  # label for the metrics middleware
-        normalized_tool_choice, tool_choice_error = _normalize_tool_choice(request)
-        if tool_choice_error is not None:
-            return invalid_request(tool_choice_error)
-        assert normalized_tool_choice is not None
-        if request.stream_options is not None and not request.stream:
-            return invalid_request("stream_options is only allowed when stream is true")
-        if request.top_logprobs is not None and not request.logprobs:
-            return invalid_request("top_logprobs requires logprobs to be true")
-        if request.top_logprobs is not None and not 0 <= request.top_logprobs <= 20:
-            return invalid_request("top_logprobs must be between 0 and 20")
-        format_error = _validate_response_format(request.response_format)
-        if format_error is not None:
-            return invalid_request(format_error)
-        include_usage = bool(request.stream_options and request.stream_options.include_usage)
-        # m11 D5: image parts need a vision engine; wire format only for now
-        from kairyu.entrypoints.chat_template import flatten_content
-
-        for message in request.messages:
-            _, has_images = flatten_content(message.content)
-            if has_images:
-                return invalid_request(
-                    f"model {request.model!r} does not support image inputs"
-                )
-        # rendered after model resolution: templates are per served model (m9 D2)
-        prompt = render_prompt(request, chat_templates)
         if request.model in auto_models:
+            try:
+                validated_input = validate_chat_input(request, chat_templates)
+            except ChatRequestError as error:
+                return JSONResponse(
+                    status_code=error.status_code, content={"error": error.payload()}
+                )
+            prompt = validated_input.prompt
+            normalized_tool_choice = validated_input.normalized_tool_choice
+            include_usage = validated_input.include_usage
             # Orchestrated models do not consume SamplingParams directly, but
             # the public chat boundary must still enforce the same selected
             # output-limit semantics before either dispatch seam is entered.
@@ -954,7 +636,7 @@ def create_app(
             try:
                 result = await selected.run(prompt)
             except Exception as error:
-                return _upstream_error(error)
+                return upstream_error(error)
             completions = (
                 CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
             )
@@ -986,54 +668,56 @@ def create_app(
             )
             return response
 
-        engine = served_engines.get(request.model)
-        if engine is None:
-            return _model_not_found(request.model)
-        if request.n > 1 and getattr(engine, "supports_n", True) is False:
-            return invalid_request(f"model {request.model!r} does not support n > 1")
         session_id = _session_id(request, http_request)
         try:
-            sampling = sampling_params_from(request)  # bad temperature/top_p/n -> 400
-        except ValueError as error:
-            return invalid_request(str(error))
-        generation_request = GenerationRequest(
-            request_id=f"http-{uuid.uuid4().hex[:12]}",
-            prompt=prompt,
-            sampling_params=sampling,
-            # Affinity glue (m7 D6): keeps a session's turns on the replica
-            # holding its warm radix-KV prefix.
-            cache_hint=CacheHint(session_id=session_id) if session_id else None,
-        )
-        validation_error = _validate_generation_request(engine, generation_request)
-        if validation_error is not None:
-            return validation_error
+            validated = validate_chat_request(
+                request,
+                served_engines,
+                chat_templates,
+                request_id=f"http-{uuid.uuid4().hex[:12]}",
+                # Affinity glue (m7 D6): keeps a session's turns on the replica
+                # holding its warm radix-KV prefix.
+                cache_hint=CacheHint(session_id=session_id) if session_id else None,
+            )
+        except ChatRequestError as error:
+            return JSONResponse(
+                status_code=error.status_code, content={"error": error.payload()}
+            )
         if request.stream and not request.tools:
             return StreamingResponse(
                 _stream_engine(
-                    engine, generation_request, request.model, request, http_request
+                    validated.engine,
+                    validated.generation_request,
+                    request.model,
+                    request,
+                    http_request,
                 ),
                 media_type="text/event-stream",
             )
         try:
-            result = await engine.generate(generation_request)
+            executed = await execute_chat(validated)
+        except ChatRequestError as error:
+            if error.execution is not None:
+                _record_usage(
+                    http_request,
+                    request.model,
+                    error.execution.result.usage,
+                    prompt=error.execution.result.prompt,
+                    completions=error.execution.result.completions,
+                )
+            return JSONResponse(
+                status_code=error.status_code, content={"error": error.payload()}
+            )
         except Exception as error:
-            return _upstream_error(error)
-        response = completion_response(
-            request,
-            prompt,
-            result.completions,
-            result.usage,
-            normalized_tool_choice=normalized_tool_choice,
-        )
+            return upstream_error(error)
+        response = executed.response
         _record_usage(
             http_request,
             request.model,
-            result.usage,
-            prompt=prompt,
-            completions=result.completions,
+            executed.result.usage,
+            prompt=executed.result.prompt,
+            completions=executed.result.completions,
         )
-        if not _tool_choice_is_satisfied(response.choices, normalized_tool_choice):
-            return _tool_choice_not_satisfied()
         if request.stream:
             # Tool calling + streaming: generate fully, then emit structured chunks so
             # tool_calls and finish_reason stay correct.
@@ -1041,7 +725,9 @@ def create_app(
                 _stream_choices(
                     response.choices,
                     request.model,
-                    usage=response.usage if include_usage else None,
+                    usage=(
+                        response.usage if validated.input.include_usage else None
+                    ),
                 ),
                 media_type="text/event-stream",
             )
@@ -1062,7 +748,7 @@ def create_app(
             return invalid_request("streaming with a prompt array is not supported")
         engine = served_engines.get(request.model)
         if engine is None:
-            return _model_not_found(request.model)
+            return model_not_found(request.model)
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
             return invalid_request(f"model {request.model!r} does not support n > 1")
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
@@ -1112,7 +798,7 @@ def create_app(
                 *(engine.generate(item) for item in generation_requests)
             )
         except Exception as error:
-            return _upstream_error(error)
+            return upstream_error(error)
         for prompt_index, (prompt, result) in enumerate(
             zip(prompts, results, strict=True)
         ):

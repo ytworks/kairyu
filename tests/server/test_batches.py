@@ -13,6 +13,7 @@ from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.backend import GenerationResult
 from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints.server.errors import sanitize_backend_error
 from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.outputs import CompletionOutput
 
@@ -168,7 +169,7 @@ async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeyp
     peak_task_count = 0
     baseline_task_count = len(asyncio.all_tasks())
 
-    async def recording_run_line(line):
+    async def recording_run_line(line, *args):
         nonlocal active, max_active, peak_task_count
         task = asyncio.current_task()
         assert task is not None
@@ -212,7 +213,7 @@ async def test_worker_peak_memory_stays_bounded_for_large_batch(
     file = store.save_file(content.encode(), "input.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
 
-    async def immediate_result(line):
+    async def immediate_result(line, *args):
         return {"custom_id": line["custom_id"]}, None, None
 
     monkeypatch.setattr(worker, "_run_line", immediate_result)
@@ -481,7 +482,7 @@ async def test_unexpected_line_failure_is_terminal_and_next_job_still_runs(
     first = store.create_batch(first_file.id, "/v1/chat/completions")
     run_line = worker._run_line
 
-    async def fail_line(line):
+    async def fail_line(line, *args):
         raise RuntimeError("secret backend detail must not escape")
 
     monkeypatch.setattr(worker, "_run_line", fail_line)
@@ -520,7 +521,7 @@ async def test_explicit_cancellation_wins_over_concurrent_processing_failure(
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def fail_after_cancel(line):
+    async def fail_after_cancel(line, *args):
         started.set()
         await release.wait()
         raise RuntimeError("processing lost the cancellation race")
@@ -551,7 +552,7 @@ async def test_task_cancellation_propagates_after_spool_cleanup(tmp_path, monkey
     job = store.create_batch(file.id, "/v1/chat/completions")
     started = asyncio.Event()
 
-    async def block_line(line):
+    async def block_line(line, *args):
         started.set()
         await asyncio.Event().wait()
 
@@ -721,6 +722,83 @@ async def test_oversized_upload_is_rejected(tmp_path, monkeypatch):
         )
     assert resp.status_code == 413
     assert resp.json()["error"]["code"] == "file_too_large"
+
+
+async def test_batch_envelope_rejections_and_duplicate_custom_id_do_not_dispatch(
+    tmp_path,
+):
+    class CountingBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            return await super().generate(request)
+
+    backend = CountingBackend()
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": backend}, max_concurrency=2)
+    valid = json.loads(_batch_line("ok", "valid"))
+    duplicate = json.loads(_batch_line("duplicate", "first"))
+    lines = [
+        valid,
+        {**json.loads(_batch_line("delete", "bad")), "method": "DELETE"},
+        {**json.loads(_batch_line("wrong-url", "bad")), "url": "/admin/usage"},
+        {key: value for key, value in valid.items() if key != "custom_id"},
+        {**valid, "custom_id": "   "},
+        duplicate,
+        {**duplicate, "body": {**duplicate["body"], "messages": [
+            {"role": "user", "content": "second"}
+        ]}},
+    ]
+    file = store.save_file(
+        "\n".join(json.dumps(line) for line in lines).encode(),
+        "input.jsonl",
+        "batch",
+    )
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    await worker.process(job.id)
+
+    completed = store.get_batch(job.id)
+    assert completed.request_counts.model_dump() == {
+        "total": 7,
+        "completed": 2,
+        "failed": 5,
+    }
+    assert backend.calls == 2
+    errors = [
+        json.loads(line)
+        for line in store.read_file_content(completed.error_file_id).splitlines()
+    ]
+    assert len(errors) == 5
+    assert all(error["error"]["type"] == "invalid_request_error" for error in errors)
+    assert sum(error["custom_id"] == "duplicate" for error in errors) == 1
+    assert any("POST" in error["error"]["message"] for error in errors)
+    assert any("batch endpoint" in error["error"]["message"] for error in errors)
+
+
+async def test_batch_backend_error_is_sanitized(tmp_path):
+    class LeakingBackend(MockBackend):
+        async def generate(self, request):
+            raise RuntimeError("http://replica-internal:9000 secret=abc")
+
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": LeakingBackend()}, max_concurrency=1)
+    file = store.save_file(_batch_line("leak", "hello").encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    await worker.process(job.id)
+
+    completed = store.get_batch(job.id)
+    error = json.loads(store.read_file_content(completed.error_file_id))
+    assert error["error"] == sanitize_backend_error(
+        RuntimeError("http://replica-internal:9000 secret=abc")
+    )
+    serialized = json.dumps(error)
+    assert "replica-internal" not in serialized
+    assert "secret=abc" not in serialized
 
 
 async def test_non_object_input_line_does_not_wedge_the_job(tmp_path):
