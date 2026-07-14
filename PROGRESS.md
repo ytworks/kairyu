@@ -49,6 +49,9 @@ OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benc
 in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
+The vLLM-compatible `AsyncLLMEngine` now owns an explicit registry of active
+request IDs: inactive aborts are stateless, while an active abort interrupts and
+closes its backend stream without poisoning later reuse of the same ID.
 `BatchStore` exposes owner-scoped lazy binary-line iteration and transactional lazy
 JSONL writers; the batch worker streams input through a bounded queue and fixed consumer
 pool, spools results incrementally, and persists controlled terminal failure while rolling
@@ -82,6 +85,17 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] Async abort owns active request lifecycles
+- What: `AsyncLLMEngine` replaced persistent abort markers with a registry of active
+  request-local events. Generation now races backend progress against abort, rejects only
+  concurrently active duplicate IDs, and centralizes deregistration, pending-task
+  cancellation, and backend iterator closure across completion, abort, and consumer close.
+- Why: unknown aborts previously retained attacker-controlled IDs and suppressed a future
+  request reusing that ID, while an active stream blocked on its backend could not observe
+  abort until another partial arrived.
+- Refs: Issue #84; `kairyu/entrypoints/async_engine.py`;
+  `tests/{compat/test_async_engine_compat,unit/test_async_engine_abort}.py`.
 
 ### 2026-07-14 — [progress] FlashInfer SM120 (Blackwell) attention enabled: GPU device placement + AOT image
 - What: The single-process GPU serve path had no device placement — `build_engine_loop` loaded the
