@@ -82,11 +82,13 @@ never changed by generation reconciliation.
 Server: `POST /admin/drain` marks the pool replica draining and flips `/readyz`
 to 503 (existing prober contract).
 
-### D3 — `BatchStoreProtocol` (pure refactor)
+### D3 — `BatchStoreProtocol` and streaming file storage
 
-The file-backed batch store's surface (`create/get/update/list`) extracted
-to a Protocol so M11 tenancy ledgers and tests can fake it. No behavior
-change; existing tests must pass unmodified.
+The file-backed batch store's surface (`create/get/update/list`) is extracted
+to a Protocol so M11 tenancy ledgers and tests can fake it. The surface also
+includes owner-scoped lazy input-line iteration and a transactional JSONL writer:
+the writer creates no artifact before its first append and publishes metadata only
+after its temporary content is closed and atomically renamed.
 
 ### D4 — OTel tracing (`entrypoints/server/tracing.py`)
 
@@ -171,9 +173,10 @@ over (α, β) (pure function over the dataset; no online learning).
   tolerates in-flight remove refusal, closes each unused candidate, and retries
   next tick without changing the applied identity.
 - **A7**: registry takes ``now: Callable[[], float] = time.monotonic``.
-- **A8**: BatchStoreProtocol is the FULL 8-method surface (save_file,
-  get_file, read_file_content, create_batch, get_batch, list_batches,
-  update_batch, recover_orphans) + FileObject/BatchJob models.
+- **A8**: BatchStoreProtocol is the FULL 10-method surface (save_file,
+  get_file, read_file_content, iter_file_lines, create_jsonl_writer,
+  create_batch, get_batch, list_batches, update_batch, recover_orphans) +
+  FileObject/BatchJob/JsonlFileWriter models.
 - **A9**: traced_span lives in ``kairyu/telemetry.py`` (L2 must not import
   L3); the gateway request span is a middleware; ServerSection threading
   already copies model_fields — only the field addition is needed.

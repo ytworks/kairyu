@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import tracemalloc
 
 import httpx
+import pytest
 
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
@@ -109,14 +111,24 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
             super().__init__()
             self.active = 0
             self.max_active = 0
+            self.batch_active = 0
+            self.max_batch_active = 0
 
         async def generate(self, request):
             self.active += 1
             self.max_active = max(self.max_active, self.active)
+            is_batch = request.request_id.startswith("batch-")
+            if is_batch:
+                self.batch_active += 1
+                self.max_batch_active = max(
+                    self.max_batch_active, self.batch_active
+                )
             try:
                 await asyncio.sleep(0.02)
                 return await super().generate(request)
             finally:
+                if is_batch:
+                    self.batch_active -= 1
                 self.active -= 1
 
     backend = CountingBackend()
@@ -133,7 +145,325 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
     finished = store.get_batch(job.id)
     assert finished.status == "completed"
     assert finished.request_counts.completed == 8
+    assert backend.max_batch_active == 2
     assert backend.max_active <= 3  # 2 batch slots + the 1 interactive request
+
+
+async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeypatch):
+    max_concurrency = 4
+    line_count = 300
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=max_concurrency)
+    content = "\n".join(
+        _batch_line(f"r{index}", f"prompt {index}") for index in range(line_count)
+    )
+    file = store.save_file(content.encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    release = asyncio.Event()
+    all_consumers_started = asyncio.Event()
+    consumer_tasks = set()
+    active = 0
+    max_active = 0
+    peak_task_count = 0
+    baseline_task_count = len(asyncio.all_tasks())
+
+    async def recording_run_line(line):
+        nonlocal active, max_active, peak_task_count
+        task = asyncio.current_task()
+        assert task is not None
+        consumer_tasks.add(task)
+        active += 1
+        max_active = max(max_active, active)
+        peak_task_count = max(peak_task_count, len(asyncio.all_tasks()))
+        if active == max_concurrency:
+            all_consumers_started.set()
+        try:
+            await release.wait()
+            return {"custom_id": line["custom_id"], "ok": True}, None
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(worker, "_run_line", recording_run_line)
+    process_task = asyncio.create_task(worker.process(job.id))
+    try:
+        await asyncio.wait_for(all_consumers_started.wait(), timeout=1)
+    finally:
+        release.set()
+    await process_task
+
+    finished = store.get_batch(job.id)
+    assert finished.request_counts.completed == line_count
+    assert max_active == max_concurrency
+    assert len(consumer_tasks) == max_concurrency
+    assert peak_task_count <= baseline_task_count + max_concurrency + 3
+
+
+async def test_worker_peak_memory_stays_bounded_for_large_batch(
+    tmp_path, monkeypatch
+):
+    line_count = 10_000
+    peak_limit_bytes = 4 * 1024 * 1024
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=4)
+    content = "\n".join(
+        json.dumps({"custom_id": f"r{index}"}) for index in range(line_count)
+    )
+    file = store.save_file(content.encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    async def immediate_result(line):
+        return {"custom_id": line["custom_id"]}, None
+
+    monkeypatch.setattr(worker, "_run_line", immediate_result)
+    tracemalloc.start()
+    try:
+        await worker.process(job.id)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    finished = store.get_batch(job.id)
+    assert finished.status == "completed"
+    assert finished.request_counts.completed == line_count
+    # This fixed budget deliberately does not scale with the input size: the
+    # bounded pipeline should retain only its small queue and consumer pool.
+    assert peak_bytes < peak_limit_bytes
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+async def test_worker_streams_input_without_bulk_read(tmp_path, monkeypatch):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=2)
+    content = (
+        "\n\n"
+        + _batch_line("a", "first")
+        + "\n   \n"
+        + _batch_line("b", "second")
+        + "\n"
+    ).encode()
+    file = store.save_file(content, "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    def fail_bulk_read(*args, **kwargs):
+        raise AssertionError("batch worker must stream input lines")
+
+    monkeypatch.setattr(store, "read_file_content", fail_bulk_read)
+
+    await worker.process(job.id)
+
+    finished = store.get_batch(job.id)
+    assert finished.status == "completed"
+    assert finished.request_counts.total == 2
+    assert finished.request_counts.completed == 2
+
+
+async def test_streaming_parse_error_fails_after_admitted_lines(tmp_path):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    content = (
+        _batch_line("accepted", "first")
+        + "\nnot-json\n"
+        + _batch_line("never-admitted", "last")
+    ).encode()
+    file = store.save_file(content, "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    await worker.process(job.id)
+
+    failed = store.get_batch(job.id)
+    assert failed.status == "failed"
+    assert failed.request_counts.total == 1
+    assert failed.output_file_id is None
+    assert failed.error_file_id is None
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+def _stored_file_names(tmp_path):
+    return {path.name for path in (tmp_path / "files").iterdir()}
+
+
+async def test_output_append_failure_persists_failed_and_cleans_spool(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    files_before = _stored_file_names(tmp_path)
+    create_writer = store.create_jsonl_writer
+
+    def create_failing_writer(filename, purpose, owner="default"):
+        writer = create_writer(filename, purpose, owner)
+        if filename.endswith("_output.jsonl"):
+            append = writer.append
+
+            def fail_after_append(payload):
+                append(payload)
+                raise OSError("secret output path must not escape")
+
+            monkeypatch.setattr(writer, "append", fail_after_append)
+        return writer
+
+    monkeypatch.setattr(store, "create_jsonl_writer", create_failing_writer)
+
+    await worker.process(job.id)
+
+    failed = store.get_batch(job.id)
+    assert failed.status == "failed"
+    assert failed.failed_at is not None
+    assert failed.errors == {
+        "message": "batch processing failed (OSError); resubmit"
+    }
+    assert failed.request_counts.model_dump() == {
+        "total": 1,
+        "completed": 0,
+        "failed": 0,
+    }
+    assert failed.output_file_id is None
+    assert failed.error_file_id is None
+    assert _stored_file_names(tmp_path) == files_before
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+async def test_second_writer_commit_failure_rolls_back_first_publication(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    content = "\n".join(
+        [_batch_line("ok", "hello"), _batch_line("bad", "hello", model="missing")]
+    )
+    file = store.save_file(content.encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    files_before = _stored_file_names(tmp_path)
+    create_writer = store.create_jsonl_writer
+
+    def create_failing_writer(filename, purpose, owner="default"):
+        writer = create_writer(filename, purpose, owner)
+        if filename.endswith("_errors.jsonl"):
+
+            def fail_commit():
+                raise OSError("secret finalize path must not escape")
+
+            monkeypatch.setattr(writer, "commit", fail_commit)
+        return writer
+
+    monkeypatch.setattr(store, "create_jsonl_writer", create_failing_writer)
+
+    await worker.process(job.id)
+
+    failed = store.get_batch(job.id)
+    assert failed.status == "failed"
+    assert failed.failed_at is not None
+    assert failed.errors == {
+        "message": "batch processing failed (OSError); resubmit"
+    }
+    assert failed.request_counts.model_dump() == {
+        "total": 2,
+        "completed": 1,
+        "failed": 1,
+    }
+    assert failed.output_file_id is None
+    assert failed.error_file_id is None
+    assert _stored_file_names(tmp_path) == files_before
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+async def test_unexpected_line_failure_is_terminal_and_next_job_still_runs(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    first_file = store.save_file(
+        _batch_line("broken", "hello").encode(), "first.jsonl", "batch"
+    )
+    first = store.create_batch(first_file.id, "/v1/chat/completions")
+    run_line = worker._run_line
+
+    async def fail_line(line):
+        raise RuntimeError("secret backend detail must not escape")
+
+    monkeypatch.setattr(worker, "_run_line", fail_line)
+
+    await worker.process(first.id)
+
+    failed = store.get_batch(first.id)
+    assert failed.status == "failed"
+    assert failed.failed_at is not None
+    assert failed.errors == {
+        "message": "batch processing failed (RuntimeError); resubmit"
+    }
+    assert failed.request_counts.model_dump() == {
+        "total": 1,
+        "completed": 0,
+        "failed": 0,
+    }
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+    monkeypatch.setattr(worker, "_run_line", run_line)
+    second_file = store.save_file(
+        _batch_line("healthy", "hello").encode(), "second.jsonl", "batch"
+    )
+    second = store.create_batch(second_file.id, "/v1/chat/completions")
+    await worker.process(second.id)
+    assert store.get_batch(second.id).status == "completed"
+
+
+async def test_explicit_cancellation_wins_over_concurrent_processing_failure(
+    tmp_path, monkeypatch
+):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fail_after_cancel(line):
+        started.set()
+        await release.wait()
+        raise RuntimeError("processing lost the cancellation race")
+
+    monkeypatch.setattr(worker, "_run_line", fail_after_cancel)
+    task = asyncio.create_task(worker.process(job.id))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    cancelled = store.get_batch(job.id)
+    cancelled.status = "cancelled"
+    store.update_batch(cancelled)
+    release.set()
+    await task
+
+    cancelled = store.get_batch(job.id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.cancelled_at is not None
+    assert cancelled.failed_at is None
+    assert cancelled.errors is None
+    assert cancelled.output_file_id is None
+    assert cancelled.error_file_id is None
+    assert list((tmp_path / "files").glob("*.tmp")) == []
+
+
+async def test_task_cancellation_propagates_after_spool_cleanup(tmp_path, monkeypatch):
+    store = BatchStore(tmp_path)
+    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    started = asyncio.Event()
+
+    async def block_line(line):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker, "_run_line", block_line)
+    task = asyncio.create_task(worker.process(job.id))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert store.get_batch(job.id).status == "in_progress"
+    assert list((tmp_path / "files").glob("*.tmp")) == []
 
 
 def _interactive_request():
@@ -170,8 +500,12 @@ async def test_cancel_stops_remaining_lines(tmp_path):
     store.update_batch(cancelled)
     await task
 
-    assert store.get_batch(job.id).status == "cancelled"
+    cancelled = store.get_batch(job.id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.output_file_id is None
+    assert cancelled.error_file_id is None
     assert backend.calls < 10  # remaining lines were skipped
+    assert list((tmp_path / "files").glob("*.tmp")) == []
 
 
 async def test_restart_marks_inflight_jobs_failed(tmp_path):
