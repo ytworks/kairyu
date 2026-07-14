@@ -7,6 +7,7 @@ the same endpoint (design doc D6).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -86,6 +87,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AUTO_MODEL = "kairyu-auto"
+
+
+def _with_usage_ledger_cleanup(lifespan):
+    """Make the app-created ledger the outermost lifespan-owned resource."""
+
+    @contextlib.asynccontextmanager
+    async def wrapped(app: FastAPI):
+        try:
+            if lifespan is None:
+                yield
+            else:
+                async with lifespan(app):
+                    yield
+        finally:
+            ledger = getattr(app.state, "usage_ledger", None)
+            if ledger is not None:
+                ledger.close()
+
+    return wrapped
 
 
 def _validate_generation_request(
@@ -479,7 +499,11 @@ def create_app(
     resolved_admin_keys: frozenset[str] | None = None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
-    app = FastAPI(title="kairyu", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="kairyu",
+        version="0.1.0",
+        lifespan=_with_usage_ledger_cleanup(lifespan),
+    )
     served_engines = dict(engines)
     # m11 D2: tiered auto models; the single-orchestrator kwarg is a shim
     auto_models: dict[str, Orchestrator] = dict(orchestrators or {})

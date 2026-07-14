@@ -74,6 +74,9 @@ Tenant usage accounting now covers synchronous and streaming generation, Respons
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
 early or a completed batch line is later rolled back by cancellation or spool failure.
+The app lifespan owns each persistent usage-ledger append handle and closes it only after
+inner worker/backend cleanup, including exceptional shutdowns. Aggregation skips and logs
+truncated tails or complete malformed records while preserving every valid usage total.
 
 The Open WebUI Compose topology is clean-checkout runnable with a standalone
 `default` mock DeploymentSpec; CI validates its binds/rendered internal endpoint and
@@ -99,6 +102,17 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] Usage ledger shutdown and recovery are app-owned (m11 D3/A7)
+- What: `create_app` now wraps its optional caller lifespan and flushes/closes the
+  app-created usage ledger after all inner worker/backend cleanup, even when that cleanup
+  raises. Ledger scans validate records independently, ignore whitespace, warn on a
+  non-newline malformed tail, error with line numbers for complete malformed records,
+  retain valid totals, and expose the latest malformed-record count.
+- Why: Issue #90 showed that the persistent O_APPEND handle was never closed and that one
+  truncated or schema-skewed JSONL line made the entire administrator usage endpoint fail.
+- Refs: Issue #90; m11 D3/A7; `kairyu/entrypoints/server/{app,tenancy}.py`;
+  `kairyu/deploy/builder.py`; `tests/server/{test_m11_product,test_serve_builder}.py`.
 
 ### 2026-07-14 — [amendment] Embeddings use explicit served model IDs (m11 D4)
 - What: `create_app` and `DeploymentSpec` now accept model-ID-to-embedding-backend

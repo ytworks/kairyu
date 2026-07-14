@@ -14,10 +14,13 @@ the same derived approximation returned on the wire.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -200,6 +203,12 @@ class UsageLedger:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = None
+        self._malformed_lines = 0
+
+    @property
+    def malformed_lines(self) -> int:
+        """Number of malformed non-whitespace records in the latest scan."""
+        return self._malformed_lines
 
     def _get_handle(self):
         if self._handle is None or self._handle.closed:
@@ -224,23 +233,56 @@ class UsageLedger:
 
     def close(self) -> None:
         if self._handle is not None and not self._handle.closed:
-            self._handle.close()
+            try:
+                self._handle.flush()
+            finally:
+                self._handle.close()
 
     def totals(self, tenant: str | None = None) -> dict[str, dict[str, int]]:
         """Aggregate by tenant (optionally filtered) for /admin/usage."""
         totals: dict[str, dict[str, int]] = {}
+        self._malformed_lines = 0
         if not self._path.is_file():
             return totals
         with open(self._path, encoding="utf-8") as handle:
-            for line in handle:
-                record = json.loads(line)
-                if tenant is not None and record["tenant"] != tenant:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    record_tenant = record["tenant"]
+                    prompt_tokens = record["prompt_tokens"]
+                    completion_tokens = record["completion_tokens"]
+                    if (
+                        not isinstance(record_tenant, str)
+                        or type(prompt_tokens) is not int
+                        or type(completion_tokens) is not int
+                    ):
+                        raise TypeError("usage ledger record has invalid field types")
+                except (json.JSONDecodeError, KeyError, TypeError) as error:
+                    self._malformed_lines += 1
+                    if not line.endswith("\n"):
+                        logger.warning(
+                            "skipping truncated usage ledger tail in %s at line %d (%s)",
+                            self._path,
+                            line_number,
+                            type(error).__name__,
+                        )
+                    else:
+                        logger.error(
+                            "skipping malformed usage ledger record in %s at line %d (%s)",
+                            self._path,
+                            line_number,
+                            type(error).__name__,
+                        )
+                    continue
+                if tenant is not None and record_tenant != tenant:
                     continue
                 bucket = totals.setdefault(
-                    record["tenant"],
+                    record_tenant,
                     {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0},
                 )
                 bucket["requests"] += 1
-                bucket["prompt_tokens"] += record["prompt_tokens"]
-                bucket["completion_tokens"] += record["completion_tokens"]
+                bucket["prompt_tokens"] += prompt_tokens
+                bucket["completion_tokens"] += completion_tokens
         return totals

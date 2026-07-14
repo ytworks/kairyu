@@ -2,7 +2,9 @@
 embeddings, vision wire, F5 logic, bench schema."""
 
 import base64
+import contextlib
 import json
+import logging
 import struct
 from types import SimpleNamespace
 
@@ -591,6 +593,174 @@ class TestTenancy:
         totals = ledger.totals()["t"]
         assert totals["prompt_tokens"] == sum(p for p, _ in returned)  # exact (< 0.1%)
         assert totals["completion_tokens"] == sum(c for _, c in returned)
+
+    def test_ledger_skips_truncated_tail_and_warns_once(self, tmp_path, caplog):
+        ledger_path = tmp_path / "ledger.jsonl"
+        ledger = UsageLedger(ledger_path)
+        ledger.record("tenant-a", "m", prompt_tokens=7, completion_tokens=3)
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write('{"tenant":"tenant-a","prompt_tokens":11')
+
+        with caplog.at_level(
+            logging.WARNING,
+            logger="kairyu.entrypoints.server.tenancy",
+        ):
+            totals = ledger.totals()
+
+        assert totals == {
+            "tenant-a": {
+                "requests": 1,
+                "prompt_tokens": 7,
+                "completion_tokens": 3,
+            }
+        }
+        assert ledger.malformed_lines == 1
+        warnings = [
+            record
+            for record in caplog.records
+            if "truncated usage ledger tail" in record.message
+        ]
+        assert len(warnings) == 1
+
+    def test_ledger_skips_complete_corruption_and_whitespace(
+        self, tmp_path, caplog
+    ):
+        ledger_path = tmp_path / "ledger.jsonl"
+        lines = [
+            json.dumps(
+                {
+                    "tenant": "tenant-a",
+                    "prompt_tokens": 2,
+                    "completion_tokens": 3,
+                }
+            ),
+            "not-json",
+            json.dumps(
+                {
+                    "tenant": "tenant-a",
+                    "prompt_tokens": "4",
+                    "completion_tokens": 5,
+                }
+            ),
+            json.dumps({"prompt_tokens": 6, "completion_tokens": 7}),
+            "   ",
+            json.dumps(
+                {
+                    "tenant": "tenant-a",
+                    "prompt_tokens": 11,
+                    "completion_tokens": 13,
+                }
+            ),
+        ]
+        ledger_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        ledger = UsageLedger(ledger_path)
+
+        with caplog.at_level(
+            logging.ERROR,
+            logger="kairyu.entrypoints.server.tenancy",
+        ):
+            totals = ledger.totals()
+
+        assert totals == {
+            "tenant-a": {
+                "requests": 2,
+                "prompt_tokens": 13,
+                "completion_tokens": 16,
+            }
+        }
+        assert ledger.malformed_lines == 3
+        errors = [
+            record.message
+            for record in caplog.records
+            if "malformed usage ledger record" in record.message
+        ]
+        assert len(errors) == 3
+        assert all(f"line {line_number}" in " ".join(errors) for line_number in (2, 3, 4))
+
+    def test_admin_usage_returns_partial_totals_for_corrupt_ledger(
+        self, tmp_path, caplog
+    ):
+        ledger_path = tmp_path / "ledger.jsonl"
+        ledger_path.write_text(
+            "\n".join(
+                (
+                    json.dumps(
+                        {
+                            "tenant": "tenant-a",
+                            "prompt_tokens": 5,
+                            "completion_tokens": 8,
+                        }
+                    ),
+                    "not-json",
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        app = create_app(
+            {"m": MockBackend()},
+            settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+        )
+
+        with caplog.at_level(
+            logging.ERROR,
+            logger="kairyu.entrypoints.server.tenancy",
+        ), TestClient(app) as client:
+            response = client.get("/admin/usage")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "usage": {
+                "tenant-a": {
+                    "requests": 1,
+                    "prompt_tokens": 5,
+                    "completion_tokens": 8,
+                }
+            }
+        }
+        assert app.state.usage_ledger.malformed_lines == 1
+
+    def test_create_app_closes_and_can_reopen_ledger_after_shutdown(self, tmp_path):
+        app = create_app(
+            {"m": MockBackend()},
+            settings=ServerSettings(usage_ledger_path=str(tmp_path / "ledger.jsonl")),
+        )
+        ledger = app.state.usage_ledger
+
+        with TestClient(app):
+            ledger.record("tenant-a", "m", prompt_tokens=1, completion_tokens=2)
+            first_handle = ledger._handle
+            assert first_handle is not None
+            assert not first_handle.closed
+
+        assert first_handle.closed
+        ledger.record("tenant-a", "m", prompt_tokens=3, completion_tokens=4)
+        assert ledger._handle is not first_handle
+        assert not ledger._handle.closed
+        ledger.close()
+
+    def test_create_app_closes_ledger_when_caller_lifespan_shutdown_fails(
+        self, tmp_path
+    ):
+        @contextlib.asynccontextmanager
+        async def failing_lifespan(_app):
+            yield
+            raise RuntimeError("caller shutdown failed")
+
+        app = create_app(
+            {"m": MockBackend()},
+            settings=ServerSettings(usage_ledger_path=str(tmp_path / "ledger.jsonl")),
+            lifespan=failing_lifespan,
+        )
+        ledger = app.state.usage_ledger
+
+        with pytest.raises(RuntimeError, match="caller shutdown failed"):
+            with TestClient(app):
+                ledger.record("tenant-a", "m", prompt_tokens=1, completion_tokens=2)
+                handle = ledger._handle
+
+        assert handle is not None
+        assert handle.closed
 
     def test_bucket_refills(self):
         clock = {"t": 0.0}

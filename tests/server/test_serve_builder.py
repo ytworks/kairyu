@@ -705,17 +705,24 @@ async def test_lifespan_attempts_orchestrator_shutdown_after_engine_failure(
         "kairyu.deploy.builder.build_orchestrator", lambda _spec: owned_orchestrator
     )
     spec = load_deployment_spec(
-        """
+        f"""
+server:
+  usage_ledger_path: {tmp_path / "usage.jsonl"}
 engines:
-  bad: { backend: mock }
-orchestrator: { spec: auto.yaml }
+  bad: {{ backend: mock }}
+orchestrator: {{ spec: auto.yaml }}
 """
     )
     app = build_app_from_spec(spec, base_dir=tmp_path)
 
     with pytest.raises(ExceptionGroup, match="application shutdown"):
         async with app.router.lifespan_context(app):
-            pass
+            app.state.usage_ledger.record(
+                "tenant-a", "bad", prompt_tokens=1, completion_tokens=2
+            )
+            ledger_handle = app.state.usage_ledger._handle
 
     assert failing_engine.shutdown_count == 1
     assert owned_backend.shutdown_count == 1
+    assert ledger_handle is not None
+    assert ledger_handle.closed

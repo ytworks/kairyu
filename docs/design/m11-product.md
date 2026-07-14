@@ -42,9 +42,10 @@ configured Orchestrator instances listed in /v1/models.
 
 `tenancy.py`: `TenantConfig` (key→tenant map, per-tenant rate + token
 budgets), `TenantLimitMiddleware` (pure-ASGI, token-bucket per tenant on
-/v1/*; 429 with retry-after), usage ledger — JSONL append via the
-BatchStore atomic-rename pattern, one record per request (tenant, model,
-prompt/completion tokens, ts) — and `GET /admin/usage?tenant=` aggregation.
+/v1/*; 429 with retry-after), usage ledger — persistent O_APPEND JSONL,
+one record per execution (tenant, model, prompt/completion tokens, ts),
+app-lifespan-owned flush/close, and row-isolated aggregation that preserves
+valid totals around malformed records — plus `GET /admin/usage?tenant=`.
 Isolation gate: tenant A at its limit 429s while tenant B proceeds; ledger
 totals reconcile with returned usage to <0.1%.
 
@@ -136,9 +137,14 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   TenantLimitMiddleware runs INSIDE auth (added before it) so 401 wins over
   429 and unauthenticated requests never drain buckets; keyless mode →
   tenant "default".
-- **A7 (D3)**: ledger = O_APPEND single-writer JSONL (atomic-rename doesn't
-  fit appends); writes happen in handlers/stream generators (middleware
-  can't see usage); batch-worker executions are NOT metered in v1 (recorded).
+- **A7 (D3, amended by Issue #90)**: ledger = O_APPEND single-writer JSONL
+  (atomic-rename doesn't fit appends); writes happen in handlers, stream
+  generators, and successful batch consumers (middleware can't see usage).
+  `create_app` owns the persistent append handle and closes it in an outer
+  lifespan after caller/builder cleanup finishes or raises. Aggregation
+  validates each non-whitespace record independently: a malformed final line
+  without a newline is a truncated tail (skip + warning), complete malformed
+  lines are corruption (skip + per-line error), and all valid rows still count.
 - **A8 (D4)**: Responses usage names are input_tokens/output_tokens/
   total_tokens; output item = {type: message, role: assistant, status,
   content: [{type: output_text, text, annotations: []}]}; instructions

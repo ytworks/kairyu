@@ -152,6 +152,9 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             if orchestrator is not None:
                 resources.append(orchestrator)
             resources.extend(orchestrators.values())
+            # create_app owns the usage ledger in an outer lifespan wrapper,
+            # so it closes only after workers stop and this shutdown completes
+            # or raises an ExceptionGroup.
             await shutdown_all(resources, "application")
 
     app = create_app(
