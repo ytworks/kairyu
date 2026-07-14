@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
+from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
@@ -24,6 +25,7 @@ from kairyu.entrypoints.server.tenancy import (
     UsageLedger,
 )
 from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.outputs import CompletionOutput
 
 
 def _auto_app(tmp_path, **kwargs):
@@ -37,6 +39,53 @@ def _auto_app(tmp_path, **kwargs):
         embedding_backends={"embedding-model": MockEmbeddingBackend(dimensions=8)},
         **kwargs,
     )
+
+
+def test_mixed_tool_choice_rejection_is_metered_once(tmp_path):
+    class MixedToolBackend(MockBackend):
+        async def generate(self, request):
+            tool_call = (
+                '<tool_call>{"name":"get_weather","arguments":{}}</tool_call>'
+            )
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(index=0, text=tool_call, token_ids=()),
+                    CompletionOutput(index=1, text="plain", token_ids=()),
+                ),
+                usage=GenerationUsage(prompt_tokens=19, completion_tokens=7),
+            )
+
+    ledger_path = tmp_path / "usage.jsonl"
+    app = create_app(
+        {"m": MixedToolBackend()},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "weather"}],
+                "n": 2,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather", "parameters": {}},
+                    }
+                ],
+                "tool_choice": "required",
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": 19,
+        "completion_tokens": 7,
+    }
 
 
 class TestOrchestratorSurface:

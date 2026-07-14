@@ -40,7 +40,17 @@ async def test_from_engine_args_constructs_engine():
 
 async def test_abort_is_accepted():
     engine = _engine()
-    await engine.abort("nonexistent")  # vLLM allows aborting unknown ids silently
+    await engine.abort("future")  # vLLM allows aborting unknown ids silently
+
+    outputs = [
+        output
+        async for output in engine.generate(
+            "future prompt", SamplingParams(), "future"
+        )
+    ]
+
+    assert outputs
+    assert outputs[-1].finished is True
 
 
 async def test_concurrent_generate_streams_are_isolated():
