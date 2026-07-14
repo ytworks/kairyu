@@ -63,6 +63,9 @@ while rolling back partial result publications after ordinary processing or stor
 Each batch row now validates a typed method/URL/custom-ID envelope and enters the same
 chat validation plus buffered-dispatch service as regular HTTP requests; invalid rows never
 reach an engine, and backend error records reveal only the exception class.
+Required and named tool choice is enforced independently for every returned choice after
+filtering; mixed or empty results are rejected before response or buffered stream emission,
+without regeneration, and the consumed generation remains metered exactly once.
 Tenant usage accounting now covers synchronous and streaming generation, Responses,
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
@@ -92,6 +95,17 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] Required tool choice is enforced per response choice (m1 D6)
+- What: required and named tool choice now succeeds only when every returned choice retains
+  a permitted tool call after per-choice filtering. Mixed and empty results use the existing
+  controlled 502 before buffered SSE emission, without regeneration, and their consumed
+  generation is recorded exactly once.
+- Why: Issue #88 showed that the existential satisfaction check accepted multi-choice
+  responses when only one choice complied, violating the request contract for the remaining
+  choices.
+- Refs: Issue #88; m1 D6; `kairyu/entrypoints/server/chat_service.py`;
+  `tests/server/{test_openai_api,test_m11_product}.py`.
 
 ### 2026-07-14 — [amendment] OpenAI-compatible streams preserve empty choices (m1 D1)
 - What: streamed choice state is now initialized whenever an upstream index is observed,
