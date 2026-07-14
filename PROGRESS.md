@@ -83,6 +83,30 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-14 — [progress] FlashInfer SM120 (Blackwell) attention enabled: GPU device placement + AOT image
+- What: The single-process GPU serve path had no device placement — `build_engine_loop` loaded the
+  model and `PagedKVPool` in fp32 on CPU, so a "GPU" deployment ran inference on CPU via the
+  device-agnostic torch backend, and FlashInfer (the sm_120 default) failed with
+  `KeyError: torch.float32` (its prefill `plan()` has no fp32 kernel). Fixes:
+  - `build_engine_loop`: probe-driven device/dtype (cuda → bf16 on-device, cpu → fp32 on host;
+    guarded so every CPU path is byte-identical). `load_model(dtype=…)` + `model.to(device)` +
+    `PagedKVPool.for_cache(dtype, device)`.
+  - `PagedModelRunner` / `PagedKVPool`: device-correct input and index tensors.
+  - `Sampler`: sample on CPU (seeded RNG + penalties/enforcer) so the m8-D2 determinism pins hold
+    while logits arrive on cuda.
+  - `FlashInferBackend.attend`: pass the `[1,H,D]` decode query (0.6.x `decode.run` rejects a 2D
+    `[H,D]` slice); the batched `attend_batched` path already passes 3D.
+  - `app.py`: backend-exception handlers log the full traceback (client still gets only the class name).
+  - `Dockerfile.cuda` → multi-stage AOT: a CUDA 13.0 `-devel` build stage compiles
+    `flashinfer-jit-cache` (`FLASHINFER_CUDA_ARCH_LIST=12.0f`, bf16/head_dim-64/FA2); slim
+    `13.0.1-runtime`, no runtime nvcc, no first-request JIT.
+- Why: run the FlashInfer paged-attention kernels on RTX PRO 6000 Blackwell (sm_120). The torch
+  backend was a correct-but-slow interim and — as found — CPU-bound. AOT removes the ~20s
+  first-request JIT so a cold replica is not ejected by the gateway readiness probe.
+- Refs: docs/design/flashinfer-sm120-aot.md; kairyu/engine/kairyu_backend.py,
+  engine/core/{model_runner,kv_pool,sampler}.py, engine/core/attention/flashinfer_gpu.py,
+  entrypoints/server/app.py, Dockerfile.cuda.
+
 ### 2026-07-14 — [progress] Responses, embeddings, and batches complete usage accounting
 - What: successful `/v1/responses` and `/v1/embeddings` calls now record one usage
   event for the authenticated tenant using the same counts returned on the wire.
