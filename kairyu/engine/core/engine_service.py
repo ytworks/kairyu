@@ -130,6 +130,10 @@ def run_engine_service(port_pipe, config: dict) -> None:
                         owners[request_id] = identity  # only after a clean submit
                     elif op == "abort":
                         engine_loop.abort(message["request_id"])
+                        # Apply abort/_forget before accepting a queued add with
+                        # the same ID; otherwise one socket-drain batch sees it
+                        # as a duplicate even though the client awaited abort send.
+                        break
                     elif op == "ping":
                         socket.send_multipart([identity, msgpack.packb({"op": "pong"})])
                     elif op == "shutdown":

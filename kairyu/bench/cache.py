@@ -14,6 +14,15 @@ from pathlib import Path
 
 _ENV_VAR = "KAIRYU_BENCH_CACHE"
 _DEFAULT = "~/.cache/kairyu/benchmarks"
+_SHA256_HEX = frozenset("0123456789abcdef")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def resolve_cache_root(flag: str | None = None) -> Path:
@@ -41,14 +50,24 @@ class BenchCache:
     def is_ready(
         self, adapter: str, dataset: str | None = None, revision: str | None = None
     ) -> bool:
-        """Both files present, and (when given) the cached dataset/revision still
-        match the adapter's current pin — so bumping ``hf_revision`` re-downloads
-        instead of silently scoring against stale rows (M6)."""
+        """Return whether the cached bytes and optional dataset pins still match."""
         if not (self.manifest_path(adapter).exists() and self.data_path(adapter).exists()):
             return False
-        if dataset is None and revision is None:
-            return True
-        manifest = self.read_manifest(adapter)
+        try:
+            manifest = self.read_manifest(adapter)
+            if not isinstance(manifest, dict):
+                return False
+            expected_digest = manifest.get("sha256")
+            if (
+                not isinstance(expected_digest, str)
+                or len(expected_digest) != 64
+                or any(character not in _SHA256_HEX for character in expected_digest)
+            ):
+                return False
+            if _sha256_file(self.data_path(adapter)) != expected_digest:
+                return False
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
         if dataset is not None and manifest.get("dataset") != dataset:
             return False
         if revision is not None and manifest.get("revision") != revision:
@@ -75,7 +94,7 @@ class BenchCache:
         with data_path.open("w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        digest = hashlib.sha256(data_path.read_bytes()).hexdigest()
+        digest = _sha256_file(data_path)
         full_manifest = {**manifest, "rows": len(rows), "sha256": digest}
         self.manifest_path(adapter).write_text(
             json.dumps(full_manifest, indent=2), encoding="utf-8"

@@ -22,7 +22,16 @@ class KVCacheFull(MemoryError):
 
 
 class _Node:
-    __slots__ = ("key", "pages", "children", "parent", "ref_count", "last_access", "computed")
+    __slots__ = (
+        "key",
+        "pages",
+        "children",
+        "parent",
+        "ref_count",
+        "last_access",
+        "computed",
+        "publishing",
+    )
 
     def __init__(
         self,
@@ -40,6 +49,9 @@ class _Node:
         # uncomputed nodes so chunked prefill in progress is never shared
         # as if it were valid cache (garbage-KV protection).
         self.computed = False
+        # Suppress same-node reentry while BlockStored is being delivered.
+        # This is reset even when the sink fails so callers can retry.
+        self.publishing = False
 
 
 @dataclass(frozen=True)
@@ -49,7 +61,11 @@ class KVAllocation:
     new_full_pages: tuple[int, ...]
     tail_page: int | None
     _node: _Node = field(repr=False)
+    # Publication and release form one allocation lifecycle: event-sink
+    # reentry must not start a nested terminal operation on this allocation.
     _freed: bool = field(default=False, repr=False)
+    _publishing: bool = field(default=False, repr=False)
+    _releasing: bool = field(default=False, repr=False)
     _tree_inserted: bool = field(default=True, repr=False)
     _page_size: int = field(default=16, repr=False)
 
@@ -299,16 +315,34 @@ class RadixKVCache:
     def mark_computed(self, allocation: KVAllocation) -> None:
         """Record that the allocation's prefill KV has been written (prefill done)."""
         if allocation._tree_inserted and allocation.new_full_pages:
-            if not allocation._node.computed:  # guard the _release double-fire
-                allocation._node.computed = True
-                self._emit_stored(allocation._node)
-            else:
-                allocation._node.computed = True
+            node = allocation._node
+            if not node.computed and not node.publishing:
+                node.publishing = True
+                object.__setattr__(allocation, "_publishing", True)
+                try:
+                    self._emit_stored(node)
+                    node.computed = True
+                finally:
+                    object.__setattr__(allocation, "_publishing", False)
+                    node.publishing = False
 
-    def _release(self, allocation: KVAllocation) -> None:
+    def _begin_release(self, allocation: KVAllocation) -> bool:
+        """Start a release, suppressing same-stack terminal reentry."""
         if allocation._freed:
             raise ValueError("allocation was already freed")
+        if allocation._publishing or allocation._releasing:
+            return False
+        object.__setattr__(allocation, "_releasing", True)
+        return True
+
+    def _finish_release(self, allocation: KVAllocation) -> None:
         object.__setattr__(allocation, "_freed", True)
+        object.__setattr__(allocation, "_releasing", False)
+
+    def _abort_release(self, allocation: KVAllocation) -> None:
+        object.__setattr__(allocation, "_releasing", False)
+
+    def _release(self, allocation: KVAllocation) -> None:
         # free()/commit run only at request completion, so the KV is written;
         # a future preemption path must release WITHOUT marking computed
         self.mark_computed(allocation)
@@ -317,9 +351,16 @@ class RadixKVCache:
             self._pool.free(allocation.new_full_pages)
 
     def free(self, allocation: KVAllocation) -> None:
-        self._release(allocation)
-        if allocation.tail_page is not None:
-            self._pool.free((allocation.tail_page,))
+        if not self._begin_release(allocation):
+            return
+        try:
+            self._release(allocation)
+            if allocation.tail_page is not None:
+                self._pool.free((allocation.tail_page,))
+        except Exception:
+            self._abort_release(allocation)
+            raise
+        self._finish_release(allocation)
 
     def commit_and_release(
         self,
@@ -333,6 +374,8 @@ class RadixKVCache:
         so caching generated tokens is what makes multi-turn prefixes hit.
         Partially-filled pages are returned to the pool.
         """
+        if not self._begin_release(allocation):
+            return
         sequence = allocation.tokens + tuple(output_tokens)
         prompt_full = len(allocation.tokens) // self._page_size
         # The decode loop writes the KV of the *previous* token each step, so
@@ -349,20 +392,45 @@ class RadixKVCache:
         )
         node = allocation._node
         kept: tuple[int, ...] = ()
-        if extra_full > 0 and allocation._tree_inserted:
-            key = sequence[prompt_full * self._page_size : sequence_full * self._page_size]
-            first_page = key[: self._page_size]
-            if first_page not in node.children:
-                kept = candidates[:extra_full]
-                child = _Node(key=key, pages=kept, parent=node)
-                child.computed = True
-                self._touch(child)
-                node.children[first_page] = child
-                self._emit_stored(child)  # decode-extension store (A13)
-        leftover = tuple(page for page in candidates if page not in kept)
-        self._release(allocation)
-        if leftover:
-            self._pool.free(leftover)
+        try:
+            if extra_full > 0 and allocation._tree_inserted:
+                key = sequence[
+                    prompt_full * self._page_size : sequence_full * self._page_size
+                ]
+                first_page = key[: self._page_size]
+                candidate_pages = candidates[:extra_full]
+                existing = node.children.get(first_page)
+                if existing is None:
+                    child = _Node(key=key, pages=candidate_pages, parent=node)
+                    # Keep an uncomputed, in-delivery child invisible to matching
+                    # and protected from reentrant eviction until the sink accepts it.
+                    child.ref_count = 1
+                    child.publishing = True
+                    self._touch(child)
+                    node.children[first_page] = child
+                    try:
+                        self._emit_stored(child)  # decode-extension store (A13)
+                        child.computed = True
+                        kept = candidate_pages
+                    finally:
+                        child.publishing = False
+                        child.ref_count = 0
+                        if (
+                            not child.computed
+                            and node.children.get(first_page) is child
+                        ):
+                            del node.children[first_page]
+                elif existing.key == key and existing.pages == candidate_pages:
+                    # A prior attempt delivered this transition but failed later.
+                    kept = candidate_pages
+            leftover = tuple(page for page in candidates if page not in kept)
+            self._release(allocation)
+            if leftover:
+                self._pool.free(leftover)
+        except Exception:
+            self._abort_release(allocation)
+            raise
+        self._finish_release(allocation)
 
     def allocate_private_page(self) -> int:
         """Allocate one non-shared page (decode growth beyond the prompt allocation)."""
@@ -382,18 +450,22 @@ class RadixKVCache:
         stays unmatched until LRU eviction reclaims it; private pages return
         to the pool immediately.
         """
-        if allocation._freed:
-            raise ValueError("allocation was already freed")
-        object.__setattr__(allocation, "_freed", True)
-        self._unlock_path(allocation._node)
-        if not allocation._tree_inserted and allocation.new_full_pages:
-            self._pool.free(allocation.new_full_pages)
-        loose = (
-            ((allocation.tail_page,) if allocation.tail_page is not None else ())
-            + tuple(decode_pages)
-        )
-        if loose:
-            self._pool.free(loose)
+        if not self._begin_release(allocation):
+            return
+        try:
+            self._unlock_path(allocation._node)
+            if not allocation._tree_inserted and allocation.new_full_pages:
+                self._pool.free(allocation.new_full_pages)
+            loose = (
+                ((allocation.tail_page,) if allocation.tail_page is not None else ())
+                + tuple(decode_pages)
+            )
+            if loose:
+                self._pool.free(loose)
+        except Exception:
+            self._abort_release(allocation)
+            raise
+        self._finish_release(allocation)
 
     def pin(
         self,

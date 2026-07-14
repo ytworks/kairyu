@@ -2,6 +2,7 @@
 
 import httpx
 
+from kairyu.deploy.prober import HealthProber
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app
@@ -61,6 +62,41 @@ async def test_readyz_503_when_pool_has_no_healthy_replica():
     assert ready.status_code == 503
     assert ready.json()["status"] == "unready"
     assert "m" in ready.json()["pools"]
+
+
+async def test_unvalidated_remote_pool_is_unready_unplaceable_and_reports_zero():
+    pool = ReplicaPool([MockBackend()])
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(503, json={"status": "starting"})
+        )
+    ) as probe_client:
+        # Construction is the serve-boundary contract: a declared readiness URL
+        # makes the initial remote entry unknown before any route can serve it.
+        HealthProber(
+            "remote",
+            pool,
+            ["http://replica/readyz"],
+            interval_s=60,
+            client=probe_client,
+        )
+        app = create_app(engines={"remote": pool})
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            ready = await client.get("/readyz")
+            completion = await client.post(
+                "/v1/chat/completions", json=_chat_body("hi", model="remote")
+            )
+            metrics = (await client.get("/metrics")).text
+
+    assert pool.healthy == (False,)
+    assert ready.status_code == 503
+    assert ready.json()["pools"] == {"remote": [False]}
+    assert completion.status_code == 502
+    assert pool.decision_counts["least_outstanding"] == 0
+    assert 'kairyu_replica_healthy{pool="remote",replica="0"} 0.0' in metrics
 
 
 async def test_metrics_exposes_request_and_pool_series():

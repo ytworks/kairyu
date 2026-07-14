@@ -198,6 +198,19 @@ def _invalid_request(message: str) -> JSONResponse:
     )
 
 
+def _validate_generation_request(
+    engine: EngineBackend, request: GenerationRequest
+) -> JSONResponse | None:
+    validate = getattr(engine, "validate_request", None)
+    if validate is None:
+        return None
+    try:
+        validate(request)
+    except ValueError as error:
+        return _invalid_request(str(error))
+    return None
+
+
 def render_prompt(
     request: ChatCompletionRequest,
     chat_templates: Mapping[str, ChatTemplate] | None,
@@ -868,6 +881,9 @@ def create_app(
             # holding its warm radix-KV prefix.
             cache_hint=CacheHint(session_id=session_id) if session_id else None,
         )
+        validation_error = _validate_generation_request(engine, generation_request)
+        if validation_error is not None:
+            return validation_error
         if request.stream and not request.tools:
             return StreamingResponse(
                 _stream_engine(
@@ -943,9 +959,14 @@ def create_app(
                 sampling_params=sampling,
             )
 
+        generation_requests = [_generation_request(prompt) for prompt in prompts]
+        for generation_request in generation_requests:
+            validation_error = _validate_generation_request(engine, generation_request)
+            if validation_error is not None:
+                return validation_error
         if request.stream:
             return StreamingResponse(
-                _stream_completions(engine, _generation_request(prompts[0]), request),
+                _stream_completions(engine, generation_requests[0], request),
                 media_type="text/event-stream",
             )
         choices: list[CompletionChoice] = []
@@ -954,7 +975,7 @@ def create_app(
             # run the prompt array concurrently (latency = max, not sum); order is
             # restored by prompt_index below so the response is unchanged (P-perf)
             results = await asyncio.gather(
-                *(engine.generate(_generation_request(prompt)) for prompt in prompts)
+                *(engine.generate(item) for item in generation_requests)
             )
         except Exception as error:
             return _upstream_error(error)

@@ -30,6 +30,7 @@ class FlakyBackend:
         self.failing = False
         self.client_failing = False  # raises a 4xx-style client error
         self.shutdown_count = 0
+        self.shutdown_error = False
 
     @property
     def prompts_seen(self) -> tuple[str, ...]:
@@ -50,6 +51,8 @@ class FlakyBackend:
 
     async def shutdown(self) -> None:
         self.shutdown_count += 1
+        if self.shutdown_error:
+            raise RuntimeError("shutdown failed")
 
 
 def make_request(prompt: str, session_id: str | None = None) -> GenerationRequest:
@@ -202,6 +205,81 @@ async def test_health_ejection_after_consecutive_failures_and_probe_recovery():
     assert await place_session(pool, backends, session) == affine
 
 
+async def test_remote_replica_requires_probe_then_ejects_and_restores():
+    trusted = FlakyBackend()
+    remote = FlakyBackend()
+    pool = ReplicaPool({"trusted": trusted}, unhealthy_after=2)
+    pool.add_replica("remote", remote, health_url="http://remote/readyz")
+    await pool.remove_replica("trusted")
+
+    assert pool.validated_by_id() == {"remote": False}
+    assert pool.healthy_by_id() == {"remote": False}
+    with pytest.raises(RuntimeError, match="eligible"):
+        await pool.generate(make_request("before-probe"))
+
+    lease = pool.acquire_drain("remote")
+    pool.drain("remote")
+    await pool.probe("remote")
+    assert pool.validated_by_id() == {"remote": True}
+    assert pool.healthy_by_id() == {"remote": True}
+    assert pool.is_draining("remote") is True
+    assert pool.is_manually_draining("remote") is True
+    with pytest.raises(RuntimeError, match="eligible"):
+        await pool.generate(make_request("still-draining"))
+
+    pool.cancel_drain("remote")
+    assert pool.is_draining("remote") is True
+    pool.release_drain("remote", lease)
+    assert pool.is_draining("remote") is False
+    assert (await pool.generate(make_request("validated"))).finished
+    remote.failing = True
+    with pytest.raises(RuntimeError, match="injected failure"):
+        await pool.generate(make_request("failure-1"))
+    assert pool.healthy_by_id() == {"remote": True}
+    with pytest.raises(RuntimeError, match="injected failure"):
+        await pool.generate(make_request("failure-2"))
+    assert pool.validated_by_id() == {"remote": True}
+    assert pool.healthy_by_id() == {"remote": False}
+
+    remote.failing = False
+    await pool.probe("remote")
+    assert pool.healthy_by_id() == {"remote": True}
+    assert (await pool.generate(make_request("restored"))).finished
+
+
+async def test_local_replica_starts_validated_and_can_require_probe_by_id():
+    pool = ReplicaPool({"local": MockBackend()})
+
+    assert pool.validated_by_id() == {"local": True}
+    assert pool.healthy_by_id() == {"local": True}
+    assert (await pool.generate(make_request("trusted"))).finished
+
+    pool.require_probe("local")
+    assert pool.validated_by_id() == {"local": False}
+    assert pool.healthy_by_id() == {"local": False}
+    with pytest.raises(RuntimeError, match="eligible"):
+        await pool.generate(make_request("unknown"))
+
+    await pool.probe("local")
+    assert pool.validated_by_id() == {"local": True}
+    assert (await pool.generate(make_request("revalidated"))).finished
+
+
+async def test_same_id_remote_readd_does_not_inherit_validation():
+    pool = ReplicaPool({"local": MockBackend()})
+    pool.add_replica("remote", MockBackend(), health_url="http://old/readyz")
+    await pool.probe("remote")
+    old_generation = pool.entry_generation("remote")
+    assert pool.validated_by_id()["remote"] is True
+
+    await pool.remove_replica("remote")
+    pool.add_replica("remote", MockBackend(), health_url="http://new/readyz")
+
+    assert pool.entry_generation("remote") is not old_generation
+    assert pool.validated_by_id()["remote"] is False
+    assert pool.healthy_by_id()["remote"] is False
+
+
 async def test_failure_count_resets_on_any_success():
     backends = [FlakyBackend()]
     pool = ReplicaPool(backends, unhealthy_after=3)
@@ -327,3 +405,44 @@ async def test_shutdown_shuts_down_all_members():
     pool = ReplicaPool(backends)
     await pool.shutdown()
     assert [b.shutdown_count for b in backends] == [1, 1, 1]
+
+
+async def test_remove_replica_closes_backend_exactly_once():
+    removed = FlakyBackend()
+    survivor = FlakyBackend()
+    pool = ReplicaPool({"removed": removed, "survivor": survivor})
+
+    await pool.remove_replica("removed")
+
+    assert removed.shutdown_count == 1
+    assert survivor.shutdown_count == 0
+    assert pool.replica_ids == ("survivor",)
+    await pool.shutdown()
+    assert removed.shutdown_count == 1
+    assert survivor.shutdown_count == 1
+
+
+async def test_forced_remove_closes_inflight_backend_immediately():
+    backend = FlakyBackend(latency_s=0.1)
+    pool = ReplicaPool({"busy": backend})
+    task = asyncio.create_task(pool.generate(make_request("busy")))
+    await asyncio.sleep(0.01)
+
+    await pool.remove_replica("busy", force=True)
+
+    assert backend.shutdown_count == 1
+    await task
+
+
+async def test_shutdown_attempts_every_unique_backend_and_aggregates_errors():
+    shared = FlakyBackend()
+    failing = FlakyBackend()
+    failing.shutdown_error = True
+    pool = ReplicaPool({"shared-a": shared, "shared-b": shared, "bad": failing})
+
+    with pytest.raises(ExceptionGroup, match="ReplicaPool shutdown") as caught:
+        await pool.shutdown()
+
+    assert shared.shutdown_count == 1
+    assert failing.shutdown_count == 1
+    assert len(caught.value.exceptions) == 1

@@ -1,10 +1,15 @@
 import asyncio
+import threading
+import time
+from collections.abc import Mapping
 
 import httpx
 import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.core.sampling_types import SampledToken
+from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
@@ -16,6 +21,75 @@ def _request(request_id: str, prompt: str, max_tokens: int = 4) -> GenerationReq
         prompt=prompt,
         sampling_params=SamplingParams(max_tokens=max_tokens),
     )
+
+
+class _SlowRunner:
+    def execute(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        time.sleep(0.01)
+        return {
+            chunk.request_id: (SampledToken(7),)
+            for chunk in scheduled
+            if not chunk.is_prefill or states[chunk.request_id].prefill_done
+        }
+
+
+class _FailOnceRunner:
+    def __init__(self) -> None:
+        self.failed = False
+
+    def execute(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("injected runner failure")
+        return {
+            chunk.request_id: (SampledToken(7),)
+            for chunk in scheduled
+            if not chunk.is_prefill or states[chunk.request_id].prefill_done
+        }
+
+
+class _ToggleTokenizer:
+    eos_token_id = None
+
+    def __init__(self) -> None:
+        self.return_token = False
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return (1,) if self.return_token else ()
+
+    def decode(self, token_ids) -> str:
+        return " ".join(f"tok{token_id}" for token_id in token_ids)
+
+    def vocab(self) -> list[str]:
+        return ["<empty>", "token"]
+
+
+async def test_zero_token_prompt_is_rejected_before_backend_state():
+    tokenizer = _ToggleTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer)
+    request = _request("empty", "normal-looking input")
+
+    with pytest.raises(ValueError, match="at least one token"):
+        backend.validate_request(request)
+    with pytest.raises(ValueError, match="at least one token"):
+        await backend.generate(request)
+
+    assert backend._active_request_ids == set()
+    assert backend._loop._active_request_ids == set()
+    assert backend._queues == {}
+    assert backend._scheduler.states == {}
+
+    tokenizer.return_token = True
+    result = await backend.generate(request)
+    assert result.finished is True
 
 
 async def test_generate_runs_through_engine_core():
@@ -38,6 +112,350 @@ async def test_stream_yields_incremental_partials():
     assert all(p.finished is False for p in partials[:-1])
     lengths = [len(p.completions[0].token_ids) for p in partials]
     assert lengths == sorted(lengths)  # monotonically growing
+
+
+async def test_stream_abandonment_aborts_engine_work():
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    stream = backend.stream(
+        _request("abandoned", "keep generating", max_tokens=10_000)
+    )
+    first = await anext(stream)
+    assert first.finished is False
+
+    await stream.aclose()
+    for _ in range(100):
+        if not backend._loop.has_work():
+            break
+        await asyncio.sleep(0.01)
+
+    assert backend._loop.has_work() is False
+    assert "abandoned" not in backend._scheduler.states
+    result = await backend.generate(_request("after-abandon", "still works", 2))
+    assert result.finished
+
+
+async def test_multi_completion_abandonment_aborts_all_siblings():
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    request = GenerationRequest(
+        request_id="multi-abandon",
+        prompt="keep generating siblings",
+        sampling_params=SamplingParams(max_tokens=10_000, n=3),
+    )
+    stream = backend.stream(request)
+    await anext(stream)
+    pump = backend._pump_task
+    assert pump is not None
+    pump.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pump
+    assert backend._pump_task is None
+
+    await stream.aclose()
+    for _ in range(100):
+        if not backend._loop.has_work():
+            break
+        await asyncio.sleep(0.01)
+    assert backend._loop.has_work() is False
+    assert not {
+        "multi-abandon#c0",
+        "multi-abandon#c1",
+        "multi-abandon#c2",
+    } & set(backend._scheduler.states)
+
+
+async def test_pump_failure_purges_requests_and_backend_recovers():
+    backend = KairyuBackend(num_pages=256, runner=_FailOnceRunner())
+    with pytest.raises(RuntimeError, match="injected runner failure"):
+        await backend.generate(_request("failed", "first", 2))
+
+    assert backend._loop.has_work() is False
+    assert "failed" not in backend._scheduler.states
+    recovered = await backend.generate(_request("recovered", "second", 2))
+    assert recovered.finished
+
+
+async def test_request_submitted_during_failure_purge_is_pumped():
+    backend = KairyuBackend(num_pages=256, runner=_FailOnceRunner())
+    purge_started = threading.Event()
+    allow_purge = threading.Event()
+    original_purge = backend._loop.purge
+
+    def delayed_purge(request_ids: tuple[str, ...]) -> None:
+        purge_started.set()
+        if not allow_purge.wait(timeout=2):
+            raise TimeoutError("test did not release purge")
+        original_purge(request_ids)
+
+    backend._loop.purge = delayed_purge
+    failed = asyncio.create_task(backend.generate(_request("failed", "first", 2)))
+    assert await asyncio.to_thread(purge_started.wait, 2)
+
+    recovered = asyncio.create_task(
+        backend.generate(_request("submitted-during-purge", "second", 2))
+    )
+    await asyncio.sleep(0)
+    allow_purge.set()
+
+    with pytest.raises(RuntimeError, match="injected runner failure"):
+        await failed
+    result = await asyncio.wait_for(recovered, timeout=2)
+    assert result.finished
+
+
+async def test_duplicate_request_id_is_rejected_without_disrupting_active_request():
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    first = asyncio.create_task(
+        backend.generate(_request("duplicate", "first", 10_000))
+    )
+    for _ in range(100):
+        if "duplicate" in backend._loop._active_request_ids:
+            break
+        await asyncio.sleep(0.01)
+    assert "duplicate" in backend._loop._active_request_ids
+
+    with pytest.raises(ValueError, match="duplicate request_id"):
+        await backend.generate(_request("duplicate", "second"))
+
+    assert not first.done()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    for _ in range(100):
+        if "duplicate" not in backend._loop._active_request_ids:
+            break
+        await asyncio.sleep(0.01)
+    assert "duplicate" not in backend._loop._active_request_ids
+
+    reused = await backend.generate(_request("duplicate", "reused", 2))
+    assert reused.finished is True
+
+
+def test_unknown_abort_does_not_reserve_request_id():
+    backend = KairyuBackend(num_pages=256)
+    backend._loop.abort("unknown")
+    backend._loop.submit("unknown", "prompt", SamplingParams(max_tokens=1))
+    backend._loop.purge(("unknown",))
+
+
+@pytest.mark.parametrize("duplicate_api", ["generate", "stream"])
+async def test_duplicate_rejected_after_worker_forget_before_terminal_delivery(
+    duplicate_api,
+):
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    forgot_request = threading.Event()
+    allow_step_return = threading.Event()
+    original_forget = backend._loop._forget
+
+    def forget_then_block(request_id: str) -> None:
+        original_forget(request_id)
+        forgot_request.set()
+        if not allow_step_return.wait(timeout=2):
+            raise TimeoutError("test did not release terminal step")
+
+    backend._loop._forget = forget_then_block
+    first = asyncio.create_task(backend.generate(_request("delivery-gap", "first", 1)))
+    assert await asyncio.to_thread(forgot_request.wait, 2)
+    original_queue = backend._queues["delivery-gap"]
+    assertions_complete = False
+
+    async def submit_duplicate() -> None:
+        duplicate = _request("delivery-gap", "duplicate", 1)
+        if duplicate_api == "generate":
+            await backend.generate(duplicate)
+        else:
+            await anext(backend.stream(duplicate))
+
+    try:
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await asyncio.wait_for(submit_duplicate(), timeout=0.2)
+        assert backend._queues["delivery-gap"] is original_queue
+        assertions_complete = True
+    finally:
+        allow_step_return.set()
+        if not assertions_complete:
+            first.cancel()
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+    result = await asyncio.wait_for(first, timeout=2)
+    assert result.finished
+    reused = await backend.generate(_request("delivery-gap", "reused", 1))
+    assert reused.finished
+
+
+async def test_duplicate_rejected_after_fatal_purge_before_failure_delivery():
+    backend = KairyuBackend(num_pages=256, runner=_FailOnceRunner())
+    purged_request = threading.Event()
+    allow_purge_return = threading.Event()
+    original_purge = backend._loop.purge
+
+    def purge_then_block(request_ids: tuple[str, ...]) -> None:
+        original_purge(request_ids)
+        purged_request.set()
+        if not allow_purge_return.wait(timeout=2):
+            raise TimeoutError("test did not release fatal purge")
+
+    backend._loop.purge = purge_then_block
+    first = asyncio.create_task(backend.generate(_request("purge-gap", "first", 1)))
+    assert await asyncio.to_thread(purged_request.wait, 2)
+    original_queue = backend._queues["purge-gap"]
+    assertions_complete = False
+
+    try:
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await asyncio.wait_for(
+                backend.generate(_request("purge-gap", "duplicate", 1)), timeout=0.2
+            )
+        assert backend._queues["purge-gap"] is original_queue
+        assertions_complete = True
+    finally:
+        allow_purge_return.set()
+        if not assertions_complete:
+            first.cancel()
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+    with pytest.raises(RuntimeError, match="injected runner failure"):
+        await asyncio.wait_for(first, timeout=2)
+    reused = await backend.generate(_request("purge-gap", "reused", 1))
+    assert reused.finished
+
+
+async def test_multi_stream_reserves_all_sub_ids_before_submit():
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    blocker = asyncio.create_task(
+        backend.generate(_request("atomic#c1", "blocker", 10_000))
+    )
+    for _ in range(100):
+        if "atomic#c1" in backend._loop._active_request_ids:
+            break
+        await asyncio.sleep(0.01)
+    assert "atomic#c1" in backend._loop._active_request_ids
+    blocker_queue = backend._queues["atomic#c1"]
+    request = GenerationRequest(
+        request_id="atomic",
+        prompt="multi",
+        sampling_params=SamplingParams(max_tokens=10_000, n=3),
+    )
+
+    try:
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            await anext(backend.stream(request))
+        assert backend._queues["atomic#c1"] is blocker_queue
+        assert "atomic#c0" not in backend._queues
+        assert "atomic#c2" not in backend._queues
+        assert not {"atomic#c0", "atomic#c2"} & backend._active_request_ids
+    finally:
+        for leaked_id in ("atomic#c0", "atomic#c2"):
+            backend._abort(leaked_id)
+            backend._queues.pop(leaked_id, None)
+        blocker.cancel()
+        try:
+            await blocker
+        except asyncio.CancelledError:
+            pass
+
+
+async def test_multi_stream_partial_submit_failure_rolls_back_all_sub_ids():
+    backend = KairyuBackend(num_pages=256)
+    real_submit = backend._loop.submit
+    submit_count = 0
+
+    def fail_second_submit(request_id, prompt, params):
+        nonlocal submit_count
+        submit_count += 1
+        if submit_count == 2:
+            raise RuntimeError("injected submit failure")
+        real_submit(request_id, prompt, params)
+
+    backend._loop.submit = fail_second_submit
+    request = GenerationRequest(
+        request_id="partial",
+        prompt="multi",
+        sampling_params=SamplingParams(max_tokens=10_000, n=3),
+    )
+    sub_ids = {"partial#c0", "partial#c1", "partial#c2"}
+
+    try:
+        with pytest.raises(RuntimeError, match="injected submit failure"):
+            await anext(backend.stream(request))
+        assert not sub_ids & set(backend._queues)
+    finally:
+        backend._loop.submit = real_submit
+        for leaked_id in sub_ids:
+            backend._abort(leaked_id)
+            backend._queues.pop(leaked_id, None)
+        for _ in range(100):
+            if not sub_ids & backend._loop._active_request_ids:
+                break
+            await asyncio.sleep(0.01)
+        assert not sub_ids & backend._loop._active_request_ids
+        assert not sub_ids & backend._active_request_ids
+
+
+async def test_single_submit_failure_rolls_back_public_id_reservation():
+    backend = KairyuBackend(num_pages=256)
+    real_submit = backend._loop.submit
+
+    def fail_submit(request_id, prompt, params):
+        raise RuntimeError("injected submit failure")
+
+    backend._loop.submit = fail_submit
+    with pytest.raises(RuntimeError, match="injected submit failure"):
+        await backend.generate(_request("submit-failure", "first", 1))
+    assert "submit-failure" not in backend._active_request_ids
+    assert "submit-failure" not in backend._queues
+
+    backend._loop.submit = real_submit
+    reused = await backend.generate(_request("submit-failure", "reused", 1))
+    assert reused.finished
+
+
+async def test_multi_generate_reserves_each_sub_for_aggregate_lifetime():
+    backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
+    request = GenerationRequest(
+        request_id="multi-generate",
+        prompt="multi",
+        sampling_params=SamplingParams(max_tokens=10_000, n=3),
+    )
+    sub_ids = {"multi-generate#c0", "multi-generate#c1", "multi-generate#c2"}
+    first = asyncio.create_task(backend.generate(request))
+    for _ in range(100):
+        if sub_ids <= backend._active_request_ids:
+            break
+        await asyncio.sleep(0.01)
+    assert sub_ids <= backend._active_request_ids
+    original_queues = {request_id: backend._queues[request_id] for request_id in sub_ids}
+
+    with pytest.raises(ValueError, match="duplicate request_id"):
+        await backend.generate(request)
+    assert all(
+        backend._queues[request_id] is queue
+        for request_id, queue in original_queues.items()
+    )
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert not sub_ids & backend._active_request_ids
+    for _ in range(100):
+        if not sub_ids & backend._loop._active_request_ids:
+            break
+        await asyncio.sleep(0.01)
+    assert not sub_ids & backend._loop._active_request_ids
+
+    reused = await backend.generate(
+        GenerationRequest(
+            request_id="multi-generate",
+            prompt="reused",
+            sampling_params=SamplingParams(max_tokens=1, n=3),
+        )
+    )
+    assert reused.finished
 
 
 async def test_concurrent_requests_are_continuously_batched():

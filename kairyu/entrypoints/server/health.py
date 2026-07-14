@@ -76,7 +76,9 @@ def add_health_routes(
                 status_code=503, content={"status": "draining"}
             )
         # Engines are constructed by the time the app exists; pools additionally
-        # need >=1 healthy replica or every request would fail.
+        # need >=1 validated, non-ejected replica or every request would fail.
+        # Declared remote readiness URLs therefore remain false here until the
+        # startup prober succeeds; backend traffic is never implicit validation.
         degraded = {
             name: engine.healthy
             for name, engine in engines.items()

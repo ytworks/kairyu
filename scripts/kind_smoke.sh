@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # m10a D5 kind smoke: cluster -> image -> helm -> ready -> completion -> teardown
 set -euo pipefail
+
+helm_gate() {
+  helm lint deploy/helm/kairyu
+  helm lint deploy/helm/kairyu -f deploy/helm/kairyu/values-gpu.yaml
+  helm template kairyu deploy/helm/kairyu >/dev/null
+  helm template kairyu deploy/helm/kairyu -f deploy/helm/kairyu/values-gpu.yaml >/dev/null
+}
+
+helm_gate
+if [[ "${1:-}" == "--helm-check" ]]; then
+  exit 0
+fi
+
 CLUSTER=${CLUSTER:-kairyu-smoke}
 IMAGE=${IMAGE:-kairyu:dev}
 

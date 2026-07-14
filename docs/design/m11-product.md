@@ -79,8 +79,14 @@ executor is a deploy-day k8s HPA/keda adapter).
 
 ### D7 — Open WebUI + frontier bench
 
-`deploy/compose/docker-compose.webui.yaml` (Open WebUI pointed at the
-gateway; smoke asserts the container config renders — no image pull in CI).
+`deploy/compose/docker-compose.webui.yaml` points Open WebUI at the internal
+Kairyu endpoint `http://kairyu:8000/v1` and mounts a standalone
+`deploy/compose/config.yaml` that serves the keyless CPU-safe mock model
+`default`. `scripts/webui_smoke.sh` first validates literal bind sources and the
+rendered internal endpoint, then starts only the `kairyu` service and asserts
+bounded readiness, exact `/v1/models == ["default"]`, and one non-streaming
+completion. CI runs this after the existing Compose drill and deliberately does
+not pull or browser-test the large mutable Open WebUI image.
 `bench/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
 quality-proxy), scoreboard JSON+md; offline unit test with mock targets.

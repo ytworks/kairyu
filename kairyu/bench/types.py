@@ -130,6 +130,7 @@ class PairResult(BaseModel):
     schema_version: int = SCHEMA_VERSION
     benchmark: str
     target: str
+    run_fingerprint: str | None = None
     status: PairStatus
     reason: str | None = None  # "docker unavailable", "dataset unavailable", ...
     # {"score":…, "n_total":…, "n_scored":…, "n_unjudged":…, "n_skipped":…, "n_failed":…}
