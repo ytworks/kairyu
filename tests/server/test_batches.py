@@ -13,6 +13,7 @@ from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.backend import GenerationResult
 from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.outputs import CompletionOutput
 
 
@@ -179,7 +180,7 @@ async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeyp
             all_consumers_started.set()
         try:
             await release.wait()
-            return {"custom_id": line["custom_id"], "ok": True}, None
+            return {"custom_id": line["custom_id"], "ok": True}, None, None
         finally:
             active -= 1
 
@@ -212,7 +213,7 @@ async def test_worker_peak_memory_stays_bounded_for_large_batch(
     job = store.create_batch(file.id, "/v1/chat/completions")
 
     async def immediate_result(line):
-        return {"custom_id": line["custom_id"]}, None
+        return {"custom_id": line["custom_id"]}, None, None
 
     monkeypatch.setattr(worker, "_run_line", immediate_result)
     tracemalloc.start()
@@ -278,6 +279,98 @@ async def test_streaming_parse_error_fails_after_admitted_lines(tmp_path):
     assert list((tmp_path / "files").glob("*.tmp")) == []
 
 
+async def test_batch_metering_uses_explicit_owner_wire_counts_and_skips_line_errors(
+    tmp_path,
+):
+    class MissingUsageBackend(MockBackend):
+        async def generate(self, request):
+            result = await super().generate(request)
+            return GenerationResult(
+                request_id=result.request_id,
+                prompt=result.prompt,
+                completions=result.completions,
+                usage=None,
+            )
+
+    class RecordingLimiter:
+        def __init__(self):
+            self.charges = []
+
+        def charge_tokens(self, tenant, tokens):
+            self.charges.append((tenant, tokens))
+
+    store = BatchStore(tmp_path / "batch")
+    ledger = UsageLedger(tmp_path / "usage.jsonl")
+    limiter = RecordingLimiter()
+    worker = BatchWorker(
+        store,
+        {"reported": MockBackend(), "derived": MissingUsageBackend()},
+        max_concurrency=1,
+        usage_ledger=ledger,
+        tenant_limiter=limiter,
+    )
+    tenant_a_file = store.save_file(
+        "\n".join(
+            [
+                _batch_line("reported", "hello", model="reported"),
+                _batch_line("error", "hello", model="missing"),
+            ]
+        ).encode(),
+        "tenant-a.jsonl",
+        "batch",
+        owner="tenant-a",
+    )
+    tenant_b_file = store.save_file(
+        _batch_line("derived", "two words", model="derived").encode(),
+        "tenant-b.jsonl",
+        "batch",
+        owner="tenant-b",
+    )
+    tenant_a_job = store.create_batch(
+        tenant_a_file.id, "/v1/chat/completions", owner="tenant-a"
+    )
+    tenant_b_job = store.create_batch(
+        tenant_b_file.id, "/v1/chat/completions", owner="tenant-b"
+    )
+
+    await worker.process(tenant_a_job.id)
+    await worker.process(tenant_b_job.id)
+
+    completed_a = store.get_batch(tenant_a_job.id, owner="tenant-a")
+    completed_b = store.get_batch(tenant_b_job.id, owner="tenant-b")
+    assert completed_a.request_counts.model_dump() == {
+        "total": 2,
+        "completed": 1,
+        "failed": 1,
+    }
+    assert completed_b.request_counts.completed == 1
+    output_a = json.loads(
+        store.read_file_content(completed_a.output_file_id, owner="tenant-a")
+    )
+    output_b = json.loads(
+        store.read_file_content(completed_b.output_file_id, owner="tenant-b")
+    )
+    wire_a = output_a["response"]["body"]["usage"]
+    wire_b = output_b["response"]["body"]["usage"]
+    totals = ledger.totals()
+    assert totals == {
+        "tenant-a": {
+            "requests": 1,
+            "prompt_tokens": wire_a["prompt_tokens"],
+            "completion_tokens": wire_a["completion_tokens"],
+        },
+        "tenant-b": {
+            "requests": 1,
+            "prompt_tokens": wire_b["prompt_tokens"],
+            "completion_tokens": wire_b["completion_tokens"],
+        },
+    }
+    assert limiter.charges == [
+        ("tenant-a", wire_a["total_tokens"]),
+        ("tenant-b", wire_b["total_tokens"]),
+    ]
+
+
 def _stored_file_names(tmp_path):
     return {path.name for path in (tmp_path / "files").iterdir()}
 
@@ -286,7 +379,10 @@ async def test_output_append_failure_persists_failed_and_cleans_spool(
     tmp_path, monkeypatch
 ):
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    ledger = UsageLedger(tmp_path / "usage.jsonl")
+    worker = BatchWorker(
+        store, {"m": MockBackend()}, max_concurrency=1, usage_ledger=ledger
+    )
     file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
     files_before = _stored_file_names(tmp_path)
@@ -323,13 +419,17 @@ async def test_output_append_failure_persists_failed_and_cleans_spool(
     assert failed.error_file_id is None
     assert _stored_file_names(tmp_path) == files_before
     assert list((tmp_path / "files").glob("*.tmp")) == []
+    assert ledger.totals()["default"]["requests"] == 1
 
 
 async def test_second_writer_commit_failure_rolls_back_first_publication(
     tmp_path, monkeypatch
 ):
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    ledger = UsageLedger(tmp_path / "usage.jsonl")
+    worker = BatchWorker(
+        store, {"m": MockBackend()}, max_concurrency=1, usage_ledger=ledger
+    )
     content = "\n".join(
         [_batch_line("ok", "hello"), _batch_line("bad", "hello", model="missing")]
     )
@@ -367,6 +467,7 @@ async def test_second_writer_commit_failure_rolls_back_first_publication(
     assert failed.error_file_id is None
     assert _stored_file_names(tmp_path) == files_before
     assert list((tmp_path / "files").glob("*.tmp")) == []
+    assert ledger.totals()["default"]["requests"] == 1
 
 
 async def test_unexpected_line_failure_is_terminal_and_next_job_still_runs(
@@ -488,7 +589,10 @@ async def test_cancel_stops_remaining_lines(tmp_path):
 
     backend = SlowBackend()
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": backend}, max_concurrency=1)
+    ledger = UsageLedger(tmp_path / "usage.jsonl")
+    worker = BatchWorker(
+        store, {"m": backend}, max_concurrency=1, usage_ledger=ledger
+    )
     lines = "\n".join(_batch_line(f"r{i}", f"p{i}") for i in range(10))
     file = store.save_file(lines.encode(), "input.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
@@ -505,6 +609,7 @@ async def test_cancel_stops_remaining_lines(tmp_path):
     assert cancelled.output_file_id is None
     assert cancelled.error_file_id is None
     assert backend.calls < 10  # remaining lines were skipped
+    assert ledger.totals()["default"]["requests"] == backend.calls
     assert list((tmp_path / "files").glob("*.tmp")) == []
 
 

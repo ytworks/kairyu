@@ -14,6 +14,7 @@ import logging
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from kairyu.batch.store import BatchJob, BatchStore, JsonlFileWriter
 from kairyu.engine.backend import EngineBackend, GenerationRequest
@@ -23,11 +24,23 @@ from kairyu.entrypoints.server.app import (
     render_prompt,
     sampling_params_from,
 )
+from kairyu.entrypoints.server.metering import (
+    TokenLimiterSink,
+    UsageLedgerSink,
+    record_tenant_usage,
+)
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
 
 logger = logging.getLogger("kairyu.batch")
 _INPUT_QUEUE_FACTOR = 2
 _INPUT_SENTINEL = object()
+
+
+@dataclass(frozen=True)
+class BatchLineUsage:
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
 
 
 class BatchWorker:
@@ -38,12 +51,16 @@ class BatchWorker:
         max_concurrency: int = 4,
         metrics=None,
         chat_templates: Mapping[str, ChatTemplate] | None = None,
+        usage_ledger: UsageLedgerSink | None = None,
+        tenant_limiter: TokenLimiterSink | None = None,
     ) -> None:
         self._store = store
         self._engines = engines
         self._max_concurrency = max_concurrency
         self._metrics = metrics
         self._chat_templates = chat_templates
+        self._usage_ledger = usage_ledger
+        self._tenant_limiter = tenant_limiter
         self._queue: asyncio.Queue[str] = asyncio.Queue()
 
     def submit(self, batch_id: str) -> None:
@@ -68,8 +85,10 @@ class BatchWorker:
         if self._metrics is not None:
             self._metrics.batch_jobs_total.labels(state=state).inc()
 
-    async def _run_line(self, line: object) -> tuple[dict | None, dict | None]:
-        """Execute one input line; returns (output_line, error_line)."""
+    async def _run_line(
+        self, line: object
+    ) -> tuple[dict | None, dict | None, BatchLineUsage | None]:
+        """Execute one input line; return output, error, and successful usage."""
         # a line that is valid JSON but not an object (e.g. a bare `5`) must
         # become a per-line error record, never escape the pipeline and wedge
         # the whole job in "in_progress" forever (S1)
@@ -98,6 +117,11 @@ class BatchWorker:
                     "error": None,
                 },
                 None,
+                BatchLineUsage(
+                    model=request.model,
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                ),
             )
         except Exception as error:
             return (
@@ -107,6 +131,7 @@ class BatchWorker:
                     "custom_id": custom_id,
                     "error": {"message": str(error), "type": "batch_request_error"},
                 },
+                None,
             )
 
     @staticmethod
@@ -186,7 +211,16 @@ class BatchWorker:
                             return
                         if input_error is not None or self._cancelled(batch_id):
                             continue
-                        output, error = await self._run_line(line)
+                        output, error, usage = await self._run_line(line)
+                        if usage is not None:
+                            record_tenant_usage(
+                                tenant=job.owner,
+                                model=usage.model,
+                                prompt_tokens=usage.prompt_tokens,
+                                completion_tokens=usage.completion_tokens,
+                                ledger=self._usage_ledger,
+                                limiter=self._tenant_limiter,
+                            )
                         if output is not None:
                             output_writer.append(output)
                             job.request_counts.completed += 1

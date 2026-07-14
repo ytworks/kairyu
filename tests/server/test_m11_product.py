@@ -2,12 +2,16 @@
 embeddings, vision wire, F5 logic, bench schema."""
 
 import base64
+import json
 import struct
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from kairyu.batch.store import BatchStore
+from kairyu.batch.worker import BatchWorker
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
@@ -115,6 +119,217 @@ class TestOrchestratorSurface:
 
 
 class TestTenancy:
+    @pytest.mark.parametrize(
+        ("surface", "model", "stream"),
+        [
+            pytest.param("chat", "m", False, id="sync-chat"),
+            pytest.param("chat", "m", True, id="stream-chat"),
+            pytest.param("completions", "m", False, id="sync-completions"),
+            pytest.param("completions", "m", True, id="stream-completions"),
+            pytest.param("chat", "kairyu-auto", False, id="sync-orchestrator"),
+            pytest.param("chat", "kairyu-auto", True, id="stream-orchestrator"),
+            pytest.param("responses", "m", False, id="responses"),
+            pytest.param("embeddings", "m", False, id="embeddings"),
+            pytest.param("batch", "m", False, id="batch"),
+        ],
+    )
+    async def test_successful_usage_endpoint_matrix_records_exactly_once(
+        self, tmp_path, surface, model, stream
+    ):
+        class RecordingLimiter:
+            def __init__(self):
+                self.charges = []
+
+            def charge_tokens(self, tenant, tokens):
+                self.charges.append((tenant, tokens))
+
+        app = _auto_app(tmp_path)
+        limiter = RecordingLimiter()
+        app.state.tenant_limiter = limiter
+
+        if surface == "batch":
+            store = BatchStore(tmp_path / "batch")
+            worker = BatchWorker(
+                store,
+                {"m": MockBackend()},
+                max_concurrency=1,
+                usage_ledger=app.state.usage_ledger,
+                tenant_limiter=limiter,
+            )
+            content = json.dumps(
+                {
+                    "custom_id": "matrix-batch",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": model,
+                        "messages": [{"role": "user", "content": "matrix prompt"}],
+                    },
+                }
+            ).encode()
+            file = store.save_file(content, "matrix.jsonl", "batch")
+            job = store.create_batch(file.id, "/v1/chat/completions")
+
+            await worker.process(job.id)
+
+            finished = store.get_batch(job.id)
+            assert finished.status == "completed"
+            assert finished.request_counts.completed == 1
+        else:
+            if surface == "chat":
+                path = "/v1/chat/completions"
+                body = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "matrix prompt"}],
+                    "stream": stream,
+                }
+            elif surface == "completions":
+                path = "/v1/completions"
+                body = {"model": model, "prompt": "matrix prompt", "stream": stream}
+            elif surface == "responses":
+                path = "/v1/responses"
+                body = {"model": model, "input": "matrix prompt"}
+            else:
+                path = "/v1/embeddings"
+                body = {"model": model, "input": "matrix prompt"}
+
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                response = await client.post(path, json=body)
+
+            assert response.status_code == 200
+            if stream:
+                assert "data: [DONE]" in response.text
+
+        totals = app.state.usage_ledger.totals()["default"]
+        assert totals["requests"] == 1
+        assert limiter.charges == [
+            (
+                "default",
+                totals["prompt_tokens"] + totals["completion_tokens"],
+            )
+        ]
+
+    def test_stream_usage_owner_finalizes_once(self, tmp_path):
+        from kairyu.engine.backend import GenerationUsage
+        from kairyu.entrypoints.server.metering import StreamUsageOwner
+        from kairyu.outputs import CompletionOutput
+
+        ledger = UsageLedger(tmp_path / "usage.jsonl")
+        owner = StreamUsageOwner(
+            tenant="tenant-a",
+            model="model-a",
+            prompt="ignored prompt",
+            ledger=ledger,
+        )
+        owner.mark_dispatched()
+        owner.observe(
+            GenerationUsage(prompt_tokens=7, completion_tokens=5),
+            (CompletionOutput(index=0, text="ignored", token_ids=()),),
+        )
+
+        owner.finalize()
+        owner.finalize()
+
+        assert ledger.totals()["tenant-a"] == {
+            "requests": 1,
+            "prompt_tokens": 7,
+            "completion_tokens": 5,
+        }
+
+    def test_stream_usage_owner_skips_undispatched_stream(self, tmp_path):
+        from kairyu.entrypoints.server.metering import StreamUsageOwner
+
+        ledger_path = tmp_path / "usage.jsonl"
+        owner = StreamUsageOwner(
+            tenant="tenant-a",
+            model="model-a",
+            prompt="unstarted prompt",
+            ledger=UsageLedger(ledger_path),
+        )
+
+        owner.finalize()
+
+        assert not ledger_path.exists()
+
+    @pytest.mark.parametrize(
+        ("with_ledger", "with_limiter"),
+        [(True, True), (True, False), (False, True), (False, False)],
+    )
+    def test_explicit_tenant_metering_keeps_optional_sinks_independent(
+        self, tmp_path, with_ledger, with_limiter
+    ):
+        from kairyu.entrypoints.server.metering import record_tenant_usage
+
+        class RecordingLimiter:
+            def __init__(self):
+                self.charges = []
+
+            def charge_tokens(self, tenant, tokens):
+                self.charges.append((tenant, tokens))
+
+        ledger_path = tmp_path / "usage.jsonl"
+        ledger = UsageLedger(ledger_path) if with_ledger else None
+        limiter = RecordingLimiter() if with_limiter else None
+
+        record_tenant_usage(
+            tenant="tenant-a",
+            model="model-a",
+            prompt_tokens=7,
+            completion_tokens=5,
+            ledger=ledger,
+            limiter=limiter,
+        )
+
+        if ledger is not None:
+            assert ledger.totals()["tenant-a"] == {
+                "requests": 1,
+                "prompt_tokens": 7,
+                "completion_tokens": 5,
+            }
+        else:
+            assert not ledger_path.exists()
+        if limiter is not None:
+            assert limiter.charges == [("tenant-a", 12)]
+
+    def test_usage_counts_prefer_backend_and_openai_usage(self):
+        from kairyu.engine.backend import GenerationUsage
+        from kairyu.entrypoints.server.metering import resolve_usage_counts
+        from kairyu.entrypoints.server.protocol import Usage
+
+        assert resolve_usage_counts(
+            GenerationUsage(prompt_tokens=7, completion_tokens=5),
+            prompt="ignored prompt",
+            completions=(),
+        ) == (7, 5)
+        assert resolve_usage_counts(
+            Usage(prompt_tokens=11, completion_tokens=3, total_tokens=14),
+            prompt="ignored prompt",
+            completions=(),
+        ) == (11, 3)
+
+    def test_usage_counts_derive_multiple_choices_with_wire_approximation(self):
+        from kairyu.entrypoints.server.app import _wire_usage
+        from kairyu.entrypoints.server.metering import resolve_usage_counts
+        from kairyu.outputs import CompletionOutput
+
+        completions = (
+            CompletionOutput(index=0, text="ignored text", token_ids=(101, 102)),
+            CompletionOutput(index=1, text="three more words", token_ids=()),
+        )
+
+        counts = resolve_usage_counts(
+            None,
+            prompt="rendered prompt words",
+            completions=completions,
+        )
+        wire = _wire_usage("rendered prompt words", completions, None)
+
+        assert counts == (3, 5)
+        assert (wire.prompt_tokens, wire.completion_tokens) == counts
+
     def test_config_repr_excludes_api_key_mapping(self):
         api_secret = "tenant-config-api-secret"
         config = TenantConfig(key_tenants={api_secret: "tenant-a"})
@@ -375,6 +590,132 @@ class TestResponseStore:
 
 
 class TestResponsesApi:
+    def test_responses_and_embeddings_meter_authenticated_tenant_with_wire_counts(
+        self, tmp_path, monkeypatch
+    ):
+        from dataclasses import replace
+
+        from kairyu.engine.backend import GenerationUsage
+
+        class ReportedUsageBackend(MockBackend):
+            async def generate(self, request):
+                result = await super().generate(request)
+                return replace(
+                    result,
+                    usage=GenerationUsage(prompt_tokens=17, completion_tokens=9),
+                )
+
+        class DerivedUsageBackend(MockBackend):
+            async def generate(self, request):
+                return replace(await super().generate(request), usage=None)
+
+        monkeypatch.setenv("KAIRYU_EXTRA_ROUTE_KEYS", "key-a")
+        ledger_path = tmp_path / "usage.jsonl"
+        app = create_app(
+            {"reported": ReportedUsageBackend(), "derived": DerivedUsageBackend()},
+            settings=ServerSettings(
+                api_keys_env="KAIRYU_EXTRA_ROUTE_KEYS",
+                usage_ledger_path=str(ledger_path),
+            ),
+            tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
+            embedding_backend=MockEmbeddingBackend(dimensions=8),
+        )
+        headers = {"Authorization": "Bearer key-a"}
+
+        with TestClient(app) as client:
+            reported = client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": "reported", "input": "reported input"},
+            )
+            derived = client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": "derived", "input": "derived input"},
+            )
+            embedding = client.post(
+                "/v1/embeddings",
+                headers=headers,
+                json={
+                    "model": "embedding-model",
+                    "input": ["two words", "one"],
+                    "encoding_format": "float",
+                },
+            )
+
+        assert reported.status_code == 200
+        assert reported.json()["usage"] == {
+            "input_tokens": 17,
+            "output_tokens": 9,
+            "total_tokens": 26,
+        }
+        assert derived.status_code == 200
+        derived_usage = derived.json()["usage"]
+        assert derived_usage["input_tokens"] > 0
+        assert derived_usage["output_tokens"] > 0
+        assert embedding.status_code == 200
+        assert embedding.json()["usage"] == {"prompt_tokens": 3, "total_tokens": 3}
+
+        totals = UsageLedger(ledger_path).totals()
+        assert set(totals) == {"tenant-a"}
+        assert totals["tenant-a"] == {
+            "requests": 3,
+            "prompt_tokens": 17 + derived_usage["input_tokens"] + 3,
+            "completion_tokens": 9 + derived_usage["output_tokens"],
+        }
+
+    def test_extra_route_failures_before_usable_results_are_unmetered(
+        self, tmp_path, monkeypatch
+    ):
+        class FailingBackend(MockBackend):
+            async def generate(self, request):
+                raise RuntimeError("backend unavailable")
+
+        class FailingEmbeddingBackend(MockEmbeddingBackend):
+            async def embed(self, texts):
+                raise RuntimeError("embedding backend unavailable")
+
+        monkeypatch.setenv("KAIRYU_EXTRA_ROUTE_KEYS", "key-a")
+        ledger_path = tmp_path / "usage.jsonl"
+        app = create_app(
+            {"m": FailingBackend()},
+            settings=ServerSettings(
+                api_keys_env="KAIRYU_EXTRA_ROUTE_KEYS",
+                usage_ledger_path=str(ledger_path),
+            ),
+            tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
+            embedding_backend=FailingEmbeddingBackend(dimensions=8),
+        )
+        headers = {"Authorization": "Bearer key-a"}
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            invalid_response = client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": "m", "input": "x", "stream": True},
+            )
+            failed_response = client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": "m", "input": "x"},
+            )
+            invalid_embedding = client.post(
+                "/v1/embeddings",
+                headers=headers,
+                json={"model": "m", "input": []},
+            )
+            failed_embedding = client.post(
+                "/v1/embeddings",
+                headers=headers,
+                json={"model": "m", "input": "x"},
+            )
+
+        assert invalid_response.status_code == 400
+        assert failed_response.status_code == 502
+        assert invalid_embedding.status_code == 400
+        assert failed_embedding.status_code == 500
+        assert not ledger_path.exists()
+
     def test_sdk_round_trip_with_previous_response_id(self, tmp_path):
         import openai
 
