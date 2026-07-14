@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO, Literal, Protocol, Self
@@ -19,6 +19,10 @@ from typing import BinaryIO, Literal, Protocol, Self
 from pydantic import BaseModel, Field
 
 _SUPPORTED_ENDPOINT = "/v1/chat/completions"
+
+
+class FileTooLargeError(Exception):
+    """A streamed file exceeded its configured byte limit."""
 
 
 class FileObject(BaseModel):
@@ -174,10 +178,19 @@ class BatchJob(BaseModel):
 
 class BatchStoreProtocol(Protocol):
     """The full store surface (m10a D3/A8) — worker, routes and builder use
-    exactly these ten methods; M11 tenancy ledgers fake this."""
+    exactly these eleven methods; M11 tenancy ledgers fake this."""
 
     def save_file(
         self, content: bytes, filename: str, purpose: str, owner: str = "default"
+    ) -> FileObject: ...
+
+    async def save_file_streaming(
+        self,
+        chunks: AsyncIterator[bytes],
+        filename: str,
+        purpose: str,
+        owner: str = "default",
+        max_bytes: int | None = None,
     ) -> FileObject: ...
 
     def get_file(self, file_id: str, owner: str | None = None) -> FileObject: ...
@@ -233,6 +246,37 @@ class BatchStore:
         except Exception:
             temporary_path.unlink(missing_ok=True)
             raise
+
+    async def save_file_streaming(
+        self,
+        chunks: AsyncIterator[bytes],
+        filename: str,
+        purpose: str,
+        owner: str = "default",
+        max_bytes: int | None = None,
+    ) -> FileObject:
+        """Stream chunks into a metadata-last file transaction."""
+        file_id = f"file-{uuid.uuid4().hex[:24]}"
+        temporary_path = self._files_dir / f"{file_id}.bin.tmp"
+        bytes_written = 0
+        try:
+            with temporary_path.open("xb") as handle:
+                async for chunk in chunks:
+                    prospective_bytes = bytes_written + len(chunk)
+                    if max_bytes is not None and prospective_bytes > max_bytes:
+                        raise FileTooLargeError
+                    handle.write(chunk)
+                    bytes_written = prospective_bytes
+            return self._commit_file(
+                temporary_path,
+                file_id=file_id,
+                bytes_written=bytes_written,
+                filename=filename,
+                purpose=purpose,
+                owner=owner,
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     def get_file(self, file_id: str, owner: str | None = None) -> FileObject:
         path = self._files_dir / f"{file_id}.json"
