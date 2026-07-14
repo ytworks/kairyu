@@ -6,7 +6,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ../../deploy/compose/config.yaml:/etc/kairyu/config.yaml:ro
+      - ./config.yaml:/etc/kairyu/config.yaml:ro
   webui:
     image: ghcr.io/open-webui/open-webui:main
     ports:

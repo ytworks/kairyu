@@ -546,8 +546,19 @@ the replica holding their warm radix-KV prefix; prefix/KV-aware placement is des
 ```bash
 ./scripts/compose_smoke.sh                     # 1 gateway + 3 replicas via Docker compose
 docker compose -f deploy/compose/docker-compose.gpu.yaml up    # gateway + GPU replica
+docker compose -f deploy/compose/docker-compose.webui.yaml up  # Open WebUI + mock model `default`
+./scripts/webui_smoke.sh                       # Kairyu-only WebUI topology smoke (no UI pull)
 helm install kairyu deploy/helm/kairyu         # k8s chart (+ values-gpu.yaml)
 ```
+
+The Open WebUI demo mounts [`deploy/compose/config.yaml`](deploy/compose/config.yaml)
+at `/etc/kairyu/config.yaml` and serves one keyless CPU-safe mock model named
+`default`. Replace that file to use a real engine or authentication policy. The
+WebUI service discovers models through its rendered internal endpoint
+`http://kairyu:8000/v1`. `scripts/webui_smoke.sh` validates that endpoint, starts
+only Kairyu, and checks readiness, exact model discovery, and one non-streaming
+completion; it intentionally does not pull or browser-test the mutable Open WebUI
+image.
 
 Full production guidance (DC topology, systemd, rolling model updates, observability) is
 in [`docs/deployment.md`](docs/deployment.md).
@@ -689,6 +700,7 @@ tokens_per_minute=200_000)}))`.
 | `deploy/compose/docker-compose.webui.yaml` | Open WebUI chat surface on the gateway |
 | `deploy/helm/kairyu/` (+ `values-gpu.yaml`) | k8s chart; readiness `/readyz`, per-GPU-profile nodeSelector |
 | `scripts/kind_smoke.sh` | end-to-end kind cluster smoke (CI job) |
+| `scripts/webui_smoke.sh` | Kairyu-only smoke for the Open WebUI topology; no UI image pull |
 | `scripts/gpu_gates/*.sh` | GPU-day gate scripts (runbook §0–§9); all support `--dry-run` |
 | `bench/serving_bench.py`, `bench/frontier_compare.py`, `bench/kv_transfer_bench.py` | latency/goodput/transfer benches |
 

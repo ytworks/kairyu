@@ -18,8 +18,9 @@ index era (review A1). ``add_replica``/``drain``/``remove_replica`` never drop
 in-flight work: drain stops NEW placements, completion on a removed id is a
 no-op (A2), and remove refuses while outstanding > 0 unless forced.
 
-Health: ``unhealthy_after`` consecutive failures removes a replica from the
-ring until ``probe()`` (which resets failures but NEVER clears draining — A4).
+Health: replicas with a declared readiness URL stay off the ring until ``probe()``
+validates them. ``unhealthy_after`` consecutive failures eject a validated replica
+until another probe (which resets failures but NEVER clears draining — A4).
 Placement is pure hashing plus one optional JSONL append. No background tasks.
 """
 
@@ -34,6 +35,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     UpstreamClientError,
+    shutdown_all,
 )
 from kairyu.orchestration.router import JsonlRouterLog
 
@@ -50,10 +52,23 @@ def _rendezvous_score(session_id: str, replica_id: str) -> bytes:
 class _ReplicaEntry:
     backend: EngineBackend
     health_url: str | None = None
+    validated: bool = True
+    generation: object = field(default_factory=object, compare=False)
     outstanding: int = 0
     consecutive_failures: int = 0
-    draining: bool = False
+    manual_draining: bool = False
+    drain_leases: set[DrainLease] = field(default_factory=set)
     removed: bool = field(default=False, compare=False)
+
+    @property
+    def draining(self) -> bool:
+        return self.manual_draining or bool(self.drain_leases)
+
+
+class DrainLease:
+    """Opaque ownership token for one independently reversible pool drain."""
+
+    __slots__ = ()
 
 
 class ReplicaPool:
@@ -111,16 +126,39 @@ class ReplicaPool:
     ) -> None:
         if replica_id in self._entries:
             raise ValueError(f"replica {replica_id!r} already in the pool")
-        self._entries[replica_id] = _ReplicaEntry(backend=backend, health_url=health_url)
+        self._entries[replica_id] = _ReplicaEntry(
+            backend=backend,
+            health_url=health_url,
+            validated=health_url is None,
+        )
 
     def drain(self, replica_id: str) -> None:
-        """Stop NEW placements; in-flight requests complete normally."""
-        self._entry(replica_id).draining = True
+        """Acquire the manual drain owner; in-flight requests complete normally."""
+        self._entry(replica_id).manual_draining = True
+
+    def cancel_drain(self, replica_id: str) -> None:
+        """Release only the manual drain owner without changing other state."""
+        self._entry(replica_id).manual_draining = False
+
+    def acquire_drain(self, replica_id: str) -> DrainLease:
+        """Acquire an independently reversible drain lease."""
+        entry = self._entry(replica_id)
+        lease = DrainLease()
+        entry.drain_leases.add(lease)
+        return lease
+
+    def release_drain(self, replica_id: str, lease: DrainLease) -> None:
+        """Release only *lease*; manual and other lease owners remain active."""
+        self._entry(replica_id).drain_leases.discard(lease)
 
     def is_draining(self, replica_id: str) -> bool:
         return self._entry(replica_id).draining
 
-    def remove_replica(self, replica_id: str, force: bool = False) -> None:
+    def is_manually_draining(self, replica_id: str) -> bool:
+        """Whether the manual owner is active, independent of drain leases."""
+        return self._entry(replica_id).manual_draining
+
+    async def remove_replica(self, replica_id: str, force: bool = False) -> None:
         entry = self._entry(replica_id)
         if entry.outstanding > 0 and not force:
             raise RuntimeError(
@@ -133,9 +171,18 @@ class ReplicaPool:
         # must not inherit phantom prefixes and route shared traffic to a cold cache
         if self._prefix_index is not None:
             self._prefix_index.forget_replica(replica_id)
+        await shutdown_all((entry.backend,), f"replica {replica_id!r}")
 
     def health_url(self, replica_id: str) -> str | None:
         return self._entry(replica_id).health_url
+
+    def require_probe(self, replica_id: str) -> None:
+        """Mark an existing id unknown until a readiness probe succeeds."""
+        self._entry(replica_id).validated = False
+
+    def entry_generation(self, replica_id: str) -> object:
+        """Opaque token that changes whenever a replica ID is re-added."""
+        return self._entry(replica_id).generation
 
     def _entry(self, replica_id: str) -> _ReplicaEntry:
         entry = self._entries.get(replica_id)
@@ -165,13 +212,14 @@ class ReplicaPool:
     @property
     def healthy(self) -> tuple[bool, ...]:
         """Per-replica health (read-only; consumed by /readyz, /metrics, the prober)."""
-        return tuple(
-            entry.consecutive_failures < self._unhealthy_after
-            for entry in self._entries.values()
-        )
+        return tuple(self._is_healthy(entry) for entry in self._entries.values())
 
     def healthy_by_id(self) -> dict[str, bool]:
         return dict(zip(self._entries, self.healthy, strict=True))
+
+    def validated_by_id(self) -> dict[str, bool]:
+        """Read-only probe-validation state keyed by stable replica id."""
+        return {rid: entry.validated for rid, entry in self._entries.items()}
 
     def outstanding_by_id(self) -> dict[str, int]:
         return {rid: entry.outstanding for rid, entry in self._entries.items()}
@@ -184,18 +232,23 @@ class ReplicaPool:
     async def probe(self, key: int | str) -> None:
         """Declare a replica healthy again, returning it to the hash ring.
 
-        Accepts the legacy ordinal or the replica id (A1). Resets the failure
-        count only — a probe NEVER clears draining (A4).
+        Accepts the legacy ordinal or the replica id (A1). Validates the entry
+        and resets its failure count — a probe NEVER clears draining (A4).
         """
-        self._entry(self._resolve_id(key)).consecutive_failures = 0
+        entry = self._entry(self._resolve_id(key))
+        entry.validated = True
+        entry.consecutive_failures = 0
 
     # -- placement -------------------------------------------------------------
+
+    def _is_healthy(self, entry: _ReplicaEntry) -> bool:
+        return entry.validated and entry.consecutive_failures < self._unhealthy_after
 
     def _eligible_ids(self) -> tuple[str, ...]:
         return tuple(
             rid
             for rid, entry in self._entries.items()
-            if entry.consecutive_failures < self._unhealthy_after and not entry.draining
+            if self._is_healthy(entry) and not entry.draining
         )
 
     def _least_outstanding(self, candidates: Sequence[str]) -> str:
@@ -208,8 +261,8 @@ class ReplicaPool:
         if not eligible:
             raise RuntimeError(
                 f"ReplicaPool: none of the {len(self._entries)} replicas are eligible "
-                f"(unhealthy after >= {self._unhealthy_after} consecutive failures, "
-                "or draining); call probe() once a replica recovers"
+                f"(unvalidated, unhealthy after >= {self._unhealthy_after} consecutive "
+                "failures, or draining); call probe() once a replica recovers"
             )
         session_id = request.cache_hint.session_id if request.cache_hint else None
         if session_id:
@@ -226,9 +279,16 @@ class ReplicaPool:
     def _prefix_select(self, eligible: tuple[str, ...], prompt: str) -> str | None:
         """alpha*overlap - beta*outstanding; None when no candidate has overlap
         (fall through to least-outstanding rather than pay a random placement)."""
+        chunk_keys = getattr(self._prefix_index, "chunk_keys", None)
+        overlap_keys = getattr(self._prefix_index, "overlap_keys", None)
+        use_precomputed = callable(chunk_keys) and callable(overlap_keys)
+        keys = chunk_keys(prompt) if use_precomputed else None
         scored = []
         for rid in eligible:
-            overlap = self._prefix_index.overlap(rid, prompt)  # compute once per replica (P5)
+            if use_precomputed:
+                overlap = overlap_keys(rid, keys)
+            else:
+                overlap = self._prefix_index.overlap(rid, prompt)
             score = (
                 self._prefix_alpha * overlap
                 - self._prefix_beta * self._entries[rid].outstanding
@@ -298,5 +358,6 @@ class ReplicaPool:
             self._finish(entry)
 
     async def shutdown(self) -> None:
-        for entry in self._entries.values():
-            await entry.backend.shutdown()
+        await shutdown_all(
+            (entry.backend for entry in self._entries.values()), "ReplicaPool"
+        )

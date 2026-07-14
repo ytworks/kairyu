@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import OrderedDict
+from collections.abc import Sequence
 
 _DEFAULT_CHUNK_CHARS = 256
 _DEFAULT_MAX_CHUNKS_PER_REPLICA = 4096
@@ -54,19 +55,27 @@ class PrefixIndex:
 
     def observe(self, replica_id: str, prompt: str) -> None:
         store = self._chunks.setdefault(replica_id, OrderedDict())
-        for key in prompt_chunks(prompt, self.chunk_chars):
+        for key in self.chunk_keys(prompt):
             store.pop(key, None)  # refresh recency
             store[key] = None
         while len(store) > self._max_chunks:
             store.popitem(last=False)
 
+    def chunk_keys(self, prompt: str) -> tuple[str, ...]:
+        """Return the immutable prefix keys for this index's chunk size."""
+        return prompt_chunks(prompt, self.chunk_chars)
+
     def overlap(self, replica_id: str, prompt: str) -> int:
         """Longest known prefix, in chunks (prefix-chained: stop at first miss)."""
+        return self.overlap_keys(replica_id, self.chunk_keys(prompt))
+
+    def overlap_keys(self, replica_id: str, keys: Sequence[str]) -> int:
+        """Longest known prefix from a caller-owned, precomputed key sequence."""
         store = self._chunks.get(replica_id)
         if not store:
             return 0
         count = 0
-        for key in prompt_chunks(prompt, self.chunk_chars):
+        for key in keys:
             if key not in store:
                 break
             count += 1

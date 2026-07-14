@@ -338,7 +338,9 @@ class GenerativeAdapter(ABC):
         """Return a skip reason, or None to proceed. Extend, don't replace."""
         if self.info.needs_vision and not target.supports_vision:
             return f"target {target.label()!r} does not support vision inputs"
-        if not ctx.offline_fixtures and not ctx.cache.is_ready(self.info.name):
+        if not ctx.offline_fixtures and not ctx.cache.is_ready(
+            self.info.name, self.info.hf_dataset, self.info.hf_revision
+        ):
             detail = ctx.download_failures.get(self.info.name, "run `kairyu bench download`")
             return f"dataset not in cache ({detail})"
         return None
@@ -351,7 +353,9 @@ class GenerativeAdapter(ABC):
             "temperature": 0.0,
             "source": "fixtures" if ctx.offline_fixtures else "cache",
         }
-        if not ctx.offline_fixtures and ctx.cache.is_ready(self.info.name):
+        if not ctx.offline_fixtures and ctx.cache.is_ready(
+            self.info.name, self.info.hf_dataset, self.info.hf_revision
+        ):
             manifest = ctx.cache.read_manifest(self.info.name)
             base["manifest"] = {
                 key: manifest.get(key) for key in ("dataset", "revision", "rows", "sha256")
