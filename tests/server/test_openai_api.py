@@ -27,8 +27,10 @@ class _EmptyTokenizer:
         return []
 
 
-def _client(app) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app)
+def _client(app, *, raise_app_exceptions: bool = True) -> httpx.AsyncClient:
+    transport = httpx.ASGITransport(
+        app=app, raise_app_exceptions=raise_app_exceptions
+    )
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
@@ -227,12 +229,14 @@ class StubBackend:
         self._error = error
         self._usage = usage
         self.calls = 0
+        self.requests = []
 
     async def generate(self, request):
         from kairyu.engine.backend import GenerationResult
         from kairyu.outputs import CompletionOutput
 
         self.calls += 1
+        self.requests.append(request)
         if self._error is not None:
             raise self._error
         return GenerationResult(
@@ -253,10 +257,142 @@ class StubBackend:
         return None
 
 
+class DispatchCountingOrchestrator:
+    """Failing spy: invalid requests must never reach either dispatch seam."""
+
+    def __init__(self):
+        self.run_calls = 0
+        self.run_chat_calls = 0
+
+    async def run(self, prompt):
+        self.run_calls += 1
+        raise AssertionError("invalid request reached orchestrator.run")
+
+    async def run_chat(self, prompt, *, stream):
+        self.run_chat_calls += 1
+        raise AssertionError("invalid request reached orchestrator.run_chat")
+
+
 _WEATHER_TOOL = {
     "type": "function",
     "function": {"name": "get_weather", "parameters": {"type": "object"}},
 }
+
+
+_OUTPUT_LIMIT_CASES = [
+    pytest.param(
+        "/v1/chat/completions",
+        "max_tokens",
+        {"model": "stub", "messages": [{"role": "user", "content": "hello"}]},
+        id="chat-max-tokens",
+    ),
+    pytest.param(
+        "/v1/chat/completions",
+        "max_completion_tokens",
+        {"model": "stub", "messages": [{"role": "user", "content": "hello"}]},
+        id="chat-max-completion-tokens",
+    ),
+    pytest.param(
+        "/v1/completions",
+        "max_tokens",
+        {"model": "stub", "prompt": "hello"},
+        id="legacy-completions-max-tokens",
+    ),
+    pytest.param(
+        "/v1/responses",
+        "max_output_tokens",
+        {"model": "stub", "input": "hello"},
+        id="responses-max-output-tokens",
+    ),
+]
+
+
+@pytest.mark.parametrize(("path", "field", "body"), _OUTPUT_LIMIT_CASES)
+@pytest.mark.parametrize("limit", [0, -1])
+async def test_nonpositive_output_token_limits_are_predispatch_400(
+    path, field, body, limit
+):
+    engine = StubBackend(text="done", finish_reason="stop")
+    app = create_app(engines={"stub": engine})
+
+    async with _client(app, raise_app_exceptions=False) as client:
+        response = await client.post(path, json={**body, field: limit})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert engine.calls == 0
+
+
+@pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])
+@pytest.mark.parametrize("limit", [0, -1])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_nonpositive_auto_output_limits_are_predispatch_400(
+    field, limit, stream
+):
+    orchestrator = DispatchCountingOrchestrator()
+    app = create_app(engines={}, orchestrators={"auto": orchestrator})
+    body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": stream,
+        field: limit,
+    }
+
+    async with _client(app, raise_app_exceptions=False) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "message": f"max_tokens must be >= 1, got {limit}",
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+    }
+    assert orchestrator.run_calls == 0
+    assert orchestrator.run_chat_calls == 0
+
+
+@pytest.mark.parametrize(("path", "field", "body"), _OUTPUT_LIMIT_CASES)
+async def test_positive_output_token_limits_reach_backend(path, field, body):
+    engine = StubBackend(text="done", finish_reason="stop")
+    app = create_app(engines={"stub": engine})
+
+    async with _client(app) as client:
+        response = await client.post(path, json={**body, field: 7})
+
+    assert response.status_code == 200
+    assert engine.calls == 1
+    assert engine.requests[0].sampling_params.max_tokens == 7
+
+
+async def test_chat_max_tokens_precedes_modern_alias_when_both_are_present():
+    engine = StubBackend(text="done", finish_reason="stop")
+    app = create_app(engines={"stub": engine})
+    body = {
+        "model": "stub",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 5,
+        "max_completion_tokens": 9,
+    }
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert engine.requests[0].sampling_params.max_tokens == 5
+
+
+async def test_responses_default_output_token_limit_is_1024():
+    engine = StubBackend(text="done", finish_reason="stop")
+    app = create_app(engines={"stub": engine})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/responses", json={"model": "stub", "input": "hello"}
+        )
+
+    assert response.status_code == 200
+    assert engine.requests[0].sampling_params.max_tokens == 1024
 
 
 @pytest.mark.parametrize(
