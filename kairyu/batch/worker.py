@@ -16,13 +16,21 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from pydantic import ValidationError
+
+from kairyu.batch.envelope import BatchLineEnvelope
 from kairyu.batch.store import BatchJob, BatchStore, JsonlFileWriter
-from kairyu.engine.backend import EngineBackend, GenerationRequest
+from kairyu.engine.backend import EngineBackend
 from kairyu.entrypoints.chat_template import ChatTemplate
-from kairyu.entrypoints.server.app import (
-    completion_response,
-    render_prompt,
-    sampling_params_from,
+from kairyu.entrypoints.server.chat_service import (
+    ChatRequestError,
+    ExecutedChat,
+    execute_chat,
+    validate_chat_request,
+)
+from kairyu.entrypoints.server.errors import (
+    invalid_request_payload,
+    sanitize_backend_error,
 )
 from kairyu.entrypoints.server.metering import (
     TokenLimiterSink,
@@ -86,7 +94,10 @@ class BatchWorker:
             self._metrics.batch_jobs_total.labels(state=state).inc()
 
     async def _run_line(
-        self, line: object
+        self,
+        line: object,
+        endpoint: str,
+        seen_custom_ids: set[str],
     ) -> tuple[dict | None, dict | None, BatchLineUsage | None]:
         """Execute one input line; return output, error, and successful usage."""
         # a line that is valid JSON but not an object (e.g. a bare `5`) must
@@ -94,21 +105,33 @@ class BatchWorker:
         # the whole job in "in_progress" forever (S1)
         custom_id = line.get("custom_id") if isinstance(line, dict) else None
         try:
-            if not isinstance(line, dict):
-                raise ValueError("input line is not a JSON object")
-            request = ChatCompletionRequest.model_validate(line["body"])
-            engine = self._engines.get(request.model)
-            if engine is None:
-                raise ValueError(f"model {request.model!r} not found")
-            prompt = render_prompt(request, self._chat_templates)
-            result = await engine.generate(
-                GenerationRequest(
-                    request_id=f"batch-{uuid.uuid4().hex[:12]}",
-                    prompt=prompt,
-                    sampling_params=sampling_params_from(request),
-                )
+            envelope = BatchLineEnvelope.model_validate(
+                line, context={"endpoint": endpoint}
             )
-            response = completion_response(request, prompt, result.completions, result.usage)
+            custom_id = envelope.custom_id
+            if custom_id in seen_custom_ids:
+                return self._line_error(
+                    custom_id,
+                    invalid_request_payload(
+                        f"custom_id {custom_id!r} is duplicated"
+                    ),
+                )
+            # No await occurs between membership and add, so this check remains
+            # atomic across the fixed asyncio consumer pool.
+            seen_custom_ids.add(custom_id)
+            request = ChatCompletionRequest.model_validate(envelope.body)
+        except ValidationError as error:
+            return self._line_error(custom_id, invalid_request_payload(str(error)))
+
+        try:
+            validated = validate_chat_request(
+                request,
+                self._engines,
+                self._chat_templates,
+                request_id=f"batch-{uuid.uuid4().hex[:12]}",
+            )
+            executed = await execute_chat(validated)
+            response = executed.response
             return (
                 {
                     "id": f"batch_req_{uuid.uuid4().hex[:16]}",
@@ -117,22 +140,41 @@ class BatchWorker:
                     "error": None,
                 },
                 None,
-                BatchLineUsage(
-                    model=request.model,
-                    prompt_tokens=response.usage.prompt_tokens,
-                    completion_tokens=response.usage.completion_tokens,
-                ),
+                self._line_usage(executed),
             )
+        except ChatRequestError as error:
+            usage = (
+                self._line_usage(error.execution)
+                if error.execution is not None
+                else None
+            )
+            output, error_record, _ = self._line_error(custom_id, error.payload())
+            return output, error_record, usage
         except Exception as error:
-            return (
-                None,
-                {
-                    "id": f"batch_req_{uuid.uuid4().hex[:16]}",
-                    "custom_id": custom_id,
-                    "error": {"message": str(error), "type": "batch_request_error"},
-                },
-                None,
-            )
+            logger.exception("batch request backend error")
+            return self._line_error(custom_id, sanitize_backend_error(error))
+
+    @staticmethod
+    def _line_usage(executed: ExecutedChat) -> BatchLineUsage:
+        return BatchLineUsage(
+            model=executed.response.model,
+            prompt_tokens=executed.response.usage.prompt_tokens,
+            completion_tokens=executed.response.usage.completion_tokens,
+        )
+
+    @staticmethod
+    def _line_error(
+        custom_id: object, payload: dict
+    ) -> tuple[None, dict, None]:
+        return (
+            None,
+            {
+                "id": f"batch_req_{uuid.uuid4().hex[:16]}",
+                "custom_id": custom_id,
+                "error": payload,
+            },
+            None,
+        )
 
     @staticmethod
     def _failure_class(error: BaseException) -> str:
@@ -173,6 +215,7 @@ class BatchWorker:
                 purpose="batch_output",
                 owner=job.owner,
             )
+            seen_custom_ids: set[str] = set()
 
             async def produce() -> None:
                 nonlocal input_error
@@ -211,7 +254,9 @@ class BatchWorker:
                             return
                         if input_error is not None or self._cancelled(batch_id):
                             continue
-                        output, error, usage = await self._run_line(line)
+                        output, error, usage = await self._run_line(
+                            line, job.endpoint, seen_custom_ids
+                        )
                         if usage is not None:
                             record_tenant_usage(
                                 tenant=job.owner,

@@ -58,6 +58,9 @@ chunks, applies its byte limit incrementally, and removes partial uploads on rej
 cancellation, or storage failure. The batch worker streams input through a bounded queue and
 fixed consumer pool, spools results incrementally, and persists controlled terminal failure
 while rolling back partial result publications after ordinary processing or storage exceptions.
+Each batch row now validates a typed method/URL/custom-ID envelope and enters the same
+chat validation plus buffered-dispatch service as regular HTTP requests; invalid rows never
+reach an engine, and backend error records reveal only the exception class.
 Tenant usage accounting now covers synchronous and streaming generation, Responses,
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
@@ -87,6 +90,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] Batch and HTTP share the chat request boundary (m7 D7)
+- What: batch JSONL rows now require a frozen envelope with non-blank, per-job-unique
+  `custom_id`, `POST`, the owning job endpoint, and an object body. A new transport-neutral
+  chat service owns tool, stream/logprob, response-format, image, model, `supports_n`,
+  sampling, and backend preflight validation plus buffered dispatch and tool-choice
+  satisfaction for both regular HTTP and batch. Controlled failures retain the same
+  message/type/code without dispatch; unexpected backend errors expose only the exception
+  class in both transports while their full tracebacks remain server-side.
+- Why: Issue #86 showed that batch ignored its method and URL, accepted missing or duplicate
+  IDs, skipped the public request checks, executed invalid work, and persisted arbitrary
+  backend exception strings containing internal topology or secrets.
+- Refs: Issue #86; m7 D7; `kairyu/batch/{envelope,worker}.py`;
+  `kairyu/entrypoints/server/{chat_service,errors,app}.py`;
+  `tests/{unit/test_batch_envelope,server/test_chat_parity,server/test_batches}.py`.
 
 ### 2026-07-14 — [amendment] Batch uploads use bounded storage transactions (m10a D3/A8)
 - What: `BatchStoreProtocol` expands from ten to eleven methods with

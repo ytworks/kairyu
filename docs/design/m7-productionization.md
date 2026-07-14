@@ -134,6 +134,14 @@ Redis/Celery/queue at this node count. Single-gateway scope: with two
 gateways, pin batch traffic to one or share the data dir (documented).
 Restart recovery marks `in_progress` jobs `failed` — honest and simple.
 
+**Amendment (2026-07-14):** every input row is a typed request envelope with
+a non-blank, per-job-unique `custom_id`, `method: POST`, and a URL equal to the
+job endpoint. Interactive and batch chat share one transport-neutral validation
+and buffered-dispatch service, including tool/format/image/model/sampling/backend
+preflight checks and post-generation tool-choice enforcement. Controlled request
+failures do not dispatch; arbitrary backend failures expose only their exception
+class while retaining the full traceback in server logs.
+
 ### D8 — Observability: `prometheus-client` + stdlib JSON logs; no OTel
 
 Metrics: `kairyu_requests_total{model,code}`,
