@@ -7,6 +7,8 @@ streaming contract.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib.util
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -14,6 +16,15 @@ from dataclasses import dataclass, field
 from kairyu.engine.backend import EngineBackend, GenerationRequest
 from kairyu.outputs import RequestOutput
 from kairyu.sampling_params import SamplingParams
+
+
+async def _cancel_task(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 @dataclass(frozen=True)
@@ -49,7 +60,7 @@ class AsyncLLMEngine:
     def __init__(self, backend: EngineBackend, model: str = "") -> None:
         self._backend = backend
         self.model = model
-        self._aborted: set[str] = set()
+        self._active: dict[str, asyncio.Event] = {}
 
     @classmethod
     def from_engine_args(cls, engine_args: AsyncEngineArgs) -> AsyncLLMEngine:
@@ -61,24 +72,57 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         request_id: str,
     ) -> AsyncIterator[RequestOutput]:
+        if request_id in self._active:
+            raise ValueError(f"request ID {request_id!r} is already active")
+        abort_event = asyncio.Event()
+        self._active[request_id] = abort_event
         request = GenerationRequest(
             request_id=request_id, prompt=prompt, sampling_params=sampling_params
         )
-        async for partial in self._backend.stream(request):
-            if request_id in self._aborted:
-                self._aborted.discard(request_id)
-                return
-            yield RequestOutput(
-                request_id=request_id,
-                prompt=prompt,
-                prompt_token_ids=(),
-                outputs=partial.completions,
-                finished=partial.finished,
-            )
+        stream: AsyncIterator | None = None
+        next_task: asyncio.Task | None = None
+        abort_task: asyncio.Task | None = None
+        try:
+            stream = aiter(self._backend.stream(request))
+            while True:
+                next_task = asyncio.create_task(anext(stream))
+                abort_task = asyncio.create_task(abort_event.wait())
+                done, _ = await asyncio.wait(
+                    {next_task, abort_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if abort_task in done:
+                    await _cancel_task(next_task)
+                    next_task = None
+                    return
+
+                await _cancel_task(abort_task)
+                abort_task = None
+                try:
+                    partial = await next_task
+                except StopAsyncIteration:
+                    return
+                finally:
+                    next_task = None
+                yield RequestOutput(
+                    request_id=request_id,
+                    prompt=prompt,
+                    prompt_token_ids=(),
+                    outputs=partial.completions,
+                    finished=partial.finished,
+                )
+        finally:
+            self._active.pop(request_id, None)
+            await _cancel_task(next_task)
+            await _cancel_task(abort_task)
+            close = getattr(stream, "aclose", None) if stream is not None else None
+            if close is not None:
+                await close()
 
     async def abort(self, request_id: str) -> None:
         """Stop streaming a request; unknown ids are ignored (vLLM behavior)."""
-        self._aborted.add(request_id)
+        event = self._active.get(request_id)
+        if event is not None:
+            event.set()
 
     async def shutdown(self) -> None:
         await self._backend.shutdown()
