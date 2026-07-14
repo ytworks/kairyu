@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from kairyu.batch.store import BatchStore
+from kairyu.batch.store import BatchStore, FileTooLargeError
 from kairyu.batch.worker import BatchWorker
 
 
@@ -19,6 +19,7 @@ def _tenant_of(request: Request) -> str:
 
 # cap the batch input upload so one client cannot OOM the gateway (S7)
 _MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+_CHUNK_BYTES = 1024 * 1024
 
 
 class CreateBatchRequest(BaseModel):
@@ -48,8 +49,19 @@ def add_batch_routes(app: FastAPI, store: BatchStore, worker: BatchWorker) -> No
         file: Annotated[UploadFile, File()],
         purpose: Annotated[str, Form()],
     ):
-        content = await file.read(_MAX_UPLOAD_BYTES + 1)
-        if len(content) > _MAX_UPLOAD_BYTES:
+        async def chunks():
+            while chunk := await file.read(_CHUNK_BYTES):
+                yield chunk
+
+        try:
+            return await store.save_file_streaming(
+                chunks(),
+                filename=file.filename or "upload",
+                purpose=purpose,
+                owner=_tenant_of(request),
+                max_bytes=_MAX_UPLOAD_BYTES,
+            )
+        except FileTooLargeError:
             return JSONResponse(
                 status_code=413,
                 content={
@@ -60,10 +72,6 @@ def add_batch_routes(app: FastAPI, store: BatchStore, worker: BatchWorker) -> No
                     }
                 },
             )
-        return store.save_file(
-            content, filename=file.filename or "upload", purpose=purpose,
-            owner=_tenant_of(request),
-        )
 
     @app.get("/v1/files/{file_id}")
     async def get_file(request: Request, file_id: str):

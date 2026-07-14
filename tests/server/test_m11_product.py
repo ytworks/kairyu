@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
+from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
@@ -26,6 +27,7 @@ from kairyu.entrypoints.server.tenancy import (
     UsageLedger,
 )
 from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.outputs import CompletionOutput
 
 
 def _auto_app(tmp_path, **kwargs):
@@ -36,9 +38,56 @@ def _auto_app(tmp_path, **kwargs):
         {"m": engine},
         orchestrators={"kairyu-auto": orchestrator, "kairyu-auto-max": deep},
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
-        embedding_backend=MockEmbeddingBackend(dimensions=8),
+        embedding_backends={"embedding-model": MockEmbeddingBackend(dimensions=8)},
         **kwargs,
     )
+
+
+def test_mixed_tool_choice_rejection_is_metered_once(tmp_path):
+    class MixedToolBackend(MockBackend):
+        async def generate(self, request):
+            tool_call = (
+                '<tool_call>{"name":"get_weather","arguments":{}}</tool_call>'
+            )
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(index=0, text=tool_call, token_ids=()),
+                    CompletionOutput(index=1, text="plain", token_ids=()),
+                ),
+                usage=GenerationUsage(prompt_tokens=19, completion_tokens=7),
+            )
+
+    ledger_path = tmp_path / "usage.jsonl"
+    app = create_app(
+        {"m": MixedToolBackend()},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "weather"}],
+                "n": 2,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather", "parameters": {}},
+                    }
+                ],
+                "tool_choice": "required",
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+    assert UsageLedger(ledger_path).totals()["default"] == {
+        "requests": 1,
+        "prompt_tokens": 19,
+        "completion_tokens": 7,
+    }
 
 
 class TestOrchestratorSurface:
@@ -131,7 +180,7 @@ class TestTenancy:
             pytest.param("chat", "kairyu-auto", False, id="sync-orchestrator"),
             pytest.param("chat", "kairyu-auto", True, id="stream-orchestrator"),
             pytest.param("responses", "m", False, id="responses"),
-            pytest.param("embeddings", "m", False, id="embeddings"),
+            pytest.param("embeddings", "embedding-model", False, id="embeddings"),
             pytest.param("batch", "m", False, id="batch"),
         ],
     )
@@ -788,7 +837,9 @@ class TestResponsesApi:
                 usage_ledger_path=str(ledger_path),
             ),
             tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
-            embedding_backend=MockEmbeddingBackend(dimensions=8),
+            embedding_backends={
+                "embedding-model": MockEmbeddingBackend(dimensions=8)
+            },
         )
         headers = {"Authorization": "Bearer key-a"}
 
@@ -854,7 +905,9 @@ class TestResponsesApi:
                 usage_ledger_path=str(ledger_path),
             ),
             tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
-            embedding_backend=FailingEmbeddingBackend(dimensions=8),
+            embedding_backends={
+                "embedding-model": FailingEmbeddingBackend(dimensions=8)
+            },
         )
         headers = {"Authorization": "Bearer key-a"}
 
@@ -872,12 +925,12 @@ class TestResponsesApi:
             invalid_embedding = client.post(
                 "/v1/embeddings",
                 headers=headers,
-                json={"model": "m", "input": []},
+                json={"model": "embedding-model", "input": []},
             )
             failed_embedding = client.post(
                 "/v1/embeddings",
                 headers=headers,
-                json={"model": "m", "input": "x"},
+                json={"model": "embedding-model", "input": "x"},
             )
 
         assert invalid_response.status_code == 400
@@ -932,7 +985,9 @@ class TestEmbeddings:
                 base_url=str(http.base_url) + "/v1", api_key="sk-local",
                 http_client=http,
             )
-            result = client.embeddings.create(model="m", input=["hello", "world"])
+            result = client.embeddings.create(
+                model="embedding-model", input=["hello", "world"]
+            )
             assert len(result.data) == 2
             assert len(result.data[0].embedding) == 8  # SDK decodes base64 (A9)
             assert result.usage.prompt_tokens > 0
@@ -941,11 +996,19 @@ class TestEmbeddings:
         with TestClient(_auto_app(tmp_path)) as client:
             as_float = client.post(
                 "/v1/embeddings",
-                json={"model": "m", "input": "hello", "encoding_format": "float"},
+                json={
+                    "model": "embedding-model",
+                    "input": "hello",
+                    "encoding_format": "float",
+                },
             ).json()["data"][0]["embedding"]
             as_b64 = client.post(
                 "/v1/embeddings",
-                json={"model": "m", "input": "hello", "encoding_format": "base64"},
+                json={
+                    "model": "embedding-model",
+                    "input": "hello",
+                    "encoding_format": "base64",
+                },
             ).json()["data"][0]["embedding"]
             decoded = struct.unpack(
                 f"<{len(as_float)}f", base64.b64decode(as_b64)
@@ -958,7 +1021,11 @@ class TestEmbeddings:
         with TestClient(_auto_app(tmp_path)) as client:
             resp = client.post(
                 "/v1/embeddings",
-                json={"model": "m", "input": "hello", "encoding_format": "Base64"},
+                json={
+                    "model": "embedding-model",
+                    "input": "hello",
+                    "encoding_format": "Base64",
+                },
             )
             assert resp.status_code == 400
 

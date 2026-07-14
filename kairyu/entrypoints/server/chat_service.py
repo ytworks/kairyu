@@ -430,4 +430,4 @@ def _tool_choice_is_satisfied(
 ) -> bool:
     if tool_choice.mode not in {"required", "named"}:
         return True
-    return any(choice.message.tool_calls for choice in choices)
+    return bool(choices) and all(choice.message.tool_calls for choice in choices)

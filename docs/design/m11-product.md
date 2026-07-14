@@ -57,7 +57,11 @@ message array), `previous_response_id`, `stream`; a `ResponseStore`
 `previous_response_id` reconstructs context; OpenAI SDK
 `client.responses.create` round-trip test. Embeddings: `EmbeddingBackend`
 protocol (`embed(texts) -> list[vector]`), `MockEmbeddingBackend`
-(deterministic hash-based vectors), `POST /v1/embeddings` with usage.
+(deterministic hash-based vectors), `POST /v1/embeddings` with usage. Embedding
+backends are registered under explicit, non-colliding served model IDs; the
+handler resolves that bounded registry before work, returns `model_not_found`
+for misses, exposes every configured ID through `/v1/models`, and uses only the
+resolved ID for the response, request metrics, and usage accounting.
 
 ### D5 — Vision wire format
 
@@ -158,3 +162,9 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   descoped to engine-level (HTTP→priority mapping is tenant config, G6);
   TTFT predictor uses GATEWAY-observable signals (in-flight count + observed
   TTFT EMA — engine internals invisible through ZMQ/vLLM backends).
+- **A12 (D4)**: embeddings use a model-ID → backend registry, not one anonymous
+  global backend. IDs are discoverable, resolve before validation/execution,
+  cannot collide with chat or orchestration IDs, and are the only identities
+  admitted to response, metric, and ledger labels; limiter charging occurs
+  only after resolution. Misses use the shared 404 `model_not_found` response
+  and record no usage.

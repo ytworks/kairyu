@@ -236,11 +236,13 @@ class OpenAICompatBackend:
         completions = tuple(
             CompletionOutput(
                 index=index,
-                text=texts[index],
-                token_ids=tuple(range(deltas_seen[index])) if finished else (),
+                text=texts.get(index, ""),
+                token_ids=(
+                    tuple(range(deltas_seen.get(index, 0))) if finished else ()
+                ),
                 finish_reason=finish.get(index, "stop") if finished else None,
             )
-            for index in sorted(texts)
+            for index in sorted(texts.keys() | finish.keys())
         )
         return GenerationResult(
             request_id=request.request_id,
@@ -280,6 +282,7 @@ class OpenAICompatBackend:
                 changed = False
                 for choice in chunk.get("choices", []):
                     index = choice.get("index", 0)
+                    texts.setdefault(index, "")
                     content = (choice.get("delta") or {}).get("content")
                     if content:
                         texts[index] = texts.get(index, "") + content
@@ -289,8 +292,8 @@ class OpenAICompatBackend:
                         finish[index] = choice["finish_reason"]
                 if changed:
                     yield self._partial(request, texts, finish, deltas_seen, finished=False)
-        if not texts:
-            raise RuntimeError(f"backend {self._base_url} streamed no content")
+        if not texts and not finish:
+            raise RuntimeError(f"backend {self._base_url} streamed no choices")
         yield self._partial(request, texts, finish, deltas_seen, finished=True, usage=usage)
 
     async def shutdown(self) -> None:

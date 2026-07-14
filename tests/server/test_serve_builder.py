@@ -79,6 +79,65 @@ async def test_gpu_gateway_exposes_canonical_default_model():
     assert "llama" not in ids
 
 
+async def test_builder_wires_named_embedding_models():
+    app = build_app_from_spec(
+        load_deployment_spec(
+            """
+engines:
+  chat: { backend: mock }
+embeddings:
+  embed-small: { backend: mock, dimensions: 4 }
+  embed-large: { backend: mock, dimensions: 9 }
+"""
+        )
+    )
+
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        small = await client.post(
+            "/v1/embeddings",
+            json={
+                "model": "embed-small",
+                "input": "hello",
+                "encoding_format": "float",
+            },
+        )
+        large = await client.post(
+            "/v1/embeddings",
+            json={
+                "model": "embed-large",
+                "input": "hello",
+                "encoding_format": "float",
+            },
+        )
+
+    assert {model["id"] for model in models.json()["data"]} == {
+        "chat",
+        "embed-small",
+        "embed-large",
+    }
+    assert small.status_code == 200
+    assert small.json()["model"] == "embed-small"
+    assert len(small.json()["data"][0]["embedding"]) == 4
+    assert large.status_code == 200
+    assert large.json()["model"] == "embed-large"
+    assert len(large.json()["data"][0]["embedding"]) == 9
+
+
+def test_builder_rejects_unknown_embedding_backend():
+    spec = load_deployment_spec(
+        """
+engines:
+  chat: { backend: mock }
+embeddings:
+  embed: { backend: does-not-exist, dimensions: 4 }
+"""
+    )
+
+    with pytest.raises(ValueError, match="unknown embedding backend"):
+        build_app_from_spec(spec)
+
+
 async def test_header_session_takes_precedence_over_user():
     app = build_app_from_spec(load_deployment_spec(POOLED_YAML))
     async with _client(app) as client:

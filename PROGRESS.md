@@ -49,13 +49,27 @@ OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benc
 in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
-`BatchStore` exposes owner-scoped lazy binary-line iteration and transactional lazy
-JSONL writers; the batch worker streams input through a bounded queue and fixed consumer
-pool, spools results incrementally, and persists controlled terminal failure while rolling
-back partial result publications after ordinary processing or storage exceptions.
+The vLLM-compatible `AsyncLLMEngine` now owns an explicit registry of active
+request IDs: inactive aborts are stateless, while an active abort interrupts and
+closes its backend stream without poisoning later reuse of the same ID.
+`OpenAICompatBackend` SSE preserves every observed choice index, including empty single
+choices and mixed empty/non-empty `n > 1` results, while rejecting streams with no choices.
+`BatchStore` exposes owner-scoped lazy binary-line iteration, metadata-last streaming
+upload transactions, and transactional lazy JSONL writers. The files route reads fixed-size
+chunks, applies its byte limit incrementally, and removes partial uploads on rejection,
+cancellation, or storage failure. The batch worker streams input through a bounded queue and
+fixed consumer pool, spools results incrementally, and persists controlled terminal failure
+while rolling back partial result publications after ordinary processing or storage exceptions.
 Each batch row now validates a typed method/URL/custom-ID envelope and enters the same
 chat validation plus buffered-dispatch service as regular HTTP requests; invalid rows never
 reach an engine, and backend error records reveal only the exception class.
+Embedding backends are configured and discovered as explicit, non-colliding model IDs;
+requests resolve that bounded registry before work, unknown IDs return `model_not_found`,
+response, metric, and ledger identities use the resolved key, and limiter charging occurs
+only after resolution.
+Required and named tool choice is enforced independently for every returned choice after
+filtering; mixed or empty results are rejected before response or buffered stream emission,
+without regeneration, and the consumed generation remains metered exactly once.
 Tenant usage accounting now covers synchronous and streaming generation, Responses,
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
@@ -100,6 +114,41 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: Issue #90; m11 D3/A7; `kairyu/entrypoints/server/{app,tenancy}.py`;
   `kairyu/deploy/builder.py`; `tests/server/{test_m11_product,test_serve_builder}.py`.
 
+### 2026-07-14 — [amendment] Embeddings use explicit served model IDs (m11 D4)
+- What: `create_app` and `DeploymentSpec` now accept model-ID-to-embedding-backend
+  registries, reject IDs that collide with engines, pools, or orchestrators, and include
+  configured embedding IDs in `/v1/models`. The embeddings route resolves before validation
+  or execution, shares the 404 `model_not_found` response, routes multiple backends, and
+  records response, metric, and ledger identity only from the resolved key while charging
+  the limiter only after resolution.
+- Why: Issue #89 showed that the anonymous global backend accepted and echoed arbitrary IDs,
+  omitted its model from discovery, and admitted attacker-controlled metric and metering
+  identities despite executing the same backend.
+- Refs: Issue #89; m11 D4/A12; `kairyu/entrypoints/server/{app,extra_routes}.py`;
+  `kairyu/deploy/{spec,builder}.py`; `tests/server/test_embeddings_models.py`.
+
+### 2026-07-14 — [amendment] Required tool choice is enforced per response choice (m1 D6)
+- What: required and named tool choice now succeeds only when every returned choice retains
+  a permitted tool call after per-choice filtering. Mixed and empty results use the existing
+  controlled 502 before buffered SSE emission, without regeneration, and their consumed
+  generation is recorded exactly once.
+- Why: Issue #88 showed that the existential satisfaction check accepted multi-choice
+  responses when only one choice complied, violating the request contract for the remaining
+  choices.
+- Refs: Issue #88; m1 D6; `kairyu/entrypoints/server/chat_service.py`;
+  `tests/server/{test_openai_api,test_m11_product}.py`.
+
+### 2026-07-14 — [amendment] OpenAI-compatible streams preserve empty choices (m1 D1)
+- What: streamed choice state is now initialized whenever an upstream index is observed,
+  independently of text content, and partial/final completions are built from the union of
+  text and finish indexes with empty defaults. Empty single choices and mixed `n > 1`
+  results retain their indexes and finish reasons; streams with no choices still fail.
+- Why: Issue #87 showed that truthy-content-only tracking converted valid immediate-EOS or
+  content-filtered empty responses into upstream errors and silently dropped empty siblings
+  from multi-choice results, contradicting non-streaming behavior.
+- Refs: Issue #87; m1 D1; `kairyu/engine/openai_backend.py`;
+  `tests/unit/test_openai_backend.py`.
+
 ### 2026-07-14 — [amendment] Batch and HTTP share the chat request boundary (m7 D7)
 - What: batch JSONL rows now require a frozen envelope with non-blank, per-job-unique
   `custom_id`, `POST`, the owning job endpoint, and an object body. A new transport-neutral
@@ -114,6 +163,30 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: Issue #86; m7 D7; `kairyu/batch/{envelope,worker}.py`;
   `kairyu/entrypoints/server/{chat_service,errors,app}.py`;
   `tests/{unit/test_batch_envelope,server/test_chat_parity,server/test_batches}.py`.
+
+### 2026-07-14 — [amendment] Batch uploads use bounded storage transactions (m10a D3/A8)
+- What: `BatchStoreProtocol` expands from ten to eleven methods with
+  `save_file_streaming`. `/v1/files` now supplies fixed 1 MiB chunks, enforces the existing
+  512 MiB limit incrementally before writing an over-limit chunk, and publishes content plus
+  owner metadata only after the stream completes. Rejection, iterator failure, cancellation,
+  close failure, and metadata failure remove partial artifacts.
+- Why: Issue #85 showed that the route read up to the complete 512 MiB allowance into memory
+  per request on top of Starlette's multipart spool, so concurrent accepted uploads could
+  exhaust the gateway even though each individual request obeyed the size cap.
+- Refs: Issue #85; m10a D3/A8; `kairyu/batch/store.py`;
+  `kairyu/entrypoints/server/batch_routes.py`; `tests/unit/test_batch_store_streaming.py`;
+  `tests/server/test_batches.py`.
+
+### 2026-07-14 — [amendment] Async abort owns active request lifecycles
+- What: `AsyncLLMEngine` replaced persistent abort markers with a registry of active
+  request-local events. Generation now races backend progress against abort, rejects only
+  concurrently active duplicate IDs, and centralizes deregistration, pending-task
+  cancellation, and backend iterator closure across completion, abort, and consumer close.
+- Why: unknown aborts previously retained attacker-controlled IDs and suppressed a future
+  request reusing that ID, while an active stream blocked on its backend could not observe
+  abort until another partial arrived.
+- Refs: Issue #84; `kairyu/entrypoints/async_engine.py`;
+  `tests/{compat/test_async_engine_compat,unit/test_async_engine_abort}.py`.
 
 ### 2026-07-14 — [progress] FlashInfer SM120 (Blackwell) attention enabled: GPU device placement + AOT image
 - What: The single-process GPU serve path had no device placement — `build_engine_loop` loaded the
