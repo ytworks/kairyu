@@ -261,6 +261,36 @@ class StubBackend:
         return None
 
 
+class MultiChoiceToolBackend:
+    def __init__(self, texts, usage=None):
+        self._texts = texts
+        self._usage = usage
+        self.calls = 0
+
+    async def generate(self, request):
+        self.calls += 1
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=tuple(
+                CompletionOutput(
+                    index=index,
+                    text=text,
+                    token_ids=(),
+                    finish_reason="stop",
+                )
+                for index, text in enumerate(self._texts)
+            ),
+            usage=self._usage,
+        )
+
+    async def stream(self, request):
+        yield await self.generate(request)
+
+    async def shutdown(self):
+        return None
+
+
 class CompletionUsageBackend:
     """Legacy-completion backend with per-prompt optional usage."""
 
@@ -831,6 +861,127 @@ async def test_unsatisfied_tool_choice_is_controlled_upstream_failure(
     assert response.status_code == 502
     assert response.json()["error"]["type"] == "upstream_error"
     assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+    assert engine.calls == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("named", [False, True])
+async def test_mixed_multi_choice_tool_choice_is_rejected(stream, named):
+    search_text = '<tool_call>{"name":"search","arguments":{"q":"rain"}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = MultiChoiceToolBackend((TOOL_CALL_TEXT, search_text if named else "plain"))
+    app = create_app(engines={"stub": engine})
+    tool_choice = (
+        {"type": "function", "function": {"name": "get_weather"}}
+        if named
+        else "required"
+    )
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL, search_tool],
+        tool_choice=tool_choice,
+        n=2,
+        stream=stream,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+    assert not response.headers["content-type"].startswith("text/event-stream")
+    assert engine.calls == 1
+
+
+async def test_empty_tool_choice_result_is_rejected():
+    engine = MultiChoiceToolBackend(())
+    app = create_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        tool_choice="required",
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+    assert engine.calls == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("named", [False, True])
+async def test_all_valid_multi_choice_tool_choice_is_accepted(stream, named):
+    search_text = '<tool_call>{"name":"search","arguments":{"q":"rain"}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    if named:
+        texts = (
+            TOOL_CALL_TEXT + search_text,
+            search_text + TOOL_CALL_TEXT,
+        )
+        tool_choice = {"type": "function", "function": {"name": "get_weather"}}
+        expected_names = ["get_weather", "get_weather"]
+    else:
+        texts = (TOOL_CALL_TEXT, search_text)
+        tool_choice = "required"
+        expected_names = ["get_weather", "search"]
+    engine = MultiChoiceToolBackend(texts)
+    app = create_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL, search_tool],
+        tool_choice=tool_choice,
+        n=2,
+        stream=stream,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    if not stream:
+        choices = response.json()["choices"]
+        assert [choice["index"] for choice in choices] == [0, 1]
+        assert [choice["finish_reason"] for choice in choices] == [
+            "tool_calls",
+            "tool_calls",
+        ]
+        assert [
+            choice["message"]["tool_calls"][0]["function"]["name"]
+            for choice in choices
+        ] == expected_names
+    else:
+        chunks = [
+            json.loads(line[len("data: "):])
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
+        calls = [
+            (choice["index"], call["index"], call["function"]["name"])
+            for choice in choices
+            for call in choice["delta"].get("tool_calls") or []
+        ]
+        finishes = [
+            (choice["index"], choice["finish_reason"])
+            for choice in choices
+            if choice["finish_reason"] is not None
+        ]
+        assert calls == [
+            (0, 0, expected_names[0]),
+            (1, 0, expected_names[1]),
+        ]
+        assert finishes == [(0, "tool_calls"), (1, "tool_calls")]
     assert engine.calls == 1
 
 

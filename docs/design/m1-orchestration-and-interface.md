@@ -95,9 +95,12 @@ through now so M2 can consume it without interface changes.
 
 `kairyu.entrypoints.server` exposes `/v1/chat/completions`, `/v1/completions`, `/v1/models`.
 Tool calling passes `tools`/`tool_choice` through to the backend and parses tool-call
-output into OpenAI's `tool_calls` schema. An `x-kairyu-orchestrate` request field (or
-model name `kairyu-auto`) routes a request through the Orchestrator instead of a raw engine
-— one endpoint, Fugu-style.
+output into OpenAI's `tool_calls` schema. For required or named tool choice, every returned
+choice must retain at least one permitted tool call after per-choice filtering; any mixed or
+empty result is rejected without regeneration, including before buffered SSE emission, while
+the consumed generation is metered exactly once. An `x-kairyu-orchestrate` request field (or
+model name `kairyu-auto`) routes a request through the Orchestrator instead of a raw engine —
+one endpoint, Fugu-style.
 
 ### D7. DSL: YAML is the source of truth; decorators build the same objects
 
