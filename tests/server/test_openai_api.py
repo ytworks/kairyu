@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from kairyu.engine.backend import GenerationResult, GenerationUsage
+from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
@@ -14,6 +15,19 @@ from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 
 TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
+
+
+class _EmptyTokenizer:
+    eos_token_id = None
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return ()
+
+    def decode(self, token_ids) -> str:
+        return ""
+
+    def vocab(self) -> list[str]:
+        return []
 
 
 def _client(app, *, raise_app_exceptions: bool = True) -> httpx.AsyncClient:
@@ -38,6 +52,44 @@ def _chat_body(content: str, **extra) -> dict:
         "messages": [{"role": "user", "content": content}],
         **extra,
     }
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("endpoint", ["chat", "completions"])
+async def test_zero_token_prompt_returns_400_before_streaming(endpoint, stream):
+    backend = KairyuBackend(tokenizer=_EmptyTokenizer())
+    app = create_app(engines={"empty": backend})
+    if endpoint == "chat":
+        path = "/v1/chat/completions"
+        body = {
+            "model": "empty",
+            "messages": [{"role": "user", "content": "normal-looking input"}],
+            "stream": stream,
+        }
+    else:
+        path = "/v1/completions"
+        body = {
+            "model": "empty",
+            "prompt": "normal-looking input",
+            "stream": stream,
+        }
+
+    async with _client(app) as client:
+        response = await client.post(path, json=body)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "at least one token" in response.json()["error"]["message"]
+    assert not response.headers["content-type"].startswith("text/event-stream")
+
+
+async def test_backend_without_validate_request_still_serves_requests():
+    app = create_app(engines={"mock": MockBackend()})
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions", json={"model": "mock", "prompt": "hello"}
+        )
+    assert response.status_code == 200
 
 
 async def test_models_endpoint_lists_engines_and_auto(app):
@@ -1285,6 +1337,50 @@ async def test_generated_tool_calls_keep_order_while_skipping_only_malformed_ent
     calls = response.json()["choices"][0]["message"]["tool_calls"]
     assert [call["function"]["name"] for call in calls] == ["first", "second"]
     assert [call["function"]["arguments"] for call in calls] == ["{}", "{}"]
+
+
+async def test_zero_token_prompt_array_is_validated_before_any_generation_starts():
+    class ArrayValidationBackend(StubBackend):
+        def __init__(self):
+            super().__init__()
+            self.validated: list[str] = []
+            self.started: list[str] = []
+
+        def validate_request(self, request):
+            self.validated.append(request.prompt)
+            if request.prompt == "invalid":
+                raise ValueError("prompt must tokenize to at least one token")
+
+        async def generate(self, request):
+            self.started.append(request.prompt)
+            return await super().generate(request)
+
+    engine = ArrayValidationBackend()
+    app = create_app(engines={"stub": engine})
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "stub", "prompt": ["valid", "invalid"]},
+        )
+
+    assert response.status_code == 400
+    assert engine.validated == ["valid", "invalid"]
+    assert engine.started == []
+
+
+async def test_runtime_value_error_remains_an_upstream_error():
+    app = create_app(engines={"stub": StubBackend(error=ValueError("runtime failure"))})
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "stub",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "upstream_error"
 
 
 async def test_streaming_with_n_gt_1_emits_all_choice_indexes(app):

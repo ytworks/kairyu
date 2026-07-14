@@ -561,8 +561,19 @@ pools:
 ```bash
 ./scripts/compose_smoke.sh                     # Docker compose で 1 ゲートウェイ + 3 レプリカ
 docker compose -f deploy/compose/docker-compose.gpu.yaml up    # ゲートウェイ + GPU レプリカ
+docker compose -f deploy/compose/docker-compose.webui.yaml up  # Open WebUI + mock モデル `default`
+./scripts/webui_smoke.sh                       # WebUI 構成の Kairyu-only smoke (UI pull なし)
 helm install kairyu deploy/helm/kairyu         # k8s チャート (+ values-gpu.yaml)
 ```
+
+Open WebUI デモは [`deploy/compose/config.yaml`](deploy/compose/config.yaml) を
+`/etc/kairyu/config.yaml` にマウントし、CPU-safe で keyless な mock モデル
+`default` を 1 つ提供します。実エンジンや認証ポリシーを使う場合はこのファイルを
+置き換えてください。WebUI サービスは render 後の内部 endpoint
+`http://kairyu:8000/v1` からモデルを検出します。`scripts/webui_smoke.sh` は
+この endpoint を検証し、Kairyu だけを起動して readiness、モデル ID の完全一致、
+non-streaming completion を確認します。可変な Open WebUI image の pull や
+browser test は意図的に行いません。
 
 本番運用の詳細(DC トポロジー、systemd、ローリングモデル更新、可観測性)は
 [`docs/deployment.md`](docs/deployment.md) にあります。
@@ -704,6 +715,7 @@ tokens_per_minute=200_000)}))`。
 | `deploy/compose/docker-compose.webui.yaml` | ゲートウェイ上の Open WebUI チャット UI |
 | `deploy/helm/kairyu/`(+ `values-gpu.yaml`) | k8s チャート。readiness は `/readyz`、GPU プロファイルごとの nodeSelector |
 | `scripts/kind_smoke.sh` | kind クラスタのエンドツーエンドスモーク(CI ジョブ) |
+| `scripts/webui_smoke.sh` | Open WebUI 構成の Kairyu-only smoke。UI image は pull しない |
 | `scripts/gpu_gates/*.sh` | GPU デイのゲートスクリプト(runbook §0–§9)。すべて `--dry-run` 対応 |
 | `bench/serving_bench.py`, `bench/frontier_compare.py`, `bench/kv_transfer_bench.py` | レイテンシ/グッドプット/転送ベンチ |
 

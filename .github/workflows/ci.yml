@@ -29,8 +29,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Validate Compose bind sources
+        run: uv run --no-dev python scripts/validate_compose_binds.py deploy/compose/docker-compose*.yaml
       - name: Compose smoke drill
         run: ./scripts/compose_smoke.sh
+      - name: WebUI Kairyu smoke
+        run: ./scripts/webui_smoke.sh
 
   kind-smoke:
     runs-on: ubuntu-latest
@@ -40,5 +45,7 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           install_only: true
+      - name: Helm schema and GPU template gate
+        run: bash scripts/kind_smoke.sh --helm-check
       - name: kind smoke (m10a D5)
         run: bash scripts/kind_smoke.sh

@@ -5,8 +5,8 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 
 ## Current Status
 
-**Deploy-ready (2026-07-03): every milestone of the local-complete plan
-(M8–M19) is implemented and CPU-verified — 646 tests, 92% cov. The only
+**Deploy-ready (2026-07-13): every milestone of the local-complete plan
+(M8–M19) is implemented and CPU-verified — 827 tests, 89% cov. The only
 remaining work is GPU execution: performance gates, kernel tuning, fabric
 bring-up, `pytest -m gpu`, and `scripts/gpu_gates/` (all pre-written and
 dry-run pinned).**
@@ -21,7 +21,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 
 | Milestone | Status |
 |-----------|--------|
-| M1 — Orchestration (L2) + Interface (L3) | Complete and merged. Router / Conductor / MoA, vLLM-compatible `LLM` + `AsyncLLMEngine`, OpenAI-compatible server, YAML/decorator DSL. |
+| M1 — Orchestration (L2) + Interface (L3) | Complete and merged. Router / Conductor / MoA, vLLM-compatible `LLM` + `AsyncLLMEngine`, OpenAI-compatible server, YAML/decorator DSL. Atomic pre-dispatch reservations enforce strict step admission and serialize result-priced work under configured cost caps without hiding a single admitted generation's actual-cost overrun. |
 | M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done: scheduler, KV manager, EngineCore step loop, overlap pipeline, pre-GPU robustness (EOS, preemption, abort, pin TTL). Paged-KV attention validated with real tensors on CPU (greedy-equivalence). **Blocked on GPU hardware** for the GPU phase. |
 | M3 — Spec decode / CUDA graphs / P-D separation | n-gram draft spec-decode policy and xgrammar structured output implemented CPU-side. CUDA graphs and the rest gated on M2 GPU phase. |
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
@@ -57,6 +57,19 @@ Tenant usage accounting now covers synchronous and streaming generation, Respons
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
 early or a completed batch line is later rolled back by cancellation or spool failure.
+
+The Open WebUI Compose topology is clean-checkout runnable with a standalone
+`default` mock DeploymentSpec; CI validates its binds/rendered internal endpoint and
+smokes only Kairyu readiness, exact model discovery, and completion without pulling the
+mutable UI image.
+
+The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
+GPU, selects the configured runtime/node profile, mounts an existing host path or
+PVC read-only, and starts the real Kairyu engine from `/models/checkpoint`.
+The checked-in SM120/`pcie-gddr` profile pins the torch attention fallback while
+the strict chart value also permits FlashInfer on supported hardware.
+CI now schema-lints and template-renders both the CPU defaults and GPU overlay
+before the kind CPU deployment/HTTP drill; it does not schedule the GPU pod.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
 deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
@@ -145,6 +158,115 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   without activating runtime isolation or per-tenant accounting.
 - Refs: Issue #46 Task 3; `kairyu/deploy/builder.py`;
   `tests/server/test_serve_builder.py`.
+
+### 2026-07-13 — [design] D4 defines atomic orchestration budget admission
+- What: D4 now requires every Conductor generation to reserve its step synchronously
+  before dispatch, gives result-priced work one exclusive unknown-cost admission slot,
+  and releases complete reservations on failure or cancellation. MoA reserves all
+  proposal plus synthesis steps as one operation. An admitted generation's eventual
+  actual cost remains fully accounted and queryable even when it crosses the cap.
+- Why: Parallel DAG roots and MoA previously admitted work from stale completed-only
+  state, multiplying strict step/cost limits. Pre-dispatch reservations close that race
+  while preserving the truthful result-priced behavior: an unknowable actual charge is
+  never clamped or hidden after admission.
+- Refs: issue #43; D4 in `docs/design/m1-orchestration-and-interface.md`;
+  `kairyu/orchestration/{budget,conductor,orchestrator}.py`
+
+### 2026-07-13 — [amendment] Remote readiness requires generation-safe probes
+- What: Remote replicas with declared readiness URLs now start unknown and stay out of placement and `/readyz` until a successful `/readyz` probe. The serve prober runs immediately at startup, validates unknown/ejected replicas with bounded concurrency, isolates failures, and binds results to the entry generation; URL-less local/programmatic pools remain trusted.
+- Why: Treating a newly constructed remote backend as healthy allowed readiness and request placement before any live endpoint check, while serial or ID-only recovery could multiply startup latency or validate a replacement from a stale response.
+- Refs: issue #52; `docs/design/m7-productionization.md` D4; `docs/design/m10-fleet-cpu.md` D1/D2/A15; `kairyu/orchestration/replica.py`, `kairyu/deploy/prober.py`, `kairyu/deploy/builder.py`
+
+### 2026-07-13 — [amendment] Elastic ownership follows same-ID entry generations
+- What: `ReplicaPool` now gives every backend entry an opaque generation token, and `PoolReconciler` binds applied identities and drain leases to that generation. An external remove/re-add of the same ID discards old tracking; desired absence acquires a fresh lease on the new entry, while desired presence baselines it without factory, replacement, or shutdown side effects. Fresh-entry manual drains remain authoritative.
+- Why: Comparing only replica ID sets missed a complete entry replacement between reconciliation ticks, so an old lease could suppress draining of the fresh entry and prevent removal from converging.
+- Refs: issue #41; `docs/design/m10-fleet-cpu.md` D1/D2 and A14; `kairyu/orchestration/replica.py`, `kairyu/deploy/registry.py`
+
+### 2026-07-13 — [amendment] Manual drains follow same-ID backend replacement
+- What: A successful identity replacement now carries the manual drain owner from the old pool entry to the new backend entry while discarding the reconciler lease. The pool exposes a manual-only drain query; the replacement backend starts with fresh health and outstanding state but remains non-eligible until manual undrain.
+- Why: Manual ownership was stored on the backend entry, so deleting the old entry and adding the replacement silently made an operator-drained logical replica eligible.
+- Refs: issue #41; `docs/design/m10-fleet-cpu.md` D1/D2 and A14; `kairyu/orchestration/replica.py`, `kairyu/deploy/registry.py`
+
+### 2026-07-13 — [amendment] Elastic drains preserve overlapping owners
+- What: Corrected the preceding reversible-drain amendment by splitting each pool entry's manual drain owner from opaque drain leases. Reconciliation now records and releases only its own lease, so a manual drain asserted before or after reconciliation remains active, and manual undrain cannot cancel reconciliation work.
+- Why: ID-only ownership over one boolean could not represent overlapping owners and allowed a desired-state revert or retry factory failure to undrain a replica that an operator had drained afterward.
+- Refs: issues #41 and #42; `docs/design/m10-fleet-cpu.md` D1/D2 and A14; `kairyu/orchestration/replica.py`, `kairyu/deploy/registry.py`
+
+### 2026-07-13 — [amendment] Elastic reconciliation owns reversible drains
+- What: Discovery and applied state now carry complete typed replica identities; same-ID changes replace backends construct-before-drain with async ownership cleanup. The reconciler separately tracks drains it initiated and cancels them when replacement/removal intent reverts or a retry factory fails, without overriding manual drains.
+- Why: Address/model/auth changes were previously invisible, while an in-flight replacement or removal could leave the old replica permanently non-eligible after desired state returned to the applied identity.
+- Refs: issues #41 and #42; `docs/design/m10-fleet-cpu.md` D1/D2, A6, A14; `kairyu/deploy/registry.py`, `kairyu/orchestration/replica.py`
+
+### 2026-07-13 — [amendment] Open WebUI Compose demo + Kairyu-only CI smoke (m11 D7)
+- What: The checked-in WebUI topology now mounts a standalone valid
+  `deploy/compose/config.yaml` serving keyless mock model `default`; all literal
+  Compose binds and mounted DeploymentSpecs are validated before startup. The new
+  `scripts/webui_smoke.sh` also pins the rendered internal WebUI endpoint, starts only
+  Kairyu, and gates bounded readiness, exact `/v1/models`, and one non-streaming
+  completion after the existing default Compose drill.
+- Why: m11 D7 previously claimed only that the container config rendered while the
+  checked-in bind target did not exist, so a clean checkout could not start the demo.
+  Keeping the smoke Kairyu-only proves the broken startup and API contract without
+  pulling or browser-testing the large mutable third-party Open WebUI image.
+- Refs: m11 D7; `deploy/compose/{docker-compose.webui.yaml,config.yaml}`;
+  `scripts/{validate_compose_binds.py,webui_smoke.sh}`; `.github/workflows/ci.yml`;
+  `tests/unit/test_compose_configs.py`.
+
+### 2026-07-13 — [amendment] Preflight the production benchmark model
+- What: Amended m19 D3 so gate 09 checks `/v1/models` after `readyz` and before
+  `serving_bench.py`, requires the requested model ID by exact equality, and uses
+  the same `KAIRYU_BENCH_MODEL` value for both steps. Added safe failure handling
+  for absent IDs, malformed responses, and non-2xx responses, plus source and
+  default/override dry-run pins for ordering and propagation.
+- Why: A healthy gateway can pass `readyz` while not serving the model selected
+  for the production benchmark, which otherwise makes the benchmark fail late or
+  exercise the wrong deployment contract.
+- Refs: m19 D3; `scripts/gpu_gates/{09_production.sh,check_served_model.py}`;
+  `tests/unit/test_gpu_gates_scripts.py`.
+
+### 2026-07-13 — [amendment] Blackwell Helm profile pins the supported attention backend
+- What: Added a strict Helm `attentionBackend` seam that renders
+  `KAIRYU_ATTENTION_BACKEND`; CPU defaults omit it, the checked-in
+  `pcie-gddr`/SM120 overlay pins `torch`, and operators can select `flashinfer`
+  on supported hardware. Extended static and render contracts plus chart docs.
+- Why: The automatic SM120 `fa2` tier selects FlashInfer, but the current build
+  has no Blackwell kernels. Without an environment seam, the documented overlay
+  could render successfully yet fail when starting the real backend.
+- Refs: Issue #49 final independent review; `deploy/helm/kairyu/{values.yaml,
+  values-gpu.yaml,values.schema.json,templates/deployment.yaml,README.md}`;
+  `docs/design/m19-deploy-packaging.md` D2 clarification.
+
+### 2026-07-13 — [amendment] GPU Helm overlay becomes a mandatory CI render gate
+- What: `scripts/kind_smoke.sh` now runs fail-fast default/GPU `helm lint` and
+  `helm template` gates before cluster creation, with a `--helm-check` mode used
+  by an explicit CI schema/GPU-template step. The script remains the single
+  command source; CI does not duplicate the four Helm invocations. Appended an
+  M19 D2/D3 amendment recording the placement/runtime/storage/real-backend gate
+  and its template-only, no-GPU execution boundary.
+- Why: The GPU overlay was statically covered but not a mandatory CI input, so
+  schema or rendering regressions could merge while the CPU kind smoke remained
+  green. Fail-fast rendering makes both chart profiles release-gating without
+  pretending ordinary CI can run a GPU workload.
+- Refs: Issue #49 Task 3; `scripts/kind_smoke.sh`, `.github/workflows/ci.yml`,
+  `tests/unit/test_fleet_elastic.py`, `docs/design/m19-deploy-packaging.md` D2/D3
+  amendment.
+
+### 2026-07-13 — [progress] Helm GPU overlay wires real model storage and engine
+- What: Added strict chart values schema and a conditional, read-only model volume
+  backed by exactly one absolute host path or existing PVC. The checked-in GPU
+  values request one NVIDIA GPU, preserve runtime/node placement, mount `/models`,
+  and replace the mock DeploymentSpec with backend `kairyu` at
+  `/models/checkpoint`; CPU defaults keep model storage disabled. Added semantic
+  render/schema regressions and operator documentation for hostPath/PVC use.
+- Refs: Issue #49 Task 2; `deploy/helm/kairyu/values.yaml`,
+  `values-gpu.yaml`, `values.schema.json`, `README.md`, `templates/deployment.yaml`,
+  `tests/unit/test_fleet_elastic.py`. Helm-backed render/lint execution remains
+  pending on a Helm-enabled host; local pure/static gates pass.
+
+### 2026-07-13 — [progress] Backend ownership closes across replica and app lifecycles
+- What: Replica removal is now an async ownership boundary that closes the removed backend exactly once. Shared shutdown aggregation attempts every unique backend, and orchestrator/application lifespan teardown cascades through separately owned workers even when another shutdown fails.
+- Why: Removed/replaced replicas and DSL-built orchestrators leaked clients and worker tasks; one shutdown exception also skipped every later resource.
+- Refs: issue #42; `kairyu/engine/backend.py`, `kairyu/orchestration/{replica,orchestrator}.py`, `kairyu/deploy/{registry,builder}.py`
 
 ### 2026-07-09 — [progress] Single-node GPU compose: dedicated gateway config + attention-backend env
 - What: `docker-compose.gpu.yaml` now mounts a new `deploy/compose/gateway-gpu.yaml`
