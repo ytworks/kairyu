@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -17,10 +18,28 @@ from kairyu.engine.backend import EngineBackend, shutdown_all
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
+from kairyu.entrypoints.server.extra_routes import (
+    EmbeddingBackend,
+    MockEmbeddingBackend,
+)
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
+
+_EMBEDDING_BACKEND_FACTORIES: dict[str, Callable[..., EmbeddingBackend]] = {
+    "mock": MockEmbeddingBackend
+}
+
+
+def _create_embedding_backend(backend: str, *, dimensions: int) -> EmbeddingBackend:
+    factory = _EMBEDDING_BACKEND_FACTORIES.get(backend)
+    if factory is None:
+        known = ", ".join(sorted(_EMBEDDING_BACKEND_FACTORIES))
+        raise ValueError(
+            f"unknown embedding backend {backend!r}; known backends: {known}"
+        )
+    return factory(dimensions=dimensions)
 
 
 def _server_settings(spec: DeploymentSpec) -> ServerSettings:
@@ -61,6 +80,12 @@ def _preflight_server(
 def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> FastAPI:
     """Construct engines, pools, orchestrator, and the app with a prober lifespan."""
     server_settings, tenant_config, api_keys, admin_keys = _preflight_server(spec)
+    embedding_backends = {
+        name: _create_embedding_backend(
+            section.backend, dimensions=section.dimensions
+        )
+        for name, section in spec.embeddings.items()
+    }
     engines: dict[str, EngineBackend] = {
         name: create_backend(entry.backend, **entry.options)
         for name, entry in spec.engines.items()
@@ -137,6 +162,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         lifespan=lifespan,
         chat_templates=chat_templates,
         tenant_config=tenant_config,
+        embedding_backends=embedding_backends,
         resolved_api_keys=api_keys,
         resolved_admin_keys=admin_keys,
     )

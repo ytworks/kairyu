@@ -63,6 +63,10 @@ while rolling back partial result publications after ordinary processing or stor
 Each batch row now validates a typed method/URL/custom-ID envelope and enters the same
 chat validation plus buffered-dispatch service as regular HTTP requests; invalid rows never
 reach an engine, and backend error records reveal only the exception class.
+Embedding backends are configured and discovered as explicit, non-colliding model IDs;
+requests resolve that bounded registry before work, unknown IDs return `model_not_found`,
+response, metric, and ledger identities use the resolved key, and limiter charging occurs
+only after resolution.
 Required and named tool choice is enforced independently for every returned choice after
 filtering; mixed or empty results are rejected before response or buffered stream emission,
 without regeneration, and the consumed generation remains metered exactly once.
@@ -95,6 +99,19 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] Embeddings use explicit served model IDs (m11 D4)
+- What: `create_app` and `DeploymentSpec` now accept model-ID-to-embedding-backend
+  registries, reject IDs that collide with engines, pools, or orchestrators, and include
+  configured embedding IDs in `/v1/models`. The embeddings route resolves before validation
+  or execution, shares the 404 `model_not_found` response, routes multiple backends, and
+  records response, metric, and ledger identity only from the resolved key while charging
+  the limiter only after resolution.
+- Why: Issue #89 showed that the anonymous global backend accepted and echoed arbitrary IDs,
+  omitted its model from discovery, and admitted attacker-controlled metric and metering
+  identities despite executing the same backend.
+- Refs: Issue #89; m11 D4/A12; `kairyu/entrypoints/server/{app,extra_routes}.py`;
+  `kairyu/deploy/{spec,builder}.py`; `tests/server/test_embeddings_models.py`.
 
 ### 2026-07-14 — [amendment] Required tool choice is enforced per response choice (m1 D6)
 - What: required and named tool choice now succeeds only when every returned choice retains

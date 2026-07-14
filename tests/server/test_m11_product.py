@@ -36,7 +36,7 @@ def _auto_app(tmp_path, **kwargs):
         {"m": engine},
         orchestrators={"kairyu-auto": orchestrator, "kairyu-auto-max": deep},
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
-        embedding_backend=MockEmbeddingBackend(dimensions=8),
+        embedding_backends={"embedding-model": MockEmbeddingBackend(dimensions=8)},
         **kwargs,
     )
 
@@ -178,7 +178,7 @@ class TestTenancy:
             pytest.param("chat", "kairyu-auto", False, id="sync-orchestrator"),
             pytest.param("chat", "kairyu-auto", True, id="stream-orchestrator"),
             pytest.param("responses", "m", False, id="responses"),
-            pytest.param("embeddings", "m", False, id="embeddings"),
+            pytest.param("embeddings", "embedding-model", False, id="embeddings"),
             pytest.param("batch", "m", False, id="batch"),
         ],
     )
@@ -667,7 +667,9 @@ class TestResponsesApi:
                 usage_ledger_path=str(ledger_path),
             ),
             tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
-            embedding_backend=MockEmbeddingBackend(dimensions=8),
+            embedding_backends={
+                "embedding-model": MockEmbeddingBackend(dimensions=8)
+            },
         )
         headers = {"Authorization": "Bearer key-a"}
 
@@ -733,7 +735,9 @@ class TestResponsesApi:
                 usage_ledger_path=str(ledger_path),
             ),
             tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
-            embedding_backend=FailingEmbeddingBackend(dimensions=8),
+            embedding_backends={
+                "embedding-model": FailingEmbeddingBackend(dimensions=8)
+            },
         )
         headers = {"Authorization": "Bearer key-a"}
 
@@ -751,12 +755,12 @@ class TestResponsesApi:
             invalid_embedding = client.post(
                 "/v1/embeddings",
                 headers=headers,
-                json={"model": "m", "input": []},
+                json={"model": "embedding-model", "input": []},
             )
             failed_embedding = client.post(
                 "/v1/embeddings",
                 headers=headers,
-                json={"model": "m", "input": "x"},
+                json={"model": "embedding-model", "input": "x"},
             )
 
         assert invalid_response.status_code == 400
@@ -811,7 +815,9 @@ class TestEmbeddings:
                 base_url=str(http.base_url) + "/v1", api_key="sk-local",
                 http_client=http,
             )
-            result = client.embeddings.create(model="m", input=["hello", "world"])
+            result = client.embeddings.create(
+                model="embedding-model", input=["hello", "world"]
+            )
             assert len(result.data) == 2
             assert len(result.data[0].embedding) == 8  # SDK decodes base64 (A9)
             assert result.usage.prompt_tokens > 0
@@ -820,11 +826,19 @@ class TestEmbeddings:
         with TestClient(_auto_app(tmp_path)) as client:
             as_float = client.post(
                 "/v1/embeddings",
-                json={"model": "m", "input": "hello", "encoding_format": "float"},
+                json={
+                    "model": "embedding-model",
+                    "input": "hello",
+                    "encoding_format": "float",
+                },
             ).json()["data"][0]["embedding"]
             as_b64 = client.post(
                 "/v1/embeddings",
-                json={"model": "m", "input": "hello", "encoding_format": "base64"},
+                json={
+                    "model": "embedding-model",
+                    "input": "hello",
+                    "encoding_format": "base64",
+                },
             ).json()["data"][0]["embedding"]
             decoded = struct.unpack(
                 f"<{len(as_float)}f", base64.b64decode(as_b64)
@@ -837,7 +851,11 @@ class TestEmbeddings:
         with TestClient(_auto_app(tmp_path)) as client:
             resp = client.post(
                 "/v1/embeddings",
-                json={"model": "m", "input": "hello", "encoding_format": "Base64"},
+                json={
+                    "model": "embedding-model",
+                    "input": "hello",
+                    "encoding_format": "Base64",
+                },
             )
             assert resp.status_code == 400
 

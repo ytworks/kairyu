@@ -54,6 +54,94 @@ def test_defaults():
     assert spec.orchestrator is None
     assert spec.batch is None
     assert spec.tenants is None
+    assert spec.embeddings == {}
+
+
+def test_named_embedding_sections_parse():
+    spec = load_deployment_spec(
+        """
+engines:
+  chat: { backend: mock }
+embeddings:
+  embed-small: { backend: mock, dimensions: 4 }
+  embed-large: { backend: mock, dimensions: 12 }
+"""
+    )
+
+    assert set(spec.embeddings) == {"embed-small", "embed-large"}
+    assert spec.embeddings["embed-small"].backend == "mock"
+    assert spec.embeddings["embed-small"].dimensions == 4
+    assert spec.embeddings["embed-large"].dimensions == 12
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    [
+        pytest.param(
+            """
+engines:
+  shared: { backend: mock }
+embeddings:
+  shared: { backend: mock, dimensions: 4 }
+""",
+            id="engine",
+        ),
+        pytest.param(
+            """
+pools:
+  shared:
+    replicas: [{ backend: mock }]
+embeddings:
+  shared: { backend: mock, dimensions: 4 }
+""",
+            id="pool",
+        ),
+        pytest.param(
+            """
+engines:
+  chat: { backend: mock }
+orchestrators:
+  shared: { spec: auto.yaml }
+embeddings:
+  shared: { backend: mock, dimensions: 4 }
+""",
+            id="named-orchestrator",
+        ),
+        pytest.param(
+            """
+engines:
+  chat: { backend: mock }
+orchestrator: { spec: auto.yaml }
+embeddings:
+  kairyu-auto: { backend: mock, dimensions: 4 }
+""",
+            id="legacy-orchestrator",
+        ),
+    ],
+)
+def test_embedding_model_name_collisions_are_rejected(yaml_text):
+    with pytest.raises(ValueError, match="collide"):
+        load_deployment_spec(yaml_text)
+
+
+def test_embedding_section_rejects_blank_name_and_nonpositive_dimensions():
+    blank_name = """
+engines:
+  chat: { backend: mock }
+embeddings:
+  "": { backend: mock, dimensions: 4 }
+"""
+    bad_dimensions = """
+engines:
+  chat: { backend: mock }
+embeddings:
+  embed: { backend: mock, dimensions: 0 }
+"""
+
+    with pytest.raises(ValueError, match="non-empty"):
+        load_deployment_spec(blank_name)
+    with pytest.raises(ValueError, match="dimensions"):
+        load_deployment_spec(bad_dimensions)
 
 
 def _deployment_with_tenants(tenants: str) -> str:

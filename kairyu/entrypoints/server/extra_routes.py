@@ -15,13 +15,14 @@ import struct
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Mapping
 from typing import Protocol
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from kairyu.entrypoints.server.errors import invalid_request
+from kairyu.entrypoints.server.errors import invalid_request, model_not_found
 from kairyu.entrypoints.server.metering import record_state_usage, resolve_usage_counts
 
 _MAX_EMBEDDING_INPUTS = 2048  # cap the embeddings batch (M6)
@@ -120,16 +121,21 @@ def add_extra_routes(
     app: FastAPI,
     engines,
     *,
-    embedding_backend=None,
+    embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
     chat_templates=None,
 ) -> None:
     store = ResponseStore()
     app.state.response_store = store
 
-    if embedding_backend is not None:
+    if embedding_backends:
 
         @app.post("/v1/embeddings")
         async def embeddings(request: EmbeddingsRequest, http_request: Request):
+            backend = embedding_backends.get(request.model)
+            if backend is None:
+                return model_not_found(request.model)
+            resolved_model = request.model
+            http_request.state.model = resolved_model
             texts = [request.input] if isinstance(request.input, str) else request.input
             if not texts:
                 return JSONResponse(
@@ -151,7 +157,7 @@ def add_extra_routes(
                         "message": "encoding_format must be 'float' or 'base64'",
                         "type": "invalid_request_error", "code": None}},
                 )
-            vectors = await embedding_backend.embed(texts)
+            vectors = await backend.embed(texts)
             data = []
             for index, vector in enumerate(vectors):
                 if request.encoding_format == "base64":  # SDK default (A9)
@@ -164,14 +170,14 @@ def add_extra_routes(
             response = {
                 "object": "list",
                 "data": data,
-                "model": request.model,
+                "model": resolved_model,
                 "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
             }
             owner = getattr(http_request.state, "tenant", None) or "default"
             record_state_usage(
                 http_request.app.state,
                 tenant=owner,
-                model=request.model,
+                model=resolved_model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=0,
             )
