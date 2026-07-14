@@ -79,6 +79,13 @@ class OrchestratorSection(BaseModel):
     spec: str = Field(description="Path to an OrchestratorSpec YAML (kairyu.dsl).")
 
 
+class EmbeddingSection(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    backend: str = Field(min_length=1)
+    dimensions: int = Field(default=64, ge=1)
+
+
 class BatchSection(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -128,6 +135,7 @@ class DeploymentSpec(BaseModel):
     # orchestrations (e.g. kairyu-auto + kairyu-auto-max) from one YAML. The
     # legacy single `orchestrator:` key stays and is served as "kairyu-auto".
     orchestrators: dict[str, OrchestratorSection] = Field(default_factory=dict)
+    embeddings: dict[str, EmbeddingSection] = Field(default_factory=dict)
     batch: BatchSection | None = None
     tenants: TenantSection | None = None
 
@@ -162,6 +170,19 @@ class DeploymentSpec(BaseModel):
                 'both orchestrator: and orchestrators["kairyu-auto"] are set; '
                 "declare kairyu-auto once (the legacy orchestrator: key is "
                 'served as "kairyu-auto")'
+            )
+        if any(not name.strip() for name in self.embeddings):
+            raise ValueError("embeddings: names must be non-empty strings")
+        orchestration_names = set(self.orchestrators)
+        if self.orchestrator is not None:
+            orchestration_names.add("kairyu-auto")
+        embedding_overlap = self.embeddings.keys() & (
+            self.engines.keys() | self.pools.keys() | orchestration_names
+        )
+        if embedding_overlap:
+            raise ValueError(
+                f"embedding names {sorted(embedding_overlap)} collide with "
+                "engines:/pools:/orchestrators: names; served model names must be unique"
             )
         if self.tenants is not None:
             TenantConfig.from_mapping(

@@ -111,6 +111,10 @@ pools:
     queue_depth_threshold: 8
     probe_interval_s: 5.0
 orchestrator: { spec: agent_pool.yaml }          # optional: kairyu-auto routing
+embeddings:
+  embed-test:
+    backend: mock                                # deterministic built-in CPU backend
+    dimensions: 384
 batch: { data_dir: /var/lib/kairyu/batch, max_concurrency: 8 }
 ```
 
@@ -127,6 +131,10 @@ Operational notes:
 - **Two GPU nodes acting as one model** (TP/PP/P-D across nodes) is an
   engine-layer concern configured by `ClusterSpec` per `docs/gpu-runbook.md`
   §7; the gateway still sees one OpenAI endpoint per coherence domain.
+- **Embedding model IDs are explicit.** Each `embeddings:` key is listed by
+  `/v1/models`, routes only to its configured backend, and must not collide
+  with an engine, pool, or orchestrator name. Unknown IDs return
+  `model_not_found` without execution or usage accounting.
 
 ## 5. Rolling model update (gate C7)
 

@@ -12,6 +12,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -78,6 +79,9 @@ from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
+
+if TYPE_CHECKING:
+    from kairyu.entrypoints.server.extra_routes import EmbeddingBackend
 
 logger = logging.getLogger(__name__)
 
@@ -470,7 +474,7 @@ def create_app(
     chat_templates: Mapping[str, ChatTemplate] | None = None,
     orchestrators: Mapping[str, Orchestrator] | None = None,
     tenant_config=None,
-    embedding_backend=None,
+    embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
     resolved_api_keys: frozenset[str] | None = None,
     resolved_admin_keys: frozenset[str] | None = None,
 ) -> FastAPI:
@@ -481,9 +485,17 @@ def create_app(
     auto_models: dict[str, Orchestrator] = dict(orchestrators or {})
     if orchestrator is not None:
         auto_models.setdefault(AUTO_MODEL, orchestrator)
-    collisions = set(auto_models) & set(served_engines)
+    served_embedding_backends = dict(embedding_backends or {})
+    collisions = (
+        (set(auto_models) & set(served_engines))
+        | (set(served_embedding_backends) & set(served_engines))
+        | (set(served_embedding_backends) & set(auto_models))
+    )
     if collisions:
-        raise ValueError(f"orchestrator names collide with engines: {sorted(collisions)}")
+        raise ValueError(
+            "served model names collide across engines, orchestrators, and embeddings: "
+            f"{sorted(collisions)}"
+        )
 
     metrics = ServerMetrics() if settings.metrics else None
     app.state.metrics = metrics
@@ -505,7 +517,9 @@ def create_app(
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 
     add_extra_routes(
-        app, served_engines, embedding_backend=embedding_backend,
+        app,
+        served_engines,
+        embedding_backends=served_embedding_backends,
         chat_templates=chat_templates,
     )
 
@@ -579,7 +593,11 @@ def create_app(
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
-        names = list(served_engines) + list(auto_models)
+        names = (
+            list(served_engines)
+            + list(auto_models)
+            + list(served_embedding_backends)
+        )
         return ModelList(data=[ModelCard(id=name) for name in names])
 
     @app.post("/v1/chat/completions")

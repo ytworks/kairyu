@@ -56,6 +56,10 @@ back partial result publications after ordinary processing or storage exceptions
 Each batch row now validates a typed method/URL/custom-ID envelope and enters the same
 chat validation plus buffered-dispatch service as regular HTTP requests; invalid rows never
 reach an engine, and backend error records reveal only the exception class.
+Embedding backends are configured and discovered as explicit, non-colliding model IDs;
+requests resolve that bounded registry before work, unknown IDs return `model_not_found`,
+response, metric, and ledger identities use the resolved key, and limiter charging occurs
+only after resolution.
 Tenant usage accounting now covers synchronous and streaming generation, Responses,
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
@@ -85,6 +89,19 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] Embeddings use explicit served model IDs (m11 D4)
+- What: `create_app` and `DeploymentSpec` now accept model-ID-to-embedding-backend
+  registries, reject IDs that collide with engines, pools, or orchestrators, and include
+  configured embedding IDs in `/v1/models`. The embeddings route resolves before validation
+  or execution, shares the 404 `model_not_found` response, routes multiple backends, and
+  records response, metric, and ledger identity only from the resolved key while charging
+  the limiter only after resolution.
+- Why: Issue #89 showed that the anonymous global backend accepted and echoed arbitrary IDs,
+  omitted its model from discovery, and admitted attacker-controlled metric and metering
+  identities despite executing the same backend.
+- Refs: Issue #89; m11 D4/A12; `kairyu/entrypoints/server/{app,extra_routes}.py`;
+  `kairyu/deploy/{spec,builder}.py`; `tests/server/test_embeddings_models.py`.
 
 ### 2026-07-14 — [amendment] Batch and HTTP share the chat request boundary (m7 D7)
 - What: batch JSONL rows now require a frozen envelope with non-blank, per-job-unique
