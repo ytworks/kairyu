@@ -52,6 +52,8 @@ replicas, auth, metrics, batch) or a replica node, and the compose topology
 The vLLM-compatible `AsyncLLMEngine` now owns an explicit registry of active
 request IDs: inactive aborts are stateless, while an active abort interrupts and
 closes its backend stream without poisoning later reuse of the same ID.
+`OpenAICompatBackend` SSE preserves every observed choice index, including empty single
+choices and mixed empty/non-empty `n > 1` results, while rejecting streams with no choices.
 `BatchStore` exposes owner-scoped lazy binary-line iteration, metadata-last streaming
 upload transactions, and transactional lazy JSONL writers. The files route reads fixed-size
 chunks, applies its byte limit incrementally, and removes partial uploads on rejection,
@@ -90,6 +92,17 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] OpenAI-compatible streams preserve empty choices (m1 D1)
+- What: streamed choice state is now initialized whenever an upstream index is observed,
+  independently of text content, and partial/final completions are built from the union of
+  text and finish indexes with empty defaults. Empty single choices and mixed `n > 1`
+  results retain their indexes and finish reasons; streams with no choices still fail.
+- Why: Issue #87 showed that truthy-content-only tracking converted valid immediate-EOS or
+  content-filtered empty responses into upstream errors and silently dropped empty siblings
+  from multi-choice results, contradicting non-streaming behavior.
+- Refs: Issue #87; m1 D1; `kairyu/engine/openai_backend.py`;
+  `tests/unit/test_openai_backend.py`.
 
 ### 2026-07-14 — [amendment] Batch and HTTP share the chat request boundary (m7 D7)
 - What: batch JSONL rows now require a frozen envelope with non-blank, per-job-unique

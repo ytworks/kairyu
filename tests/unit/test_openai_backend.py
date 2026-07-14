@@ -431,6 +431,19 @@ def _sse_transport(captured: dict) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+def _sse_chunks_transport(*chunks: dict) -> httpx.MockTransport:
+    body = b"".join(
+        f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks
+    ) + b"data: [DONE]\n\n"
+    return httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+
 async def test_stream_parses_sse_into_cumulative_partials(monkeypatch):
     monkeypatch.setenv("TEST_API_KEY", "sk-test")
     captured: dict = {}
@@ -448,6 +461,99 @@ async def test_stream_parses_sse_into_cumulative_partials(monkeypatch):
     assert texts == ["hel", "hello", "hello"]
     assert [result.finished for result in results] == [False, False, True]
     assert results[-1].completions[0].finish_reason == "stop"
+    await backend.shutdown()
+
+
+async def test_stream_returns_empty_text_for_valid_empty_single_choice():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                ]
+            },
+        ),
+    )
+
+    results = [result async for result in backend.stream(_request())]
+
+    assert len(results) == 1
+    assert results[0].finished is True
+    assert len(results[0].completions) == 1
+    completion = results[0].completions[0]
+    assert completion.index == 0
+    assert completion.text == ""
+    assert completion.token_ids == ()
+    assert completion.finish_reason == "stop"
+    await backend.shutdown()
+
+
+async def test_stream_preserves_empty_choice_alongside_nonempty_with_n_gt_1():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {
+                "choices": [
+                    {"index": 0, "delta": {"content": "hello"}},
+                    {"index": 1, "delta": {"role": "assistant"}},
+                ]
+            },
+            {
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"},
+                    {"index": 1, "delta": {}, "finish_reason": "stop"},
+                ]
+            },
+        ),
+    )
+
+    results = [
+        result
+        async for result in backend.stream(
+            _request(sampling_params=SamplingParams(n=2))
+        )
+    ]
+
+    final = results[-1]
+    assert final.finished is True
+    assert [completion.index for completion in final.completions] == [0, 1]
+    assert [completion.text for completion in final.completions] == ["hello", ""]
+    assert [completion.finish_reason for completion in final.completions] == [
+        "stop",
+        "stop",
+    ]
+    await backend.shutdown()
+
+
+async def test_stream_raises_when_no_choices_observed():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 0},
+            }
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="streamed no choices"):
+        async for _ in backend.stream(_request()):
+            pass
     await backend.shutdown()
 
 
