@@ -49,6 +49,8 @@ OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benc
 in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
+`OpenAICompatBackend` SSE preserves every observed choice index, including empty single
+choices and mixed empty/non-empty `n > 1` results, while rejecting streams with no choices.
 `BatchStore` exposes owner-scoped lazy binary-line iteration and transactional lazy
 JSONL writers; the batch worker streams input through a bounded queue and fixed consumer
 pool, spools results incrementally, and persists controlled terminal failure while rolling
@@ -82,6 +84,17 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-14 — [amendment] OpenAI-compatible streams preserve empty choices (m1 D1)
+- What: streamed choice state is now initialized whenever an upstream index is observed,
+  independently of text content, and partial/final completions are built from the union of
+  text and finish indexes with empty defaults. Empty single choices and mixed `n > 1`
+  results retain their indexes and finish reasons; streams with no choices still fail.
+- Why: Issue #87 showed that truthy-content-only tracking converted valid immediate-EOS or
+  content-filtered empty responses into upstream errors and silently dropped empty siblings
+  from multi-choice results, contradicting non-streaming behavior.
+- Refs: Issue #87; m1 D1; `kairyu/engine/openai_backend.py`;
+  `tests/unit/test_openai_backend.py`.
 
 ### 2026-07-14 — [progress] FlashInfer SM120 (Blackwell) attention enabled: GPU device placement + AOT image
 - What: The single-process GPU serve path had no device placement — `build_engine_loop` loaded the
