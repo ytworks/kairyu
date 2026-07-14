@@ -34,6 +34,11 @@ The protocol boundary is also exactly the seam where the M2 custom engine plugs 
 "add a fourth backend", not a rewrite. This mirrors how SGLang and vLLM both isolate their
 schedulers behind an engine-client interface.
 
+For `OpenAICompatBackend` streaming, choice presence is established by an observed upstream
+choice index rather than by non-empty text. Role-only, finish-only, and empty-content choices
+remain valid empty completions (including within `n > 1`), while a stream that observes no
+choices at all remains an upstream failure.
+
 ### D2. vLLM compatibility is signature-level, verified by contract tests
 
 `kairyu.SamplingParams`, `kairyu.LLM`, `kairyu.RequestOutput`, `kairyu.CompletionOutput`

@@ -6,6 +6,8 @@ import tracemalloc
 
 import httpx
 import pytest
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartParser
 
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
@@ -722,6 +724,54 @@ async def test_oversized_upload_is_rejected(tmp_path, monkeypatch):
         )
     assert resp.status_code == 413
     assert resp.json()["error"]["code"] == "file_too_large"
+    assert list((tmp_path / "files").iterdir()) == []
+
+
+async def test_concurrent_upload_memory_stays_bounded(tmp_path, monkeypatch):
+    import kairyu.entrypoints.server.batch_routes as batch_routes
+    from kairyu.entrypoints.server.app import create_app
+
+    max_upload_bytes = 256 * 1024
+    chunk_bytes = 8 * 1024
+    concurrent_uploads = 8
+    payload = b"x" * (max_upload_bytes - 1)
+    monkeypatch.setattr(batch_routes, "_MAX_UPLOAD_BYTES", max_upload_bytes)
+    monkeypatch.setattr(batch_routes, "_CHUNK_BYTES", chunk_bytes, raising=False)
+    monkeypatch.setattr(MultiPartParser, "spool_max_size", 4 * 1024)
+    read_sizes = []
+    original_read = UploadFile.read
+
+    async def tracking_read(self, size=-1):
+        read_sizes.append(size)
+        return await original_read(self, size)
+
+    monkeypatch.setattr(UploadFile, "read", tracking_read)
+    app = create_app({"m": MockBackend()})
+    store = BatchStore(tmp_path)
+    batch_routes.add_batch_routes(app, store, BatchWorker(store, {"m": MockBackend()}))
+
+    async with _client(app) as client:
+        tracemalloc.start()
+        try:
+            responses = await asyncio.gather(
+                *(
+                    client.post(
+                        "/v1/files",
+                        files={"file": (f"input-{index}.jsonl", payload)},
+                        data={"purpose": "batch"},
+                    )
+                    for index in range(concurrent_uploads)
+                )
+            )
+            _, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+    assert all(response.status_code == 200 for response in responses)
+    assert read_sizes
+    assert max(read_sizes) <= chunk_bytes
+    assert peak_bytes < concurrent_uploads * max_upload_bytes
+    assert list((tmp_path / "files").glob("*.tmp")) == []
 
 
 async def test_batch_envelope_rejections_and_duplicate_custom_id_do_not_dispatch(
