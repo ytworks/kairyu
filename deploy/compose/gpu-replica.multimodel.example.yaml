@@ -1,0 +1,42 @@
+# EXAMPLE — not mounted by any compose file. Serving multiple models from the
+# hierarchical model layout (scheme B). Source-of-truth policy is B: this compose
+# is hand-written; Ansible templating from kairyu_models is a future option (see
+# plans/model-checkpoint-layout.md §6). To use, copy the engines you need into
+# gpu-replica.yaml (the file docker-compose.gpu.yaml actually mounts).
+#
+# Prerequisite: matching Ansible kairyu_models entries so the on-disk paths exist
+# (roles/kairyu). Each entry places /models/<name>/<version>/ and flips
+# /models/<name>/current; the default: true entry also maintains the
+# /models/checkpoint back-compat symlink.
+#
+#   # inventories/<env>/group_vars/gpu_nodes.yml
+#   kairyu_models:
+#     qwen2.5-0.5b-instruct:
+#       src: "s3://bucket/qwen2.5-0.5b-checkpoint.tar.gz"
+#       version: "2026-07-15"
+#       default: true          # keeps /models/checkpoint -> this model's current
+#     llama-3.1-8b-instruct:
+#       src: "s3://bucket/llama-3.1-8b/"   # unpacked prefix (aws s3 sync)
+#       version: "2026-07-15"
+#   kairyu_model_keep_versions: 2
+engines:
+  # Default model via the back-compat symlink (kept pointing at the default: true
+  # kairyu_models entry's current). Identical to the stock gpu-replica.yaml.
+  default:
+    backend: kairyu
+    options:
+      model_path: /models/checkpoint
+  # Additional models point straight at their versioned `current` symlink.
+  qwen-05b:
+    backend: kairyu
+    options:
+      model_path: /models/qwen2.5-0.5b-instruct/current
+  llama-8b:
+    backend: kairyu
+    options:
+      model_path: /models/llama-3.1-8b-instruct/current
+server:
+  api_keys_env: null
+# NOTE: the gateway (gateway-gpu.yaml) exposes ONE pool -> engine "default". To
+# serve the extra engines to clients, add a matching `pools:` entry there per
+# model so each can be addressed by name.
