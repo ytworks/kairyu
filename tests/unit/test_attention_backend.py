@@ -6,7 +6,11 @@ import types
 import pytest
 import torch
 
-from kairyu.engine.core.attention import TorchAttentionBackend, select_backend
+from kairyu.engine.core.attention import (
+    TorchAttentionBackend,
+    select_backend,
+    select_backend_name,
+)
 from kairyu.engine.core.attention.mla_torch import mla_absorbed, mla_decompress, mla_scale
 from kairyu.engine.core.hw_profile import HardwareProfile
 from kairyu.engine.core.kv_pool import PagedKVPool
@@ -357,3 +361,27 @@ class TestSelector:
         monkeypatch.setattr(FlashInferBackend, "__init__", lambda self, device="cuda": None)
         sm120 = HardwareProfile(arch="cuda", sm=120)
         assert isinstance(select_backend(sm120), FlashInferBackend)
+
+
+class TestSelectBackendName:
+    """select_backend_name mirrors select_backend's precedence but returns the
+    NAME without importing/instantiating flashinfer (CPU/macOS safe)."""
+
+    def test_cpu_profile_and_none_are_torch(self):
+        assert select_backend_name(None) == "torch"
+        assert select_backend_name(HardwareProfile(arch="cpu")) == "torch"
+
+    def test_sm120_is_flashinfer_without_importing(self):
+        # no fake_flashinfer / monkeypatch: name resolution never imports the backend
+        assert select_backend_name(HardwareProfile(arch="cuda", sm=120)) == "flashinfer"
+
+    def test_env_override_wins(self, monkeypatch):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "torch")
+        assert select_backend_name(HardwareProfile(arch="cuda", sm=120)) == "torch"
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashinfer")
+        assert select_backend_name(HardwareProfile(arch="cpu")) == "flashinfer"
+
+    def test_invalid_env_fails_loudly(self, monkeypatch):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "bogus")
+        with pytest.raises(ValueError, match="bogus"):
+            select_backend_name(None)

@@ -17,7 +17,10 @@ from collections.abc import Awaitable, Callable, Iterable
 
 _ASGIApp = Callable[..., Awaitable[None]]
 
-_OPEN_PATHS = ("/health", "/readyz")
+# /backends is an open introspection endpoint (kept out of /v1/ so the
+# concurrency cap and per-model metrics labeling don't apply); its disclosure
+# level matches the already-open /readyz and /metrics.
+_OPEN_PATHS = ("/health", "/readyz", "/backends")
 _GUARDED_PREFIX = "/v1/"
 
 # collapse per-object id path segments (file-…, batch_…, uuids, long hex/digits)

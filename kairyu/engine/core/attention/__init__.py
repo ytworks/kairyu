@@ -42,7 +42,15 @@ class AttentionBackend(Protocol):
         ...
 
 
-from kairyu.engine.core.attention.selector import select_backend  # noqa: E402
+from kairyu.engine.core.attention.selector import (  # noqa: E402
+    select_backend,
+    select_backend_name,
+)
 from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend  # noqa: E402
 
-__all__ = ["AttentionBackend", "TorchAttentionBackend", "select_backend"]
+__all__ = [
+    "AttentionBackend",
+    "TorchAttentionBackend",
+    "select_backend",
+    "select_backend_name",
+]

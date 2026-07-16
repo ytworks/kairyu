@@ -2,14 +2,34 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Mapping
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from kairyu.engine.backend import EngineBackend
+# Import the pure name resolver from the module (NOT the attention package,
+# whose __init__ pulls in torch_backend) so importing health.py stays torch-free.
+from kairyu.engine.core.attention.selector import select_backend_name
+from kairyu.engine.core.hw_profile import probe
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.orchestration.replica import ReplicaPool
+
+# type(engine).__name__ -> engine-registry backend name. Kept local (not a class
+# attr) so this endpoint needs no engine-class change and stays robust to tests
+# that construct backends directly.
+_ENGINE_LABELS = {
+    "MockBackend": "mock",
+    "KairyuBackend": "kairyu",
+    "OpenAICompatBackend": "openai",
+    "VLLMBackend": "vllm",
+    "ZmqEngineBackend": "kairyu-proc",
+    "ReplicaPool": "replica-pool",
+}
+# Engine backends that run attention locally in-process (so the resolved
+# attention backend applies to them); remote/echo engines report null.
+_LOCAL_ATTENTION_BACKENDS = frozenset({"kairyu", "kairyu-proc"})
 
 
 def add_health_routes(
@@ -93,6 +113,56 @@ def add_health_routes(
                 },
             )
         return {"status": "ready"}
+
+    @app.get("/backends")
+    async def backends() -> dict:
+        """Report the resolved attention backend, library versions, and the
+        per-engine backend map (m13). Open endpoint (see middleware _OPEN_PATHS);
+        disclosure level matches the existing public /readyz and /metrics.
+
+        attention backend is a process-level decision (env override or probed hw
+        profile — deterministic and shared), so it is resolved once here with
+        ``select_backend_name(probe())`` rather than deep-walking each engine."""
+        from importlib.metadata import PackageNotFoundError, version
+
+        override = os.environ.get("KAIRYU_ATTENTION_BACKEND")
+        try:
+            profile = probe()
+            attention = select_backend_name(profile)
+            kernel_tier = profile.kernel_tier
+        except Exception:  # introspection must never 500; fall back to torch
+            attention, kernel_tier = "torch", "torch"
+
+        def _pkg_version(name: str) -> str | None:
+            try:
+                return version(name)
+            except PackageNotFoundError:
+                return None
+
+        versions = {"torch": _pkg_version("torch")}
+        if attention == "flashinfer":  # only meaningful when it is the resolved kernel
+            versions["flashinfer"] = _pkg_version("flashinfer")
+
+        engine_list = []
+        for name, engine in engines.items():
+            label = _ENGINE_LABELS.get(type(engine).__name__, type(engine).__name__)
+            engine_list.append(
+                {
+                    "model": name,
+                    "engine_backend": label,
+                    "attention_backend": (
+                        attention if label in _LOCAL_ATTENTION_BACKENDS else None
+                    ),
+                }
+            )
+
+        return {
+            "attention_backend": attention,
+            "source": "env" if override else "hw_profile",
+            "kernel_tier": kernel_tier,
+            "versions": versions,
+            "engines": engine_list,
+        }
 
     if metrics is not None:
 
