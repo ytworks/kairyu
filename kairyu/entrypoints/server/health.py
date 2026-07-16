@@ -121,8 +121,14 @@ def add_health_routes(
         disclosure level matches the existing public /readyz and /metrics.
 
         attention backend is a process-level decision (env override or probed hw
-        profile — deterministic and shared), so it is resolved once here with
-        ``select_backend_name(probe())`` rather than deep-walking each engine."""
+        profile — deterministic and shared), resolved once here with
+        ``select_backend_name(probe())`` rather than deep-walking each engine.
+
+        Topology note: a pure gateway runs NO local attention — it forwards to
+        replicas — so its own probe reports torch and its engines are all pools.
+        To still surface the real kernel, each ReplicaPool engine asks ONE replica
+        for its /backends and adopts that replica's attention backend (cached,
+        best-effort, null on unreachable). `role` distinguishes the two cases."""
         from importlib.metadata import PackageNotFoundError, version
 
         override = os.environ.get("KAIRYU_ATTENTION_BACKEND")
@@ -133,34 +139,53 @@ def add_health_routes(
         except Exception:  # introspection must never 500; fall back to torch
             attention, kernel_tier = "torch", "torch"
 
-        def _pkg_version(name: str) -> str | None:
-            try:
-                return version(name)
-            except PackageNotFoundError:
-                return None
+        def _pkg_version(*names: str) -> str | None:
+            # flashinfer ships under a few distribution names (flashinfer-python;
+            # the AOT flashinfer-jit-cache) — try each so the version isn't null.
+            for name in names:
+                try:
+                    return version(name)
+                except PackageNotFoundError:
+                    continue
+            return None
 
-        versions = {"torch": _pkg_version("torch")}
-        if attention == "flashinfer":  # only meaningful when it is the resolved kernel
-            versions["flashinfer"] = _pkg_version("flashinfer")
+        def _versions_for(attn: str) -> dict[str, str | None]:
+            out: dict[str, str | None] = {"torch": _pkg_version("torch")}
+            if attn == "flashinfer":  # only meaningful when it is the resolved kernel
+                out["flashinfer"] = _pkg_version("flashinfer", "flashinfer-python")
+            return out
 
         engine_list = []
         for name, engine in engines.items():
             label = _ENGINE_LABELS.get(type(engine).__name__, type(engine).__name__)
-            engine_list.append(
-                {
-                    "model": name,
-                    "engine_backend": label,
-                    "attention_backend": (
-                        attention if label in _LOCAL_ATTENTION_BACKENDS else None
-                    ),
-                }
-            )
+            entry: dict = {
+                "model": name,
+                "engine_backend": label,
+                "attention_backend": attention if label in _LOCAL_ATTENTION_BACKENDS else None,
+            }
+            if isinstance(engine, ReplicaPool):
+                replica = await engine.probe_backends()
+                if replica:  # adopt the replica's (real) attention backend
+                    entry["attention_backend"] = replica.get("attention_backend")
+                    entry["via_replica"] = {
+                        "attention_backend": replica.get("attention_backend"),
+                        "kernel_tier": replica.get("kernel_tier"),
+                        "versions": replica.get("versions"),
+                    }
+            engine_list.append(entry)
+
+        role = (
+            "gateway"
+            if engine_list and all(e["engine_backend"] == "replica-pool" for e in engine_list)
+            else "engine-host"
+        )
 
         return {
             "attention_backend": attention,
             "source": "env" if override else "hw_profile",
             "kernel_tier": kernel_tier,
-            "versions": versions,
+            "role": role,
+            "versions": _versions_for(attention),
             "engines": engine_list,
         }
 

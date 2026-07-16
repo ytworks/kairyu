@@ -3,7 +3,9 @@
 import httpx
 
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.entrypoints.server.app import create_app
+from kairyu.orchestration.replica import ReplicaPool
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -49,3 +51,46 @@ async def test_backends_is_open_without_api_key():
 
     assert open_resp.status_code == 200
     assert guarded.status_code == 401
+
+
+async def test_backends_gateway_aggregates_replica_through_pool():
+    # A gateway (all engines are ReplicaPools) runs no local attention, so its own
+    # probe reports the process kernel; for each pool it must adopt the replica's
+    # /backends. Wire the pool's replica to an in-process "replica" app via ASGI
+    # transport so the whole fetch path (URL derivation + transport reuse) runs.
+    replica_app = create_app(engines={"default": MockBackend()})
+    replica_backend = OpenAICompatBackend(
+        base_url="http://replica/v1",
+        model="default",
+        api_key_env=None,
+        transport=httpx.ASGITransport(app=replica_app),
+    )
+    gateway_app = create_app(engines={"llama": ReplicaPool([replica_backend])})
+
+    async with _client(gateway_app) as client:
+        resp = await client.get("/backends")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["role"] == "gateway"
+    pool = {e["model"]: e for e in body["engines"]}["llama"]
+    assert pool["engine_backend"] == "replica-pool"
+    # WITHOUT aggregation a replica-pool engine would be null; a non-null value
+    # here proves the gateway fetched and adopted the replica's /backends.
+    assert pool["attention_backend"] in {"torch", "flashinfer"}
+    assert pool["via_replica"]["attention_backend"] == pool["attention_backend"]
+    assert "torch" in pool["via_replica"]["versions"]
+
+
+async def test_backends_gateway_pool_without_backends_endpoint_degrades():
+    # A replica that does not expose /backends (plain MockBackend, no
+    # fetch_backends) -> probe returns None -> attention stays null, no crash.
+    gateway_app = create_app(engines={"llama": ReplicaPool([MockBackend()])})
+    async with _client(gateway_app) as client:
+        resp = await client.get("/backends")
+
+    assert resp.status_code == 200
+    pool = {e["model"]: e for e in resp.json()["engines"]}["llama"]
+    assert pool["engine_backend"] == "replica-pool"
+    assert pool["attention_backend"] is None
+    assert "via_replica" not in pool
