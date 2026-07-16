@@ -39,13 +39,15 @@ RUN git clone --recursive --depth 1 --branch ${FLASHINFER_REF} \
     https://github.com/flashinfer-ai/flashinfer.git
 WORKDIR /src/flashinfer
 RUN pip install --no-cache-dir -v .        # pure-python package (fast); build_backend imports flashinfer
-# Scope the AOT op set to what kairyu actually uses: bf16/f16, head_dim 64, FA2
-# class, no sliding-window / logits-soft-cap. The default config compiles ~656
-# ops (all dtypes incl. FP8 e4m3/e5m2, head_dim 128/256, FA3) — kairyu only ever
-# JITs ONE kernel (batch_prefill bf16 head_dim_qk_64, which also serves
-# tensor-core decode). Scoping cuts the build from thousands of nvcc steps to a
-# handful AND avoids the SM120 FP4/FP8 kernel risks (plan §9/§12.3).
-RUN sed -i 's|config=None,  # Use default config|config={"fa2_head_dim": [(64, 64)], "fa3_head_dim": [], "f16_dtype": [__import__("torch").float16, __import__("torch").bfloat16], "f8_dtype": [], "use_sliding_window": [False], "use_logits_soft_cap": [False]},|' \
+# Scope the AOT op set to what kairyu's served models use: bf16/f16, head_dim
+# 64 (qwen2.5-0.5b) AND 128 (llama-3.x), FA2 class, no sliding-window /
+# logits-soft-cap. The default config compiles ~656 ops (all dtypes incl. FP8
+# e4m3/e5m2, head_dim 256, FA3); scoping to these two head dims keeps the build to
+# a handful of nvcc steps AND avoids the SM120 FP4/FP8 kernel risks (plan §9/§12.3).
+# The batch_prefill bf16 kernels also serve tensor-core decode. Add a (qk, vo)
+# pair here when serving a model with a new head_dim, else flashinfer will try to
+# JIT it at request time and fail (no nvcc in the -runtime image).
+RUN sed -i 's|config=None,  # Use default config|config={"fa2_head_dim": [(64, 64), (128, 128)], "fa3_head_dim": [], "f16_dtype": [__import__("torch").float16, __import__("torch").bfloat16], "f8_dtype": [], "use_sliding_window": [False], "use_logits_soft_cap": [False]},|' \
     flashinfer-jit-cache/build_backend.py \
  && grep -n 'fa2_head_dim' flashinfer-jit-cache/build_backend.py
 ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}

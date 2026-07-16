@@ -1,8 +1,15 @@
-# EXAMPLE — not mounted by any compose file. Serving multiple models from the
-# hierarchical model layout (scheme B). Source-of-truth policy is B: this compose
-# is hand-written; Ansible templating from kairyu_models is a future option (see
-# plans/model-checkpoint-layout.md §6). To use, copy the engines you need into
-# gpu-replica.yaml (the file docker-compose.gpu.yaml actually mounts).
+# EXAMPLE / reference — not mounted by any compose file. Shows serving multiple
+# models from the hierarchical model layout (scheme B). In the kairyu-iac ansible
+# deployment, gpu-replica.yaml / gateway-gpu.yaml are RENDERED from the
+# `kairyu_models` inventory (single source of truth), so the stock compose in this
+# repo stays single-model. Use this file as a hand-written reference, or copy the
+# engines you need into gpu-replica.yaml for a manual deploy.
+#
+# HEAD_DIM / AOT: flashinfer kernels are precompiled ahead-of-time in
+# Dockerfile.cuda for a fixed set of head_dims (currently 64 and 128). A model
+# whose head_dim is outside that set makes flashinfer try to JIT at request time
+# and FAIL on the slim -runtime image (no nvcc). Extend the `fa2_head_dim` scope in
+# Dockerfile.cuda and rebuild the image before serving such a model.
 #
 # Prerequisite: matching Ansible kairyu_models entries so the on-disk paths exist
 # (roles/kairyu). Each entry places /models/<name>/<version>/ and flips
