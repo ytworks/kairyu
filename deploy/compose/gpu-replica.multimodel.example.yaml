@@ -1,0 +1,49 @@
+# EXAMPLE / reference — not mounted by any compose file. Shows serving multiple
+# models from the hierarchical model layout (scheme B). In the kairyu-iac ansible
+# deployment, gpu-replica.yaml / gateway-gpu.yaml are RENDERED from the
+# `kairyu_models` inventory (single source of truth), so the stock compose in this
+# repo stays single-model. Use this file as a hand-written reference, or copy the
+# engines you need into gpu-replica.yaml for a manual deploy.
+#
+# HEAD_DIM / AOT: flashinfer kernels are precompiled ahead-of-time in
+# Dockerfile.cuda for a fixed set of head_dims (currently 64 and 128). A model
+# whose head_dim is outside that set makes flashinfer try to JIT at request time
+# and FAIL on the slim -runtime image (no nvcc). Extend the `fa2_head_dim` scope in
+# Dockerfile.cuda and rebuild the image before serving such a model.
+#
+# Prerequisite: matching Ansible kairyu_models entries so the on-disk paths exist
+# (roles/kairyu). Each entry places /models/<name>/<version>/ and flips
+# /models/<name>/current; the default: true entry also maintains the
+# /models/checkpoint back-compat symlink.
+#
+#   # inventories/<env>/group_vars/gpu_nodes.yml
+#   kairyu_models:
+#     qwen2.5-0.5b-instruct:
+#       src: "s3://bucket/qwen2.5-0.5b-checkpoint.tar.gz"
+#       version: "2026-07-15"
+#       default: true          # keeps /models/checkpoint -> this model's current
+#     llama-3.1-8b-instruct:
+#       src: "s3://bucket/llama-3.1-8b/"   # unpacked prefix (aws s3 sync)
+#       version: "2026-07-15"
+#   kairyu_model_keep_versions: 2
+engines:
+  # Default model via the back-compat symlink (kept pointing at the default: true
+  # kairyu_models entry's current). Identical to the stock gpu-replica.yaml.
+  default:
+    backend: kairyu
+    options:
+      model_path: /models/checkpoint
+  # Additional models point straight at their versioned `current` symlink.
+  qwen-05b:
+    backend: kairyu
+    options:
+      model_path: /models/qwen2.5-0.5b-instruct/current
+  llama-8b:
+    backend: kairyu
+    options:
+      model_path: /models/llama-3.1-8b-instruct/current
+server:
+  api_keys_env: null
+# NOTE: the gateway (gateway-gpu.yaml) exposes ONE pool -> engine "default". To
+# serve the extra engines to clients, add a matching `pools:` entry there per
+# model so each can be addressed by name.
