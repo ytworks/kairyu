@@ -103,6 +103,19 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-16 — [progress] FlashInfer AOT covers head_dim 128; multi-model serving is inventory-driven
+- What: Extended the FlashInfer AOT jit-cache build in `Dockerfile.cuda` from head_dim 64 only to
+  `fa2_head_dim=[(64,64),(128,128)]`, so head_dim-128 models (Llama-3.x) run on the SM120 FlashInfer
+  kernels alongside head_dim-64 (Qwen2.5). Previously a 128 model hit a request-time JIT that fails on the
+  slim `-runtime` image (no nvcc; `ninja` exit 127). Kept the stock `gpu-replica.yaml`/`gateway-gpu.yaml`
+  single-model and refreshed `gpu-replica.multimodel.example.yaml`; the deployment (kairyu-iac) renders the
+  multi-model compose from its `kairyu_models` inventory, so no deployment-specific model set is hardcoded here.
+- Why: Serve several eval models (Qwen2.5-0.5B + Llama-3.2-3B + Llama-3.1-8B) on one RTX PRO 6000 (SM120)
+  replica on FlashInfer, without baking a model list into the OSS compose.
+- Refs: PR #99; `Dockerfile.cuda`, `deploy/compose/gpu-replica.multimodel.example.yaml`; kairyu-iac develop
+  (compose templating from `kairyu_models`). Adding a model with a new head_dim needs the `fa2_head_dim`
+  scope extended + an image rebuild (the one dependency that stays in this repo).
+
 ### 2026-07-14 — [amendment] Usage ledger shutdown and recovery are app-owned (m11 D3/A7)
 - What: `create_app` now wraps its optional caller lifespan and flushes/closes the
   app-created usage ledger after all inner worker/backend cleanup, even when that cleanup
