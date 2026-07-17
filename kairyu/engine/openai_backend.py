@@ -124,6 +124,34 @@ class OpenAICompatBackend:
         self._request_stream_usage = request_stream_usage
         self._client: httpx.AsyncClient | None = None
 
+    @property
+    def base_url(self) -> str:
+        """The upstream OpenAI-compatible base (``.../v1``), trailing slash stripped."""
+        return self._base_url
+
+    async def fetch_backends(self, *, timeout_s: float = 2.0) -> dict | None:
+        """Best-effort GET of a kairyu replica's ``/backends`` (m13 introspection).
+
+        When this backend points at a kairyu node (the DP-replica case), the node
+        is a kairyu server whose OpenAI base is ``<root>/v1``, so its introspection
+        endpoint lives at ``<root>/backends``. Reuses this backend's pooled client
+        (and any test transport) and keyless/auth headers. Returns ``None`` for a
+        non-kairyu upstream (no ``/backends`` → non-200) or any transport error —
+        introspection must never raise into the caller's ``/backends`` handler."""
+        root = self._base_url[: -len("/v1")] if self._base_url.endswith("/v1") else self._base_url
+        try:
+            response = await self._get_client().get(
+                f"{root}/backends", headers=self._headers(), timeout=timeout_s
+            )
+        except (httpx.HTTPError, RuntimeError):  # RuntimeError: missing api key
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return None
+
     def _api_key(self) -> str:
         assert self._api_key_env is not None
         key = os.environ.get(self._api_key_env)

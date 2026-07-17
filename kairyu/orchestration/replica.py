@@ -114,6 +114,10 @@ class ReplicaPool:
             "least_outstanding": 0,
             "prefix_match": 0,
         }
+        # m13: cached /backends payload of one replica for the gateway's own
+        # /backends aggregation. Only successful probes are cached (a process's
+        # attention backend is constant for its lifetime); None stays uncached.
+        self._backends_cache: dict | None = None
 
     # -- membership (m10a D1) -------------------------------------------------
 
@@ -238,6 +242,31 @@ class ReplicaPool:
         entry = self._entry(self._resolve_id(key))
         entry.validated = True
         entry.consecutive_failures = 0
+
+    async def probe_backends(self) -> dict | None:
+        """Best-effort ``/backends`` payload of ONE replica, for the gateway's own
+        ``/backends`` aggregation (m13).
+
+        The gateway process runs no local attention (it forwards), so it cannot
+        name the kernel its replicas use; it asks one. Prefers a healthy replica
+        but falls back to any (this is introspection, not request placement).
+        Delegates the actual fetch to the replica backend (``fetch_backends`` —
+        the pool holds no URLs itself), and caches the first success since a
+        replica's attention backend is constant for its lifetime. Returns ``None``
+        if no replica exposes ``/backends`` (e.g. non-kairyu or unreachable)."""
+        if self._backends_cache is not None:
+            return self._backends_cache
+        healthy_first = [rid for rid, e in self._entries.items() if self._is_healthy(e)]
+        rest = [rid for rid in self._entries if rid not in healthy_first]
+        for rid in healthy_first + rest:
+            fetch = getattr(self._entries[rid].backend, "fetch_backends", None)
+            if fetch is None:
+                continue
+            payload = await fetch()
+            if payload is not None:
+                self._backends_cache = payload
+                return payload
+        return None
 
     # -- placement -------------------------------------------------------------
 

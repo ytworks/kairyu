@@ -103,6 +103,23 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-16 — [progress] GET /backends introspection endpoint (m13)
+- What: Added an open `GET /backends` reporting the resolved attention backend
+  (torch/flashinfer), library versions, and the per-engine backend map. New pure
+  `select_backend_name(profile)` names the backend without importing flashinfer
+  (`select_backend` delegates to it). In the gateway+replica topology the gateway
+  runs no local attention, so for `ReplicaPool` engines it aggregates one replica's
+  `/backends` (L1 `OpenAICompatBackend.fetch_backends` → L2 `ReplicaPool.probe_backends`,
+  cached + best-effort) and surfaces the replica's kernel under `via_replica`; `role`
+  distinguishes gateway vs engine-host.
+- Why: tooling (the verify web app) must show "what am I running on" without
+  deep-walking private engine internals. The aggregation was needed because the
+  proxy gateway — the process callers actually reach — otherwise only ever reports
+  its own CPU/torch, hiding the replicas' flashinfer.
+- Refs: engine/core/attention/selector.py, entrypoints/server/health.py,
+  entrypoints/server/middleware.py (`_OPEN_PATHS`), engine/openai_backend.py,
+  orchestration/replica.py, tests/server/test_backends.py; PR #100.
+
 ### 2026-07-16 — [progress] FlashInfer AOT covers head_dim 128; multi-model serving is inventory-driven
 - What: Extended the FlashInfer AOT jit-cache build in `Dockerfile.cuda` from head_dim 64 only to
   `fa2_head_dim=[(64,64),(128,128)]`, so head_dim-128 models (Llama-3.x) run on the SM120 FlashInfer

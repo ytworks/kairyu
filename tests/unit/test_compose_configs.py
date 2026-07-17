@@ -417,6 +417,26 @@ def test_ci_and_default_smoke_fail_fast_through_validator():
     assert "deploy/compose/docker-compose*.yaml" in validation_command
 
 
+def test_compose_validator_imports_without_engine_extra():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.modules['torch'] = None; "
+                "import scripts.validate_compose_binds"
+            ),
+        ],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_webui_smoke_validation_failure_never_invokes_docker(tmp_path):
     env, docker_log = _webui_smoke_env(tmp_path, uv_exit=23)
 
