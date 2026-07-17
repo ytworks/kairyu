@@ -9,9 +9,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from kairyu.engine.backend import EngineBackend
-# Import the pure name resolver from the module (NOT the attention package,
-# whose __init__ pulls in torch_backend) so importing health.py stays torch-free.
-from kairyu.engine.core.attention.selector import select_backend_name
+from kairyu.engine.core.attention_selector import select_backend_name
 from kairyu.engine.core.hw_profile import probe
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.orchestration.replica import ReplicaPool
