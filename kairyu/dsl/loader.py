@@ -33,7 +33,10 @@ def _build_worker(worker: WorkerSpec) -> EngineBackend:
         options.setdefault("model", worker.model)
     if worker.base_url is not None:
         options.setdefault("base_url", worker.base_url)
-    if worker.api_key_env is not None:
+    # OpenAICompatBackend defaults to OPENAI_API_KEY when this argument is
+    # omitted. Preserve WorkerSpec's None so local node-to-node workers remain
+    # explicitly keyless.
+    if worker.backend == "openai" or worker.api_key_env is not None:
         options.setdefault("api_key_env", worker.api_key_env)
     return create_backend(worker.backend, **options)
 
