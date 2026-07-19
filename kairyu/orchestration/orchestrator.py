@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from kairyu.engine.backend import (
     EngineBackend,
@@ -77,6 +77,19 @@ class OrchestratorEvent:
     result: OrchestratorResult | None = None
 
 
+class PreviewNotSupportedError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class EngineDescriptor:
+    backend_type: str
+    model: str | None = None
+
+    def as_dict(self) -> dict[str, str | None]:
+        return {"backend_type": self.backend_type, "model": self.model}
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -88,10 +101,19 @@ class Orchestrator:
         sampling_params: SamplingParams | None = None,
         cost_model: CostModel = zero_cost,
         moa_samples: int = 0,
+        engine_descriptors: Mapping[str, EngineDescriptor] | None = None,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
         self._engines = dict(engines)
+        supplied_descriptors = dict(engine_descriptors or {})
+        self._engine_descriptors = {
+            name: supplied_descriptors.get(
+                name,
+                EngineDescriptor(backend_type=type(engine).__name__),
+            )
+            for name, engine in self._engines.items()
+        }
         self._router = router or RuleRouter()
         self._roles = roles or _DEFAULT_ROLES
         self._budget = budget or Budget()
@@ -100,6 +122,73 @@ class Orchestrator:
         self._cost_model = cost_model
         # m11 A4: >0 routes multi_agent through MoA (the deep kairyu-auto-max tier)
         self._moa_samples = moa_samples
+
+    def preview_route(self, prompt: str) -> RouteDecision:
+        preview = getattr(self._router, "preview", None)
+        if preview is None:
+            raise PreviewNotSupportedError(
+                f"router {type(self._router).__name__} does not support preview"
+            )
+        try:
+            return preview(prompt)
+        except NotImplementedError as error:
+            raise PreviewNotSupportedError(str(error)) from error
+
+    def _resolved_engine_descriptor(self, key: str) -> dict[str, object]:
+        configured = key in self._engines
+        effective = key if configured else next(iter(self._engines))
+        return {
+            "configured": configured,
+            "engine": effective,
+            "fallback": not configured,
+        }
+
+    def describe_routing(self) -> dict[str, object]:
+        describe = getattr(self._router, "describe", None)
+        router = (
+            describe()
+            if describe is not None
+            else {"router_type": type(self._router).__name__}
+        )
+        role_workers = tuple(dict.fromkeys(role.worker for role in self._roles))
+        if self._moa_samples > 0:
+            multi_engines = [
+                self._resolved_engine_descriptor(key) for key in ("tier1", "tier2")
+            ]
+            multi_mode = "moa"
+        else:
+            multi_engines = [
+                self._resolved_engine_descriptor(key) for key in role_workers
+            ]
+            multi_mode = "roles"
+        return {
+            "router": router,
+            "targets": ["tier1", "tier2", "multi_agent"],
+            "configured_engines": {
+                name: descriptor.as_dict()
+                for name, descriptor in self._engine_descriptors.items()
+            },
+            "target_resolution": {
+                "tier1": self._resolved_engine_descriptor("tier1"),
+                "tier2": self._resolved_engine_descriptor("tier2"),
+                "multi_agent": {
+                    "mode": multi_mode,
+                    "engines": multi_engines,
+                },
+            },
+            "roles": [
+                {
+                    "name": role.name,
+                    "worker": role.worker,
+                    "role_type": role.role_type,
+                    "depends_on": list(role.depends_on),
+                    "verifies": role.verifies,
+                }
+                for role in self._roles
+            ],
+            "budget": asdict(self._budget),
+            "moa_samples": self._moa_samples,
+        }
 
     async def shutdown(self) -> None:
         await shutdown_all(self._engines.values(), "Orchestrator")

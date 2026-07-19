@@ -77,14 +77,26 @@ class GreedyLinearBandit:
     def weights(self) -> dict[str, list[float]]:
         return {arm: list(row) for arm, row in self._weights.items()}
 
+    @property
+    def epsilon(self) -> float:
+        return self._epsilon
+
     def _score(self, arm: str, x: list[float]) -> float:
         return sum(w * v for w, v in zip(self._weights[arm], x, strict=True))
 
-    def select(self, features: QueryFeatures) -> str:
-        if self._rng.random() < self._epsilon:
-            return self._rng.choice(self._arms)
+    def _select(self, features: QueryFeatures, rng: random.Random) -> str:
+        if rng.random() < self._epsilon:
+            return rng.choice(self._arms)
         x = _vectorize(features)
         return max(self._arms, key=lambda arm: self._score(arm, x))
+
+    def select(self, features: QueryFeatures) -> str:
+        return self._select(features, self._rng)
+
+    def peek_select(self, features: QueryFeatures) -> str:
+        preview_rng = random.Random()
+        preview_rng.setstate(self._rng.getstate())
+        return self._select(features, preview_rng)
 
     def update(self, features: QueryFeatures, arm: str, reward: float) -> None:
         if arm not in self._weights:
@@ -136,6 +148,38 @@ class BanditRouter:
             features=features,
             reason="bandit",
         )
+
+    def preview(self, query: str, context: dict | None = None) -> RouteDecision:
+        features = extract_features(query)
+        if not self.is_warm:
+            preview = getattr(self._base, "preview", None)
+            if preview is None:
+                raise NotImplementedError("base router does not support preview")
+            base = preview(query, context)
+            return RouteDecision(
+                target=base.target,
+                confidence=base.confidence,
+                features=features,
+                reason=(
+                    f"bandit:cold_start({dict(self._update_counts)}); {base.reason}"
+                ),
+            )
+        target = self._bandit.peek_select(features)
+        return RouteDecision(
+            target=target,  # type: ignore[arg-type]
+            confidence=0.5,
+            features=features,
+            reason="bandit:preview",
+        )
+
+    def describe(self) -> dict[str, object]:
+        return {
+            "router_type": type(self).__name__,
+            "epsilon": self._bandit.epsilon,
+            "is_warm": self.is_warm,
+            "min_updates_per_arm": self._min_updates,
+            "fallback_type": type(self._base).__name__,
+        }
 
     def record_reward(self, query: str, target: str, reward: float) -> None:
         features = extract_features(query)

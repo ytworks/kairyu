@@ -68,6 +68,11 @@ def test_decorator_pool_builds_equivalent_spec():
 
 async def test_build_orchestrator_runs_end_to_end():
     orchestrator = build_orchestrator(load_spec(YAML_SPEC))
+    descriptor = orchestrator.describe_routing()
+    assert descriptor["configured_engines"] == {
+        "tier1": {"backend_type": "mock", "model": None},
+        "tier2": {"backend_type": "mock", "model": None},
+    }
     result = await orchestrator.run(
         "First, plan the work. Then execute it. Finally, summarize the outcome."
     )

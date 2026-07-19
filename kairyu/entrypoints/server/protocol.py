@@ -22,6 +22,96 @@ class ChatMessage(BaseModel):
     tool_call_id: str | None = None
 
 
+class RouteFeatures(BaseModel):
+    char_len: int
+    word_count: int
+    has_code_fence: bool
+    math_symbol_count: int
+    reasoning_keyword_count: int
+    multi_step_marker_count: int
+    question_count: int
+
+
+class RouteDecisionPayload(BaseModel):
+    target: str
+    confidence: float
+    reason: str
+    features: RouteFeatures
+
+
+class RoutePreviewRequest(BaseModel):
+    model: str
+    messages: list[ChatMessage] = Field(min_length=1)
+
+
+class RoutePreviewResponse(BaseModel):
+    model: str
+    orchestrated: bool
+    binding: bool = False
+    router_type: str | None = None
+    target: str | None = None
+    confidence: float | None = None
+    reason: str | None = None
+    features: RouteFeatures | None = None
+
+
+class RouterDescriptorPayload(BaseModel):
+    router_type: str
+    thresholds: dict[str, int] | None = None
+    min_confidence: float | None = None
+    fallback_type: str | None = None
+    epsilon: float | None = None
+    is_warm: bool | None = None
+    min_updates_per_arm: int | None = None
+
+
+class EngineDescriptorPayload(BaseModel):
+    backend_type: str
+    model: str | None = None
+
+
+class EngineResolutionPayload(BaseModel):
+    configured: bool
+    engine: str
+    fallback: bool
+
+
+class TargetResolutionPayload(BaseModel):
+    configured: bool | None = None
+    engine: str | None = None
+    fallback: bool | None = None
+    mode: str | None = None
+    engines: list[EngineResolutionPayload] = Field(default_factory=list)
+
+
+class RoleDescriptorPayload(BaseModel):
+    name: str
+    worker: str
+    role_type: str
+    depends_on: list[str]
+    verifies: str | None = None
+
+
+class BudgetDescriptorPayload(BaseModel):
+    max_steps: int
+    max_refine_depth: int
+    max_cost_usd: float | None = None
+
+
+class RoutingModelDescriptorPayload(BaseModel):
+    router: RouterDescriptorPayload
+    targets: list[str]
+    configured_engines: dict[str, EngineDescriptorPayload]
+    target_resolution: dict[str, TargetResolutionPayload]
+    roles: list[RoleDescriptorPayload]
+    budget: BudgetDescriptorPayload
+    moa_samples: int
+
+
+class RoutingResponse(BaseModel):
+    models: dict[str, RoutingModelDescriptorPayload]
+
+
 class StreamOptions(BaseModel):
     include_usage: bool = False
 

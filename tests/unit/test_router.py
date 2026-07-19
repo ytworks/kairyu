@@ -33,6 +33,14 @@ def test_simple_query_routes_to_tier1():
     assert decision.reason
 
 
+def test_rule_router_preview_matches_route_and_describes_thresholds():
+    router = RuleRouter()
+    assert router.preview(REASONING_QUERY) == router.route(REASONING_QUERY)
+    descriptor = router.describe()
+    assert descriptor["router_type"] == "RuleRouter"
+    assert descriptor["thresholds"]["tier2_min_chars"] == 600
+
+
 def test_reasoning_query_routes_to_tier2():
     assert RuleRouter().route(REASONING_QUERY).target == "tier2"
 

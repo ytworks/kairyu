@@ -11,7 +11,7 @@ from kairyu.engine.backend import EngineBackend
 from kairyu.engine.registry import create_backend
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.conductor import RoleSpec, chars_cost_model, zero_cost
-from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
 
 
 def load_spec(source: str | Path) -> OrchestratorSpec:
@@ -40,6 +40,21 @@ def _build_worker(worker: WorkerSpec) -> EngineBackend:
 
 def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
     engines = {worker.name: _build_worker(worker) for worker in spec.workers}
+    engine_descriptors = {
+        worker.name: EngineDescriptor(
+            backend_type=worker.backend,
+            model=(
+                worker.model
+                if worker.model is not None
+                else (
+                    worker.options.get("model")
+                    if isinstance(worker.options.get("model"), str)
+                    else None
+                )
+            ),
+        )
+        for worker in spec.workers
+    }
     roles = (
         tuple(
             RoleSpec(
@@ -67,4 +82,5 @@ def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
         budget=budget,
         shared_prefix=spec.shared_prefix,
         cost_model=cost_model,
+        engine_descriptors=engine_descriptors,
     )

@@ -38,6 +38,7 @@ KV pages, TP collectives, and P-D transfers never leave the DC fabric
 | TLS termination, certificates | Cloud LB (or DC reverse proxy) | serves plain HTTP behind it |
 | Client authentication | Gateway | `server.api_keys_env` (static keys, constant-time compare) |
 | Process overload | Gateway | `server.max_concurrency` → 429 + Retry-After |
+| Routing inspection | Gateway | `/v1/route` uses data-plane auth; `/routing` remains inside the configured API-key boundary |
 | Node-to-node auth inside the DC | Deployment choice | keyless (`api_key_env: null`) or a shared key env var |
 | Audit trail | Gateway | JSON access log with `X-Request-ID`, JSONL router decision log |
 

@@ -392,6 +392,7 @@ worker group (gloo on CPU, NCCL on GPU). There is no CLI flag for it.
 
 Endpoints served: `/v1/chat/completions` (SSE streaming, tools, logprobs, `n>1`,
 `response_format: json_schema`, vision content parts), `/v1/completions`, `/v1/models`,
+`/v1/route` (non-dispatching route preview), `/routing` (routing descriptor),
 `/v1/embeddings`, `/v1/responses` (subset), `/v1/files` + `/v1/batches`, `/health`,
 `/readyz`, `/metrics` (Prometheus), `/admin/*`. Full list in the
 [configuration reference](#http-surface).
@@ -660,6 +661,7 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
 vision content-parts wire format), `/v1/completions`, `/v1/embeddings`
 (float + base64), `/v1/responses` (subset: `input`, `instructions`,
 `previous_response_id`), `/v1/models`, `/v1/files` + `/v1/batches`, `/health`,
+`/v1/route`, `/routing`,
 `/readyz`, `/metrics`, `POST /admin/drain` / `POST /admin/undrain` (auth-protected;
 drain flips readyz to 503), `GET /admin/usage?tenant=` (when the ledger is enabled).
 
@@ -667,6 +669,14 @@ Request extras: `X-Session-ID` (or the OpenAI `user` field) pins a session to th
 replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds a `kairyu_trace`
 block to `kairyu-auto` responses; `stream_options: {include_usage: true}` appends
 the final usage chunk.
+
+`POST /v1/route` accepts `{model, messages}` and renders the same model-specific chat
+template as actual chat before calling the Router's non-mutating `preview()`. It never
+dispatches an engine and returns `binding:false`; concurrent traffic can still make a later
+stateful-router decision differ. `GET /routing` returns whitelisted Router settings,
+effective target fallback, safe engine metadata, role dependencies, and budget. It is not an
+auth-exempt path. Unary auto-model responses include structured `kairyu_route` only with
+`X-Kairyu-Trace: 1`; the normal OpenAI-compatible response shape is unchanged.
 
 ### Multi-tenancy
 

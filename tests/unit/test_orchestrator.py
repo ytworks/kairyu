@@ -5,7 +5,11 @@ import pytest
 from kairyu.engine.mock import MockBackend
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.moa import MoAResult
-from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.orchestrator import (
+    EngineDescriptor,
+    Orchestrator,
+    PreviewNotSupportedError,
+)
 
 SIMPLE = "What is 2?"
 COMPLEX = (
@@ -29,6 +33,42 @@ def _orchestrator(**kwargs) -> Orchestrator:
         {"tier1": MockBackend(), "tier2": MockBackend()},
     )
     return Orchestrator(engines=engines, **kwargs)
+
+
+def test_preview_route_is_non_dispatching_and_describes_effective_fallback():
+    only = MockBackend()
+    orchestrator = Orchestrator(
+        engines={"worker": only},
+        engine_descriptors={
+            "worker": EngineDescriptor(backend_type="openai", model="small")
+        },
+    )
+
+    decision = orchestrator.preview_route(SIMPLE)
+    descriptor = orchestrator.describe_routing()
+
+    assert decision.target == "tier1"
+    assert only.prompts_seen == ()
+    assert descriptor["configured_engines"] == {
+        "worker": {"backend_type": "openai", "model": "small"}
+    }
+    assert descriptor["target_resolution"]["tier1"] == {
+        "configured": False,
+        "engine": "worker",
+        "fallback": True,
+    }
+    assert descriptor["router"]["thresholds"]["multi_agent_min_chars"] == 2000
+    assert all("prompt" not in role for role in descriptor["roles"])
+
+
+def test_preview_route_rejects_router_without_preview():
+    class RouteOnly:
+        def route(self, query, context=None):
+            return _orchestrator().preview_route(query)
+
+    orchestrator = _orchestrator(router=RouteOnly())
+    with pytest.raises(PreviewNotSupportedError, match="does not support preview"):
+        orchestrator.preview_route(SIMPLE)
 
 
 def _track_budget_releases(monkeypatch):
