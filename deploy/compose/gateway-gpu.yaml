@@ -21,4 +21,4 @@ pools:
     probe_interval_s: 1.0
 orchestrators:
   kairyu-auto:
-    spec: /etc/kairyu/routing.yaml
+    spec: routing.yaml
