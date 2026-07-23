@@ -8,6 +8,7 @@ services:
       - "8000:8000"
     volumes:
       - ./gateway-gpu.yaml:/etc/kairyu/config.yaml:ro
+      - ./routing.yaml:/etc/kairyu/routing.yaml:ro
     depends_on:
       - replica
   replica:

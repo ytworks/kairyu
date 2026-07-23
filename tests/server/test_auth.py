@@ -6,6 +6,7 @@ import pytest
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.orchestration.orchestrator import Orchestrator
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -92,6 +93,27 @@ async def test_valid_keys_are_admitted(app):
                 headers={"Authorization": f"Bearer {key}"},
             )
             assert response.status_code == 200
+
+
+async def test_route_and_routing_config_require_auth(monkeypatch):
+    monkeypatch.setenv("KAIRYU_API_KEYS", "secret")
+    app = create_app(
+        engines={"m": MockBackend()},
+        orchestrators={"auto": Orchestrator({"tier1": MockBackend()})},
+        settings=ServerSettings(api_keys_env="KAIRYU_API_KEYS"),
+    )
+    route_body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    async with _client(app) as client:
+        assert (await client.post("/v1/route", json=route_body)).status_code == 401
+        assert (await client.get("/routing")).status_code == 401
+        headers = {"Authorization": "Bearer secret"}
+        assert (
+            await client.post("/v1/route", json=route_body, headers=headers)
+        ).status_code == 200
+        assert (await client.get("/routing", headers=headers)).status_code == 200
 
 
 async def test_health_readyz_metrics_stay_open(app):

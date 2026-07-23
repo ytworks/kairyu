@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -42,6 +42,10 @@ class RouteDecision:
 class Router(Protocol):
     def route(self, query: str, context: dict | None = None) -> RouteDecision: ...
 
+    def preview(self, query: str, context: dict | None = None) -> RouteDecision: ...
+
+    def describe(self) -> dict[str, object]: ...
+
 
 class RuleRouter:
     """Threshold rules over extracted features; no model in the hot path."""
@@ -49,7 +53,7 @@ class RuleRouter:
     def __init__(self, thresholds: RouteThresholds = DEFAULT_THRESHOLDS) -> None:
         self._thresholds = thresholds
 
-    def route(self, query: str, context: dict | None = None) -> RouteDecision:
+    def _decide(self, query: str) -> RouteDecision:
         features = extract_features(query)
         t = self._thresholds
         if (
@@ -87,6 +91,18 @@ class RuleRouter:
             features=features,
             reason="no heavy signals; short query",
         )
+
+    def route(self, query: str, context: dict | None = None) -> RouteDecision:
+        return self._decide(query)
+
+    def preview(self, query: str, context: dict | None = None) -> RouteDecision:
+        return self._decide(query)
+
+    def describe(self) -> dict[str, object]:
+        return {
+            "router_type": type(self).__name__,
+            "thresholds": asdict(self._thresholds),
+        }
 
 
 class JsonlRouterLog:

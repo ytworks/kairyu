@@ -1,0 +1,36 @@
+# Default single-model routing spec. Deployment tooling may render this file
+# from inventory to map tier1 and tier2 to different replica model IDs.
+workers:
+  - name: tier1
+    backend: openai
+    model: default
+    base_url: http://replica:8000/v1
+    api_key_env: null
+  - name: tier2
+    backend: openai
+    model: default
+    base_url: http://replica:8000/v1
+    api_key_env: null
+roles:
+  - name: planner
+    worker: tier2
+    role_type: planner
+    prompt: "[planner] Break the task into a short actionable plan.\nTask: {query}"
+  - name: worker
+    worker: tier1
+    prompt: "[worker] Execute this plan.\nPlan: {planner}\nTask: {query}"
+    depends_on: [planner]
+  - name: verifier
+    worker: tier2
+    role_type: verifier
+    verifies: worker
+    prompt: "[verifier] Reply PASS or FAIL with reasons.\nTask: {query}\nAnswer: {worker}"
+    depends_on: [worker]
+  - name: synthesizer
+    worker: tier2
+    role_type: synthesizer
+    prompt: "[synthesizer] Produce the final answer.\nTask: {query}\nDraft: {worker}\nNotes: {verifier}"
+    depends_on: [worker, verifier]
+budget:
+  max_steps: 12
+  max_refine_depth: 2

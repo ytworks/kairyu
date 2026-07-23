@@ -51,6 +51,9 @@ OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benc
 in `bench/`; `kairyu serve <deployment.yaml>` runs a hardened gateway (pool of remote
 replicas, auth, metrics, batch) or a replica node, and the compose topology
 (1 gateway + 3 mock replicas) passes the CI smoke drill incl. kill/recover.
+Router inspection now has a non-dispatching, non-mutating `/v1/route` preview that shares
+chat prompt rendering, an authenticated `/routing` descriptor, and opt-in structured actual
+decisions; the GPU compose mounts an explicit routing spec for `kairyu-auto`.
 The vLLM-compatible `AsyncLLMEngine` now owns an explicit registry of active
 request IDs: inactive aborts are stateless, while an active abort interrupts and
 closes its backend stream without poisoning later reuse of the same ID.
@@ -134,6 +137,17 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: Issues #102, #103, #104; `tests/unit/test_model_loader_backend.py`;
   `kairyu/engine/kairyu_backend.py`; `scripts/gpu_gates/{00_env,06_multigpu}.sh`;
   `tests/{dist,gpu}/`; `bench/results/env-2026-07-23.json`.
+
+### 2026-07-19 — [amendment] Routing verification is non-mutating and deployment-visible
+- What: Added built-in Router `preview`/safe descriptor contracts, including RNG-cloned bandit
+  preview; exposed rendered-prompt `/v1/route`, authenticated `/routing`, and opt-in structured
+  actual decisions. GPU compose now mounts a routing spec consumed by inventory-driven gateway
+  orchestration, while the verification BFF/UI separates preview from actual distribution/history.
+- Why: A direct `route()` dry-run advanced bandit RNG, raw-query preview diverged from templated
+  chat execution, and deployed GPU gateways did not serve any orchestrator even though local mock did.
+- Refs: M1 D3/D6, M4 router learning; `kairyu/orchestration/`,
+  `kairyu/entrypoints/server/app.py`, `deploy/compose/`.
+
 
 ### 2026-07-16 — [progress] GET /backends introspection endpoint (m13)
 - What: Added an open `GET /backends` reporting the resolved attention backend

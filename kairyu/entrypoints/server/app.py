@@ -73,10 +73,14 @@ from kairyu.entrypoints.server.protocol import (
     ModelCard,
     ModelList,
     PromptTokensDetails,
+    RouteDecisionPayload,
+    RoutePreviewRequest,
+    RoutePreviewResponse,
+    RoutingResponse,
     Usage,
 )
 from kairyu.entrypoints.server.settings import ServerSettings
-from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.orchestrator import Orchestrator, PreviewNotSupportedError
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
@@ -87,6 +91,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AUTO_MODEL = "kairyu-auto"
+
+
+def _route_payload(decision) -> RouteDecisionPayload:
+    return RouteDecisionPayload(
+        target=decision.target,
+        confidence=decision.confidence,
+        reason=decision.reason,
+        features=decision.features.as_dict(),
+    )
 
 
 def _with_usage_ledger_cleanup(lifespan):
@@ -624,6 +637,55 @@ def create_app(
         )
         return ModelList(data=[ModelCard(id=name) for name in names])
 
+    @app.post("/v1/route", response_model=RoutePreviewResponse)
+    async def preview_route(request: RoutePreviewRequest, http_request: Request):
+        http_request.state.model = request.model
+        selected = auto_models.get(request.model)
+        if selected is not None:
+            chat_request = ChatCompletionRequest(
+                model=request.model,
+                messages=request.messages,
+            )
+            try:
+                prompt = validate_chat_input(chat_request, chat_templates).prompt
+                decision = selected.preview_route(prompt)
+            except ChatRequestError as error:
+                return JSONResponse(
+                    status_code=error.status_code,
+                    content={"error": error.payload()},
+                )
+            except PreviewNotSupportedError as error:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": {
+                            "message": str(error),
+                            "type": "invalid_request_error",
+                            "code": "preview_not_supported",
+                        }
+                    },
+                )
+            payload = _route_payload(decision)
+            descriptor = selected.describe_routing()
+            return RoutePreviewResponse(
+                model=request.model,
+                orchestrated=True,
+                router_type=descriptor["router"]["router_type"],
+                **payload.model_dump(),
+            )
+        if request.model in served_engines:
+            return RoutePreviewResponse(model=request.model, orchestrated=False)
+        return model_not_found(request.model)
+
+    @app.get("/routing", response_model=RoutingResponse)
+    async def routing_config() -> RoutingResponse:
+        return RoutingResponse(
+            models={
+                name: selected.describe_routing()
+                for name, selected in auto_models.items()
+            }
+        )
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: ChatCompletionRequest, http_request: Request):
         http_request.state.model = request.model  # label for the metrics middleware
@@ -699,8 +761,6 @@ def create_app(
                 usage=usage,
                 normalized_tool_choice=normalized_tool_choice,
             )
-            if want_trace:
-                response = response.model_copy(update={"kairyu_trace": list(result.trace)})
             _record_usage(
                 http_request,
                 request.model,
@@ -708,6 +768,13 @@ def create_app(
                 prompt=prompt,
                 completions=completions,
             )
+            if want_trace:
+                payload = response.model_dump(mode="json")
+                payload["kairyu_trace"] = list(result.trace)
+                payload["kairyu_route"] = _route_payload(result.route).model_dump(
+                    mode="json"
+                )
+                return JSONResponse(content=payload)
             return response
 
         session_id = _session_id(request, http_request)

@@ -11,7 +11,7 @@ from kairyu.engine.backend import EngineBackend
 from kairyu.engine.registry import create_backend
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.conductor import RoleSpec, chars_cost_model, zero_cost
-from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
 
 
 def load_spec(source: str | Path) -> OrchestratorSpec:
@@ -33,13 +33,31 @@ def _build_worker(worker: WorkerSpec) -> EngineBackend:
         options.setdefault("model", worker.model)
     if worker.base_url is not None:
         options.setdefault("base_url", worker.base_url)
-    if worker.api_key_env is not None:
+    # OpenAICompatBackend defaults to OPENAI_API_KEY when this argument is
+    # omitted. Preserve WorkerSpec's None so local node-to-node workers remain
+    # explicitly keyless.
+    if worker.backend == "openai" or worker.api_key_env is not None:
         options.setdefault("api_key_env", worker.api_key_env)
     return create_backend(worker.backend, **options)
 
 
 def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
     engines = {worker.name: _build_worker(worker) for worker in spec.workers}
+    engine_descriptors = {
+        worker.name: EngineDescriptor(
+            backend_type=worker.backend,
+            model=(
+                worker.model
+                if worker.model is not None
+                else (
+                    worker.options.get("model")
+                    if isinstance(worker.options.get("model"), str)
+                    else None
+                )
+            ),
+        )
+        for worker in spec.workers
+    }
     roles = (
         tuple(
             RoleSpec(
@@ -67,4 +85,5 @@ def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
         budget=budget,
         shared_prefix=spec.shared_prefix,
         cost_model=cost_model,
+        engine_descriptors=engine_descriptors,
     )
