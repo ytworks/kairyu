@@ -20,7 +20,7 @@ If Hugging Face authentication is required:
 HF_TOKEN=hf_... ./examples/qwen3-32b-single-gpu/run.sh
 ```
 
-The OpenAI-compatible API is available at `http://127.0.0.1:8000/v1`.
+The OpenAI-compatible API is available at `http://127.0.0.1:8001/v1`.
 The downloaded model is kept in the `kairyu-qwen3-32b_qwen3-32b` Docker volume.
 
 Stop the service with `Ctrl-C`. Remove its containers with:
