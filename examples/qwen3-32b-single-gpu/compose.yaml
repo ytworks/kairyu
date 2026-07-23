@@ -1,0 +1,41 @@
+name: kairyu-qwen3-32b
+
+services:
+  model-download:
+    image: python:3.12-slim
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - qwen3-32b:/models
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        pip install --no-cache-dir huggingface_hub==1.21.0 hf-xet==1.5.1
+        python -c 'import os; from huggingface_hub import snapshot_download; snapshot_download(repo_id="Qwen/Qwen3-32B", local_dir="/models/qwen3-32b", token=os.environ.get("HF_TOKEN") or None)'
+    restart: "no"
+
+  kairyu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.cuda
+    environment:
+      KAIRYU_ATTENTION_BACKEND: ${KAIRYU_ATTENTION_BACKEND:-torch}
+    depends_on:
+      model-download:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./kairyu.yaml:/etc/kairyu/config.yaml:ro
+      - qwen3-32b:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  qwen3-32b:
