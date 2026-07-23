@@ -13,4 +13,4 @@ case "$gpu_count" in
 esac
 
 echo "Using all $gpu_count visible GPUs"
-exec docker compose up --build
+exec docker compose up --build "$@"

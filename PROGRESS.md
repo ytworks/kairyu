@@ -113,8 +113,8 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - What: Replaced the single-GPU Qwen3-32B example with a Compose workflow that
   reserves every visible NVIDIA GPU, derives `tensor_parallel_size` at startup,
   and rejects GPU counts that cannot evenly shard Qwen3-32B. Added a one-command
-  serving benchmark that records timestamped JSON and regenerates a Markdown
-  summary of all saved runs.
+  start-and-benchmark script targeting host port 8001; it records timestamped
+  JSON and regenerates a Markdown summary of all saved runs.
 - Refs: `examples/qwen3-32b-multi-gpu/`.
 
 ### 2026-07-23 — [progress] GPU gate-integrity issues #102–#104 fixed and hardware-verified
