@@ -24,6 +24,12 @@ TINY = dict(
 )
 
 
+@pytest.fixture(autouse=True)
+def _force_torch_attention_for_cpu_fixture(monkeypatch):
+    """Keep this CPU-safe fixture independent of host CUDA availability."""
+    monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "torch")
+
+
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory):
     torch.manual_seed(31)
