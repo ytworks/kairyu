@@ -21,20 +21,41 @@ services:
       dockerfile: Dockerfile.cuda
     environment:
       KAIRYU_ATTENTION_BACKEND: ${KAIRYU_ATTENTION_BACKEND:-torch}
+    shm_size: 1gb
+    ulimits:
+      memlock: -1
     depends_on:
       model-download:
         condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        gpu_count="$$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d '[:space:]')"
+        case "$$gpu_count" in
+          2|4|8) ;;
+          *)
+            echo "Qwen3-32B requires 2, 4, or 8 visible NVIDIA GPUs; found $$gpu_count" >&2
+            exit 1
+            ;;
+        esac
+        sed "s/__TENSOR_PARALLEL_SIZE__/$$gpu_count/" \
+          /etc/kairyu/config.template.yaml > /tmp/kairyu.yaml
+        echo "Starting Qwen3-32B with tensor_parallel_size=$$gpu_count"
+        exec kairyu serve /tmp/kairyu.yaml
     ports:
       - "127.0.0.1:8001:8000"
     volumes:
-      - ./kairyu.yaml:/etc/kairyu/config.yaml:ro
+      - ./kairyu.template.yaml:/etc/kairyu/config.template.yaml:ro
+      - ../../bench:/bench:ro
+      - ./benchmark_report.py:/opt/kairyu/benchmark_report.py:ro
+      - ./results:/results
       - qwen3-32b:/models:ro
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: all
               capabilities: [gpu]
 
 volumes:
