@@ -10,8 +10,9 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 (10 passed), and the explicit 2-GPU NCCL EP gate is green on the 8× RTX PRO
 6000 Blackwell host. The three gate-integrity problems found during the first
 hardware run (Issues #102–#104) are fixed and GPU-verified in PR #105. Real-model parity,
-performance,
-and production/fabric drills remain.**
+performance, and production/fabric drills remain. The all-visible-GPU Qwen3-32B
+Compose and benchmark/report workflow are implemented but still need validation
+on the GPU host.**
 
 _Last updated: 2026-07-23_
 
@@ -107,6 +108,14 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-23 — [progress] All-GPU Qwen3-32B TP serve and benchmark workflow implemented
+- What: Replaced the single-GPU Qwen3-32B example with a Compose workflow that
+  reserves every visible NVIDIA GPU, derives `tensor_parallel_size` at startup,
+  and rejects GPU counts that cannot evenly shard Qwen3-32B. Added a one-command
+  start-and-benchmark script targeting host port 8001; it records timestamped
+  JSON and regenerates a Markdown summary of all saved runs.
+- Refs: `examples/qwen3-32b-multi-gpu/`.
 
 ### 2026-07-23 — [progress] GPU gate-integrity issues #102–#104 fixed and hardware-verified
 - What: Pinned the CPU-only synthetic model fixture to torch attention so the

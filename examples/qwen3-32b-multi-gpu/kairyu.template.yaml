@@ -8,6 +8,6 @@ engines:
     backend: kairyu
     options:
       model_path: /models/qwen3-32b
-      tensor_parallel_size: 1
+      tensor_parallel_size: __TENSOR_PARALLEL_SIZE__
       num_pages: 1024
       max_num_batched_tokens: 1024
