@@ -124,11 +124,24 @@ class LearnedRouter:
         self._fallback = fallback
         self._min_confidence = min_confidence
 
-    def route(self, query: str, context: dict | None = None) -> RouteDecision:
+    def _decide(
+        self,
+        query: str,
+        context: dict | None = None,
+        *,
+        preview: bool = False,
+    ) -> RouteDecision:
         features = extract_features(query)
         label, confidence = self._model.predict(features.as_dict())
         if confidence < self._min_confidence and self._fallback is not None:
-            base = self._fallback.route(query, context)
+            fallback = (
+                getattr(self._fallback, "preview", None)
+                if preview
+                else self._fallback.route
+            )
+            if fallback is None:
+                raise NotImplementedError("fallback router does not support preview")
+            base = fallback(query, context)
             return RouteDecision(
                 target=base.target,
                 confidence=base.confidence,
@@ -141,3 +154,18 @@ class LearnedRouter:
             features=features,
             reason="learned",
         )
+
+    def route(self, query: str, context: dict | None = None) -> RouteDecision:
+        return self._decide(query, context)
+
+    def preview(self, query: str, context: dict | None = None) -> RouteDecision:
+        return self._decide(query, context, preview=True)
+
+    def describe(self) -> dict[str, object]:
+        return {
+            "router_type": type(self).__name__,
+            "min_confidence": self._min_confidence,
+            "fallback_type": (
+                type(self._fallback).__name__ if self._fallback is not None else None
+            ),
+        }

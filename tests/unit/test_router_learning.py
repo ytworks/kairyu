@@ -94,6 +94,12 @@ def test_learned_router_implements_protocol_with_fallback():
     strict = LearnedRouter(model=model, fallback=RuleRouter(), min_confidence=1.01)
     assert strict.route(CODE).target == RuleRouter().route(CODE).target
     assert "fallback" in strict.route(CODE).reason
+    assert router.preview(SHORT) == router.route(SHORT)
+    assert router.describe() == {
+        "router_type": "LearnedRouter",
+        "min_confidence": 0.34,
+        "fallback_type": "RuleRouter",
+    }
 
 
 def test_learned_router_p99_latency_under_10ms():
@@ -106,6 +112,19 @@ def test_learned_router_p99_latency_under_10ms():
         durations.append(time.perf_counter() - start)
     durations.sort()
     assert durations[int(len(durations) * 0.99)] < 0.010
+
+
+def test_learned_preview_rejects_route_only_fallback():
+    class RouteOnly:
+        def route(self, query, context=None):
+            raise AssertionError("preview must not call route")
+
+    model = train_model(_synthetic_examples(60), epochs=20, seed=3)
+    router = LearnedRouter(model=model, fallback=RouteOnly(), min_confidence=1.01)
+    import pytest as _pytest
+
+    with _pytest.raises(NotImplementedError, match="does not support preview"):
+        router.preview(CODE)
 
 
 def test_bandit_converges_to_context_optimal_arm():
@@ -178,6 +197,31 @@ def test_bandit_router_defers_to_base_until_warm():
     warm = router.route(SHORT)
     assert warm.reason == "bandit"
     assert warm.target == "tier1"
+
+
+def test_bandit_preview_does_not_advance_rng_or_mutate_learning_state():
+    from kairyu.orchestration.learning.bandit import BanditRouter
+
+    bandit = GreedyLinearBandit(epsilon=1.0, seed=23)
+    router = BanditRouter(bandit, base=RuleRouter(), min_updates_per_arm=0)
+    rng_before = bandit._rng.getstate()
+    weights_before = bandit.weights
+    counts_before = dict(router._update_counts)
+
+    preview = router.preview(CODE)
+
+    assert preview.reason == "bandit:preview"
+    assert bandit._rng.getstate() == rng_before
+    assert bandit.weights == weights_before
+    assert router._update_counts == counts_before
+    assert router.route(CODE).target == preview.target
+    assert router.describe() == {
+        "router_type": "BanditRouter",
+        "epsilon": 1.0,
+        "is_warm": True,
+        "min_updates_per_arm": 0,
+        "fallback_type": "RuleRouter",
+    }
 
 
 def test_record_outcome_validates_ranges(tmp_path):

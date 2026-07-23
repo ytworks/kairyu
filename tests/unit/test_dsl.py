@@ -68,8 +68,45 @@ def test_decorator_pool_builds_equivalent_spec():
 
 async def test_build_orchestrator_runs_end_to_end():
     orchestrator = build_orchestrator(load_spec(YAML_SPEC))
+    descriptor = orchestrator.describe_routing()
+    assert descriptor["configured_engines"] == {
+        "tier1": {"backend_type": "mock", "model": None},
+        "tier2": {"backend_type": "mock", "model": None},
+    }
     result = await orchestrator.run(
         "First, plan the work. Then execute it. Finally, summarize the outcome."
     )
     assert result.route.target == "multi_agent"
     assert result.text
+
+
+def test_build_openai_worker_preserves_keyless_auth(monkeypatch):
+    captured = {}
+
+    def fake_create_backend(name, **options):
+        captured["name"] = name
+        captured["options"] = options
+        return object()
+
+    monkeypatch.setattr("kairyu.dsl.loader.create_backend", fake_create_backend)
+    build_orchestrator(
+        load_spec(
+            """
+workers:
+  - name: local
+    backend: openai
+    model: default
+    base_url: http://replica:8000/v1
+    api_key_env: null
+"""
+        )
+    )
+
+    assert captured == {
+        "name": "openai",
+        "options": {
+            "model": "default",
+            "base_url": "http://replica:8000/v1",
+            "api_key_env": None,
+        },
+    }
