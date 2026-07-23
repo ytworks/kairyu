@@ -33,6 +33,11 @@ report with one command:
 ./examples/qwen3-32b-multi-gpu/run-benchmark.sh
 ```
 
+While the command runs, the shell reports model readiness and benchmark
+progress every five seconds. Completed request counts come from Kairyu's local
+metrics endpoint; if that endpoint cannot be read, the shell continues to show
+elapsed time. Progress reporting does not change the benchmark result.
+
 To benchmark an already-running service separately:
 
 ```console
