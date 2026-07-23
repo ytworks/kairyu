@@ -14,16 +14,19 @@ metrics_url="http://127.0.0.1:8001/metrics"
 
 metric_request_count() {
   model="$1"
-  curl --fail --silent "$metrics_url" 2>/dev/null |
+  metrics="$(curl --fail --silent "$metrics_url" 2>/dev/null)" || return 1
+  printf '%s\n' "$metrics" |
     awk -v model="$model" '
       $1 ~ /^kairyu_requests_total\{/ &&
-      index($1, "model=\"" model "\"") &&
-      $2 ~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/ {
+      index($1, "model=\"" model "\"") {
+        if ($2 !~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/) {
+          malformed = 1
+          next
+        }
         total += $2
-        found = 1
       }
       END {
-        if (!found) exit 1
+        if (malformed) exit 1
         printf "%.0f\n", total
       }
     '

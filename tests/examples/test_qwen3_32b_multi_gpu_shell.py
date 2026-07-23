@@ -190,6 +190,39 @@ def test_benchmark_reports_metric_progress_and_configuration(tmp_path: Path) -> 
     assert "report-output" in result.stdout
 
 
+def test_benchmark_counts_from_zero_when_model_metric_appears_later(
+    tmp_path: Path,
+) -> None:
+    example, fake_bin, state = _benchmark_fixture(tmp_path, metrics=False)
+    _write_executable(
+        fake_bin / "curl",
+        """#!/bin/sh
+case "$*" in
+  *readyz*) exit 0 ;;
+  *metrics*)
+    count_file="$STATE_DIR/metrics-count"
+    count=0
+    [ ! -f "$count_file" ] || count="$(cat "$count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$count_file"
+    if [ "$count" -eq 1 ]; then
+      echo '# no qwen3-32b request series before its first request'
+    else
+      echo 'kairyu_requests_total{code="200",model="qwen3-32b"} 3.0'
+    fi
+    exit 0
+    ;;
+esac
+exit 1
+""",
+    )
+
+    result = _run(example / "benchmark.sh", fake_bin, state, NUM_REQUESTS="3")
+
+    assert result.returncode == 0, result.stderr
+    assert "[benchmark] completed 3/3 (elapsed 5s)" in result.stdout
+
+
 def test_benchmark_falls_back_when_metrics_are_unavailable(tmp_path: Path) -> None:
     example, fake_bin, state = _benchmark_fixture(tmp_path, metrics=False)
 
