@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from collections.abc import Callable
@@ -7,7 +8,13 @@ from pathlib import Path
 import pytest
 
 import kairyu.evaluation.worker as worker_module
-from kairyu.evaluation.adapters.base import AdapterRunPlan, RunSelection
+from kairyu.evaluation.adapters.base import (
+    AdapterItem,
+    AdapterRunPlan,
+    ItemResult,
+    ModelRole,
+    RunSelection,
+)
 from kairyu.evaluation.artifacts import RUN_ARTIFACT_FILES
 from kairyu.evaluation.connectors import (
     ConnectorError,
@@ -77,6 +84,7 @@ class _ScriptedConnector:
         request: ModelRequest,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        max_attempts: int | None = None,
     ) -> ConnectorResult:
         if cancel_requested is not None and cancel_requested():
             return _connector_error(request, ConnectorErrorCode.CANCELLED)
@@ -118,13 +126,16 @@ class _ConnectorFactory:
         self.error_ordinals = error_ordinals
         self.invalid_answer_ordinals = invalid_answer_ordinals
         self.connectors: list[_ScriptedConnector] = []
+        self.roles: list[ModelRole] = []
 
     def __call__(
         self,
         _config: ConnectorConfig,
         plan: AdapterRunPlan,
         _runtime: EvaluationRuntime,
+        role: ModelRole,
     ):
+        self.roles.append(role)
         connector = _ScriptedConnector(
             plan,
             error_ordinals=self.error_ordinals,
@@ -147,6 +158,7 @@ class _CrashDuringRequestConnector:
         request: ModelRequest,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        max_attempts: int | None = None,
     ) -> ConnectorResult:
         assert cancel_requested is not None
         assert cancel_requested() is False
@@ -155,9 +167,16 @@ class _CrashDuringRequestConnector:
 
 
 class _CancelDuringRequestConnector:
-    def __init__(self, service: BenchmarkService, run_id: str) -> None:
+    def __init__(
+        self,
+        service: BenchmarkService,
+        run_id: str,
+        *,
+        provider_request_id: str | None = None,
+    ) -> None:
         self._service = service
         self._run_id = run_id
+        self._provider_request_id = provider_request_id
         self.requests: list[ModelRequest] = []
 
     def complete(
@@ -165,13 +184,18 @@ class _CancelDuringRequestConnector:
         request: ModelRequest,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        max_attempts: int | None = None,
     ) -> ConnectorResult:
         self.requests.append(request)
         cancelled = self._service.cancel(self._run_id)
         assert cancelled.cancel_requested is True
         assert cancel_requested is not None
         assert cancel_requested() is True
-        return _connector_error(request, ConnectorErrorCode.CANCELLED)
+        return _connector_error(
+            request,
+            ConnectorErrorCode.CANCELLED,
+            provider_request_id=self._provider_request_id,
+        )
 
 
 class _UnexpectedCancelledConnector:
@@ -183,6 +207,7 @@ class _UnexpectedCancelledConnector:
         request: ModelRequest,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        max_attempts: int | None = None,
     ) -> ConnectorResult:
         assert cancel_requested is not None
         assert cancel_requested() is False
@@ -206,6 +231,7 @@ class _ExceptionalCancelAfterCheckpointConnector(_ScriptedConnector):
         request: ModelRequest,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        max_attempts: int | None = None,
     ) -> ConnectorResult:
         ordinal = int(request.request_id.split("-", 2)[1])
         if ordinal == 1:
@@ -213,12 +239,49 @@ class _ExceptionalCancelAfterCheckpointConnector(_ScriptedConnector):
             cancelled = self._service.cancel(self._run_id)
             assert cancelled.cancel_requested is True
             raise RuntimeError("synthetic exception after durable cancellation")
-        return super().complete(request, cancel_requested=cancel_requested)
+        return super().complete(
+            request,
+            cancel_requested=cancel_requested,
+            max_attempts=max_attempts,
+        )
+
+
+class _ExceptionalCancelAfterFailedCheckpointConnector(_ScriptedConnector):
+    def __init__(
+        self,
+        plan: AdapterRunPlan,
+        service: BenchmarkService,
+        run_id: str,
+    ) -> None:
+        super().__init__(plan, error_ordinals=frozenset({0}))
+        self._service = service
+        self._run_id = run_id
+
+    def complete(
+        self,
+        request: ModelRequest,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        max_attempts: int | None = None,
+    ) -> ConnectorResult:
+        ordinal = int(request.request_id.split("-", 2)[1])
+        if ordinal == 1:
+            self.requests.append(request)
+            cancelled = self._service.cancel(self._run_id)
+            assert cancelled.cancel_requested is True
+            raise RuntimeError("synthetic exception after failed checkpoint and cancellation")
+        return super().complete(
+            request,
+            cancel_requested=cancel_requested,
+            max_attempts=max_attempts,
+        )
 
 
 def _connector_error(
     request: ModelRequest,
     code: ConnectorErrorCode,
+    *,
+    provider_request_id: str | None = None,
 ) -> ConnectorResult:
     return ConnectorResult(
         error=ConnectorError(
@@ -227,6 +290,7 @@ def _connector_error(
             detail="controlled offline failure",
             retryable=code is ConnectorErrorCode.RATE_LIMIT,
             attempts=1,
+            provider_request_id=provider_request_id,
             latency_seconds=0.0,
         )
     )
@@ -617,6 +681,31 @@ def test_structured_connector_errors_produce_partial_or_failed_reports(
     assert report["state"] == expected_state.value
     assert report["metrics"][0]["value"] == metric_value
     assert report["errors"] == [{"count": failed, "error_class": "rate_limit"}]
+    stored_items = tuple(
+        stored_item.item for stored_item in runtime.store.list_run_items("run-errors")
+    )
+    assert all(item.checkpoint_relative_path is not None for item in stored_items)
+    failed_results = tuple(
+        ItemResult.model_validate_json(
+            runtime.artifacts.read_bytes(
+                item.checkpoint_source_run_id,
+                item.checkpoint_relative_path,
+            )
+        )
+        for item in stored_items
+        if item.state is ItemState.FAILED
+    )
+    assert {result.error_class for result in failed_results} == {"rate_limit"}
+    assert {result.target_attempts for result in failed_results} == {1}
+    assert all(result.target_request_sha256 is not None for result in failed_results)
+    predictions = tuple(
+        json.loads(line)
+        for line in runtime.artifacts.read_bytes("run-errors", "predictions.jsonl").splitlines()
+    )
+    assert len(predictions) == 2
+    assert all(prediction["target_attempts"] == 1 for prediction in predictions)
+    assert all(prediction["target_request_sha256"] is not None for prediction in predictions)
+    assert factory.roles == [ModelRole.TARGET]
     assert {
         artifact.relative_path for artifact in runtime.store.list_artifacts("run-errors")
     } >= set(RUN_ARTIFACT_FILES)
@@ -652,6 +741,9 @@ def test_connector_cancel_without_durable_intent_is_a_failed_run(tmp_path: Path)
 def test_resume_reuses_only_verified_completed_checkpoint(tmp_path: Path):
     runtime = EvaluationRuntime(tmp_path / "state")
     service = _run_partial(runtime, "run-source")
+    source_items = tuple(stored.item for stored in runtime.store.list_run_items("run-source"))
+    assert [item.state for item in source_items] == [ItemState.COMPLETED, ItemState.FAILED]
+    assert all(item.checkpoint_relative_path is not None for item in source_items)
 
     resumed = service.resume("run-source", new_run_id="run-successor")
     factory = _ConnectorFactory()
@@ -717,7 +809,7 @@ def test_preflight_failure_releases_job_for_immediate_retry(
     runtime = EvaluationRuntime(tmp_path / "state")
     _, job_id = _submit(runtime, "run-preflight")
 
-    def fail_preflight(_payload):
+    def fail_preflight(_payload, **_kwargs):
         raise RuntimeError("synthetic preflight failure")
 
     monkeypatch.setattr(
@@ -746,7 +838,7 @@ def test_permanent_preflight_poison_is_blocked_after_three_attempts(
     runtime = EvaluationRuntime(tmp_path / "state")
     _, job_id = _submit(runtime, "run-poison")
 
-    def permanent_failure(_payload):
+    def permanent_failure(_payload, **_kwargs):
         raise ValueError("synthetic permanent preflight failure")
 
     monkeypatch.setattr(worker_module, "rebuild_plan_from_job", permanent_failure)
@@ -959,6 +1051,28 @@ def test_mid_item_cancel_persists_one_consistent_cancelled_snapshot(tmp_path: Pa
     assert job.status == "cancelled"
     assert job.cancel_requested is True
     assert len(connector.requests) == 1
+    stored_items = tuple(item.item for item in runtime.store.list_run_items("run-mid-cancel"))
+    assert [item.state for item in stored_items] == [
+        ItemState.CANCELLED,
+        ItemState.PENDING,
+    ]
+    cancelled_item = stored_items[0]
+    assert cancelled_item.error_class == "cancelled"
+    assert cancelled_item.checkpoint_relative_path is not None
+    assert cancelled_item.checkpoint_sha256 is not None
+    assert cancelled_item.checkpoint_source_run_id == "run-mid-cancel"
+    checkpoint = runtime.artifacts.read_bytes(
+        "run-mid-cancel",
+        cancelled_item.checkpoint_relative_path,
+    )
+    assert hashlib.sha256(checkpoint).hexdigest() == cancelled_item.checkpoint_sha256
+    cancelled_result = ItemResult.model_validate_json(checkpoint)
+    assert cancelled_result.error_class == "cancelled"
+    assert cancelled_result.target_attempts == 1
+    assert cancelled_result.target_request_sha256 is not None
+    assert worker_module._checkpoint_is_verified(runtime, cancelled_item)
+    wrong_ordinal = cancelled_item.model_copy(update={"ordinal": cancelled_item.ordinal + 1})
+    assert not worker_module._checkpoint_is_verified(runtime, wrong_ordinal)
 
     manifest = runtime.artifacts.read_json("run-mid-cancel", "manifest.json")
     report = runtime.artifacts.read_json("run-mid-cancel", "report.json")
@@ -976,6 +1090,31 @@ def test_mid_item_cancel_persists_one_consistent_cancelled_snapshot(tmp_path: Pa
     assert report["counts"]["pending"] == 1
     assert metrics[0]["value"] is None
     assert metrics[0]["denominator"] == 0
+    predictions = tuple(
+        json.loads(line)
+        for line in runtime.artifacts.read_bytes("run-mid-cancel", "predictions.jsonl").splitlines()
+    )
+    assert len(predictions) == 1
+    assert predictions[0]["item_id"] == cancelled_item.item_id
+    assert predictions[0]["target_attempts"] == 1
+    assert predictions[0]["target_request_sha256"] is not None
+    errors = tuple(
+        json.loads(line)
+        for line in runtime.artifacts.read_bytes("run-mid-cancel", "errors.jsonl").splitlines()
+    )
+    assert errors == (
+        {
+            "error_class": "cancelled",
+            "item_id": cancelled_item.item_id,
+            "ordinal": cancelled_item.ordinal,
+        },
+    )
+    usage = UsageEvidence.model_validate(
+        runtime.artifacts.read_json("run-mid-cancel", "usage.json")
+    )
+    assert usage.input_tokens == 0
+    assert usage.output_tokens == 0
+    assert usage.measurement_status == "partial"
     artifact_items = tuple(
         RunItem.model_validate_json(line)
         for line in runtime.artifacts.read_bytes(
@@ -989,6 +1128,54 @@ def test_mid_item_cancel_persists_one_consistent_cancelled_snapshot(tmp_path: Pa
         artifact.relative_path for artifact in runtime.store.list_artifacts("run-mid-cancel")
     }
 
+    resumed = service.resume("run-mid-cancel", new_run_id="run-mid-cancel-resumed")
+    recovery_factory = _ConnectorFactory()
+    assert resumed.run.run.resumed_from_run_id == "run-mid-cancel"
+    assert (
+        run_worker_once(
+            runtime,
+            worker_id="worker-cancel-resumed",
+            connector_factory=recovery_factory,
+        )
+        == "run-mid-cancel-resumed"
+    )
+    assert len(recovery_factory.requests) == 2
+    assert runtime.store.get_run("run-mid-cancel-resumed").run.state is RunState.COMPLETED
+
+
+def test_cancel_checkpoint_rejects_registered_secret_without_persisting_it(
+    tmp_path: Path,
+):
+    secret = "cancel-provider-secret-value-7319"
+    runtime = EvaluationRuntime(
+        tmp_path / "state",
+        secret_registry=SecretValueRegistry((secret,)),
+    )
+    service, job_id = _submit(runtime, "run-cancel-secret")
+    connector = _CancelDuringRequestConnector(
+        service,
+        "run-cancel-secret",
+        provider_request_id=secret,
+    )
+
+    with pytest.raises(SecretSafetyError) as raised:
+        run_worker_once(
+            runtime,
+            worker_id="worker-cancel-secret",
+            connector_factory=lambda *_args: (connector, lambda: None),
+        )
+
+    assert secret not in str(raised.value)
+    assert runtime.store.get_job(job_id).status == "cancelled"
+    assert runtime.store.get_run("run-cancel-secret").run.state is RunState.CANCELLED
+    item = runtime.store.list_run_items("run-cancel-secret")[0].item
+    assert item.state is ItemState.RUNNING
+    assert item.checkpoint_relative_path is None
+    assert secret.encode() not in runtime.store.database_path.read_bytes()
+    for path in runtime.artifacts.root.rglob("*"):
+        if path.is_file():
+            assert secret.encode() not in path.read_bytes()
+
 
 def test_exceptional_cancel_reconstructs_completed_checkpoint_evidence(
     tmp_path: Path,
@@ -1001,6 +1188,7 @@ def test_exceptional_cancel_reconstructs_completed_checkpoint_evidence(
         _config: ConnectorConfig,
         plan: AdapterRunPlan,
         _runtime: EvaluationRuntime,
+        _role: ModelRole,
     ):
         nonlocal connector
         connector = _ExceptionalCancelAfterCheckpointConnector(
@@ -1057,6 +1245,79 @@ def test_exceptional_cancel_reconstructs_completed_checkpoint_evidence(
     assert report["usage"]["input_tokens"] == 7
     assert report["usage"]["output_tokens"] == 3
     assert report["usage"]["measurement_status"] == "partial"
+
+
+def test_cancel_report_collects_failed_checkpoint_but_excludes_running_item(
+    tmp_path: Path,
+):
+    runtime = EvaluationRuntime(tmp_path / "state")
+    service, job_id = _submit(runtime, "run-failed-then-cancel")
+    connector: _ExceptionalCancelAfterFailedCheckpointConnector | None = None
+
+    def connector_factory(
+        _config: ConnectorConfig,
+        plan: AdapterRunPlan,
+        _runtime: EvaluationRuntime,
+        role: ModelRole,
+    ):
+        nonlocal connector
+        assert role is ModelRole.TARGET
+        connector = _ExceptionalCancelAfterFailedCheckpointConnector(
+            plan,
+            service,
+            "run-failed-then-cancel",
+        )
+        return connector, lambda: None
+
+    with pytest.raises(
+        RuntimeError,
+        match="synthetic exception after failed checkpoint and cancellation",
+    ):
+        run_worker_once(
+            runtime,
+            worker_id="worker-failed-then-cancel",
+            connector_factory=connector_factory,
+        )
+
+    assert connector is not None
+    assert len(connector.requests) == 2
+    run = runtime.store.get_run("run-failed-then-cancel").run
+    assert run.state is RunState.CANCELLED
+    assert run.failed_count == 1
+    assert runtime.store.get_job(job_id).status == "cancelled"
+    items = tuple(stored.item for stored in runtime.store.list_run_items("run-failed-then-cancel"))
+    assert [item.state for item in items] == [ItemState.FAILED, ItemState.RUNNING]
+    assert items[0].checkpoint_relative_path is not None
+    assert items[1].checkpoint_relative_path is None
+
+    predictions = tuple(
+        json.loads(line)
+        for line in runtime.artifacts.read_bytes(
+            "run-failed-then-cancel",
+            "predictions.jsonl",
+        ).splitlines()
+    )
+    assert len(predictions) == 1
+    assert predictions[0]["item_id"] == items[0].item_id
+    assert predictions[0]["target_attempts"] == 1
+    assert predictions[0]["target_request_sha256"] is not None
+    metrics = runtime.artifacts.read_json("run-failed-then-cancel", "metrics.json")
+    assert metrics[0]["denominator"] == 0
+    assert metrics[0]["value"] is None
+    errors = tuple(
+        json.loads(line)
+        for line in runtime.artifacts.read_bytes(
+            "run-failed-then-cancel",
+            "errors.jsonl",
+        ).splitlines()
+    )
+    assert errors == (
+        {
+            "error_class": "rate_limit",
+            "item_id": items[0].item_id,
+            "ordinal": 0,
+        },
+    )
 
 
 @pytest.mark.parametrize(
@@ -1299,6 +1560,41 @@ def test_worker_rejects_tampered_durable_job_payload_before_state_or_connector_u
     assert runtime.store.list_artifacts(job.run_id) == []
 
 
+def test_worker_revalidates_registered_secret_in_durable_payload_before_plan_use(
+    tmp_path: Path,
+):
+    secret = "ordinary-runtime-secret-7319"
+    runtime = EvaluationRuntime(
+        tmp_path / "state",
+        secret_registry=SecretValueRegistry((secret,)),
+    )
+    _, job_id = _submit(runtime, "run-registered-secret-tamper")
+    payload = json.loads(json.dumps(runtime.store.get_job(job_id).payload))
+    payload["connector"]["endpoint"] = f"https://example.test/provider/{secret}"
+    with sqlite3.connect(runtime.store.database_path) as connection:
+        connection.execute(
+            "UPDATE jobs SET payload_json = ? WHERE job_id = ?",
+            (json.dumps(payload, ensure_ascii=False, allow_nan=False), job_id),
+        )
+
+    def connector_must_not_be_constructed(*_args):
+        raise AssertionError("connector construction preceded secret validation")
+
+    with pytest.raises(SecretSafetyError) as raised:
+        run_worker_once(
+            runtime,
+            worker_id="worker-registered-secret-tamper",
+            connector_factory=connector_must_not_be_constructed,
+        )
+
+    assert secret not in str(raised.value)
+    job = runtime.store.get_job(job_id)
+    assert job.status == "queued"
+    assert runtime.store.get_run(job.run_id).run.state is RunState.PENDING
+    assert runtime.store.list_run_items(job.run_id) == []
+    assert runtime.store.list_artifacts(job.run_id) == []
+
+
 def test_connector_configuration_is_bound_into_protocol_identity(tmp_path: Path):
     runtime = EvaluationRuntime(tmp_path / "state")
     service = BenchmarkService(runtime)
@@ -1369,3 +1665,32 @@ def test_submit_rejects_runtime_secret_in_endpoint_before_persistence(
     assert runtime.store.list_runs() == []
     assert runtime.store.claim_job("worker-no-secret-job", lease_seconds=10) is None
     assert not (runtime.artifacts.root / "run-secret-endpoint").exists()
+
+
+@pytest.mark.parametrize(
+    "update",
+    (
+        {"item_id": "other-item"},
+        {"ordinal": 1},
+        {"input_sha256": "b" * 64},
+    ),
+)
+def test_adapter_result_identity_must_match_planned_item(update):
+    plan_item = AdapterItem(
+        item_id="item-01",
+        ordinal=0,
+        input_sha256="a" * 64,
+        prompt="synthetic",
+        target="answer",
+        choice_permutation=(),
+    )
+    result = ItemResult(
+        item_id=plan_item.item_id,
+        ordinal=plan_item.ordinal,
+        input_sha256=plan_item.input_sha256,
+        response_text="synthetic",
+        target=plan_item.target,
+    ).model_copy(update=update)
+
+    with pytest.raises(ValueError, match="identity"):
+        worker_module._validate_item_result_identity(plan_item, result)

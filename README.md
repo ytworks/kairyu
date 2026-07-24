@@ -716,20 +716,21 @@ tokens_per_minute=200_000)}))`.
 
 ## 8. Benchmarks
 
-M20 is replacing the legacy quality suite one benchmark at a time. GPQA Diamond is
-the first `available` adapter; the remaining catalog entries stay `planned` until their
-individual PRs land. Its offline synthetic smoke exercises durable submission, worker
-leases, item checkpoints, cancellation/resume, immutable evidence, and JSON/Markdown/HTML
-reporting without downloading a dataset or calling a model API:
+M20 is replacing only the legacy accuracy-execution path one benchmark at a time.
+Humanity's Last Exam (HLE) and GPQA Diamond are now `available`; the other nine catalog
+entries remain `planned` until their individual PRs land. HLE's complete offline smoke
+workflow is:
 
 ```bash
 uv run kairyu benchmark list
-uv run kairyu benchmark doctor gpqa-diamond --profile smoke
-uv run kairyu benchmark prepare gpqa-diamond --profile smoke --dry-run
-uv run kairyu benchmark plan gpqa-diamond --profile smoke --mode smoke \
-    --connector fake
-uv run kairyu benchmark run gpqa-diamond --profile smoke --mode smoke \
-    --connector fake --wait --state-dir .kairyu/evaluation
+uv run kairyu benchmark doctor humanitys-last-exam --profile smoke
+uv run kairyu benchmark prepare humanitys-last-exam --profile smoke --dry-run
+uv run kairyu benchmark plan humanitys-last-exam --profile smoke --mode smoke \
+    --connector fake --judge-connector fake
+uv run kairyu benchmark run humanitys-last-exam --profile smoke --mode smoke \
+    --connector fake --judge-connector fake --wait \
+    --state-dir .kairyu/evaluation
+uv run kairyu benchmark references list --benchmark humanitys-last-exam
 
 # Durable lifecycle (use the run ID returned by run/resume)
 uv run kairyu benchmark status <run-id> --state-dir .kairyu/evaluation
@@ -737,16 +738,32 @@ uv run kairyu benchmark cancel <run-id> --state-dir .kairyu/evaluation
 uv run kairyu benchmark resume <run-id> --state-dir .kairyu/evaluation
 uv run kairyu benchmark worker --once --state-dir .kairyu/evaluation
 uv run kairyu benchmark report <run-id> --state-dir .kairyu/evaluation
-uv run kairyu benchmark references list --benchmark gpqa-diamond
 ```
 
-Gated GPQA profiles never download data or accept terms automatically; they require an
-explicitly approved local CSV/JSONL snapshot and SHA-256. Full mode is additionally
-fail-closed behind `--confirm-full-run` and `BENCHMARK_ALLOW_FULL_RUN=1`, and CI always
-rejects it. During the stacked-PR migration, the legacy command below remains available,
-but it is not the implementation or result format targeted by M20. The top-level
-`bench/` performance and operational tooling is outside this replacement and remains
-supported. See
+`--connector` configures the target and the independent `--judge-connector` options
+configure HLE's judge. The smoke fixture has exactly one text item and one inline-image
+item; both target and judge responses are fixed fake responses, so it downloads no
+dataset and calls no external API.
+
+The gated `official-latest` and `fugu-2026` HLE profiles require manual acceptance of
+the CAIS terms, an approved local UTF-8 JSONL file, its caller-supplied lowercase
+SHA-256, and exactly 2,500 records. Images must be bounded inline PNG, JPEG, WebP, or
+GIF `data:` URIs. Kairyu neither downloads HLE nor accepts access terms. The adapter
+reports Accuracy, Calibration Error, Success-only Accuracy, and overall/success-only
+95% Wald confidence-interval half-widths. It pins
+`centerforaisafety/simple-evals@8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3`
+through a checksummed local compatibility layer. Each target request and Judge
+request-plus-parse path has one shared five-attempt ceiling, including connector
+retries. Stored Fugu HLE references remain `incompatible`, so they produce no delta or
+rank. Only synthetic smoke execution has been validated; no full 2,500-item HLE run or published-score reproduction is claimed.
+
+Gated GPQA profiles similarly require a manually approved local CSV/JSONL snapshot and
+SHA-256. Full mode fails closed behind `--confirm-full-run` and
+`BENCHMARK_ALLOW_FULL_RUN=1`, and CI always rejects it. During the stacked-PR migration,
+the legacy `kairyu bench` guide and runner remain available. The final cutover targets
+only the accuracy execution implementation under `kairyu/bench`; the top-level
+`bench/` performance, capacity, GPU, and operational tools are not removed or renamed.
+See
 [`docs/design/m20-evaluation-platform.md`](docs/design/m20-evaluation-platform.md).
 
 `kairyu bench` runs the 11-benchmark Fugu-release quality suite against any deployed

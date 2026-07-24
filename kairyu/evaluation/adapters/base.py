@@ -23,7 +23,7 @@ from kairyu.evaluation.schemas import (
 )
 
 if TYPE_CHECKING:
-    from kairyu.evaluation.connectors import ModelConnector
+    from kairyu.evaluation.connectors import ConnectorResult, ModelConnector
 
 
 class CheckStatus(StrEnum):
@@ -37,6 +37,12 @@ class PreparationStatus(StrEnum):
     READY = "ready"
     NEEDS_USER_ACTION = "needs_user_action"
     BLOCKED = "blocked"
+
+
+class ModelRole(StrEnum):
+    TARGET = "target"
+    JUDGE = "judge"
+    SIMULATOR = "simulator"
 
 
 class DoctorCheck(FrozenModel):
@@ -80,6 +86,8 @@ class RunSelection(FrozenModel):
     profile: str
     mode: RunMode = RunMode.SMOKE
     target_model: str = Field(min_length=1)
+    judge_model: str | None = None
+    simulator_model: str | None = None
     limit: int | None = Field(default=None, ge=1)
     sample_ids: tuple[str, ...] = ()
     seed: int = 42
@@ -96,6 +104,8 @@ class RunSelection(FrozenModel):
             "repeats": 1,
         }
     )
+    judge_generation_parameters: dict[str, JsonValue] = Field(default_factory=dict)
+    simulator_generation_parameters: dict[str, JsonValue] = Field(default_factory=dict)
 
     @field_validator("sample_ids")
     @classmethod
@@ -106,7 +116,11 @@ class RunSelection(FrozenModel):
             raise ValueError("sample IDs must be unique")
         return value
 
-    @field_validator("generation_parameters")
+    @field_validator(
+        "generation_parameters",
+        "judge_generation_parameters",
+        "simulator_generation_parameters",
+    )
     @classmethod
     def _generation_parameters_are_immutable(
         cls,
@@ -114,7 +128,11 @@ class RunSelection(FrozenModel):
     ) -> dict[str, JsonValue]:
         return cast(dict[str, JsonValue], freeze_json_value(value))
 
-    @field_serializer("generation_parameters")
+    @field_serializer(
+        "generation_parameters",
+        "judge_generation_parameters",
+        "simulator_generation_parameters",
+    )
     def _serialize_generation_parameters(self, value: object) -> JsonValue:
         return thaw_json_value(value)
 
@@ -157,6 +175,16 @@ class ExecutionSpec(FrozenModel):
     container_image_digest: str | None = None
 
 
+class ModelRolePlan(FrozenModel):
+    """Exact call and timeout contribution for one model role."""
+
+    role: ModelRole
+    model: str = Field(min_length=1)
+    model_calls: int = Field(ge=0)
+    timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
+    maximum_output_tokens: int = Field(ge=0)
+
+
 @dataclass(frozen=True, slots=True)
 class AdapterItem:
     """Prepared item kept in worker memory.
@@ -172,6 +200,26 @@ class AdapterItem:
     prompt: str
     target: str
     choice_permutation: tuple[int, ...]
+    image_data_uri: str | None = None
+    category: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelConnectorSet:
+    """Role-separated connectors preserving target-only adapter calls."""
+
+    target: ModelConnector
+    judge: ModelConnector | None = None
+    simulator: ModelConnector | None = None
+
+    def complete(self, request, *, cancel_requested=None, max_attempts=None):
+        """Delegate the legacy target-only connector interface."""
+
+        return self.target.complete(
+            request,
+            cancel_requested=cancel_requested,
+            max_attempts=max_attempts,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +239,7 @@ class AdapterRunPlan:
     execution: ExecutionSpec
     official_eligible: bool
     selection: RunSelection
+    model_roles: tuple[ModelRolePlan, ...] = ()
 
 
 class ItemResult(FrozenModel):
@@ -210,6 +259,35 @@ class ItemResult(FrozenModel):
     provider_model: str | None = None
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+    target_attempts: int | None = Field(default=None, ge=0)
+    target_request_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    scores: dict[str, float] = Field(default_factory=dict)
+    report_error_class: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    judge_response_text: str | None = None
+    judge_finish_reason: str | None = None
+    judge_provider_request_id: str | None = None
+    judge_provider_model: str | None = None
+    judge_input_tokens: int | None = Field(default=None, ge=0)
+    judge_output_tokens: int | None = Field(default=None, ge=0)
+    judge_latency_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    judge_attempts: int | None = Field(default=None, ge=0)
+    judge_request_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @field_validator("scores")
+    @classmethod
+    def _scores_are_immutable(cls, value: dict[str, float]) -> dict[str, float]:
+        return cast(dict[str, float], freeze_json_value(value))
+
+    @field_serializer("scores")
+    def _serialize_scores(self, value: object) -> JsonValue:
+        return thaw_json_value(value)
 
 
 class CollectedResult(FrozenModel):
@@ -297,6 +375,15 @@ class BenchmarkAdapter(ABC):
     ) -> Mapping[str, Any]:
         """Return adapter-specific report fields from collected evidence."""
 
+    def smoke_connector_results(
+        self,
+        plan: AdapterRunPlan,
+        role: ModelRole,
+    ) -> Mapping[str, ConnectorResult]:
+        """Return fixed offline connector results for one smoke role."""
+
+        raise ValueError(f"{plan.benchmark_id} does not define fixed {role.value} smoke responses")
+
 
 __all__ = [
     "AdapterItem",
@@ -309,6 +396,9 @@ __all__ = [
     "DoctorReport",
     "ExecutionSpec",
     "ItemResult",
+    "ModelConnectorSet",
+    "ModelRole",
+    "ModelRolePlan",
     "PreparationResult",
     "PreparationStatus",
     "ResourceRequirements",

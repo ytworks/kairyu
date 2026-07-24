@@ -13,15 +13,15 @@ import httpx
 
 from kairyu.evaluation.adapters import get_adapter
 from kairyu.evaluation.adapters.base import (
+    AdapterItem,
     AdapterRunPlan,
     BenchmarkAdapter,
     ItemResult,
+    ModelConnectorSet,
+    ModelRole,
 )
 from kairyu.evaluation.artifacts import ArtifactWrite
 from kairyu.evaluation.connectors import (
-    ConnectorResponse,
-    ConnectorResult,
-    ConnectorUsage,
     FakeOpenAIConnector,
     ModelConnector,
     OpenAICompatibleConnector,
@@ -58,7 +58,7 @@ from kairyu.evaluation.service import (
 )
 
 ConnectorFactory = Callable[
-    [ConnectorConfig, AdapterRunPlan, EvaluationRuntime],
+    [ConnectorConfig, AdapterRunPlan, EvaluationRuntime, ModelRole],
     tuple[ModelConnector, Callable[[], None]],
 ]
 
@@ -146,7 +146,7 @@ def run_worker_once(
             runtime,
             claim,
             lease_seconds=lease_seconds,
-            connector_factory=connector_factory or _default_connector_factory,
+            connector_factory=connector_factory,
         )
     except LeaseConflictError:
         raise
@@ -211,9 +211,12 @@ def _execute_claim(
     claim: JobClaim,
     *,
     lease_seconds: float,
-    connector_factory: ConnectorFactory,
+    connector_factory: ConnectorFactory | None,
 ) -> None:
-    plan = rebuild_plan_from_job(claim.job.payload)
+    plan = rebuild_plan_from_job(
+        claim.job.payload,
+        secret_registry=runtime.secret_registry,
+    )
     adapter = get_adapter(plan.benchmark_id)
     stored = runtime.store.get_run(claim.job.run_id)
     _require_matching_plan(stored.run, plan)
@@ -285,24 +288,33 @@ def _execute_claim(
                 lease_token=claim.lease_token,
             )
 
-        connector_config = ConnectorConfig.model_validate(claim.job.payload["connector"])
-        connector, close_connector = connector_factory(connector_config, plan, runtime)
+        payload = BenchmarkJobPayload.model_validate(
+            claim.job.payload,
+            context={"secret_registry": runtime.secret_registry},
+        )
+        connectors, close_connectors = _build_model_connectors(
+            payload,
+            plan,
+            runtime,
+            connector_factory=connector_factory,
+        )
         try:
             _run_pending_items(
                 runtime,
                 claim,
                 adapter,
                 plan,
-                connector,
+                connectors,
                 lease_seconds=lease_seconds,
             )
         finally:
-            close_connector()
+            close_connectors()
 
     stored = runtime.store.get_run(claim.job.run_id)
     items = tuple(item.item for item in _list_all_run_items(runtime, stored.run.run_id))
     results = _reconstruct_results(runtime, plan, items)
-    collected = adapter.collect(stored.run.run_id, plan, results)
+    collected_results = _results_for_collection(results, items)
+    collected = adapter.collect(stored.run.run_id, plan, collected_results)
     terminal = _transition_to_terminal(runtime, claim, stored, items)
     _publish_aggregates(
         runtime,
@@ -311,6 +323,7 @@ def _execute_claim(
         terminal.run,
         items,
         results,
+        collected_results,
         collected.metrics,
         collected.error_counts,
     )
@@ -333,7 +346,7 @@ def _run_pending_items(
     claim: JobClaim,
     adapter: BenchmarkAdapter,
     plan: AdapterRunPlan,
-    connector: ModelConnector,
+    connector: ModelConnectorSet,
     *,
     lease_seconds: float,
 ) -> None:
@@ -382,6 +395,15 @@ def _run_pending_items(
             )
         cancelled_during_call = heartbeat.cancel_requested or _cancel_requested(runtime, claim)
         if cancelled_during_call:
+            checkpoint_path: str | None = None
+            checkpoint_sha256: str | None = None
+            if _result_has_concrete_evidence(result):
+                checkpoint_path, checkpoint_sha256 = _publish_item_checkpoint(
+                    runtime,
+                    claim,
+                    plan_item,
+                    result,
+                )
             cancelled = runtime.store.compare_and_set_run_item(
                 claim.job.run_id,
                 plan_item.item_id,
@@ -389,7 +411,13 @@ def _run_pending_items(
                 expected_state=ItemState.RUNNING,
                 expected_version=started_version,
                 new_state=ItemState.CANCELLED,
-                error_class="cancelled",
+                scores=dict(result.scores),
+                error_class=result.error_class or "cancelled",
+                checkpoint_relative_path=checkpoint_path,
+                checkpoint_sha256=checkpoint_sha256,
+                checkpoint_source_run_id=(
+                    claim.job.run_id if checkpoint_path is not None else None
+                ),
             )
             if cancelled is None:
                 raise RuntimeError("cancelled item changed before persistence")
@@ -397,6 +425,13 @@ def _run_pending_items(
         error_class = result.error_class
         if error_class == "cancelled":
             error_class = "unexpected_connector_cancellation"
+            result = result.model_copy(update={"error_class": error_class})
+        checkpoint_path, checkpoint_sha256 = _publish_item_checkpoint(
+            runtime,
+            claim,
+            plan_item,
+            result,
+        )
         if error_class is not None:
             failed = runtime.store.compare_and_set_run_item(
                 claim.job.run_id,
@@ -405,7 +440,11 @@ def _run_pending_items(
                 expected_state=ItemState.RUNNING,
                 expected_version=started_version,
                 new_state=ItemState.FAILED,
+                scores=dict(result.scores),
                 error_class=error_class,
+                checkpoint_relative_path=checkpoint_path,
+                checkpoint_sha256=checkpoint_sha256,
+                checkpoint_source_run_id=claim.job.run_id,
             )
             if failed is None:
                 raise RuntimeError("failed item changed before persistence")
@@ -416,26 +455,12 @@ def _run_pending_items(
                     "error_class": error_class,
                     "item_id": plan_item.item_id,
                     "ordinal": plan_item.ordinal,
+                    "checkpoint_sha256": checkpoint_sha256,
                 },
                 lease_token=claim.lease_token,
             )
             continue
 
-        checkpoint_content = _canonical_bytes(result.model_dump(mode="json"))
-        checkpoint_sha256 = hashlib.sha256(checkpoint_content).hexdigest()
-        checkpoint_path = (
-            f"upstream/checkpoints/{plan_item.ordinal:06d}-"
-            f"{plan_item.input_sha256[:12]}-{checkpoint_sha256[:12]}.json"
-        )
-        _publish_bytes(
-            runtime,
-            run_id=claim.job.run_id,
-            name=f"checkpoint-{plan_item.ordinal:06d}-{checkpoint_sha256[:12]}",
-            relative_path=checkpoint_path,
-            media_type="application/json",
-            content=checkpoint_content,
-            publication_token=claim.lease_token,
-        )
         completed = runtime.store.compare_and_set_run_item(
             claim.job.run_id,
             plan_item.item_id,
@@ -443,7 +468,11 @@ def _run_pending_items(
             expected_state=ItemState.RUNNING,
             expected_version=started_version,
             new_state=ItemState.COMPLETED,
-            scores={"accuracy": 1.0 if result.correct else 0.0},
+            scores=(
+                dict(result.scores)
+                if result.scores
+                else {"accuracy": 1.0 if result.correct else 0.0}
+            ),
             checkpoint_relative_path=checkpoint_path,
             checkpoint_sha256=checkpoint_sha256,
             checkpoint_source_run_id=claim.job.run_id,
@@ -454,12 +483,85 @@ def _run_pending_items(
             claim.job.run_id,
             "item_completed",
             {
-                "correct": result.correct,
                 "item_id": plan_item.item_id,
+                "report_error_class": result.report_error_class,
+                "scores": (
+                    dict(result.scores)
+                    if result.scores
+                    else {"accuracy": 1.0 if result.correct else 0.0}
+                ),
                 "ordinal": plan_item.ordinal,
             },
             lease_token=claim.lease_token,
         )
+
+
+def _publish_item_checkpoint(
+    runtime: EvaluationRuntime,
+    claim: JobClaim,
+    plan_item: AdapterItem,
+    result: ItemResult,
+) -> tuple[str, str]:
+    _validate_item_result_identity(plan_item, result)
+    checkpoint_content = _canonical_bytes(result.model_dump(mode="json"))
+    checkpoint_sha256 = hashlib.sha256(checkpoint_content).hexdigest()
+    checkpoint_path = (
+        f"upstream/checkpoints/{plan_item.ordinal:06d}-"
+        f"{plan_item.input_sha256[:12]}-{checkpoint_sha256[:12]}.json"
+    )
+    _publish_bytes(
+        runtime,
+        run_id=claim.job.run_id,
+        name=f"checkpoint-{plan_item.ordinal:06d}-{checkpoint_sha256[:12]}",
+        relative_path=checkpoint_path,
+        media_type="application/json",
+        content=checkpoint_content,
+        publication_token=claim.lease_token,
+    )
+    return checkpoint_path, checkpoint_sha256
+
+
+def _validate_item_result_identity(
+    plan_item: AdapterItem,
+    result: ItemResult,
+) -> None:
+    if (
+        result.item_id != plan_item.item_id
+        or result.ordinal != plan_item.ordinal
+        or result.input_sha256 != plan_item.input_sha256
+    ):
+        raise ValueError("adapter result identity does not match the planned item")
+
+
+def _result_has_concrete_evidence(result: ItemResult) -> bool:
+    """Return whether cancellation produced evidence beyond immutable item identity."""
+
+    return any(
+        (
+            bool(result.response_text),
+            result.extracted_answer is not None,
+            result.latency_seconds is not None,
+            result.finish_reason is not None,
+            result.provider_request_id is not None,
+            result.provider_model is not None,
+            result.input_tokens is not None,
+            result.output_tokens is not None,
+            result.target_attempts is not None,
+            result.target_request_sha256 is not None,
+            bool(result.scores),
+            result.report_error_class is not None,
+            result.confidence is not None,
+            result.judge_response_text is not None,
+            result.judge_finish_reason is not None,
+            result.judge_provider_request_id is not None,
+            result.judge_provider_model is not None,
+            result.judge_input_tokens is not None,
+            result.judge_output_tokens is not None,
+            result.judge_latency_seconds is not None,
+            result.judge_attempts is not None,
+            result.judge_request_sha256 is not None,
+        )
+    )
 
 
 def _build_preparation_items(
@@ -532,29 +634,42 @@ def _checkpoint_is_verified(
     if hashlib.sha256(content).hexdigest() != expected_sha256:
         return False
     try:
-        result = ItemResult.model_validate_json(content)
+        result = ItemResult.model_validate_json(
+            content,
+            context={"secret_registry": runtime.secret_registry},
+        )
     except ValueError:
         return False
-    return result.item_id == item.item_id and result.input_sha256 == item.input_sha256
-
-
-def _reconstruct_completed_results(
-    runtime: EvaluationRuntime,
-    items: tuple[RunItem, ...],
-) -> tuple[ItemResult, ...]:
-    results: list[ItemResult] = []
-    for item in sorted(items, key=lambda candidate: candidate.ordinal):
-        if item.state is not ItemState.COMPLETED:
-            continue
-        if not _checkpoint_is_verified(runtime, item):
-            raise RuntimeError("completed item checkpoint failed verification")
-        origin = item.checkpoint_source_run_id
-        relative_path = item.checkpoint_relative_path
-        assert origin is not None and relative_path is not None
-        results.append(
-            ItemResult.model_validate_json(runtime.artifacts.read_bytes(origin, relative_path))
+    if (
+        result.item_id != item.item_id
+        or result.ordinal != item.ordinal
+        or result.input_sha256 != item.input_sha256
+    ):
+        return False
+    if item.state is ItemState.COMPLETED:
+        return result.error_class is None
+    if item.state is ItemState.FAILED:
+        return result.error_class is not None and result.error_class == item.error_class
+    if item.state is ItemState.CANCELLED:
+        return result.error_class == item.error_class or (
+            result.error_class is None and item.error_class == "cancelled"
         )
-    return tuple(results)
+    return False
+
+
+def _load_checkpoint_result(
+    runtime: EvaluationRuntime,
+    item: RunItem,
+) -> ItemResult:
+    if not _checkpoint_is_verified(runtime, item):
+        raise RuntimeError(f"{item.state.value} item checkpoint failed verification")
+    origin = item.checkpoint_source_run_id
+    relative_path = item.checkpoint_relative_path
+    assert origin is not None and relative_path is not None
+    return ItemResult.model_validate_json(
+        runtime.artifacts.read_bytes(origin, relative_path),
+        context={"secret_registry": runtime.secret_registry},
+    )
 
 
 def _reconstruct_results(
@@ -566,15 +681,13 @@ def _reconstruct_results(
     results: list[ItemResult] = []
     for item in sorted(items, key=lambda candidate: candidate.ordinal):
         if item.state is ItemState.COMPLETED:
-            if not _checkpoint_is_verified(runtime, item):
-                raise RuntimeError("completed item checkpoint failed verification")
-            origin = item.checkpoint_source_run_id
-            relative_path = item.checkpoint_relative_path
-            assert origin is not None and relative_path is not None
-            results.append(
-                ItemResult.model_validate_json(runtime.artifacts.read_bytes(origin, relative_path))
-            )
-        elif item.state in {ItemState.FAILED, ItemState.CANCELLED}:
+            results.append(_load_checkpoint_result(runtime, item))
+        elif (
+            item.state in {ItemState.FAILED, ItemState.CANCELLED}
+            and item.checkpoint_relative_path is not None
+        ):
+            results.append(_load_checkpoint_result(runtime, item))
+        elif item.state is ItemState.FAILED:
             plan_item = plan_by_id[item.item_id]
             results.append(
                 ItemResult(
@@ -588,6 +701,18 @@ def _reconstruct_results(
                 )
             )
     return tuple(results)
+
+
+def _results_for_collection(
+    results: tuple[ItemResult, ...],
+    items: tuple[RunItem, ...],
+) -> tuple[ItemResult, ...]:
+    collectible = {
+        (item.item_id, item.ordinal)
+        for item in items
+        if item.state in {ItemState.COMPLETED, ItemState.FAILED}
+    }
+    return tuple(result for result in results if (result.item_id, result.ordinal) in collectible)
 
 
 def _transition_to_terminal(
@@ -643,17 +768,46 @@ def _summarize_usage(
 ) -> UsageEvidence:
     gaps: list[str] = []
     if any(result.input_tokens is None for result in results):
-        gaps.append("one or more item results lack input token usage")
+        gaps.append("one or more item results lack target input token usage")
     if any(result.output_tokens is None for result in results):
-        gaps.append("one or more item results lack output token usage")
+        gaps.append("one or more item results lack target output token usage")
     if any(result.latency_seconds is None for result in results):
-        gaps.append("one or more item results lack latency measurements")
+        gaps.append("one or more item results lack target latency measurements")
+    if any(result.target_attempts is not None and result.target_attempts > 1 for result in results):
+        gaps.append("target usage may omit earlier connector attempts")
+    judge_results = tuple(
+        result
+        for result in results
+        if result.judge_response_text is not None
+        or result.judge_provider_model is not None
+        or result.judge_input_tokens is not None
+        or result.judge_output_tokens is not None
+        or result.judge_attempts is not None
+        or result.judge_request_sha256 is not None
+    )
+    if any(result.judge_input_tokens is None for result in judge_results):
+        gaps.append("one or more judged items lack judge input token usage")
+    if any(result.judge_output_tokens is None for result in judge_results):
+        gaps.append("one or more judged items lack judge output token usage")
+    if any(result.judge_latency_seconds is None for result in judge_results):
+        gaps.append("one or more judged items lack judge latency measurements")
+    if any(
+        result.judge_attempts is not None and result.judge_attempts > 1 for result in judge_results
+    ):
+        gaps.append("judge usage may omit earlier connector attempts")
     if any(item.state is not ItemState.COMPLETED for item in items):
         gaps.append("usage is unavailable for one or more non-completed items")
     return UsageEvidence(
-        input_tokens=sum(result.input_tokens or 0 for result in results),
-        output_tokens=sum(result.output_tokens or 0 for result in results),
-        total_latency_seconds=sum(result.latency_seconds or 0.0 for result in results),
+        input_tokens=sum(
+            (result.input_tokens or 0) + (result.judge_input_tokens or 0) for result in results
+        ),
+        output_tokens=sum(
+            (result.output_tokens or 0) + (result.judge_output_tokens or 0) for result in results
+        ),
+        total_latency_seconds=sum(
+            (result.latency_seconds or 0.0) + (result.judge_latency_seconds or 0.0)
+            for result in results
+        ),
         measurement_status="partial" if gaps else "complete",
         measurement_unavailable_reasons=tuple(dict.fromkeys(gaps)),
         actual_cost_usd=None,
@@ -662,18 +816,11 @@ def _summarize_usage(
 
 
 def _error_records_from_results(
-    benchmark_id: str,
     results: tuple[ItemResult, ...],
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for result in results:
-        error_class = result.error_class
-        if (
-            error_class is None
-            and benchmark_id == "gpqa-diamond"
-            and result.extracted_answer not in {"A", "B", "C", "D"}
-        ):
-            error_class = "invalid_answer"
+        error_class = result.error_class or result.report_error_class
         if error_class is not None:
             records.append(
                 {
@@ -686,16 +833,13 @@ def _error_records_from_results(
 
 
 def _validate_collected_error_counts(
-    benchmark_id: str,
     records: list[dict[str, Any]],
     collected_error_counts: Mapping[str, int],
 ) -> None:
-    if benchmark_id != "gpqa-diamond":
-        return
     declared = Counter(collected_error_counts)
     derived = Counter(str(record["error_class"]) for record in records)
     if declared != derived:
-        raise RuntimeError("GPQA collected error counts do not match per-item error evidence")
+        raise RuntimeError("collected error counts do not match per-item error evidence")
 
 
 def _publish_aggregates(
@@ -705,37 +849,62 @@ def _publish_aggregates(
     run,
     items: tuple[RunItem, ...],
     results: tuple[ItemResult, ...],
+    collected_results: tuple[ItemResult, ...],
     metrics: tuple[Metric, ...],
     collected_error_counts: Mapping[str, int],
 ) -> None:
-    snapshot = load_reference_snapshot()
+    snapshot = load_reference_snapshot(benchmark_id=plan.benchmark_id)
     predictions = [
         {
             "extracted_answer": result.extracted_answer,
             "finish_reason": result.finish_reason,
+            "confidence": result.confidence,
             "item_id": result.item_id,
+            "judge_attempts": result.judge_attempts,
+            "judge_finish_reason": result.judge_finish_reason,
+            "judge_latency_seconds": result.judge_latency_seconds,
+            "judge_provider_model": result.judge_provider_model,
+            "judge_provider_request_id": result.judge_provider_request_id,
+            "judge_request_sha256": result.judge_request_sha256,
+            "judge_response_text": result.judge_response_text,
             "latency_seconds": result.latency_seconds,
             "provider_request_id": result.provider_request_id,
             "provider_model": result.provider_model,
             "response_text": result.response_text,
+            "target_attempts": result.target_attempts,
+            "target_request_sha256": result.target_request_sha256,
         }
         for result in results
-        if result.error_class is None
     ]
     item_results = [
         item.model_dump(mode="json")
         for item in sorted(items, key=lambda candidate: candidate.ordinal)
     ]
-    errors = _error_records_from_results(plan.benchmark_id, results)
+    errors = _error_records_from_results(results)
     _validate_collected_error_counts(
-        plan.benchmark_id,
-        errors,
+        _error_records_from_results(collected_results),
         collected_error_counts,
+    )
+    represented_items = {(str(record["item_id"]), int(record["ordinal"])) for record in errors}
+    errors.extend(
+        {
+            "error_class": item.error_class or item.state.value,
+            "item_id": item.item_id,
+            "ordinal": item.ordinal,
+        }
+        for item in items
+        if item.state in {ItemState.FAILED, ItemState.CANCELLED}
+        and (item.item_id, item.ordinal) not in represented_items
     )
     usage = _summarize_usage(results, items)
     protocol_payload = plan.protocol.model_dump(mode="json")
     observed_provider_models = sorted(
-        {result.provider_model for result in results if result.provider_model is not None}
+        {
+            model
+            for result in results
+            for model in (result.provider_model, result.judge_provider_model)
+            if model is not None
+        }
     )
     manifest = build_run_manifest(
         run,
@@ -829,7 +998,8 @@ def _recover_terminal_claim(
     stored = runtime.store.get_run(claim.job.run_id)
     items = tuple(item.item for item in _list_all_run_items(runtime, stored.run.run_id))
     results = _reconstruct_results(runtime, plan, items)
-    collected = adapter.collect(stored.run.run_id, plan, results)
+    collected_results = _results_for_collection(results, items)
+    collected = adapter.collect(stored.run.run_id, plan, collected_results)
     _publish_aggregates(
         runtime,
         claim,
@@ -837,6 +1007,7 @@ def _recover_terminal_claim(
         stored.run,
         items,
         results,
+        collected_results,
         collected.metrics,
         collected.error_counts,
     )
@@ -929,41 +1100,32 @@ def render_cancelled_job_report(
     run_id: str,
     job_payload: dict[str, Any],
 ):
-    """Publish a zero/partial cancelled report even when a queued job never leased."""
+    """Publish a zero or partial cancelled report without inventing metrics."""
 
     stored = runtime.store.get_run(run_id)
     if stored.run.state is not RunState.CANCELLED:
         raise ValueError("cancelled report requires a cancelled run")
-    job_snapshot = BenchmarkJobPayload.model_validate(job_payload)
-    protocol = job_snapshot.protocol
-    items = tuple(item.item for item in _list_all_run_items(runtime, run_id))
-    results = _reconstruct_completed_results(runtime, items)
-    completed = tuple(item for item in items if item.state is ItemState.COMPLETED)
-    numerator = sum(int(item.scores.get("accuracy", 0.0)) for item in completed)
-    denominator = len(completed)
-    metric = Metric(
-        run_id=run_id,
-        name="accuracy",
-        display_name="Accuracy",
-        value=(numerator / denominator * 100.0) if denominator else None,
-        numerator=numerator,
-        denominator=denominator,
-        scale=100.0,
-        unit="percent",
-        primary=True,
-        higher_is_better=True,
-        dimensions={"aggregation": "mean", "shots": 0},
-        official_eligible=False,
+    job_snapshot = BenchmarkJobPayload.model_validate(
+        job_payload,
+        context={"secret_registry": runtime.secret_registry},
     )
-    reference_snapshot = load_reference_snapshot()
+    plan = rebuild_plan_from_job(
+        job_snapshot.model_dump(mode="json"),
+        secret_registry=runtime.secret_registry,
+    )
+    adapter = get_adapter(plan.benchmark_id)
+    items = tuple(item.item for item in _list_all_run_items(runtime, run_id))
+    results = _reconstruct_results(runtime, plan, items)
+    collected = adapter.collect(run_id, plan, _results_for_collection(results, items))
+    reference_snapshot = load_reference_snapshot(benchmark_id=plan.benchmark_id)
     token = runtime.store.finalization_token(run_id)
     _publish_cancelled_evidence(
         runtime,
         stored.run,
-        protocol,
+        job_snapshot.protocol,
         items,
         results,
-        metric,
+        collected.metrics,
         reference_snapshot,
         token,
     )
@@ -976,7 +1138,7 @@ def _publish_cancelled_evidence(
     protocol: ProtocolSignature,
     items: tuple[RunItem, ...],
     results: tuple[ItemResult, ...],
-    metric: Metric,
+    metrics: tuple[Metric, ...],
     snapshot: ReferenceSnapshot,
     token: PublicationToken,
 ) -> None:
@@ -984,17 +1146,32 @@ def _publish_cancelled_evidence(
         {
             "extracted_answer": result.extracted_answer,
             "finish_reason": result.finish_reason,
+            "confidence": result.confidence,
             "item_id": result.item_id,
+            "judge_attempts": result.judge_attempts,
+            "judge_finish_reason": result.judge_finish_reason,
+            "judge_latency_seconds": result.judge_latency_seconds,
+            "judge_provider_model": result.judge_provider_model,
+            "judge_provider_request_id": result.judge_provider_request_id,
+            "judge_request_sha256": result.judge_request_sha256,
+            "judge_response_text": result.judge_response_text,
             "latency_seconds": result.latency_seconds,
             "provider_request_id": result.provider_request_id,
             "provider_model": result.provider_model,
             "response_text": result.response_text,
+            "target_attempts": result.target_attempts,
+            "target_request_sha256": result.target_request_sha256,
         }
         for result in results
     ]
     usage = _summarize_usage(results, items)
     observed_provider_models = sorted(
-        {result.provider_model for result in results if result.provider_model is not None}
+        {
+            model
+            for result in results
+            for model in (result.provider_model, result.judge_provider_model)
+            if model is not None
+        }
     )
     manifest = build_run_manifest(
         run,
@@ -1015,7 +1192,7 @@ def _publish_cancelled_evidence(
         item.model_dump(mode="json")
         for item in sorted(items, key=lambda candidate: candidate.ordinal)
     ]
-    errors = _error_records_from_results(run.benchmark_id, results)
+    errors = _error_records_from_results(results)
     represented_items = {(str(record["item_id"]), int(record["ordinal"])) for record in errors}
     errors.extend(
         {
@@ -1057,7 +1234,7 @@ def _publish_cancelled_evidence(
             "metrics",
             "metrics.json",
             "application/json",
-            _canonical_bytes([metric.model_dump(mode="json")]),
+            _canonical_bytes([metric.model_dump(mode="json") for metric in metrics]),
         ),
         ("errors", "errors.jsonl", "application/x-ndjson", _jsonl_bytes(errors)),
         (
@@ -1085,34 +1262,63 @@ def _publish_cancelled_evidence(
         )
 
 
+def _build_model_connectors(
+    payload: BenchmarkJobPayload,
+    plan: AdapterRunPlan,
+    runtime: EvaluationRuntime,
+    *,
+    connector_factory: ConnectorFactory | None,
+) -> tuple[ModelConnectorSet, Callable[[], None]]:
+    closers: list[Callable[[], None]] = []
+
+    def build(config: ConnectorConfig | None, role: ModelRole) -> ModelConnector | None:
+        if config is None:
+            return None
+        try:
+            if connector_factory is None:
+                connector, closer = _default_connector_factory(
+                    config,
+                    plan,
+                    runtime,
+                    role=role,
+                )
+            else:
+                connector, closer = connector_factory(config, plan, runtime, role)
+        except BaseException:
+            for existing_closer in reversed(closers):
+                existing_closer()
+            raise
+        closers.append(closer)
+        return connector
+
+    target = build(payload.connector, ModelRole.TARGET)
+    assert target is not None
+    judge = build(payload.judge_connector, ModelRole.JUDGE)
+    simulator = build(payload.simulator_connector, ModelRole.SIMULATOR)
+    closed = False
+
+    def close_all() -> None:
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        for closer in reversed(closers):
+            closer()
+
+    return ModelConnectorSet(target=target, judge=judge, simulator=simulator), close_all
+
+
 def _default_connector_factory(
     config: ConnectorConfig,
     plan: AdapterRunPlan,
     runtime: EvaluationRuntime,
+    *,
+    role: ModelRole = ModelRole.TARGET,
 ) -> tuple[ModelConnector, Callable[[], None]]:
     if config.kind == "fake":
-        responses: dict[str, ConnectorResult] = {}
-        for index, item in enumerate(plan.items):
-            answer = item.target
-            if index:
-                answer = "B" if item.target == "A" else "A"
-            request_id = f"gpqa-{item.ordinal}-{item.input_sha256[:16]}"
-            responses[request_id] = ConnectorResult(
-                response=ConnectorResponse(
-                    request_id=request_id,
-                    content=f"Synthetic reasoning only.\nANSWER: {answer}",
-                    finish_reason="stop",
-                    provider_request_id=f"fake-{item.ordinal}",
-                    provider_model=plan.target_model,
-                    usage=ConnectorUsage(
-                        prompt_tokens=10,
-                        completion_tokens=5,
-                        total_tokens=15,
-                    ),
-                    latency_seconds=0.0,
-                    attempts=1,
-                )
-            )
+        if plan.mode.value != "smoke":
+            raise ValueError("fixed fake connectors are smoke-only")
+        responses = get_adapter(plan.benchmark_id).smoke_connector_results(plan, role)
         return (
             FakeOpenAIConnector(
                 responses,
@@ -1140,6 +1346,8 @@ def _require_matching_plan(run, plan: AdapterRunPlan) -> None:
         or run.profile != plan.profile
         or run.mode is not plan.mode
         or run.target_model != plan.target_model
+        or run.judge_model != plan.selection.judge_model
+        or run.simulator_model != plan.selection.simulator_model
         or run.protocol_hash != plan.protocol_hash
         or run.item_input_manifest_sha256 != plan.item_input_manifest_sha256
         or run.selected_item_ids != tuple(item.item_id for item in plan.items)

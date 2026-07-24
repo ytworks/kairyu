@@ -21,6 +21,8 @@ from kairyu.evaluation.adapters.base import (
     DoctorReport,
     ExecutionSpec,
     ItemResult,
+    ModelRole,
+    ModelRolePlan,
     PreparationResult,
     PreparationStatus,
     ResourceRequirements,
@@ -36,7 +38,14 @@ from kairyu.evaluation.adapters.gpqa_v181 import (
     prepare_records,
     sha256_file,
 )
-from kairyu.evaluation.connectors import ModelConnector, ModelRequest
+from kairyu.evaluation.connectors import (
+    ConnectorResponse,
+    ConnectorResult,
+    ConnectorUsage,
+    ModelConnector,
+    ModelRequest,
+    canonical_connector_request_sha256,
+)
 from kairyu.evaluation.guards import validate_run_guard
 from kairyu.evaluation.profiles import ProfileLock, get_profile_lock, load_profiles
 from kairyu.evaluation.protocol import protocol_hash
@@ -578,6 +587,15 @@ class GPQADiamondAdapter(BenchmarkAdapter):
             execution=execution,
             official_eligible=official_eligible,
             selection=canonical_selection,
+            model_roles=(
+                ModelRolePlan(
+                    role=ModelRole.TARGET,
+                    model=selection.target_model,
+                    model_calls=len(items),
+                    timeout_seconds=timeout_seconds,
+                    maximum_output_tokens=maximum_output_tokens,
+                ),
+            ),
         )
 
     def protocol_signature(self, plan: AdapterRunPlan) -> ProtocolSignature:
@@ -620,8 +638,10 @@ class GPQADiamondAdapter(BenchmarkAdapter):
                 plan.selection.generation_parameters.get("timeout_seconds", 120.0)
             ),
         )
+        request_sha256 = canonical_connector_request_sha256(request)
         outcome = connector.complete(request, cancel_requested=cancel_check)
         if outcome.error is not None:
+            error = outcome.error
             return ItemResult(
                 item_id=item.item_id,
                 ordinal=item.ordinal,
@@ -629,7 +649,11 @@ class GPQADiamondAdapter(BenchmarkAdapter):
                 response_text="",
                 target=item.target,
                 correct=False,
-                error_class=outcome.error.code.value,
+                error_class=error.code.value,
+                latency_seconds=error.latency_seconds,
+                provider_request_id=error.provider_request_id,
+                target_attempts=error.attempts,
+                target_request_sha256=request_sha256,
             )
         response = outcome.response
         assert response is not None
@@ -643,12 +667,16 @@ class GPQADiamondAdapter(BenchmarkAdapter):
             extracted_answer=extracted,
             target=item.target,
             correct=extracted == item.target,
+            scores={"accuracy": 1.0 if extracted == item.target else 0.0},
+            report_error_class=(None if extracted in {"A", "B", "C", "D"} else "invalid_answer"),
             latency_seconds=response.latency_seconds,
             finish_reason=response.finish_reason,
             provider_request_id=response.provider_request_id,
             provider_model=response.provider_model,
             input_tokens=(usage.prompt_tokens if usage is not None else None),
             output_tokens=(usage.completion_tokens if usage is not None else None),
+            target_attempts=response.attempts,
+            target_request_sha256=request_sha256,
         )
 
     def collect(
@@ -665,8 +693,10 @@ class GPQADiamondAdapter(BenchmarkAdapter):
         for result in results:
             if result.error_class is not None:
                 error_counts[result.error_class] = error_counts.get(result.error_class, 0) + 1
-            elif result.extracted_answer not in {"A", "B", "C", "D"}:
-                error_counts["invalid_answer"] = error_counts.get("invalid_answer", 0) + 1
+            elif result.report_error_class is not None:
+                error_counts[result.report_error_class] = (
+                    error_counts.get(result.report_error_class, 0) + 1
+                )
         metric = Metric(
             run_id=run_id,
             name="accuracy",
@@ -692,6 +722,37 @@ class GPQADiamondAdapter(BenchmarkAdapter):
             skipped_count=0,
             error_counts=error_counts,
         )
+
+    def smoke_connector_results(
+        self,
+        plan: AdapterRunPlan,
+        role: ModelRole,
+    ) -> Mapping[str, ConnectorResult]:
+        if role is not ModelRole.TARGET:
+            return {}
+        responses: dict[str, ConnectorResult] = {}
+        for index, item in enumerate(plan.items):
+            answer = item.target
+            if index:
+                answer = "B" if item.target == "A" else "A"
+            request_id = f"gpqa-{item.ordinal}-{item.input_sha256[:16]}"
+            responses[request_id] = ConnectorResult(
+                response=ConnectorResponse(
+                    request_id=request_id,
+                    content=f"Synthetic reasoning only.\nANSWER: {answer}",
+                    finish_reason="stop",
+                    provider_request_id=f"fake-target-{item.ordinal}",
+                    provider_model=plan.target_model,
+                    usage=ConnectorUsage(
+                        prompt_tokens=10,
+                        completion_tokens=5,
+                        total_tokens=15,
+                    ),
+                    latency_seconds=0.0,
+                    attempts=1,
+                )
+            )
+        return responses
 
     def render_report_data(
         self,

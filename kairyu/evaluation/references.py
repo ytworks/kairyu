@@ -1,6 +1,6 @@
 """Offline, versioned reference-result snapshots for evaluation reports.
 
-Reference data is deliberately loaded from package resources.  Rendering a report
+Reference data is deliberately loaded from package resources. Rendering a report
 must never turn into a web lookup, and a changed source row must fail its evidence
 hash instead of silently changing a comparison.
 """
@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from importlib import resources
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -28,13 +30,28 @@ from kairyu.evaluation.schemas import (
 )
 
 GPQA_REFERENCE_RESOURCE = "resources/references/sakana-fugu-technical-report-2026-v2-gpqa.yaml"
+HLE_REFERENCE_RESOURCE = "resources/references/sakana-fugu-technical-report-2026-v2-hle.yaml"
+REFERENCE_RESOURCES_BY_BENCHMARK: Mapping[str, str] = MappingProxyType(
+    {
+        "gpqa-diamond": GPQA_REFERENCE_RESOURCE,
+        "humanitys-last-exam": HLE_REFERENCE_RESOURCE,
+    }
+)
 
+_BENCHMARK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _EXPECTED_GPQA_ROWS = (
     ("fugu-ultra-gpqa-diamond-2026-v2", "Fugu Ultra", 95.5),
     ("fugu-gpqa-diamond-2026-v2", "Fugu", 95.5),
     ("claude-opus-4.8-gpqa-diamond-2026-v2", "Claude Opus 4.8", 92.0),
     ("gemini-3.1-pro-gpqa-diamond-2026-v2", "Gemini 3.1 Pro", 94.3),
     ("gpt-5.5-gpqa-diamond-2026-v2", "GPT-5.5", 93.6),
+)
+_EXPECTED_HLE_ROWS = (
+    ("fugu-ultra-humanitys-last-exam-2026-v2", "Fugu Ultra", 50.0),
+    ("fugu-humanitys-last-exam-2026-v2", "Fugu", 47.2),
+    ("claude-opus-4.8-humanitys-last-exam-2026-v2", "Claude Opus 4.8", 49.8),
+    ("gemini-3.1-pro-humanitys-last-exam-2026-v2", "Gemini 3.1 Pro", 44.4),
+    ("gpt-5.5-humanitys-last-exam-2026-v2", "GPT-5.5", 41.4),
 )
 
 
@@ -136,19 +153,42 @@ def evidence_hash(record: Source | ReferenceResult) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def load_reference_snapshot(path: str | Path | None = None) -> ReferenceSnapshot:
-    """Load and strictly validate the pinned GPQA reference snapshot.
+def available_reference_benchmark_ids() -> tuple[str, ...]:
+    """Return benchmark IDs with reviewed, packaged reference snapshots."""
 
-    ``path`` exists for review tooling and tests.  With no path, only the packaged
-    resource is read; this function performs no network access.
+    return tuple(REFERENCE_RESOURCES_BY_BENCHMARK)
+
+
+def reference_resource_for_benchmark(benchmark_id: str) -> str:
+    """Resolve a benchmark ID to its reviewed package resource."""
+
+    if _BENCHMARK_ID_PATTERN.fullmatch(benchmark_id) is None:
+        raise KeyError(f"invalid benchmark ID {benchmark_id!r}")
+    try:
+        return REFERENCE_RESOURCES_BY_BENCHMARK[benchmark_id]
+    except KeyError as exc:
+        raise KeyError(f"no reference snapshot for {benchmark_id!r}") from exc
+
+
+def load_reference_snapshot(
+    path: str | Path | None = None,
+    *,
+    benchmark_id: str = "gpqa-diamond",
+) -> ReferenceSnapshot:
+    """Load the requested benchmark's pinned reference snapshot offline.
+
+    ``path`` exists for review tooling and tests. The requested ``benchmark_id``
+    remains authoritative even for a custom path, so one benchmark cannot load
+    another benchmark's reference rows by accident.
     """
 
+    resource_path = reference_resource_for_benchmark(benchmark_id)
     try:
         text = (
             Path(path).read_text(encoding="utf-8")
             if path is not None
             else resources.files("kairyu.evaluation")
-            .joinpath(GPQA_REFERENCE_RESOURCE)
+            .joinpath(resource_path)
             .read_text(encoding="utf-8")
         )
     except (OSError, UnicodeError) as exc:
@@ -165,7 +205,22 @@ def load_reference_snapshot(path: str | Path | None = None) -> ReferenceSnapshot
         snapshot = ReferenceSnapshot.model_validate(payload)
     except (TypeError, ValueError) as exc:
         raise ReferenceDataError("reference snapshot failed schema validation") from exc
-    _validate_gpqa_snapshot(snapshot)
+    if (
+        snapshot.schema_version != 1
+        or snapshot.source.schema_version != 1
+        or any(result.schema_version != 1 for result in snapshot.results)
+    ):
+        raise ReferenceDataError("unsupported reference snapshot or record schema version")
+    if snapshot.benchmark_id != benchmark_id:
+        raise ReferenceDataError(
+            "reference snapshot benchmark ID does not match requested benchmark"
+        )
+    if benchmark_id == "gpqa-diamond":
+        _validate_gpqa_snapshot(snapshot)
+    elif benchmark_id == "humanitys-last-exam":
+        _validate_hle_snapshot(snapshot)
+    else:  # pragma: no cover - guarded by the resource index
+        raise ReferenceDataError("reference snapshot has no benchmark validator")
     return snapshot
 
 
@@ -209,3 +264,58 @@ def _validate_gpqa_snapshot(snapshot: ReferenceSnapshot) -> None:
             raise ReferenceDataError("unresolved GPQA references cannot claim a protocol hash")
         if result.comparability is not Comparability.INCOMPATIBLE:
             raise ReferenceDataError("GPQA references must remain incompatible")
+
+
+def _validate_hle_snapshot(snapshot: ReferenceSnapshot) -> None:
+    if snapshot.schema_version != 1:
+        raise ReferenceDataError("unsupported HLE reference snapshot schema version")
+    if snapshot.snapshot_id != "sakana-fugu-technical-report-2026-v2-hle":
+        raise ReferenceDataError("unexpected HLE reference snapshot identity")
+    if snapshot.benchmark_id != "humanitys-last-exam":
+        raise ReferenceDataError("HLE reference snapshot has the wrong benchmark")
+    if snapshot.source.source_type is not SourceType.PAPER_COMPILATION:
+        raise ReferenceDataError("HLE references must be a paper compilation")
+    if snapshot.source.source_id != "sakana-fugu-technical-report-2026-v2":
+        raise ReferenceDataError("unexpected HLE source identity")
+    if snapshot.source.url != "https://arxiv.org/pdf/2606.21228":
+        raise ReferenceDataError("HLE source must retain its reviewed arXiv URL")
+    if snapshot.source.locator != "Table 1 (Humanity's Last Exam); Appendix A":
+        raise ReferenceDataError("HLE source must retain its reviewed locator")
+    if snapshot.source.release_page != "https://sakana.ai/fugu-release/":
+        raise ReferenceDataError("HLE source must retain its reviewed release page")
+
+    actual_rows = tuple(
+        (result.reference_id, result.model_name, result.score) for result in snapshot.results
+    )
+    if actual_rows != _EXPECTED_HLE_ROWS:
+        raise ReferenceDataError("HLE reference rows differ from the reviewed snapshot")
+    for result in snapshot.results:
+        if result.score_scale != 100.0:
+            raise ReferenceDataError("HLE reference scores must use the 0-100 scale")
+        if result.source_type is not SourceType.PAPER_COMPILATION:
+            raise ReferenceDataError("HLE reference source type must be paper_compilation")
+        if result.benchmark_version != "fugu-2026" or result.profile != "fugu-2026":
+            raise ReferenceDataError("HLE references must retain the reviewed profile")
+        if result.metric_name != "accuracy" or result.sample_count != 2500:
+            raise ReferenceDataError("HLE references must retain metric and sample evidence")
+        if result.provider_reported is not None:
+            raise ReferenceDataError("unverified provider reporting must remain null")
+        if result.independently_reproduced:
+            raise ReferenceDataError("paper-compiled HLE scores are not reproduced results")
+        if result.protocol_hash is not None:
+            raise ReferenceDataError("unresolved HLE references cannot claim a protocol hash")
+        if result.comparability is not Comparability.INCOMPATIBLE:
+            raise ReferenceDataError("HLE references must remain incompatible")
+
+
+__all__ = [
+    "GPQA_REFERENCE_RESOURCE",
+    "HLE_REFERENCE_RESOURCE",
+    "REFERENCE_RESOURCES_BY_BENCHMARK",
+    "ReferenceDataError",
+    "ReferenceSnapshot",
+    "available_reference_benchmark_ids",
+    "evidence_hash",
+    "load_reference_snapshot",
+    "reference_resource_for_benchmark",
+]

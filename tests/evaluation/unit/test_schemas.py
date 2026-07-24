@@ -477,13 +477,13 @@ def test_run_item_checkpoint_identity_is_all_or_none(checkpoint_fields):
         )
 
 
-def test_run_item_checkpoint_is_completed_only_and_uses_portable_path():
+def test_run_item_checkpoint_is_terminal_only_and_uses_portable_path():
     checkpoint = {
         "checkpoint_relative_path": "items/item-01.json",
         "checkpoint_sha256": "b" * 64,
         "checkpoint_source_run_id": "run-source",
     }
-    with pytest.raises(ValidationError, match="completed items"):
+    with pytest.raises(ValidationError, match="completed, failed, or cancelled items"):
         RunItem(
             run_id="run-01",
             item_id="item-01",

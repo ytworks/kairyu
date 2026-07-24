@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from kairyu.evaluation.protocol import protocol_hash
 from kairyu.evaluation.schemas import (
@@ -19,6 +19,7 @@ from kairyu.evaluation.schemas import (
     Comparability,
     FrozenModel,
     ItemState,
+    JsonValue,
     Metric,
     ProtocolSignature,
     ReferenceResult,
@@ -26,6 +27,8 @@ from kairyu.evaluation.schemas import (
     RunMode,
     RunState,
     Source,
+    freeze_json_value,
+    thaw_json_value,
 )
 
 _REPORTABLE_STATES = frozenset(
@@ -251,17 +254,9 @@ class ReportInputs(FrozenModel):
             raise ValueError("reports require a completed, cancelled, partial, or failed run")
         if self.protocol.benchmark_id != run.benchmark_id:
             raise ValueError("run and protocol benchmark IDs must match")
-        if (
-            run.judge_model is not None
-            and self.protocol.judge_model is not None
-            and run.judge_model != self.protocol.judge_model
-        ):
+        if run.judge_model != self.protocol.judge_model:
             raise ValueError("run and protocol judge models must match")
-        if (
-            run.simulator_model is not None
-            and self.protocol.simulator_model is not None
-            and run.simulator_model != self.protocol.simulator_model
-        ):
+        if run.simulator_model != self.protocol.simulator_model:
             raise ValueError("run and protocol simulator models must match")
         computed_protocol_hash = protocol_hash(self.protocol)
         if run.protocol_hash is not None and run.protocol_hash != computed_protocol_hash:
@@ -279,8 +274,6 @@ class ReportInputs(FrozenModel):
             raise ValueError("reports require exactly one primary metric")
         primary = primary_metrics[0]
         _validate_metric(primary)
-        if run.completed_count == 0 and primary.value is not None:
-            raise ValueError("a run with zero completed items must have a null metric value")
 
         item_ids = [item.item_id for item in self.items]
         ordinals = [item.ordinal for item in self.items]
@@ -346,11 +339,38 @@ class ReportProtocol(FrozenModel):
     harness_version: str
     harness_commit: str | None
     prompt_version: str
+    modalities: tuple[str, ...]
+    tools: tuple[str, ...]
+    web_access: bool
+    judge_model: str | None
+    judge_prompt_version: str | None
+    judge_reasoning_mode: str | None
+    generation_parameters: dict[str, JsonValue]
+    judge_generation_parameters: dict[str, JsonValue]
+    model_connectors: dict[str, JsonValue]
+    dependency_compatibility_patches: tuple[str, ...]
     retries: int = Field(ge=0)
     timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     reasoning_effort: str | None
     metric_implementation: str
     unresolved_fields: tuple[str, ...] = ()
+
+    @field_validator(
+        "generation_parameters",
+        "judge_generation_parameters",
+        "model_connectors",
+    )
+    @classmethod
+    def _freeze_protocol_json(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return freeze_json_value(value)
+
+    @field_serializer(
+        "generation_parameters",
+        "judge_generation_parameters",
+        "model_connectors",
+    )
+    def _serialize_protocol_json(self, value: object) -> JsonValue:
+        return thaw_json_value(value)
 
 
 class ReportCounts(FrozenModel):
@@ -376,6 +396,16 @@ class ReportMetric(FrozenModel):
     primary: bool
     higher_is_better: bool
     official_eligible: bool
+    dimensions: dict[str, JsonValue]
+
+    @field_validator("dimensions")
+    @classmethod
+    def _freeze_dimensions(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return freeze_json_value(value)
+
+    @field_serializer("dimensions")
+    def _serialize_dimensions(self, value: object) -> JsonValue:
+        return thaw_json_value(value)
 
 
 class ReportItem(FrozenModel):
@@ -421,7 +451,7 @@ class EvaluationReport(FrozenModel):
 
     notice: str
     reproducibility_notice: str
-    schema_version: int = 2
+    schema_version: int = 3
     report_date: date
     evidence_as_of: datetime
     run_id: str
@@ -763,6 +793,32 @@ def build_report(inputs: ReportInputs) -> EvaluationReport:
             harness_version=inputs.protocol.harness_version,
             harness_commit=inputs.protocol.harness_commit,
             prompt_version=inputs.protocol.prompt_version,
+            modalities=inputs.protocol.modalities,
+            tools=inputs.protocol.tools,
+            web_access=inputs.protocol.web_access,
+            judge_model=inputs.protocol.judge_model,
+            judge_prompt_version=inputs.protocol.judge_prompt_version,
+            judge_reasoning_mode=inputs.protocol.judge_reasoning_mode,
+            generation_parameters=dict(
+                inputs.protocol.model_dump(mode="json")["generation_parameters"]
+            ),
+            judge_generation_parameters=dict(
+                inputs.protocol.model_dump(mode="json")["adapter_configuration"].get(
+                    "judge_generation_parameters",
+                    {},
+                )
+            ),
+            model_connectors=dict(
+                inputs.protocol.model_dump(mode="json")["adapter_configuration"].get(
+                    "model_connectors",
+                    {
+                        "target": inputs.protocol.model_dump(mode="json")[
+                            "adapter_configuration"
+                        ].get("model_connector")
+                    },
+                )
+            ),
+            dependency_compatibility_patches=(inputs.protocol.dependency_compatibility_patches),
             retries=inputs.protocol.retries,
             timeout_seconds=(
                 inputs.protocol.timeout_seconds
@@ -824,6 +880,9 @@ def render_json(report: EvaluationReport) -> str:
 
 
 def render_markdown(report: EvaluationReport) -> str:
+    generation_parameters_json = _compact_json(report.protocol.generation_parameters)
+    judge_generation_parameters_json = _compact_json(report.protocol.judge_generation_parameters)
+    model_connectors_json = _compact_json(report.protocol.model_connectors)
     lines = [
         f"> **{_md(report.notice)}**",
         "",
@@ -870,6 +929,16 @@ def render_markdown(report: EvaluationReport) -> str:
         )
         + " |",
         "",
+        "- Modalities: " + ", ".join(_md(value) for value in report.protocol.modalities),
+        "- Tools: " + (", ".join(_md(value) for value in report.protocol.tools) or "none"),
+        f"- Web access: {str(report.protocol.web_access).lower()}",
+        f"- Judge model: {_md(report.protocol.judge_model)}",
+        f"- Judge prompt: {_md(report.protocol.judge_prompt_version)}",
+        f"- Judge reasoning mode: {_md(report.protocol.judge_reasoning_mode)}",
+        f"- Generation parameters: {_md(generation_parameters_json)}",
+        f"- Judge generation parameters: {_md(judge_generation_parameters_json)}",
+        f"- Model connectors: {_md(model_connectors_json)}",
+        "",
         "## Usage / Cost",
         "",
         "| Input tokens | Output tokens | Total latency (seconds) | "
@@ -890,8 +959,9 @@ def render_markdown(report: EvaluationReport) -> str:
         "",
         "## Metrics",
         "",
-        "| Metric | Value | Numerator | Denominator | Scale | Unit | Primary | Official |",
-        "|---|---:|---:|---:|---:|---|---|---|",
+        "| Metric | Value | Numerator | Denominator | Scale | Unit | "
+        "Dimensions | Primary | Official |",
+        "|---|---:|---:|---:|---:|---|---|---|---|",
     ]
     lines.extend(
         "| "
@@ -903,6 +973,7 @@ def render_markdown(report: EvaluationReport) -> str:
                 _display(metric.denominator),
                 _display(metric.scale),
                 _md(metric.unit),
+                _md(_compact_json(metric.dimensions)),
                 str(metric.primary).lower(),
                 str(metric.official_eligible).lower(),
             )
@@ -918,6 +989,9 @@ def render_markdown(report: EvaluationReport) -> str:
 
 
 def render_html(report: EvaluationReport) -> str:
+    generation_parameters_json = _compact_json(report.protocol.generation_parameters)
+    judge_generation_parameters_json = _compact_json(report.protocol.judge_generation_parameters)
+    model_connectors_json = _compact_json(report.protocol.model_connectors)
     counts = "".join(
         f"<td>{_html(value)}</td>" for value in report.counts.model_dump(mode="python").values()
     )
@@ -929,6 +1003,7 @@ def render_html(report: EvaluationReport) -> str:
         f"<td>{_html(metric.denominator)}</td>"
         f"<td>{_html(metric.scale)}</td>"
         f"<td>{_html(metric.unit)}</td>"
+        f"<td>{_html(_compact_json(metric.dimensions))}</td>"
         f"<td>{_html(metric.primary)}</td>"
         f"<td>{_html(metric.official_eligible)}</td>"
         "</tr>"
@@ -1029,6 +1104,16 @@ grid-template-columns:max-content 1fr;gap:.4rem 1rem}}dt{{font-weight:700}}
 <dt>Retries</dt><dd>{_html(report.protocol.retries)}</dd>
 <dt>Timeout (seconds)</dt><dd>{_html(report.protocol.timeout_seconds)}</dd>
 <dt>Reasoning effort</dt><dd>{_html(report.protocol.reasoning_effort)}</dd>
+<dt>Modalities</dt><dd>{_html(", ".join(report.protocol.modalities))}</dd>
+<dt>Tools</dt><dd>{_html(", ".join(report.protocol.tools) or "none")}</dd>
+<dt>Web access</dt><dd>{_html(report.protocol.web_access)}</dd>
+<dt>Judge model</dt><dd>{_html(report.protocol.judge_model)}</dd>
+<dt>Judge prompt</dt><dd>{_html(report.protocol.judge_prompt_version)}</dd>
+<dt>Judge reasoning mode</dt><dd>{_html(report.protocol.judge_reasoning_mode)}</dd>
+<dt>Generation parameters</dt><dd><code>{_html(generation_parameters_json)}</code></dd>
+<dt>Judge generation parameters</dt>
+<dd><code>{_html(judge_generation_parameters_json)}</code></dd>
+<dt>Model connectors</dt><dd><code>{_html(model_connectors_json)}</code></dd>
 </dl>
 <h2>Usage / Cost</h2>
 <dl>
@@ -1042,7 +1127,7 @@ grid-template-columns:max-content 1fr;gap:.4rem 1rem}}dt{{font-weight:700}}
 </dl>
 <h2>Metrics</h2>
 <table><thead><tr><th>Metric</th><th>Value</th><th>Numerator</th><th>Denominator</th>
-<th>Scale</th><th>Unit</th><th>Primary</th><th>Official</th></tr></thead>
+<th>Scale</th><th>Unit</th><th>Dimensions</th><th>Primary</th><th>Official</th></tr></thead>
 <tbody>{metrics}</tbody></table>
 <h2>Errors</h2><table><thead><tr><th>Class</th><th>Count</th></tr></thead>
 <tbody>{errors}</tbody></table>
@@ -1227,6 +1312,7 @@ def _summarize_metric(metric: Metric) -> ReportMetric:
         primary=metric.primary,
         higher_is_better=metric.higher_is_better,
         official_eligible=metric.official_eligible,
+        dimensions=dict(metric.model_dump(mode="json")["dimensions"]),
     )
 
 
@@ -1357,6 +1443,16 @@ def _ensure_no_raw_benchmark_content(value: Any) -> None:
             seen.add(identity)
             retained.append(current)
             stack.extend(current)
+
+
+def _compact_json(value: object) -> str:
+    return json.dumps(
+        thaw_json_value(value),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _display(value: object) -> str:

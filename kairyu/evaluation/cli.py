@@ -151,6 +151,7 @@ def handle(args: argparse.Namespace) -> int:
         plan = bind_connector_to_plan(
             adapter.build_run_plan(selection),
             _connector_from_args(args),
+            judge_connector=_judge_connector_from_args(args),
         )
         _emit(_plan_payload(plan, adapter.metadata()), args.format)
         return 0
@@ -158,6 +159,7 @@ def handle(args: argparse.Namespace) -> int:
         selection = _selection_from_args(args)
         _guard_selection(selection)
         connector = _connector_from_args(args)
+        judge_connector = _judge_connector_from_args(args)
         if selection.mode is RunMode.FULL:
             from kairyu.evaluation.adapters import get_adapter
 
@@ -165,6 +167,7 @@ def handle(args: argparse.Namespace) -> int:
             preview = bind_connector_to_plan(
                 adapter.build_run_plan(selection),
                 connector,
+                judge_connector=judge_connector,
             )
             _emit_full_run_preflight(
                 _preflight_payload(preview, adapter.metadata()),
@@ -176,6 +179,7 @@ def handle(args: argparse.Namespace) -> int:
             args.benchmark_id,
             selection,
             connector,
+            judge_connector=judge_connector,
         )
         payload = submitted.model_dump(mode="json")
         if args.wait:
@@ -235,9 +239,7 @@ def handle(args: argparse.Namespace) -> int:
         _emit(report.model_dump(mode="json"), args.format)
         return 0
     if command == "references" and args.reference_command == "list":
-        if args.benchmark != "gpqa-diamond":
-            raise ValueError("reference data is not implemented for this benchmark yet")
-        snapshot = load_reference_snapshot()
+        snapshot = load_reference_snapshot(benchmark_id=args.benchmark)
         _emit(snapshot.model_dump(mode="json"), args.format)
         return 0
     raise ValueError(f"unknown benchmark command {command!r}")
@@ -274,6 +276,7 @@ def _add_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--profile", default="smoke")
     parser.add_argument("--mode", choices=tuple(RunMode), default=RunMode.SMOKE.value)
     parser.add_argument("--model", default="kairyu-synthetic-model")
+    parser.add_argument("--judge-model")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--sample-id", "--sample-ids", dest="sample_ids", action="append")
     parser.add_argument("--seed", type=int, default=42)
@@ -281,6 +284,11 @@ def _add_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--judge-temperature", type=float)
+    parser.add_argument("--judge-top-p", type=float)
+    parser.add_argument("--judge-max-tokens", type=int)
+    parser.add_argument("--judge-timeout-seconds", type=float)
+    parser.add_argument("--judge-reasoning-effort")
     parser.add_argument("--dataset-path")
     parser.add_argument("--dataset-sha256")
     parser.add_argument("--accepted-access", action="store_true")
@@ -293,13 +301,30 @@ def _add_connector_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--secret-env-name")
     parser.add_argument("--max-response-bytes", type=int, default=1_048_576)
     parser.add_argument("--max-retries", type=int, default=2)
+    parser.add_argument("--judge-connector", choices=("fake", "openai"))
+    parser.add_argument("--judge-endpoint")
+    parser.add_argument("--judge-secret-env-name")
+    parser.add_argument("--judge-max-response-bytes", type=int, default=1_048_576)
+    parser.add_argument("--judge-max-retries", type=int, default=2)
 
 
 def _selection_from_args(args: argparse.Namespace) -> RunSelection:
+    judge_generation_parameters = {
+        key: value
+        for key, value in {
+            "max_tokens": args.judge_max_tokens,
+            "reasoning_effort": args.judge_reasoning_effort,
+            "temperature": args.judge_temperature,
+            "timeout_seconds": args.judge_timeout_seconds,
+            "top_p": args.judge_top_p,
+        }.items()
+        if value is not None
+    }
     return RunSelection(
         profile=args.profile,
         mode=RunMode(args.mode),
         target_model=args.model,
+        judge_model=args.judge_model,
         limit=args.limit,
         sample_ids=tuple(args.sample_ids or ()),
         seed=args.seed,
@@ -314,6 +339,7 @@ def _selection_from_args(args: argparse.Namespace) -> RunSelection:
             "timeout_seconds": args.timeout_seconds,
             "top_p": args.top_p,
         },
+        judge_generation_parameters=judge_generation_parameters,
     )
 
 
@@ -333,6 +359,25 @@ def _connector_from_args(args: argparse.Namespace) -> ConnectorConfig:
         secret_env_name=args.secret_env_name,
         max_response_bytes=args.max_response_bytes,
         max_retries=args.max_retries,
+    )
+
+
+def _judge_connector_from_args(args: argparse.Namespace) -> ConnectorConfig | None:
+    configured = (
+        args.judge_connector is not None
+        or args.judge_endpoint is not None
+        or args.judge_secret_env_name is not None
+    )
+    if not configured:
+        return None
+    if args.judge_connector is None:
+        raise ValueError("judge endpoint or credential requires --judge-connector")
+    return ConnectorConfig(
+        kind=args.judge_connector,
+        endpoint=args.judge_endpoint,
+        secret_env_name=args.judge_secret_env_name,
+        max_response_bytes=args.judge_max_response_bytes,
+        max_retries=args.judge_max_retries,
     )
 
 

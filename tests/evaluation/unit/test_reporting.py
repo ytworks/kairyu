@@ -44,6 +44,13 @@ def _protocol() -> ProtocolSignature:
         generation_parameters={"temperature": 0.0, "seed": 42},
         reasoning_effort="medium",
         judge_model="judge-model",
+        adapter_configuration={
+            "judge_generation_parameters": {
+                "max_tokens": 2048,
+                "reasoning_effort": "high",
+                "temperature": 0.0,
+            }
+        },
         simulator_model="simulator-model",
         metric_implementation="accuracy-v1",
     )
@@ -59,6 +66,8 @@ def _run(
     failed_count: int = 0,
     skipped_count: int = 0,
     target_model: str = "fake-model",
+    judge_model: str | None = "judge-model",
+    simulator_model: str | None = "simulator-model",
 ) -> BenchmarkRun:
     protocol = _protocol()
     return BenchmarkRun(
@@ -76,6 +85,8 @@ def _run(
         failed_count=failed_count,
         skipped_count=skipped_count,
         target_model=target_model,
+        judge_model=judge_model,
+        simulator_model=simulator_model,
         created_at=CREATED,
         started_at=STARTED,
         finished_at=FINISHED,
@@ -245,6 +256,7 @@ def test_rendered_reports_are_deterministic_complete_and_evidence_only():
     assert first.html == second.html
     assert first.json.startswith('{\n  "notice":')
     payload = json.loads(first.json)
+    assert payload["schema_version"] == 3
     assert payload["report_date"] == "2026-07-20"
     assert payload["evidence_as_of"] == "2026-07-20T01:02:00Z"
     assert payload["protocol_hash"] == protocol_hash(_protocol())
@@ -252,6 +264,11 @@ def test_rendered_reports_are_deterministic_complete_and_evidence_only():
     assert payload["protocol"]["retries"] == 2
     assert payload["protocol"]["timeout_seconds"] == 90.0
     assert payload["protocol"]["reasoning_effort"] == "medium"
+    assert payload["protocol"]["judge_generation_parameters"] == {
+        "max_tokens": 2048,
+        "reasoning_effort": "high",
+        "temperature": 0.0,
+    }
     assert "Provider APIs may be nondeterministic" in payload["reproducibility_notice"]
     assert "seed does not guarantee identical responses" in payload["reproducibility_notice"]
     assert payload["target_model"] == "fake-model"
@@ -303,6 +320,11 @@ def test_rendered_reports_are_deterministic_complete_and_evidence_only():
     assert "<h2>Usage / Cost</h2>" in first.html
     assert "<dt>Actual cost (USD)</dt><dd>0.125</dd>" in first.html
     assert "## Protocol Details" in first.markdown
+    assert (
+        "- Judge generation parameters: "
+        '{"max\\_tokens":2048,"reasoning\\_effort":"high",'
+        '"temperature":0.0}'
+    ) in first.markdown
     assert f"| kairyu-gpqa-smoke | 1 | {'c' * 40} | 2 | 90.0 | medium |" in first.markdown
     assert "Provider APIs may be nondeterministic" in first.markdown
     assert "<h2>Protocol Details</h2>" in first.html
@@ -310,6 +332,7 @@ def test_rendered_reports_are_deterministic_complete_and_evidence_only():
     assert "<dt>Retries</dt><dd>2</dd>" in first.html
     assert "<dt>Timeout (seconds)</dt><dd>90.0</dd>" in first.html
     assert "<dt>Reasoning effort</dt><dd>medium</dd>" in first.html
+    assert "<dt>Judge generation parameters</dt>" in first.html
     assert "Provider APIs may be nondeterministic" in first.html
 
 
@@ -373,7 +396,7 @@ def test_failed_item_errors_are_aggregated_without_leaking_item_evidence():
         input_sha256="1" * 64,
         error_class="rate_limit",
     )
-    metric = _metric(value=None, numerator=0, denominator=0)
+    metric = _metric(value=0.0, numerator=0, denominator=1)
 
     payload = json.loads(
         render_report(
@@ -387,6 +410,8 @@ def test_failed_item_errors_are_aggregated_without_leaking_item_evidence():
     )
 
     assert payload["errors"] == [{"count": 1, "error_class": "rate_limit"}]
+    assert payload["metrics"][0]["value"] == 0.0
+    assert payload["metrics"][0]["denominator"] == 1
     assert payload["items"] == [{"item_id": "synthetic-1", "score": None, "state": "failed"}]
     assert set(payload["items"][0]) == {"item_id", "state", "score"}
 
@@ -449,3 +474,46 @@ def test_report_rejects_mismatched_run_counts_and_metric_math():
     bad_metric = _metric(value=49.0)
     with pytest.raises(ValidationError, match="does not match"):
         _inputs(metric=bad_metric)
+
+
+@pytest.mark.parametrize(
+    ("role", "run_model", "protocol_model"),
+    (
+        ("judge", None, "judge-model"),
+        ("judge", "judge-model", None),
+        ("judge", "run-judge", "protocol-judge"),
+        ("simulator", None, "simulator-model"),
+        ("simulator", "simulator-model", None),
+        ("simulator", "run-simulator", "protocol-simulator"),
+    ),
+)
+def test_report_requires_exact_optional_role_model_equality(
+    role: str,
+    run_model: str | None,
+    protocol_model: str | None,
+):
+    field = f"{role}_model"
+    protocol = _protocol().model_copy(update={field: protocol_model})
+    run = _run().model_copy(
+        update={
+            field: run_model,
+            "protocol_hash": protocol_hash(protocol),
+        }
+    )
+
+    with pytest.raises(ValidationError, match=f"run and protocol {role} models must match"):
+        _inputs(run=run, protocol=protocol)
+
+
+def test_report_accepts_matching_absent_optional_role_models():
+    protocol = _protocol().model_copy(
+        update={
+            "judge_model": None,
+            "simulator_model": None,
+        }
+    )
+    run = _run(judge_model=None, simulator_model=None).model_copy(
+        update={"protocol_hash": protocol_hash(protocol)}
+    )
+
+    assert _inputs(run=run, protocol=protocol).run == run
