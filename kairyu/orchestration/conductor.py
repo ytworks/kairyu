@@ -16,6 +16,15 @@ from dataclasses import dataclass, field
 
 from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest, GenerationResult
 from kairyu.orchestration.budget import Budget, BudgetState
+from kairyu.orchestration.trace import (
+    TraceBudget,
+    TraceError,
+    TraceEvent,
+    TraceTiming,
+    TraceUsage,
+    WorkerTraceIdentity,
+    utc_now_iso,
+)
 from kairyu.sampling_params import SamplingParams
 
 _PASS_PREFIX = "PASS"
@@ -51,13 +60,6 @@ class RoleSpec:
 
 
 @dataclass(frozen=True)
-class TraceEvent:
-    node: str
-    kind: str
-    detail: str = ""
-
-
-@dataclass(frozen=True)
 class ConductorResult:
     final_text: str
     outputs: dict[str, str]
@@ -86,6 +88,18 @@ class _BudgetRefused(Exception):
     """Internal control flow for a generation that could not reserve budget."""
 
 
+class _ObservedGenerationError(Exception):
+    """A backend/cost failure already represented in the structured trace."""
+
+
+@dataclass(frozen=True)
+class _GenerationObservation:
+    text: str
+    timing: TraceTiming
+    usage: TraceUsage | None
+    budget: TraceBudget
+
+
 def _is_pass(verdict_text: str) -> bool:
     first_line = verdict_text.strip().splitlines()[0] if verdict_text.strip() else ""
     return first_line.upper().startswith(_PASS_PREFIX)
@@ -99,12 +113,21 @@ class Conductor:
         shared_prefix: str = "",
         sampling_params: SamplingParams | None = None,
         cost_model: CostModel = zero_cost,
+        worker_trace: Mapping[str, WorkerTraceIdentity] | None = None,
     ) -> None:
         self._roles = tuple(roles)
         self._workers = dict(workers)
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
         self._cost_model = cost_model
+        supplied_trace = dict(worker_trace or {})
+        self._worker_trace = {
+            worker: supplied_trace.get(
+                worker,
+                WorkerTraceIdentity(engine=worker),
+            )
+            for worker in self._workers
+        }
         self._by_name = {role.name: role for role in self._roles}
         self._verifier_for = {
             role.verifies: role for role in self._roles if role.role_type == "verifier"
@@ -174,9 +197,53 @@ class Conductor:
         fingerprint = hashlib.sha256(self._shared_prefix.encode()).hexdigest()[:16]
         return CacheHint(session_id=session, prefix_fingerprint=fingerprint)
 
+    def _trace_event(
+        self,
+        spec: RoleSpec,
+        kind: str,
+        *,
+        operation: str,
+        status: str,
+        attempt: int,
+        detail: str = "",
+        timing: TraceTiming | None = None,
+        usage: TraceUsage | None = None,
+        budget: TraceBudget | None = None,
+        metadata: dict | None = None,
+        error: TraceError | None = None,
+    ) -> TraceEvent:
+        identity = self._worker_trace[spec.worker]
+        return TraceEvent(
+            node=spec.name,
+            kind=kind,
+            detail=detail,
+            operation=operation,
+            status=status,
+            attempt=attempt,
+            role=spec.role_type,
+            worker=spec.worker,
+            engine=identity.engine,
+            model=identity.model,
+            timing=timing,
+            usage=usage,
+            budget=budget,
+            metadata=dict(metadata or {}),
+            error=error,
+        )
+
     async def _generate(
-        self, run: _RunState, session: str, node: str, worker: str, prompt: str, attempt: int
-    ) -> str:
+        self,
+        run: _RunState,
+        session: str,
+        node: str,
+        worker: str,
+        prompt: str,
+        attempt: int,
+        *,
+        spec: RoleSpec | None = None,
+        operation: str = "generation",
+    ) -> _GenerationObservation:
+        event_spec = spec or RoleSpec(name=node, worker=worker, prompt="")
         backend = self._workers[worker]
         request = GenerationRequest(
             request_id=f"{session}-{node}-{attempt}",
@@ -184,29 +251,83 @@ class Conductor:
             sampling_params=self._sampling_params,
             cache_hint=self._cache_hint(session),
         )
+        queued_at = utc_now_iso()
+        budget_before = run.budget
         unknown_cost = run.budget.budget.max_cost_usd is not None
         reserved = run.budget.try_reserve(unknown_cost=unknown_cost)
         if reserved is None:
             raise _BudgetRefused
         run.budget = reserved
+        started_at = utc_now_iso()
         try:
             result = await backend.generate(request)
+            actual_cost = self._cost_model(request, result)
             reconciled = run.budget.reconcile_success(
-                cost=self._cost_model(request, result),
+                cost=actual_cost,
                 unknown_cost=unknown_cost,
             )
+        except Exception as error:
+            run.budget = run.budget.release(unknown_cost=unknown_cost)
+            run.trace.append(
+                self._trace_event(
+                    event_spec,
+                    "failed",
+                    operation=operation,
+                    status="failed",
+                    attempt=attempt,
+                    detail=type(error).__name__,
+                    timing=TraceTiming(
+                        queued_at=queued_at,
+                        started_at=started_at,
+                        completed_at=utc_now_iso(),
+                    ),
+                    budget=TraceBudget.between(budget_before, run.budget),
+                    error=TraceError(type=type(error).__name__),
+                )
+            )
+            raise _ObservedGenerationError from error
         except BaseException:
             run.budget = run.budget.release(unknown_cost=unknown_cost)
             raise
         run.budget = reconciled
+        trace_usage = None
         if result.usage is not None:  # m11 A1: usage was dropped here
             run.usage[0] += result.usage.prompt_tokens
             run.usage[1] += result.usage.completion_tokens
-        return result.text
+            trace_usage = TraceUsage(
+                prompt_tokens=result.usage.prompt_tokens,
+                completion_tokens=result.usage.completion_tokens,
+                cached_tokens=result.usage.cached_tokens,
+            )
+        return _GenerationObservation(
+            text=result.text,
+            timing=TraceTiming(
+                queued_at=queued_at,
+                started_at=started_at,
+                completed_at=utc_now_iso(),
+            ),
+            usage=trace_usage,
+            budget=TraceBudget.between(
+                budget_before,
+                run.budget,
+                steps_consumed=1,
+                cost_consumed_usd=actual_cost,
+            ),
+        )
 
     async def _run_unit(self, run: _RunState, session: str, query: str, spec: RoleSpec) -> None:
         if run.budget.is_exhausted:
-            run.trace.append(TraceEvent(spec.name, "skipped:budget"))
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "skipped:budget",
+                    operation="generation",
+                    status="skipped",
+                    attempt=0,
+                    budget=TraceBudget.between(run.budget, run.budget),
+                    metadata={"reason": "budget"},
+                )
+            )
             return
         base_prompt = self._render(spec.prompt, query, run.outputs)
         verifier = self._verifier_for.get(spec.name)
@@ -214,30 +335,89 @@ class Conductor:
         depth = 0
         while True:
             try:
-                text = await self._generate(
-                    run, session, spec.name, spec.worker, prompt, depth
+                observed = await self._generate(
+                    run,
+                    session,
+                    spec.name,
+                    spec.worker,
+                    prompt,
+                    depth,
+                    spec=spec,
+                    operation="generation",
                 )
             except _BudgetRefused:
-                run.trace.append(TraceEvent(spec.name, "skipped:budget"))
+                run.trace.append(
+                    self._trace_event(
+                        spec,
+                        "skipped:budget",
+                        operation="generation",
+                        status="skipped",
+                        attempt=depth,
+                        budget=TraceBudget.between(run.budget, run.budget),
+                        metadata={"reason": "budget"},
+                    )
+                )
                 if spec.name not in run.outputs:
                     return
                 break
+            text = observed.text
             run.outputs[spec.name] = text
-            run.trace.append(TraceEvent(spec.name, "generated", f"attempt={depth}"))
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "generated",
+                    operation="generation",
+                    status="success",
+                    attempt=depth,
+                    detail=f"attempt={depth}",
+                    timing=observed.timing,
+                    usage=observed.usage,
+                    budget=observed.budget,
+                )
+            )
             if verifier is None:
                 break
             verifier_prompt = self._render(verifier.prompt, query, run.outputs)
             try:
-                verdict = await self._generate(
-                    run, session, verifier.name, verifier.worker, verifier_prompt, depth
+                verifier_observed = await self._generate(
+                    run,
+                    session,
+                    verifier.name,
+                    verifier.worker,
+                    verifier_prompt,
+                    depth,
+                    spec=verifier,
+                    operation="verification",
                 )
             except _BudgetRefused:
-                run.trace.append(TraceEvent(verifier.name, "skipped:budget"))
+                run.trace.append(
+                    self._trace_event(
+                        verifier,
+                        "skipped:budget",
+                        operation="verification",
+                        status="skipped",
+                        attempt=depth,
+                        budget=TraceBudget.between(run.budget, run.budget),
+                        metadata={"reason": "budget"},
+                    )
+                )
                 break
+            verdict = verifier_observed.text
             run.outputs[verifier.name] = verdict
             passed = _is_pass(verdict)
             run.trace.append(
-                TraceEvent(verifier.name, "verified", f"attempt={depth} pass={passed}")
+                self._trace_event(
+                    verifier,
+                    "verified",
+                    operation="verification",
+                    status="success",
+                    attempt=depth,
+                    detail=f"attempt={depth} pass={passed}",
+                    timing=verifier_observed.timing,
+                    usage=verifier_observed.usage,
+                    budget=verifier_observed.budget,
+                    metadata={"pass": passed},
+                )
             )
             if passed or not run.budget.can_refine(depth):
                 break
@@ -256,8 +436,20 @@ class Conductor:
         # result produced so far (O4). Sibling units keep their completed work.
         try:
             await self._run_unit(run, session, query, spec)
+        except _ObservedGenerationError:
+            pass
         except Exception as error:
-            run.trace.append(TraceEvent(spec.name, "failed", type(error).__name__))
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "failed",
+                    operation="generation",
+                    status="failed",
+                    attempt=0,
+                    detail=type(error).__name__,
+                    error=TraceError(type=type(error).__name__),
+                )
+            )
 
     def _final_text(self, run: _RunState) -> str:
         dependents: set[str] = set()

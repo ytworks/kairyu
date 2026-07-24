@@ -102,9 +102,12 @@ class TestOrchestratorSurface:
                       "messages": [{"role": "user", "content": "hello"}]},
             )
             assert response.status_code == 200
-            usage = response.json()["usage"]
+            payload = response.json()
+            usage = payload["usage"]
             assert usage["completion_tokens"] > 0  # m11 A1: real, not zero
-            assert "kairyu_trace" not in response.json() or response.json()["kairyu_trace"] is None
+            assert "kairyu_trace" not in payload
+            assert "kairyu_trace_v2" not in payload
+            assert "kairyu_route" not in payload
 
     def test_auto_model_rejects_unsupported_params(self, tmp_path):
         # M4: params the orchestrator can't honor (n>1, logprobs, tools,
@@ -133,6 +136,24 @@ class TestOrchestratorSurface:
             )
             trace = response.json().get("kairyu_trace")
             assert trace and any("route:" in line for line in trace)
+            trace_v2 = response.json().get("kairyu_trace_v2")
+            assert trace_v2["trace_version"] == "2.0"
+            assert trace_v2["request_id"] == response.json()["id"]
+            assert trace_v2["events"][0]["kind"] == "routing"
+            assert trace_v2["events"][0]["seq"] == 1
+            assert trace_v2["events"][-1]["kind"] == "generation"
+            assert trace_v2["events"][-1]["timing"]["completed_at"]
+            assert "hello" not in str(trace_v2)
+            assert response.json()["kairyu_route"]["target"] == "tier1"
+
+    def test_structured_trace_is_declared_in_openapi(self, tmp_path):
+        with TestClient(_auto_app(tmp_path)) as client:
+            schemas = client.get("/openapi.json").json()["components"]["schemas"]
+        response_schema = schemas["ChatCompletionResponse"]
+        assert "kairyu_trace_v2" in response_schema["properties"]
+        assert "kairyu_route" in response_schema["properties"]
+        assert "KairyuTraceV2" in schemas
+        assert "RouteDecisionPayload" in schemas
 
     def test_auto_stream_chunks_and_usage(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:

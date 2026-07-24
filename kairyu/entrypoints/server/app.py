@@ -60,6 +60,7 @@ from kairyu.entrypoints.server.middleware import (
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionChunk,
     ChatCompletionRequest,
+    ChatCompletionResponse,
     Choice,
     ChoiceLogprobs,
     ChunkChoice,
@@ -91,6 +92,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AUTO_MODEL = "kairyu-auto"
+_KAIRYU_CHAT_EXTENSION_FIELDS = {
+    "kairyu_trace",
+    "kairyu_trace_v2",
+    "kairyu_route",
+}
 
 
 def _route_payload(decision) -> RouteDecisionPayload:
@@ -99,6 +105,14 @@ def _route_payload(decision) -> RouteDecisionPayload:
         confidence=decision.confidence,
         reason=decision.reason,
         features=decision.features.as_dict(),
+    )
+
+
+def _chat_response_payload(response: ChatCompletionResponse) -> dict:
+    """Preserve the OpenAI wire shape while omitting unset Kairyu extensions."""
+    return response.model_dump(
+        mode="json",
+        exclude=_KAIRYU_CHAT_EXTENSION_FIELDS,
     )
 
 
@@ -686,7 +700,7 @@ def create_app(
             }
         )
 
-    @app.post("/v1/chat/completions")
+    @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
     async def chat_completions(request: ChatCompletionRequest, http_request: Request):
         http_request.state.model = request.model  # label for the metrics middleware
         if request.model in auto_models:
@@ -769,13 +783,17 @@ def create_app(
                 completions=completions,
             )
             if want_trace:
-                payload = response.model_dump(mode="json")
+                payload = _chat_response_payload(response)
                 payload["kairyu_trace"] = list(result.trace)
+                if result.structured_trace is not None:
+                    payload["kairyu_trace_v2"] = result.structured_trace.as_dict(
+                        request_id=response.id
+                    )
                 payload["kairyu_route"] = _route_payload(result.route).model_dump(
                     mode="json"
                 )
                 return JSONResponse(content=payload)
-            return response
+            return JSONResponse(content=_chat_response_payload(response))
 
         session_id = _session_id(request, http_request)
         try:
@@ -840,7 +858,7 @@ def create_app(
                 ),
                 media_type="text/event-stream",
             )
-        return response
+        return JSONResponse(content=_chat_response_payload(response))
 
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest, http_request: Request):
