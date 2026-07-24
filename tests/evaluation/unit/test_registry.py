@@ -1,4 +1,4 @@
-"""The M20 catalog is exact, ordered, and metadata-only."""
+"""The M20 catalog is exact, ordered, and lazily exposes landed adapters."""
 
 import pytest
 
@@ -39,10 +39,13 @@ def test_catalog_is_exact_and_deterministically_ordered():
     assert len(BENCHMARK_IDS) == len(set(BENCHMARK_IDS)) == 11
 
 
-def test_foundation_catalog_does_not_claim_adapters_are_available():
-    assert {entry.implementation_status for entry in benchmark_catalog()} == {
-        ImplementationStatus.PLANNED
-    }
+def test_only_landed_adapter_is_available():
+    statuses = {entry.benchmark_id: entry.implementation_status for entry in benchmark_catalog()}
+
+    assert statuses["gpqa-diamond"] is ImplementationStatus.AVAILABLE
+    assert {
+        status for benchmark_id, status in statuses.items() if benchmark_id != "gpqa-diamond"
+    } == {ImplementationStatus.PLANNED}
 
 
 def test_get_benchmark_returns_the_catalog_entry():

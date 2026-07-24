@@ -304,11 +304,14 @@ class ProtocolSignature(FrozenModel):
     schema_version: PositiveInt = 1
     benchmark_id: Identifier
     benchmark_version: Annotated[str, Field(min_length=1)]
+    dataset_id: Annotated[str, Field(min_length=1)] = "unresolved"
     dataset_revision: Annotated[str, Field(min_length=1)]
     split: Annotated[str, Field(min_length=1)]
     sample_filter: dict[str, JsonValue] = Field(default_factory=dict)
     harness_name: Annotated[str, Field(min_length=1)]
     harness_version: Annotated[str, Field(min_length=1)]
+    harness_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")] | None = None
+    dependency_lock_sha256: Sha256 | None = None
     agent_scaffold: str | None = None
     prompt_version: Annotated[str, Field(min_length=1)]
     modalities: tuple[str, ...] = ("text",)
@@ -328,12 +331,14 @@ class ProtocolSignature(FrozenModel):
     metric_implementation: Annotated[str, Field(min_length=1)]
     dependency_compatibility_patches: tuple[str, ...] = ()
     code_execution_sandbox: dict[str, JsonValue] = Field(default_factory=dict)
+    adapter_configuration: dict[str, JsonValue] = Field(default_factory=dict)
     unresolved_fields: tuple[str, ...] = ()
 
     @field_validator(
         "sample_filter",
         "generation_parameters",
         "code_execution_sandbox",
+        "adapter_configuration",
     )
     @classmethod
     def _json_fields_are_secret_free(
@@ -351,6 +356,7 @@ class ProtocolSignature(FrozenModel):
         "sample_filter",
         "generation_parameters",
         "code_execution_sandbox",
+        "adapter_configuration",
     )
     def _serialize_json_fields(self, value: object) -> JsonValue:
         return thaw_json_value(value)
@@ -483,9 +489,19 @@ class RunItem(FrozenModel):
     state: ItemState = ItemState.PENDING
     attempt: PositiveInt = 1
     input_sha256: Sha256
-    checkpoint: str | None = None
+    checkpoint_relative_path: Annotated[str, Field(min_length=1, max_length=1024)] | None = None
+    checkpoint_sha256: Sha256 | None = None
+    checkpoint_source_run_id: RunIdentifier | None = None
     error_class: str | None = None
     scores: dict[str, Annotated[float, Field(allow_inf_nan=False)]] = Field(default_factory=dict)
+
+    @field_validator("checkpoint_relative_path")
+    @classmethod
+    def _portable_checkpoint_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        _validate_portable_relative_path(value, "checkpoint")
+        return value
 
     @field_validator("scores")
     @classmethod
@@ -504,6 +520,22 @@ class RunItem(FrozenModel):
     def _serialize_scores(self, value: object) -> JsonValue:
         return thaw_json_value(value)
 
+    @model_validator(mode="after")
+    def _checkpoint_is_complete_terminal_evidence(self) -> RunItem:
+        checkpoint_fields = (
+            self.checkpoint_relative_path,
+            self.checkpoint_sha256,
+            self.checkpoint_source_run_id,
+        )
+        populated = sum(value is not None for value in checkpoint_fields)
+        if populated not in {0, len(checkpoint_fields)}:
+            raise ValueError(
+                "checkpoint path, SHA-256, and source-run provenance must be all present or absent"
+            )
+        if populated and self.state is not ItemState.COMPLETED:
+            raise ValueError("checkpoints are valid only for completed items")
+        return self
+
 
 class Artifact(FrozenModel):
     schema_version: PositiveInt = 1
@@ -518,16 +550,7 @@ class Artifact(FrozenModel):
     @field_validator("relative_path")
     @classmethod
     def _portable_relative_path(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        safe_component = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-        if (
-            "\\" in value
-            or path.is_absolute()
-            or path.as_posix() != value
-            or not path.parts
-            or any(not safe_component.fullmatch(part) for part in path.parts)
-        ):
-            raise ValueError("artifact path must be canonical portable safe ASCII components")
+        _validate_portable_relative_path(value, "artifact")
         return value
 
     @field_validator("created_at")
@@ -536,6 +559,19 @@ class Artifact(FrozenModel):
         normalised = _aware(value, "created_at")
         assert normalised is not None
         return normalised
+
+
+def _validate_portable_relative_path(value: str, kind: str) -> None:
+    path = PurePosixPath(value)
+    safe_component = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+    if (
+        "\\" in value
+        or path.is_absolute()
+        or path.as_posix() != value
+        or not path.parts
+        or any(not safe_component.fullmatch(part) for part in path.parts)
+    ):
+        raise ValueError(f"{kind} path must be canonical portable safe ASCII components")
 
 
 class Metric(FrozenModel):

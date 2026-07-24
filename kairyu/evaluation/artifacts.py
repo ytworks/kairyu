@@ -12,8 +12,8 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
-import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -33,6 +33,7 @@ from kairyu.evaluation.safety import (
 from kairyu.evaluation.schemas import thaw_json_value
 
 _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+DEFAULT_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 
 PublicationGuardFactory = Callable[[PublicationToken], AbstractContextManager[None]]
 
@@ -61,6 +62,10 @@ class ArtifactConflictError(RuntimeError):
     """An artifact destination already contains different immutable bytes."""
 
 
+class ArtifactSizeLimitError(ValueError):
+    """An artifact exceeded this store instance’s configured byte limit."""
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactWrite:
     """Metadata produced by one durable artifact publication."""
@@ -84,9 +89,16 @@ class ArtifactStore:
         *,
         publication_guard: PublicationGuardFactory,
         secret_registry: SecretValueRegistry | None = None,
+        max_artifact_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
     ) -> None:
         if not callable(publication_guard):
             raise TypeError("publication_guard must be callable")
+        if (
+            isinstance(max_artifact_bytes, bool)
+            or not isinstance(max_artifact_bytes, int)
+            or max_artifact_bytes <= 0
+        ):
+            raise ValueError("max_artifact_bytes must be a positive integer")
         candidate = Path(root).expanduser().absolute()
         _assert_no_symlink(candidate, include_missing_tail=False)
         candidate.mkdir(parents=True, exist_ok=True)
@@ -94,26 +106,39 @@ class ArtifactStore:
         self._root = candidate
         self._publication_guard = publication_guard
         self._secret_registry = secret_registry
+        self._max_artifact_bytes = max_artifact_bytes
 
     @property
     def root(self) -> Path:
         return self._root
 
+    @property
+    def max_artifact_bytes(self) -> int:
+        return self._max_artifact_bytes
+
     def create_run(self, run_id: str) -> Path:
         """Create and return a run directory, including its fixed subdirectories."""
         self._scan_text(run_id)
         run_directory = self._run_path(run_id)
-        _assert_directory(self._root)
-        if run_directory.is_symlink():
-            raise UnsafeArtifactPath(f"run directory is a symlink: {run_id!r}")
-        run_directory.mkdir(mode=0o700, exist_ok=True)
-        _assert_directory(run_directory)
-        for name in RUN_ARTIFACT_DIRECTORIES:
-            child = run_directory / name
-            if child.is_symlink():
-                raise UnsafeArtifactPath(f"run artifact directory is a symlink: {name!r}")
-            child.mkdir(mode=0o700, exist_ok=True)
-            _assert_directory(child)
+        root_descriptor = _open_directory_path(self._root)
+        try:
+            run_descriptor = _open_or_create_directory_at(
+                root_descriptor,
+                run_id,
+                display_path=run_directory,
+            )
+            try:
+                for name in RUN_ARTIFACT_DIRECTORIES:
+                    child_descriptor = _open_or_create_directory_at(
+                        run_descriptor,
+                        name,
+                        display_path=run_directory / name,
+                    )
+                    os.close(child_descriptor)
+            finally:
+                os.close(run_descriptor)
+        finally:
+            os.close(root_descriptor)
         return run_directory
 
     def run_dir(self, run_id: str) -> Path:
@@ -145,6 +170,7 @@ class ArtifactStore:
         """Publish immutable bytes while holding an active publication fence."""
         if not isinstance(content, bytes):
             raise TypeError("artifact content must be bytes")
+        self._ensure_size(len(content))
         if not isinstance(publication_token, PublicationToken):
             raise TypeError("publication_token must be a PublicationToken")
         if publication_token.run_id != run_id:
@@ -161,39 +187,63 @@ class ArtifactStore:
 
         with self._publication_guard(publication_token):
             destination = self.path_for(run_id, relative_path)
-            self._create_safe_parents(self.run_dir(run_id), destination.parent)
-            _reject_symlink_or_directory(destination)
-            file_descriptor, raw_temporary_path = tempfile.mkstemp(
-                prefix=f".{destination.name}.",
-                suffix=".tmp",
-                dir=destination.parent,
+            parts = _validate_relative_path(relative_path)
+            parent_descriptor = _open_artifact_parent(
+                self._root,
+                run_id,
+                parts,
+                create=True,
             )
-            temporary_path: Path | None = Path(raw_temporary_path)
+            temporary_name: str | None = None
+            file_descriptor = -1
             try:
+                _reject_symlink_or_directory_at(
+                    parent_descriptor,
+                    parts[-1],
+                    display_path=destination,
+                )
+                temporary_name, file_descriptor = _create_temporary_file_at(
+                    parent_descriptor,
+                    destination_name=parts[-1],
+                )
                 with os.fdopen(file_descriptor, "wb") as handle:
+                    file_descriptor = -1
                     handle.write(content)
                     handle.flush()
                     os.fsync(handle.fileno())
-                _reject_symlink_or_directory(destination)
-                _assert_directory(destination.parent)
+                _reject_symlink_or_directory_at(
+                    parent_descriptor,
+                    parts[-1],
+                    display_path=destination,
+                )
                 try:
                     os.link(
-                        temporary_path,
-                        destination,
+                        temporary_name,
+                        parts[-1],
+                        src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor,
                         follow_symlinks=False,
                     )
                 except FileExistsError:
-                    existing_sha256, existing_size = _hash_regular_file(destination)
+                    existing_sha256, existing_size = _hash_regular_file_at(
+                        parent_descriptor,
+                        parts[-1],
+                        display_path=destination,
+                        max_bytes=self._max_artifact_bytes,
+                    )
                     if existing_sha256 != content_sha256 or existing_size != len(content):
                         raise ArtifactConflictError(
                             "artifact destination already contains different bytes"
                         ) from None
-                temporary_path.unlink()
-                temporary_path = None
-                _fsync_directory(destination.parent)
+                _unlink_at(parent_descriptor, temporary_name)
+                temporary_name = None
+                os.fsync(parent_descriptor)
             finally:
-                if temporary_path is not None:
-                    temporary_path.unlink(missing_ok=True)
+                if file_descriptor >= 0:
+                    os.close(file_descriptor)
+                if temporary_name is not None:
+                    _unlink_at(parent_descriptor, temporary_name, missing_ok=True)
+                os.close(parent_descriptor)
 
         return ArtifactWrite(
             run_id=run_id,
@@ -218,6 +268,7 @@ class ArtifactStore:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
+        self._ensure_size(len(encoded))
         ensure_secret_free_serialized_json(
             encoded,
             secret_registry=self._secret_registry,
@@ -239,6 +290,7 @@ class ArtifactStore:
     ) -> ArtifactWrite:
         """Publish newline-delimited canonical JSON after scanning each record."""
         encoded_records: list[bytes] = []
+        encoded_size = 0
         for record in records:
             encoded = json.dumps(
                 thaw_json_value(record),
@@ -247,6 +299,8 @@ class ArtifactStore:
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
+            encoded_size += len(encoded) + 1
+            self._ensure_size(encoded_size)
             ensure_secret_free_serialized_json(
                 encoded,
                 secret_registry=self._secret_registry,
@@ -281,28 +335,44 @@ class ArtifactStore:
         )
 
     def read_bytes(self, run_id: str, relative_path: str | Path) -> bytes:
-        """Read one artifact without following a symlink at the final component."""
+        """Read one artifact through a pinned, symlink-safe parent descriptor."""
         path = self.path_for(run_id, relative_path)
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        parts = _validate_relative_path(relative_path)
+        parent_descriptor = _open_artifact_parent(
+            self._root,
+            run_id,
+            parts,
+            create=False,
+        )
         try:
-            file_descriptor = os.open(path, flags)
-        except OSError as exc:
-            if path.is_symlink():
-                raise UnsafeArtifactPath(f"artifact is a symlink: {relative_path!s}") from exc
-            raise
-        try:
-            metadata = os.fstat(file_descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise UnsafeArtifactPath(f"artifact is not a regular file: {relative_path!s}")
-            with os.fdopen(file_descriptor, "rb") as handle:
-                file_descriptor = -1
-                return handle.read()
+            file_descriptor = _open_regular_file_at(
+                parent_descriptor,
+                parts[-1],
+                display_path=path,
+            )
+            try:
+                metadata = os.fstat(file_descriptor)
+                self._ensure_size(metadata.st_size)
+                with os.fdopen(file_descriptor, "rb") as handle:
+                    file_descriptor = -1
+                    content = handle.read(self._max_artifact_bytes + 1)
+                self._ensure_size(len(content))
+                return content
+            finally:
+                if file_descriptor >= 0:
+                    os.close(file_descriptor)
         finally:
-            if file_descriptor >= 0:
-                os.close(file_descriptor)
+            os.close(parent_descriptor)
 
     def read_json(self, run_id: str, relative_path: str | Path) -> Any:
         return json.loads(self.read_bytes(run_id, relative_path))
+
+    def _ensure_size(self, size_bytes: int) -> None:
+        if size_bytes > self._max_artifact_bytes:
+            raise ArtifactSizeLimitError(
+                "artifact exceeds configured byte limit "
+                f"({size_bytes} > {self._max_artifact_bytes})"
+            )
 
     def _scan_text(self, value: str) -> None:
         ensure_secret_free_bytes(
@@ -315,18 +385,6 @@ class ArtifactStore:
         path = self._root / run_id
         _assert_contained(self._root, path)
         return path
-
-    @staticmethod
-    def _create_safe_parents(run_directory: Path, parent: Path) -> None:
-        _assert_contained(run_directory, parent)
-        relative_parts = parent.relative_to(run_directory).parts
-        current = run_directory
-        for part in relative_parts:
-            current /= part
-            if current.is_symlink():
-                raise UnsafeArtifactPath(f"artifact parent is a symlink: {current}")
-            current.mkdir(mode=0o700, exist_ok=True)
-            _assert_directory(current)
 
 
 def _validate_run_id(run_id: str) -> None:
@@ -398,45 +456,237 @@ def _assert_directory(path: Path) -> None:
         raise UnsafeArtifactPath(f"artifact path is not a directory: {path}")
 
 
-def _reject_symlink_or_directory(path: Path) -> None:
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_directory_path(path: Path) -> int:
     try:
-        metadata = path.lstat()
+        descriptor = os.open(path, _directory_open_flags())
+    except OSError as exc:
+        if path.is_symlink():
+            raise UnsafeArtifactPath(f"artifact directory is a symlink: {path}") from exc
+        raise
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        os.close(descriptor)
+        raise UnsafeArtifactPath(f"artifact path is not a directory: {path}")
+    return descriptor
+
+
+def _open_directory_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    display_path: Path,
+) -> int:
+    try:
+        descriptor = os.open(
+            name,
+            _directory_open_flags(),
+            dir_fd=parent_descriptor,
+        )
+    except OSError as exc:
+        if _is_symlink_at(parent_descriptor, name):
+            raise UnsafeArtifactPath(
+                f"symlink is not allowed in artifact path: {display_path}"
+            ) from exc
+        raise
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        os.close(descriptor)
+        raise UnsafeArtifactPath(f"artifact path is not a directory: {display_path}")
+    return descriptor
+
+
+def _open_or_create_directory_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    display_path: Path,
+) -> int:
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
+    except FileExistsError:
+        pass
+    try:
+        return _open_directory_at(
+            parent_descriptor,
+            name,
+            display_path=display_path,
+        )
+    except NotADirectoryError as exc:
+        # Preserve Path.mkdir(exist_ok=True) semantics for callers that use a
+        # file where a run or artifact directory must be created.
+        raise FileExistsError(display_path) from exc
+
+
+def _open_artifact_parent(
+    root_directory: Path,
+    run_id: str,
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+) -> int:
+    """Open an artifact parent below pinned root and run directory FDs."""
+    current_descriptor = _open_directory_path(root_directory)
+    try:
+        current_path = root_directory / run_id
+        next_descriptor = _open_directory_at(
+            current_descriptor,
+            run_id,
+            display_path=current_path,
+        )
+        os.close(current_descriptor)
+        current_descriptor = next_descriptor
+        for part in parts[:-1]:
+            current_path /= part
+            if create:
+                next_descriptor = _open_or_create_directory_at(
+                    current_descriptor,
+                    part,
+                    display_path=current_path,
+                )
+            else:
+                next_descriptor = _open_directory_at(
+                    current_descriptor,
+                    part,
+                    display_path=current_path,
+                )
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+        result = current_descriptor
+        current_descriptor = -1
+        return result
+    finally:
+        if current_descriptor >= 0:
+            os.close(current_descriptor)
+
+
+def _is_symlink_at(parent_descriptor: int, name: str) -> bool:
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISLNK(metadata.st_mode)
+
+
+def _reject_symlink_or_directory_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    display_path: Path,
+) -> None:
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
     except FileNotFoundError:
         return
     if stat.S_ISLNK(metadata.st_mode):
-        raise UnsafeArtifactPath(f"artifact destination is a symlink: {path}")
+        raise UnsafeArtifactPath(f"artifact destination is a symlink: {display_path}")
     if stat.S_ISDIR(metadata.st_mode):
-        raise UnsafeArtifactPath(f"artifact destination is a directory: {path}")
+        raise UnsafeArtifactPath(f"artifact destination is a directory: {display_path}")
 
 
-def _hash_regular_file(path: Path) -> tuple[str, int]:
-    _reject_symlink_or_directory(path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+def _create_temporary_file_at(
+    parent_descriptor: int,
+    *,
+    destination_name: str,
+) -> tuple[str, int]:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    for _ in range(128):
+        name = f".{destination_name}.{secrets.token_hex(16)}.tmp"
+        try:
+            descriptor = os.open(
+                name,
+                flags,
+                mode=0o600,
+                dir_fd=parent_descriptor,
+            )
+        except FileExistsError:
+            continue
+        return name, descriptor
+    raise FileExistsError("could not allocate a unique artifact temporary file")
+
+
+def _open_regular_file_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    display_path: Path,
+) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
-        file_descriptor = os.open(path, flags)
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
     except OSError as exc:
-        if path.is_symlink():
-            raise UnsafeArtifactPath(f"artifact is a symlink: {path}") from exc
+        if _is_symlink_at(parent_descriptor, name):
+            raise UnsafeArtifactPath(f"artifact is a symlink: {display_path}") from exc
         raise
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise UnsafeArtifactPath(f"artifact is not a regular file: {display_path}")
+    return descriptor
+
+
+def _hash_regular_file_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    display_path: Path,
+    max_bytes: int,
+) -> tuple[str, int]:
+    file_descriptor = _open_regular_file_at(
+        parent_descriptor,
+        name,
+        display_path=display_path,
+    )
     digest = hashlib.sha256()
     try:
         metadata = os.fstat(file_descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise UnsafeArtifactPath(f"artifact is not a regular file: {path}")
+        if metadata.st_size > max_bytes:
+            raise ArtifactSizeLimitError(
+                f"artifact exceeds configured byte limit ({metadata.st_size} > {max_bytes})"
+            )
+        observed_size = 0
         with os.fdopen(file_descriptor, "rb") as handle:
             file_descriptor = -1
-            while chunk := handle.read(1024 * 1024):
+            while chunk := handle.read(min(1024 * 1024, max_bytes + 1)):
+                observed_size += len(chunk)
+                if observed_size > max_bytes:
+                    raise ArtifactSizeLimitError(
+                        "artifact exceeds configured byte limit during read"
+                    )
                 digest.update(chunk)
-        return digest.hexdigest(), metadata.st_size
+        return digest.hexdigest(), observed_size
     finally:
         if file_descriptor >= 0:
             os.close(file_descriptor)
 
 
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    file_descriptor = os.open(path, flags)
+def _unlink_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    missing_ok: bool = False,
+) -> None:
     try:
-        os.fsync(file_descriptor)
-    finally:
-        os.close(file_descriptor)
+        os.unlink(name, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        if not missing_ok:
+            raise

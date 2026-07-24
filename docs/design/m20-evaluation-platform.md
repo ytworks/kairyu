@@ -1,7 +1,7 @@
 # M20 Design: Reproducible Evaluation Platform
 
-Status: **Foundation implemented** (2026-07-24; benchmark adapters, execution
-orchestration/reporting, and the legacy cutover are pending).
+Status: **Foundation and GPQA Diamond implemented** (2026-07-24; the remaining
+benchmark adapters and the legacy cutover are pending).
 Milestone: M20
 Date: 2026-07-24
 Depends on: M7 production lifecycle patterns, M9/M11 OpenAI-compatible wire
@@ -127,15 +127,20 @@ benchmark_runs/<run-id>/
   upstream/
 ```
 
-Artifact publication validates containment, rejects symlink traversal, and holds a
-store-owned publication transaction guard across the publish boundary. Active workers
-use their lease generation; a terminal, non-leased run may receive a version-fenced
-finalization token solely for `report.json`, `report.md`, and `report.html`. Execution
-evidence such as predictions, item results, logs, and upstream outputs always requires
-an active worker lease. The store writes and fsyncs a same-directory temporary
-file, then creates the destination atomically
-without replacement. A byte-identical retry is idempotent; different existing bytes
-are a conflict and are never overwritten. Artifact metadata is registered under the
+Artifact publication validates containment, pins every path component with no-follow
+directory descriptors, rejects symlink traversal, enforces a configurable per-artifact
+byte limit (64 MiB by default), and holds a store-owned publication transaction guard
+across the publish boundary. Active workers use their lease generation. A terminal,
+non-leased run normally receives a version-fenced finalization token solely for `report.json`, `report.md`, and
+`report.html`. A queued run can be cancelled before any worker lease exists, so a
+cancelled-run token has one narrower exceptional capability: it may create the exact
+standard aggregate paths listed above from the already-frozen run/job snapshot. That
+token still cannot create checkpoints, logs, arbitrary paths, or upstream outputs. All
+other execution evidence requires an active worker lease. The store writes and fsyncs a
+same-directory temporary file, then creates the destination atomically without replacement through the pinned
+parent descriptor. Reads, idempotence hashing, and parent-directory fsync use the
+same bounded descriptor-relative path. A byte-identical retry is idempotent; different
+existing bytes are a conflict and are never overwritten. Artifact metadata is registered under the
 same publication fence. Report regeneration reads artifacts and local reference
 snapshots only. Aggregate paths are published once per run; resumable checkpoints use
 item-scoped paths under `upstream/checkpoints/`.
@@ -221,6 +226,33 @@ It deliberately does not:
 Each following PR adds one benchmark adapter, its pinned runtime/profile metadata,
 and four-layer tests. The final PR archives legacy results and removes the legacy
 package, dependencies, configuration, documentation, and command.
+
+### GPQA Diamond implementation
+
+The first adapter pins the GPQA behavior used by EvalScope 1.8.1: zero-shot
+single-answer prompting, one sequential Python-MT choice shuffle with seed 42, the
+upstream answer extraction behavior, and mean exact-match Accuracy on the 198-item
+Diamond split. Kairyu also records its explicit bounded request policy: one sequential
+chat-completion call per item, temperature 0, top_p 1, at most 1,024 output tokens, a
+120-second per-attempt timeout, and the connector retry limit. This is a reviewed
+compatibility policy, not a claim of byte-identical provider behavior. The protocol
+also pins the local compatibility module by SHA-256 alongside the dependency lock. The
+implementation is local and offline; ordinary CI uses only a two-item synthetic fixture and a fixed fake
+connector.
+
+GPQA never downloads gated data. Non-smoke preparation requires a manually approved
+local CSV or JSONL snapshot, an explicit access acknowledgement, and the caller-provided
+SHA-256. Parsing and hashing use the same bounded, no-symlink byte snapshot. Public item
+IDs are hashes, and official questions and choices are excluded from control metadata
+and reports.
+
+`official-latest` and `fugu-2026` remain fail-closed for official comparison until a
+reviewed dataset-byte lock resolves their dataset provenance. Smoke, sample, partial,
+cancelled, and provider-model-mismatched results are always unofficial. Stored Fugu
+table values remain incompatible reference evidence and therefore produce no delta or
+rank. Provider API version, runtime attestation, source retrieval date, worker/provider
+hardware, and monetary cost remain explicit unknowns with reasons rather than guessed
+values.
 
 ## 4. Implementation order
 

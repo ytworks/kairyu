@@ -1,0 +1,92 @@
+schema_version: 1
+benchmark_id: gpqa-diamond
+profiles:
+  - name: smoke
+    description: Offline synthetic two-item wiring profile; never an official GPQA score.
+    dataset_id: kairyu.synthetic.gpqa-diamond
+    dataset_revision: d00d5ff92cf97f99b66af968abb7b247494d2f8f79a434a91e1ce45172683eed
+    dataset_sha256: d00d5ff92cf97f99b66af968abb7b247494d2f8f79a434a91e1ce45172683eed
+    split: synthetic
+    expected_full_count: 198
+    data_license: CC0-1.0
+    gated: false
+    harness_name: kairyu-evalscope-gpqa-compat
+    harness_repository: https://github.com/modelscope/evalscope
+    harness_version: 1.8.1+compat.1
+    harness_commit: fce1d21391dc2d7b45c9cf0edb9b9e40d526aed3
+    dependency_lock_sha256: 2a6d1ac99eff465169b28eabd8e655711d7e5aaa241ef2f7fe0946c054efe186
+    evalscope_wheel_sha256: 0bbbd2302d038b2c3a95cad2c4b20b93cc4ca911dc7b0033060c551a22cbab8f
+    compatibility_layer_sha256: 533999762a93d5a75694ea785212e131dadbf725b1862d9c5fc2f453c4774556
+    prompt_version: evalscope-v1.8.1-single-answer-cot
+    prompt_sha256: f759b2cf67b53500e906bc321c88285351eadd9918a8479505626828f04e6aba
+    seed: 42
+    repeats: 1
+    few_shot: 0
+    shuffle_algorithm: python-mt19937-sequential-index-v1
+    preprocess_version: evalscope-v1.8.1-gpqa-preprocess
+    answer_parser_version: evalscope-v1.8.1-parse-answers
+    metric_implementation: evalscope-v1.8.1-acc-mean
+    source_urls:
+      - https://github.com/modelscope/evalscope/tree/v1.8.1/evalscope/benchmarks/gpqa
+    unresolved_fields: []
+  - name: fugu-2026
+    description: Reproducible best-effort profile for the Fugu report's published EvalScope version.
+    dataset_id: Idavidrein/gpqa
+    dataset_revision: unresolved-fugu-2026-dataset-snapshot
+    dataset_sha256: null
+    split: train
+    expected_full_count: 198
+    data_license: CC-BY-4.0
+    gated: true
+    harness_name: kairyu-evalscope-gpqa-compat
+    harness_repository: https://github.com/modelscope/evalscope
+    harness_version: 1.8.1+compat.1
+    harness_commit: fce1d21391dc2d7b45c9cf0edb9b9e40d526aed3
+    dependency_lock_sha256: 2a6d1ac99eff465169b28eabd8e655711d7e5aaa241ef2f7fe0946c054efe186
+    evalscope_wheel_sha256: 0bbbd2302d038b2c3a95cad2c4b20b93cc4ca911dc7b0033060c551a22cbab8f
+    compatibility_layer_sha256: 533999762a93d5a75694ea785212e131dadbf725b1862d9c5fc2f453c4774556
+    prompt_version: evalscope-v1.8.1-single-answer-cot
+    prompt_sha256: f759b2cf67b53500e906bc321c88285351eadd9918a8479505626828f04e6aba
+    seed: 42
+    repeats: 1
+    few_shot: 0
+    shuffle_algorithm: python-mt19937-sequential-index-v1
+    preprocess_version: evalscope-v1.8.1-gpqa-preprocess
+    answer_parser_version: evalscope-v1.8.1-parse-answers
+    metric_implementation: evalscope-v1.8.1-acc-mean
+    source_urls:
+      - https://huggingface.co/datasets/Idavidrein/gpqa
+      - https://github.com/modelscope/evalscope/tree/v1.8.1/evalscope/benchmarks/gpqa
+    unresolved_fields:
+      - dataset_revision
+  - name: official-latest
+    description: Approved local snapshot of the original-author GPQA Diamond data with pinned semantics.
+    dataset_id: Idavidrein/gpqa
+    dataset_revision: 633f5ee89ab8ad4522a9f850766b73f62147ffdd
+    dataset_sha256: null
+    split: train
+    expected_full_count: 198
+    data_license: CC-BY-4.0
+    gated: true
+    harness_name: kairyu-evalscope-gpqa-compat
+    harness_repository: https://github.com/modelscope/evalscope
+    harness_version: 1.8.1+compat.1
+    harness_commit: fce1d21391dc2d7b45c9cf0edb9b9e40d526aed3
+    dependency_lock_sha256: 2a6d1ac99eff465169b28eabd8e655711d7e5aaa241ef2f7fe0946c054efe186
+    evalscope_wheel_sha256: 0bbbd2302d038b2c3a95cad2c4b20b93cc4ca911dc7b0033060c551a22cbab8f
+    compatibility_layer_sha256: 533999762a93d5a75694ea785212e131dadbf725b1862d9c5fc2f453c4774556
+    prompt_version: evalscope-v1.8.1-single-answer-cot
+    prompt_sha256: f759b2cf67b53500e906bc321c88285351eadd9918a8479505626828f04e6aba
+    seed: 42
+    repeats: 1
+    few_shot: 0
+    shuffle_algorithm: python-mt19937-sequential-index-v1
+    preprocess_version: evalscope-v1.8.1-gpqa-preprocess
+    answer_parser_version: evalscope-v1.8.1-parse-answers
+    metric_implementation: evalscope-v1.8.1-acc-mean
+    source_urls:
+      - https://huggingface.co/datasets/Idavidrein/gpqa
+      - https://github.com/idavidrein/gpqa
+      - https://github.com/modelscope/evalscope/tree/v1.8.1/evalscope/benchmarks/gpqa
+    unresolved_fields:
+      - dataset_revision

@@ -716,12 +716,37 @@ tokens_per_minute=200_000)}))`.
 
 ## 8. Benchmarks
 
-M20 is replacing the legacy quality suite one benchmark at a time. The new,
-non-destructive catalog is available with `uv run kairyu benchmark list`; entries
-remain marked `planned` until their adapter PR lands. During the stacked-PR migration,
-the legacy command below remains available, but it is not the implementation or result
-format targeted by M20. The top-level `bench/` performance and operational tooling is
-outside this replacement and remains supported. See
+M20 is replacing the legacy quality suite one benchmark at a time. GPQA Diamond is
+the first `available` adapter; the remaining catalog entries stay `planned` until their
+individual PRs land. Its offline synthetic smoke exercises durable submission, worker
+leases, item checkpoints, cancellation/resume, immutable evidence, and JSON/Markdown/HTML
+reporting without downloading a dataset or calling a model API:
+
+```bash
+uv run kairyu benchmark list
+uv run kairyu benchmark doctor gpqa-diamond --profile smoke
+uv run kairyu benchmark prepare gpqa-diamond --profile smoke --dry-run
+uv run kairyu benchmark plan gpqa-diamond --profile smoke --mode smoke \
+    --connector fake
+uv run kairyu benchmark run gpqa-diamond --profile smoke --mode smoke \
+    --connector fake --wait --state-dir .kairyu/evaluation
+
+# Durable lifecycle (use the run ID returned by run/resume)
+uv run kairyu benchmark status <run-id> --state-dir .kairyu/evaluation
+uv run kairyu benchmark cancel <run-id> --state-dir .kairyu/evaluation
+uv run kairyu benchmark resume <run-id> --state-dir .kairyu/evaluation
+uv run kairyu benchmark worker --once --state-dir .kairyu/evaluation
+uv run kairyu benchmark report <run-id> --state-dir .kairyu/evaluation
+uv run kairyu benchmark references list --benchmark gpqa-diamond
+```
+
+Gated GPQA profiles never download data or accept terms automatically; they require an
+explicitly approved local CSV/JSONL snapshot and SHA-256. Full mode is additionally
+fail-closed behind `--confirm-full-run` and `BENCHMARK_ALLOW_FULL_RUN=1`, and CI always
+rejects it. During the stacked-PR migration, the legacy command below remains available,
+but it is not the implementation or result format targeted by M20. The top-level
+`bench/` performance and operational tooling is outside this replacement and remains
+supported. See
 [`docs/design/m20-evaluation-platform.md`](docs/design/m20-evaluation-platform.md).
 
 `kairyu bench` runs the 11-benchmark Fugu-release quality suite against any deployed
