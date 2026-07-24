@@ -11,7 +11,7 @@ remaining work is GPU execution: performance gates, kernel tuning, fabric
 bring-up, `pytest -m gpu`, and `scripts/gpu_gates/` (all pre-written and
 dry-run pinned).**
 
-_Last updated: 2026-07-19_
+_Last updated: 2026-07-23_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -52,6 +52,9 @@ replicas, auth, metrics, batch) or a replica node, and the compose topology
 Router inspection now has a non-dispatching, non-mutating `/v1/route` preview that shares
 chat prompt rendering, an authenticated `/routing` descriptor, and opt-in structured actual
 decisions; the GPU compose mounts an explicit routing spec for `kairyu-auto`.
+Unary orchestrated responses can now opt into versioned `kairyu_trace_v2` events with
+route/role status, attempts, timing, resolved engine/model, token usage, budget deltas, and
+sanitized failures while retaining the legacy string trace and excluding prompt/output text.
 The vLLM-compatible `AsyncLLMEngine` now owns an explicit registry of active
 request IDs: inactive aborts are stateless, while an active abort interrupts and
 closes its backend stream without poisoning later reuse of the same ID.
@@ -105,6 +108,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-23 — [progress] Versioned structured orchestration trace for evaluation tooling
+- What: Added additive, opt-in `kairyu_trace_v2` on unary orchestrated chat responses while
+  preserving `kairyu_trace`. Direct, Conductor, and MoA paths emit a common versioned envelope
+  with sequenced route/role events, status/attempt, timestamps, resolved worker/engine/model,
+  backend token usage, budget deltas, and exception class only. The Pydantic response schema
+  declares both structured route and trace for capability discovery while unrequested extension
+  fields remain absent. MoA preserves proposal/synthesizer resolution even when both fall back
+  to one engine. A contract document pins compatibility, timing, privacy, and extension rules.
+- Why: The verification app needs to overlay the actual execution path on the configured role
+  DAG and diagnose latency/refinement/budget behavior without parsing strings or collecting
+  prompts and generated text.
+- Refs: `docs/design/observability-trace-contract.md`,
+  `kairyu/orchestration/{trace,conductor,orchestrator}.py`,
+  `kairyu/entrypoints/server/{protocol,app}.py`.
 
 ### 2026-07-19 — [amendment] Routing verification is non-mutating and deployment-visible
 - What: Added built-in Router `preview`/safe descriptor contracts, including RNG-cloned bandit

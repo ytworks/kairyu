@@ -334,6 +334,13 @@ async def test_failed_generation_releases_reservation_for_later_unit():
     assert any(
         event.node == "first" and event.kind == "failed" for event in result.trace
     )
+    failed = next(event for event in result.trace if event.node == "first")
+    assert failed.operation == "generation"
+    assert failed.status == "failed"
+    assert failed.error is not None
+    assert failed.error.type == "RuntimeError"
+    assert failed.timing is not None
+    assert failed.timing.completed_at is not None
 
 
 async def test_cancelled_generation_releases_reservation_and_propagates():
@@ -410,8 +417,17 @@ async def test_verifier_budget_refusal_preserves_completed_target():
     assert backend.prompts_seen == ["do: task"]
     assert run.outputs == {"worker": "best completed draft"}
     assert run.completion_order == ["worker"]
-    assert run.trace == [
-        conductor_module.TraceEvent("worker", "generated", "attempt=0"),
-        conductor_module.TraceEvent("check", "skipped:budget"),
+    assert [(event.node, event.kind, event.detail) for event in run.trace] == [
+        ("worker", "generated", "attempt=0"),
+        ("check", "skipped:budget", ""),
     ]
     assert conductor._final_text(run) == "best completed draft"
+    generated, skipped = run.trace
+    assert generated.operation == "generation"
+    assert generated.status == "success"
+    assert generated.timing is not None
+    assert generated.budget is not None
+    assert generated.budget.steps_consumed == 1
+    assert skipped.operation == "verification"
+    assert skipped.status == "skipped"
+    assert skipped.metadata == {"reason": "budget"}
