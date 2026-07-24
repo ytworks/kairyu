@@ -721,6 +721,14 @@ tokens_per_minute=200_000)}))`。
 
 ## 8. ベンチマーク
 
+M20では旧品質スイートを1ベンチマークずつ置換しています。新しい非破壊catalogは
+`uv run kairyu benchmark list` で確認でき、各entryはadapter PRが入るまで
+`planned` と表示されます。stacked PRでの移行中は下記の旧commandも残りますが、
+M20が目標とする実装・結果形式ではありません。トップレベルの `bench/` にある
+性能・運用ツールは置換対象外で、引き続きサポートします。詳細は
+[`docs/design/m20-evaluation-platform.md`](docs/design/m20-evaluation-platform.md)
+を参照してください。
+
 `kairyu bench` は、デプロイ済みゲートウェイに対して Fugu リリースの 11 ベンチマーク
 品質スイートを実行します — 単一モデルとオーケストレーションティアがスコアボードの
 列として並び、日付・脚注付きのスコアボードが出力されます:
