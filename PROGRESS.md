@@ -5,11 +5,14 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 
 ## Current Status
 
-**Deploy-ready (2026-07-13): every milestone of the local-complete plan
-(M8–M19) is implemented and CPU-verified — 827 tests, 89% cov. The only
-remaining work is GPU execution: performance gates, kernel tuning, fabric
-bring-up, `pytest -m gpu`, and `scripts/gpu_gates/` (all pre-written and
-dry-run pinned).**
+**GPU bring-up in progress (2026-07-23): the CPU-safe full suite is green
+(1409 passed, 12 skipped, 92% cov), the single-GPU kernel suite is green
+(10 passed), and the explicit 2-GPU NCCL EP gate is green on the 8× RTX PRO
+6000 Blackwell host. The three gate-integrity problems found during the first
+hardware run (Issues #102–#104) are fixed and GPU-verified in PR #105. Real-model parity,
+performance, and production/fabric drills remain. The all-visible-GPU Qwen3-32B
+Compose and benchmark/report workflow are implemented but still need validation
+on the GPU host.**
 
 _Last updated: 2026-07-23_
 
@@ -124,6 +127,44 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   `kairyu/orchestration/{trace,conductor,orchestrator}.py`,
   `kairyu/entrypoints/server/{protocol,app}.py`.
 
+### 2026-07-23 — [progress] All-GPU Qwen3-32B TP serve and benchmark workflow implemented
+- What: Replaced the single-GPU Qwen3-32B example with a Compose workflow that
+  reserves every visible NVIDIA GPU, derives `tensor_parallel_size` at startup,
+  and rejects GPU counts that cannot evenly shard Qwen3-32B. Added a one-command
+  start-and-benchmark script targeting host port 8001; it records timestamped
+  JSON and regenerates a Markdown summary of all saved runs.
+- Refs: `examples/qwen3-32b-multi-gpu/`.
+
+### 2026-07-23 — [progress] GPU gate-integrity issues #102–#104 fixed and hardware-verified
+- What: Pinned the CPU-only synthetic model fixture to torch attention so the
+  CUDA-visible default suite is green (1409 passed, 12 skipped, 92% coverage);
+  removed the no-op `KAIRYU_DIST_BACKEND=nccl` rerun from the multi-GPU gate
+  while retaining the explicit 2-GPU NCCL EP test; and added a real §0 recorder
+  that writes the dated `EnvRecord` with driver, CUDA, library versions, GPU
+  topology, MIG/vBIOS inventory, and explicit null/unmeasured P2P fields. The
+  explicit NCCL test and real SM120 environment-record generation both pass.
+- Why: Gate 0 must be host-independent, and hardware gates must produce the
+  evidence they claim rather than returning a false green result.
+- Refs: PR #105; Issues #102, #103, #104; `scripts/gpu_gates/{00_env,06_multigpu,record_env.py}`;
+  `tests/unit/{test_model_loader_backend,test_gpu_gate_regressions}.py`.
+
+### 2026-07-23 — [progress] First RTX PRO 6000 GPU validation exposed three gate-integrity defects
+- What: Provisioned the locked dev/GPU/engine environment on an 8× RTX PRO 6000
+  Blackwell Server Edition host (driver 595.71.05, CUDA 13.2). Ruff passed; the
+  CUDA-hidden full suite passed with 1407 tests, 12 skips, and 92% coverage; the
+  single-GPU marked suite passed 10 tests; the explicit 2-GPU NCCL EP test
+  passed; and the 8-test distributed suite passed on gloo. With CUDA visible,
+  two ordinary model-loader/backend tests failed because the SM120 profile
+  auto-selected FlashInfer for an unsupported tiny fixture. Audit also found
+  that the §6 script’s `KAIRYU_DIST_BACKEND=nccl` rerun remains on gloo and the
+  §0 script never writes its required environment JSON.
+- Why: These failures make Gate 0 host-dependent and allow the environment and
+  multi-GPU gate scripts to report success without producing the evidence they
+  claim.
+- Refs: Issues #102, #103, #104; `tests/unit/test_model_loader_backend.py`;
+  `kairyu/engine/kairyu_backend.py`; `scripts/gpu_gates/{00_env,06_multigpu}.sh`;
+  `tests/{dist,gpu}/`; `bench/results/env-2026-07-23.json`.
+
 ### 2026-07-19 — [amendment] Routing verification is non-mutating and deployment-visible
 - What: Added built-in Router `preview`/safe descriptor contracts, including RNG-cloned bandit
   preview; exposed rendered-prompt `/v1/route`, authenticated `/routing`, and opt-in structured
@@ -133,6 +174,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   chat execution, and deployed GPU gateways did not serve any orchestrator even though local mock did.
 - Refs: M1 D3/D6, M4 router learning; `kairyu/orchestration/`,
   `kairyu/entrypoints/server/app.py`, `deploy/compose/`.
+
 
 ### 2026-07-16 — [progress] GET /backends introspection endpoint (m13)
 - What: Added an open `GET /backends` reporting the resolved attention backend
