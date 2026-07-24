@@ -1,4 +1,4 @@
-"""`kairyu` console entrypoint: `serve` (design m7 D3) and `bench` (goal G6 P-C1)."""
+"""``kairyu`` console entrypoint for serving and evaluation commands."""
 
 from __future__ import annotations
 
@@ -10,11 +10,12 @@ from kairyu.bench.cli import add_bench_parser
 from kairyu.deploy.builder import build_app_from_config
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.entrypoints.server.middleware import configure_json_logging
+from kairyu.evaluation.cli import add_benchmark_parser
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kairyu", description="Kairyu serving CLI"
+        prog="kairyu", description="Kairyu serving and evaluation CLI"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     serve = subparsers.add_parser(
@@ -26,6 +27,7 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default=None, help="Override server.host")
     serve.add_argument("--port", type=int, default=None, help="Override server.port")
     add_bench_parser(subparsers)
+    add_benchmark_parser(subparsers)
     return parser
 
 
@@ -45,6 +47,10 @@ def main(argv: list[str] | None = None) -> None:
         )
     elif args.command == "bench":
         from kairyu.bench.cli import handle
+
+        sys.exit(handle(args))
+    elif args.command == "benchmark":
+        from kairyu.evaluation.cli import handle
 
         sys.exit(handle(args))
 

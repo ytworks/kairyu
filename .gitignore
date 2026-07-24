@@ -217,7 +217,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Benchmark artifacts (kairyu bench): results are per-run evidence, data is
-# downloaded to the cache dir — neither belongs in the repo.
+# Benchmark artifacts: results are per-run evidence, data is downloaded to
+# explicit cache roots — none belongs in the repo. Keep the legacy paths until
+# the M20 archive-and-cutover PR has shipped.
+benchmark_runs/
+.benchmark-cache/
 bench/results/
 bench/data/

@@ -716,6 +716,14 @@ tokens_per_minute=200_000)}))`.
 
 ## 8. Benchmarks
 
+M20 is replacing the legacy quality suite one benchmark at a time. The new,
+non-destructive catalog is available with `uv run kairyu benchmark list`; entries
+remain marked `planned` until their adapter PR lands. During the stacked-PR migration,
+the legacy command below remains available, but it is not the implementation or result
+format targeted by M20. The top-level `bench/` performance and operational tooling is
+outside this replacement and remains supported. See
+[`docs/design/m20-evaluation-platform.md`](docs/design/m20-evaluation-platform.md).
+
 `kairyu bench` runs the 11-benchmark Fugu-release quality suite against any deployed
 gateway — single models and orchestration tiers as scoreboard columns — and writes a
 dated, footnoted scoreboard:

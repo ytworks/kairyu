@@ -5,16 +5,20 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 
 ## Current Status
 
-**GPU bring-up in progress (2026-07-23): the CPU-safe full suite is green
+**GPU bring-up in progress (2026-07-24): the CPU-safe full suite is green
 (1409 passed, 12 skipped, 92% cov), the single-GPU kernel suite is green
 (10 passed), and the explicit 2-GPU NCCL EP gate is green on the 8× RTX PRO
 6000 Blackwell host. The three gate-integrity problems found during the first
 hardware run (Issues #102–#104) are fixed and GPU-verified in PR #105. Real-model parity,
 performance, and production/fabric drills remain. The all-visible-GPU Qwen3-32B
 Compose and benchmark/report workflow are implemented but still need validation
-on the GPU host.**
+on the GPU host. The M20 reproducible-evaluation foundation is implemented with
+an exact eleven-entry planned catalog, strict schemas/protocol guards, durable
+SQLite leases/events with cancellation, identity-fenced immutable successor
+creation, and lease/report-only publication-fenced artifacts; individual adapters
+and the legacy cutover remain.**
 
-_Last updated: 2026-07-23_
+_Last updated: 2026-07-24_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -40,6 +44,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
+| M20 — Reproducible evaluation platform | **Foundation implemented** (2026-07-24, `docs/design/m20-evaluation-platform.md`): exact planned catalog, deeply immutable secret-free protocols, conservative comparison, fail-closed full guard, canonical create-once lease/report-only publication-fenced artifacts, and SQLite WAL state/events/store-clocked leases with cancellation and identity-fenced immutable successor creation. Eleven adapter PRs, reporting/reference workflows, and legacy cutover remain. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03). 610 tests. |
@@ -101,13 +106,79 @@ deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
 footnoted scoreboard (G6 P-C1).
 
+M20 now exposes `kairyu benchmark list` as a metadata-only replacement catalog:
+all eleven entries are explicitly `planned`, and no new run command is exposed
+until an adapter has its pinned protocol and synthetic end-to-end coverage. The
+legacy `kairyu bench` command remains only during the stacked migration. The new
+foundation rejects unsafe paths/symlinks, publishes canonical artifacts create-once
+under an active lease or report-only terminal fence, persists run state, events,
+store-clocked worker leases, cancellation intent, protocol/item-manifest identity,
+and immutable successor lineage in SQLite WAL, and treats unresolved protocol
+evidence as incompatible rather than exact. Top-level `bench/` performance and
+operational tooling remains supported and is outside the M20 quality-suite cutover.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
 (PCIe-switch chassis, ≥400 Gb/s RDMA NICs) gates E4/E5 and is decided during E3 from
-E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
+E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews. M20 exact
+Fugu comparability remains blocked on unpublished upstream commits, dataset revisions,
+patches, and full judge/simulator IDs; gated-data acceptance and a disposable-VM
+executor are deployment prerequisites for several later adapters.
 
 ## Change Log
+
+### 2026-07-24 — [amendment] Resume identity and evidence publication made fail-closed
+- What: Required protocol and ordered item-input-manifest hashes before resume;
+  made nested evidence genuinely immutable while preserving digest-only secret
+  validation context; limited terminal finalizers to the three report files; made
+  artifact names and canonical paths jointly create-once; retained partial evidence
+  independently of interrupted status; and defined the reviewed `near` comparison
+  fields while all new protocol fields fail closed.
+- Why: Final review reproduced hash mutation through base-class methods, context-free
+  secret injection on copies, resume without item identity, late execution-evidence
+  publication, contradictory metadata for one path, and unreachable comparison states.
+  Each could make a durable report disagree with its immutable protocol or evidence.
+- Refs: M20 D3, D5, D7, D8; `kairyu/evaluation/`;
+  `tests/evaluation/unit/`.
+
+### 2026-07-24 — [amendment] Resume attempts and terminal reports made immutable
+- What: Replaced same-run requeue with an atomic, single-successor run and job;
+  reset successor progress while preserving protocol, selection, model roles, and
+  profile lineage; and added a version-fenced finalization token for mandatory
+  artifacts after a terminal job has relinquished its lease.
+- Why: Reopening a run could collide with create-once aggregate artifact paths and
+  mutate historical attempt identity, while immediate cancellation otherwise left no
+  authorized publisher for required terminal reports. Immutable run IDs keep each
+  attempt auditable and prevent stale tokens from crossing lineage boundaries.
+- Refs: M20 D3, D5, D8; `kairyu/evaluation/`;
+  `tests/evaluation/unit/`.
+
+### 2026-07-24 — [amendment] Evaluation persistence boundaries fenced after review
+- What: Deep-froze nested protocol JSON and rejected non-finite values; required
+  protocol evidence for comparable references; moved lease authority to a
+  store-owned clock; added durable controller cancellation/requeue; scanned all
+  persisted identifiers and common text encodings for secrets; and made filesystem
+  artifacts create-once, digest-idempotent, and fenced by the active SQLite lease.
+- Why: Review reproduced caller-time lease resurrection, stale-worker file overwrite,
+  secret leakage through non-JSON columns and filenames, mutable protocol hashes, and
+  stranded cancel/resume flows. These paths violated M20's reproducibility and
+  durability contracts despite the original unit suite passing.
+- Refs: M20 D2, D3, D5, D7, D8; `kairyu/evaluation/`;
+  `tests/evaluation/unit/`.
+
+### 2026-07-24 — [design] Reproducible evaluation foundation established
+- What: Added the M20 architecture and its first implementation slice: an exact
+  eleven-entry metadata-only catalog under `kairyu benchmark list`, strict frozen
+  run/profile/protocol/reference schemas, canonical protocol hashing with conservative
+  comparison, a CI-fail-closed full-run guard, symlink-safe atomic artifact storage,
+  and a SQLite WAL control store with state CAS, ordered events, and worker leases.
+- Why: The foreground `kairyu bench` suite cannot preserve item-level evidence,
+  safely isolate hostile evaluators, resume durable work, or make reproducible score
+  comparisons. The replacement must land incrementally without claiming unfinished
+  adapters are runnable or deleting user-local legacy results.
+- Refs: M20 D1–D8; `docs/design/m20-evaluation-platform.md`; `kairyu/evaluation/`;
+  `tests/evaluation/unit/`.
 
 ### 2026-07-23 — [progress] All-GPU Qwen3-32B TP serve and benchmark workflow implemented
 - What: Replaced the single-GPU Qwen3-32B example with a Compose workflow that
