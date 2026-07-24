@@ -1,0 +1,121 @@
+schema_version: 1
+snapshot_id: sakana-fugu-technical-report-2026-v2-gpqa
+benchmark_id: gpqa-diamond
+source:
+  schema_version: 1
+  source_id: sakana-fugu-technical-report-2026-v2
+  source_type: paper_compilation
+  title: Sakana AI Fugu Technical Report 2026
+  url: https://arxiv.org/pdf/2606.21228
+  locator: Table 1 (GPQA Diamond); Appendix A
+  release_page: https://sakana.ai/fugu-release/
+  publication_date: null
+  retrieved_at: 2026-07-24T00:00:00Z
+  evidence_hash: 664e564b3b8caf6304c28f4dfb9aeb38cb64ca64a467251b06ed0682986ecea5
+  notes: Scores are a paper compilation; underlying provider protocols are unresolved.
+results:
+  - schema_version: 1
+    reference_id: fugu-ultra-gpqa-diamond-2026-v2
+    benchmark_id: gpqa-diamond
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: Fugu Ultra
+    model_version: null
+    score: 95.5
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 198
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: 0b0f6f9c9bc46d18fafa8268af7ba5f5afc39d2dd41918b04bbb2af15513228d
+  - schema_version: 1
+    reference_id: fugu-gpqa-diamond-2026-v2
+    benchmark_id: gpqa-diamond
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: Fugu
+    model_version: null
+    score: 95.5
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 198
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: 8dcb9844762b52b603f65b671558e2f53f57c8dbf12c7326815408fb10bba23a
+  - schema_version: 1
+    reference_id: claude-opus-4.8-gpqa-diamond-2026-v2
+    benchmark_id: gpqa-diamond
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: Claude Opus 4.8
+    model_version: null
+    score: 92.0
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 198
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: f32d91d7114dbe220d74f1c7fb7e4f4f19af9597c4139b452c30d894e5813fd7
+  - schema_version: 1
+    reference_id: gemini-3.1-pro-gpqa-diamond-2026-v2
+    benchmark_id: gpqa-diamond
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: Gemini 3.1 Pro
+    model_version: null
+    score: 94.3
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 198
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: 488225d1048e7f554b426fd996c9684154ff555a7dc2eac462b710ecee51e4d5
+  - schema_version: 1
+    reference_id: gpt-5.5-gpqa-diamond-2026-v2
+    benchmark_id: gpqa-diamond
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: GPT-5.5
+    model_version: null
+    score: 93.6
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 198
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: b68a1804aebd4124929bc0f6e91750c8a584bbacb69e1c64f6e3e80bc11e8fd9

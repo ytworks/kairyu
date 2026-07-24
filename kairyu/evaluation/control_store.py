@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Protocol, TypeAlias
 
-from kairyu.evaluation.schemas import Artifact, BenchmarkRun, RunState
+from kairyu.evaluation.schemas import Artifact, BenchmarkRun, ItemState, RunItem, RunState
 
 JobStatus = Literal["queued", "leased", "completed", "failed", "cancelled"]
 ReleasedJobStatus = Literal["queued", "completed", "failed", "cancelled"]
@@ -20,6 +20,15 @@ class StoreConflictError(RuntimeError):
 
 class LeaseConflictError(RuntimeError):
     """A worker attempted to mutate a lease it no longer owns."""
+
+
+class InvalidItemStateTransitionError(RuntimeError):
+    """An item-state change is not part of the durable item lifecycle."""
+
+    def __init__(self, source: ItemState, target: ItemState) -> None:
+        self.source = source
+        self.target = target
+        super().__init__(f"invalid run-item state transition: {source.value} -> {target.value}")
 
 
 class InvalidRunStateTransitionError(RuntimeError):
@@ -80,11 +89,50 @@ def validate_run_state_transition(source: RunState, target: RunState) -> None:
         raise InvalidRunStateTransitionError(source, target)
 
 
+_ALLOWED_ITEM_STATE_TRANSITIONS: dict[ItemState, frozenset[ItemState]] = {
+    ItemState.PENDING: frozenset({ItemState.RUNNING, ItemState.SKIPPED, ItemState.CANCELLED}),
+    ItemState.RUNNING: frozenset(
+        {
+            ItemState.COMPLETED,
+            ItemState.FAILED,
+            ItemState.SKIPPED,
+            ItemState.CANCELLED,
+        }
+    ),
+    ItemState.COMPLETED: frozenset(),
+    ItemState.FAILED: frozenset(),
+    ItemState.SKIPPED: frozenset(),
+    ItemState.CANCELLED: frozenset(),
+}
+
+
+def validate_item_state_transition(source: ItemState, target: ItemState) -> None:
+    """Raise when an item transition would rewrite terminal evidence."""
+
+    if target not in _ALLOWED_ITEM_STATE_TRANSITIONS[source]:
+        raise InvalidItemStateTransitionError(source, target)
+
+
 @dataclass(frozen=True, slots=True)
 class StoredRun:
     run: BenchmarkRun
     version: int
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StoredRunItem:
+    item: RunItem
+    version: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RunItemUpdateResult:
+    """The item and run versions committed by one atomic item transition."""
+
+    item: StoredRunItem
+    run: StoredRun
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +147,14 @@ class JobRecord:
     cancel_requested: bool
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RunCreationResult:
+    """A first-attempt run and job committed in one transaction."""
+
+    run: StoredRun
+    job: JobRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,25 +181,41 @@ class FinalizationToken:
 
     run_id: str
     run_version: int
+    allow_aggregate_artifacts: bool = False
 
 
 PublicationToken: TypeAlias = LeaseToken | FinalizationToken
 FINALIZATION_ARTIFACT_PATHS = frozenset({"report.json", "report.md", "report.html"})
+CANCELLED_FINALIZATION_ARTIFACT_PATHS = FINALIZATION_ARTIFACT_PATHS | frozenset(
+    {
+        "manifest.json",
+        "protocol.json",
+        "events.jsonl",
+        "predictions.jsonl",
+        "item_results.jsonl",
+        "metrics.json",
+        "errors.jsonl",
+        "usage.json",
+        "references.json",
+    }
+)
 
 
 def validate_artifact_publication(
     publication_token: PublicationToken,
     relative_path: str,
 ) -> None:
-    """Reject non-report post-run publications while leases remain unrestricted."""
+    """Restrict post-run writes to immutable reports or cancelled evidence."""
 
-    if (
-        isinstance(publication_token, FinalizationToken)
-        and relative_path not in FINALIZATION_ARTIFACT_PATHS
-    ):
-        raise LeaseConflictError(
-            "finalization tokens may publish only report.json, report.md, or report.html"
-        )
+    if not isinstance(publication_token, FinalizationToken):
+        return
+    allowed_paths = (
+        CANCELLED_FINALIZATION_ARTIFACT_PATHS
+        if publication_token.allow_aggregate_artifacts
+        else FINALIZATION_ARTIFACT_PATHS
+    )
+    if relative_path not in allowed_paths:
+        raise LeaseConflictError("finalization token cannot publish this artifact path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +240,55 @@ class ControlStore(Protocol):
 
     def create_run(self, run: BenchmarkRun) -> StoredRun: ...
 
+    def create_run_and_enqueue(
+        self,
+        run: BenchmarkRun,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        job_id: str | None = None,
+    ) -> RunCreationResult: ...
+
     def get_run(self, run_id: str) -> StoredRun: ...
 
     def list_runs(self, *, limit: int = 100) -> list[StoredRun]: ...
+
+    def complete_preparation(
+        self,
+        run_id: str,
+        *,
+        lease_token: LeaseToken,
+        expected_version: int,
+        protocol_hash: str,
+        item_input_manifest_sha256: str,
+        expected_full_count: int | None,
+        items: Sequence[RunItem],
+    ) -> StoredRun | None: ...
+
+    def get_run_item(self, run_id: str, item_id: str) -> StoredRunItem: ...
+
+    def list_run_items(
+        self,
+        run_id: str,
+        *,
+        after_ordinal: int = -1,
+        limit: int = 1_000,
+    ) -> list[StoredRunItem]: ...
+
+    def compare_and_set_run_item(
+        self,
+        run_id: str,
+        item_id: str,
+        *,
+        lease_token: LeaseToken,
+        expected_state: ItemState,
+        expected_version: int,
+        new_state: ItemState,
+        scores: Mapping[str, float] | None = None,
+        error_class: str | None = None,
+        checkpoint_relative_path: str | None = None,
+        checkpoint_sha256: str | None = None,
+        checkpoint_source_run_id: str | None = None,
+    ) -> RunItemUpdateResult | None: ...
 
     def compare_and_set_run_state(
         self,

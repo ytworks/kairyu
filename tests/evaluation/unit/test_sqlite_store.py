@@ -6,13 +6,14 @@ import pytest
 
 from kairyu.evaluation.control_store import (
     FinalizationToken,
+    InvalidItemStateTransitionError,
     InvalidRunStateTransitionError,
     LeaseConflictError,
     LeaseToken,
     StoreConflictError,
 )
 from kairyu.evaluation.safety import SecretSafetyError, SecretValueRegistry
-from kairyu.evaluation.schemas import Artifact, BenchmarkRun, RunState
+from kairyu.evaluation.schemas import Artifact, BenchmarkRun, ItemState, RunItem, RunState
 from kairyu.evaluation.sqlite_store import SqliteControlStore
 
 NOW = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
@@ -52,6 +53,18 @@ def _run(run_id: str = "run-01", **updates) -> BenchmarkRun:
     return BenchmarkRun(**values)
 
 
+def _items(run_id: str = "run-01", count: int = 2) -> tuple[RunItem, ...]:
+    return tuple(
+        RunItem(
+            run_id=run_id,
+            item_id=f"item-{ordinal + 1}",
+            ordinal=ordinal,
+            input_sha256=f"{ordinal + 1:064x}",
+        )
+        for ordinal in range(count)
+    )
+
+
 def _advance_run(store, lease_token, *states: RunState):
     current = store.get_run(lease_token.run_id)
     for state in states:
@@ -79,12 +92,19 @@ def test_initialises_versioned_schema_in_wal_mode_and_reopens(tmp_path, clock):
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,)]
+        ).fetchall() == [(1,), (2,)]
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-    assert {"schema_migrations", "benchmark_runs", "jobs", "events", "artifacts"} <= tables
+    assert {
+        "schema_migrations",
+        "benchmark_runs",
+        "jobs",
+        "events",
+        "artifacts",
+        "run_items",
+    } <= tables
 
 
 def test_rejects_database_from_a_newer_schema_version(tmp_path, clock):
@@ -259,6 +279,27 @@ def test_claim_heartbeat_and_release_enforce_active_lease_owner(tmp_path, clock)
     assert store.claim_job("worker-b", lease_seconds=30) is None
 
 
+def test_heartbeat_never_shortens_lease_when_store_clock_regresses(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run())
+    store.enqueue_job("run-01")
+    claimed = store.claim_job("worker-a", lease_seconds=30)
+    assert claimed is not None
+    original_expiry = claimed.job.lease_expires_at
+    assert original_expiry == NOW + timedelta(seconds=30)
+
+    clock.set(NOW - timedelta(seconds=10))
+    heartbeat = store.heartbeat_job(claimed.lease_token, lease_seconds=30)
+
+    assert heartbeat.lease_expires_at == original_expiry
+    clock.set(NOW + timedelta(seconds=21))
+    assert store.claim_job("worker-b", lease_seconds=30) is None
+    clock.set(original_expiry)
+    reclaimed = store.claim_job("worker-b", lease_seconds=30)
+    assert reclaimed is not None
+    assert reclaimed.lease_token.attempt == 2
+
+
 def test_expired_lease_is_reclaimed_and_stale_worker_cannot_mutate_it(tmp_path, clock):
     database = tmp_path / "control.sqlite3"
     first_process = SqliteControlStore(database, clock=clock)
@@ -365,6 +406,27 @@ def test_begin_immediate_prevents_double_claim_under_concurrency(tmp_path, clock
     assert sum(result is not None for result in results) == 1
     winner = next(result for result in results if result)
     assert store.get_job(winner.job.job_id).attempts == 1
+
+
+def test_lower_attempt_job_is_claimed_before_requeued_poison_job(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run("run-poison"))
+    store.enqueue_job("run-poison", job_id="job-poison")
+    poison_claim = store.claim_job("worker-a", lease_seconds=30)
+    assert poison_claim is not None
+    assert poison_claim.job.job_id == "job-poison"
+    store.release_job(poison_claim.lease_token, status="queued")
+
+    clock.advance(seconds=1)
+    store.create_run(_run("run-healthy", created_at=clock.value))
+    store.enqueue_job("run-healthy", job_id="job-healthy")
+
+    healthy_claim = store.claim_job("worker-b", lease_seconds=30)
+
+    assert healthy_claim is not None
+    assert healthy_claim.job.job_id == "job-healthy"
+    assert healthy_claim.lease_token.attempt == 1
+    assert store.get_job("job-poison").attempts == 1
 
 
 def test_events_are_transactionally_sequenced_and_pageable(tmp_path, clock):
@@ -1025,3 +1087,631 @@ def test_finalization_publication_guard_holds_write_lock(tmp_path, clock):
         with sqlite3.connect(database, timeout=0, isolation_level=None) as contender:
             with pytest.raises(sqlite3.OperationalError, match="locked"):
                 contender.execute("BEGIN IMMEDIATE")
+
+
+def test_migration_two_preserves_a_version_one_database(tmp_path, clock):
+    database = tmp_path / "control.sqlite3"
+    original = SqliteControlStore(database, clock=clock)
+    original.create_run(_run())
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE run_items")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 2")
+
+    upgraded = SqliteControlStore(database, clock=clock)
+
+    assert upgraded.get_run("run-01").run == _run()
+    assert upgraded.list_run_items("run-01") == []
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,), (2,)]
+
+
+def test_complete_preparation_atomically_freezes_identity_and_items(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(
+        _run(
+            protocol_hash=None,
+            item_input_manifest_sha256=None,
+            expected_full_count=None,
+        )
+    )
+    store.enqueue_job("run-01")
+    claim = store.claim_job("worker-a", lease_seconds=30)
+    assert claim is not None
+    preparing = _advance_run(store, claim.lease_token, RunState.PREPARING)
+    items = _items()
+
+    ready = store.complete_preparation(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="c" * 64,
+        item_input_manifest_sha256="d" * 64,
+        expected_full_count=198,
+        items=items,
+    )
+    retry = store.complete_preparation(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="c" * 64,
+        item_input_manifest_sha256="d" * 64,
+        expected_full_count=198,
+        items=items,
+    )
+
+    assert ready is not None
+    assert ready == retry
+    assert ready.version == preparing.version + 1
+    assert ready.run.state is RunState.READY
+    assert ready.run.protocol_hash == "c" * 64
+    assert ready.run.item_input_manifest_sha256 == "d" * 64
+    assert ready.run.selected_item_ids == ("item-1", "item-2")
+    assert ready.run.expected_full_count == 198
+    stored_items = store.list_run_items("run-01")
+    assert [record.item for record in stored_items] == list(items)
+    assert [record.version for record in stored_items] == [0, 0]
+    assert store.get_run_item("run-01", "item-1") == stored_items[0]
+    assert store.list_run_items("run-01", after_ordinal=0) == [stored_items[1]]
+
+
+def test_preparation_failure_rolls_back_all_item_rows_and_run_identity(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run(protocol_hash=None, item_input_manifest_sha256=None))
+    store.enqueue_job("run-01")
+    claim = store.claim_job("worker-a", lease_seconds=30)
+    assert claim is not None
+    preparing = _advance_run(store, claim.lease_token, RunState.PREPARING)
+    invalid_items = (
+        _items()[0],
+        _items()[1].model_copy(update={"ordinal": 3}),
+    )
+
+    with pytest.raises(ValueError, match="contiguous"):
+        store.complete_preparation(
+            "run-01",
+            lease_token=claim.lease_token,
+            expected_version=preparing.version,
+            protocol_hash="c" * 64,
+            item_input_manifest_sha256="d" * 64,
+            expected_full_count=198,
+            items=invalid_items,
+        )
+
+    assert store.get_run("run-01") == preparing
+    assert store.list_run_items("run-01") == []
+    assert (
+        store.complete_preparation(
+            "run-01",
+            lease_token=claim.lease_token,
+            expected_version=preparing.version - 1,
+            protocol_hash="c" * 64,
+            item_input_manifest_sha256="d" * 64,
+            expected_full_count=198,
+            items=_items(),
+        )
+        is None
+    )
+    assert store.list_run_items("run-01") == []
+
+
+def test_run_item_transitions_atomically_update_counters_and_are_idempotent(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run())
+    store.enqueue_job("run-01")
+    claim = store.claim_job("worker-a", lease_seconds=30)
+    assert claim is not None
+    preparing = _advance_run(store, claim.lease_token, RunState.PREPARING)
+    ready = store.complete_preparation(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="a" * 64,
+        item_input_manifest_sha256="b" * 64,
+        expected_full_count=198,
+        items=_items(),
+    )
+    assert ready is not None
+    running = _advance_run(store, claim.lease_token, RunState.RUNNING)
+
+    started = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+    retry_started = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+
+    assert started is not None
+    assert retry_started == started
+    assert started.item.version == 1
+    assert started.run.version == running.version + 1
+    assert started.run.run.completed_count == 0
+    assert store.get_run("run-01") == started.run
+
+    completed = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.RUNNING,
+        expected_version=started.item.version,
+        new_state=ItemState.COMPLETED,
+        scores={"accuracy": 1.0},
+        checkpoint_relative_path="items/item-1.json",
+        checkpoint_sha256="e" * 64,
+        checkpoint_source_run_id="run-01",
+    )
+    retry_completed = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.RUNNING,
+        expected_version=started.item.version,
+        new_state=ItemState.COMPLETED,
+        scores={"accuracy": 1.0},
+        checkpoint_relative_path="items/item-1.json",
+        checkpoint_sha256="e" * 64,
+        checkpoint_source_run_id="run-01",
+    )
+
+    assert completed is not None
+    assert retry_completed == completed
+    assert completed.item.item.state is ItemState.COMPLETED
+    assert completed.item.item.checkpoint_source_run_id == "run-01"
+    assert completed.run.run.completed_count == 1
+    assert completed.run.version == started.run.version + 1
+    assert store.get_run("run-01") == completed.run
+    assert (
+        store.compare_and_set_run_item(
+            "run-01",
+            "item-1",
+            lease_token=claim.lease_token,
+            expected_state=ItemState.RUNNING,
+            expected_version=started.item.version,
+            new_state=ItemState.COMPLETED,
+            scores={"accuracy": 0.0},
+            checkpoint_relative_path="items/item-1.json",
+            checkpoint_sha256="e" * 64,
+            checkpoint_source_run_id="run-01",
+        )
+        is None
+    )
+    assert store.get_run("run-01") == completed.run
+
+    skipped = store.compare_and_set_run_item(
+        "run-01",
+        "item-2",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.SKIPPED,
+    )
+    assert skipped is not None
+    assert skipped.run.run.completed_count == 1
+    assert skipped.run.run.skipped_count == 1
+    assert skipped.run.run.failed_count == 0
+
+
+def test_terminal_timestamp_never_precedes_persisted_item_evidence(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run())
+    store.enqueue_job("run-01")
+    claim = store.claim_job("worker-a", lease_seconds=30)
+    assert claim is not None
+    preparing = _advance_run(store, claim.lease_token, RunState.PREPARING)
+    ready = store.complete_preparation(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="a" * 64,
+        item_input_manifest_sha256="b" * 64,
+        expected_full_count=198,
+        items=_items(),
+    )
+    assert ready is not None
+    _advance_run(store, claim.lease_token, RunState.RUNNING)
+
+    first_started = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+    assert first_started is not None
+    clock.advance(seconds=20)
+    first_completed = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.RUNNING,
+        expected_version=first_started.item.version,
+        new_state=ItemState.COMPLETED,
+        scores={"accuracy": 1.0},
+    )
+    assert first_completed is not None
+
+    clock.set(NOW + timedelta(seconds=10))
+    second_started = store.compare_and_set_run_item(
+        "run-01",
+        "item-2",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+    assert second_started is not None
+    second_completed = store.compare_and_set_run_item(
+        "run-01",
+        "item-2",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.RUNNING,
+        expected_version=second_started.item.version,
+        new_state=ItemState.COMPLETED,
+        scores={"accuracy": 1.0},
+    )
+    assert second_completed is not None
+
+    terminal = store.compare_and_set_run_state(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_state=RunState.RUNNING,
+        expected_version=second_completed.run.version,
+        new_state=RunState.COMPLETED,
+    )
+    assert terminal is not None
+    evidence_timestamp = max(item.updated_at for item in store.list_run_items("run-01"))
+    assert terminal.run.finished_at == evidence_timestamp
+    assert terminal.updated_at == evidence_timestamp
+
+
+def test_invalid_item_evidence_rolls_back_item_and_run_together(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run())
+    store.enqueue_job("run-01")
+    claim = store.claim_job("worker-a", lease_seconds=30)
+    assert claim is not None
+    preparing = _advance_run(store, claim.lease_token, RunState.PREPARING)
+    ready = store.complete_preparation(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="a" * 64,
+        item_input_manifest_sha256="b" * 64,
+        expected_full_count=198,
+        items=_items(count=1),
+    )
+    assert ready is not None
+    _advance_run(store, claim.lease_token, RunState.RUNNING)
+    started = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+    assert started is not None
+
+    with pytest.raises(ValueError, match="all present or absent"):
+        store.compare_and_set_run_item(
+            "run-01",
+            "item-1",
+            lease_token=claim.lease_token,
+            expected_state=ItemState.RUNNING,
+            expected_version=started.item.version,
+            new_state=ItemState.COMPLETED,
+            checkpoint_relative_path="items/item-1.json",
+        )
+    with pytest.raises(StoreConflictError, match="current run or one of its ancestors"):
+        store.compare_and_set_run_item(
+            "run-01",
+            "item-1",
+            lease_token=claim.lease_token,
+            expected_state=ItemState.RUNNING,
+            expected_version=started.item.version,
+            new_state=ItemState.COMPLETED,
+            checkpoint_relative_path="items/item-1.json",
+            checkpoint_sha256="e" * 64,
+            checkpoint_source_run_id="missing-run",
+        )
+    with pytest.raises(InvalidItemStateTransitionError):
+        store.compare_and_set_run_item(
+            "run-01",
+            "item-1",
+            lease_token=claim.lease_token,
+            expected_state=ItemState.RUNNING,
+            expected_version=started.item.version,
+            new_state=ItemState.RUNNING,
+        )
+
+    assert store.get_run_item("run-01", "item-1") == started.item
+    assert store.get_run("run-01") == started.run
+
+
+def test_stale_lease_cannot_prepare_or_mutate_items(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run())
+    store.enqueue_job("run-01")
+    original = store.claim_job("worker-a", lease_seconds=10)
+    assert original is not None
+    preparing = _advance_run(store, original.lease_token, RunState.PREPARING)
+    clock.advance(seconds=10)
+    current = store.claim_job("worker-b", lease_seconds=10)
+    assert current is not None
+
+    with pytest.raises(LeaseConflictError):
+        store.complete_preparation(
+            "run-01",
+            lease_token=original.lease_token,
+            expected_version=preparing.version,
+            protocol_hash="a" * 64,
+            item_input_manifest_sha256="b" * 64,
+            expected_full_count=198,
+            items=_items(),
+        )
+    ready = store.complete_preparation(
+        "run-01",
+        lease_token=current.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="a" * 64,
+        item_input_manifest_sha256="b" * 64,
+        expected_full_count=198,
+        items=_items(),
+    )
+    assert ready is not None
+    _advance_run(store, current.lease_token, RunState.RUNNING)
+    clock.advance(seconds=10)
+    newest = store.claim_job("worker-c", lease_seconds=30)
+    assert newest is not None
+
+    with pytest.raises(LeaseConflictError):
+        store.compare_and_set_run_item(
+            "run-01",
+            "item-1",
+            lease_token=current.lease_token,
+            expected_state=ItemState.PENDING,
+            expected_version=0,
+            new_state=ItemState.RUNNING,
+        )
+    updated = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=newest.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+    assert updated is not None
+
+
+def test_concurrent_different_item_outcomes_increment_exactly_one_counter(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run())
+    store.enqueue_job("run-01")
+    claim = store.claim_job("worker-a", lease_seconds=30)
+    assert claim is not None
+    preparing = _advance_run(store, claim.lease_token, RunState.PREPARING)
+    ready = store.complete_preparation(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="a" * 64,
+        item_input_manifest_sha256="b" * 64,
+        expected_full_count=198,
+        items=_items(count=1),
+    )
+    assert ready is not None
+    _advance_run(store, claim.lease_token, RunState.RUNNING)
+    started = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+    assert started is not None
+
+    def finish(state: ItemState):
+        return store.compare_and_set_run_item(
+            "run-01",
+            "item-1",
+            lease_token=claim.lease_token,
+            expected_state=ItemState.RUNNING,
+            expected_version=started.item.version,
+            new_state=state,
+            error_class="SyntheticError" if state is ItemState.FAILED else None,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(finish, (ItemState.COMPLETED, ItemState.FAILED)))
+
+    assert sum(result is not None for result in results) == 1
+    final_run = store.get_run("run-01").run
+    assert final_run.completed_count + final_run.failed_count == 1
+    assert final_run.skipped_count == 0
+
+
+def test_resume_keeps_source_items_and_leaves_successor_reconstruction_to_worker(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run())
+    store.enqueue_job("run-01", job_id="job-01")
+    claim = store.claim_job("worker-a", lease_seconds=30)
+    assert claim is not None
+    preparing = _advance_run(store, claim.lease_token, RunState.PREPARING)
+    ready = store.complete_preparation(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="a" * 64,
+        item_input_manifest_sha256="b" * 64,
+        expected_full_count=198,
+        items=_items(),
+    )
+    assert ready is not None
+    _advance_run(store, claim.lease_token, RunState.RUNNING)
+    started = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+    assert started is not None
+    completed = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.RUNNING,
+        expected_version=started.item.version,
+        new_state=ItemState.COMPLETED,
+        scores={"accuracy": 1.0},
+        checkpoint_relative_path="items/item-1.json",
+        checkpoint_sha256="e" * 64,
+        checkpoint_source_run_id="run-01",
+    )
+    assert completed is not None
+    store.request_cancel("run-01")
+    store.release_job(claim.lease_token, status="failed")
+    source_items = store.list_run_items("run-01")
+
+    successor = store.resume_run("run-01", "run-02")
+
+    assert store.list_run_items("run-01") == source_items
+    assert successor.run.run.selected_item_ids == ("item-1", "item-2")
+    assert store.list_run_items("run-02") == []
+
+    successor_claim = store.claim_job("worker-b", lease_seconds=30)
+    assert successor_claim is not None
+    successor_preparing = _advance_run(
+        store,
+        successor_claim.lease_token,
+        RunState.PREPARING,
+    )
+    successor_items = (
+        source_items[0].item.model_copy(update={"run_id": "run-02"}),
+        source_items[1].item.model_copy(update={"run_id": "run-02"}),
+    )
+    successor_ready = store.complete_preparation(
+        "run-02",
+        lease_token=successor_claim.lease_token,
+        expected_version=successor_preparing.version,
+        protocol_hash="a" * 64,
+        item_input_manifest_sha256="b" * 64,
+        expected_full_count=198,
+        items=successor_items,
+    )
+
+    assert successor_ready is not None
+    assert successor_ready.run.completed_count == 1
+    rebuilt_items = store.list_run_items("run-02")
+    assert rebuilt_items[0].item.state is ItemState.COMPLETED
+    assert rebuilt_items[0].item.checkpoint_source_run_id == "run-01"
+    assert rebuilt_items[1].item.state is ItemState.PENDING
+
+
+def test_create_run_and_enqueue_commits_run_and_job_together(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+
+    result = store.create_run_and_enqueue(
+        _run(),
+        payload={"adapter": "gpqa-diamond", "mode": "smoke"},
+        job_id="job-01",
+    )
+
+    assert result.run == store.get_run("run-01")
+    assert result.run.version == 0
+    assert result.run.updated_at == NOW
+    assert result.job == store.get_job("job-01")
+    assert result.job.run_id == "run-01"
+    assert result.job.status == "queued"
+    assert result.job.payload == {"adapter": "gpqa-diamond", "mode": "smoke"}
+    assert result.job.attempts == 0
+    assert result.job.cancel_requested is False
+    assert result.job.created_at == NOW
+    assert result.job.updated_at == NOW
+
+
+def test_create_run_and_enqueue_rolls_back_run_when_job_id_conflicts(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    original = store.create_run_and_enqueue(_run("run-01"), job_id="job-shared")
+
+    with pytest.raises(StoreConflictError, match="run or job already exists"):
+        store.create_run_and_enqueue(_run("run-02"), job_id="job-shared")
+
+    assert store.list_runs() == [original.run]
+    assert store.get_job("job-shared") == original.job
+    with pytest.raises(KeyError):
+        store.get_run("run-02")
+
+
+def test_create_run_and_enqueue_duplicate_run_does_not_insert_job(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    original = store.create_run_and_enqueue(_run("run-01"), job_id="job-01")
+
+    with pytest.raises(StoreConflictError, match="run or job already exists"):
+        store.create_run_and_enqueue(_run("run-01"), job_id="job-02")
+
+    assert store.list_runs() == [original.run]
+    assert store.get_job("job-01") == original.job
+    with pytest.raises(KeyError):
+        store.get_job("job-02")
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    (
+        ({"api_key": "plain-looking-value"}, SecretSafetyError),
+        ({"nested": {"value": float("nan")}}, ValueError),
+        ({"unsupported": object()}, TypeError),
+    ),
+)
+def test_create_run_and_enqueue_invalid_payload_leaves_no_records(
+    tmp_path,
+    clock,
+    payload,
+    error,
+):
+    database = tmp_path / "control.sqlite3"
+    store = SqliteControlStore(database, clock=clock)
+
+    with pytest.raises(error):
+        store.create_run_and_enqueue(
+            _run(),
+            payload=payload,
+            job_id="job-01",
+        )
+
+    assert store.list_runs() == []
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone() == (0,)
+
+
+def test_create_run_and_enqueue_registered_secret_leaves_no_records(tmp_path, clock):
+    database = tmp_path / "control.sqlite3"
+    registry = SecretValueRegistry(["known-secret-value"])
+    store = SqliteControlStore(database, clock=clock, secret_registry=registry)
+
+    with pytest.raises(SecretSafetyError):
+        store.create_run_and_enqueue(
+            _run(),
+            payload={"metadata": "prefix-known-secret-value-suffix"},
+            job_id="job-01",
+        )
+
+    assert store.list_runs() == []
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone() == (0,)

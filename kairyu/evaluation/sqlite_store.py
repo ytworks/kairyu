@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,9 +22,13 @@ from kairyu.evaluation.control_store import (
     PublicationToken,
     ReleasedJobStatus,
     ResumeResult,
+    RunCreationResult,
+    RunItemUpdateResult,
     StoreConflictError,
     StoredRun,
+    StoredRunItem,
     validate_artifact_publication,
+    validate_item_state_transition,
     validate_run_state_transition,
 )
 from kairyu.evaluation.safety import (
@@ -32,9 +36,16 @@ from kairyu.evaluation.safety import (
     ensure_secret_free_bytes,
     ensure_secret_free_serialized_json,
 )
-from kairyu.evaluation.schemas import Artifact, BenchmarkRun, RunState, thaw_json_value
+from kairyu.evaluation.schemas import (
+    Artifact,
+    BenchmarkRun,
+    ItemState,
+    RunItem,
+    RunState,
+    thaw_json_value,
+)
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _JOB_STATUSES: frozenset[JobStatus] = frozenset(
     {"queued", "leased", "completed", "failed", "cancelled"}
 )
@@ -114,6 +125,28 @@ _MIGRATION_1 = (
         PRIMARY KEY (run_id, name),
         UNIQUE (run_id, relative_path)
     )
+    """,
+)
+_MIGRATION_2 = (
+    """
+    CREATE TABLE run_items (
+        run_id TEXT NOT NULL REFERENCES benchmark_runs(run_id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        state TEXT NOT NULL CHECK (
+            state IN ('pending', 'running', 'completed', 'failed', 'skipped', 'cancelled')
+        ),
+        version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+        payload_json TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (run_id, item_id),
+        UNIQUE (run_id, ordinal)
+    )
+    """,
+    """
+    CREATE INDEX run_items_state_order
+    ON run_items(run_id, state, ordinal)
     """,
 )
 
@@ -208,6 +241,88 @@ class SqliteControlStore:
                 raise StoreConflictError("run already exists") from exc
         return StoredRun(run=run, version=0, updated_at=now)
 
+    def create_run_and_enqueue(
+        self,
+        run: BenchmarkRun,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        job_id: str | None = None,
+    ) -> RunCreationResult:
+        """Commit a first-attempt run and its queued job atomically."""
+
+        if run.state is not RunState.PENDING:
+            raise ValueError("new runs must be pending")
+        if run.attempt != 1 or run.resumed_from_run_id is not None:
+            raise ValueError("new runs must be first attempts; use resume_run for successors")
+        selected_job_id = job_id or f"job-{uuid.uuid4().hex}"
+        _validate_identifier(selected_job_id, "job_id")
+        timestamp = self._now()
+        run_payload = _model_json(run, self._secret_registry)
+        state = _state_value(run.state)
+        encoded_job_payload = _json(dict(payload or {}), self._secret_registry)
+        persisted_job_payload = json.loads(encoded_job_payload)
+        self._scan_persisted_text(
+            run.run_id,
+            run.benchmark_id,
+            run.profile,
+            _enum_or_string(run.mode),
+            state,
+            selected_job_id,
+        )
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                with connection:
+                    connection.execute(
+                        """
+                        INSERT INTO benchmark_runs (
+                            run_id, benchmark_id, profile, mode, state, version,
+                            payload_json, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+                        """,
+                        (
+                            run.run_id,
+                            run.benchmark_id,
+                            run.profile,
+                            _enum_or_string(run.mode),
+                            state,
+                            run_payload,
+                            run.created_at.timestamp(),
+                            timestamp.timestamp(),
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO jobs (
+                            job_id, run_id, status, payload_json, attempts,
+                            lease_owner, lease_expires_at, created_at, updated_at
+                        ) VALUES (?, ?, 'queued', ?, 0, NULL, NULL, ?, ?)
+                        """,
+                        (
+                            selected_job_id,
+                            run.run_id,
+                            encoded_job_payload,
+                            timestamp.timestamp(),
+                            timestamp.timestamp(),
+                        ),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise StoreConflictError("run or job already exists") from exc
+        stored_run = StoredRun(run=run, version=0, updated_at=timestamp)
+        job = JobRecord(
+            job_id=selected_job_id,
+            run_id=run.run_id,
+            status="queued",
+            payload=persisted_job_payload,
+            attempts=0,
+            lease_owner=None,
+            lease_expires_at=None,
+            cancel_requested=False,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        return RunCreationResult(run=stored_run, job=job)
+
     def get_run(self, run_id: str) -> StoredRun:
         self._scan_persisted_text(run_id)
         with closing(self._connect()) as connection:
@@ -233,6 +348,414 @@ class SqliteControlStore:
             ).fetchall()
         return [_stored_run_from_row(row) for row in rows]
 
+    def complete_preparation(
+        self,
+        run_id: str,
+        *,
+        lease_token: LeaseToken,
+        expected_version: int,
+        protocol_hash: str,
+        item_input_manifest_sha256: str,
+        expected_full_count: int | None,
+        items: Sequence[RunItem],
+    ) -> StoredRun | None:
+        """Atomically freeze prepared identity, item rows, and the READY state."""
+
+        if expected_version < 0:
+            raise ValueError("expected_version must be non-negative")
+        prepared_items = _validate_preparation_items(
+            run_id,
+            items,
+            expected_full_count=expected_full_count,
+        )
+        selected_item_ids = tuple(item.item_id for item in prepared_items)
+        prepared_completed_count = sum(item.state is ItemState.COMPLETED for item in prepared_items)
+        self._scan_persisted_text(
+            run_id,
+            protocol_hash,
+            item_input_manifest_sha256,
+            *(item.item_id for item in prepared_items),
+        )
+        self._scan_lease_token(lease_token)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                timestamp = self._now()
+                _require_active_lease(
+                    connection,
+                    lease_token,
+                    run_id=run_id,
+                    now=timestamp,
+                )
+                row = connection.execute(
+                    """
+                    SELECT payload_json, version, state, updated_at
+                    FROM benchmark_runs
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(run_id)
+                stored = _stored_run_from_row(row)
+                if (
+                    row["state"] == RunState.READY.value
+                    and row["version"] == expected_version + 1
+                    and _same_prepared_run_identity(
+                        stored.run,
+                        protocol_hash=protocol_hash,
+                        item_input_manifest_sha256=item_input_manifest_sha256,
+                        selected_item_ids=selected_item_ids,
+                        expected_full_count=expected_full_count,
+                        completed_count=prepared_completed_count,
+                    )
+                    and _stored_items_match(connection, run_id, prepared_items)
+                ):
+                    connection.commit()
+                    return stored
+                if row["version"] != expected_version:
+                    connection.rollback()
+                    return None
+                if row["state"] != RunState.PREPARING.value:
+                    raise StoreConflictError("preparation completion requires a preparing run")
+                run = stored.run
+                if run.completed_count or run.failed_count or run.skipped_count:
+                    raise StoreConflictError("preparing run already has aggregate item evidence")
+                for item in prepared_items:
+                    if item.state is not ItemState.COMPLETED:
+                        continue
+                    source_run_id = item.checkpoint_source_run_id
+                    assert source_run_id is not None
+                    if source_run_id == run_id or not _run_lineage_contains(
+                        connection,
+                        run_id,
+                        source_run_id,
+                    ):
+                        raise StoreConflictError(
+                            "prepared checkpoint source is not an ancestor run"
+                        )
+                if run.protocol_hash not in {None, protocol_hash}:
+                    raise StoreConflictError("prepared protocol identity conflicts with run intent")
+                if run.item_input_manifest_sha256 not in {
+                    None,
+                    item_input_manifest_sha256,
+                }:
+                    raise StoreConflictError("prepared item manifest conflicts with run intent")
+                if run.selected_item_ids and run.selected_item_ids != selected_item_ids:
+                    raise StoreConflictError("prepared item selection conflicts with run intent")
+                if (
+                    run.expected_full_count is not None
+                    and run.expected_full_count != expected_full_count
+                ):
+                    raise StoreConflictError("prepared expected count conflicts with run intent")
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM run_items WHERE run_id = ? LIMIT 1",
+                        (run_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise StoreConflictError("preparing run already has item rows")
+
+                validate_run_state_transition(run.state, RunState.READY)
+                updated_run = BenchmarkRun.model_validate(
+                    {
+                        **run.model_dump(),
+                        "state": RunState.READY,
+                        "protocol_hash": protocol_hash,
+                        "item_input_manifest_sha256": item_input_manifest_sha256,
+                        "selected_item_ids": selected_item_ids,
+                        "expected_full_count": expected_full_count,
+                        "completed_count": prepared_completed_count,
+                        "failed_count": 0,
+                        "skipped_count": 0,
+                    }
+                )
+                for item in prepared_items:
+                    payload_json = _model_json(item, self._secret_registry)
+                    connection.execute(
+                        """
+                        INSERT INTO run_items (
+                            run_id, item_id, ordinal, state, version, payload_json,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            item.item_id,
+                            item.ordinal,
+                            item.state.value,
+                            payload_json,
+                            timestamp.timestamp(),
+                            timestamp.timestamp(),
+                        ),
+                    )
+                new_version = expected_version + 1
+                result = connection.execute(
+                    """
+                    UPDATE benchmark_runs
+                    SET state = ?, version = ?, payload_json = ?, updated_at = ?
+                    WHERE run_id = ? AND state = ? AND version = ?
+                    """,
+                    (
+                        RunState.READY.value,
+                        new_version,
+                        _model_json(updated_run, self._secret_registry),
+                        timestamp.timestamp(),
+                        run_id,
+                        RunState.PREPARING.value,
+                        expected_version,
+                    ),
+                )
+                if result.rowcount != 1:
+                    raise StoreConflictError("run changed while completing preparation")
+                connection.commit()
+                return StoredRun(
+                    run=updated_run,
+                    version=new_version,
+                    updated_at=timestamp,
+                )
+            except sqlite3.IntegrityError as exc:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise StoreConflictError("prepared item rows conflict with stored state") from exc
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
+    def get_run_item(self, run_id: str, item_id: str) -> StoredRunItem:
+        self._scan_persisted_text(run_id, item_id)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json, version, updated_at
+                FROM run_items
+                WHERE run_id = ? AND item_id = ?
+                """,
+                (run_id, item_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError((run_id, item_id))
+        return _stored_run_item_from_row(row)
+
+    def list_run_items(
+        self,
+        run_id: str,
+        *,
+        after_ordinal: int = -1,
+        limit: int = 1_000,
+    ) -> list[StoredRunItem]:
+        self._scan_persisted_text(run_id)
+        if not isinstance(after_ordinal, int) or isinstance(after_ordinal, bool):
+            raise TypeError("after_ordinal must be an integer")
+        if after_ordinal < -1:
+            raise ValueError("after_ordinal must be at least -1")
+        _validate_limit(limit)
+        with closing(self._connect()) as connection:
+            if not _run_exists(connection, run_id):
+                raise KeyError(run_id)
+            rows = connection.execute(
+                """
+                SELECT payload_json, version, updated_at
+                FROM run_items
+                WHERE run_id = ? AND ordinal > ?
+                ORDER BY ordinal
+                LIMIT ?
+                """,
+                (run_id, after_ordinal, limit),
+            ).fetchall()
+        return [_stored_run_item_from_row(row) for row in rows]
+
+    def compare_and_set_run_item(
+        self,
+        run_id: str,
+        item_id: str,
+        *,
+        lease_token: LeaseToken,
+        expected_state: ItemState,
+        expected_version: int,
+        new_state: ItemState,
+        scores: Mapping[str, float] | None = None,
+        error_class: str | None = None,
+        checkpoint_relative_path: str | None = None,
+        checkpoint_sha256: str | None = None,
+        checkpoint_source_run_id: str | None = None,
+    ) -> RunItemUpdateResult | None:
+        """CAS one item and its aggregate run counters in a single transaction."""
+
+        if expected_version < 0:
+            raise ValueError("expected_version must be non-negative")
+        expected = ItemState(_enum_or_string(expected_state))
+        target = ItemState(_enum_or_string(new_state))
+        validate_item_state_transition(expected, target)
+        requested_scores = dict(scores or {})
+        self._scan_persisted_text(
+            run_id,
+            item_id,
+            expected.value,
+            target.value,
+            *(
+                value
+                for value in (
+                    error_class,
+                    checkpoint_relative_path,
+                    checkpoint_sha256,
+                    checkpoint_source_run_id,
+                )
+                if value is not None
+            ),
+        )
+        self._scan_lease_token(lease_token)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                timestamp = self._now()
+                _require_active_lease(
+                    connection,
+                    lease_token,
+                    run_id=run_id,
+                    now=timestamp,
+                )
+                row = connection.execute(
+                    """
+                    SELECT payload_json, version, state, updated_at
+                    FROM run_items
+                    WHERE run_id = ? AND item_id = ?
+                    """,
+                    (run_id, item_id),
+                ).fetchone()
+                if row is None:
+                    raise KeyError((run_id, item_id))
+                current_item = _stored_run_item_from_row(row)
+                run_row = connection.execute(
+                    """
+                    SELECT payload_json, version, state, updated_at
+                    FROM benchmark_runs
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if run_row is None:
+                    raise KeyError(run_id)
+                current_run = _stored_run_from_row(run_row)
+                if row["version"] != expected_version or row["state"] != expected.value:
+                    if (
+                        row["version"] == expected_version + 1
+                        and row["state"] == target.value
+                        and _same_item_result(
+                            current_item.item,
+                            scores=requested_scores,
+                            error_class=error_class,
+                            checkpoint_relative_path=checkpoint_relative_path,
+                            checkpoint_sha256=checkpoint_sha256,
+                            checkpoint_source_run_id=checkpoint_source_run_id,
+                        )
+                    ):
+                        connection.commit()
+                        return RunItemUpdateResult(item=current_item, run=current_run)
+                    connection.rollback()
+                    return None
+                if current_run.run.state not in {RunState.RUNNING, RunState.CANCELLING}:
+                    raise StoreConflictError(
+                        "run items may change only while the run is running or cancelling"
+                    )
+                validate_item_state_transition(current_item.item.state, target)
+                if checkpoint_source_run_id is not None and not _run_lineage_contains(
+                    connection,
+                    run_id,
+                    checkpoint_source_run_id,
+                ):
+                    raise StoreConflictError(
+                        "checkpoint source is not the current run or one of its ancestors"
+                    )
+                mutation_timestamp = max(
+                    timestamp,
+                    current_item.updated_at,
+                    current_run.updated_at,
+                )
+                updated_item = RunItem.model_validate(
+                    {
+                        **current_item.item.model_dump(),
+                        "state": target,
+                        "scores": requested_scores,
+                        "error_class": error_class,
+                        "checkpoint_relative_path": checkpoint_relative_path,
+                        "checkpoint_sha256": checkpoint_sha256,
+                        "checkpoint_source_run_id": checkpoint_source_run_id,
+                    }
+                )
+                count_fields = {
+                    ItemState.COMPLETED: "completed_count",
+                    ItemState.FAILED: "failed_count",
+                    ItemState.SKIPPED: "skipped_count",
+                }
+                run_changes: dict[str, Any] = {}
+                count_field = count_fields.get(target)
+                if count_field is not None:
+                    run_changes[count_field] = getattr(current_run.run, count_field) + 1
+                    if current_run.run.state is RunState.CANCELLING:
+                        run_changes["partial"] = True
+                updated_run = BenchmarkRun.model_validate(
+                    {**current_run.run.model_dump(), **run_changes}
+                )
+                new_item_version = expected_version + 1
+                item_result = connection.execute(
+                    """
+                    UPDATE run_items
+                    SET state = ?, version = ?, payload_json = ?, updated_at = ?
+                    WHERE run_id = ? AND item_id = ? AND state = ? AND version = ?
+                    """,
+                    (
+                        target.value,
+                        new_item_version,
+                        _model_json(updated_item, self._secret_registry),
+                        mutation_timestamp.timestamp(),
+                        run_id,
+                        item_id,
+                        expected.value,
+                        expected_version,
+                    ),
+                )
+                if item_result.rowcount != 1:
+                    connection.rollback()
+                    return None
+                new_run_version = current_run.version + 1
+                run_result = connection.execute(
+                    """
+                    UPDATE benchmark_runs
+                    SET version = ?, payload_json = ?, updated_at = ?
+                    WHERE run_id = ? AND state = ? AND version = ?
+                    """,
+                    (
+                        new_run_version,
+                        _model_json(updated_run, self._secret_registry),
+                        mutation_timestamp.timestamp(),
+                        run_id,
+                        current_run.run.state.value,
+                        current_run.version,
+                    ),
+                )
+                if run_result.rowcount != 1:
+                    raise StoreConflictError("run changed while updating an item")
+                connection.commit()
+                return RunItemUpdateResult(
+                    item=StoredRunItem(
+                        item=updated_item,
+                        version=new_item_version,
+                        updated_at=mutation_timestamp,
+                    ),
+                    run=StoredRun(
+                        run=updated_run,
+                        version=new_run_version,
+                        updated_at=mutation_timestamp,
+                    ),
+                )
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
     def compare_and_set_run_state(
         self,
         run_id: str,
@@ -256,7 +779,7 @@ class SqliteControlStore:
                 timestamp = self._now()
                 row = connection.execute(
                     """
-                    SELECT payload_json, version, state
+                    SELECT payload_json, version, state, updated_at
                     FROM benchmark_runs
                     WHERE run_id = ?
                     """,
@@ -276,6 +799,12 @@ class SqliteControlStore:
                 validate_run_state_transition(RunState(expected), RunState(target))
                 run = BenchmarkRun.model_validate_json(row["payload_json"])
                 target_state = RunState(target)
+                transition_timestamp = max(
+                    timestamp,
+                    run.created_at,
+                    run.started_at or run.created_at,
+                    _from_timestamp(row["updated_at"]),
+                )
                 terminal_states = {
                     RunState.CANCELLED,
                     RunState.PARTIAL,
@@ -285,7 +814,9 @@ class SqliteControlStore:
                 changes: dict[str, Any] = {
                     "state": target_state,
                     "partial": _partial_for_transition(run, target_state, partial),
-                    "finished_at": (timestamp if target_state in terminal_states else None),
+                    "finished_at": (
+                        transition_timestamp if target_state in terminal_states else None
+                    ),
                 }
                 if (
                     target_state
@@ -296,7 +827,7 @@ class SqliteControlStore:
                     }
                     and run.started_at is None
                 ):
-                    changes["started_at"] = timestamp
+                    changes["started_at"] = transition_timestamp
                 if termination_reason is not None:
                     changes["termination_reason"] = termination_reason
                 updated_run = BenchmarkRun.model_validate({**run.model_dump(), **changes})
@@ -311,7 +842,7 @@ class SqliteControlStore:
                         target,
                         new_version,
                         _model_json(updated_run, self._secret_registry),
-                        timestamp.timestamp(),
+                        transition_timestamp.timestamp(),
                         run_id,
                         expected,
                         expected_version,
@@ -324,7 +855,7 @@ class SqliteControlStore:
                 return StoredRun(
                     run=updated_run,
                     version=new_version,
-                    updated_at=timestamp,
+                    updated_at=transition_timestamp,
                 )
             except BaseException:
                 if connection.in_transaction:
@@ -411,6 +942,7 @@ class SqliteControlStore:
                     WHERE status = 'queued'
                        OR (status = 'leased' AND lease_expires_at <= ?)
                     ORDER BY
+                        attempts,
                         CASE WHEN status = 'leased' THEN 0 ELSE 1 END,
                         created_at,
                         job_id
@@ -480,13 +1012,15 @@ class SqliteControlStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 timestamp = self._now()
-                lease_expires_at = timestamp + timedelta(seconds=lease_seconds)
-                _require_active_lease(
+                lease = _require_active_lease(
                     connection,
                     lease_token,
                     run_id=lease_token.run_id,
                     now=timestamp,
                 )
+                requested_expiry = timestamp + timedelta(seconds=lease_seconds)
+                current_expiry = _from_timestamp(lease["lease_expires_at"])
+                lease_expires_at = max(current_expiry, requested_expiry)
                 result = connection.execute(
                     """
                     UPDATE jobs
@@ -854,7 +1388,11 @@ class SqliteControlStore:
                     raise StoreConflictError(
                         "finalization token requires a matching terminal run and job"
                     )
-                token = FinalizationToken(run_id=run_id, run_version=row["version"])
+                token = FinalizationToken(
+                    run_id=run_id,
+                    run_version=row["version"],
+                    allow_aggregate_artifacts=(RunState(row["state"]) is RunState.CANCELLED),
+                )
                 connection.commit()
                 return token
             except BaseException:
@@ -1137,6 +1675,13 @@ class SqliteControlStore:
                         "INSERT INTO schema_migrations(version, applied_at) VALUES (1, ?)",
                         (self._now().timestamp(),),
                     )
+                if 2 not in applied:
+                    for statement in _MIGRATION_2:
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?)",
+                        (self._now().timestamp(),),
+                    )
                 connection.commit()
             except BaseException:
                 if connection.in_transaction:
@@ -1196,6 +1741,12 @@ def _transition_run_in_transaction(
         return _stored_run_from_row(row)
     validate_run_state_transition(source, target)
     run = BenchmarkRun.model_validate_json(row["payload_json"])
+    transition_timestamp = max(
+        timestamp,
+        run.created_at,
+        run.started_at or run.created_at,
+        _from_timestamp(row["updated_at"]),
+    )
     terminal_states = {
         RunState.CANCELLED,
         RunState.PARTIAL,
@@ -1206,10 +1757,10 @@ def _transition_run_in_transaction(
         "state": target,
         "termination_reason": termination_reason,
         "partial": _partial_for_transition(run, target, None),
-        "finished_at": timestamp if target in terminal_states else None,
+        "finished_at": transition_timestamp if target in terminal_states else None,
     }
     if target in {RunState.RUNNING, RunState.CANCELLING, *terminal_states}:
-        changes["started_at"] = run.started_at or timestamp
+        changes["started_at"] = run.started_at or transition_timestamp
     updated_run = BenchmarkRun.model_validate({**run.model_dump(), **changes})
     new_version = row["version"] + 1
     result = connection.execute(
@@ -1222,14 +1773,18 @@ def _transition_run_in_transaction(
             target.value,
             new_version,
             _model_json(updated_run, secret_registry),
-            timestamp.timestamp(),
+            transition_timestamp.timestamp(),
             run_id,
             row["version"],
         ),
     )
     if result.rowcount != 1:
         raise StoreConflictError("run changed during controller transition")
-    return StoredRun(run=updated_run, version=new_version, updated_at=timestamp)
+    return StoredRun(
+        run=updated_run,
+        version=new_version,
+        updated_at=transition_timestamp,
+    )
 
 
 def _finalise_cancelled_run_in_transaction(
@@ -1262,6 +1817,135 @@ def _finalise_cancelled_run_in_transaction(
         timestamp=timestamp,
         termination_reason="cancel_requested",
         secret_registry=secret_registry,
+    )
+
+
+def _validate_preparation_items(
+    run_id: str,
+    items: Sequence[RunItem],
+    *,
+    expected_full_count: int | None,
+) -> tuple[RunItem, ...]:
+    if expected_full_count is not None and (
+        not isinstance(expected_full_count, int)
+        or isinstance(expected_full_count, bool)
+        or expected_full_count < 0
+    ):
+        raise ValueError("expected_full_count must be a non-negative integer or None")
+    prepared_items = tuple(items)
+    if not prepared_items:
+        raise ValueError("preparation requires at least one run item")
+    if expected_full_count is not None and expected_full_count < len(prepared_items):
+        raise ValueError("expected_full_count cannot be smaller than selected items")
+    for ordinal, item in enumerate(prepared_items):
+        if not isinstance(item, RunItem):
+            raise TypeError("items must contain RunItem records")
+        if item.run_id != run_id:
+            raise ValueError("prepared item belongs to a different run")
+        if item.ordinal != ordinal:
+            raise ValueError("prepared item ordinals must be contiguous and ordered from zero")
+        if item.attempt != 1:
+            raise ValueError("prepared items must be first-attempt records")
+        if item.state is ItemState.PENDING:
+            if item.scores or item.error_class is not None:
+                raise ValueError("pending prepared items cannot contain result evidence")
+        elif item.state is ItemState.COMPLETED:
+            if item.error_class is not None or item.checkpoint_relative_path is None:
+                raise ValueError(
+                    "completed prepared items require checkpoint evidence without an error"
+                )
+        else:
+            raise ValueError("prepared items must be pending or checkpoint-completed")
+    item_ids = tuple(item.item_id for item in prepared_items)
+    if len(set(item_ids)) != len(item_ids):
+        raise ValueError("prepared item IDs must be unique")
+    return prepared_items
+
+
+def _same_prepared_run_identity(
+    run: BenchmarkRun,
+    *,
+    protocol_hash: str,
+    item_input_manifest_sha256: str,
+    selected_item_ids: tuple[str, ...],
+    expected_full_count: int | None,
+    completed_count: int,
+) -> bool:
+    return (
+        run.protocol_hash == protocol_hash
+        and run.item_input_manifest_sha256 == item_input_manifest_sha256
+        and run.selected_item_ids == selected_item_ids
+        and run.expected_full_count == expected_full_count
+        and run.completed_count == completed_count
+        and run.failed_count == 0
+        and run.skipped_count == 0
+    )
+
+
+def _stored_items_match(
+    connection: sqlite3.Connection,
+    run_id: str,
+    expected_items: Sequence[RunItem],
+) -> bool:
+    rows = connection.execute(
+        """
+        SELECT payload_json, version, updated_at
+        FROM run_items
+        WHERE run_id = ?
+        ORDER BY ordinal
+        """,
+        (run_id,),
+    ).fetchall()
+    return len(rows) == len(expected_items) and all(
+        row["version"] == 0 and RunItem.model_validate_json(row["payload_json"]) == expected_item
+        for row, expected_item in zip(rows, expected_items, strict=True)
+    )
+
+
+def _run_lineage_contains(
+    connection: sqlite3.Connection,
+    run_id: str,
+    source_run_id: str,
+) -> bool:
+    current_run_id: str | None = run_id
+    seen: set[str] = set()
+    while current_run_id is not None and current_run_id not in seen:
+        if current_run_id == source_run_id:
+            return True
+        seen.add(current_run_id)
+        row = connection.execute(
+            "SELECT resumed_from_run_id FROM benchmark_runs WHERE run_id = ?",
+            (current_run_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        current_run_id = row["resumed_from_run_id"]
+    return False
+
+
+def _same_item_result(
+    item: RunItem,
+    *,
+    scores: Mapping[str, float],
+    error_class: str | None,
+    checkpoint_relative_path: str | None,
+    checkpoint_sha256: str | None,
+    checkpoint_source_run_id: str | None,
+) -> bool:
+    return (
+        dict(item.scores) == dict(scores)
+        and item.error_class == error_class
+        and item.checkpoint_relative_path == checkpoint_relative_path
+        and item.checkpoint_sha256 == checkpoint_sha256
+        and item.checkpoint_source_run_id == checkpoint_source_run_id
+    )
+
+
+def _stored_run_item_from_row(row: sqlite3.Row) -> StoredRunItem:
+    return StoredRunItem(
+        item=RunItem.model_validate_json(row["payload_json"]),
+        version=row["version"],
+        updated_at=_from_timestamp(row["updated_at"]),
     )
 
 
@@ -1391,6 +2075,10 @@ def _require_finalization_fence(
         row is None
         or row["version"] != finalization_token.run_version
         or not _is_finalized_pair(row["state"], row["status"])
+        or (
+            finalization_token.allow_aggregate_artifacts
+            and RunState(row["state"]) is not RunState.CANCELLED
+        )
     ):
         raise LeaseConflictError(
             "finalization token is stale or does not match terminal stored state"

@@ -13,6 +13,7 @@ from kairyu.evaluation.schemas import (
     BenchmarkRun,
     Comparability,
     ImplementationStatus,
+    ItemState,
     Metric,
     ProtocolSignature,
     ReferenceResult,
@@ -450,3 +451,75 @@ def test_artifact_requires_canonical_sha256_and_aware_time():
             size_bytes=1,
             created_at=datetime.now(),
         )
+
+
+@pytest.mark.parametrize(
+    "checkpoint_fields",
+    (
+        {"checkpoint_relative_path": "items/item-01.json"},
+        {"checkpoint_sha256": "b" * 64},
+        {"checkpoint_source_run_id": "run-source"},
+        {
+            "checkpoint_relative_path": "items/item-01.json",
+            "checkpoint_sha256": "b" * 64,
+        },
+    ),
+)
+def test_run_item_checkpoint_identity_is_all_or_none(checkpoint_fields):
+    with pytest.raises(ValidationError, match="all present or absent"):
+        RunItem(
+            run_id="run-01",
+            item_id="item-01",
+            ordinal=0,
+            input_sha256="a" * 64,
+            state=ItemState.COMPLETED,
+            **checkpoint_fields,
+        )
+
+
+def test_run_item_checkpoint_is_completed_only_and_uses_portable_path():
+    checkpoint = {
+        "checkpoint_relative_path": "items/item-01.json",
+        "checkpoint_sha256": "b" * 64,
+        "checkpoint_source_run_id": "run-source",
+    }
+    with pytest.raises(ValidationError, match="completed items"):
+        RunItem(
+            run_id="run-01",
+            item_id="item-01",
+            ordinal=0,
+            input_sha256="a" * 64,
+            state=ItemState.RUNNING,
+            **checkpoint,
+        )
+    with pytest.raises(ValidationError, match="canonical portable"):
+        RunItem(
+            run_id="run-01",
+            item_id="item-01",
+            ordinal=0,
+            input_sha256="a" * 64,
+            state=ItemState.COMPLETED,
+            **{**checkpoint, "checkpoint_relative_path": "../item-01.json"},
+        )
+
+    item = RunItem(
+        run_id="run-01",
+        item_id="item-01",
+        ordinal=0,
+        input_sha256="a" * 64,
+        state=ItemState.COMPLETED,
+        **checkpoint,
+    )
+
+    assert item.model_dump(mode="json") == {
+        "schema_version": 1,
+        "run_id": "run-01",
+        "item_id": "item-01",
+        "ordinal": 0,
+        "state": "completed",
+        "attempt": 1,
+        "input_sha256": "a" * 64,
+        **checkpoint,
+        "error_class": None,
+        "scores": {},
+    }

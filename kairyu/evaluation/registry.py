@@ -8,6 +8,7 @@ contract and synthetic end-to-end tests land.
 
 from __future__ import annotations
 
+from kairyu.evaluation.adapters import available_adapter_ids
 from kairyu.evaluation.schemas import BenchmarkDefinition, ImplementationStatus
 
 _UNRESOLVED_VERSION = "unresolved"
@@ -52,8 +53,26 @@ _CATALOG: tuple[BenchmarkDefinition, ...] = (
     BenchmarkDefinition(
         benchmark_id="gpqa-diamond",
         display_name="GPQA Diamond",
-        benchmark_version=_UNRESOLVED_VERSION,
+        description=(
+            "198 expert-written science multiple-choice questions; official data access is gated."
+        ),
+        benchmark_version="gpqa-diamond-evalscope-v1.8.1",
+        licenses=(
+            "GPQA data: CC-BY-4.0 with original-provider access terms",
+            "EvalScope compatibility source: Apache-2.0",
+            "Kairyu synthetic smoke fixture: CC0-1.0",
+        ),
+        data_sources=(
+            "https://huggingface.co/datasets/Idavidrein/gpqa",
+            "https://github.com/modelscope/evalscope/tree/v1.8.1/evalscope/benchmarks/gpqa",
+        ),
+        required_auth=("manually approved local GPQA snapshot",),
         primary_metric="Accuracy",
+        auxiliary_metrics=("invalid answer count", "API error count"),
+        modalities=("text",),
+        required_capabilities=("chat completions",),
+        supports_resume=True,
+        implementation_status=ImplementationStatus.AVAILABLE,
     ),
     BenchmarkDefinition(
         benchmark_id="scicode",
@@ -86,8 +105,13 @@ _BY_ID = {entry.benchmark_id: entry for entry in _CATALOG}
 
 if len(_BY_ID) != len(_CATALOG):  # pragma: no cover - import-time invariant
     raise RuntimeError("duplicate benchmark ID in the evaluation catalog")
-if any(entry.implementation_status is not ImplementationStatus.PLANNED for entry in _CATALOG):
-    raise RuntimeError("foundation catalog entries must start as planned")
+_AVAILABLE_IDS = {
+    entry.benchmark_id
+    for entry in _CATALOG
+    if entry.implementation_status is ImplementationStatus.AVAILABLE
+}
+if _AVAILABLE_IDS != set(available_adapter_ids()):
+    raise RuntimeError("available catalog entries and lazy adapter factories differ")
 
 
 def benchmark_catalog() -> tuple[BenchmarkDefinition, ...]:

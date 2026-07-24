@@ -12,11 +12,11 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 hardware run (Issues #102–#104) are fixed and GPU-verified in PR #105. Real-model parity,
 performance, and production/fabric drills remain. The all-visible-GPU Qwen3-32B
 Compose and benchmark/report workflow are implemented but still need validation
-on the GPU host. The M20 reproducible-evaluation foundation is implemented with
-an exact eleven-entry planned catalog, strict schemas/protocol guards, durable
-SQLite leases/events with cancellation, identity-fenced immutable successor
-creation, and lease/report-only publication-fenced artifacts; individual adapters
-and the legacy cutover remain.**
+on the GPU host. The M20 reproducible-evaluation foundation and GPQA Diamond
+vertical slice are implemented with an exact eleven-entry catalog, strict schemas/protocol guards,
+durable SQLite jobs and checkpoints, artifact-only report regeneration, and
+publication-fenced artifacts; GPQA is available, while ten adapters and the legacy
+accuracy-suite cutover remain. Top-level `bench/` tooling remains supported.**
 
 _Last updated: 2026-07-24_
 
@@ -44,7 +44,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
-| M20 — Reproducible evaluation platform | **Foundation implemented** (2026-07-24, `docs/design/m20-evaluation-platform.md`): exact planned catalog, deeply immutable secret-free protocols, conservative comparison, fail-closed full guard, canonical create-once lease/report-only publication-fenced artifacts, and SQLite WAL state/events/store-clocked leases with cancellation and identity-fenced immutable successor creation. Eleven adapter PRs, reporting/reference workflows, and legacy cutover remain. |
+| M20 — Reproducible evaluation platform | **Foundation + GPQA Diamond implemented** (2026-07-24, `docs/design/m20-evaluation-platform.md`): exact eleven-entry catalog with GPQA available, immutable secret-free protocols, guarded planning/full-run preflight, durable item checkpoints/cancellation/resume, bounded descriptor-relative artifacts, artifact-only JSON/Markdown/HTML reporting, and incompatible evidence-only Fugu references. Ten adapter PRs and the legacy accuracy-suite cutover remain; top-level `bench/` is unchanged. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03). 610 tests. |
@@ -106,16 +106,17 @@ deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
 footnoted scoreboard (G6 P-C1).
 
-M20 now exposes `kairyu benchmark list` as a metadata-only replacement catalog:
-all eleven entries are explicitly `planned`, and no new run command is exposed
-until an adapter has its pinned protocol and synthetic end-to-end coverage. The
-legacy `kairyu bench` command remains only during the stacked migration. The new
-foundation rejects unsafe paths/symlinks, publishes canonical artifacts create-once
-under an active lease or report-only terminal fence, persists run state, events,
-store-clocked worker leases, cancellation intent, protocol/item-manifest identity,
-and immutable successor lineage in SQLite WAL, and treats unresolved protocol
-evidence as incompatible rather than exact. Top-level `bench/` performance and
-operational tooling remains supported and is outside the M20 quality-suite cutover.
+M20 exposes `kairyu benchmark list` as an exact eleven-entry replacement catalog.
+GPQA Diamond is the first `available` adapter; the other ten entries remain `planned`
+until their pinned protocols and synthetic end-to-end coverage land. GPQA supports
+doctor, prepare, guarded plan/run, durable status/cancel/resume, artifact-only report
+regeneration, and offline reference listing. Smoke uses a two-item CC0 fixture and a
+fixed fake connector. Gated profiles require a manually approved, checksum-pinned
+local snapshot; unresolved provider, hardware, retrieval, runtime, and cost evidence
+remains explicit and makes formal comparison fail closed. No official/full run or paid
+API call has been performed. The legacy `kairyu bench` accuracy command remains only
+during the stacked migration. Top-level `bench/` performance and operational tooling
+remains supported and is outside the M20 quality-suite cutover.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -127,6 +128,27 @@ patches, and full judge/simulator IDs; gated-data acceptance and a disposable-VM
 executor are deployment prerequisites for several later adapters.
 
 ## Change Log
+
+### 2026-07-24 — [progress] GPQA Diamond vertical slice implemented
+- What: Added the first runnable M20 adapter with pinned EvalScope 1.8.1-compatible
+  preprocessing, prompting, parsing, and Accuracy; guarded smoke/sample/full planning;
+  an offline synthetic end-to-end path; durable item checkpoints and lifecycle commands;
+  typed manifests, usage, and JSON/Markdown/HTML reports; and immutable Fugu reference
+  evidence. Official data remains manually supplied and fail-closed. No official/full
+  benchmark or paid model API was run.
+- Refs: M20 D2-D8; `kairyu/evaluation/adapters/gpqa_diamond.py`;
+  `kairyu/evaluation/resources/`; `tests/evaluation/`.
+
+### 2026-07-24 — [amendment] Terminal evidence and artifact I/O made fail-closed
+- What: Unified normal and cancellation manifests, reconstructed reports only from
+  checksum-verified artifacts, retained completed checkpoints on partial cancellation,
+  bounded worker retries and artifact bytes, and pinned artifact path traversal and
+  publication to no-follow directory descriptors.
+- Why: Renderer crashes, queued cancellation, stale workers, oversized files, and
+  parent-path replacement could otherwise leave terminal runs without required evidence
+  or make published bytes disagree with their durable lease and protocol identity.
+- Refs: M20 D5, D8; `kairyu/evaluation/{artifacts,reporting,worker}.py`;
+  `tests/evaluation/unit/`.
 
 ### 2026-07-24 — [amendment] Resume identity and evidence publication made fail-closed
 - What: Required protocol and ordered item-input-manifest hashes before resume;

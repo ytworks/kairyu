@@ -1,5 +1,10 @@
 # Fugu Benchmark Suite (`kairyu bench`)
 
+> This page documents the legacy accuracy suite during the M20 stacked migration.
+> GPQA Diamond is now available through `kairyu benchmark`; the legacy package is
+> removed only after all replacement adapters land. The performance and operational
+> programs in top-level `bench/` are separate and remain supported.
+
 One command runs every benchmark from Sakana's Fugu release table
 ([sakana.ai/fugu-release](https://sakana.ai/fugu-release/)) against a deployed
 kairyu gateway — single models and orchestrations side by side — then writes a

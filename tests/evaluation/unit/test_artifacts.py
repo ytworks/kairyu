@@ -10,6 +10,7 @@ import pytest
 from kairyu.evaluation.artifacts import (
     RUN_ARTIFACT_DIRECTORIES,
     ArtifactConflictError,
+    ArtifactSizeLimitError,
     ArtifactStore,
     UnsafeArtifactPath,
 )
@@ -38,11 +39,18 @@ def _publication_guard(publication_token):
     yield
 
 
-def _store(root, *, publication_guard=_publication_guard, secret_registry=None):
+def _store(
+    root,
+    *,
+    publication_guard=_publication_guard,
+    secret_registry=None,
+    max_artifact_bytes=64 * 1024 * 1024,
+):
     store = _RawArtifactStore(
         root,
         publication_guard=publication_guard,
         secret_registry=secret_registry,
+        max_artifact_bytes=max_artifact_bytes,
     )
     store.write_bytes = partial(store.write_bytes, publication_token=_TOKEN)
     store.write_json = partial(store.write_json, publication_token=_TOKEN)
@@ -113,6 +121,62 @@ def test_store_rejects_symlink_as_root_or_root_parent(tmp_path):
         _store(link / "benchmark_runs")
 
 
+def test_create_run_rejects_root_symlink_swap_before_pinned_open(tmp_path, monkeypatch):
+    root = tmp_path / "benchmark_runs"
+    store = _store(root)
+    external = tmp_path / "external"
+    external.mkdir()
+    pinned = tmp_path / "benchmark-runs-pinned"
+    original_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if Path(path) == root and dir_fd is None and not swapped:
+            swapped = True
+            root.rename(pinned)
+            root.symlink_to(external, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+
+    with pytest.raises(UnsafeArtifactPath):
+        store.create_run("run-01")
+
+    assert swapped
+    assert not (external / "run-01").exists()
+
+
+def test_read_rejects_root_symlink_swap_before_pinned_open(tmp_path, monkeypatch):
+    root = tmp_path / "benchmark_runs"
+    store = _store(root)
+    store.create_run("run-01")
+    store.write_bytes("run-01", "logs/result.bin", b"inside")
+    external = tmp_path / "external"
+    (external / "run-01" / "logs").mkdir(parents=True)
+    outside = external / "run-01" / "logs" / "result.bin"
+    outside.write_bytes(b"outside")
+    pinned = tmp_path / "benchmark-runs-pinned"
+    original_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if Path(path) == root and dir_fd is None and not swapped:
+            swapped = True
+            root.rename(pinned)
+            root.symlink_to(external, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+
+    with pytest.raises(UnsafeArtifactPath):
+        store.read_bytes("run-01", "logs/result.bin")
+
+    assert swapped
+    assert outside.read_bytes() == b"outside"
+
+
 def test_store_rejects_run_directory_symlink(tmp_path):
     root = tmp_path / "benchmark_runs"
     store = _store(root)
@@ -155,6 +219,132 @@ def test_atomic_byte_write_returns_digest_and_leaves_no_temp_file(tmp_path):
     assert result.sha256 == ("239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5")
     assert result.size_bytes == 7
     assert store.read_bytes("run-01", "upstream/result.bin") == b"payload"
+    assert list(run_dir.rglob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("invalid_limit", (0, -1, True, 1.5, "1024"))
+def test_artifact_size_limit_must_be_a_positive_integer(tmp_path, invalid_limit):
+    with pytest.raises(ValueError, match="positive integer"):
+        _RawArtifactStore(
+            tmp_path / "benchmark_runs",
+            publication_guard=_publication_guard,
+            max_artifact_bytes=invalid_limit,
+        )
+
+
+def test_write_rejects_oversized_artifact_before_creating_a_temp_file(tmp_path):
+    store = _store(tmp_path / "benchmark_runs", max_artifact_bytes=4)
+    run_dir = store.create_run("run-01")
+
+    with pytest.raises(ArtifactSizeLimitError, match="5 > 4"):
+        store.write_bytes("run-01", "manifest.json", b"12345")
+
+    assert not (run_dir / "manifest.json").exists()
+    assert list(run_dir.rglob("*.tmp")) == []
+
+
+def test_write_accepts_artifact_at_exact_size_limit(tmp_path):
+    store = _store(tmp_path / "benchmark_runs", max_artifact_bytes=4)
+    store.create_run("run-01")
+
+    store.write_bytes("run-01", "manifest.json", b"1234")
+
+    assert store.read_bytes("run-01", "manifest.json") == b"1234"
+
+
+def test_jsonl_enforces_limit_while_collecting_records(tmp_path):
+    store = _store(tmp_path / "benchmark_runs", max_artifact_bytes=3)
+    run_dir = store.create_run("run-01")
+
+    with pytest.raises(ArtifactSizeLimitError):
+        store.write_jsonl("run-01", "events.jsonl", ({}, {}))
+
+    assert not (run_dir / "events.jsonl").exists()
+
+
+def test_read_rejects_oversized_regular_file_before_loading_it(tmp_path):
+    store = _store(tmp_path / "benchmark_runs", max_artifact_bytes=4)
+    run_dir = store.create_run("run-01")
+    (run_dir / "manifest.json").write_bytes(b"12345")
+
+    with pytest.raises(ArtifactSizeLimitError, match="5 > 4"):
+        store.read_bytes("run-01", "manifest.json")
+
+
+def test_json_writer_enforces_utf8_encoded_size_at_exact_boundary(tmp_path):
+    payload = {"message": "é"}
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    exact = _store(tmp_path / "exact", max_artifact_bytes=len(encoded))
+    exact.create_run("run-01")
+    exact.write_json("run-01", "manifest.json", payload)
+
+    oversized = _store(tmp_path / "oversized", max_artifact_bytes=len(encoded) - 1)
+    oversized.create_run("run-01")
+    with pytest.raises(ArtifactSizeLimitError):
+        oversized.write_json("run-01", "manifest.json", payload)
+
+    assert exact.read_bytes("run-01", "manifest.json") == encoded
+    assert not (oversized.run_dir("run-01") / "manifest.json").exists()
+
+
+def test_text_writer_enforces_multibyte_utf8_size_at_exact_boundary(tmp_path):
+    exact = _store(tmp_path / "exact", max_artifact_bytes=2)
+    exact.create_run("run-01")
+    exact.write_text("run-01", "report.md", "é")
+
+    oversized = _store(tmp_path / "oversized", max_artifact_bytes=1)
+    oversized.create_run("run-01")
+    with pytest.raises(ArtifactSizeLimitError, match="2 > 1"):
+        oversized.write_text("run-01", "report.md", "é")
+
+    assert exact.read_bytes("run-01", "report.md") == "é".encode()
+    assert not (oversized.run_dir("run-01") / "report.md").exists()
+
+
+def test_idempotent_retry_rejects_existing_artifact_over_limit(tmp_path):
+    store = _store(tmp_path / "benchmark_runs", max_artifact_bytes=4)
+    run_dir = store.create_run("run-01")
+    destination = run_dir / "manifest.json"
+    destination.write_bytes(b"12345")
+
+    with pytest.raises(ArtifactSizeLimitError, match="5 > 4"):
+        store.write_bytes("run-01", "manifest.json", b"1234")
+
+    assert destination.read_bytes() == b"12345"
+    assert list(run_dir.rglob("*.tmp")) == []
+
+
+def test_idempotent_retry_detects_growth_after_initial_fstat(tmp_path, monkeypatch):
+    store = _store(tmp_path / "benchmark_runs", max_artifact_bytes=4)
+    run_dir = store.create_run("run-01")
+    destination = run_dir / "manifest.json"
+    destination.write_bytes(b"1234")
+    original_fstat = os.fstat
+    regular_stat_count = 0
+
+    def grow_after_initial_fstat(file_descriptor):
+        nonlocal regular_stat_count
+        metadata = original_fstat(file_descriptor)
+        if metadata.st_size == 4:
+            regular_stat_count += 1
+            if regular_stat_count == 2:
+                with destination.open("ab") as handle:
+                    handle.write(b"5")
+        return metadata
+
+    monkeypatch.setattr(os, "fstat", grow_after_initial_fstat)
+
+    with pytest.raises(ArtifactSizeLimitError, match="during read"):
+        store.write_bytes("run-01", "manifest.json", b"1234")
+
+    assert regular_stat_count == 2
+    assert destination.read_bytes() == b"12345"
     assert list(run_dir.rglob("*.tmp")) == []
 
 
@@ -221,7 +411,15 @@ def test_failed_link_cleans_temporary_file(tmp_path, monkeypatch):
     store = _store(tmp_path / "benchmark_runs")
     run_dir = store.create_run("run-01")
 
-    def fail_link(source, destination, *, follow_symlinks):
+    def fail_link(
+        source,
+        destination,
+        *,
+        src_dir_fd,
+        dst_dir_fd,
+        follow_symlinks,
+    ):
+        assert src_dir_fd == dst_dir_fd
         raise OSError("injected link failure")
 
     monkeypatch.setattr(os, "link", fail_link)
@@ -243,6 +441,61 @@ def test_read_rejects_artifact_replaced_by_symlink(tmp_path):
 
     with pytest.raises(UnsafeArtifactPath):
         store.read_bytes("run-01", "manifest.json")
+
+
+def test_read_rejects_parent_symlink_swap_before_pinned_open(tmp_path, monkeypatch):
+    store = _store(tmp_path / "benchmark_runs")
+    run_dir = store.create_run("run-01")
+    store.write_bytes("run-01", "logs/result.bin", b"inside")
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "result.bin").write_bytes(b"outside")
+    pinned = run_dir / "logs-pinned"
+    original_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == "logs" and dir_fd is not None and not swapped:
+            swapped = True
+            (run_dir / "logs").rename(pinned)
+            (run_dir / "logs").symlink_to(external, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+
+    with pytest.raises(UnsafeArtifactPath):
+        store.read_bytes("run-01", "logs/result.bin")
+
+    assert swapped
+    assert (external / "result.bin").read_bytes() == b"outside"
+
+
+def test_write_rejects_parent_symlink_swap_before_pinned_open(tmp_path, monkeypatch):
+    store = _store(tmp_path / "benchmark_runs")
+    run_dir = store.create_run("run-01")
+    external = tmp_path / "external"
+    external.mkdir()
+    pinned = run_dir / "logs-pinned"
+    original_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == "logs" and dir_fd is not None and not swapped:
+            swapped = True
+            (run_dir / "logs").rename(pinned)
+            (run_dir / "logs").symlink_to(external, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+
+    with pytest.raises(UnsafeArtifactPath):
+        store.write_bytes("run-01", "logs/result.bin", b"inside")
+
+    assert swapped
+    assert not (external / "result.bin").exists()
+    assert list(pinned.rglob("*.tmp")) == []
 
 
 def test_read_rejects_directory(tmp_path):
@@ -407,11 +660,20 @@ def test_publication_guard_is_held_at_atomic_link_boundary(tmp_path, monkeypatch
         finally:
             guard_held = False
 
-    def observing_link(source, destination, *, follow_symlinks):
+    def observing_link(
+        source,
+        destination,
+        *,
+        src_dir_fd,
+        dst_dir_fd,
+        follow_symlinks,
+    ):
         observed.append(guard_held)
         return original_link(
             source,
             destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
             follow_symlinks=follow_symlinks,
         )
 
@@ -583,27 +845,35 @@ def test_queued_cancel_finalization_token_publishes_source_not_successor(tmp_pat
 
     assert not (artifacts.run_dir("run-successor") / "report.md").exists()
 
-    with pytest.raises(LeaseConflictError, match="only report"):
-        artifacts.write_jsonl(
-            "run-source",
-            "predictions.jsonl",
-            ({"prediction": "late"},),
-            publication_token=finalization_token,
-        )
-    assert not (artifacts.run_dir("run-source") / "predictions.jsonl").exists()
-
+    prediction_write = artifacts.write_jsonl(
+        "run-source",
+        "predictions.jsonl",
+        ({"prediction": "late"},),
+        publication_token=finalization_token,
+    )
     predictions = Artifact(
         run_id="run-source",
         name="predictions.jsonl",
-        relative_path="predictions.jsonl",
+        relative_path=prediction_write.relative_path,
         media_type="application/x-ndjson",
-        sha256="c" * 64,
-        size_bytes=1,
+        sha256=prediction_write.sha256,
+        size_bytes=prediction_write.size_bytes,
         created_at=now,
     )
-    with pytest.raises(LeaseConflictError, match="only report"):
+    assert (
         control.register_artifact(
             predictions,
             publication_token=finalization_token,
         )
-    assert control.list_artifacts("run-source") == [metadata]
+        == predictions
+    )
+    assert control.list_artifacts("run-source") == [predictions, metadata]
+
+    with pytest.raises(LeaseConflictError, match="cannot publish"):
+        artifacts.write_jsonl(
+            "run-source",
+            "upstream/late.jsonl",
+            ({"prediction": "forbidden"},),
+            publication_token=finalization_token,
+        )
+    assert not (artifacts.run_dir("run-source") / "upstream/late.jsonl").exists()
