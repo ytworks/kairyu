@@ -204,6 +204,7 @@ def test_full_run_prints_preflight_before_service_submit(
 
     import kairyu.evaluation.adapters as adapters
 
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("BENCHMARK_ALLOW_FULL_RUN", "1")
     monkeypatch.setattr(adapters, "get_adapter", lambda _benchmark_id: FakeAdapter())
     monkeypatch.setattr(evaluation_cli, "BenchmarkService", StopBeforeEnqueueService)
