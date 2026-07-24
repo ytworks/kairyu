@@ -9,10 +9,13 @@ import kairyu.evaluation.adapters.gpqa_diamond as gpqa_module
 from kairyu.evaluation.adapters.base import ItemResult, RunSelection
 from kairyu.evaluation.adapters.gpqa_diamond import GPQADiamondAdapter
 from kairyu.evaluation.connectors import (
+    ConnectorError,
+    ConnectorErrorCode,
     ConnectorResponse,
     ConnectorResult,
     ConnectorUsage,
     FakeOpenAIConnector,
+    canonical_connector_request_sha256,
 )
 from kairyu.evaluation.guards import RunGuardError
 from kairyu.evaluation.profiles import get_profile_lock, load_profile_resource
@@ -372,6 +375,32 @@ def test_connector_identity_and_retries_are_protocol_bound_and_fail_closed():
     assert fake.estimate.maximum_duration_seconds == 240.0
 
 
+def test_connector_binding_never_shrinks_adapter_retry_or_resource_ceiling():
+    plan = GPQADiamondAdapter().build_run_plan(_selection(), environ={})
+    protocol = plan.protocol.model_copy(update={"retries": 2})
+    adapter_bounded = replace(
+        plan,
+        protocol=protocol,
+        protocol_hash=protocol_hash(protocol),
+        estimate=plan.estimate.model_copy(
+            update={
+                "maximum_model_calls": 6,
+                "maximum_duration_seconds": 720.0,
+                "maximum_output_tokens": 12_345,
+            }
+        ),
+    )
+
+    bound = bind_connector_to_plan(adapter_bounded, ConnectorConfig(kind="fake"))
+
+    assert bound.protocol.retries == 2
+    assert bound.estimate.maximum_model_calls == 6
+    assert bound.estimate.maximum_duration_seconds == 720.0
+    assert bound.estimate.maximum_output_tokens == 12_345
+    planning = bound.protocol.adapter_configuration["planning_evidence"]["estimate"]
+    assert planning == bound.estimate.model_dump(mode="json")
+
+
 def test_doctor_reports_unmeasurable_resources_and_model_capability_as_warnings(
     monkeypatch,
 ):
@@ -425,6 +454,58 @@ def test_run_revalidates_compatibility_layer_before_connector_use(monkeypatch):
     connector = FakeOpenAIConnector({})
     with pytest.raises(ValueError, match="compatibility module checksum"):
         adapter.run(plan, plan.items[0], connector, cancel_check=lambda: False)
+
+
+def test_run_preserves_canonical_target_request_and_attempt_evidence():
+    adapter = GPQADiamondAdapter()
+    plan = adapter.build_run_plan(_selection(), environ={})
+    item = plan.items[0]
+    request_id = f"gpqa-{item.ordinal}-{item.input_sha256[:16]}"
+    success_connector = FakeOpenAIConnector(
+        {request_id: _success(request_id, f"Reasoning.\nANSWER: {item.target}")}
+    )
+
+    success = adapter.run(
+        plan,
+        item,
+        success_connector,
+        cancel_check=lambda: False,
+    )
+
+    assert success.target_attempts == 1
+    assert success.target_request_sha256 == canonical_connector_request_sha256(
+        success_connector.requests[0]
+    )
+
+    error_connector = FakeOpenAIConnector(
+        {
+            request_id: ConnectorResult(
+                error=ConnectorError(
+                    request_id=request_id,
+                    code=ConnectorErrorCode.RATE_LIMIT,
+                    detail="controlled failure",
+                    retryable=True,
+                    attempts=3,
+                    provider_request_id="provider-error-01",
+                    latency_seconds=1.25,
+                )
+            )
+        }
+    )
+    failed = adapter.run(
+        plan,
+        item,
+        error_connector,
+        cancel_check=lambda: False,
+    )
+
+    assert failed.error_class == "rate_limit"
+    assert failed.latency_seconds == 1.25
+    assert failed.provider_request_id == "provider-error-01"
+    assert failed.target_attempts == 3
+    assert failed.target_request_sha256 == canonical_connector_request_sha256(
+        error_connector.requests[0]
+    )
 
 
 def test_scope_guards_run_before_profile_or_dataset_access(monkeypatch):

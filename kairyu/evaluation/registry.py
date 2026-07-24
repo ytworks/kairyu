@@ -41,8 +41,39 @@ _CATALOG: tuple[BenchmarkDefinition, ...] = (
     BenchmarkDefinition(
         benchmark_id="humanitys-last-exam",
         display_name="Humanity's Last Exam",
-        benchmark_version=_UNRESOLVED_VERSION,
+        description=(
+            "The gated 2,500-item CAIS expert benchmark with text and image "
+            "questions, an LLM judge, accuracy, calibration error, and Wald intervals."
+        ),
+        benchmark_version="humanitys-last-exam-cais-simple-evals-2026.07",
+        licenses=(
+            "CAIS HLE dataset: MIT with original-provider access conditions",
+            "CAIS simple-evals harness: MIT",
+            "Kairyu synthetic smoke fixture: CC0-1.0",
+        ),
+        data_sources=(
+            "https://huggingface.co/datasets/cais/hle",
+            "https://github.com/centerforaisafety/simple-evals/tree/"
+            "8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3/hle",
+            "https://arxiv.org/abs/2501.14249",
+        ),
+        required_auth=("manually approved local CAIS HLE snapshot",),
         primary_metric="Accuracy",
+        auxiliary_metrics=(
+            "Calibration Error",
+            "Success-only Accuracy",
+            "95% Wald confidence interval half-width",
+            "judge and API error counts",
+        ),
+        higher_is_better=True,
+        modalities=("text", "image"),
+        required_capabilities=(
+            "chat completions",
+            "inline image input",
+            "separate judge connector",
+        ),
+        supports_resume=True,
+        implementation_status=ImplementationStatus.AVAILABLE,
     ),
     BenchmarkDefinition(
         benchmark_id="charxiv-reasoning",
@@ -54,7 +85,8 @@ _CATALOG: tuple[BenchmarkDefinition, ...] = (
         benchmark_id="gpqa-diamond",
         display_name="GPQA Diamond",
         description=(
-            "198 expert-written science multiple-choice questions; official data access is gated."
+            "198 expert-written science multiple-choice questions; official "
+            "data access is gated and examples are not emitted in reports."
         ),
         benchmark_version="gpqa-diamond-evalscope-v1.8.1",
         licenses=(
@@ -64,6 +96,7 @@ _CATALOG: tuple[BenchmarkDefinition, ...] = (
         ),
         data_sources=(
             "https://huggingface.co/datasets/Idavidrein/gpqa",
+            "https://github.com/idavidrein/gpqa",
             "https://github.com/modelscope/evalscope/tree/v1.8.1/evalscope/benchmarks/gpqa",
         ),
         required_auth=("manually approved local GPQA snapshot",),

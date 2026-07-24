@@ -1,9 +1,60 @@
 # Fugu Benchmark Suite (`kairyu bench`)
 
 > This page documents the legacy accuracy suite during the M20 stacked migration.
-> GPQA Diamond is now available through `kairyu benchmark`; the legacy package is
-> removed only after all replacement adapters land. The performance and operational
-> programs in top-level `bench/` are separate and remain supported.
+> Humanity's Last Exam and GPQA Diamond are now available through `kairyu benchmark`;
+> the other nine adapters remain planned. This legacy guide and runner stay available
+> during migration. The final cutover targets only accuracy execution under
+> `kairyu/bench`; top-level `bench/` performance, capacity, GPU, and operational
+> programs remain supported and are not removed or renamed.
+
+## M20 replacement status
+
+The replacement command manages each accuracy benchmark independently and preserves
+durable evidence. HLE's smoke profile exercises doctor, preparation, planning, target
+and judge calls, worker execution, reports, and references without a dataset download
+or external model API:
+
+```bash
+uv run kairyu benchmark doctor humanitys-last-exam --profile smoke
+uv run kairyu benchmark prepare humanitys-last-exam --profile smoke --dry-run
+uv run kairyu benchmark plan humanitys-last-exam --profile smoke --mode smoke \
+    --connector fake --judge-connector fake
+uv run kairyu benchmark run humanitys-last-exam --profile smoke --mode smoke \
+    --connector fake --judge-connector fake --wait \
+    --state-dir .kairyu/evaluation
+uv run kairyu benchmark references list --benchmark humanitys-last-exam
+```
+
+`--connector` selects the target connector. HLE has an independent judge role selected
+with `--judge-connector`, `--judge-endpoint`, and `--judge-secret-env-name`. The smoke
+fixture contains exactly two synthetic items—one text and one inline-image—and uses
+fixed fake target and judge responses. It does not test a provider endpoint or an
+official HLE sample.
+
+The `official-latest` and `fugu-2026` profiles are gated and never fetch a dataset or
+accept terms. The operator must first accept the CAIS conditions manually, then supply
+an approved local UTF-8 JSONL snapshot, `--accepted-access`, its lowercase
+`--dataset-sha256`, and `--dataset-path`. The snapshot must contain exactly 2,500
+records. Any image must be a base64 inline PNG, JPEG, WebP, or GIF `data:` URI and is
+subject to the adapter's byte limits. Preparation can be inspected without accepting
+terms or reading a dataset:
+
+```bash
+uv run kairyu benchmark prepare humanitys-last-exam \
+    --profile official-latest --dry-run
+```
+
+HLE reports Accuracy, Calibration Error, Success-only Accuracy, Overall 95% Wald CI
+half-width, and Success-only 95% Wald CI half-width. Its reviewed evaluator semantics
+pin `centerforaisafety/simple-evals` commit
+`8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3` plus the checksummed
+`kairyu.evaluation.adapters.hle_official_2026` compatibility layer. Each target request
+and Judge request-plus-parse path has a total five-attempt budget; connector retries
+consume, rather than multiply, that budget. The stored five-row Fugu reference snapshot
+lacks compatible protocol hashes and therefore cannot produce deltas or ranks. Only the fake two-item smoke path has been validated: a full
+2,500-item run and reproduction of any published score have not been executed.
+
+The remainder of this page is the unchanged legacy `kairyu bench` operating guide.
 
 One command runs every benchmark from Sakana's Fugu release table
 ([sakana.ai/fugu-release](https://sakana.ai/fugu-release/)) against a deployed

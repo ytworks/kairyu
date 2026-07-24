@@ -13,6 +13,8 @@ from kairyu.evaluation.adapters import get_adapter
 from kairyu.evaluation.adapters.base import (
     AdapterRunPlan,
     ExecutionSpec,
+    ModelRole,
+    ModelRolePlan,
     ResourceRequirements,
     RunEstimate,
     RunSelection,
@@ -60,6 +62,8 @@ class BenchmarkJobPayload(FrozenModel):
 
     benchmark_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
     connector: ConnectorConfig
+    judge_connector: ConnectorConfig | None = None
+    simulator_connector: ConnectorConfig | None = None
     official_eligible: bool
     protocol: ProtocolSignature
     selection: RunSelection
@@ -68,6 +72,14 @@ class BenchmarkJobPayload(FrozenModel):
     def _cross_fields_match(self) -> BenchmarkJobPayload:
         if self.protocol.benchmark_id != self.benchmark_id:
             raise ValueError("job protocol benchmark ID does not match")
+        if self.selection.judge_model != self.protocol.judge_model:
+            raise ValueError("job judge model does not match the protocol")
+        if self.selection.simulator_model != self.protocol.simulator_model:
+            raise ValueError("job simulator model does not match the protocol")
+        if (self.judge_connector is None) != (self.selection.judge_model is None):
+            raise ValueError("judge model and connector must be configured together")
+        if (self.simulator_connector is None) != (self.selection.simulator_model is None):
+            raise ValueError("simulator model and connector must be configured together")
         if self.official_eligible and self.protocol.unresolved_fields:
             raise ValueError("unresolved protocol cannot be official eligible")
         return self
@@ -102,55 +114,195 @@ def validate_runtime_connector(
 def bind_connector_to_plan(
     plan: AdapterRunPlan,
     connector: ConnectorConfig,
+    *,
+    judge_connector: ConnectorConfig | None = None,
+    simulator_connector: ConnectorConfig | None = None,
 ) -> AdapterRunPlan:
-    """Bind connector identity, effective retries, and final planning evidence."""
+    """Bind role-separated connector identity, retries, and planning evidence."""
+
+    role_plans = _normalized_model_roles(plan)
+    retry_budget_scope = plan.protocol.adapter_configuration.get("retry_budget_scope")
+    max_attempts_per_request = plan.protocol.adapter_configuration.get("max_attempts_per_request")
+    has_adapter_retry_budget = (
+        retry_budget_scope is not None or max_attempts_per_request is not None
+    )
+    adapter_attempt_budget: int | None = None
+    if has_adapter_retry_budget:
+        if (
+            retry_budget_scope != "per-model-request-total-attempts"
+            or not isinstance(max_attempts_per_request, int)
+            or isinstance(max_attempts_per_request, bool)
+            or max_attempts_per_request < 1
+            or max_attempts_per_request != plan.protocol.retries + 1
+        ):
+            raise ValueError("adapter retry budget marker is invalid or inconsistent")
+        required_model_calls = sum(role.model_calls for role in role_plans) * (
+            max_attempts_per_request
+        )
+        if plan.estimate.maximum_model_calls < required_model_calls:
+            raise ValueError("adapter estimate does not cover its declared retry budget")
+        adapter_attempt_budget = max_attempts_per_request
+    connector, judge_connector, simulator_connector = _complete_smoke_connector_roles(
+        plan,
+        connector,
+        judge_connector,
+        simulator_connector,
+        role_plans=role_plans,
+    )
+    configs = {
+        ModelRole.TARGET: connector,
+        ModelRole.JUDGE: judge_connector,
+        ModelRole.SIMULATOR: simulator_connector,
+    }
+    required_roles = {role.role for role in role_plans if role.model_calls}
+    for role in required_roles:
+        if configs[role] is None:
+            raise ValueError(f"{role.value} model calls require a connector")
+    for role, configured in configs.items():
+        if configured is not None and role not in required_roles:
+            raise ValueError(f"{role.value} connector is configured but the plan has no calls")
+
+    effective_retries: dict[ModelRole, int] = {}
+    connector_payloads: dict[str, dict] = {}
+    maximum_model_calls = 0
+    maximum_duration_seconds = 0.0
+    total_backoff_seconds = 0.0
+    role_backoff_seconds: dict[ModelRole, float] = {}
+    for role_plan in role_plans:
+        configured = configs[role_plan.role]
+        if configured is None or not role_plan.model_calls:
+            continue
+        retries = configured.max_retries if configured.kind == "openai" else 0
+        if has_adapter_retry_budget:
+            assert adapter_attempt_budget is not None
+            backoff = _default_connector_backoff_for_attempt_budget(
+                total_attempts=adapter_attempt_budget,
+                retries_per_call=retries,
+            )
+        else:
+            backoff = _default_connector_backoff_seconds(retries)
+        effective_retries[role_plan.role] = retries
+        connector_payloads[role_plan.role.value] = configured.model_dump(mode="json")
+        maximum_model_calls += role_plan.model_calls * (retries + 1)
+        maximum_duration_seconds += role_plan.model_calls * (
+            role_plan.timeout_seconds * (retries + 1) + backoff
+        )
+        role_backoff_seconds[role_plan.role] = role_plan.model_calls * backoff
+        total_backoff_seconds += role_backoff_seconds[role_plan.role]
+
+    if has_adapter_retry_budget:
+        assert adapter_attempt_budget is not None
+        backoff_summary = ", ".join(
+            f"{role.value}={role_backoff_seconds[role]:g}s"
+            for role in sorted(role_backoff_seconds, key=lambda value: value.value)
+        )
+        retry_assumption = (
+            f"Adapter-owned total attempt budgets cap each model request at "
+            f"{adapter_attempt_budget} attempts; connector-internal retries add "
+            f"{total_backoff_seconds:g} seconds of worst-case default backoff "
+            f"across role calls ({backoff_summary}) without increasing model-call "
+            "or output-token ceilings."
+        )
+    elif len(effective_retries) == 1 and ModelRole.TARGET in effective_retries:
+        per_item_backoff = _default_connector_backoff_seconds(effective_retries[ModelRole.TARGET])
+        retry_assumption = (
+            "Maximum calls and duration include all configured connector attempts "
+            f"and {per_item_backoff:g} seconds of default backoff per item."
+        )
+    else:
+        retry_summary = ", ".join(
+            f"{role.value}={effective_retries[role]}"
+            for role in sorted(effective_retries, key=lambda value: value.value)
+        )
+        retry_assumption = (
+            "Maximum calls and duration include role-specific connector attempts "
+            f"({retry_summary}) and {total_backoff_seconds:g} seconds of total backoff."
+        )
+    if has_adapter_retry_budget:
+        estimate = plan.estimate.model_copy(
+            update={
+                "maximum_duration_seconds": (
+                    plan.estimate.maximum_duration_seconds + total_backoff_seconds
+                    if plan.estimate.maximum_duration_seconds is not None
+                    else None
+                ),
+                "assumptions": (*plan.estimate.assumptions, retry_assumption),
+            }
+        )
+    else:
+        estimate = plan.estimate.model_copy(
+            update={
+                "maximum_model_calls": max(
+                    plan.estimate.maximum_model_calls,
+                    maximum_model_calls,
+                ),
+                "maximum_duration_seconds": max(
+                    plan.estimate.maximum_duration_seconds or 0.0,
+                    maximum_duration_seconds,
+                ),
+                "assumptions": (*plan.estimate.assumptions, retry_assumption),
+            }
+        )
 
     protocol_payload = plan.protocol.model_dump(mode="json")
-    connector_payload = connector.model_dump(mode="json")
-    effective_retries = connector.max_retries if connector.kind == "openai" else 0
-    retry_backoff_seconds = _default_connector_backoff_seconds(effective_retries)
-    maximum_duration_seconds = plan.estimate.maximum_duration_seconds
-    if maximum_duration_seconds is not None:
-        maximum_duration_seconds *= effective_retries + 1
-        maximum_duration_seconds += plan.estimate.model_calls * retry_backoff_seconds
-    estimate = plan.estimate.model_copy(
-        update={
-            "maximum_model_calls": plan.estimate.model_calls * (effective_retries + 1),
-            "maximum_duration_seconds": maximum_duration_seconds,
-            "assumptions": (
-                *plan.estimate.assumptions,
-                "Maximum calls and duration include all configured connector attempts "
-                f"and {retry_backoff_seconds:g} seconds of default backoff per item.",
+    base_configuration = dict(protocol_payload["adapter_configuration"])
+    reviewed_by_role = base_configuration.get("reviewed_model_connectors")
+    if not isinstance(reviewed_by_role, dict):
+        reviewed_by_role = {}
+    if "target" not in reviewed_by_role:
+        legacy_reviewed = base_configuration.get("reviewed_model_connector")
+        if legacy_reviewed is not None:
+            reviewed_by_role["target"] = legacy_reviewed
+    connector_reviews: dict[str, dict[str, str]] = {}
+    for role_name, payload in connector_payloads.items():
+        matches = reviewed_by_role.get(role_name) == payload
+        connector_reviews[role_name] = {
+            "status": "verified" if matches else "unresolved",
+            "reason": (
+                "Connector configuration matches the reviewed profile identity."
+                if matches
+                else "The profile does not pin this exact connector configuration."
             ),
         }
-    )
-    reviewed_connector = protocol_payload["adapter_configuration"].get("reviewed_model_connector")
-    connector_matches_review = (
-        reviewed_connector is not None and reviewed_connector == connector_payload
-    )
+
     planning_evidence = {
         "estimate": estimate.model_dump(mode="json"),
         "resources": plan.resources.model_dump(mode="json"),
         "execution": plan.execution.model_dump(mode="json"),
     }
     adapter_configuration = {
-        **dict(protocol_payload["adapter_configuration"]),
-        "model_connector": connector_payload,
-        "model_connector_review": {
-            "status": "verified" if connector_matches_review else "unresolved",
-            "reason": (
-                "Connector configuration matches the reviewed profile identity."
-                if connector_matches_review
-                else "The profile does not pin this exact connector configuration."
-            ),
-        },
+        **base_configuration,
+        "model_connector": connector_payloads[ModelRole.TARGET.value],
+        "model_connector_review": connector_reviews[ModelRole.TARGET.value],
         "planning_evidence": planning_evidence,
     }
+    if len(connector_payloads) > 1:
+        adapter_configuration.update(
+            {
+                "model_connectors": connector_payloads,
+                "model_connector_reviews": connector_reviews,
+                "model_calls_by_role": {role.role.value: role.model_calls for role in role_plans},
+            }
+        )
+    maximum_retries = (
+        plan.protocol.retries
+        if has_adapter_retry_budget
+        else max(
+            plan.protocol.retries,
+            max(effective_retries.values(), default=0),
+        )
+    )
     protocol = plan.protocol.model_copy(
         update={
             "adapter_configuration": adapter_configuration,
-            "retries": effective_retries,
+            "retries": maximum_retries,
         }
+    )
+    connectors_match_review = all(
+        review["status"] == "verified" for review in connector_reviews.values()
+    )
+    retries_match_review = has_adapter_retry_budget or all(
+        retries == plan.protocol.retries for retries in effective_retries.values()
     )
     return replace(
         plan,
@@ -158,15 +310,85 @@ def bind_connector_to_plan(
         protocol_hash=protocol_hash(protocol),
         estimate=estimate,
         official_eligible=(
-            plan.official_eligible
-            and connector_matches_review
-            and effective_retries == plan.protocol.retries
+            plan.official_eligible and connectors_match_review and retries_match_review
         ),
+    )
+
+
+def _normalized_model_roles(plan: AdapterRunPlan) -> tuple[ModelRolePlan, ...]:
+    roles = plan.model_roles
+    if not roles:
+        timeout = plan.protocol.timeout_seconds
+        if timeout is None:
+            timeout = float(plan.protocol.generation_parameters.get("timeout_seconds", 600.0))
+        roles = (
+            ModelRolePlan(
+                role=ModelRole.TARGET,
+                model=plan.target_model,
+                model_calls=plan.estimate.model_calls,
+                timeout_seconds=timeout,
+                maximum_output_tokens=plan.estimate.maximum_output_tokens or 0,
+            ),
+        )
+    role_names = [entry.role for entry in roles]
+    if len(set(role_names)) != len(role_names):
+        raise ValueError("model role plans must be unique")
+    if sum(entry.model_calls for entry in roles) != plan.estimate.model_calls:
+        raise ValueError("model role calls do not sum to the run estimate")
+    expected_models = {
+        ModelRole.TARGET: plan.target_model,
+        ModelRole.JUDGE: plan.selection.judge_model,
+        ModelRole.SIMULATOR: plan.selection.simulator_model,
+    }
+    for entry in roles:
+        if expected_models[entry.role] != entry.model:
+            raise ValueError(f"{entry.role.value} role model does not match the selection")
+    return roles
+
+
+def _complete_smoke_connector_roles(
+    plan: AdapterRunPlan,
+    connector: ConnectorConfig,
+    judge_connector: ConnectorConfig | None,
+    simulator_connector: ConnectorConfig | None,
+    *,
+    role_plans: tuple[ModelRolePlan, ...] | None = None,
+) -> tuple[ConnectorConfig, ConnectorConfig | None, ConnectorConfig | None]:
+    roles = role_plans or _normalized_model_roles(plan)
+    configs = {
+        ModelRole.TARGET: connector,
+        ModelRole.JUDGE: judge_connector,
+        ModelRole.SIMULATOR: simulator_connector,
+    }
+    for role_plan in roles:
+        if (
+            role_plan.model_calls
+            and configs[role_plan.role] is None
+            and connector.kind == "fake"
+            and plan.mode is RunMode.SMOKE
+        ):
+            configs[role_plan.role] = connector
+    return (
+        configs[ModelRole.TARGET],
+        configs[ModelRole.JUDGE],
+        configs[ModelRole.SIMULATOR],
     )
 
 
 def _default_connector_backoff_seconds(retries: int) -> float:
     return sum(min(0.5 * (2 ** (attempt - 1)), 4.0) for attempt in range(1, retries + 1))
+
+
+def _default_connector_backoff_for_attempt_budget(
+    *,
+    total_attempts: int,
+    retries_per_call: int,
+) -> float:
+    attempts_per_call = retries_per_call + 1
+    full_calls, final_attempts = divmod(total_attempts, attempts_per_call)
+    return full_calls * _default_connector_backoff_seconds(retries_per_call) + (
+        _default_connector_backoff_seconds(final_attempts - 1) if final_attempts else 0.0
+    )
 
 
 class EvaluationRuntime:
@@ -203,6 +425,8 @@ class BenchmarkService:
         selection: RunSelection,
         connector: ConnectorConfig,
         *,
+        judge_connector: ConnectorConfig | None = None,
+        simulator_connector: ConnectorConfig | None = None,
         run_id: str | None = None,
     ) -> SubmissionResult:
         """Validate, plan, and durably enqueue without executing a model call."""
@@ -216,12 +440,39 @@ class BenchmarkService:
             sample_ids=selection.sample_ids,
         )
         connector = validate_runtime_connector(self.runtime, connector)
-        if connector.kind == "fake" and selection.mode is not RunMode.SMOKE:
-            raise ValueError("the fixed fake connector is smoke-only")
+        judge_connector = (
+            validate_runtime_connector(self.runtime, judge_connector)
+            if judge_connector is not None
+            else None
+        )
+        simulator_connector = (
+            validate_runtime_connector(self.runtime, simulator_connector)
+            if simulator_connector is not None
+            else None
+        )
         adapter = get_adapter(benchmark_id)
-        plan = bind_connector_to_plan(
-            adapter.build_run_plan(selection),
+        unbound_plan = adapter.build_run_plan(selection)
+        connector, judge_connector, simulator_connector = _complete_smoke_connector_roles(
+            unbound_plan,
             connector,
+            judge_connector,
+            simulator_connector,
+        )
+        configured_connectors = tuple(
+            value
+            for value in (connector, judge_connector, simulator_connector)
+            if value is not None
+        )
+        if (
+            any(value.kind == "fake" for value in configured_connectors)
+            and selection.mode is not RunMode.SMOKE
+        ):
+            raise ValueError("fixed fake connectors are smoke-only")
+        plan = bind_connector_to_plan(
+            unbound_plan,
+            connector,
+            judge_connector=judge_connector,
+            simulator_connector=simulator_connector,
         )
         selected_run_id = run_id or f"run-{uuid.uuid4().hex}"
         run = BenchmarkRun(
@@ -234,10 +485,14 @@ class BenchmarkService:
             selected_item_ids=tuple(item.item_id for item in plan.items),
             expected_full_count=plan.expected_full_count,
             target_model=selection.target_model,
+            judge_model=plan.selection.judge_model,
+            simulator_model=plan.selection.simulator_model,
         )
         job_payload = BenchmarkJobPayload(
             benchmark_id=benchmark_id,
             connector=connector,
+            judge_connector=judge_connector,
+            simulator_connector=simulator_connector,
             official_eligible=plan.official_eligible,
             protocol=plan.protocol,
             selection=plan.selection,
@@ -280,10 +535,15 @@ class BenchmarkService:
         return self.runtime.store.get_run(run_id)
 
 
-def rebuild_plan_from_job(payload: dict) -> AdapterRunPlan:
+def rebuild_plan_from_job(
+    payload: dict,
+    *,
+    secret_registry: SecretValueRegistry | None = None,
+) -> AdapterRunPlan:
     """Recreate and reauthorize a plan from untrusted durable job metadata."""
 
-    snapshot = BenchmarkJobPayload.model_validate(payload)
+    context = {"secret_registry": secret_registry} if secret_registry is not None else None
+    snapshot = BenchmarkJobPayload.model_validate(payload, context=context)
     selection = snapshot.selection
     # Worker-level guard is deliberately before adapter lookup/import.
     validate_run_guard(
@@ -295,10 +555,15 @@ def rebuild_plan_from_job(payload: dict) -> AdapterRunPlan:
     plan = bind_connector_to_plan(
         get_adapter(snapshot.benchmark_id).build_run_plan(selection),
         snapshot.connector,
+        judge_connector=snapshot.judge_connector,
+        simulator_connector=snapshot.simulator_connector,
     )
-    if snapshot.protocol != plan.protocol or protocol_hash(snapshot.protocol) != plan.protocol_hash:
+    if (
+        snapshot.protocol.model_dump(mode="json") != plan.protocol.model_dump(mode="json")
+        or protocol_hash(snapshot.protocol) != plan.protocol_hash
+    ):
         raise ValueError("durable protocol snapshot does not match reconstructed plan")
-    if snapshot.selection != plan.selection:
+    if snapshot.selection.model_dump(mode="json") != plan.selection.model_dump(mode="json"):
         raise ValueError("durable selection snapshot is not canonical")
     if snapshot.official_eligible is not plan.official_eligible:
         raise ValueError("durable official-eligibility flag does not match plan")

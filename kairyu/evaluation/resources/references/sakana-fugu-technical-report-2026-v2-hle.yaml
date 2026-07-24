@@ -1,0 +1,121 @@
+schema_version: 1
+snapshot_id: sakana-fugu-technical-report-2026-v2-hle
+benchmark_id: humanitys-last-exam
+source:
+  schema_version: 1
+  source_id: sakana-fugu-technical-report-2026-v2
+  source_type: paper_compilation
+  title: Sakana AI Fugu Technical Report 2026
+  url: https://arxiv.org/pdf/2606.21228
+  locator: Table 1 (Humanity's Last Exam); Appendix A
+  release_page: https://sakana.ai/fugu-release/
+  publication_date: null
+  retrieved_at: 2026-07-24T00:00:00Z
+  evidence_hash: 66f6762c0dc1e58a8685c180ba0c6661ec0f5822990f151b2eb7fc19764da430
+  notes: Scores are a paper compilation; underlying provider protocols are unresolved.
+results:
+  - schema_version: 1
+    reference_id: fugu-ultra-humanitys-last-exam-2026-v2
+    benchmark_id: humanitys-last-exam
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: Fugu Ultra
+    model_version: null
+    score: 50.0
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 2500
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: 3bfaf4c8cc3311f13871db9cc04ee4410a3023f682ec8b9c90470e5761d634b6
+  - schema_version: 1
+    reference_id: fugu-humanitys-last-exam-2026-v2
+    benchmark_id: humanitys-last-exam
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: Fugu
+    model_version: null
+    score: 47.2
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 2500
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: 32940dd0f29d9c8720b18e77b7f2b4771ee4397ab18481785c98bb7555125f51
+  - schema_version: 1
+    reference_id: claude-opus-4.8-humanitys-last-exam-2026-v2
+    benchmark_id: humanitys-last-exam
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: Claude Opus 4.8
+    model_version: null
+    score: 49.8
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 2500
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: c502789ab80faa22ec694b5283389e563319ed653cecab16c6a7a10a6f82a16a
+  - schema_version: 1
+    reference_id: gemini-3.1-pro-humanitys-last-exam-2026-v2
+    benchmark_id: humanitys-last-exam
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: Gemini 3.1 Pro
+    model_version: null
+    score: 44.4
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 2500
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: a0116dd8864e0acc839882f7e20e59db9445688ac98ae256ced63cdf2300505d
+  - schema_version: 1
+    reference_id: gpt-5.5-humanitys-last-exam-2026-v2
+    benchmark_id: humanitys-last-exam
+    benchmark_version: fugu-2026
+    profile: fugu-2026
+    protocol_hash: null
+    model_name: GPT-5.5
+    model_version: null
+    score: 41.4
+    score_scale: 100.0
+    metric_name: accuracy
+    sample_count: 2500
+    source_id: sakana-fugu-technical-report-2026-v2
+    source_type: paper_compilation
+    provider_reported: null
+    independently_reproduced: false
+    publication_date: null
+    retrieved_at: 2026-07-24T00:00:00Z
+    notes: Compiled score; exact protocol evidence is unavailable.
+    comparability: incompatible
+    evidence_hash: 01b5e4db9e5f0c94a4483ba93ced7a875ae69efd5bbf21e448af304de12c6903

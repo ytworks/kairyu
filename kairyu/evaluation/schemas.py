@@ -532,8 +532,12 @@ class RunItem(FrozenModel):
             raise ValueError(
                 "checkpoint path, SHA-256, and source-run provenance must be all present or absent"
             )
-        if populated and self.state is not ItemState.COMPLETED:
-            raise ValueError("checkpoints are valid only for completed items")
+        if populated and self.state not in {
+            ItemState.COMPLETED,
+            ItemState.FAILED,
+            ItemState.CANCELLED,
+        }:
+            raise ValueError("checkpoints are valid only for completed, failed, or cancelled items")
         return self
 
 

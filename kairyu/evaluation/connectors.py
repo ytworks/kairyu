@@ -7,6 +7,9 @@ through the evaluation artifact and control stores.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import os
 import re
@@ -14,11 +17,19 @@ import time
 from collections.abc import Callable, Mapping
 from enum import StrEnum
 from ipaddress import ip_address
-from typing import Annotated, Any, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, TypeAlias, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    JsonValue,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from kairyu.evaluation.safety import (
     SecretSafetyError,
@@ -26,7 +37,7 @@ from kairyu.evaluation.safety import (
     ensure_secret_free_bytes,
     ensure_secret_free_json,
 )
-from kairyu.evaluation.schemas import FrozenModel
+from kairyu.evaluation.schemas import FrozenModel, freeze_json_value, thaw_json_value
 
 CancelCallback = Callable[[], bool]
 BackoffCallback = Callable[[int], None]
@@ -34,8 +45,15 @@ Clock = Callable[[], float]
 SecretResolver = Callable[[str], str | None]
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_JSON_SCHEMA_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+_INLINE_IMAGE_DATA_URL = re.compile(
+    r"data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]*={0,2})\Z"
+)
 _MAX_RETRIES = 10
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+_MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024
+_MAX_INLINE_IMAGE_URL_CHARS = 28_000_000
+_MAX_JSON_SCHEMA_BYTES = 256 * 1024
 
 
 class _ConnectorModel(FrozenModel):
@@ -45,13 +63,126 @@ class _ConnectorModel(FrozenModel):
         extra="forbid",
         frozen=True,
         hide_input_in_errors=True,
+        populate_by_name=True,
+        serialize_by_alias=True,
         str_strip_whitespace=False,
     )
 
 
+class ConnectorTextPart(_ConnectorModel):
+    """One OpenAI chat text content part."""
+
+    type: Literal["text"] = "text"
+    text: Annotated[str, Field(min_length=1, max_length=4_000_000)]
+
+
+class ConnectorImageURL(_ConnectorModel):
+    """One bounded inline image URL; remote provider fetches are forbidden."""
+
+    url: Annotated[str, Field(min_length=1, max_length=_MAX_INLINE_IMAGE_URL_CHARS)]
+    detail: Literal["auto", "low", "high"] | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _validate_inline_image(
+        cls,
+        value: str,
+        info: ValidationInfo,
+    ) -> str:
+        _decode_inline_image(
+            value,
+            secret_registry=_registry_from_validation_info(info),
+        )
+        return value
+
+    @property
+    def decoded_size(self) -> int:
+        """Return validated decoded image bytes without retaining image data."""
+
+        return _decoded_base64_size(self.url.rsplit(",", 1)[1])
+
+
+class ConnectorImagePart(_ConnectorModel):
+    """One OpenAI chat inline image content part."""
+
+    type: Literal["image_url"] = "image_url"
+    image_url: ConnectorImageURL
+
+
+ConnectorContentPart: TypeAlias = Annotated[
+    ConnectorTextPart | ConnectorImagePart,
+    Field(discriminator="type"),
+]
+ConnectorMessageContent: TypeAlias = (
+    str
+    | Annotated[
+        tuple[ConnectorContentPart, ...],
+        Field(min_length=1, max_length=256),
+    ]
+)
+
+
 class ConnectorMessage(_ConnectorModel):
     role: Literal["system", "developer", "user", "assistant"]
-    content: Annotated[str, Field(min_length=1, max_length=4_000_000)]
+    content: ConnectorMessageContent
+
+    @model_validator(mode="after")
+    def _images_are_user_input_and_bounded(self) -> ConnectorMessage:
+        if isinstance(self.content, str):
+            if not self.content or len(self.content) > 4_000_000:
+                raise ValueError("text message content is outside the supported bound")
+            return self
+        images = [part for part in self.content if isinstance(part, ConnectorImagePart)]
+        if images and self.role != "user":
+            raise ValueError("image content parts are restricted to user messages")
+        if sum(part.image_url.decoded_size for part in images) > _MAX_INLINE_IMAGE_BYTES:
+            raise ValueError("decoded inline images exceed the per-message byte limit")
+        return self
+
+
+class ConnectorJSONSchema(_ConnectorModel):
+    """Named strict JSON Schema for an OpenAI structured response."""
+
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    schema_definition: Mapping[str, JsonValue] = Field(alias="schema")
+    strict: Literal[True] = True
+
+    @field_validator("name")
+    @classmethod
+    def _name_is_portable(cls, value: str) -> str:
+        if _JSON_SCHEMA_NAME.fullmatch(value) is None:
+            raise ValueError("JSON Schema name must use portable characters")
+        return value
+
+    @field_validator("schema_definition", mode="before")
+    @classmethod
+    def _schema_is_bounded_json(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            raise ValueError("JSON Schema must be an object")
+        encoded = _canonical_json_bytes(value)
+        if len(encoded) > _MAX_JSON_SCHEMA_BYTES:
+            raise ValueError("JSON Schema exceeds the supported byte limit")
+        return value
+
+    @model_validator(mode="after")
+    def _freeze_schema(self) -> ConnectorJSONSchema:
+        object.__setattr__(
+            self,
+            "schema_definition",
+            freeze_json_value(self.schema_definition),
+        )
+        return self
+
+    @field_serializer("schema_definition")
+    def _serialize_schema(self, value: Mapping[str, JsonValue]) -> JsonValue:
+        return thaw_json_value(value)
+
+
+class ConnectorResponseFormat(_ConnectorModel):
+    """OpenAI chat-completions JSON Schema response format."""
+
+    type: Literal["json_schema"] = "json_schema"
+    json_schema: ConnectorJSONSchema
 
 
 class ConnectorRequest(_ConnectorModel):
@@ -63,6 +194,9 @@ class ConnectorRequest(_ConnectorModel):
     max_tokens: Annotated[int, Field(ge=1, le=10_000_000)] = 1_024
     seed: int | None = None
     timeout_seconds: Annotated[float, Field(gt=0, le=86_400, allow_inf_nan=False)] = 600.0
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
+    response_format: ConnectorResponseFormat | None = None
+    allow_empty_content: bool = False
 
     @field_validator("request_id", "model")
     @classmethod
@@ -70,6 +204,21 @@ class ConnectorRequest(_ConnectorModel):
         if not value.strip():
             raise ValueError("connector identifiers must be non-blank")
         return value
+
+    @model_validator(mode="after")
+    def _inline_images_are_request_bounded(self) -> ConnectorRequest:
+        total = 0
+        for message in self.messages:
+            if isinstance(message.content, str):
+                continue
+            total += sum(
+                part.image_url.decoded_size
+                for part in message.content
+                if isinstance(part, ConnectorImagePart)
+            )
+        if total > _MAX_INLINE_IMAGE_BYTES:
+            raise ValueError("decoded inline images exceed the per-request byte limit")
+        return self
 
 
 class ConnectorUsage(_ConnectorModel):
@@ -86,7 +235,7 @@ class ConnectorUsage(_ConnectorModel):
 
 class ConnectorResponse(_ConnectorModel):
     request_id: Annotated[str, Field(min_length=1, max_length=256)]
-    content: Annotated[str, Field(min_length=1, max_length=16_000_000)]
+    content: Annotated[str, Field(max_length=16_000_000)]
     finish_reason: Annotated[str, Field(min_length=1, max_length=128)] | None = None
     provider_request_id: Annotated[str, Field(min_length=1, max_length=512)] | None = None
     provider_model: Annotated[str, Field(min_length=1, max_length=512)] | None = None
@@ -135,6 +284,39 @@ class ConnectorResult(_ConnectorModel):
         return outcome.request_id
 
 
+def canonical_connector_request_json(
+    request: ConnectorRequest,
+    *,
+    secret_registry: SecretValueRegistry | None = None,
+) -> str:
+    """Serialize one validated request deterministically for protocol evidence."""
+
+    if not isinstance(request, ConnectorRequest):
+        raise TypeError("request must be a ConnectorRequest")
+    registry = secret_registry if secret_registry is not None else request._secret_registry
+    snapshot = ConnectorRequest.model_validate(
+        request.model_dump(mode="python"),
+        context=_validation_context(registry),
+    )
+    payload = snapshot.model_dump(mode="json")
+    ensure_secret_free_json(payload, secret_registry=registry)
+    return _canonical_json_bytes(payload).decode("utf-8")
+
+
+def canonical_connector_request_sha256(
+    request: ConnectorRequest,
+    *,
+    secret_registry: SecretValueRegistry | None = None,
+) -> str:
+    """Hash the canonical request snapshot used as protocol evidence."""
+
+    canonical = canonical_connector_request_json(
+        request,
+        secret_registry=secret_registry,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # Adapter-facing names keep the boundary independent from one wire provider.
 ModelRequest = ConnectorRequest
 ModelResponse = ConnectorResult
@@ -147,6 +329,7 @@ class ModelConnector(Protocol):
         request: ModelRequest,
         *,
         cancel_requested: CancelCallback | None = None,
+        max_attempts: int | None = None,
     ) -> ModelResponse: ...
 
 
@@ -183,8 +366,10 @@ class FakeOpenAIConnector:
         request: ConnectorRequest,
         *,
         cancel_requested: CancelCallback | None = None,
+        max_attempts: int | None = None,
     ) -> ConnectorResult:
         cancelled = cancel_requested or _never_cancelled
+        attempt_limit = _validate_max_attempts(max_attempts)
         request = ConnectorRequest.model_validate(
             request.model_dump(mode="python"),
             context=_validation_context(self._secret_registry),
@@ -213,6 +398,31 @@ class FakeOpenAIConnector:
                 ConnectorErrorCode.MALFORMED,
                 "no fixed fake response for request",
                 attempts=0,
+                secret_registry=self._secret_registry,
+            )
+        attempts = (
+            result.response.attempts if result.response is not None else result.error.attempts
+        )
+        if attempts > attempt_limit:
+            return _error_result(
+                request.request_id,
+                ConnectorErrorCode.MALFORMED,
+                "fixed fake response exceeds the per-call attempt budget",
+                attempts=attempt_limit,
+                secret_registry=self._secret_registry,
+            )
+        if (
+            result.response is not None
+            and not result.response.content
+            and not request.allow_empty_content
+        ):
+            return _error_result(
+                request.request_id,
+                ConnectorErrorCode.EMPTY_RESPONSE,
+                "model response content was empty",
+                attempts=result.response.attempts,
+                provider_request_id=result.response.provider_request_id,
+                latency_seconds=result.response.latency_seconds,
                 secret_registry=self._secret_registry,
             )
         return result
@@ -271,8 +481,10 @@ class OpenAICompatibleConnector:
         request: ConnectorRequest,
         *,
         cancel_requested: CancelCallback | None = None,
+        max_attempts: int | None = None,
     ) -> ConnectorResult:
         cancelled = cancel_requested or _never_cancelled
+        attempt_limit = min(self._max_retries + 1, _validate_max_attempts(max_attempts))
         started = self._clock()
         if cancelled():
             return self._cancelled(request.request_id, attempts=0, started=started)
@@ -314,17 +526,13 @@ class OpenAICompatibleConnector:
                 secret_registry=self._secret_registry,
             )
 
-        body: dict[str, Any] = {
-            "model": request.model,
-            "messages": [message.model_dump(mode="json") for message in request.messages],
-            "temperature": request.temperature,
-            "top_p": request.top_p,
-            "max_tokens": request.max_tokens,
-            "stream": False,
-        }
-        if request.seed is not None:
-            body["seed"] = request.seed
-        headers = {"Authorization": f"Bearer {secret}"} if secret is not None else {}
+        wire_body = _canonical_wire_request_bytes(
+            request,
+            secret_registry=self._secret_registry,
+        )
+        headers = {"Content-Type": "application/json"}
+        if secret is not None:
+            headers["Authorization"] = f"Bearer {secret}"
 
         attempts = 0
         while True:
@@ -335,7 +543,7 @@ class OpenAICompatibleConnector:
                 with self._client.stream(
                     "POST",
                     self._url,
-                    json=body,
+                    content=wire_body,
                     headers=headers,
                     timeout=request.timeout_seconds,
                 ) as response:
@@ -359,7 +567,7 @@ class OpenAICompatibleConnector:
                         attempts=attempts,
                         started=started,
                     )
-                if attempts <= self._max_retries:
+                if attempts < attempt_limit:
                     if self._prepare_retry(attempts, cancelled):
                         continue
                     return self._cancelled(
@@ -405,7 +613,7 @@ class OpenAICompatibleConnector:
             if cancelled():
                 return self._cancelled(request.request_id, attempts=attempts, started=started)
             if status_code == 429:
-                if attempts <= self._max_retries:
+                if attempts < attempt_limit:
                     if self._prepare_retry(attempts, cancelled):
                         continue
                     return self._cancelled(
@@ -506,7 +714,7 @@ class OpenAICompatibleConnector:
             content = message.get("content")
             if not isinstance(content, str):
                 raise ValueError
-            if not content:
+            if not content and not request.allow_empty_content:
                 return _error_result(
                     request.request_id,
                     ConnectorErrorCode.EMPTY_RESPONSE,
@@ -589,6 +797,107 @@ class _ResponseTooLarge(RuntimeError):
 
 class _ConnectorCancelled(RuntimeError):
     pass
+
+
+def _validate_max_attempts(value: int | None) -> int:
+    if value is None:
+        return _MAX_RETRIES + 1
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError("max_attempts must be a positive integer")
+    return value
+
+
+def _canonical_wire_request_bytes(
+    request: ConnectorRequest,
+    *,
+    secret_registry: SecretValueRegistry,
+) -> bytes:
+    payload: dict[str, Any] = {
+        "model": request.model,
+        "messages": [
+            message.model_dump(mode="json", exclude_none=True) for message in request.messages
+        ],
+        "temperature": request.temperature,
+        "top_p": request.top_p,
+        "max_tokens": request.max_tokens,
+        "stream": False,
+    }
+    if request.seed is not None:
+        payload["seed"] = request.seed
+    if request.reasoning_effort is not None:
+        payload["reasoning_effort"] = request.reasoning_effort
+    if request.response_format is not None:
+        payload["response_format"] = request.response_format.model_dump(mode="json")
+    encoded = _canonical_json_bytes(payload)
+    ensure_secret_free_bytes(encoded, secret_registry=secret_registry)
+    return encoded
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (RecursionError, TypeError, ValueError):
+        raise ValueError("connector JSON must be finite and serializable") from None
+
+
+def _registry_from_validation_info(
+    info: ValidationInfo,
+) -> SecretValueRegistry | None:
+    if not isinstance(info.context, Mapping):
+        return None
+    registry = info.context.get("secret_registry")
+    return registry if isinstance(registry, SecretValueRegistry) else None
+
+
+def _decode_inline_image(
+    value: str,
+    *,
+    secret_registry: SecretValueRegistry | None,
+) -> bytes:
+    match = _INLINE_IMAGE_DATA_URL.fullmatch(value)
+    if match is None:
+        raise ValueError("image URL must be a supported inline data:image/...;base64 value")
+    mime_type, payload = match.groups()
+    decoded_size = _decoded_base64_size(payload)
+    if decoded_size == 0:
+        raise ValueError("inline image must not be empty")
+    if decoded_size > _MAX_INLINE_IMAGE_BYTES:
+        raise ValueError("decoded inline image exceeds the supported byte limit")
+    try:
+        decoded = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("inline image base64 is malformed") from None
+    if len(decoded) != decoded_size or base64.b64encode(decoded).decode("ascii") != payload:
+        raise ValueError("inline image base64 must use canonical padding")
+    _validate_image_signature(mime_type, decoded)
+    ensure_secret_free_bytes(decoded, secret_registry=secret_registry)
+    return decoded
+
+
+def _decoded_base64_size(payload: str) -> int:
+    if len(payload) % 4:
+        raise ValueError("inline image base64 must use canonical padding")
+    padding = len(payload) - len(payload.rstrip("="))
+    return (len(payload) // 4) * 3 - padding
+
+
+def _validate_image_signature(mime_type: str, decoded: bytes) -> None:
+    valid = {
+        "image/png": decoded.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg": decoded.startswith(b"\xff\xd8\xff"),
+        "image/gif": decoded.startswith((b"GIF87a", b"GIF89a")),
+        "image/webp": (
+            len(decoded) >= 12 and decoded.startswith(b"RIFF") and decoded[8:12] == b"WEBP"
+        ),
+    }
+    if not valid[mime_type]:
+        raise ValueError("inline image bytes do not match the declared MIME type")
 
 
 def _parse_usage(value: object) -> dict[str, int] | None:
@@ -719,17 +1028,26 @@ def _default_backoff(attempt: int) -> None:
 
 
 __all__ = [
+    "ConnectorContentPart",
     "ConnectorError",
     "ConnectorErrorCode",
+    "ConnectorImagePart",
+    "ConnectorImageURL",
+    "ConnectorJSONSchema",
     "ConnectorMessage",
+    "ConnectorMessageContent",
     "ConnectorRequest",
     "ConnectorResponse",
+    "ConnectorResponseFormat",
     "ConnectorResult",
+    "ConnectorTextPart",
     "ConnectorUsage",
     "FakeOpenAIConnector",
     "ModelConnector",
     "ModelRequest",
     "ModelResponse",
     "OpenAICompatibleConnector",
+    "canonical_connector_request_json",
+    "canonical_connector_request_sha256",
     "normalize_openai_base_url",
 ]

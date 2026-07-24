@@ -19,8 +19,15 @@ def _load_gpqa_diamond() -> BenchmarkAdapter:
     return GPQADiamondAdapter()
 
 
+def _load_humanitys_last_exam() -> BenchmarkAdapter:
+    from kairyu.evaluation.adapters.humanitys_last_exam import HumanitysLastExamAdapter
+
+    return HumanitysLastExamAdapter()
+
+
 _ADAPTER_FACTORIES: dict[str, Callable[[], BenchmarkAdapter]] = {
     "gpqa-diamond": _load_gpqa_diamond,
+    "humanitys-last-exam": _load_humanitys_last_exam,
 }
 
 

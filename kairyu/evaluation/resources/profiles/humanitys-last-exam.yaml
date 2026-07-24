@@ -1,0 +1,234 @@
+schema_version: 1
+benchmark_id: humanitys-last-exam
+profiles:
+  - name: smoke
+    description: Fully offline two-item CC0 fixture covering text and inline-image plumbing.
+    benchmark_version: humanitys-last-exam-cais-simple-evals-2026.07
+    dataset_id: kairyu.synthetic.humanitys-last-exam
+    dataset_revision: 0f85f6fffc09191181b42ac327a66ed97746f661696d1d24798a8f1b396fb194
+    dataset_sha256: 0f85f6fffc09191181b42ac327a66ed97746f661696d1d24798a8f1b396fb194
+    split: smoke
+    expected_full_count: 2500
+    data_license: CC0-1.0
+    gated: false
+    harness_name: kairyu-cais-simple-evals-hle-compat
+    harness_repository: https://github.com/centerforaisafety/simple-evals
+    harness_version: git-8e53435+compat.2
+    harness_commit: 8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3
+    dependency_lock_sha256: 2a6d1ac99eff465169b28eabd8e655711d7e5aaa241ef2f7fe0946c054efe186
+    compatibility_layer_sha256: 37671a5fe9bbc2ed0676a18164797f74f7fad67045e0a2679f72491d3a2f66cb
+    compatibility_patch_module: kairyu.evaluation.adapters.hle_official_2026
+    prompt_version: cais-simple-evals-hle-2026.07
+    prompt_sha256: 94fd163680229c67352a8c4f38bff04dae4183cea13e6afc7674904e21ae6502
+    seed: 42
+    repeats: 1
+    few_shot: 0
+    shuffle_algorithm: dataset-order-no-shuffle
+    preprocess_version: cais-simple-evals-hle-local-jsonl-v1
+    answer_parser_version: cais-simple-evals-hle-judge-xml-regex-v1
+    metric_implementation: cais-simple-evals-hle-compute-metrics-v1
+    modalities:
+      - text
+      - image
+    tools: []
+    web_access: false
+    retries: 4
+    judge_model: gpt-5-mini
+    judge_prompt_version: cais-simple-evals-hle-judge-2026.07
+    generation_parameters:
+      temperature: 0.0
+      top_p: 1.0
+      max_tokens: 4096
+      judge_max_tokens: 2048
+      timeout_seconds: 600.0
+      repeats: 1
+      seed: 42
+    adapter_configuration:
+      answer_parser: cais-simple-evals-hle-judge-xml-regex-v1
+      few_shot: 0
+      preprocess: cais-simple-evals-hle-local-jsonl-v1
+      repeats: 1
+      seed: 42
+      shuffle: dataset-order-no-shuffle
+      upstream_source_sha256: d276f725ecc5ea2c08f73e161f97760881332c3d33d20b197c2ffbac5f55edfe
+      target_prompt_sha256: 40f399fe8c277e2cb98ad8ca663461141d1abbf01a18da3c4129eccc706b4326
+      judge_prompt_sha256: bf081baac98cc6e45b7b2e18330920a64c0747b1915b346043694305cd396172
+      confidence_missing_default: 100
+      confidence_range_patch: reject-outside-0-100
+      calibration_error_p: "2"
+      calibration_error_beta: 100
+      calibration_final_bin_behavior: excluded-as-upstream
+      calibration_tie_sort_patch: python-stable-sort
+      content_part_order: text-then-image
+      target_calls_per_item_max: 5
+      judge_calls_per_target_success_max: 5
+      retry_budget_scope: per-model-request-total-attempts
+      max_attempts_per_request: 5
+      model_request_policy: target-and-judge-max-5-attempts-v1
+      target_empty_response_policy: pass-to-judge-as-official
+      judge_parse_exception_policy: retry-as-judge-parse-error
+      request_construction_error_policy: fail-item-attempt-zero-v1
+      request_concurrency: 1
+      expected_official_count: 2500
+    source_urls:
+      - https://github.com/centerforaisafety/simple-evals/tree/8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3/hle
+      - https://huggingface.co/datasets/cais/hle
+      - https://arxiv.org/abs/2501.14249
+    unresolved_fields: []
+
+  - name: fugu-2026
+    description: Best-effort profile for the published Fugu HLE row; undisclosed protocol fields remain unresolved.
+    benchmark_version: humanitys-last-exam-fugu-2026
+    dataset_id: cais/hle
+    dataset_revision: unresolved-fugu-2026-dataset-snapshot
+    dataset_sha256: null
+    split: test
+    expected_full_count: 2500
+    data_license: MIT with original-provider access conditions
+    gated: true
+    harness_name: kairyu-cais-simple-evals-hle-compat
+    harness_repository: https://github.com/centerforaisafety/simple-evals
+    harness_version: git-8e53435+compat.2
+    harness_commit: 8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3
+    dependency_lock_sha256: 2a6d1ac99eff465169b28eabd8e655711d7e5aaa241ef2f7fe0946c054efe186
+    compatibility_layer_sha256: 37671a5fe9bbc2ed0676a18164797f74f7fad67045e0a2679f72491d3a2f66cb
+    compatibility_patch_module: kairyu.evaluation.adapters.hle_official_2026
+    prompt_version: cais-simple-evals-hle-2026.07
+    prompt_sha256: 94fd163680229c67352a8c4f38bff04dae4183cea13e6afc7674904e21ae6502
+    seed: 42
+    repeats: 1
+    few_shot: 0
+    shuffle_algorithm: dataset-order-no-shuffle
+    preprocess_version: cais-simple-evals-hle-local-jsonl-v1
+    answer_parser_version: cais-simple-evals-hle-judge-xml-regex-v1
+    metric_implementation: cais-simple-evals-hle-compute-metrics-v1
+    modalities:
+      - text
+      - image
+    tools: []
+    web_access: false
+    retries: 4
+    judge_model: unresolved-fugu-2026-judge-model
+    judge_prompt_version: cais-simple-evals-hle-judge-2026.07
+    generation_parameters:
+      temperature: 0.0
+      top_p: 1.0
+      max_tokens: 4096
+      judge_max_tokens: 2048
+      timeout_seconds: 600.0
+      repeats: 1
+      seed: 42
+    adapter_configuration:
+      answer_parser: cais-simple-evals-hle-judge-xml-regex-v1
+      few_shot: 0
+      preprocess: cais-simple-evals-hle-local-jsonl-v1
+      repeats: 1
+      seed: 42
+      shuffle: dataset-order-no-shuffle
+      upstream_source_sha256: d276f725ecc5ea2c08f73e161f97760881332c3d33d20b197c2ffbac5f55edfe
+      target_prompt_sha256: 40f399fe8c277e2cb98ad8ca663461141d1abbf01a18da3c4129eccc706b4326
+      judge_prompt_sha256: bf081baac98cc6e45b7b2e18330920a64c0747b1915b346043694305cd396172
+      confidence_missing_default: 100
+      confidence_range_patch: reject-outside-0-100
+      calibration_error_p: "2"
+      calibration_error_beta: 100
+      calibration_final_bin_behavior: excluded-as-upstream
+      calibration_tie_sort_patch: python-stable-sort
+      content_part_order: text-then-image
+      target_calls_per_item_max: 5
+      judge_calls_per_target_success_max: 5
+      retry_budget_scope: per-model-request-total-attempts
+      max_attempts_per_request: 5
+      model_request_policy: target-and-judge-max-5-attempts-v1
+      target_empty_response_policy: pass-to-judge-as-official
+      judge_parse_exception_policy: retry-as-judge-parse-error
+      request_construction_error_policy: fail-item-attempt-zero-v1
+      request_concurrency: 1
+      expected_official_count: 2500
+    source_urls:
+      - https://arxiv.org/pdf/2606.21228
+      - https://sakana.ai/fugu-release/
+      - https://huggingface.co/datasets/cais/hle
+      - https://github.com/centerforaisafety/simple-evals/tree/8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3/hle
+    unresolved_fields:
+      - dataset_revision
+      - generation_parameters
+      - harness_commit
+      - judge_model
+
+  - name: official-latest
+    description: Approved local copy of the current 2500-item CAIS HLE test snapshot with the reviewed official evaluator.
+    benchmark_version: humanitys-last-exam-cais-simple-evals-2026.07
+    dataset_id: cais/hle
+    dataset_revision: 5a81a4c7271a2a2a312b9a690f0c2fde837e4c29
+    dataset_sha256: null
+    split: test
+    expected_full_count: 2500
+    data_license: MIT with original-provider access conditions
+    gated: true
+    harness_name: kairyu-cais-simple-evals-hle-compat
+    harness_repository: https://github.com/centerforaisafety/simple-evals
+    harness_version: git-8e53435+compat.2
+    harness_commit: 8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3
+    dependency_lock_sha256: 2a6d1ac99eff465169b28eabd8e655711d7e5aaa241ef2f7fe0946c054efe186
+    compatibility_layer_sha256: 37671a5fe9bbc2ed0676a18164797f74f7fad67045e0a2679f72491d3a2f66cb
+    compatibility_patch_module: kairyu.evaluation.adapters.hle_official_2026
+    prompt_version: cais-simple-evals-hle-2026.07
+    prompt_sha256: 94fd163680229c67352a8c4f38bff04dae4183cea13e6afc7674904e21ae6502
+    seed: 42
+    repeats: 1
+    few_shot: 0
+    shuffle_algorithm: dataset-order-no-shuffle
+    preprocess_version: cais-simple-evals-hle-local-jsonl-v1
+    answer_parser_version: cais-simple-evals-hle-judge-xml-regex-v1
+    metric_implementation: cais-simple-evals-hle-compute-metrics-v1
+    modalities:
+      - text
+      - image
+    tools: []
+    web_access: false
+    retries: 4
+    judge_model: gpt-5-mini
+    judge_prompt_version: cais-simple-evals-hle-judge-2026.07
+    generation_parameters:
+      temperature: 0.0
+      top_p: 1.0
+      max_tokens: 4096
+      judge_max_tokens: 2048
+      timeout_seconds: 600.0
+      repeats: 1
+      seed: 42
+    adapter_configuration:
+      answer_parser: cais-simple-evals-hle-judge-xml-regex-v1
+      few_shot: 0
+      preprocess: cais-simple-evals-hle-local-jsonl-v1
+      repeats: 1
+      seed: 42
+      shuffle: dataset-order-no-shuffle
+      upstream_source_sha256: d276f725ecc5ea2c08f73e161f97760881332c3d33d20b197c2ffbac5f55edfe
+      target_prompt_sha256: 40f399fe8c277e2cb98ad8ca663461141d1abbf01a18da3c4129eccc706b4326
+      judge_prompt_sha256: bf081baac98cc6e45b7b2e18330920a64c0747b1915b346043694305cd396172
+      confidence_missing_default: 100
+      confidence_range_patch: reject-outside-0-100
+      calibration_error_p: "2"
+      calibration_error_beta: 100
+      calibration_final_bin_behavior: excluded-as-upstream
+      calibration_tie_sort_patch: python-stable-sort
+      content_part_order: text-then-image
+      target_calls_per_item_max: 5
+      judge_calls_per_target_success_max: 5
+      retry_budget_scope: per-model-request-total-attempts
+      max_attempts_per_request: 5
+      model_request_policy: target-and-judge-max-5-attempts-v1
+      target_empty_response_policy: pass-to-judge-as-official
+      judge_parse_exception_policy: retry-as-judge-parse-error
+      request_construction_error_policy: fail-item-attempt-zero-v1
+      request_concurrency: 1
+      expected_official_count: 2500
+    source_urls:
+      - https://huggingface.co/datasets/cais/hle/tree/5a81a4c7271a2a2a312b9a690f0c2fde837e4c29
+      - https://github.com/centerforaisafety/simple-evals/tree/8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3/hle
+      - https://arxiv.org/abs/2501.14249
+      - https://labs.scale.com/leaderboard/humanitys_last_exam
+    unresolved_fields:
+      - generation_parameters

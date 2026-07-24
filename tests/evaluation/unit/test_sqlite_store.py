@@ -1376,6 +1376,70 @@ def test_terminal_timestamp_never_precedes_persisted_item_evidence(tmp_path, clo
     assert terminal.updated_at == evidence_timestamp
 
 
+def test_failed_item_accepts_immutable_checkpoint_provenance(tmp_path, clock):
+    store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
+    store.create_run(_run())
+    store.enqueue_job("run-01")
+    claim = store.claim_job("worker-a", lease_seconds=30)
+    assert claim is not None
+    preparing = _advance_run(store, claim.lease_token, RunState.PREPARING)
+    ready = store.complete_preparation(
+        "run-01",
+        lease_token=claim.lease_token,
+        expected_version=preparing.version,
+        protocol_hash="a" * 64,
+        item_input_manifest_sha256="b" * 64,
+        expected_full_count=198,
+        items=_items(count=1),
+    )
+    assert ready is not None
+    _advance_run(store, claim.lease_token, RunState.RUNNING)
+    started = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.PENDING,
+        expected_version=0,
+        new_state=ItemState.RUNNING,
+    )
+    assert started is not None
+
+    failed = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.RUNNING,
+        expected_version=started.item.version,
+        new_state=ItemState.FAILED,
+        error_class="rate_limit",
+        checkpoint_relative_path="upstream/checkpoints/item-1.json",
+        checkpoint_sha256="e" * 64,
+        checkpoint_source_run_id="run-01",
+    )
+    retry = store.compare_and_set_run_item(
+        "run-01",
+        "item-1",
+        lease_token=claim.lease_token,
+        expected_state=ItemState.RUNNING,
+        expected_version=started.item.version,
+        new_state=ItemState.FAILED,
+        error_class="rate_limit",
+        checkpoint_relative_path="upstream/checkpoints/item-1.json",
+        checkpoint_sha256="e" * 64,
+        checkpoint_source_run_id="run-01",
+    )
+
+    assert failed is not None
+    assert retry == failed
+    assert failed.item.item.state is ItemState.FAILED
+    assert failed.item.item.error_class == "rate_limit"
+    assert failed.item.item.checkpoint_relative_path == "upstream/checkpoints/item-1.json"
+    assert failed.item.item.checkpoint_sha256 == "e" * 64
+    assert failed.item.item.checkpoint_source_run_id == "run-01"
+    assert failed.run.run.failed_count == 1
+    assert failed.run.run.completed_count == 0
+
+
 def test_invalid_item_evidence_rolls_back_item_and_run_together(tmp_path, clock):
     store = SqliteControlStore(tmp_path / "control.sqlite3", clock=clock)
     store.create_run(_run())

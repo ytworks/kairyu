@@ -12,11 +12,12 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 hardware run (Issues #102–#104) are fixed and GPU-verified in PR #105. Real-model parity,
 performance, and production/fabric drills remain. The all-visible-GPU Qwen3-32B
 Compose and benchmark/report workflow are implemented but still need validation
-on the GPU host. The M20 reproducible-evaluation foundation and GPQA Diamond
-vertical slice are implemented with an exact eleven-entry catalog, strict schemas/protocol guards,
-durable SQLite jobs and checkpoints, artifact-only report regeneration, and
-publication-fenced artifacts; GPQA is available, while ten adapters and the legacy
-accuracy-suite cutover remain. Top-level `bench/` tooling remains supported.**
+on the GPU host. The M20 reproducible-evaluation foundation, GPQA Diamond, and
+Humanity's Last Exam vertical slices are implemented with an exact eleven-entry
+catalog, strict schemas/protocol guards, durable SQLite jobs and checkpoints,
+artifact-only report regeneration, and publication-fenced artifacts. GPQA and
+HLE are available; nine adapters and the legacy accuracy-execution cutover remain.
+Top-level `bench/` tooling remains supported.**
 
 _Last updated: 2026-07-24_
 
@@ -44,7 +45,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
-| M20 — Reproducible evaluation platform | **Foundation + GPQA Diamond implemented** (2026-07-24, `docs/design/m20-evaluation-platform.md`): exact eleven-entry catalog with GPQA available, immutable secret-free protocols, guarded planning/full-run preflight, durable item checkpoints/cancellation/resume, bounded descriptor-relative artifacts, artifact-only JSON/Markdown/HTML reporting, and incompatible evidence-only Fugu references. Ten adapter PRs and the legacy accuracy-suite cutover remain; top-level `bench/` is unchanged. |
+| M20 — Reproducible evaluation platform | **Foundation + GPQA Diamond + Humanity's Last Exam implemented** (2026-07-24, `docs/design/m20-evaluation-platform.md`): exact eleven-entry catalog with GPQA and HLE available, immutable secret-free protocols, independent multimodal target/judge roles, guarded planning/full-run preflight, durable terminal item checkpoints/cancellation/resume, bounded descriptor-relative artifacts, artifact-only JSON/Markdown/HTML reporting, and incompatible evidence-only Fugu references. Nine adapter PRs and the legacy accuracy-execution cutover remain; top-level `bench/` is unchanged. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03). 610 tests. |
@@ -107,16 +108,19 @@ with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
 footnoted scoreboard (G6 P-C1).
 
 M20 exposes `kairyu benchmark list` as an exact eleven-entry replacement catalog.
-GPQA Diamond is the first `available` adapter; the other ten entries remain `planned`
-until their pinned protocols and synthetic end-to-end coverage land. GPQA supports
-doctor, prepare, guarded plan/run, durable status/cancel/resume, artifact-only report
-regeneration, and offline reference listing. Smoke uses a two-item CC0 fixture and a
-fixed fake connector. Gated profiles require a manually approved, checksum-pinned
-local snapshot; unresolved provider, hardware, retrieval, runtime, and cost evidence
-remains explicit and makes formal comparison fail closed. No official/full run or paid
-API call has been performed. The legacy `kairyu bench` accuracy command remains only
-during the stacked migration. Top-level `bench/` performance and operational tooling
-remains supported and is outside the M20 quality-suite cutover.
+GPQA Diamond and Humanity's Last Exam are `available`; the other nine entries remain
+`planned` until their pinned protocols and synthetic end-to-end coverage land. Both
+adapters support doctor, prepare, guarded plan/run, durable status/cancel/resume,
+artifact-only report regeneration, and offline reference listing. HLE adds inline
+multimodal input, independent target and judge connectors, the official five-attempt
+model-request budget, judge retry/parse evidence, and accuracy/calibration metrics.
+Smoke uses two-item CC0 fixtures and fixed fake connectors. Gated profiles require
+manually approved, checksum-pinned local snapshots; unresolved provider, hardware,
+retrieval, runtime, and cost evidence remains explicit and makes formal comparison
+fail closed. No official/full run or paid API call has been performed. The legacy
+`kairyu bench` accuracy command remains during the stacked migration. Top-level
+`bench/` performance and operational tooling remains supported and is outside the
+M20 quality-suite cutover.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -128,6 +132,16 @@ patches, and full judge/simulator IDs; gated-data acceptance and a disposable-VM
 executor are deployment prerequisites for several later adapters.
 
 ## Change Log
+
+### 2026-07-24 — [progress] Humanity's Last Exam vertical slice implemented
+- What: Added a pinned CAIS simple-evals-compatible multimodal HLE adapter with
+  gated approved local snapshots, independent target and judge connectors, the
+  official five-attempt request budget, Accuracy/calibration/Wald metrics, durable
+  failed and cancelled evidence with resume, a two-item offline smoke fixture, and
+  immutable Fugu reference evidence. No official/full benchmark, paid API, Docker,
+  or upstream dataset download was run.
+- Refs: M20 D2-D8; `kairyu/evaluation/adapters/humanitys_last_exam.py`;
+  `kairyu/evaluation/resources/`; `tests/evaluation/`.
 
 ### 2026-07-24 — [progress] GPQA Diamond vertical slice implemented
 - What: Added the first runnable M20 adapter with pinned EvalScope 1.8.1-compatible

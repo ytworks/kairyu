@@ -1,7 +1,7 @@
 # M20 Design: Reproducible Evaluation Platform
 
-Status: **Foundation and GPQA Diamond implemented** (2026-07-24; the remaining
-benchmark adapters and the legacy cutover are pending).
+Status: **Foundation, GPQA Diamond, and Humanity's Last Exam implemented**
+(2026-07-24; nine benchmark adapters and the legacy accuracy cutover are pending).
 Milestone: M20
 Date: 2026-07-24
 Depends on: M7 production lifecycle patterns, M9/M11 OpenAI-compatible wire
@@ -28,6 +28,9 @@ M20 covers exactly these quality benchmarks:
 10. Artificial Analysis Long Context Reasoning
 11. MRCR v2
 
+At this checkpoint Humanity's Last Exam and GPQA Diamond are `available`; the other
+nine catalog entries remain `planned`.
+
 The performance and operational tools under top-level `bench/` are not part of
 this catalog and remain supported.
 
@@ -35,17 +38,17 @@ this catalog and remain supported.
 
 ### D1 — Replace the quality suite instead of preserving compatibility
 
-The new package is `kairyu.evaluation`, exposed as `kairyu benchmark`. The old
-`kairyu.bench` package and `kairyu bench` entry point remain only while the
-benchmark-by-benchmark implementation series is in flight. The final cutover
-removes them; no permanent compatibility adapter is retained.
+The new accuracy package is `kairyu.evaluation`, exposed as `kairyu benchmark`.
+The old `kairyu.bench` package and `kairyu bench` accuracy runner remain available
+while the benchmark-by-benchmark implementation series is in flight. The final
+cutover replaces only that legacy accuracy-execution implementation; no permanent
+compatibility adapter is retained.
 
-This cutover is limited to the accuracy-oriented quality suite. Top-level `bench/`
-performance, capacity, GPU, and operational tooling remains supported and is not
-renamed, archived, or deleted by M20. Legacy quality-suite results are not silently
-deleted or promoted into comparable native runs. A one-time importer records them
-as immutable legacy artifacts with checksums and incompatible/unknown protocol
-provenance.
+The repository's top-level `bench/` directory is a separate surface. Its performance,
+capacity, GPU, and operational tools remain supported and are not renamed, archived,
+or deleted by M20. Legacy quality-suite results are not silently deleted or promoted
+into comparable native runs. A one-time importer records them as immutable legacy
+artifacts with checksums and incompatible/unknown protocol provenance.
 
 ### D2 — Profiles and upstreams are immutable inputs
 
@@ -224,8 +227,10 @@ It deliberately does not:
 - remove the legacy command before replacement coverage exists.
 
 Each following PR adds one benchmark adapter, its pinned runtime/profile metadata,
-and four-layer tests. The final PR archives legacy results and removes the legacy
-package, dependencies, configuration, documentation, and command.
+and four-layer tests. The final PR archives legacy accuracy results and retires only
+the `kairyu/bench` quality-execution package, its dedicated dependencies and
+configuration, and the associated `kairyu bench` command documentation. It does not
+alter top-level `bench/` tooling.
 
 ### GPQA Diamond implementation
 
@@ -254,11 +259,55 @@ rank. Provider API version, runtime attestation, source retrieval date, worker/p
 hardware, and monetary cost remain explicit unknowns with reasons rather than guessed
 values.
 
+### Humanity's Last Exam implementation
+
+The second adapter covers the gated 2,500-item CAIS Humanity's Last Exam dataset,
+including both text and image questions. It pins
+`centerforaisafety/simple-evals@8e53435ff2985b0f32ea7ceb7e92c3a175f2c0f3`
+and a checksummed local compatibility module,
+`kairyu.evaluation.adapters.hle_official_2026`. The module preserves the reviewed
+target prompt, judge prompt and parser, confidence handling, Accuracy, Calibration
+Error, success-only Accuracy, and overall/success-only 95% Wald confidence-interval
+half-width calculations. Documented compatibility patches are protocol inputs rather
+than silent changes to upstream behavior.
+
+Each item gives the target request and the judge request-plus-XML-parse path an
+independent five-attempt total budget, matching the pinned evaluator. Connector-internal
+attempts consume that same budget rather than multiplying it; the budget scope and limit
+are protocol inputs and planning uses the corresponding worst-case call ceiling.
+
+HLE is the first available adapter to require two model roles. The target and judge
+have separate connector configurations, endpoints, secret references, model IDs,
+timeouts, response limits, and retry policies. The target sees the question and
+optional image; the judge sees the question, target response, and correct answer.
+Neither role receives the other role's connector secret, and secrets are excluded from
+protocol and evidence artifacts.
+
+The `official-latest` and `fugu-2026` profiles never download HLE or accept provider
+terms. They require manual acceptance, an approved local UTF-8 JSONL snapshot, an
+explicit access acknowledgement, a caller-supplied lowercase SHA-256, and exactly
+2,500 records. The input is a bounded regular non-symlink file. Image fields must be
+bounded base64 inline PNG, JPEG, WebP, or GIF `data:` URIs; remote image URLs and
+unbounded payloads are rejected.
+
+Ordinary CI executes a checksummed two-item CC0 fixture with exactly one text question
+and one inline-image question. Fixed fake target and judge responses exercise durable
+submission, independent connector binding, worker leases, per-item checkpoints,
+aggregation, and JSON/Markdown/HTML reports without a dataset download or external API.
+This is orchestration evidence only. No full 2,500-item HLE run, real target/judge
+provider run, or published-score reproduction has been executed or validated.
+
+The checked-in Fugu HLE snapshot records five published Accuracy rows as immutable
+reference evidence. Their missing protocol hashes make every comparison
+`incompatible`; reports therefore emit no delta or rank. The `official-latest` profile
+also retains unresolved generation parameters, while the Fugu profile retains further
+unresolved dataset, harness, generation, and judge identity fields.
+
 ## 4. Implementation order
 
-1. Foundation.
-2. GPQA Diamond.
-3. Humanity's Last Exam.
+1. Foundation. **Implemented.**
+2. GPQA Diamond. **Implemented.**
+3. Humanity's Last Exam. **Implemented.**
 4. CharXiv Reasoning.
 5. MRCR v2.
 6. Artificial Analysis Long Context Reasoning.

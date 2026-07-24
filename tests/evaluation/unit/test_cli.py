@@ -29,8 +29,11 @@ def test_human_list_is_ordered_and_marks_landed_adapter_available(capsys):
     assert [line.split()[0] for line in lines[1:]] == list(BENCHMARK_IDS)
     statuses = {line.split()[0]: line.rsplit("[", 1)[1].rstrip("]") for line in lines[1:]}
     assert statuses["gpqa-diamond"] == "available"
+    assert statuses["humanitys-last-exam"] == "available"
     assert {
-        status for benchmark_id, status in statuses.items() if benchmark_id != "gpqa-diamond"
+        status
+        for benchmark_id, status in statuses.items()
+        if benchmark_id not in {"gpqa-diamond", "humanitys-last-exam"}
     } == {"planned"}
 
 
@@ -41,8 +44,11 @@ def test_json_list_is_stable_and_machine_readable(capsys):
     assert [entry["benchmark_id"] for entry in payload] == list(BENCHMARK_IDS)
     statuses = {entry["benchmark_id"]: entry["implementation_status"] for entry in payload}
     assert statuses["gpqa-diamond"] == "available"
+    assert statuses["humanitys-last-exam"] == "available"
     assert {
-        status for benchmark_id, status in statuses.items() if benchmark_id != "gpqa-diamond"
+        status
+        for benchmark_id, status in statuses.items()
+        if benchmark_id not in {"gpqa-diamond", "humanitys-last-exam"}
     } == {"planned"}
     assert payload[0]["benchmark_id"] == "swe-bench-pro"
     assert payload[0]["display_name"] == "SWE-Bench Pro"
@@ -86,6 +92,46 @@ def test_plan_exposes_truthful_estimates_resources_and_unresolved_evidence(capsy
         "runtime_dependency_environment",
         "source_retrieval_date",
     }
+
+
+def test_hle_plan_cli_judge_reasoning_effort_changes_protocol_hash(capsys):
+    assert (
+        handle(
+            _parse(
+                [
+                    "plan",
+                    "humanitys-last-exam",
+                    "--format",
+                    "json",
+                ]
+            )
+        )
+        == 0
+    )
+    default_plan = json.loads(capsys.readouterr().out)
+
+    assert (
+        handle(
+            _parse(
+                [
+                    "plan",
+                    "humanitys-last-exam",
+                    "--judge-reasoning-effort",
+                    "high",
+                    "--format",
+                    "json",
+                ]
+            )
+        )
+        == 0
+    )
+    reasoned_plan = json.loads(capsys.readouterr().out)
+
+    assert reasoned_plan["selected_item_ids"] == default_plan["selected_item_ids"]
+    assert (
+        reasoned_plan["item_input_manifest_sha256"] == (default_plan["item_input_manifest_sha256"])
+    )
+    assert reasoned_plan["protocol_hash"] != default_plan["protocol_hash"]
 
 
 def test_plan_binds_openai_retries_and_exact_default_backoff(capsys):
