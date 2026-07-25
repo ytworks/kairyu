@@ -153,12 +153,17 @@ class StateSync:
         for rid in active:
             snap = _snapshot_state(states[rid])
             prev = self._states.get(rid)
-            # a preempted+re-admitted request may change pages/prompt: re-send full
+            # A delta may only ever APPEND. Comparing the retained prefix rather
+            # than just its length is what makes that true: a preempted request
+            # can change pages/prompt, and a rejected speculative draft replaces
+            # already-sent tokens with different ones at the SAME length. The old
+            # `len(prev) > len(snap)` test missed that case entirely — the delta
+            # came out empty and every worker kept the rejected token forever.
             if (
                 prev is None
                 or prev.page_ids != snap.page_ids
                 or prev.prompt_token_ids != snap.prompt_token_ids
-                or len(prev.outputs) > len(snap.outputs)
+                or snap.outputs[: len(prev.outputs)] != prev.outputs
             ):
                 new.append(snap)
             else:

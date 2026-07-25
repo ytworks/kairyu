@@ -92,6 +92,18 @@ class PagedModelRunner:
         # Input tensors (token ids, positions) must be built on the model's device
         # so the GPU forward never mixes CPU inputs with on-device weights/KV.
         self._device = next(model.parameters()).device
+        # In-flight tokens: under OverlapEngineCore the snapshot for step N+1 is
+        # taken BEFORE step N's token is committed, so `state.outputs` is short
+        # and reading `outputs[position - 1]` raised IndexError. The runner
+        # already produced those tokens; it just never kept them.
+        #
+        # This is the HOST-SIDE half of m2 §2.2. That section specifies patching
+        # the placeholder slot device-to-device from the sampled tensor, with no
+        # host sync in the hot path; this keeps Python ints and rebuilds the
+        # input tensor each step. It makes overlap CORRECT on a real runner —
+        # which it was not — but the zero-host-sync property is still open.
+        self._future_tokens: dict[str, dict[int, int]] = {}
+
         # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
         # the seam has existed since m17 with no caller, and enabling it by
         # default would change what every deployment executes.
@@ -164,6 +176,7 @@ class PagedModelRunner:
         """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
         if self._sampler is not None:
             self._sampler.release(request_id)
+        self._future_tokens.pop(request_id, None)
 
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
         if self._sampler is None:
@@ -174,9 +187,37 @@ class PagedModelRunner:
             position,
             logits,
             prompt=state.request.prompt_token_ids,
-            outputs=tuple(state.outputs),
+            # the SAME completion the decode input came from: presence,
+            # frequency and repetition penalties are computed over this history,
+            # so an overlap snapshot missing the in-flight token would penalise a
+            # different set of tokens than the eager path and pick differently
+            outputs=self._effective_outputs(state, position),
             eos_token_id=state.request.eos_token_id,
         )
+
+    def _effective_outputs(self, state: object, position: int) -> tuple[int, ...]:
+        """Committed outputs, extended with any in-flight token before ``position``.
+
+        Under overlap the snapshot for step N+1 is taken before step N commits,
+        so `state.outputs` is short by exactly the tokens this runner has already
+        sampled. Sampling reads that history for the penalties, so it needs the
+        same view the decode input does.
+        """
+        outputs = tuple(state.outputs)
+        if position <= len(outputs):
+            return outputs
+        pending = self._future_tokens.get(state.request.request_id, {})
+        extended = list(outputs)
+        for index in range(len(outputs), position):
+            if index not in pending:
+                # a gap means the history is genuinely unknown; penalties over a
+                # silently-short history are worse than a loud failure
+                raise RuntimeError(
+                    f"no token for {state.request.request_id} at position {index} "
+                    f"while sampling position {position}"
+                )
+            extended.append(pending[index])
+        return tuple(extended)
 
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
@@ -209,12 +250,61 @@ class PagedModelRunner:
         )
         if state.prefill_done and end == len(prompt):
             logits = self._model.logits(hidden[-1])
-            sampled[chunk.request_id] = (self._sample(state, logits, position=0),)
+            token = self._sample(state, logits, position=0)
+            self._remember(chunk.request_id, 0, token)
+            sampled[chunk.request_id] = (token,)
+
+    def _remember(self, request_id: str, position: int, token: SampledToken) -> None:
+        """Keep this step's token so later steps can read it before it commits.
+
+        A decode input needs `position - 1`; the sampler's penalties need every
+        uncommitted token before `position`. Both are served from here.
+
+        Trimming is driven by what has been COMMITTED, not by a fixed depth.
+        `OverlapEngineCore` accepts any `pipeline_depth >= 1`, so a constant cap
+        would silently drop a position a deeper pipeline still needs — and the
+        symptom would be a RuntimeError mid-run, not a wrong answer, but only
+        because the lookup fails loudly. Anything at or below the committed
+        length is redundant: `_effective_outputs` and `_previous_token` both
+        prefer committed values there.
+        """
+        pending = self._future_tokens.setdefault(request_id, {})
+        pending[position] = token.token_id
+
+    def _forget_committed(self, request_id: str, committed: int) -> None:
+        """Drop in-flight tokens the scheduler has since committed."""
+        pending = self._future_tokens.get(request_id)
+        if not pending:
+            return
+        for position in [key for key in pending if key < committed]:
+            del pending[position]
+
+    def _previous_token(self, state, position: int) -> int:
+        """The token at ``position - 1``, committed or still in flight.
+
+        Committed outputs win: after `update()` they are the authority, and a
+        speculative rollback replaces in-flight values that the future buffer
+        would otherwise still hold.
+        """
+        index = position - 1
+        outputs = state.outputs
+        if index < len(outputs):
+            return outputs[index]
+        pending = self._future_tokens.get(state.request.request_id, {})
+        if index in pending:
+            return pending[index]
+        raise RuntimeError(
+            f"no token for {state.request.request_id} at position {index}: "
+            f"{len(outputs)} committed, in-flight {sorted(pending)}"
+        )
 
     def _decode_inputs(self, chunk: ScheduledChunk, state):
         prompt = state.request.prompt_token_ids
         position = chunk.position
-        input_token = state.outputs[position - 1] if position > 0 else prompt[-1]
+        # whatever the scheduler has committed is authoritative from here on, so
+        # the in-flight copies of it are dead weight
+        self._forget_committed(state.request.request_id, len(state.outputs))
+        input_token = self._previous_token(state, position) if position > 0 else prompt[-1]
         absolute = len(prompt) + position - 1
         cached = state.allocation.num_cached_tokens if state.allocation else 0
         page_table = list(state.allocation.pages) + list(state.decode_pages)
@@ -228,7 +318,9 @@ class PagedModelRunner:
             self._pool, page_table, seq_len=absolute + 1, write_from=cached,
         )
         logits = self._model.logits(hidden[-1])
-        sampled[chunk.request_id] = (self._sample(state, logits, position=chunk.position),)
+        token = self._sample(state, logits, position=chunk.position)
+        self._remember(chunk.request_id, chunk.position, token)
+        sampled[chunk.request_id] = (token,)
 
     def _graph_logits(
         self,
@@ -287,6 +379,6 @@ class PagedModelRunner:
             logits = self._model.logits(hidden)  # [B, vocab]
         for i, chunk in enumerate(chunks):
             state = states[chunk.request_id]
-            sampled[chunk.request_id] = (
-                self._sample(state, logits[i], position=chunk.position),
-            )
+            token = self._sample(state, logits[i], position=chunk.position)
+            self._remember(chunk.request_id, chunk.position, token)
+            sampled[chunk.request_id] = (token,)

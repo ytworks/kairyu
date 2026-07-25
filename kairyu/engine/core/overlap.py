@@ -2,9 +2,14 @@
 
 While the device executes step N, the scheduler plans step N+1 using the
 in-flight token accounting in Scheduler: decode chunks carry an explicit
-``position`` so the runner never needs previously-committed token values from
-the host (on GPU, the last-token slot is patched device-side — the SGLang
-"future token" technique). Sampled tokens are committed via update() while the
+``position``, and the runner keeps the tokens it has sampled but not yet had
+committed (``PagedModelRunner._future_tokens``), so a snapshot one step behind
+still resolves both the decode input and the sampler's penalty history.
+
+Still OPEN (m2 §2.2): patching the last-token slot DEVICE-side from the sampled
+tensor, with no host sync in the hot path. Today's version relays Python ints
+and rebuilds the input tensor each step — correct, but not the zero-overhead
+technique that section describes. Sampled tokens are committed via update() while the
 next step is already running, so the device never waits on host bookkeeping.
 
 The pipeline structure (schedule-ahead, bounded depth, late finish commit) is
