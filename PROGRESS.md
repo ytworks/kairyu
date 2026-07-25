@@ -112,6 +112,20 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [progress] m2 §2.2: the decode input slot is patched device-side
+- What: `SampledToken` carries `device_token` — the sampled id resident on the device that
+  produced the logits — and `PagedModelRunner` stacks those tensors for the next decode
+  input instead of rebuilding it from a Python list. `torch.tensor(ints, device=...)` was
+  a host-to-device copy of values the device had produced one step earlier.
+- Why: this is the half of m2 §2.2 that #136 explicitly left open. It closes the
+  round trip on the input path. What remains open, and is now stated in `overlap.py`
+  rather than implied: the sampling DECISION stays on the host by design — the
+  reproducibility pins (m8 D2, spec == greedy) are defined by the CPU RNG stream — so the
+  per-token `.item()` remains. Removing it means moving the RNG and stop conditions onto
+  the device, which changes what those pins mean.
+- Refs: m2 §2.2, `kairyu/engine/core/sampler.py`, `kairyu/engine/core/model_runner.py`,
+  `tests/gpu/test_device_future_token_gpu.py`
+
 ### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
 - What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
   `position - 1` before that token is committed. `OverlapEngineCore` takes the snapshot

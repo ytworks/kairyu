@@ -6,10 +6,14 @@ in-flight token accounting in Scheduler: decode chunks carry an explicit
 committed (``PagedModelRunner._future_tokens``), so a snapshot one step behind
 still resolves both the decode input and the sampler's penalty history.
 
-Still OPEN (m2 §2.2): patching the last-token slot DEVICE-side from the sampled
-tensor, with no host sync in the hot path. Today's version relays Python ints
-and rebuilds the input tensor each step — correct, but not the zero-overhead
-technique that section describes. Sampled tokens are committed via update() while the
+The last-token slot IS patched device-side (m2 §2.2): `SampledToken` carries the
+id on the device that produced it, and the runner stacks those tensors instead of
+rebuilding the input from a host list each step.
+
+Still OPEN: the sampling DECISION stays on the host — by design, since the
+reproducibility pins (m8 D2, spec == greedy) are defined by the CPU RNG stream —
+so `.item()` per token remains. Removing that sync means moving the RNG and the
+stop conditions onto the device, which changes what those pins mean. Sampled tokens are committed via update() while the
 next step is already running, so the device never waits on host bookkeeping.
 
 The pipeline structure (schedule-ahead, bounded depth, late finish commit) is

@@ -58,12 +58,14 @@ class PagedModelRunner:
         # input tensor each step. It makes overlap CORRECT on a real runner —
         # which it was not — but the zero-host-sync property is still open.
         self._future_tokens: dict[str, dict[int, int]] = {}
+        self._device_tokens: dict[str, dict[int, object]] = {}
 
     def release(self, request_id: str) -> None:
         """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
         if self._sampler is not None:
             self._sampler.release(request_id)
         self._future_tokens.pop(request_id, None)
+        self._device_tokens.pop(request_id, None)
 
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
         if self._sampler is None:
@@ -157,6 +159,10 @@ class PagedModelRunner:
         """
         pending = self._future_tokens.setdefault(request_id, {})
         pending[position] = token.token_id
+        if token.device_token is not None:
+            # m2 §2.2: the next step's input slot is patched from THIS tensor,
+            # so the token value never round-trips through the host
+            self._device_tokens.setdefault(request_id, {})[position] = token.device_token
 
     def _forget_committed(self, request_id: str, committed: int) -> None:
         """Drop in-flight tokens the scheduler has since committed."""
@@ -165,6 +171,10 @@ class PagedModelRunner:
             return
         for position in [key for key in pending if key < committed]:
             del pending[position]
+        device_pending = self._device_tokens.get(request_id)
+        if device_pending:
+            for position in [key for key in device_pending if key < committed]:
+                del device_pending[position]
 
     def _previous_token(self, state, position: int) -> int:
         """The token at ``position - 1``, committed or still in flight.
@@ -209,6 +219,38 @@ class PagedModelRunner:
         self._remember(chunk.request_id, chunk.position, token)
         sampled[chunk.request_id] = (token,)
 
+    def _decode_token_tensor(
+        self,
+        chunks: list[ScheduledChunk],
+        states: Mapping[str, object],
+        fallback: list[int],
+    ) -> torch.Tensor:
+        """The decode inputs, built on device where the tokens already are.
+
+        `torch.tensor(list_of_ints, device=...)` is a host-to-device copy of
+        values that were produced on the device one step earlier. When every row
+        has a device token from the previous step, they are stacked instead —
+        m2 §2.2's "patch the last-token slot device-side". A row whose previous
+        token was the PROMPT's last (position 0) has no such tensor, so that
+        step still comes from the host; it happens once per request, not once
+        per token.
+        """
+        stacked = []
+        for chunk in chunks:
+            request_id = chunk.request_id
+            index = chunk.position - 1
+            if index < len(states[request_id].outputs):
+                stacked = []  # committed values live on the host; take the copy
+                break
+            device_token = self._device_tokens.get(request_id, {}).get(index)
+            if device_token is None:
+                stacked = []
+                break
+            stacked.append(device_token)
+        if len(stacked) == len(chunks) and stacked:
+            return torch.stack(stacked).to(torch.long)
+        return torch.tensor(fallback, dtype=torch.long, device=self._device)
+
     def _execute_decode_batch(
         self, chunks: list[ScheduledChunk], states: Mapping[str, object], sampled: dict
     ) -> None:
@@ -223,7 +265,7 @@ class PagedModelRunner:
             seq_lens.append(absolute + 1)
             write_from.append(cached)
         hidden = self._model.forward_decode_batch(
-            torch.tensor(tokens, dtype=torch.long, device=self._device),
+            self._decode_token_tensor(chunks, states, tokens),
             torch.tensor(positions, device=self._device),
             self._pool, page_tables, seq_lens, write_from,
         )

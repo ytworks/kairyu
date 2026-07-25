@@ -101,6 +101,7 @@ class Sampler:
         eos_token_id: int | None = None,
     ) -> SampledToken:
         state = self._state_for(request_id, sampling, eos_token_id)
+        source_device = logits.device
         # Sampling runs on CPU: the seeded torch.Generator + multinomial and the
         # penalty/enforcer index tensors are all CPU, and the reproducibility pins
         # (m8 D2, spec ≡ greedy) are defined by the CPU RNG stream — a CUDA
@@ -121,12 +122,23 @@ class Sampler:
             token_id = int(torch.argmax(logits).item())
         else:
             token_id = self._sample_scaled(logits, sampling, state.base_seed, position)
+        # The decision itself is CPU by design (the reproducibility pins are the
+        # CPU RNG stream). What m2 §2.2 needs is the RESULT resident where the
+        # next forward reads it, so the input slot is patched device-to-device
+        # instead of the runner rebuilding a host list every step.
+        device_token = (
+            torch.as_tensor(token_id, dtype=torch.long, device=source_device)
+            if source_device.type != "cpu"
+            else None
+        )
 
         logprob, top_logprobs = self._report(raw_logsoftmax, sampling, token_id)
         terminated = False
         if state.enforcer is not None:
             terminated = self._accept_once(state, position, token_id)
-        return SampledToken(token_id, logprob, top_logprobs, terminated)
+        return SampledToken(
+            token_id, logprob, top_logprobs, terminated, device_token=device_token
+        )
 
     @staticmethod
     def _apply_penalties(
