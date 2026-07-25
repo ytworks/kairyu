@@ -500,3 +500,198 @@ def pd_two_process(rank: int, world_size: int, init_file: str, out_dir: str,
         pd_prefill_process(rank, world_size, init_file, out_dir, model_dir, prompt, max_new)
     else:
         pd_decode_process(rank, world_size, init_file, out_dir, model_dir, prompt, max_new)
+
+
+def reduce_scatter_equivalence(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """reduce_scatter must equal all_reduce sliced to this rank's shard.
+
+    On gloo the implementation IS that, so this pins the contract the NCCL path
+    has to honour; the GPU mirror runs the real collective.
+    """
+    comm = _setup(rank, world_size, init_file)
+    rows = 4 * world_size
+    payload = torch.arange(rows * 3, dtype=torch.float32).reshape(rows, 3) + 100 * rank
+
+    scattered = comm.tensor_reduce_scatter(payload)
+
+    summed = payload.clone()
+    comm.tensor_all_reduce(summed)
+    span = rows // world_size
+    expected = summed[rank * span : (rank + 1) * span]
+
+    _finish(out_dir, rank, {
+        "shape": list(scattered.shape),
+        "max_error": float((scattered - expected).abs().max()),
+        # re-gathering the shards must reconstruct the full all_reduce
+        "regathered_matches": bool(
+            torch.allclose(comm.tensor_all_gather(scattered.contiguous()), summed)
+        ),
+    })
+
+
+def reduce_scatter_rejects_indivisible(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """A ragged first dimension has no equal shard; fail loudly, not silently."""
+    comm = _setup(rank, world_size, init_file)
+    payload = torch.ones(world_size * 2 + 1, 2)
+    try:
+        comm.tensor_reduce_scatter(payload)
+        _finish(out_dir, rank, {"raised": False})
+    except ValueError as error:
+        _finish(out_dir, rank, {"raised": True, "message": str(error)})
+
+
+def reduce_scatter_nccl_equivalence(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """The real NCCL collective, against the same all_reduce-and-slice contract."""
+    import torch.distributed as dist
+
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+
+    torch.cuda.set_device(rank)
+    init_distributed(rank, world_size, f"file://{init_file}", backend="nccl")
+    try:
+        comm = TorchDistCommunicator(device=f"cuda:{rank}")
+        device = torch.device("cuda", rank)
+        rows = 4 * world_size
+        payload = (
+            torch.arange(rows * 3, dtype=torch.float32, device=device).reshape(rows, 3)
+            + 100 * rank
+        )
+        scattered = comm.tensor_reduce_scatter(payload)
+        summed = payload.clone()
+        comm.tensor_all_reduce(summed)
+        span = rows // world_size
+        expected = summed[rank * span : (rank + 1) * span]
+        Path(out_dir, f"rank{rank}.json").write_text(
+            json.dumps(
+                {
+                    "shape": list(scattered.shape),
+                    "max_error": float((scattered - expected).abs().max()),
+                    "device": str(scattered.device),
+                }
+            )
+        )
+    finally:
+        dist.destroy_process_group()
+
+
+def sequence_parallel_parity(
+    rank: int, world_size: int, init_file: str, out_dir: str, model_dir: str
+) -> None:
+    """SP must be the same arithmetic as plain TP, only sharded differently."""
+    from kairyu.models.parallel import build_tp_model
+
+    comm = _setup(rank, world_size, init_file)
+    torch.manual_seed(11)
+    tokens = torch.randint(0, 256, (12,))
+    positions = torch.arange(12)
+
+    from kairyu.engine.core.kv_pool import PagedKVPool
+
+    def run(sequence_parallel: bool):
+        model, local, _full = build_tp_model(
+            model_dir, world_size, rank, comm, sequence_parallel=sequence_parallel
+        )
+        pool = PagedKVPool(
+            num_layers=local.num_hidden_layers, num_pages=8, page_size=16,
+            num_kv_heads=local.kv_cache_num_heads, head_dim=local.kv_cache_head_dim,
+        )
+        hidden = model.forward_tokens(
+            tokens, positions, pool, [0, 1], seq_len=12, write_from=0
+        )
+        return model.logits(hidden[-1])
+
+    plain = run(False)
+    sharded = run(True)
+    _finish(out_dir, rank, {
+        "shape": list(sharded.shape),
+        "max_error": float((plain - sharded).abs().max()),
+        "argmax_equal": int(plain.argmax()) == int(sharded.argmax()),
+    })
+
+
+def sequence_parallel_ragged(
+    rank: int, world_size: int, init_file: str, out_dir: str, model_dir: str
+) -> None:
+    """A token count that does not divide by tp must still be exact."""
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.models.parallel import build_tp_model
+
+    comm = _setup(rank, world_size, init_file)
+    torch.manual_seed(13)
+    length = 11  # odd on purpose: 11 % 2 != 0
+    tokens = torch.randint(0, 256, (length,))
+    positions = torch.arange(length)
+
+    def run(sequence_parallel: bool):
+        model, local, _full = build_tp_model(
+            model_dir, world_size, rank, comm, sequence_parallel=sequence_parallel
+        )
+        pool = PagedKVPool(
+            num_layers=local.num_hidden_layers, num_pages=8, page_size=16,
+            num_kv_heads=local.kv_cache_num_heads, head_dim=local.kv_cache_head_dim,
+        )
+        return model.forward_tokens(
+            tokens, positions, pool, [0, 1], seq_len=length, write_from=0
+        )
+
+    plain = run(False)
+    sharded = run(True)
+    _finish(out_dir, rank, {
+        "rows": int(sharded.shape[0]),
+        "expected_rows": length,
+        "max_error": float((plain - sharded).abs().max()),
+    })
+
+
+def sequence_parallel_nccl_parity(
+    rank: int, world_size: int, init_file: str, out_dir: str, model_dir: str
+) -> None:
+    """SP == plain TP on real devices, bf16, over NCCL."""
+    import torch.distributed as dist
+
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.models.parallel import build_tp_model
+
+    torch.cuda.set_device(rank)
+    init_distributed(rank, world_size, f"file://{init_file}", backend="nccl")
+    try:
+        comm = TorchDistCommunicator(device=f"cuda:{rank}")
+        device = torch.device("cuda", rank)
+        torch.manual_seed(11)
+        tokens = torch.randint(0, 256, (12,), device=device)
+        positions = torch.arange(12, device=device)
+
+        def run(sequence_parallel: bool):
+            model, local, _full = build_tp_model(
+                model_dir, world_size, rank, comm,
+                dtype=torch.bfloat16, device=f"cuda:{rank}",
+                sequence_parallel=sequence_parallel,
+            )
+            pool = PagedKVPool(
+                num_layers=local.num_hidden_layers, num_pages=8, page_size=16,
+                num_kv_heads=local.kv_cache_num_heads, head_dim=local.kv_cache_head_dim,
+                dtype=torch.bfloat16, device=f"cuda:{rank}",
+            )
+            return model.forward_tokens(
+                tokens, positions, pool, [0, 1], seq_len=12, write_from=0
+            )
+
+        plain, sharded = run(False), run(True)
+        Path(out_dir, f"rank{rank}.json").write_text(
+            json.dumps(
+                {
+                    "rows": int(sharded.shape[0]),
+                    "max_error": float((plain.float() - sharded.float()).abs().max()),
+                    "device": str(sharded.device),
+                }
+            )
+        )
+    finally:
+        dist.destroy_process_group()

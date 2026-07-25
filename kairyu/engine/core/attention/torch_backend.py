@@ -15,6 +15,28 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 
 
 class TorchAttentionBackend:
+    #: ``GraphDecodeBackend`` (m17 D1): ``attend_decode`` below is pure tensor
+    #: algebra — ``gather_batched``, an ``arange`` compare and SDPA. Nothing
+    #: reads a device value into Python, so a capture of it is sound.
+    supports_graph_capture = True
+
+    def plan_decode(
+        self,
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        num_qo_heads: int,
+        q_dtype: torch.dtype,
+    ) -> None:
+        """No host phase: nothing to plan (``GraphDecodeBackend``).
+
+        ``attend_decode`` reads the page-table and length BUFFERS at run time,
+        so there is no schedule to refresh between replays. Implemented anyway
+        so the executor's step-boundary hook is unconditionally callable.
+        """
+        return None
+
     def attend(
         self,
         query: torch.Tensor,
@@ -39,6 +61,38 @@ class TorchAttentionBackend:
             enable_gqa=True,
         )
         return out[0].transpose(0, 1).reshape(chunk_len, -1)
+
+    def attend_decode(
+        self,
+        query: torch.Tensor,  # [B, heads, head_dim] — one new token per sequence
+        kv_pool: PagedKVPool,
+        layer: int,
+        page_tables: torch.Tensor,  # [B, P] int
+        seq_lens: torch.Tensor,  # [B] int — tokens valid so far, this one included
+    ) -> torch.Tensor:
+        """Decode attention with NO host values (m17 D1 static-buffer rule).
+
+        `attend_batched` takes Python page lists and int lengths, so a captured
+        graph would replay against whatever those were AT CAPTURE TIME. Here the
+        page table and lengths are tensors: the same kernels read wherever the
+        buffers currently point, which is what makes capture/replay correct.
+
+        Every page is gathered and the tail masked, rather than slicing to
+        `seq_len` — a data-dependent shape cannot be captured.
+        """
+        keys, values = kv_pool.gather_batched(layer, page_tables)  # [B, S, KVH, D]
+        span = keys.shape[1]
+        valid = (
+            torch.arange(span, device=query.device)[None, :] < seq_lens[:, None]
+        )  # [B, S]
+        context = nn.functional.scaled_dot_product_attention(
+            query.unsqueeze(2),  # [B, heads, 1, d]
+            keys.transpose(1, 2),  # [B, kv_heads, S, d]
+            values.transpose(1, 2),
+            attn_mask=valid[:, None, None, :],
+            enable_gqa=True,
+        )
+        return context.squeeze(2).reshape(query.shape[0], -1)
 
     def attend_batched(
         self,
