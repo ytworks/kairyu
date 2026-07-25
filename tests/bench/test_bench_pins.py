@@ -165,7 +165,10 @@ def test_scicode_golden_data_fetch_carries_the_pin(tmp_path, monkeypatch):
     monkeypatch.setattr(hub, "download_file", fake_download)
     monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: [])
     adapter = all_adapters()["scicode"]
-    adapter.normalize(DownloadContext(cache=BenchCache(tmp_path / "cache")))
+    # an empty split fails closed on the sub-step count; the golden-data fetch
+    # has already happened by then, which is what this test is about
+    with pytest.raises(Exception, match="expected 291"):
+        adapter.normalize(DownloadContext(cache=BenchCache(tmp_path / "cache")))
 
     assert seen and seen[0]["file"] == "test_data.h5"
     assert seen[0]["revision"] == adapter.info.hf_revision
