@@ -92,6 +92,18 @@ class PagedModelRunner:
         # Input tensors (token ids, positions) must be built on the model's device
         # so the GPU forward never mixes CPU inputs with on-device weights/KV.
         self._device = next(model.parameters()).device
+        # In-flight tokens: under OverlapEngineCore the snapshot for step N+1 is
+        # taken BEFORE step N's token is committed, so `state.outputs` is short
+        # and reading `outputs[position - 1]` raised IndexError. The runner
+        # already produced those tokens; it just never kept them.
+        #
+        # This is the HOST-SIDE half of m2 §2.2. That section specifies patching
+        # the placeholder slot device-to-device from the sampled tensor, with no
+        # host sync in the hot path; this keeps Python ints and rebuilds the
+        # input tensor each step. It makes overlap CORRECT on a real runner —
+        # which it was not — but the zero-host-sync property is still open.
+        self._future_tokens: dict[str, dict[int, int]] = {}
+
         # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
         # the seam has existed since m17 with no caller, and enabling it by
         # default would change what every deployment executes.
@@ -159,18 +171,6 @@ class PagedModelRunner:
         """Weight swap or pool resize: every capture is stale (m17 D2)."""
         if self._graph is not None:
             self._graph.invalidate()
-
-        # In-flight tokens: under OverlapEngineCore the snapshot for step N+1 is
-        # taken BEFORE step N's token is committed, so `state.outputs` is short
-        # and reading `outputs[position - 1]` raised IndexError. The runner
-        # already produced those tokens; it just never kept them.
-        #
-        # This is the HOST-SIDE half of m2 §2.2. That section specifies patching
-        # the placeholder slot device-to-device from the sampled tensor, with no
-        # host sync in the hot path; this keeps Python ints and rebuilds the
-        # input tensor each step. It makes overlap CORRECT on a real runner —
-        # which it was not — but the zero-host-sync property is still open.
-        self._future_tokens: dict[str, dict[int, int]] = {}
 
     def release(self, request_id: str) -> None:
         """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
