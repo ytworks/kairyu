@@ -523,6 +523,20 @@ class TestFlashInferTensorDecode:
         assert wrapper.indices_buffer[:3].tolist() == [5, 2, 0]
         assert wrapper.last_page_len_buffer.tolist() == [4, 4]
 
+    def test_flashinfer_satisfies_the_graph_capture_contract(self, fake_flashinfer):
+        """The declaration the runner's fail-fast gate reads (#138 review [P1]).
+
+        Splitting the host plan out of the captured region is exactly what
+        earns this: before it, ``attend_decode`` existed but planned inline, so
+        a runner that only checked the METHOD would have built a graph path
+        whose first capture died on a D2H copy.
+        """
+        from kairyu.engine.core.attention import graph_capture_gap
+
+        backend = self._backend()
+        assert backend.supports_graph_capture is True
+        assert graph_capture_gap(backend) is None
+
     def test_eager_replans_once_per_step_not_once_per_layer(self, fake_flashinfer):
         backend = self._backend()
         pool = _pool(layers=3)

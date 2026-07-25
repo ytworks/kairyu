@@ -47,6 +47,15 @@ def _is_capturing() -> bool:
 class FlashInferBackend:
     """One instance serves every layer: shared workspace + plan cache."""
 
+    #: ``GraphDecodeBackend`` (see ``kairyu.engine.core.attention``): declared
+    #: TRUE only because the host work lives in ``plan_decode`` — outside the
+    #: captured region — and ``attend_decode`` below is a bare ``run()`` over
+    #: the PERSISTENT paged buffers a ``use_cuda_graph=True`` wrapper owns.
+    #: This attribute is what ``PagedModelRunner`` gates on, so it is a promise
+    #: about ``attend_decode``, not about this class in general: ``plan()``
+    #: still cannot be captured and the eager list paths still sync to the host.
+    supports_graph_capture = True
+
     def __init__(self, device: str = "cuda") -> None:
         import flashinfer  # deferred: not installable on macOS; [gpu] extra
 

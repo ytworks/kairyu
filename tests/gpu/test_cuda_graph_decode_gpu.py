@@ -44,8 +44,10 @@ def _generate(model_dir: str, graph_backend, max_new: int = 6):
     from kairyu.engine.core.scheduler import EngineRequest, Scheduler
     from kairyu.models.loader import load_model
 
-    # torch backend: flashinfer's attend_* still take Python lists, so the
-    # capturable tensor path is only defined for this one
+    # the torch backend, pinned deliberately: FlashInfer is capture-capable too
+    # now (it declares supports_graph_capture and plans in the step hook), and
+    # its own gates live in test_flashinfer_tensor_decode.py. This file is the
+    # graph seam itself, so it uses the reference kernel.
     model, config, _ = load_model(
         model_dir, dtype=torch.bfloat16, attention_backend=TorchAttentionBackend()
     )
