@@ -213,6 +213,21 @@ async def test_progress_does_not_change_results(tmp_path, http_factory):
     assert quiet == loud
 
 
+async def test_pair_play_by_play_is_not_duplicated_on_stdout(tmp_path, http_factory, capsys):
+    """Live output belongs to the reporter; stdout keeps the artifacts."""
+    config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",))
+    runner = SuiteRunner(
+        config,
+        http_factory=http_factory,
+        probe_docker=lambda: (False, "t"),
+        progress=LineProgress(io.StringIO(), interval_s=0.0),
+    )
+    await runner.run()
+    out = capsys.readouterr().out
+    assert "[run] gpqa-diamond" not in out
+    assert "# Fugu benchmark scoreboard" in out  # the artifact still prints
+
+
 async def test_cached_pairs_are_reported_as_cached(tmp_path, http_factory):
     config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",))
     for _ in range(2):

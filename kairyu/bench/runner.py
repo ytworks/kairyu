@@ -5,6 +5,10 @@ saturates a shared gateway; sequential pairs keep per-cell numbers
 uncontended and comparable). Resume: same --run-id reuses every stored pair
 whose run fingerprint matches and status is not "failed". Exit code 1 only
 when a pair hard-failed.
+
+Live per-pair output belongs to the progress reporter (stderr); stdout carries
+the artifacts — download notes and the final scoreboard — so a run can be piped
+without the play-by-play interleaving into it.
 """
 
 from __future__ import annotations
@@ -238,14 +242,12 @@ class SuiteRunner:
                         expected_fingerprint=fingerprint,
                     )
                     if existing is not None and existing.status != "failed":
-                        print(f"[cached] {adapter.info.name} × {label}: {existing.status}")
                         self._progress.pair_start(adapter.info.name, label)
                         self._progress.pair_done(
                             existing.status, existing.score, cached=True
                         )
                         pairs.append(existing)
                         continue
-                print(f"[run] {adapter.info.name} × {label} ...")
                 self._progress.pair_start(
                     adapter.info.name,
                     label,
@@ -274,8 +276,6 @@ class SuiteRunner:
                         )
                 result = result.model_copy(update={"run_fingerprint": fingerprint})
                 store.save_pair(result)
-                score = f"{result.score * 100:.1f}" if result.score is not None else "n/a"
-                print(f"       -> {result.status} (score={score})")
                 self._progress.pair_done(result.status, result.score)
                 pairs.append(result)
 

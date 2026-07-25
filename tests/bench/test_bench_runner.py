@@ -108,18 +108,19 @@ async def test_pair_results_carry_item_evidence(tmp_path, http_factory):
 
 
 async def test_resume_skips_stored_pairs(tmp_path, http_factory, capsys):
+    """Reuse is announced by the progress reporter (stderr), not on stdout."""
     config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",))
     await _runner(config, http_factory).run()
     capsys.readouterr()
 
     await _runner(config, http_factory).run()
-    out = capsys.readouterr().out
-    assert "[cached] gpqa-diamond × m" in out
+    err = capsys.readouterr().err
+    assert "gpqa-diamond × m: cached" in err
 
     rerun_config = config.model_copy(update={"rerun": True})
     await _runner(rerun_config, http_factory).run()
-    out = capsys.readouterr().out
-    assert "[cached]" not in out
+    err = capsys.readouterr().err
+    assert "cached" not in err
 
 
 async def test_adapter_crash_becomes_failed_pair_and_exit_1(
@@ -515,7 +516,7 @@ async def test_resolved_api_key_value_does_not_change_run_fingerprint(
     monkeypatch.setenv("RUNNER_TEST_API_KEY", "second-secret")
     assert await _runner(config, http_factory).run() == 0
 
-    assert "[cached] gpqa-diamond × m" in capsys.readouterr().out
+    assert "gpqa-diamond × m: cached" in capsys.readouterr().err
     assert (store.run_dir / "run.json").read_bytes() == run_before
     assert b"first-secret" not in run_before
     assert b"second-secret" not in run_before

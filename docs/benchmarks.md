@@ -124,6 +124,10 @@ so the runner reports what it is doing:
   either way. Agentic slots have no item count until their harness returns, so
   they are labelled `agentic harness` and show an indeterminate bar.
 
+The play-by-play goes to **stderr** and the artifacts (download notes, the
+scoreboard, the accuracy report) to **stdout**, so
+`kairyu bench run … > scoreboard.txt` keeps the two apart.
+
 ## Degradation model (why one command always completes)
 
 Every unmet precondition becomes data, never a crash. Per (benchmark, target)
