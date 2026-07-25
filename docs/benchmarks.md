@@ -118,13 +118,19 @@ Two consequences:
   steps of those problems call the helpers they define. kairyu does the same: those
   three are excluded from scoring and their pinned-by-hash implementation is
   carried into the context. 288 is also the denominator Fugu reports, and
-  acquisition fails closed unless it lands on 291 sub-steps / 288 scoreable.
+  acquisition fails closed unless it lands on 291 sub-steps / 288 scoreable — and
+  also if any of those three implementations cannot be fetched at its pinned hash,
+  because scoring their dependents without them would charge the model for a
+  missing harness file.
 - Nearly all of those compare against golden data (`target`) from `test_data.h5`,
   which the HF export does not contain. It is fetched from the upstream repo first
   and otherwise from a public mirror (`Srimadh/Scicode-test-data-h5`), and is
   accepted only when its size and **SHA-256 content hash** match the pin: magic
   bytes alone prove the file format, so a different-but-valid HDF5 would otherwise
-  be trusted as every expected value in the benchmark. The pin says *which* bytes
+  be trusted as every expected value in the benchmark. The check runs again when a
+  cached asset is reused (once per pair, since the file is ~1 GB), so a replaced or
+  truncated file cannot become the expected-answer source under a manifest that
+  still advertises the pin. The pin says *which* bytes
   were scored against — it has **not** been cross-checked against the official
   Google Drive artifact, and the methodology says so. Sub-steps left without the
   file are `unjudged`, never guessed.

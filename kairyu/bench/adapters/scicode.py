@@ -320,14 +320,16 @@ class SciCodeAdapter(GenerativeAdapter):
                 f"expected {_GOLDEN_SUBSTEPS} (the official evaluator skips "
                 f"{sorted(_EXCLUDED_STEPS)})"
             )
-        missing = [
-            key for key in _PROVIDED_STEPS if key not in provided
-        ]
+        missing = [key for key in _PROVIDED_STEPS if key not in provided]
         if missing:
-            print(
-                "[scicode] could not fetch the provided implementation for "
-                f"{missing}; later steps of those problems will be missing that "
-                "helper and are recorded unjudged"
+            # Without these, later steps of problems 13/62/76 call helpers nothing
+            # defines and would score zero -- polluting the 288-step denominator
+            # with failures that are the harness's fault, not the model's.
+            raise DatasetUnavailable(
+                "SciCode's official provided implementations are unavailable for "
+                f"{[f'problem {p} step {i + 1}' for p, i in sorted(missing)]} "
+                "(fetch failed, or the content hash did not match); later steps of "
+                "those problems depend on them, so scoring would be wrong"
             )
         return normalized
 
@@ -416,6 +418,8 @@ class SciCodeAdapter(GenerativeAdapter):
                 annotations=self.info.annotations,
             )
 
+        # one validation of the ~1 GB golden asset per pair, not per sub-step
+        self._h5_cache = None
         groups = select_problem_groups(
             group_by_problem(self.load_items(ctx)), ctx.limit, ctx.seed
         )
@@ -494,8 +498,21 @@ class SciCodeAdapter(GenerativeAdapter):
         return any("target" in test for test in tests)
 
     def _h5_bytes(self, ctx: RunContext) -> bytes | None:
+        """Cached golden data, revalidated against the pin before it is trusted.
+
+        Checking only at download time would let a replaced or truncated asset
+        become the expected-answer source under a manifest that still advertises
+        the pinned hash. Cached per pair, not per item: the file is ~1 GB.
+        """
+        cached = getattr(self, "_h5_cache", None)
+        if cached is not None:
+            return cached or None
         path = ctx.cache.assets_dir(self.info.name) / _H5_NAME
-        return path.read_bytes() if path.exists() else None
+        data = b""
+        if path.exists() and golden_data_is_authentic(path):
+            data = path.read_bytes()
+        self._h5_cache = data
+        return data or None
 
     async def score(
         self, item: BenchItem, response_text: str, ctx: RunContext
@@ -520,7 +537,10 @@ class SciCodeAdapter(GenerativeAdapter):
                 return ItemResult(
                     item_id=item.id,
                     status="unjudged",
-                    error="official golden data (test_data.h5) not available",
+                    error=(
+                        "official golden data (test_data.h5) not available or does "
+                        "not match its pinned hash"
+                    ),
                     response_excerpt=excerpt(response_text),
                 )
             files[_H5_NAME] = h5
