@@ -64,10 +64,38 @@ stop_progress_monitor() {
 
 curl --fail --silent --show-error http://127.0.0.1:8001/readyz >/dev/null
 
-gpu_count="$(
+# `sh -ec "... | wc -l"` returns wc's status, so a failed nvidia-smi inside the
+# container would be reported as a GPU/TP count of 0 in the benchmark header —
+# a wrong number recorded next to real measurements
+if ! gpu_list="$(
   docker compose exec -T kairyu sh -ec \
-    "nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d '[:space:]'"
-)"
+    "nvidia-smi --query-gpu=index --format=csv,noheader" 2>/dev/null
+)"; then
+  echo "nvidia-smi failed inside the kairyu container:" >&2
+  docker compose exec -T kairyu sh -ec \
+    "nvidia-smi --query-gpu=index --format=csv,noheader" >&2 2>&1 || true
+  exit 1
+fi
+# a wrong GPU/TP count would be recorded in the header next to real measurements
+unexpected="$(printf '%s\n' "$gpu_list" | awk 'NF && !/^[0-9]+$/ { n++ } END { print n + 0 }')"
+if [ "$unexpected" -ne 0 ]; then
+  echo "nvidia-smi returned $unexpected line(s) that are not GPU indices:" >&2
+  printf '%s\n' "$gpu_list" >&2
+  exit 1
+fi
+gpu_count="$(printf '%s\n' "$gpu_list" | awk 'NF && /^[0-9]+$/ { n++ } END { print n + 0 }')"
+# run.sh and the compose startup both gate on this; without it here an empty GPU
+# list parses cleanly to 0 and is then printed in the benchmark header AND passed
+# as `--tensor-parallel 0` — the wrong-number-next-to-real-measurements case this
+# whole change exists to prevent
+case "$gpu_count" in
+  2|4|8) ;;
+  *)
+    echo "Qwen3-32B requires 2, 4, or 8 visible NVIDIA GPUs; found $gpu_count" >&2
+    printf '%s\n' "$gpu_list" >&2
+    exit 1
+    ;;
+esac
 image_id="$(docker compose images -q kairyu)"
 if [ -z "$image_id" ]; then
   echo "Kairyu image not found; start the service first" >&2

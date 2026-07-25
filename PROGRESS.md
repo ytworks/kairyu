@@ -160,6 +160,88 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   `kairyu/engine/core/{model_runner,step_executor,radix_kv}.py`,
   `tests/unit/test_graph_decode_wiring.py`, `tests/gpu/test_cuda_graph_decode_gpu.py`.
 
+### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
+- What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
+  `position - 1` before that token is committed. `OverlapEngineCore` takes the snapshot
+  for step N+1 before step N commits, so `state.outputs` is one short — every real-model
+  overlap run raised `IndexError: tuple index out of range`. Committed outputs still win
+  over the in-flight value, so a speculative rollback is not shadowed, and only the newest
+  position is retained (a decode reads exactly one).
+- Why: `overlap.py` already specified this — "decode chunks carry an explicit position so
+  the runner never needs previously-committed token values from the host (on GPU, the
+  last-token slot is patched device-side)" — and nothing implemented it. The toy runner
+  honours the contract by ignoring outputs entirely, which is why no CPU test could see
+  the gap. It blocked the overlap-ON half of G2 A1 and runbook §1 Gate 1, both of which
+  require overlap ON and OFF.
+  Scope: this is the HOST-SIDE half of m2 §2.2. That section specifies patching the
+  placeholder slot device-to-device from the sampled tensor with no host sync in the hot
+  path; this keeps Python ints and rebuilds the input tensor each step. Correctness is
+  restored — overlap ON now runs and matches OFF — but the device-side technique and the
+  zero-host-sync invariant remain OPEN, along with the perf gate that would show them.
+- Refs: m2 §2.2 (partially), G2 A1, `kairyu/engine/core/model_runner.py`,
+  `tests/unit/test_overlap_future_token.py`, `tests/gpu/test_overlap_future_token_gpu.py`
+
+### 2026-07-25 — [amendment] m18 D3: CudaStreamProvider landed; KV serde can read a device pool
+- What: `CudaStreamProvider` implemented (the deploy-day half of the m18 D3 stream seam),
+  and `kv_serde._to_bytes` now copies to host before `.numpy()`.
+- Why: the seam had never run against a CUDA pool. `_to_bytes` called `.numpy()` on the
+  tensor directly, so `extract_page` on a device `PagedKVPool` raised `TypeError: can't
+  convert cuda:0 device type tensor to numpy` — the real handoff could not read GPU KV at
+  all, which a side stream does not help with. Scope is recorded honestly: the extraction
+  copy is now isolated on a side stream that waits on the caller's stream FOR THE DEVICE
+  THE PROVIDER WAS BUILT FOR (an argument-less `current_stream()` follows the thread's
+  current device instead). End-to-end overlap with the next forward is NOT delivered —
+  `StreamCopyKVHandoff` blocks the host before returning and `PDCoordinator` commits
+  before stepping decode — and neither is production wiring; both need a completion event
+  handed to the consumer rather than a host-wide wait.
+- Refs: m18 D3 (amended), `kairyu/engine/core/handoff_stream.py`,
+  `kairyu/engine/core/kv_serde.py`, `tests/gpu/test_handoff_stream_gpu.py`
+
+### 2026-07-25 — [amendment] m16 D1: reduce_scatter implemented; "same-call-site optimization" withdrawn
+- What: `TorchDistCommunicator.tensor_reduce_scatter` added — NCCL's real collective, and
+  all_reduce + a local slice under gloo, which has none. The D1 note calling NCCL's
+  reduce_scatter "a same-call-site optimization recorded for deploy day" is withdrawn as
+  incorrect, and the m16 §3 non-goal is narrowed to USING it at the `RowParallelLinear`
+  call site (which needs sequence parallelism), not to the primitive.
+- Why: measured, not assumed. On 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch
+  2.12.1+cu130 / NCCL 2.29.7 — per-trial worst-rank elapsed via CUDA events,
+  barrier-bounded, MAX-reduced across ranks, buffers outside the timed region, paths
+  interleaved, 120 samples each (6 rounds x 20 trials) — `all_reduce` medians 3.784 ms while
+  `reduce_scatter`+`all_gather` medians 3.944 ms. Swapping one for the other at the same
+  call site moves the same bytes and adds a launch, so it LOSES; all_reduce's p95 sits
+  below rs+ag's MINIMUM, so this is not straggler noise (the full supports do overlap — a
+  few all_reduce samples land above rs+ag's floor — so the claim is about the bulk). `reduce_scatter`
+  alone medians 1.988 ms (1.90x), but its output is a shard, so realising that win means
+  sequence parallelism — a design change m16 does not specify and one that should be
+  argued on activation memory as much as on comm time. The call site is deliberately
+  unchanged.
+- Refs: m16 D1 + §3 (amended), `kairyu/engine/core/dist_comm.py`,
+  `bench/reduce_scatter_bench.py`, `bench/results/reduce-scatter-2026-07-25.json`
+  (raw per-trial samples committed)
+
+### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
+- What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
+  `tensor_parallel_size > 1`, which happens BEFORE the `probe()` block that selects
+  `compute_device`/`compute_dtype` and calls `model.to(...)`. Every spawned rank therefore
+  kept the CPU/fp32 defaults of `DenseDecoder` and `PagedKVPool`, so the
+  `examples/qwen3-32b-multi-gpu` deployment ran Qwen3-32B on the host in fp32 over gloo —
+  8 GPUs at 0 MiB, ~153 GB of host RAM, and generation that never returned. Added
+  `TPPlacement`/`tp_placement()` in `engine/core/worker.py`: one CUDA device per rank
+  (`cuda:<rank>`), bf16, and the NCCL backend, threaded through `build_tp_runner` →
+  `build_tp_model` → `PagedKVPool`. `torch.cuda.set_device(rank)` now precedes
+  `init_process_group`; `TorchDistCommunicator` takes the rank's device so its own
+  `all_reduce`/`barrier` do not hand NCCL host tensors; the attention backend is selected
+  from the PLACEMENT rather than the raw probe (a CPU-placed rank on a GPU box was getting
+  the flashinfer kernel and fp32 tensors); and the rendezvous timeout is raised from the
+  CI-tuned 120 s, which a cold multi-GB shard read trips before anything is deadlocked.
+- Why: the GPU half of M5 assumed the placement the single-process path performs; nothing
+  performed it for the multi-process path, and no CPU test could observe the difference
+  because on a CPU box the defaults are correct. This was the first real-hardware use of
+  `kairyu serve --tp N`.
+- Refs: m5 D1/D3, m16 D1/D2, `docs/gpu-runbook.md` §6.1; `kairyu/engine/core/worker.py`,
+  `kairyu/models/parallel.py`, `kairyu/engine/core/dist_comm.py`,
+  `tests/dist/test_distributed.py` (CPU parity now pins `force_cpu=True`).
+
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
   are now passed to every fetch (they were recorded but unused, so the cache and run
@@ -756,6 +838,21 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: `Dockerfile.cuda`; supersedes the base image recorded in the
   2026-07-03 M19 deploy-packaging entry (m19 D1).
 
+### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
+- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
+  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
+  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
+  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
+  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
+  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
+- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
+  from the serve entrypoint — so real tensor-parallel models could not be
+  deployed. Now `kairyu serve --tp 2` runs end to end.
+- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
+  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
+  `kairyu/models/loader.py`, test
+  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
+
 ### 2026-07-04 — [design] Review remediation Phase 6: GPU-day seam changes (CPU design + C5 contract test)
 - What: Captured the five GPU-day seam changes from the full-repo review in
   `docs/design/gpu-day-seams.md` (C5 CUDA-graph static buffers, C4 batched
@@ -774,20 +871,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: review report; `docs/design/gpu-day-seams.md`,
   `kairyu/engine/core/step_executor.py` (`SnapshotGraphBackend`),
   `tests/unit/test_step_executor.py`.
-### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
-- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
-  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
-  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
-  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
-  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
-  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
-- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
-  from the serve entrypoint — so real tensor-parallel models could not be
-  deployed. Now `kairyu serve --tp 2` runs end to end.
-- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
-  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
-  `kairyu/models/loader.py`, test
-  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
 
 ### 2026-07-04 — [progress] Review remediation Phase 8: packaging + doc accuracy
 - What: Fixed the cross-cutting packaging/doc defects from the full-repo review.
@@ -812,6 +895,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   **Deferred follow-up:** `kairyu validate` cross-artifact command, typed
   `GenerationRequest.prompt` (token-ids/multimodal), `deploy/spec.py`
   ServerSection compose-not-inherit, and the `kairyu/bench/` package boundary.
+
 ### 2026-07-04 — [progress] Review remediation Phase 7: host-path performance (safe subset)
 - What: Fixed the provably-safe, output-preserving host-path hot spots from the
   full-repo review. **P5**: `prompt_chunks` re-hashed the whole prompt prefix per
@@ -834,6 +918,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   — file-handle lifecycle), P6 (eviction leaf heap), P7 (batched spec verify),
   and the MEDIUM-perf items (sampler penalty state, stop-string offset, queue
   coalescing, scheduler deque, KV-event hash chain, page-table cache).
+
 ### 2026-07-04 — [progress] Review remediation Phase 5: bench scoring correctness + security
 - What: Fixed the scoring-integrity and security defects in the Fugu bench suite.
   **B1**: the MCQ answer-extraction regex matched "answer" + the first letter of
@@ -859,6 +944,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   per-pair config hash), B4 + denominator policy (skipped/unjudged as 0 or n/a,
   show per-target n_scored), LCB per-line/tolerant scoring, sandbox NPROC/session
   hardening, self-judge (judge==target) scoreboard flag, judge prompt delimiters.
+
 ### 2026-07-04 — [progress] Review remediation Phase 4: model + quant parity
 - What: Fixed the parity-affecting model/quant defects from the full-repo review.
   **M3 (rope)**: unsupported `rope_scaling` kinds (linear/dynamic/longrope) now
@@ -887,6 +973,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   RATE only, not output correctness (verification is by the target), so no CPU
   test can validate a fix; plus the design items (linear_factory context,
   forward_fused wiring, HF-name-preserving TP/EP wrappers, draft-head quant).
+
 ### 2026-07-04 — [progress] Review remediation Phase 3: orchestration + fleet reliability
 - What: Fixed the L2 fleet/orchestration HIGH defects from the full-repo review.
   **O1**: request errors were all counted as replica failures — a new
@@ -913,6 +1000,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   tests under `tests/unit/`. Deferred follow-up: M1 (verifier non-target deps +
   _SafeDict masking), M3 (MoA path Budget/cost wiring), M8 (run_chat periodic
   keep-alive), and the KvEventIndex↔ReplicaPool integration (design item).
+
 ### 2026-07-04 — [progress] Review remediation Phase 2: API security + tenant isolation
 - What: Fixed the CRITICAL/HIGH L3-server defects from the full-repo review.
   **C3 (CRITICAL) batch/file tenant isolation**: File/Batch objects gained an

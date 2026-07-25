@@ -1,0 +1,27 @@
+{
+  "cuda": "13.2 (driver); PyTorch runtime 13.0",
+  "date": "2026-07-23",
+  "driver": "595.71.05",
+  "library_versions": {
+    "flashinfer": "0.6.14",
+    "nixl": "1.3.0",
+    "torch": "2.12.1+cu130",
+    "triton": "3.7.1"
+  },
+  "notes": "8x RTX PRO 6000 Blackwell Server Edition; PCIe-only topology (NODE within GPU pairs, SYS across pairs); MIG disabled on every GPU; VBIOS 98.02.67.00.0A. GPU 0 had an unrelated 40402 MiB process, so validation used GPUs 1-2. Bandwidth and numeric P2P measurements were not run.",
+  "profile": {
+    "arch": "cuda",
+    "device_count": 8,
+    "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "formats": [
+      "bf16",
+      "fp8",
+      "nvfp4"
+    ],
+    "interconnect": "pcie",
+    "measured_bandwidth_gbs": null,
+    "memory_gb": 101.975851008,
+    "p2p_matrix": null,
+    "sm": 120
+  }
+}
