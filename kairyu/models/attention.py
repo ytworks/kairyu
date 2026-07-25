@@ -84,6 +84,38 @@ class Attention(nn.Module):
         )
         return self.o_proj(context)
 
+    def forward_decode_tensors(
+        self,
+        hidden: torch.Tensor,  # [B, H]
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_pool,
+        layer: int,
+        page_tables: torch.Tensor,  # [B, P]
+        positions: torch.Tensor,  # [B]
+        seq_lens: torch.Tensor,  # [B]
+    ) -> torch.Tensor:
+        """Decode attention with no host values anywhere (m17 D1).
+
+        Same math as ``forward_decode_batch``; the difference is that the page
+        table, positions and lengths stay tensors, so a captured graph replays
+        against the buffers' CURRENT contents instead of the values that happened
+        to be there at capture time.
+        """
+        batch = hidden.shape[0]
+        query = self.q_proj(hidden).view(batch, self.num_heads, self.head_dim)
+        keys = self.k_proj(hidden).view(batch, self.num_kv_heads, self.head_dim)
+        values = self.v_proj(hidden).view(batch, self.num_kv_heads, self.head_dim)
+        if self.q_norm is not None:
+            query = self.q_norm(query)
+            keys = self.k_norm(keys)
+        query, keys = apply_rope(query, keys, cos, sin)
+        kv_pool.write_batched(layer, page_tables, positions, keys, values)
+        context = self.backend.attend_decode(
+            query, kv_pool, layer, page_tables, seq_lens
+        )
+        return self.o_proj(context)
+
     def forward_decode_batch(
         self,
         hidden: torch.Tensor,  # [B, H] — one new token per sequence

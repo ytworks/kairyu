@@ -60,5 +60,7 @@ def test_environment_gate_writes_schema_valid_record(tmp_path, monkeypatch):
     assert payload["profile"]["sm"] == 120
     assert payload["profile"]["p2p_matrix"] is None
     assert payload["library_versions"]["flashinfer"] == "flashinfer-python-version"
-    assert "Numeric bandwidth/P2P measurements are unmeasured" in payload["notes"]
+    # measurement is opt-in; a null must announce that it was skipped rather than
+    # sit next to real numbers reading as a measured zero
+    assert "skipped" in payload["notes"]
     assert "fake-vbios" in payload["notes"]

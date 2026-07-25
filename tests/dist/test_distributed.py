@@ -128,8 +128,10 @@ def test_dist_tp_launcher_serve_path_matches_single_process(llama_dir):
     prompt = torch.randint(0, 256, (11,)).tolist()
     reference = _single_process_greedy(llama_dir, prompt, max_new=12)
 
+    # force_cpu: the reference is a single-process fp32 HOST run, so on a GPU
+    # box the launcher must not follow the probe onto bf16 devices
     launcher = DistTPLauncher(
-        llama_dir, tp=2, num_pages=64, page_size=4, vocab=TP_VOCAB
+        llama_dir, tp=2, num_pages=64, page_size=4, vocab=TP_VOCAB, force_cpu=True
     )
     try:
         scheduler = Scheduler(
@@ -159,3 +161,185 @@ def test_pp2_greedy_matches_single_process(spawn2, llama_dir):
     results = spawn2(dist_targets.pp_greedy_parity, llama_dir, prompt, 10)
     assert results[0]["outputs"] == reference
     assert results[1]["outputs"] == reference
+
+
+def test_serving_collectives_do_not_inherit_the_startup_timeout(tmp_path):
+    """Review [P1] on #124: `init_process_group(timeout=)` bounds EVERY operation
+    on that group, so the cold-load allowance must not become the operational one.
+
+    Single process on purpose — this is a property of how the groups are built,
+    and a spawn adds teardown-ordering noise without testing anything more."""
+    import torch.distributed as dist
+
+    from kairyu.engine.core import worker as worker_module
+
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{tmp_path / 'rdv-timeout'}",
+        rank=0,
+        world_size=1,
+        timeout=__import__("datetime").timedelta(
+            seconds=worker_module._STARTUP_TIMEOUT_S
+        ),
+    )
+    try:
+        group = worker_module.serving_group("gloo")
+        host = torch.device("cpu")
+        serving = group._get_backend(host).options._timeout.total_seconds()
+        startup = (
+            dist.distributed_c10d._get_default_group()
+            ._get_backend(host)
+            .options._timeout.total_seconds()
+        )
+        assert startup == worker_module._STARTUP_TIMEOUT_S == 1800.0
+        assert serving == worker_module._SERVE_OP_TIMEOUT_S == 120.0
+        assert serving < startup, "the step loop inherited the startup allowance"
+    finally:
+        dist.destroy_process_group()
+
+
+
+class _AlwaysWrongDraft:
+    """Proposes a token the model will never pick, so every draft is REJECTED.
+
+    The n-gram source proposes nothing on a random-token fixture (verified: 0
+    proposals), so a parity test using it never enters the rollback path — which
+    is exactly where the delta protocol was broken.
+    """
+
+    def __init__(self, token: int = 200) -> None:
+        self.token = token
+
+    def propose(self, context, max_draft: int) -> list[int]:
+        return [self.token] * min(1, max_draft)
+
+
+class _EchoDraft:
+    """Proposes what the reference actually produced, so drafts are ACCEPTED."""
+
+    def __init__(self, reference: list[int]) -> None:
+        self._reference = list(reference)
+
+    def propose(self, context, max_draft: int) -> list[int]:
+        # context is prompt + committed outputs; the next reference token is the
+        # one at the current output length
+        produced = len(context) - self._prompt_len
+        remaining = self._reference[produced : produced + max_draft]
+        return list(remaining)
+
+    def bind_prompt(self, prompt_len: int) -> "_EchoDraft":
+        self._prompt_len = prompt_len
+        return self
+
+
+def _tp_speculative_outputs(llama_dir, prompt, max_new, draft_source):
+    from kairyu.engine.core.engine_core import EngineCore
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+    from kairyu.engine.core.spec_runner import SpeculativeRunner
+    from kairyu.engine.core.worker import DistTPLauncher
+
+    launcher = DistTPLauncher(
+        llama_dir, tp=2, num_pages=64, page_size=4, vocab=TP_VOCAB, force_cpu=True
+    )
+    try:
+        scheduler = Scheduler(
+            RadixKVCache(num_pages=64, page_size=4),
+            max_num_batched_tokens=6,
+            page_size=4,
+            speculative_tokens=4,
+        )
+        runner = SpeculativeRunner(launcher.runner, draft_source=draft_source)
+        engine = EngineCore(scheduler, runner)
+        engine.add_request(
+            EngineRequest(
+                "a", tuple(prompt), max_new_tokens=max_new, sampling=EngineSampling()
+            )
+        )
+        outputs = list(engine.run_to_completion()["a"])
+    finally:
+        launcher.shutdown()
+    return outputs, runner
+
+
+def test_tp_speculative_rejected_draft_does_not_corrupt_rank_state(llama_dir):
+    """The rollback path: a rejected draft replaces already-broadcast tokens with
+    DIFFERENT ones at the SAME length. StateSync only re-sent a full snapshot when
+    the output list got SHORTER, so the delta came out empty and every worker kept
+    the rejected token."""
+    torch.manual_seed(83)
+    prompt = torch.randint(0, 256, (11,)).tolist()
+    reference = _single_process_greedy(llama_dir, prompt, max_new=12)
+
+    outputs, runner = _tp_speculative_outputs(
+        llama_dir, prompt, 12, _AlwaysWrongDraft()
+    )
+    assert runner.draft_proposed > 0, "the draft path was never entered"
+    assert runner.draft_accepted == 0, "the fixture must force rejections"
+    assert outputs == reference
+
+
+def test_tp_speculative_accepted_draft_matches_greedy(llama_dir):
+    torch.manual_seed(83)
+    prompt = torch.randint(0, 256, (11,)).tolist()
+    reference = _single_process_greedy(llama_dir, prompt, max_new=12)
+
+    outputs, runner = _tp_speculative_outputs(
+        llama_dir, prompt, 12, _EchoDraft(reference).bind_prompt(len(prompt))
+    )
+    assert runner.draft_proposed > 0, "the draft path was never entered"
+    assert runner.draft_accepted > 0, "the fixture must produce acceptances"
+    assert outputs == reference
+
+
+class _TinyTokenizer:
+    """256 ids, matching the fixture's vocab_size (the toy tokenizer's 50k would
+    trip the vocab-agreement guard before the wiring is reached)."""
+
+    eos_token_id = None
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return tuple(ord(ch) % 256 for ch in text)
+
+    def decode(self, token_ids) -> str:
+        return "".join(chr(int(t) % 128) for t in token_ids)
+
+    def vocab(self) -> list[str]:
+        return [f"t{i}" for i in range(256)]
+
+
+def test_build_engine_loop_accepts_speculative_with_real_model_tp(llama_dir, monkeypatch):
+    from kairyu.engine.core.spec_runner import SpeculativeRunner
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    # rank 0 AND the spawned workers must agree on the backend; the env var is
+    # the only seam both see, so this runs on a GPU box without a second device
+    monkeypatch.setenv("KAIRYU_TP_FORCE_CPU", "1")
+
+    loop, _cache, scheduler = build_engine_loop(
+        model_path=llama_dir,
+        tensor_parallel_size=2,
+        num_pages=64,
+        page_size=4,
+        max_num_batched_tokens=6,
+        tokenizer=_TinyTokenizer(),
+        speculative="ngram",
+        speculative_tokens=4,
+    )
+    try:
+        assert isinstance(loop._runner, SpeculativeRunner)
+        # the scheduler must reserve for the draft, or every speculative chunk
+        # is silently downgraded to a single token
+        assert scheduler._spec_k == 4
+    finally:
+        loop.tp_launcher.shutdown()
+
+
+def test_in_process_tp_still_rejects_speculative():
+    # the toy path shares ONE runner across ranks: drafting there would score
+    # against itself, so the guard stays for that case
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    with pytest.raises(ValueError, match="requires a real model"):
+        build_engine_loop(tensor_parallel_size=2, speculative="ngram")

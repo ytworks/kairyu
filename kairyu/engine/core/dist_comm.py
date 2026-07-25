@@ -33,12 +33,29 @@ def init_distributed(
 
 
 class TorchDistCommunicator:
-    """One per process; ``backend='nccl'`` + device is the deploy-day change."""
+    """One per process; ``device`` is the rank's compute device under NCCL.
 
-    def __init__(self, group: dist.ProcessGroup | None = None) -> None:
+    NCCL rejects host tensors, so the collectives this class builds itself (the
+    float tuple all_reduce, the barrier) must be staged on that device. It
+    stays ``None`` for gloo, where host tensors are the only correct choice.
+    """
+
+    def __init__(
+        self,
+        group: dist.ProcessGroup | None = None,
+        device: str | torch.device | None = None,
+    ) -> None:
         if not dist.is_initialized():
             raise RuntimeError("call init_distributed() before TorchDistCommunicator")
         self._group = group
+        self._device = (
+            torch.device(device) if device is not None and str(device) != "cpu" else None
+        )
+
+    @property
+    def group(self) -> dist.ProcessGroup | None:
+        """The group these collectives run on; None means the default group."""
+        return self._group
 
     @property
     def rank(self) -> int:
@@ -56,7 +73,7 @@ class TorchDistCommunicator:
         return box[0]
 
     def all_reduce(self, values: tuple[float, ...]) -> tuple[float, ...]:
-        tensor = torch.tensor(values, dtype=torch.float64)
+        tensor = torch.tensor(values, dtype=torch.float64, device=self._device)
         dist.all_reduce(tensor, group=self._group)
         return tuple(tensor.tolist())
 
@@ -66,6 +83,11 @@ class TorchDistCommunicator:
         return tuple(box)
 
     def barrier(self) -> None:
+        if self._device is not None and self._device.type == "cuda":
+            # without device_ids NCCL picks a device by guesswork and can pair
+            # two ranks onto one GPU
+            dist.barrier(group=self._group, device_ids=[self._device.index])
+            return
         dist.barrier(group=self._group)
 
     def send(self, dst: int, payload: object) -> None:
