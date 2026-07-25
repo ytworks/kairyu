@@ -37,13 +37,66 @@ from kairyu.bench.types import (
 _NEEDLES = 8
 _MAX_CONTEXT_TOKENS = 131_072  # "up to 128K context"
 
+# The dataset card defines its bins by the tokens used by **prompt + answer**
+# under `o200k_base`, with 100 samples per (needle count, bin):
+#   [4096, 8192] (8192, 16384] (16384, 32768] (32768, 65536] (65536, 131072]
+#   (131072, 262144] (262144, 524288] (524288, 1048576]
+# Five of those bins sit at or below 128K, so Fugu's 8-needle slice is exactly
+# 500 rows. A chars/4 approximation over the prompt alone cannot land on those
+# boundaries, so it cannot select the same population.
+_BIN_UPPER_BOUNDS = (8192, 16384, 32768, 65536, 131_072, 262_144, 524_288, 1_048_576)
+_SAMPLES_PER_BIN = 100
+_ENCODING = "o200k_base"
+
+
+def _encoder():
+    """The official `o200k_base` encoder, or a typed failure.
+
+    Approximating here would silently score a different population than the one
+    the published bins define, so a missing tokenizer is a skipped cell.
+    """
+    try:
+        import tiktoken
+    except ImportError as error:  # pragma: no cover - exercised via monkeypatch
+        raise DatasetUnavailable(
+            "MRCRv2 selects the official token bins, which needs tiktoken: "
+            "pip install 'kairyu[bench]'"
+        ) from error
+    return tiktoken.get_encoding(_ENCODING)
+
+
+def selected_bins() -> tuple[int, ...]:
+    """Official bins at or below Fugu's 128K ceiling."""
+    return tuple(bound for bound in _BIN_UPPER_BOUNDS if bound <= _MAX_CONTEXT_TOKENS)
+
+
+def expected_rows() -> int:
+    """100 samples per selected bin, per the dataset card."""
+    return _SAMPLES_PER_BIN * len(selected_bins())
+
+
+def token_bin(total_tokens: int) -> int | None:
+    """Upper bound of the official bin holding `total_tokens`, else None."""
+    if total_tokens < 4096:
+        return None
+    for bound in _BIN_UPPER_BOUNDS:
+        if total_tokens <= bound:
+            return bound
+    return None
+
+
+def count_tokens(encoder, messages: list[dict], answer: str = "") -> int:
+    """Exact `o200k_base` tokens, matching the card's `n_tokens` helper."""
+    total = sum(len(encoder.encode(str(message.get("content", "")))) for message in messages)
+    return total + (len(encoder.encode(answer)) if answer else 0)
+
 
 def prompt_tokens(messages: list[dict], n_chars: object = None) -> int:
-    """Estimated prompt tokens for an MRCR row.
+    """Approximate prompt tokens, for the target's context gate only.
 
-    The dataset's own `n_chars` is preferred when present (it counts the whole
-    conversation upstream); otherwise the shared chars/4 heuristic is summed
-    over the messages. Both are estimates and recorded as such.
+    Selection uses exact counts (see `count_tokens`); this heuristic only decides
+    whether an item fits a *target's* declared window, where the dataset's own
+    `n_chars` is the better signal when present.
     """
     if isinstance(n_chars, int | float) and n_chars > 0:
         return int(n_chars) // 4 + 1
@@ -65,10 +118,10 @@ class MrcrAdapter(GenerativeAdapter):
         metric="sequence-match ratio",
         hf_dataset="openai/mrcr",
         annotations=(
-            f"{_NEEDLES}-needle items at up to "
-            f"{_MAX_CONTEXT_TOKENS // 1024}K estimated prompt tokens (Fugu's "
-            "reported slice); the published split also contains 2/4-needle and "
-            "longer-context items, which are excluded",
+            f"{_NEEDLES}-needle items in the official o200k_base bins at or below "
+            f"{_MAX_CONTEXT_TOKENS // 1024}K prompt+answer tokens (Fugu's reported "
+            "slice); the published split also contains 2/4-needle and "
+            "longer-context bins, which are excluded",
         ),
     )
 
@@ -76,38 +129,50 @@ class MrcrAdapter(GenerativeAdapter):
         from kairyu.bench.hub import load_hf_rows
 
         rows = load_hf_rows(self.info.hf_dataset, split="train")
+        encoder = _encoder()
         normalized: list[dict] = []
-        wrong_needles = too_long = 0
+        wrong_needles = out_of_range = 0
+        per_bin: dict[int, int] = {}
         for index, row in enumerate(rows):
             if row.get("n_needles") != _NEEDLES:
                 wrong_needles += 1
                 continue
             messages = json.loads(row["prompt"])
-            est = prompt_tokens(messages, row.get("n_chars"))
-            if est > _MAX_CONTEXT_TOKENS:
-                too_long += 1
+            answer = row["answer"]
+            # the card bins on prompt + answer, so selection must too
+            total = count_tokens(encoder, messages, answer)
+            bin_bound = token_bin(total)
+            if bin_bound is None or bin_bound > _MAX_CONTEXT_TOKENS:
+                out_of_range += 1
                 continue
+            per_bin[bin_bound] = per_bin.get(bin_bound, 0) + 1
             normalized.append(
                 {
                     "id": f"mrcr-{index:05d}",
                     "messages": messages,
-                    "answer": row["answer"],
+                    "answer": answer,
                     "prepend": row["random_string_to_prepend"],
                     "n_needles": row.get("n_needles"),
-                    "est_prompt_tokens": est,
+                    "token_bin": bin_bound,
+                    "total_tokens": total,
+                    "prompt_tokens": count_tokens(encoder, messages),
+                    "est_prompt_tokens": prompt_tokens(messages, row.get("n_chars")),
                 }
             )
-        if not normalized:
+        expected = expected_rows()
+        if len(normalized) != expected:
             raise DatasetUnavailable(
-                f"{self.info.hf_dataset} has no {_NEEDLES}-needle item within "
-                f"{_MAX_CONTEXT_TOKENS} estimated prompt tokens "
-                f"({len(rows)} rows seen)"
+                f"{self.info.hf_dataset}@{self.info.hf_revision} yielded "
+                f"{len(normalized)} {_NEEDLES}-needle rows at or below "
+                f"{_MAX_CONTEXT_TOKENS} prompt+answer tokens, expected {expected} "
+                f"({_SAMPLES_PER_BIN} per official bin); per-bin counts {per_bin}"
             )
         # The excluded counts are the denominator story; never silent.
         print(
             f"[mrcr-v2] kept {len(normalized)}/{len(rows)} rows "
-            f"({wrong_needles} not {_NEEDLES}-needle, {too_long} over "
-            f"{_MAX_CONTEXT_TOKENS} estimated prompt tokens)"
+            f"({wrong_needles} not {_NEEDLES}-needle, {out_of_range} outside the "
+            f"bins at or below {_MAX_CONTEXT_TOKENS} prompt+answer tokens); "
+            f"per-bin counts {dict(sorted(per_bin.items()))}"
         )
         return normalized
 
@@ -143,10 +208,13 @@ class MrcrAdapter(GenerativeAdapter):
         base = super().methodology(ctx)
         base["needles"] = _NEEDLES
         base["max_context_tokens"] = _MAX_CONTEXT_TOKENS
+        base["tokenizer"] = _ENCODING
+        base["selected_bins"] = list(selected_bins())
+        base["expected_rows"] = expected_rows()
         base["selection"] = (
-            f"only n_needles == {_NEEDLES} rows whose estimated prompt tokens "
-            f"(dataset n_chars/4 when present, else chars/4 over messages) are "
-            f"<= {_MAX_CONTEXT_TOKENS}"
+            f"only n_needles == {_NEEDLES} rows whose exact {_ENCODING} "
+            "prompt+answer token count falls in an official bin at or below "
+            f"{_MAX_CONTEXT_TOKENS} ({_SAMPLES_PER_BIN} samples per bin)"
         )
         base["truncation_policy"] = (
             "items whose ~chars/4 estimated prompt tokens exceed the target's "
