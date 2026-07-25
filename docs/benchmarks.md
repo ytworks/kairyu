@@ -44,6 +44,8 @@ run.json                                      # fingerprint + identity + config 
 <benchmark>--<sha16>/<target>--<sha16>.json   # one PairResult per scoreboard cell
 scoreboard.json                               # machine-readable table
 scoreboard.md                                 # Fugu-layout table (also printed to stdout)
+comparison.json                               # measured vs published, machine-readable
+comparison.md                                 # accuracy report vs the Fugu release table
 ```
 
 Benchmark and target components retain a readable sanitized prefix and append
@@ -231,6 +233,51 @@ so the runner reports what it is doing:
 The play-by-play goes to **stderr** and the artifacts (download notes, the
 scoreboard, the accuracy report) to **stdout**, so
 `kairyu bench run … > scoreboard.txt` keeps the two apart.
+
+## Accuracy report vs the published Fugu scores
+
+Every run also writes `comparison.md` / `comparison.json` (and prints the
+report), placing each measured cell next to the values published on
+[sakana.ai/fugu-release](https://sakana.ai/fugu-release/) — Fugu, Fugu Ultra,
+Opus 4.8, Gemini 3.1 Pro, GPT 5.5, plus the Fable 5 / Mythos Preview columns
+that appear only in the per-benchmark figure — with `Δ` = measured − published
+**Fugu**. `kairyu bench report <run_id>` rebuilds it (`--no-comparison` to skip).
+
+The published values are **committed constants** in `kairyu/bench/reference.py`,
+transcribed from the release page's two figures on 2026-07-25. The page renders
+its table as a **PNG**, so there is nothing to scrape; the module records the
+source URLs, both asset paths, and the retrieval date, and refreshing means
+re-reading those images.
+
+What the report refuses to do:
+
+- **Invent a number.** A skipped cell is `—`, never 0.
+- **Hide a denominator.** Every score carries its item count, `partial` carries
+  `*`, `failed` carries `!` (**even without a score**, so a failed cell never
+  reads as merely absent), and the reason is reprinted.
+- **Print a delta for anything that is not a full-suite measurement of the same
+  thing.** Comparability is carried per cell, so all of these render `n/c`:
+  a substituted dataset (Long Context Reasoning → LongBench v2), a *run-time*
+  substitution (the τ2 harness standing in for τ³), a partial or failed cell, and
+  a **subset or fixture run** — `--limit`/`--smoke` cells are legitimately
+  `completed`, so without this a 20-item run would print an unmarked delta
+  against a full-suite published score.
+- **Bury the caveat.** When a reason applies to every cell, both `scoreboard.md`
+  and `comparison.md` open with a banner saying so, because a shell warning does
+  not survive into the file an operator opens hours later.
+- **Let a resumed pair keep someone else's comparability.** Run-level reasons
+  belong to the run doing the reporting, so a reused pair is re-stamped (and
+  re-saved) with them. A pair written before these fields existed validates as
+  `comparable=True` by model default under an unchanged fingerprint, and would
+  otherwise resume into a subset run with a numeric delta and no banner.
+- **Imply the baselines are comparable.** The page states that every non-Fugu
+  score is *provider-reported*; the report repeats that, so those columns read
+  as orientation rather than as measurements made under this harness.
+
+It also reprints the run's own methodology footnotes (substituted datasets,
+uncompiled checkers, self-judging, degraded cells) and the release's HLE
+**text-only** variant, which the figure reports separately from the headline
+table's full set.
 
 ## Degradation model (why one command always completes)
 

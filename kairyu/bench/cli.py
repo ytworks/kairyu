@@ -103,10 +103,16 @@ def add_bench_parser(subparsers) -> None:
     )
 
     report = commands.add_parser(
-        "report", help="Rebuild and print the scoreboard from stored pair results."
+        "report",
+        help="Rebuild the scoreboard and the accuracy report vs published Fugu scores.",
     )
     report.add_argument("run", help="Run id (under bench/results/fugu) or a run directory")
     report.add_argument("--results-dir", default="bench/results/fugu")
+    report.add_argument(
+        "--no-comparison",
+        action="store_true",
+        help="Print only the scoreboard, without the published-score comparison",
+    )
 
     commands.add_parser("list", help="List benchmarks, requirements, and cache status.")
 
@@ -157,6 +163,7 @@ def _handle_download(args) -> int:
 
 def _handle_report(args) -> int:
     from kairyu.bench.aggregate import build_scoreboard, render_markdown
+    from kairyu.bench.compare import build_comparison, render_comparison_markdown
     from kairyu.bench.store import ResultStore
     from kairyu.bench.types import BenchTarget, JudgeConfig, PairResult
 
@@ -221,8 +228,15 @@ def _handle_report(args) -> int:
         judge=judge,
     )
     markdown = render_markdown(scoreboard)
-    ResultStore(run_dir.parent, run_dir.name).save_scoreboard(scoreboard, markdown)
+    store = ResultStore(run_dir.parent, run_dir.name)
+    store.save_scoreboard(scoreboard, markdown)
     print(markdown)
+
+    if not getattr(args, "no_comparison", False):
+        comparison = build_comparison(scoreboard)
+        comparison_markdown = render_comparison_markdown(comparison)
+        store.save_comparison(comparison, comparison_markdown)
+        print(comparison_markdown)
     return 0
 
 
