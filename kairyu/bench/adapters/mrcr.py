@@ -128,7 +128,9 @@ class MrcrAdapter(GenerativeAdapter):
     def normalize(self, ctx: DownloadContext) -> list[dict]:
         from kairyu.bench.hub import load_hf_rows
 
-        rows = load_hf_rows(self.info.hf_dataset, split="train")
+        rows = load_hf_rows(
+            self.info.hf_dataset, split="train", revision=self.info.hf_revision
+        )
         encoder = _encoder()
         normalized: list[dict] = []
         wrong_needles = out_of_range = 0
