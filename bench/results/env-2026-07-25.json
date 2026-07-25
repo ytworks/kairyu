@@ -1,0 +1,110 @@
+{
+  "cuda": "13.0",
+  "date": "2026-07-25",
+  "driver": "595.84",
+  "library_versions": {
+    "flashinfer": "0.6.14",
+    "nixl": "1.3.0",
+    "sglang": "not installed",
+    "torch": "2.12.1",
+    "triton": "3.7.1",
+    "vllm": "not installed"
+  },
+  "notes": "Bandwidth and P2P are MEASURED (GB/s): p2p_matrix[i][j] is a device-to-device copy from i to j, the diagonal is a device-local copy counting read+write.\n\nGPU topology and inventory audit follows.\n\ntopology:\n\u001b[4mGPU0\tGPU1\tGPU2\tGPU3\tGPU4\tGPU5\tGPU6\tGPU7\tNIC0\tNIC1\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\u001b[0m\nGPU0\t X \tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t0-15,64-79\t0\t\tN/A\nGPU1\tNODE\t X \tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t0-15,64-79\t0\t\tN/A\nGPU2\tSYS\tSYS\t X \tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t16-31,80-95\t1\t\tN/A\nGPU3\tSYS\tSYS\tNODE\t X \tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t16-31,80-95\t1\t\tN/A\nGPU4\tSYS\tSYS\tSYS\tSYS\t X \tNODE\tSYS\tSYS\tNODE\tNODE\t32-47,96-111\t2\t\tN/A\nGPU5\tSYS\tSYS\tSYS\tSYS\tNODE\t X \tSYS\tSYS\tNODE\tNODE\t32-47,96-111\t2\t\tN/A\nGPU6\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t X \tNODE\tSYS\tSYS\t48-63,112-127\t3\t\tN/A\nGPU7\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t X \tSYS\tSYS\t48-63,112-127\t3\t\tN/A\nNIC0\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t X \tPIX\t\t\t\t\nNIC1\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tPIX\t X \t\t\t\t\n\nLegend:\n\n  X    = Self\n  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)\n  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node\n  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)\n  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)\n  PIX  = Connection traversing at most a single PCIe bridge\n  NV#  = Connection traversing a bonded set of # NVLinks\n\nNIC Legend:\n\n  NIC0: mlx5_0\n  NIC1: mlx5_1\n\ninventory:\n0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:16:00.0, 97887 MiB, Disabled, 98.02.67.00.0A\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:27:00.0, 97887 MiB, Disabled, 98.02.67.00.0A\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:49:00.0, 97887 MiB, Disabled, 98.02.67.00.0A\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:5A:00.0, 97887 MiB, Disabled, 98.02.67.00.0A\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:98:00.0, 97887 MiB, Disabled, 98.02.67.00.0A\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:B8:00.0, 97887 MiB, Disabled, 98.02.67.00.0A\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:C8:00.0, 97887 MiB, Disabled, 98.02.67.00.0A\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 00000000:D8:00.0, 97887 MiB, Disabled, 98.02.67.00.0A",
+  "profile": {
+    "arch": "cuda",
+    "device_count": 8,
+    "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "formats": [
+      "bf16",
+      "fp8",
+      "nvfp4"
+    ],
+    "interconnect": "pcie",
+    "measured_bandwidth_gbs": 1441.69,
+    "memory_gb": 101.975851008,
+    "p2p_matrix": [
+      [
+        1437.97,
+        32.01,
+        32.17,
+        32.49,
+        32.48,
+        30.0,
+        29.82,
+        32.59
+      ],
+      [
+        33.64,
+        1432.94,
+        34.96,
+        33.77,
+        31.06,
+        31.97,
+        29.63,
+        29.51
+      ],
+      [
+        36.41,
+        35.58,
+        1439.89,
+        36.21,
+        31.78,
+        32.09,
+        31.7,
+        32.73
+      ],
+      [
+        33.82,
+        36.01,
+        34.35,
+        1432.65,
+        32.48,
+        31.91,
+        32.89,
+        32.94
+      ],
+      [
+        33.11,
+        32.9,
+        30.99,
+        32.04,
+        1445.32,
+        33.84,
+        36.34,
+        34.0
+      ],
+      [
+        33.05,
+        32.86,
+        32.51,
+        32.08,
+        35.63,
+        1435.52,
+        35.39,
+        32.64
+      ],
+      [
+        29.67,
+        30.8,
+        32.95,
+        32.22,
+        35.46,
+        35.87,
+        1435.73,
+        36.67
+      ],
+      [
+        32.36,
+        32.22,
+        32.7,
+        29.55,
+        33.81,
+        35.63,
+        33.86,
+        1434.8
+      ]
+    ],
+    "sm": 120
+  }
+}

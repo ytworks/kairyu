@@ -441,6 +441,23 @@ class RadixKVCache:
     def free_private_pages(self, pages: tuple[int, ...]) -> None:
         self._pool.free(pages)
 
+    def reserve_scratch_page(self) -> int:
+        """Take one page PERMANENTLY out of circulation (m17 A5).
+
+        A captured CUDA graph replays a fixed bucket size: the padding rows past
+        the real batch still execute their KV write, and it lands on whichever
+        page id their page table holds. That id must therefore be one this cache
+        can never hand out again — otherwise every partial-bucket replay
+        overwrites a live (or about-to-be-allocated) request's K/V.
+
+        Unlike ``allocate_private_page`` the page is never returned: the capture
+        outlives every request, so ``free_private_pages`` must not be called on
+        it. Capacity drops by exactly one page for the process lifetime.
+        """
+        if not self._ensure_free(1):
+            raise KVCacheFull("no free or evictable page to reserve as graph scratch")
+        return self._pool.allocate(1)[0]
+
     def release_preempted(
         self, allocation: KVAllocation, decode_pages: tuple[int, ...] = ()
     ) -> None:
