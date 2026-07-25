@@ -146,6 +146,26 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: `kairyu/bench/adapters/mrcr.py`, `kairyu/bench/fixtures/mrcr-v2.jsonl`,
   `tests/bench/test_bench_mcq_adapters.py`, `docs/benchmarks.md`.
 
+### 2026-07-25 — [amendment] SciCode runs sequentially and can reach its golden data
+- What: The SciCode slot could not produce a meaningful number. `SciCode1/SciCode` ships
+  no reference code at all (every `ground_truth_code` and `general_solution` is null), so
+  the adapter's "gold prior-step code" was always the empty string and any sub-step
+  calling an earlier step's helper could only raise `NameError`. Separately, 288 of the
+  291 test-split sub-steps compare against `target` golden data from `test_data.h5`,
+  which the HF export does not contain, so those items were all `unjudged` — leaving
+  three scoreable sub-steps. Sub-steps now run SEQUENTIALLY per problem with the model's
+  own earlier code carried into both the prompt and the executed program; `--limit`
+  selects whole problems; the golden data is fetched from upstream first and otherwise
+  from a pinned public mirror, accepted only on HDF5 magic bytes; and prompts now include
+  problem-level and step-level background (Fugu's with-background condition). Extracted
+  `attempt_item()` in `adapters/base.py` so the sequential loop and the shared generative
+  loop classify request failures identically.
+- Why: 288 is exactly the denominator Fugu reports, and the sequential setting is
+  SciCode's main one — evaluating steps in isolation without any prior implementation
+  measures nothing the benchmark is about.
+- Refs: `kairyu/bench/adapters/{scicode,base}.py`, `kairyu/bench/fixtures/scicode.jsonl`,
+  `tests/bench/test_bench_scicode_sequential.py`, `docs/benchmarks.md`.
+
 ### 2026-07-23 — [progress] Versioned structured orchestration trace for evaluation tooling
 - What: Added additive, opt-in `kairyu_trace_v2` on unary orchestrated chat responses while
   preserving `kairyu_trace`. Direct, Conductor, and MoA paths emit a common versioned envelope
