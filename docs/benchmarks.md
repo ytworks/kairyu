@@ -164,7 +164,20 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   after run initialization are skipped rather than scored as valid input.
 - Download deps are an extra: `uv sync --extra bench` (or
   `pip install 'kairyu[bench]'`).
-- **Gated datasets** (GPQA Diamond, HLE): accept the license on the dataset
+- **Pinned revisions.** Every slot whose data kairyu downloads is pinned to a
+  commit in `kairyu/bench/pins.py`. This matters: `openai/mrcr` was corrected in
+  December 2025 and HLE's item count has shifted since release, so a score taken
+  against "whatever `main` was that day" is comparable to neither Fugu's number
+  nor an earlier kairyu run. A pin only applies when the recorded dataset id
+  still matches, and an adapter that declares its own revision keeps it.
+  Refreshing a pin changes the run fingerprint, so stored runs are refused for
+  resume rather than silently reinterpreted — the procedure is in that module's
+  docstring.
+  The **agentic** slots are the exception: mini-swe-agent, Harbor and the τ
+  harness fetch their own datasets and expose no revision knob, so SWE-Bench Pro
+  in particular tracks upstream (which has had post-release test fixes). That is
+  a real limitation of those harnesses, not something this suite can pin.
+- **Gated datasets** (GPQA Diamond, HLE, LiveCodeBench Pro): accept the license on the dataset
   page (e.g. <https://huggingface.co/datasets/Idavidrein/gpqa>) and set
   `HF_TOKEN`. Without it those cells report `skipped (gated)` and the run
   continues.

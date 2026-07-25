@@ -112,6 +112,20 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] Bench dataset revisions are pinned in one registry
+- What: Added `kairyu/bench/pins.py` mapping adapter name → (dataset id, commit sha) for
+  HLE, GPQA Diamond, CharXiv, SciCode, MRCRv2, LongBench-v2, and LiveCodeBench Pro;
+  `all_adapters()` fills each adapter's unset `hf_revision` from it per instance. A pin
+  applies only when the recorded dataset id still matches, and an adapter that declares
+  its own revision keeps it. Agentic slots stay unpinned because their harnesses fetch
+  their own data with no revision knob — recorded as a limitation in `docs/benchmarks.md`.
+- Why: `openai/mrcr` was corrected in December 2025 and HLE's item count has shifted since
+  release, so unpinned cells were comparable to neither Fugu's numbers nor to earlier
+  kairyu runs. Revisions are already part of the run fingerprint, so repinning now refuses
+  resume instead of reinterpreting stored evidence.
+- Refs: `kairyu/bench/pins.py`, `kairyu/bench/adapters/__init__.py`,
+  `tests/bench/{test_bench_pins,test_bench_runner}.py`, `docs/benchmarks.md`.
+
 ### 2026-07-23 — [progress] Versioned structured orchestration trace for evaluation tooling
 - What: Added additive, opt-in `kairyu_trace_v2` on unary orchestrated chat responses while
   preserving `kairyu_trace`. Direct, Conductor, and MoA paths emit a common versioned envelope
