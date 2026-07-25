@@ -13,6 +13,11 @@ from kairyu.engine.core.step_executor import (
     build_decode_batch,
 )
 
+# These executors run a synthetic decode_fn with no KV pool behind the page
+# ids, so no id can corrupt anything; the runner gates pin the real reservation
+# (m17 A5). The argument is required precisely so that choice is never implicit.
+SCRATCH = 0
+
 
 def _batch(size: int, max_pages: int = 1) -> DecodeBatch:
     return build_decode_batch(
@@ -21,6 +26,7 @@ def _batch(size: int, max_pages: int = 1) -> DecodeBatch:
         page_lists=[(i,) for i in range(size)],
         seq_lens=[6] * size,
         max_pages=max_pages,
+        scratch_page=SCRATCH,
     )
 
 
@@ -48,7 +54,7 @@ class TestBuckets:
 class TestGraphStepExecutor:
     def test_captures_once_per_bucket_and_replays(self):
         backend = FakeGraphBackend()
-        executor = GraphStepExecutor(_decode_fn, backend, max_batch=32)
+        executor = GraphStepExecutor(_decode_fn, backend, max_batch=32, scratch_page=SCRATCH)
         for _ in range(4):
             executor.execute_decode(_batch(3))  # bucket 4
         assert backend.captures == 1
@@ -58,7 +64,7 @@ class TestGraphStepExecutor:
 
     def test_outputs_match_eager_and_padding_dropped(self):
         backend = FakeGraphBackend()
-        executor = GraphStepExecutor(_decode_fn, backend, max_batch=32)
+        executor = GraphStepExecutor(_decode_fn, backend, max_batch=32, scratch_page=SCRATCH)
         batch = _batch(5)  # padded to bucket 8
         graph_out = executor.execute_decode(batch)
         eager_out = EagerStepExecutor(_decode_fn).execute_decode(batch)
@@ -67,11 +73,12 @@ class TestGraphStepExecutor:
 
     def test_copy_in_refreshes_values_between_replays(self):
         backend = FakeGraphBackend()
-        executor = GraphStepExecutor(_decode_fn, backend, max_batch=8)
+        executor = GraphStepExecutor(_decode_fn, backend, max_batch=8, scratch_page=SCRATCH)
         first = executor.execute_decode(_batch(2))
         shifted = build_decode_batch(
             token_ids=[99, 100], positions=[7, 8],
             page_lists=[(0,), (1,)], seq_lens=[8, 9], max_pages=1,
+            scratch_page=SCRATCH,
         )
         second = executor.execute_decode(shifted)
         assert not torch.equal(first, second)
@@ -79,7 +86,7 @@ class TestGraphStepExecutor:
 
     def test_oversize_batch_falls_back_to_eager(self):
         backend = FakeGraphBackend()
-        executor = GraphStepExecutor(_decode_fn, backend, max_batch=4)
+        executor = GraphStepExecutor(_decode_fn, backend, max_batch=4, scratch_page=SCRATCH)
         out = executor.execute_decode(_batch(6))
         assert backend.captures == 0  # never captured
         assert out.shape[0] == 6
@@ -88,17 +95,19 @@ class TestGraphStepExecutor:
         # a page table wider than the captured static buffer runs eager, never
         # silently truncated (C5)
         backend = FakeGraphBackend()
-        executor = GraphStepExecutor(_decode_fn, backend, max_batch=8, max_pages=2)
+        executor = GraphStepExecutor(
+            _decode_fn, backend, max_batch=8, max_pages=2, scratch_page=SCRATCH
+        )
         wide = build_decode_batch(
             token_ids=[1], positions=[1], page_lists=[(0, 1, 2)], seq_lens=[9],
-            max_pages=3,
+            max_pages=3, scratch_page=SCRATCH,
         )
         executor.execute_decode(wide)
         assert backend.captures == 0
 
     def test_invalidate_forces_recapture(self):
         backend = FakeGraphBackend()
-        executor = GraphStepExecutor(_decode_fn, backend, max_batch=8)
+        executor = GraphStepExecutor(_decode_fn, backend, max_batch=8, scratch_page=SCRATCH)
         executor.execute_decode(_batch(2))
         executor.invalidate()
         executor.execute_decode(_batch(2))
@@ -129,6 +138,7 @@ def test_graph_replay_reflects_current_page_tables():
     batch = build_decode_batch(
         token_ids=[10, 11, 12], positions=[5, 6, 7],
         page_lists=[(3,), (4,), (5,)], seq_lens=[6, 6, 6], max_pages=1,
+        scratch_page=0,
     )
     out = executor.execute_decode(batch)
     assert out.flatten().tolist() == [3.0, 4.0, 5.0]  # not the scratch page (0)

@@ -49,10 +49,16 @@ def build_decode_batch(
     seq_lens: Sequence[int],
     max_pages: int,
     *,
-    scratch_page: int = 0,
+    scratch_page: int,
     device: str | torch.device = "cpu",
 ) -> DecodeBatch:
-    """Pad ragged per-sequence page lists into a [B, max_pages] int32 tensor."""
+    """Pad ragged per-sequence page lists into a [B, max_pages] int32 tensor.
+
+    ``scratch_page`` is REQUIRED and has no default: page 0 is the first page a
+    ``PagePool`` hands out, so a defaulted 0 silently aliases a live request's KV
+    (m17 A5). Callers over a real pool must pass a page id the allocator can
+    never return; callers with no pool behind the ids pass whatever is unused.
+    """
     batch = len(seq_lens)
     page_tables = torch.full(
         (batch, max_pages), scratch_page, dtype=torch.int32, device=device
@@ -143,10 +149,21 @@ class GraphStepExecutor:
         decode_fn: DecodeFn,
         graph_backend,
         max_batch: int,
+        *,
+        scratch_page: int,
         max_pages: int = 1,
-        scratch_page: int = 0,
         device: str | torch.device = "cpu",
     ) -> None:
+        """``scratch_page`` is REQUIRED (m17 A5, review [P1]).
+
+        Every replay executes the FULL bucket: the rows past the real batch still
+        run their KV write, and it lands on whatever page id the padded page
+        table holds. A defaulted 0 pointed those writes at the first page a
+        ``PagePool`` hands out, so a partial bucket overwrote a live request's
+        K/V at slot 0 — and the capture warmup did it even for a full batch.
+        There is no safe default; the owner of the pool must name a page its
+        allocator can never return.
+        """
         self._decode_fn = decode_fn
         self._backend = graph_backend
         self._buckets = decode_buckets(max_batch)

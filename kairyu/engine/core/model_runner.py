@@ -25,6 +25,35 @@ from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.models.llama import DenseDecoder
 
 
+def _tensor_decode_gap(model: DenseDecoder) -> str | None:
+    """Why this model cannot run the tensor decode contract, or None (m17 [P2]).
+
+    ``_graph_decode`` calls ``forward_decode_tensors``, which unconditionally
+    calls ``backend.attend_decode``. Only ``TorchAttentionBackend`` implements
+    that today, and ``MlaAttention`` has no tensor decode form at all — so a
+    FlashInfer or MLA model used to construct fine and then die with an
+    ``AttributeError`` on the first BATCHED decode, arbitrarily far into a run.
+    Checked once, at construction, where the operator can still act on it.
+    """
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        return f"{type(model).__name__} exposes no model.layers to check"
+    for index, layer in enumerate(layers):
+        attention = getattr(layer, "self_attn", None)
+        if not hasattr(attention, "forward_decode_tensors"):
+            return (
+                f"layer {index}'s attention ({type(attention).__name__}) has no "
+                "forward_decode_tensors"
+            )
+        backend = getattr(attention, "backend", None)
+        if not hasattr(backend, "attend_decode"):
+            return (
+                f"layer {index}'s attention backend ({type(backend).__name__}) "
+                "has no attend_decode"
+            )
+    return None
+
+
 class PagedModelRunner:
     def __init__(
         self,
@@ -54,6 +83,7 @@ class PagedModelRunner:
         # the seam has existed since m17 with no caller, and enabling it by
         # default would change what every deployment executes.
         self._graph = None
+        self._graph_scratch_page: int | None = None
         if graph_backend is not None:
             from kairyu.engine.core.step_executor import GraphStepExecutor
 
@@ -62,11 +92,32 @@ class PagedModelRunner:
                     "graph_max_batch and graph_max_pages must be >= 1 when a "
                     f"graph backend is given (got {graph_max_batch}, {graph_max_pages})"
                 )
+            gap = _tensor_decode_gap(model)
+            if gap is not None:  # [P2]: fail here, not on the first batched decode
+                raise ValueError(
+                    f"graph decode needs the tensor decode contract but {gap}. "
+                    "Only the torch attention backend implements it today "
+                    "(flashinfer and MLA are m13 work) — build this runner "
+                    "without graph_backend."
+                )
+            # [P1]: the padding rows of every replay write KV somewhere. That
+            # page has to come OUT of the scheduler's allocator, so take it from
+            # the cache the scheduler allocates from — there is no way to pick a
+            # safe id without it.
+            if cache is None:
+                raise ValueError(
+                    "a graph backend needs the RadixKVCache the scheduler "
+                    "allocates from: the captured graph's padding rows write KV "
+                    "to a scratch page that must be reserved out of the "
+                    "allocator (m17 A5), and only the cache can reserve it"
+                )
+            self._graph_scratch_page = cache.reserve_scratch_page()
             self._graph = GraphStepExecutor(
                 self._graph_decode,
                 graph_backend,
                 max_batch=graph_max_batch,
                 max_pages=graph_max_pages,
+                scratch_page=self._graph_scratch_page,
                 device=self._device,
             )
 
@@ -166,15 +217,22 @@ class PagedModelRunner:
         tensor the captured kernels index; `GraphStepExecutor` falls back to
         eager for an oversize batch or a page table wider than the static buffer, so
         this cannot fail on shape.
+
+        The width padding uses the SAME reserved scratch page as the row padding:
+        a short row's tail entries are only ever read (and then masked off by
+        seq_lens), but pointing them at an allocatable page leaves the class of
+        bug [P1] found one indexing mistake away.
         """
         from kairyu.engine.core.step_executor import build_decode_batch
 
+        assert self._graph_scratch_page is not None  # set with self._graph
         batch = build_decode_batch(
             token_ids=tokens,
             positions=positions,
             page_lists=page_tables,
             seq_lens=seq_lens,
             max_pages=max(len(table) for table in page_tables),
+            scratch_page=self._graph_scratch_page,
             device=self._device,
         )
         return self._graph.execute_decode(batch)

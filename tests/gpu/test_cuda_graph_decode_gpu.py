@@ -58,7 +58,7 @@ def _generate(model_dir: str, graph_backend, max_new: int = 6):
         if graph_backend is not None
         else {}
     )
-    runner = PagedModelRunner(model, pool, sampler=Sampler(), **extra)
+    runner = PagedModelRunner(model, pool, sampler=Sampler(), cache=cache, **extra)
     core = EngineCore(scheduler, runner)
     for index, prompt in enumerate(PROMPTS):
         core.add_request(
@@ -81,6 +81,48 @@ def test_captured_decode_matches_eager(llama_dir):
     assert runner._graph._captured, "nothing was captured; the graph path was skipped"
     assert graphed == eager
     assert all(len(tokens) == 6 for tokens in eager.values())
+
+
+def test_padding_rows_never_write_kv_into_an_allocatable_page(llama_dir):
+    """m17 A5 on real hardware: a partial bucket replays padding rows whose KV
+    write must land on the reserved scratch page, never on a page the scheduler
+    can still hand out. The CPU gate of the same name pins the policy; this one
+    pins it through recorded kernels over recorded memory."""
+    from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
+    from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.models.loader import load_model
+
+    _require_cuda()
+    model, config, _ = load_model(
+        llama_dir, dtype=torch.bfloat16, attention_backend=TorchAttentionBackend()
+    )
+    cache = RadixKVCache(num_pages=16, page_size=16)
+    pool = PagedKVPool.for_cache(cache, config, dtype=torch.bfloat16, device="cuda:0")
+    runner = PagedModelRunner(
+        model.to("cuda:0"), pool, cache=cache, graph_backend=CudaGraphBackend(),
+        graph_max_batch=4, graph_max_pages=1,
+    )
+
+    handed_out = [cache.allocate_private_page() for _ in range(4)]
+    finished, rows = handed_out[0], handed_out[1:]
+    cache.free_private_pages((finished,))
+
+    pool.k.fill_(7.0)
+    pool.v.fill_(7.0)
+    before_k, before_v = pool.k.clone(), pool.v.clone()
+
+    runner._graph_logits([1, 2, 3], [0, 0, 0], [[page] for page in rows], [1, 1, 1])
+    torch.cuda.synchronize()
+
+    free_pages = [cache.allocate_private_page() for _ in range(cache.num_free_pages)]
+    assert finished in free_pages
+    for page in free_pages:
+        assert torch.equal(pool.k[:, page], before_k[:, page]), f"K of page {page} clobbered"
+        assert torch.equal(pool.v[:, page], before_v[:, page]), f"V of page {page} clobbered"
+    assert not torch.equal(pool.k[:, rows[0]], before_k[:, rows[0]])
 
 
 def test_the_graph_is_off_unless_a_backend_is_given(llama_dir):

@@ -112,6 +112,27 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] CUDA-graph decode: reserved scratch page + backend fail-fast
+- What: `PagedModelRunner(graph_backend=...)` now wires the m17 D1 capture seam into
+  batched decode (PR #138), with two review blockers fixed before merge. [P1] the
+  scratch page the graph's padding rows write KV to is now RESERVED out of the
+  allocator via the new `RadixKVCache.reserve_scratch_page()`, and a graph backend
+  without a cache is rejected; `GraphStepExecutor`/`build_decode_batch` no longer
+  default `scratch_page` to 0. [P2] the runner now checks at construction that every
+  layer's attention implements the tensor decode contract
+  (`forward_decode_tensors` + `backend.attend_decode`) and raises `ValueError`
+  naming the gap. The seam stays OFF unless a backend is passed.
+- Why: the scratch page defaulted to 0, which `PagePool` hands out as the FIRST
+  ordinary page — so the capture warmup and every partial-bucket replay wrote K/V
+  into a live request's page 0 slot 0, silently corrupting its cache whenever the
+  damage did not cross an argmax boundary. And a FlashInfer or MLA model constructed
+  fine and then died with `AttributeError` on the first batched decode, arbitrarily
+  deep into a run, rather than at build time. Capacity now drops by exactly one page
+  for the graph's lifetime — the documented cost of the reservation.
+- Refs: m17 D1/D2/A5, `docs/gpu-runbook.md` §6.3, PR #138 review [P1]/[P2];
+  `kairyu/engine/core/{model_runner,step_executor,radix_kv}.py`,
+  `tests/unit/test_graph_decode_wiring.py`, `tests/gpu/test_cuda_graph_decode_gpu.py`.
+
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
   are now passed to every fetch (they were recorded but unused, so the cache and run
