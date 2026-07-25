@@ -2,6 +2,8 @@
 
 Status: **Implemented** (2026-07-03). Reviewed (1-reviewer panel with gloo
 spawn verification incl. uneven all_to_all splits, 2026-07-03; §6 binding).
+Amended 2026-07-25 (D1: `tensor_reduce_scatter`, measured) and 2026-07-26
+(**D6**: opt-in sequence parallelism, lifting the §3 call-site non-goal).
 Milestone: M16 (roadmap Track E3 local half; G2-as-amended multi-GPU gates'
 code, NCCL swapped in on deploy day)
 Date: 2026-07-03
@@ -65,9 +67,9 @@ call sites use all_reduce (+ local slice).
 >
 > The 1.90x is real but only available if the consumer accepts a **shard** —
 > i.e. sequence parallelism, where the shard survives the norm and the next
-> column-parallel matmul re-gathers it. That is a design change this milestone
-> does not specify, and it should be justified by activation memory as much as by
-> comm time.
+> column-parallel matmul re-gathers it. That design change is now specified in
+> **D6** (added 2026-07-26) — and, as this note predicted, it is justified by
+> activation memory, NOT by comm time.
 
 ### D2 — Tensor-parallel sharding (`models/parallel.py`)
 
@@ -116,12 +118,58 @@ EP=2 parity, PP=2 parity, communicator contract): spawned-process lines
 don't count toward coverage, so all decision logic stays in pure in-proc
 functions.
 
+### D6 — Sequence parallelism (Megatron TP+SP), opt-in (`models/parallel.py`)
+
+> **Added 2026-07-26.** This lifts the §3 non-goal on using `reduce_scatter` at
+> the `RowParallelLinear` call site. It is a design change to D2, recorded here
+> rather than in a new milestone doc because it only re-plumbs D2's own modules.
+
+`build_tp_model(..., sequence_parallel=True)` shards the residual stream
+BETWEEN blocks along **tokens**, so the norms and the inter-block residual hold
+S/tp rows instead of S. Off by default; `tp >= 2` required (fail-fast
+`ValueError`), and D2's plain-TP path is byte-for-byte the old one when the flag
+is off — the wrappers are only installed when a context exists.
+
+`SequenceParallelContext` owns the region and is shared by every wrapper of one
+model. Its contract:
+
+- `scatter(x)` — entry: full `[S, H]` -> this rank's `[ceil(S/tp), H]`.
+- `gather(x)` — shard -> the REAL sequence (`tensor_all_gather`, padding
+  trimmed).
+- `reduce_scatter(x)` — full `[S, H]` partial sums -> this rank's reduced shard.
+
+Placement (D2's tree, wrappers only): `ScatterAfterEmbedding` on
+`embed_tokens` enters the region; `SequenceParallelNorm` on
+`input_layernorm`/`post_attention_layernorm` runs the norm ON THE SHARD then
+all_gathers into the TP region — RMSNorm/LayerNorm are per-token, so this is the
+identical arithmetic, which is what makes a sharded residual stream valid at all;
+`RowParallelLinear(o_proj/down_proj)` takes the context and exits with
+`tensor_reduce_scatter` instead of `tensor_all_reduce` (it both sums across ranks
+AND re-shards); `GatherBeforeNorm` on the final norm exits, so the lm_head and
+A3's vocab-parallel gather still see the whole sequence.
+
+**Padding lives at the shard boundary ONLY** — added on the way in, removed on
+the way out (`context.padding`). It must NEVER be visible inside the TP region:
+attention builds its mask from the real sequence length, so a padded gather
+produces a residual add between a 12-row and an 11-row tensor. `reduce_scatter`
+re-pads immediately before the collective (which needs a divisible count) and
+the next `gather` trims.
+
+**What this does NOT buy: comm time.** all_gather + reduce_scatter moves what one
+all_reduce moves — measured slightly WORSE (D1 amendment, ~0.96x). The gain is
+ACTIVATION MEMORY. Enabling it for speed would be a mistake, so the module
+docstring says so too.
+
+Scope: dense decoders built by `build_tp_model` (D2). NOT wired into EP (D3),
+PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
+
 ## 3. Non-goals
 
 - symmetric-memory optimizations (deploy day). NCCL execution, the P2P matrix
-  and `reduce_scatter` itself landed 2026-07-25 — see the D1 amendment; what
-  remains non-goal is USING reduce_scatter at the RowParallelLinear call site,
-  which needs sequence parallelism.
+  and `reduce_scatter` itself landed 2026-07-25 (D1 amendment), and using it at
+  the `RowParallelLinear` call site landed 2026-07-26 as opt-in sequence
+  parallelism (**D6**) — that non-goal is lifted. What remains non-goal is
+  sequence parallelism for EP/PP/the SPMD worker, and making it the default.
 - Cross-node rendezvous (`kairyu.launch` — G5 F3); DeepEP/UCCL adapters
   (deploy-day EP fast path; the all_to_all path is the portable baseline).
 - Overlap of comm/compute streams (GPU-only).
@@ -141,6 +189,10 @@ functions.
   passes on gloo exactly as on FakeCommunicator.
 - In-proc: shard bounds/QKV head math, vocab-parallel masking, get_slice
   loading equals full-load-then-slice.
+- D6: SP ≡ plain TP on gloo (max error AND argmax), and again with a **ragged**
+  11 tokens across 2 ranks asserting an 11-row output — the gate that pins
+  padding to the shard boundary (`tests/dist/test_distributed.py`); the same
+  parity over real NCCL in bf16 (`tests/gpu/test_sequence_parallel_nccl.py`).
 - Full suite green; dist tests excluded from cov accounting by design.
 
 ## 6. Review record (binding amendments)
