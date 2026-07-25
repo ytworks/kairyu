@@ -22,8 +22,10 @@ Run:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
+import subprocess
 from pathlib import Path
 
 from kairyu.engine.core.comm import FakeCommunicator
@@ -190,6 +192,120 @@ def _real_prompts(model_path: str, count: int, max_new: int) -> list[EngineReque
         )
         for index, text in enumerate(_TEXT_PROMPTS[:count])
     ]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _safetensors_header(path: Path) -> str:
+    """Digest a shard's safetensors header.
+
+    The header is the JSON map of every tensor's name, dtype, shape and byte
+    range, so two checkpoints that agree on it hold the same tensors laid out
+    the same way. Hashing it costs a few hundred KB per shard instead of the
+    tens of GB a full content hash would read, which is what makes recording
+    provenance on every run affordable.
+    """
+    with path.open("rb") as handle:
+        length = int.from_bytes(handle.read(8), "little")
+        header = handle.read(length)
+    return hashlib.sha256(header).hexdigest()
+
+
+def _checkpoint_provenance(model_path: str) -> dict:
+    """Identify the checkpoint by content, not by the path it was read from.
+
+    G2 §8 requires that a number a decision rests on be reviewable next to the
+    config that produced it. A machine-local `model_path` does not survive the
+    machine, so the evidence records what the weights and tokenizer actually
+    were: a per-shard header digest, the file sizes, and a hash of the config
+    and tokenizer files.
+    """
+    root = Path(model_path)
+    if not root.is_dir():
+        raise SystemExit(f"--model-path is not a directory: {model_path}")
+
+    shards = sorted(root.glob("*.safetensors"))
+    if not shards:
+        raise SystemExit(f"no *.safetensors under {model_path}; cannot record provenance")
+
+    weights = [
+        {
+            "file": shard.name,
+            "bytes": shard.stat().st_size,
+            "header_sha256": _safetensors_header(shard),
+        }
+        for shard in shards
+    ]
+    # one digest over every shard identity, so evidence can be compared at a glance
+    rollup = hashlib.sha256(
+        json.dumps(weights, sort_keys=True).encode()
+    ).hexdigest()
+
+    metadata = {}
+    for name in ("config.json", "generation_config.json"):
+        candidate = root / name
+        if candidate.is_file():
+            metadata[name] = _sha256(candidate)
+
+    tokenizer = {}
+    for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"):
+        candidate = root / name
+        if candidate.is_file():
+            tokenizer[name] = _sha256(candidate)
+    if not tokenizer:
+        raise SystemExit(f"no tokenizer files under {model_path}; cannot record provenance")
+
+    name = None
+    config_file = root / "config.json"
+    if config_file.is_file():
+        parsed = json.loads(config_file.read_text())
+        name = parsed.get("_name_or_path") or parsed.get("model_type")
+
+    return {
+        "name": name or root.name,
+        "weights_sha256": rollup,
+        "weights": weights,
+        "metadata_sha256": metadata,
+        "tokenizer_sha256": tokenizer,
+        # kept for debugging only — it identifies nothing on another machine
+        "read_from": str(root),
+    }
+
+
+def _code_provenance() -> dict:
+    """The commit that produced the numbers, and whether it was modified."""
+    def _git(*argv: str) -> str | None:
+        try:
+            done = subprocess.run(
+                ["git", *argv],
+                cwd=Path(__file__).resolve().parent,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    commit = _git("rev-parse", "HEAD")
+    tracked = _git("status", "--porcelain", "--untracked-files=no")
+    untracked = _git("ls-files", "--others", "--exclude-standard")
+    return {
+        "commit": commit,
+        # a modified tracked file means the commit alone does not describe the run
+        "dirty": None if tracked is None else bool(tracked),
+        # untracked files are reported separately rather than folded into `dirty`:
+        # scratch dirs and agent worktrees sit in the tree during a run without
+        # changing the code that produced the numbers, but a reader still gets to
+        # see that something unversioned was present.
+        "untracked_files": None if untracked is None else len(untracked.splitlines()),
+    }
 
 
 def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
@@ -381,6 +497,9 @@ def main() -> int:
             results[f"tp{degree}_vs_tp{degrees[0]}_overlap_{'on' if overlap else 'off'}"] = {
                 "prompts": len(base),
                 "exact_match": matches,
+                # match_rate is DISPLAY only: 20000/20001 rounds to 1.0 at four
+                # places and would clear an `== 1.0` gate. The verdict compares
+                # the counts.
                 "match_rate": round(matches / len(base), 4),
                 "tokens": token_total,
                 "token_match_rate": round(token_matched / token_total, 4) if token_total else 0.0,
@@ -411,7 +530,8 @@ def main() -> int:
     config = {
         "harness": harness,
         "hardware": hardware,
-        "model_path": args.model_path,
+        "checkpoint": _checkpoint_provenance(args.model_path) if args.model_path else None,
+        "code": _code_provenance(),
         "tp_degrees": degrees,
         "num_prompts": len(prompts),
         "max_new_tokens": args.max_new_tokens,
@@ -426,6 +546,9 @@ def main() -> int:
         args.out.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"written: {args.out}")
     worst = min(entry["match_rate"] for entry in results.values())
+    all_exact = all(
+        entry["exact_match"] == entry["prompts"] for entry in results.values()
+    )
     if args.model_path:
         # G2 §7 (amended 2026-07-25): free-running greedy sequence equality is NOT
         # a correctness gate. One flipped token fails a whole prompt and every
@@ -440,9 +563,9 @@ def main() -> int:
         return 0
     # The toy harness IS deterministic, so exactness here is a real invariant:
     # sharding over FakeCommunicator ranks must not change a single token.
-    verdict = "OK" if worst == 1.0 else "FAIL"
+    verdict = "OK" if all_exact else "FAIL"
     print(f"worst match rate: {worst:.4f} (toy harness must be exact) -> {verdict}")
-    return 0 if worst == 1.0 else 1
+    return 0 if all_exact else 1
 
 
 if __name__ == "__main__":
