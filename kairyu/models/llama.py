@@ -58,6 +58,16 @@ class DecoderLayer(nn.Module):
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
+    def forward_decode_tensors(
+        self, hidden, cos, sin, kv_pool, layer, page_tables, positions, seq_lens
+    ):
+        """Tensor-only decode layer (m17 D1): no Python page lists."""
+        hidden = hidden + self.self_attn.forward_decode_tensors(
+            self.input_layernorm(hidden),
+            cos, sin, kv_pool, layer, page_tables, positions, seq_lens,
+        )
+        return hidden + self.mlp(self.post_attention_layernorm(hidden))
+
     def forward_decode_batch(
         self, hidden, cos, sin, kv_pool, layer, page_tables, positions, seq_lens, write_from
     ):
@@ -140,6 +150,26 @@ class DenseDecoder(nn.Module):
                 hidden, cos, sin, kv_pool, index, page_tables, positions, seq_lens, write_from
             )
         return self.model.norm(hidden)  # [B, H]
+
+    @torch.no_grad()
+    def forward_decode_tensors(
+        self,
+        token_ids: torch.Tensor,  # [B]
+        positions: torch.Tensor,  # [B]
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,  # [B, P]
+        seq_lens: torch.Tensor,  # [B]
+    ) -> torch.Tensor:
+        """Batched decode with every input a tensor — the CUDA-graph-capturable
+        form of ``forward_decode_batch`` (m17 D1). Numerically identical; pinned
+        by test_tensor_decode_matches_list_decode."""
+        hidden = self.model.embed_tokens(token_ids)
+        cos, sin = self.model.rotary_emb(positions)
+        for index, layer in enumerate(self.model.layers):
+            hidden = layer.forward_decode_tensors(
+                hidden, cos, sin, kv_pool, index, page_tables, positions, seq_lens
+            )
+        return self.model.norm(hidden)
 
     @torch.no_grad()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:

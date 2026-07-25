@@ -137,12 +137,18 @@ def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
 
     ``force_cpu`` is for the CPU parity tests, which compare TP output against a
     single-process fp32 host reference and so must not follow the probe onto a
-    GPU. Deployment never sets it.
+    GPU. ``KAIRYU_TP_FORCE_CPU`` is the same switch for callers that cannot pass
+    the argument — notably `build_engine_loop`, whose spawned ranks read it from
+    the inherited environment, so rank 0 and the workers cannot end up on
+    different backends and deadlock the first collective. Deployment sets neither.
     """
+    import os
+
     import torch
 
     from kairyu.engine.core.hw_profile import probe
 
+    force_cpu = force_cpu or bool(os.environ.get("KAIRYU_TP_FORCE_CPU"))
     profile = probe()
     if force_cpu or profile.arch != "cuda":
         return TPPlacement("cpu", torch.float32, "gloo")
@@ -332,6 +338,20 @@ class DistTPLauncher:
         # the one collective that legitimately absorbs load skew
         startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
         self.runner = DistTPModelRunner(self._comm, runner)
+
+    def dead_ranks(self) -> tuple[int, ...]:
+        """Spawned ranks that are no longer running (rank 0 is this process).
+
+        A dead rank leaves the group unable to complete a single collective, but
+        rank 0 stays up and keeps answering health checks — on hardware this
+        presented as a served model that accepted requests and never returned a
+        token. Cheap enough for `/readyz`: `is_alive()` is a waitpid, no IPC.
+        """
+        return tuple(
+            index + 1
+            for index, process in enumerate(self._ctx.processes)
+            if not process.is_alive()
+        )
 
     def shutdown(self) -> None:
         import contextlib
