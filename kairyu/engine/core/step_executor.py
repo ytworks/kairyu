@@ -145,12 +145,20 @@ class GraphStepExecutor:
         max_batch: int,
         max_pages: int = 1,
         scratch_page: int = 0,
+        device: str | torch.device = "cpu",
     ) -> None:
         self._decode_fn = decode_fn
         self._backend = graph_backend
         self._buckets = decode_buckets(max_batch)
         self._max_pages = max_pages
         self._scratch_page = scratch_page
+        # The static buffers must live where the captured kernels run. Without
+        # this they were allocated on the host regardless of backend, so a real
+        # CUDA graph would replay over memory the GPU never writes — the module
+        # docstring already required device tensors, nothing enforced it, and
+        # `build_decode_batch` (the other constructor) has taken a device all
+        # along. Defaults to cpu so the FakeGraphBackend tests are unchanged.
+        self._device = torch.device(device)
         self._captured: dict[int, tuple[object, DecodeBatch]] = {}
 
     def execute_decode(self, batch: DecodeBatch) -> torch.Tensor:
@@ -172,12 +180,15 @@ class GraphStepExecutor:
 
     def _capture(self, bucket: int) -> None:
         static = DecodeBatch(
-            token_ids=torch.zeros(bucket, dtype=torch.int64),
-            positions=torch.zeros(bucket, dtype=torch.int64),
+            token_ids=torch.zeros(bucket, dtype=torch.int64, device=self._device),
+            positions=torch.zeros(bucket, dtype=torch.int64, device=self._device),
             page_tables=torch.full(
-                (bucket, self._max_pages), self._scratch_page, dtype=torch.int32
+                (bucket, self._max_pages),
+                self._scratch_page,
+                dtype=torch.int32,
+                device=self._device,
             ),
-            seq_lens=torch.ones(bucket, dtype=torch.int32),
+            seq_lens=torch.ones(bucket, dtype=torch.int32, device=self._device),
         )
         replayable = self._backend.capture(self._decode_fn, static)
         self._captured[bucket] = (replayable, static)
