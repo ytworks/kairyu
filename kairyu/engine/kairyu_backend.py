@@ -18,7 +18,12 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
+from kairyu.engine.backend import (
+    EngineReadiness,
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+)
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import SampledToken, mix_seed
@@ -245,6 +250,7 @@ class KairyuBackend:
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
+        self._engine_error: Exception | None = None  # last step failure, for readiness()
 
     def validate_request(self, request: GenerationRequest) -> None:
         self._loop.tokenize_prompt(request.prompt)
@@ -254,13 +260,24 @@ class KairyuBackend:
         try:
             while self._loop.has_work():
                 updates = await asyncio.to_thread(self._loop.step)
+                # a completed step is the only proof the engine still runs, so it
+                # is also what clears a previous failure (transient faults must
+                # not strand the node out of rotation forever)
+                self._engine_error = None
                 for request_id, update in updates:
                     queue = self._queues.get(request_id)
                     if queue is not None:
                         queue.put_nowait(update)
         except Exception as error:
+            # recorded FIRST: purge itself runs through the same broken transport
+            # that just failed, and when it raises too the original error escapes
+            # as an unretrieved task exception and nothing observes the fault
+            self._engine_error = error
             request_ids = tuple(self._queues)
-            await asyncio.to_thread(self._loop.purge, request_ids)
+            try:
+                await asyncio.to_thread(self._loop.purge, request_ids)
+            except Exception:  # noqa: BLE001 - already failing; report the first cause
+                pass
             failure = StreamUpdate((), "", True, None, error)
             for request_id in request_ids:
                 queue = self._queues.get(request_id)
@@ -271,6 +288,26 @@ class KairyuBackend:
             self._pump_task = None
             if restart_after_exit:
                 self._ensure_pump()
+
+    def readiness(self) -> EngineReadiness:
+        """Cheap, honest liveness for `/readyz` (no probe generation).
+
+        Covers the two ways a hardware deployment has been observed to keep
+        answering `/readyz` with "ready" while unable to emit a single token: the
+        step loop died, or the spawned TP ranks did.
+        """
+        launcher = getattr(self._loop, "tp_launcher", None)
+        if launcher is not None:
+            dead = launcher.dead_ranks()
+            if dead:
+                return EngineReadiness(
+                    False, f"tensor-parallel ranks not running: {sorted(dead)}"
+                )
+        if self._engine_error is not None:
+            return EngineReadiness(
+                False, f"engine step failed: {type(self._engine_error).__name__}"
+            )
+        return EngineReadiness(True)
 
     def _ensure_pump(self) -> None:
         if not self._loop.has_work():

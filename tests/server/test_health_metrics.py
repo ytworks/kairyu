@@ -186,3 +186,56 @@ def test_admin_drain_requires_admin_key_and_undrain_recovers(monkeypatch):
         assert client.post("/admin/undrain", headers=user).status_code == 403
         assert client.post("/admin/undrain", headers=admin).status_code == 200
         assert client.get("/readyz").status_code == 200  # recovered
+
+
+class _ReadinessBackend(MockBackend):
+    """A local engine that can report itself unable to serve."""
+
+    def __init__(self, status) -> None:
+        super().__init__()
+        self._status = status
+
+    def readiness(self):
+        return self._status
+
+
+async def test_readyz_503_when_a_local_engine_reports_itself_unable_to_serve():
+    # "constructed" is not "able to serve". A KairyuBackend whose step loop or
+    # spawned TP ranks have died stays constructed and used to keep /readyz at
+    # 200, so a benchmark ran 14 minutes against a dead 8-GPU deployment.
+    from kairyu.engine.backend import EngineReadiness
+
+    app = create_app(
+        engines={"m": _ReadinessBackend(EngineReadiness(False, "ranks not running: [1, 2]"))}
+    )
+    async with _client(app) as client:
+        ready = await client.get("/readyz")
+    assert ready.status_code == 503
+    assert ready.json() == {
+        "status": "unready",
+        "engines": {"m": "ranks not running: [1, 2]"},
+    }
+
+
+async def test_readyz_200_when_the_local_engine_reports_ready():
+    from kairyu.engine.backend import EngineReadiness
+
+    app = create_app(engines={"m": _ReadinessBackend(EngineReadiness(True))})
+    async with _client(app) as client:
+        ready = await client.get("/readyz")
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ready"}
+
+
+async def test_readyz_reports_unready_when_the_readiness_check_itself_raises():
+    # introspection must never 500, but it must not report ready either: a probe
+    # that cannot answer is not evidence the engine is fine
+    class _Exploding(MockBackend):
+        def readiness(self):
+            raise RuntimeError("boom")
+
+    app = create_app(engines={"m": _Exploding()})
+    async with _client(app) as client:
+        ready = await client.get("/readyz")
+    assert ready.status_code == 503
+    assert "boom" in ready.json()["engines"]["m"]

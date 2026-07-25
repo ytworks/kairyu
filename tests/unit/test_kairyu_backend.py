@@ -524,3 +524,60 @@ async def test_full_stack_openai_server_over_engine_core():
     data = response.json()
     assert data["choices"][0]["message"]["content"]
     assert data["choices"][0]["finish_reason"] == "length"
+
+
+class _AlwaysFailRunner:
+    def execute(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        raise RuntimeError("transport is gone")
+
+
+class _DeadRankLauncher:
+    def __init__(self, dead: tuple[int, ...]) -> None:
+        self._dead = dead
+
+    def dead_ranks(self) -> tuple[int, ...]:
+        return self._dead
+
+
+async def test_readiness_is_ready_before_any_work():
+    backend = KairyuBackend(runner=_SlowRunner())
+    assert backend.readiness().ready is True
+
+
+async def test_readiness_flips_after_the_step_loop_dies():
+    # the observed hardware failure: the step loop raised, every in-flight
+    # request was failed, and the node kept reporting itself ready forever
+    backend = KairyuBackend(runner=_AlwaysFailRunner())
+    with pytest.raises(RuntimeError):
+        await backend.generate(_request("r1", "hello"))
+    status = backend.readiness()
+    assert status.ready is False
+    assert "RuntimeError" in status.detail
+
+
+async def test_readiness_recovers_once_a_step_completes():
+    # a transient fault must not strand the node out of rotation
+    backend = KairyuBackend(runner=_FailOnceRunner())
+    with pytest.raises(RuntimeError):
+        await backend.generate(_request("r1", "hello"))
+    assert backend.readiness().ready is False
+    await backend.generate(_request("r2", "hello"))
+    assert backend.readiness().ready is True
+
+
+async def test_readiness_reports_dead_tensor_parallel_ranks():
+    backend = KairyuBackend(runner=_SlowRunner())
+    backend._loop.tp_launcher = _DeadRankLauncher((2, 5))
+    status = backend.readiness()
+    assert status.ready is False
+    assert "[2, 5]" in status.detail
+
+
+async def test_live_tensor_parallel_ranks_stay_ready():
+    backend = KairyuBackend(runner=_SlowRunner())
+    backend._loop.tp_launcher = _DeadRankLauncher(())
+    assert backend.readiness().ready is True

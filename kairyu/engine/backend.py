@@ -96,3 +96,17 @@ class EngineBackend(Protocol):
     def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]: ...
 
     async def shutdown(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class EngineReadiness:
+    """An engine's own answer to "could I serve a request right now?".
+
+    Optional: `/readyz` only consults engines that implement ``readiness()``, so
+    remote and mock backends are unaffected. It must stay CHEAP — the endpoint is
+    polled by load balancers — which means reporting known-fatal state, never
+    running a probe generation.
+    """
+
+    ready: bool
+    detail: str = ""

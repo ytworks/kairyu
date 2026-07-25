@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
-from kairyu.engine.backend import EngineBackend
+from kairyu.engine.backend import EngineBackend, EngineReadiness
 from kairyu.engine.core.attention_selector import select_backend_name
 from kairyu.engine.core.hw_profile import probe
 from kairyu.entrypoints.server.metrics import ServerMetrics
@@ -109,6 +109,26 @@ def add_health_routes(
                     "status": "unready",
                     "pools": {name: list(health) for name, health in degraded.items()},
                 },
+            )
+        # Local engines get a say too. "Constructed" is not "able to serve": a
+        # KairyuBackend whose step loop or spawned TP ranks have died stays
+        # constructed, so without this the endpoint reports ready while the node
+        # cannot emit a token — which is exactly how a benchmark ran against a
+        # dead 8-GPU deployment for 14 minutes before anyone noticed.
+        failed = {}
+        for name, engine in engines.items():
+            probe_readiness = getattr(engine, "readiness", None)
+            if probe_readiness is None:
+                continue
+            try:
+                status = probe_readiness()
+            except Exception as error:  # introspection must never 500
+                status = EngineReadiness(False, f"readiness check failed: {error!r}")
+            if not status.ready:
+                failed[name] = status.detail
+        if failed:
+            return JSONResponse(
+                status_code=503, content={"status": "unready", "engines": failed}
             )
         return {"status": "ready"}
 
