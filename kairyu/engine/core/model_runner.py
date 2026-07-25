@@ -10,6 +10,21 @@ written before it is read at every decode position; positions below
 ``num_cached_tokens`` are never rewritten (shared radix slots).
 Requests are processed sequentially within a step (CPU correctness first;
 cross-request batching arrives with M13/GPU).
+
+m2 §2.2 status (the "future token" technique), so the scope is stated where the
+code is rather than only in the design doc:
+
+- DONE — the decode input slots are persistent device tensors written in place
+  (`_decode_input_slots`), shared by the batched and the single-request path, so
+  no decode step allocates a device tensor and neither path is a fallback.
+- DONE (#136) — the runner keeps its uncommitted tokens, so overlap can resolve
+  a decode input one step before the scheduler commits it.
+- OPEN — filling those slots DEVICE-to-device, and §2.2's invariant that the
+  step loop never blocks on ``.item()``/``.cpu()``. Both require the sampling
+  DECISION to move onto the device; today it is host-side by design (m8 D2 pins
+  reproducibility to the CPU RNG stream), so the sampled id exists only as a
+  Python int and reaches the device by one batched H2D copy per step. The
+  batched-decode attention loop also reads ``int(positions[i])`` per row.
 """
 
 from __future__ import annotations
@@ -97,12 +112,16 @@ class PagedModelRunner:
         # and reading `outputs[position - 1]` raised IndexError. The runner
         # already produced those tokens; it just never kept them.
         #
-        # This is the HOST-SIDE half of m2 §2.2. That section specifies patching
-        # the placeholder slot device-to-device from the sampled tensor, with no
-        # host sync in the hot path; this keeps Python ints and rebuilds the
-        # input tensor each step. It makes overlap CORRECT on a real runner —
-        # which it was not — but the zero-host-sync property is still open.
+        # This is the HOST-SIDE half of m2 §2.2 (see the module docstring for what
+        # of that section is implemented and what cannot be while the sampling
+        # decision is host-side).
         self._future_tokens: dict[str, dict[int, int]] = {}
+        # The decode input slots themselves: allocated once on the device and
+        # written IN PLACE every step (`_decode_input_slots`).
+        self._decode_slots: torch.Tensor | None = None
+        self._decode_positions: torch.Tensor | None = None
+        self._slot_staging: torch.Tensor | None = None
+        self._slot_copy_done: torch.cuda.Event | None = None
 
         # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
         # the seam has existed since m17 with no caller, and enabling it by
@@ -310,11 +329,95 @@ class PagedModelRunner:
         page_table = list(state.allocation.pages) + list(state.decode_pages)
         return input_token, absolute, page_table, cached
 
+    def _retire_decode_slots(self) -> None:
+        """Drain the in-flight staging DMA before its buffers can be dropped.
+
+        A growth replaces `_slot_staging` and the device slots wholesale, and the
+        event recorded by the last `_decode_input_slots` is the ONLY handle on the
+        transfer that may still be reading them. Overwriting `_slot_copy_done`
+        first destroys that handle: what remains is a freshly recorded event that
+        says nothing about the old DMA. Freeing pinned host memory is not
+        stream-ordered, so the source rows could go back to the allocator while
+        the copy engine is still reading them. Wait here, BEFORE anything is
+        released. Growth doubles, so this blocking wait is amortized away.
+        """
+        if self._slot_copy_done is not None:
+            self._slot_copy_done.synchronize()
+        self._slot_staging = None
+        self._slot_copy_done = None
+
+    def _allocate_decode_slots(self, size: int) -> None:
+        """(Re)allocate the persistent slots, doubling so growth is amortized."""
+        self._retire_decode_slots()
+        current = 0 if self._decode_slots is None else self._decode_slots.numel()
+        capacity = max(8, size, 2 * current)
+        self._decode_slots = torch.zeros(capacity, dtype=torch.long, device=self._device)
+        self._decode_positions = torch.zeros(capacity, dtype=torch.long, device=self._device)
+        if self._device.type == "cuda":
+            # pinned, so the H2D below is a real async DMA rather than a staged
+            # pageable copy that blocks the calling thread
+            self._slot_staging = torch.zeros(2, capacity, dtype=torch.long).pin_memory()
+            self._slot_copy_done = torch.cuda.Event()
+            self._slot_copy_done.record()
+        else:
+            self._slot_staging = None
+            self._slot_copy_done = None
+
+    def _decode_input_slots(
+        self, tokens: list[int], positions: list[int]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Write this step's decode inputs INTO the persistent device slots.
+
+        m2 §5 names this: "the GPU runner owns a future-token device buffer
+        indexed by (request, position)". The slots are allocated once and patched
+        in place, so no decode step allocates a device tensor and BOTH decode
+        paths — batched and single-request — read the same memory. Views are
+        returned, so a caller that kept last step's view sees this step's values;
+        that aliasing is the property, and `test_decode_input_slots.py` pins it.
+
+        What this does NOT do, and what m2 §2.2 asks for, is fill the slots
+        device-to-device. The sampler decides on the host by design (m8 D2 pins
+        reproducibility to the CPU RNG stream), so the chosen id exists only as a
+        Python int and one H2D copy per step is unavoidable — see the note in
+        `sampler.py`. Removing it means moving the sampling decision itself onto
+        the device. Per-row scalar copies would be the same round trip B times
+        over, so the ids are copied as one batched transfer.
+        """
+        size = len(tokens)
+        if self._decode_slots is None or self._decode_slots.numel() < size:
+            self._allocate_decode_slots(size)
+        assert self._decode_slots is not None and self._decode_positions is not None
+        host_tokens = torch.tensor(tokens, dtype=torch.long)
+        host_positions = torch.tensor(positions, dtype=torch.long)
+        if self._slot_staging is None:
+            self._decode_slots[:size].copy_(host_tokens)
+            self._decode_positions[:size].copy_(host_positions)
+        else:
+            assert self._slot_copy_done is not None
+            # the previous step's DMA must have drained before its source rows are
+            # overwritten; in practice it long since has (the sampler syncs once
+            # per step), so this is a completed-event check, not a stall — but it
+            # does not DEPEND on the sampler still syncing. The other way the
+            # source rows stop being valid is a capacity growth, and that path
+            # waits on THIS event in `_retire_decode_slots` before replacing it.
+            self._slot_copy_done.synchronize()
+            self._slot_staging[0, :size].copy_(host_tokens)
+            self._slot_staging[1, :size].copy_(host_positions)
+            self._decode_slots[:size].copy_(self._slot_staging[0, :size], non_blocking=True)
+            self._decode_positions[:size].copy_(
+                self._slot_staging[1, :size], non_blocking=True
+            )
+            self._slot_copy_done.record()
+        return self._decode_slots[:size], self._decode_positions[:size]
+
     def _execute_decode(self, chunk: ScheduledChunk, state, sampled: dict) -> None:
         input_token, absolute, page_table, cached = self._decode_inputs(chunk, state)
+        # the single-request path uses the SAME slots as the batched one: a
+        # workload that drops to one request must not fall back to rebuilding a
+        # fresh device tensor every step
+        token_slot, position_slot = self._decode_input_slots([input_token], [absolute])
         hidden = self._model.forward_tokens(
-            torch.tensor([input_token], dtype=torch.long, device=self._device),
-            torch.tensor([absolute], device=self._device),
+            token_slot, position_slot,
             self._pool, page_table, seq_len=absolute + 1, write_from=cached,
         )
         logits = self._model.logits(hidden[-1])
@@ -371,9 +474,9 @@ class PagedModelRunner:
         if self._graph is not None:
             logits = self._graph_logits(tokens, positions, page_tables, seq_lens)
         else:
+            token_slots, position_slots = self._decode_input_slots(tokens, positions)
             hidden = self._model.forward_decode_batch(
-                torch.tensor(tokens, dtype=torch.long, device=self._device),
-                torch.tensor(positions, device=self._device),
+                token_slots, position_slots,
                 self._pool, page_tables, seq_lens, write_from,
             )
             logits = self._model.logits(hidden)  # [B, vocab]

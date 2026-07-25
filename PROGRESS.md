@@ -112,6 +112,51 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] Growing the decode slots waits for the in-flight staging DMA
+- What: `PagedModelRunner._allocate_decode_slots` now calls `_retire_decode_slots()`
+  first, which synchronizes the OLD `_slot_copy_done` event and drops the old pinned
+  staging buffer only afterwards. A new CUDA gate
+  (`test_growing_the_slots_waits_for_the_in_flight_staging_dma`) keeps a real transfer
+  outstanding (`torch.cuda._sleep` ahead of the H2D) and asserts that no replacement
+  buffer is allocated while the old event is unfinished.
+- Why: PR #143 review [P2] on the staging lifecycle. `_decode_input_slots` grew capacity
+  BEFORE it synchronized, and the growth overwrote `_slot_staging` and `_slot_copy_done`
+  together — so the `synchronize()` that followed was on a freshly recorded, empty event
+  and the handle on the outstanding DMA was already gone. Freeing pinned host memory is
+  not stream-ordered, so the source rows could be returned to the allocator while the copy
+  engine was still reading them. Ordinary generation only survived because the host
+  sampler pulls logits to CPU every step — exactly the dependency the previous entry
+  claimed the event had removed. An active decode batch can grow (8 → 9+) mid-run, so the
+  claim in the 2026-07-26 [progress] entry below ("ordered against reuse by a CUDA event")
+  did not hold across a growth until this change; it holds now.
+- Refs: m2 §2.2 + §5, PR #143 review, `kairyu/engine/core/model_runner.py`,
+  `tests/gpu/test_decode_input_slots_gpu.py`
+
+### 2026-07-26 — [progress] m2 §2.2: persistent decode input slots, and the honest scope
+- What: the decode inputs (token ids and positions) live in persistent device tensors
+  allocated once and written IN PLACE every step
+  (`PagedModelRunner._decode_input_slots`), used by the batched AND the single-request
+  decode path. No decode step allocates a device tensor, and the one-request tail of a
+  workload no longer takes a different, host-rebuilding path. On CUDA the ids are staged
+  through pinned memory and copied as one async DMA per step, ordered against reuse by a
+  CUDA event.
+  NOT done, and now stated as OPEN in `overlap.py`, `model_runner.py` and m2 §2.2 instead
+  of claimed: filling those slots DEVICE-to-device, and §2.2's "step loop never blocks on
+  `.item()`/`.cpu()`" invariant.
+- Why: the sampler decides on the CPU because m8 D2 pins reproducibility (incl. spec ≡
+  greedy) to the CPU RNG stream. The chosen id therefore exists only as a Python int and
+  there is nothing on the device to copy from; one batched H2D per step is the floor until
+  the sampling DECISION itself moves onto the device, which redefines what those pins mean.
+  An earlier revision of this entry claimed the device-to-device patch was done, on the
+  strength of a `SampledToken.device_token` that was `torch.as_tensor(int, device=cuda)` —
+  a fresh scalar H2D per row, i.e. the same round trip B times over rather than once. That
+  claim and that field are withdrawn (PR #143 review, [P1]); the single-request path gap is
+  [P2] of the same review. A second, independent violation of the same invariant remains in
+  `models/attention.py::forward_decode_batch` (`int(positions[i])` per row per layer).
+- Refs: m2 §2.2 + §5, PR #143 review, `kairyu/engine/core/model_runner.py`,
+  `kairyu/engine/core/sampler.py`, `tests/unit/test_decode_input_slots.py`,
+  `tests/gpu/test_decode_input_slots_gpu.py`
+
 ### 2026-07-26 — [amendment] m16 D6 records sequence parallelism; the §3 call-site non-goal is lifted
 - What: the entry below landed sequence parallelism but updated PROGRESS only, leaving the
   binding design doc contradicting it — m16's D1 amendment still said SP was "a design
