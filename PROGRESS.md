@@ -134,6 +134,26 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m5 D1/D3, m16 D1/D2, `docs/gpu-runbook.md` §6.1; `kairyu/engine/core/worker.py`,
   `kairyu/models/parallel.py`, `kairyu/engine/core/dist_comm.py`,
   `tests/dist/test_distributed.py` (CPU parity now pins `force_cpu=True`).
+### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
+- What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
+  `position - 1` before that token is committed. `OverlapEngineCore` takes the snapshot
+  for step N+1 before step N commits, so `state.outputs` is one short — every real-model
+  overlap run raised `IndexError: tuple index out of range`. Committed outputs still win
+  over the in-flight value, so a speculative rollback is not shadowed, and only the newest
+  position is retained (a decode reads exactly one).
+- Why: `overlap.py` already specified this — "decode chunks carry an explicit position so
+  the runner never needs previously-committed token values from the host (on GPU, the
+  last-token slot is patched device-side)" — and nothing implemented it. The toy runner
+  honours the contract by ignoring outputs entirely, which is why no CPU test could see
+  the gap. It blocked the overlap-ON half of G2 A1 and runbook §1 Gate 1, both of which
+  require overlap ON and OFF.
+  Scope: this is the HOST-SIDE half of m2 §2.2. That section specifies patching the
+  placeholder slot device-to-device from the sampled tensor with no host sync in the hot
+  path; this keeps Python ints and rebuilds the input tensor each step. Correctness is
+  restored — overlap ON now runs and matches OFF — but the device-side technique and the
+  zero-host-sync invariant remain OPEN, along with the perf gate that would show them.
+- Refs: m2 §2.2 (partially), G2 A1, `kairyu/engine/core/model_runner.py`,
+  `tests/unit/test_overlap_future_token.py`, `tests/gpu/test_overlap_future_token_gpu.py`
 
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
