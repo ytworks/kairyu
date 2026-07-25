@@ -109,11 +109,18 @@ Pro is scored by the local sandbox, not the official judge.
   rather than scoring a silent subset.
 - **LiveCodeBench Pro** pins Fugu's 2025 Q2 slice (`quater_2025_4_6`, 167
   problems) and joins each `problem_id` to a `<problem_id>.zip` in the testcase
-  repo (`testdata/<n>.in` / `.ans`). The archives also ship a per-problem
-  testlib `checker.cpp` that kairyu does **not** compile: grading is per-line
-  whitespace-normalized comparison, so multi-answer problems can only lose
-  points and the cell is a **lower bound**. Problems without a usable archive
-  are reported and excluded, never silently counted as failures.
+  repo (`testdata/<n>.in` / `.ans`). Acquisition **fails closed**: the split must
+  yield exactly 167 problems, every archive must download, and each archive's
+  usable cases must match the `sum(subtasks[].n_cases)` it declares with no
+  unpaired input. `download_file()` turns a timeout, a 401 and a 404 alike into
+  `None`, so excluding a problem would cache a smaller denominator permanently —
+  and a rate over a shrunken set is not even a lower bound on the full 167. The
+  testcase repo's pin is part of the cache identity (`AdapterInfo.extra_sources`)
+  so repinning it rebuilds rather than leaving stale bytes "ready" under a new
+  methodology. The archives also ship a per-problem testlib `checker.cpp` that
+  kairyu does **not** compile: grading is per-line whitespace-normalized
+  comparison, so multi-answer problems can only lose points and the cell is a
+  **lower bound**.
 
 ## Degradation model (why one command always completes)
 

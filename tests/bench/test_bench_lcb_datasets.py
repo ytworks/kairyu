@@ -180,6 +180,18 @@ def _pro_row(problem_id: str) -> dict:
     }
 
 
+def _complete_archive(cases: int = 1) -> bytes:
+    entries = {}
+    for index in range(1, cases + 1):
+        entries[f"testdata/{index}.in"] = f"{index} {index}\n"
+        entries[f"testdata/{index}.ans"] = f"{index * 2}\n"
+    config = (
+        "type: default\ninput_suffix: .in\noutput_suffix: .ans\n"
+        f"subtasks:\n  - score: 100\n    n_cases: {cases}\n"
+    )
+    return _zip_bytes(entries, config=config)
+
+
 def _patch_pro_hub(monkeypatch, rows, archives: dict[str, bytes]):
     import kairyu.bench.hub as hub
 
@@ -203,13 +215,14 @@ def _patch_pro_hub(monkeypatch, rows, archives: dict[str, bytes]):
     return seen
 
 
+def _full_split(count: int = 167) -> list[dict]:
+    return [_pro_row(f"p{index:04d}") for index in range(count)]
+
+
 def test_livecodebench_pro_normalize_joins_zip_testcases(tmp_path, monkeypatch):
-    archive = _zip_bytes({"testdata/1.in": "2 3\n", "testdata/1.ans": "5\n"})
-    seen = _patch_pro_hub(
-        monkeypatch,
-        [_pro_row("1983A"), _pro_row("1983B")],
-        {"1983A.zip": archive},  # 1983B has no archive -> excluded, not fatal
-    )
+    problems = _full_split()
+    archives = {f"{row['problem_id']}.zip": _complete_archive() for row in problems}
+    seen = _patch_pro_hub(monkeypatch, problems, archives)
 
     ctx = _ctx(tmp_path)
     rows = LiveCodeBenchProAdapter().normalize(ctx)
@@ -217,24 +230,101 @@ def test_livecodebench_pro_normalize_joins_zip_testcases(tmp_path, monkeypatch):
     assert seen["split"] == "quater_2025_4_6"  # Fugu's 2025 Q2 slice
     assert seen["gated"] is True
     assert len(seen["revision"]) == 40 and len(seen["testcase_revision"]) == 40
-    assert [row["id"] for row in rows] == ["lcb-pro-1983A"]
-    assert rows[0]["question"] == "solve 1983A"
-    assert rows[0]["tests"] == [{"input": "2 3\n", "output": "5\n", "testtype": "stdin"}]
+    assert len(rows) == 167  # the full published slice, never a subset
+    assert rows[0]["id"] == "lcb-pro-p0000"
+    assert rows[0]["tests"] == [{"input": "1 1\n", "output": "2\n", "testtype": "stdin"}]
+    assert rows[0]["declared_cases"] == 1
     assert rows[0]["fn_name"] is None
-    # the downloaded archive is not left behind in the cache
+    # the downloaded archives are not left behind in the cache
     assert not list((ctx.cache.assets_dir("livecodebench-pro")).glob("*.zip"))
 
 
-def test_livecodebench_pro_normalize_fails_closed_without_any_join(tmp_path, monkeypatch):
-    _patch_pro_hub(monkeypatch, [_pro_row("1983A")], {})
-    with pytest.raises(DatasetUnavailable, match="could be joined"):
+def test_livecodebench_pro_fails_closed_on_a_short_split(tmp_path, monkeypatch):
+    problems = _full_split(160)
+    _patch_pro_hub(
+        monkeypatch,
+        problems,
+        {f"{row['problem_id']}.zip": _complete_archive() for row in problems},
+    )
+    with pytest.raises(DatasetUnavailable, match="expected 167"):
+        LiveCodeBenchProAdapter().normalize(_ctx(tmp_path))
+
+
+def test_livecodebench_pro_fails_closed_on_a_missing_archive(tmp_path, monkeypatch):
+    """download_file() maps a timeout, a 401 and a 404 all to None."""
+    problems = _full_split()
+    archives = {f"{row['problem_id']}.zip": _complete_archive() for row in problems}
+    archives.pop("p0100.zip")
+    _patch_pro_hub(monkeypatch, problems, archives)
+    with pytest.raises(DatasetUnavailable, match="no usable archive for problem p0100"):
+        LiveCodeBenchProAdapter().normalize(_ctx(tmp_path))
+
+
+def test_livecodebench_pro_fails_closed_on_an_incomplete_archive(tmp_path, monkeypatch):
+    """config.yaml declares n_cases; fewer usable cases means a partial fetch."""
+    problems = _full_split()
+    archives = {f"{row['problem_id']}.zip": _complete_archive() for row in problems}
+    archives["p0007.zip"] = _zip_bytes(
+        {"testdata/1.in": "1\n", "testdata/1.ans": "1\n"},
+        config=(
+            "input_suffix: .in\noutput_suffix: .ans\n"
+            "subtasks:\n  - score: 100\n    n_cases: 60\n"
+        ),
+    )
+    _patch_pro_hub(monkeypatch, problems, archives)
+    with pytest.raises(DatasetUnavailable, match="incomplete: 1 usable cases, 60 declared"):
+        LiveCodeBenchProAdapter().normalize(_ctx(tmp_path))
+
+
+def test_livecodebench_pro_fails_closed_on_unpaired_cases(tmp_path, monkeypatch):
+    problems = _full_split()
+    archives = {f"{row['problem_id']}.zip": _complete_archive() for row in problems}
+    archives["p0003.zip"] = _zip_bytes(
+        {"testdata/1.in": "1\n", "testdata/1.ans": "1\n", "testdata/2.in": "2\n"},
+        config=(
+            "input_suffix: .in\noutput_suffix: .ans\n"
+            "subtasks:\n  - score: 100\n    n_cases: 1\n"
+        ),
+    )
+    _patch_pro_hub(monkeypatch, problems, archives)
+    with pytest.raises(DatasetUnavailable, match="unpaired"):
         LiveCodeBenchProAdapter().normalize(_ctx(tmp_path))
 
 
 def test_livecodebench_pro_normalize_reports_schema_drift(tmp_path, monkeypatch):
-    _patch_pro_hub(monkeypatch, [{"question_id": "x", "problem_statement": "y"}], {})
+    rows = _full_split()
+    rows[0] = {"question_id": "x", "problem_statement": "y"}
+    _patch_pro_hub(monkeypatch, rows, {})
     with pytest.raises(DatasetUnavailable, match="format drift"):
         LiveCodeBenchProAdapter().normalize(_ctx(tmp_path))
+
+
+def test_read_testcase_archive_reports_declared_cases():
+    from kairyu.bench.adapters.livecodebench_pro import read_testcase_archive
+
+    parsed = read_testcase_archive(_complete_archive(cases=3))
+    assert parsed.declared_cases == 3
+    assert len(parsed.tests) == 3
+    assert parsed.unpaired == ()
+    assert parsed.complete
+
+    # no config.yaml: completeness can only mean "some cases parsed"
+    bare = read_testcase_archive(_zip_bytes({"testdata/1.in": "a", "testdata/1.ans": "A"}))
+    assert bare.declared_cases is None and bare.complete
+    assert not read_testcase_archive(_zip_bytes({"README": "x"})).complete
+
+
+def test_livecodebench_pro_records_the_testcase_pin_in_cache_identity():
+    """Repinning the archives must invalidate the cache, not just the docs."""
+    from kairyu.bench.adapters.base import cache_pins
+    from kairyu.bench.adapters.livecodebench_pro import _TESTCASE_REVISION
+
+    info = LiveCodeBenchProAdapter().info
+    pins = cache_pins(info)
+    assert pins["sources"] == [
+        ["QAQAQAQAQ/LiveCodeBench-Pro-Testcase", _TESTCASE_REVISION]
+    ]
+    assert len(_TESTCASE_REVISION) == 40
 
 
 def test_livecodebench_pro_is_declared_gated(tmp_path, monkeypatch):

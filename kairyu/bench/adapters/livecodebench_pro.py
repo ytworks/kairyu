@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from dataclasses import dataclass
 
 from kairyu.bench.adapters.base import AdapterInfo, DownloadContext, RunContext
 from kairyu.bench.adapters.livecodebench import LiveCodeBenchAdapter
@@ -32,15 +33,38 @@ _DEFAULT_INPUT_SUFFIX = ".in"
 _DEFAULT_OUTPUT_SUFFIX = ".ans"
 
 
-def parse_testcase_zip(data: bytes) -> list[dict]:
-    """ZIP bytes -> stdin test rows, ordered by numeric case name.
+@dataclass(frozen=True)
+class TestcaseArchive:
+    """Parsed testcase ZIP: the cases, and how many the archive declares.
+
+    `declared_cases` is `sum(subtasks[].n_cases)` from `config.yaml`. It is what
+    makes "did I get the whole archive" answerable: a truncated download or an
+    unpaired `.in` would otherwise just shrink the denominator.
+    """
+
+    tests: list[dict]
+    declared_cases: int | None
+    unpaired: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        if self.unpaired:
+            return False
+        if self.declared_cases is None:
+            return bool(self.tests)
+        return len(self.tests) == self.declared_cases
+
+
+def read_testcase_archive(data: bytes) -> TestcaseArchive:
+    """ZIP bytes -> cases ordered by numeric name, plus completeness evidence.
 
     `config.yaml` carries the suffixes; both default to the observed
-    `.in`/`.ans`. A case is emitted only when both halves are present.
+    `.in`/`.ans`.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         names = set(archive.namelist())
         input_suffix, output_suffix = _DEFAULT_INPUT_SUFFIX, _DEFAULT_OUTPUT_SUFFIX
+        declared: int | None = None
         if "config.yaml" in names:
             import yaml
 
@@ -48,14 +72,25 @@ def parse_testcase_zip(data: bytes) -> list[dict]:
             if isinstance(config, dict):
                 input_suffix = config.get("input_suffix") or input_suffix
                 output_suffix = config.get("output_suffix") or output_suffix
+                subtasks = config.get("subtasks")
+                if isinstance(subtasks, list):
+                    counts = [
+                        subtask.get("n_cases")
+                        for subtask in subtasks
+                        if isinstance(subtask, dict)
+                        and isinstance(subtask.get("n_cases"), int)
+                    ]
+                    if counts:
+                        declared = sum(counts)
 
         stems: list[tuple[float, str, str]] = []
+        unpaired: list[str] = []
         for name in names:
             if not name.endswith(input_suffix) or name.endswith("/"):
                 continue
             stem = name[: -len(input_suffix)]
-            expected = f"{stem}{output_suffix}"
-            if expected not in names:
+            if f"{stem}{output_suffix}" not in names:
+                unpaired.append(name)
                 continue
             leaf = stem.rsplit("/", maxsplit=1)[-1]
             order = float(leaf) if leaf.isdigit() else float("inf")
@@ -74,7 +109,14 @@ def parse_testcase_zip(data: bytes) -> list[dict]:
                     "testtype": "stdin",
                 }
             )
-        return tests
+        return TestcaseArchive(
+            tests=tests, declared_cases=declared, unpaired=tuple(sorted(unpaired))
+        )
+
+
+def parse_testcase_zip(data: bytes) -> list[dict]:
+    """Cases only; see `read_testcase_archive` for completeness evidence."""
+    return read_testcase_archive(data).tests
 
 
 class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
@@ -84,6 +126,9 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
         metric="pass@1",
         hf_dataset="QAQAQAQAQ/LiveCodeBench-Pro",
         hf_revision=_PROBLEM_REVISION,
+        # The archives decide the tests, so repinning them must invalidate the
+        # cache rather than leave stale bytes "ready" under a new methodology.
+        extra_sources=(("QAQAQAQAQ/LiveCodeBench-Pro-Testcase", _TESTCASE_REVISION),),
         gated=True,
         needs_execution=True,
         annotations=(
@@ -108,9 +153,16 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
             revision=self.info.hf_revision,
             gated=True,
         )
+        # A short problem list means the split moved or the fetch was partial;
+        # either way the denominator would silently shrink.
+        if len(problems) != _SPLIT_PROBLEMS:
+            raise DatasetUnavailable(
+                f"{self.info.hf_dataset}@{self.info.hf_revision} {_SPLIT} yielded "
+                f"{len(problems)} problems, expected {_SPLIT_PROBLEMS}"
+            )
+
         assets = ctx.cache.assets_dir(self.info.name)
         normalized: list[dict] = []
-        missing_testcases: list[str] = []
         for row in problems:
             key = row.get("problem_id")
             statement = row.get("problem_statement")
@@ -126,37 +178,36 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
                 assets / f"{key}.zip",
                 revision=_TESTCASE_REVISION,
             )
+            # `download_file` maps every failure to None -- 404, but equally a
+            # timeout, a 401, or a rate limit. Excluding the problem would cache
+            # a smaller denominator as if it were the whole split, and the
+            # resulting rate is not even a lower bound on the full 167.
             if archive is None:
-                missing_testcases.append(key)
-                continue
-            tests = parse_testcase_zip(archive.read_bytes())
+                raise DatasetUnavailable(
+                    f"{self._TESTCASE_DATASET}@{_TESTCASE_REVISION} has no usable "
+                    f"archive for problem {key} (missing, or the fetch failed); "
+                    "retry rather than score a partial split"
+                )
+            parsed = read_testcase_archive(archive.read_bytes())
             archive.unlink(missing_ok=True)  # keep only the normalized JSONL
-            if not tests:
-                missing_testcases.append(key)
-                continue
+            if not parsed.complete:
+                raise DatasetUnavailable(
+                    f"{self._TESTCASE_DATASET} archive for problem {key} is "
+                    f"incomplete: {len(parsed.tests)} usable cases, "
+                    f"{parsed.declared_cases} declared in config.yaml"
+                    + (f", unpaired {list(parsed.unpaired)}" if parsed.unpaired else "")
+                )
             normalized.append(
                 {
                     "id": f"lcb-pro-{key}",
                     "question": statement,
                     "starter_code": "",
                     "fn_name": None,
-                    "tests": tests,
+                    "tests": parsed.tests,
+                    "declared_cases": parsed.declared_cases,
                     "time_limit": row.get("time_limit"),
                     "memory_limit": row.get("memory_limit"),
                 }
-            )
-        if not normalized:
-            raise DatasetUnavailable(
-                f"no {self.info.hf_dataset} {_SPLIT} problem could be joined with a "
-                f"{self._TESTCASE_DATASET} archive ({len(problems)} problems seen)"
-            )
-        if missing_testcases:
-            # Visible in the download detail; never a silent denominator change.
-            print(
-                f"[livecodebench-pro] {len(missing_testcases)} of {len(problems)} "
-                f"problems have no usable testcase archive and are excluded: "
-                f"{', '.join(missing_testcases[:10])}"
-                f"{' ...' if len(missing_testcases) > 10 else ''}"
             )
         return normalized
 
