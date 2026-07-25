@@ -150,3 +150,5 @@ def test_toy_results_record_the_running_commit(tmp_path):
     code = json.loads(out.read_text())["config"]["code"]
     assert code["commit"] and len(code["commit"]) == 40
     assert code["dirty"] in (True, False)
+    # untracked scratch dirs must not be reported as modified code
+    assert isinstance(code["untracked_files"], int)
