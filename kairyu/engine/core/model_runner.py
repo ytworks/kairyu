@@ -32,6 +32,9 @@ class PagedModelRunner:
         pool: PagedKVPool,
         sampler: Sampler | None = None,
         cache: object | None = None,
+        graph_backend: object | None = None,
+        graph_max_batch: int = 0,
+        graph_max_pages: int = 0,
     ) -> None:
         if cache is not None:  # fail-fast sizing agreement (m12 D3)
             if pool.num_pages != cache.num_pages or pool.page_size != cache.page_size:
@@ -47,6 +50,38 @@ class PagedModelRunner:
         # Input tensors (token ids, positions) must be built on the model's device
         # so the GPU forward never mixes CPU inputs with on-device weights/KV.
         self._device = next(model.parameters()).device
+        # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
+        # the seam has existed since m17 with no caller, and enabling it by
+        # default would change what every deployment executes.
+        self._graph = None
+        if graph_backend is not None:
+            from kairyu.engine.core.step_executor import GraphStepExecutor
+
+            if graph_max_batch < 1 or graph_max_pages < 1:
+                raise ValueError(
+                    "graph_max_batch and graph_max_pages must be >= 1 when a "
+                    f"graph backend is given (got {graph_max_batch}, {graph_max_pages})"
+                )
+            self._graph = GraphStepExecutor(
+                self._graph_decode,
+                graph_backend,
+                max_batch=graph_max_batch,
+                max_pages=graph_max_pages,
+                device=self._device,
+            )
+
+    def _graph_decode(self, batch) -> torch.Tensor:
+        """The captured region: embed -> layers -> norm -> logits, tensors only."""
+        hidden = self._model.forward_decode_tensors(
+            batch.token_ids, batch.positions, self._pool,
+            batch.page_tables, batch.seq_lens,
+        )
+        return self._model.logits(hidden)
+
+    def invalidate_graphs(self) -> None:
+        """Weight swap or pool resize: every capture is stale (m17 D2)."""
+        if self._graph is not None:
+            self._graph.invalidate()
 
     def release(self, request_id: str) -> None:
         """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
@@ -118,6 +153,32 @@ class PagedModelRunner:
         logits = self._model.logits(hidden[-1])
         sampled[chunk.request_id] = (self._sample(state, logits, position=chunk.position),)
 
+    def _graph_logits(
+        self,
+        tokens: list[int],
+        positions: list[int],
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+    ) -> torch.Tensor:
+        """Route this decode through capture/replay (m17 D1).
+
+        `build_decode_batch` pads the ragged page lists into the [B, max_pages]
+        tensor the captured kernels index; `GraphStepExecutor` falls back to
+        eager for an oversize batch or a page table wider than the static buffer, so
+        this cannot fail on shape.
+        """
+        from kairyu.engine.core.step_executor import build_decode_batch
+
+        batch = build_decode_batch(
+            token_ids=tokens,
+            positions=positions,
+            page_lists=page_tables,
+            seq_lens=seq_lens,
+            max_pages=max(len(table) for table in page_tables),
+            device=self._device,
+        )
+        return self._graph.execute_decode(batch)
+
     def _execute_decode_batch(
         self, chunks: list[ScheduledChunk], states: Mapping[str, object], sampled: dict
     ) -> None:
@@ -131,12 +192,15 @@ class PagedModelRunner:
             page_tables.append(page_table)
             seq_lens.append(absolute + 1)
             write_from.append(cached)
-        hidden = self._model.forward_decode_batch(
-            torch.tensor(tokens, dtype=torch.long, device=self._device),
-            torch.tensor(positions, device=self._device),
-            self._pool, page_tables, seq_lens, write_from,
-        )
-        logits = self._model.logits(hidden)  # [B, vocab]
+        if self._graph is not None:
+            logits = self._graph_logits(tokens, positions, page_tables, seq_lens)
+        else:
+            hidden = self._model.forward_decode_batch(
+                torch.tensor(tokens, dtype=torch.long, device=self._device),
+                torch.tensor(positions, device=self._device),
+                self._pool, page_tables, seq_lens, write_from,
+            )
+            logits = self._model.logits(hidden)  # [B, vocab]
         for i, chunk in enumerate(chunks):
             state = states[chunk.request_id]
             sampled[chunk.request_id] = (
