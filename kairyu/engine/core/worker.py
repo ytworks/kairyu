@@ -157,6 +157,31 @@ def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
     return TPPlacement(f"cuda:{rank}", torch.bfloat16, "nccl")
 
 
+class _DeferredComm:
+    """Forwards to whichever communicator is bound to it.
+
+    The model's `RowParallelLinear` wrappers capture a communicator at build
+    time, but the serving group must not exist until every failure-prone startup
+    step has succeeded — otherwise a rank-local failure leaves an UNaborted
+    subgroup whose teardown waits on peers that will never arrive (review [P1] on
+    #129). Building against this proxy and binding afterwards keeps both: the
+    load happens on the startup group, the step loop runs on the serving one.
+    """
+
+    def __init__(self, target) -> None:
+        self._target = target
+
+    def bind(self, target) -> None:
+        self._target = target
+
+    @property
+    def group(self):
+        return self._target.group
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_target"), name)
+
+
 def serving_group(backend: str):
     """A second process group carrying the OPERATIONAL collective timeout.
 
@@ -257,10 +282,7 @@ def _tp_worker_entry(
         timeout_s=_STARTUP_TIMEOUT_S,
     )
     startup_comm = TorchDistCommunicator(device=placement.device)
-    # created before the slow shard load, while every rank is still in lockstep
-    comm = TorchDistCommunicator(
-        group=serving_group(placement.backend), device=placement.device
-    )
+    comm = _DeferredComm(startup_comm)
     runner, _ = build_tp_runner(
         model_dir, world_size, rank, comm, num_pages, page_size, vocab, placement
     )
@@ -268,6 +290,11 @@ def _tp_worker_entry(
     # — runs on the long-timeout startup group
     handshake = startup_comm.broadcast(None, src=0)
     validate_handshake(handshake, model_dir, num_pages, page_size)
+    comm.bind(
+        TorchDistCommunicator(
+            group=serving_group(placement.backend), device=placement.device
+        )
+    )
     try:
         worker_step_loop(comm, runner)
     finally:
@@ -312,26 +339,97 @@ class DistTPLauncher:
             nprocs=tp - 1,
             join=False,
         )
-        if placement.backend == "nccl":
-            torch.cuda.set_device(0)
-        init_distributed(
-            0,
-            tp,
-            f"file://{self._init_file}",
-            backend=placement.backend,
-            timeout_s=_STARTUP_TIMEOUT_S,
-        )
-        startup_comm = TorchDistCommunicator(device=placement.device)
-        # created before the slow shard load, while every rank is still in lockstep
-        self._comm = TorchDistCommunicator(
-            group=serving_group(placement.backend), device=placement.device
-        )
-        runner, self.full_config = build_tp_runner(
-            model_dir, tp, 0, self._comm, num_pages, page_size, vocab, placement
-        )
-        # the one collective that legitimately absorbs load skew
-        startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
-        self.runner = DistTPModelRunner(self._comm, runner)
+        # Everything past the spawn can raise — an indivisible TP degree, a
+        # missing tensor, not enough GPUs. Without this the workers and the
+        # process group outlive the failed constructor: the caller sees the real
+        # error, then a "destroy_process_group() was not called" warning, and the
+        # next launcher in the same process cannot rendezvous at all.
+        try:
+            if placement.backend == "nccl":
+                torch.cuda.set_device(0)
+            init_distributed(
+                0,
+                tp,
+                f"file://{self._init_file}",
+                backend=placement.backend,
+                timeout_s=_STARTUP_TIMEOUT_S,
+            )
+            startup_comm = TorchDistCommunicator(device=placement.device)
+            # the model is built against the startup group; nothing that can fail
+            # may leave a serving subgroup behind for _abandon_start to miss
+            self._comm = _DeferredComm(startup_comm)
+            runner, self.full_config = build_tp_runner(
+                model_dir, tp, 0, self._comm, num_pages, page_size, vocab, placement
+            )
+            # the one collective that legitimately absorbs load skew
+            startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
+            # every failure-prone step is done: now the step loop gets its own
+            # bounded-timeout group
+            self._comm.bind(
+                TorchDistCommunicator(
+                    group=serving_group(placement.backend), device=placement.device
+                )
+            )
+            self.runner = DistTPModelRunner(self._comm, runner)
+        except BaseException:
+            self._abandon_start()
+            raise
+
+    def _abandon_start(self) -> None:
+        """Tear down a half-built group without waiting on it.
+
+        Order is the OPPOSITE of the normal shutdown's. There the ranks are
+        healthy and destroy is a rendezvous; here they are dead of the same error
+        or stuck in a collective nobody will complete, so `destroy_process_group`
+        — which every rank must reach — can BLOCK rather than return the original
+        error. `contextlib.suppress` catches an exception but cannot bound that
+        (review [P1] on #129).
+
+        So the communicator is aborted first, which is non-collective; after that
+        nothing can block, and the workers are terminated and reaped. Every step
+        is best-effort: this runs while an exception is in flight and must not
+        replace it with one of its own.
+        """
+        import contextlib
+        import os
+
+        import torch.distributed as dist
+
+        if dist.is_initialized():
+            with contextlib.suppress(Exception):
+                self._abort_communicator()
+            with contextlib.suppress(Exception):
+                dist.destroy_process_group()
+        for process in self._ctx.processes:
+            if process.is_alive():
+                process.terminate()
+        for process in self._ctx.processes:
+            with contextlib.suppress(Exception):
+                process.join(timeout=10)
+            if process.is_alive():  # pragma: no cover - terminate was ignored
+                with contextlib.suppress(Exception):
+                    process.kill()
+                    process.join(timeout=5)
+        with contextlib.suppress(OSError):
+            os.unlink(self._init_file)
+
+    @staticmethod
+    def _abort_communicator() -> None:
+        """NCCL only: drop the communicator without waiting for peers.
+
+        gloo needs none, and the hook is absent on older torch — both are
+        "nothing to abort" rather than an error.
+        """
+        import torch
+        import torch.distributed as dist
+
+        if not torch.cuda.is_available():
+            return
+        group = dist.distributed_c10d._get_default_group()
+        backend = group._get_backend(torch.device("cuda", torch.cuda.current_device()))
+        abort = getattr(backend, "abort", None) or getattr(backend, "_abort", None)
+        if abort is not None:
+            abort()
 
     def shutdown(self) -> None:
         import contextlib

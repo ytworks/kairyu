@@ -198,3 +198,29 @@ def test_serving_collectives_do_not_inherit_the_startup_timeout(tmp_path):
         dist.destroy_process_group()
 
 
+
+
+def test_failed_launcher_start_leaves_no_group_or_workers(llama_dir):
+    # A constructor that raises after mp.spawn used to leave the workers running
+    # and the process group initialized: the caller got the real error, then a
+    # "destroy_process_group() was not called" warning, and the NEXT launcher in
+    # the same process could not rendezvous at all.
+    import torch.distributed as dist
+
+    from kairyu.engine.core.worker import DistTPLauncher
+
+    assert not dist.is_initialized()
+    # TINY_LLAMA has 2 kv heads, so tp=4 fails inside build_tp_runner -> tp_view,
+    # i.e. after the spawn and after the group is up
+    with pytest.raises(ValueError, match="num_kv_heads"):
+        DistTPLauncher(
+            llama_dir, tp=4, num_pages=64, page_size=4, vocab=TP_VOCAB, force_cpu=True
+        )
+    assert not dist.is_initialized(), "process group survived a failed start"
+
+    # and the process is still usable: a good launcher can rendezvous afterwards
+    launcher = DistTPLauncher(
+        llama_dir, tp=2, num_pages=64, page_size=4, vocab=TP_VOCAB, force_cpu=True
+    )
+    launcher.shutdown()
+    assert not dist.is_initialized()
