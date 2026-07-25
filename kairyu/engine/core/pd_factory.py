@@ -16,8 +16,9 @@ KV actually lives:
 The device path also DEFERS (m18 D3): the copy's completion event is recorded
 instead of blocking the host, so the producer's next step is queued alongside it.
 That is only offered where the consumer honours it — `build_pd_coordinator`
-returns a `PDCoordinator`, which gates every prefill-side release on the event
-and therefore keeps the source pages leased for the copy's whole lifetime.
+returns a `PDCoordinator`, which holds the whole settlement (release, commit and
+decode-side adoption) behind that event until its next prefill forward has been
+queued, keeping the source pages leased for the copy's whole lifetime.
 `build_kv_handoff` defaults to the blocking form for any other caller.
 """
 
@@ -107,10 +108,11 @@ def build_pd_coordinator(
 
     `defer_handoff` defaults ON here, and only here: this is the one caller that
     both enables the deferred copy and settles it. `PDCoordinator` keeps the
-    prefill-side allocation leased and gates every release on the copy's
-    completion event, so the producer's next step overlaps the copy without the
-    source pages ever being reusable under it. Pass False to fall back to the
-    blocking copy (bisecting a suspected ordering bug against it, for instance).
+    prefill-side allocation leased and settles a step's transfers only after the
+    NEXT prefill forward has been queued, so the copy overlaps that forward
+    without the source pages ever being reusable under it. Pass False to fall
+    back to the blocking copy (bisecting a suspected ordering bug against it,
+    for instance).
     """
     import torch
 

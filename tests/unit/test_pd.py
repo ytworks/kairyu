@@ -296,6 +296,23 @@ class _WatchedKVCache(RadixKVCache):
         return super().free(*args, **kwargs)
 
 
+class _LoggingRunner(_ToyRunner):
+    """A runner that puts its forward on the same timeline as the stream calls.
+
+    Without it the timeline shows only copies and releases, and a gate fenced
+    directly in front of every kernel looks exactly like a gate that lets one
+    through — which is how the un-overlapped version passed review twice.
+    """
+
+    def __init__(self, log: list[str], name: str) -> None:
+        self._log = log
+        self._name = name
+
+    def execute(self, scheduled, states):
+        self._log.append(f"execute:{self._name}")
+        return super().execute(scheduled, states)
+
+
 def _deferred_coordinator(*, failures: int = 0, max_transfer_retries: int = 1):
     """A PDCoordinator whose handoff returns before its copy has finished."""
     from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
@@ -308,9 +325,9 @@ def _deferred_coordinator(*, failures: int = 0, max_transfer_retries: int = 1):
     inner = LocalKVHandoff(decode_kv)
     coordinator = PDCoordinator(
         prefill_scheduler=prefill_sched,
-        prefill_runner=_ToyRunner(),
+        prefill_runner=_LoggingRunner(log, "prefill"),
         decode_scheduler=decode_sched,
-        decode_runner=_ToyRunner(),
+        decode_runner=_LoggingRunner(log, "decode"),
         handoff=StreamCopyKVHandoff(
             _FlakyHandoff(inner, failures) if failures else inner, provider, defer=True
         ),
@@ -384,6 +401,68 @@ def test_every_copy_in_a_batched_prefill_step_is_settled() -> None:
     assert outputs == _single_core_reference(requests)
     assert log.count("record") == 2, f"expected one copy per prompt: {log}"
     _assert_no_release_under_a_running_copy(log)
+
+
+def _assert_every_copy_overlaps_engine_work(log: list[str]) -> None:
+    """The point of deferring: a copy must have engine work queued ALONGSIDE it.
+
+    ``record`` starts a copy on the side stream; the first ``wait`` after it is
+    the gate that orders the caller's stream behind that copy. Anything the
+    coordinator enqueues in between runs against the copy; a gate with nothing
+    in between is a fence, and the copy is back on the critical path even though
+    the host was never blocked.
+    """
+    records = [index for index, event in enumerate(log) if event == "record"]
+    assert records, "the handoff never deferred; the test proves nothing"
+    for index in records:
+        gate = next(
+            (j for j in range(index + 1, len(log)) if log[j] == "wait"), None
+        )
+        assert gate is not None, f"a deferred copy was never settled: {log}"
+        overlapped = [e for e in log[index + 1 : gate] if e.startswith("execute")]
+        assert overlapped, (
+            f"the copy recorded at {index} was gated at {gate} with no engine "
+            f"work queued in between: nothing overlapped it, so deferring bought "
+            f"only a non-blocking host. timeline: {log}"
+        )
+
+
+def test_a_deferred_copy_has_engine_work_queued_alongside_it() -> None:
+    """[P1] the gate used to sit at the end of the step that started the copy.
+
+    Both prompts here transfer in different steps, so each copy has a later
+    prefill forward or a decode step available to overlap with — if the gate is
+    positioned to let them through.
+    """
+    coordinator, log = _deferred_coordinator()
+    requests = [
+        # 24 + 24 tokens against a 32-token budget: `a` prefills in one step,
+        # `b` spills into the next, so step 2 has a forward to queue while a's
+        # copy is still running
+        EngineRequest("a", prompt_token_ids=tuple(range(1, 25)), max_new_tokens=2),
+        EngineRequest("b", prompt_token_ids=tuple(range(50, 74)), max_new_tokens=2),
+    ]
+    for request in requests:
+        coordinator.add_request(request)
+
+    outputs = coordinator.run_to_completion()
+
+    assert outputs == _single_core_reference(requests)
+    _assert_every_copy_overlaps_engine_work(log)
+    _assert_no_release_under_a_running_copy(log)
+
+
+def test_a_blocking_handoff_settles_inside_its_own_step() -> None:
+    """The pipeline is the deferring path's alone: a blocking transfer already
+    finished its copy, so holding the request back a step would buy nothing."""
+    coordinator, _, _ = _make_coordinator()
+    request = EngineRequest("r", prompt_token_ids=(1, 2, 3, 4, 5, 6), max_new_tokens=3)
+    coordinator.add_request(request)
+
+    coordinator._step_prefill()
+
+    assert coordinator._handover is None
+    assert "r" in coordinator._decode.states, "adoption was deferred for no reason"
 
 
 def test_a_deferring_handoff_that_cannot_be_gated_is_refused() -> None:

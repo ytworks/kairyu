@@ -112,6 +112,32 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] m18 D3: the deferred KV copy's gate is pipelined one producer step
+- What: `PDCoordinator` no longer settles a deferred transfer in the step that started it.
+  `_release_source_pages` is replaced by `_settle_handover`, which completes a whole
+  step's transfers at once — the prefill commit, the abort on a failed copy, AND the
+  decode-side `resume_with_kv` — behind one `gate_pending()`. `_step_prefill` plans, runs
+  its forward, and only then settles the PREVIOUS step's `_Handover`, so the gate lands
+  with that forward (and the decode step queued before it) already in front of it. A step
+  with nothing to schedule settles up front instead, so the leased pages come back rather
+  than deadlocking admission. Blocking handoffs are unaffected: they settle in their own
+  step, as before. Correction to the entry below, which claimed the gate gave the producer
+  overlap; it did not.
+- Why: [P1] on PR #142. The gate was stream-ordered rather than a host block, but it sat
+  immediately before every subsequent kernel — the decode step and the next prefill
+  forward were both queued after it — so the device timeline stayed exactly as serial as
+  the blocking form. Measured on the 8× RTX PRO 6000 host before the fix: copy
+  `[11.651, 12.342] ms`, next prefill forward `[12.898, 13.369] ms`; after it the two
+  intervals overlap. Adoption had to move with the release because it is the other half of
+  the m6 D4 rule (it is what puts the destination pages in front of the decode runner).
+  The cost is one extra step of prefill-side KV lease — capacity, never correctness, since
+  a page the prefill scheduler still owns cannot be handed to anyone else.
+- Refs: m18 D3 (amended), `kairyu/engine/core/pd.py`, `tests/unit/test_pd.py`
+  (`test_a_deferred_copy_has_engine_work_queued_alongside_it`,
+  `test_a_blocking_handoff_settles_inside_its_own_step`),
+  `tests/gpu/test_handoff_stream_gpu.py`
+  (`test_the_copy_overlaps_the_next_prefill_forward_on_the_coordinator`)
+
 ### 2026-07-26 — [amendment] m18 D3: the deferred KV copy keeps its source lease, and gets a caller
 - What: `StreamCopyKVHandoff(defer=True)` records the copy's completion event instead of
   blocking, and `PDCoordinator` is now the consumer that settles it.

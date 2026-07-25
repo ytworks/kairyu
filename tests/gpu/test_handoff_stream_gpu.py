@@ -473,6 +473,116 @@ def test_gating_does_not_stop_the_host_the_way_waiting_does():
     torch.cuda.synchronize()
 
 
+def test_the_copy_overlaps_the_next_prefill_forward_on_the_coordinator():
+    """[P1] a non-blocking host is not overlap.
+
+    The gate used to sit at the end of the very step that recorded the copy, so
+    every later kernel — the decode step, the next prefill forward — queued
+    behind it. The host no longer stopped, but the device timeline was still
+    serial. This measures the thing that actually matters, on the device clock:
+    the interval the copy occupies on the side stream against the interval the
+    NEXT prefill forward occupies on the caller's stream.
+    """
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+    from kairyu.engine.core.pd import PDCoordinator
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampling_types import SampledToken
+    from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+
+    _require_cuda()
+
+    def _burn(payload):
+        out = payload * 1.000001
+        for _ in range(40):
+            out = out * 1.000001
+        return out
+
+    class _TimedProvider(CudaStreamProvider):
+        """CudaStreamProvider that also brackets each copy with timing events."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.spans: list[tuple] = []
+            self._opened = None
+
+        def begin(self) -> None:
+            super().begin()
+            self._opened = torch.cuda.Event(enable_timing=True)
+            self._opened.record(self._stream)
+
+        def record(self):
+            self._close_window()
+            done = torch.cuda.Event(enable_timing=True)
+            done.record(self._stream)
+            self.spans.append((self._opened, done))
+            return done
+
+    class _SlowCopy:
+        """Accounting-only transfer plus device work long enough to be timed."""
+
+        def __init__(self, dest_kv, payload) -> None:
+            self._dest, self._payload, self.sink = dest_kv, payload, None
+
+        def transfer(self, tokens, first_token, pages=()):
+            self.sink = _burn(self._payload)
+            allocation = self._dest.allocate(tuple(tokens))
+            self._dest.mark_computed(allocation)
+            return allocation
+
+    class _KernelRunner:
+        """A runner whose forward is real device work on the caller's stream."""
+
+        def __init__(self, payload) -> None:
+            self._payload, self.sink = payload, None
+            self.spans: list[tuple] = []
+
+        def execute(self, scheduled, states):
+            start = torch.cuda.Event(enable_timing=True)
+            start.record()
+            self.sink = _burn(self._payload)
+            done = torch.cuda.Event(enable_timing=True)
+            done.record()
+            self.spans.append((start, done))
+            return {
+                chunk.request_id: (SampledToken(7),)
+                for chunk in scheduled
+                if not chunk.is_prefill or states[chunk.request_id].prefill_done
+            }
+
+    payload = torch.randn(1 << 23, device="cuda:0")  # 32 MB per kernel
+    prefill_kv = RadixKVCache(num_pages=64, page_size=4)
+    decode_kv = RadixKVCache(num_pages=64, page_size=4)
+    provider = _TimedProvider()
+    prefill_runner = _KernelRunner(payload)
+    coordinator = PDCoordinator(
+        prefill_scheduler=Scheduler(prefill_kv, max_num_batched_tokens=32, page_size=4),
+        prefill_runner=prefill_runner,
+        decode_scheduler=Scheduler(decode_kv, max_num_batched_tokens=32, page_size=4),
+        decode_runner=_KernelRunner(payload),
+        handoff=StreamCopyKVHandoff(_SlowCopy(decode_kv, payload), provider, defer=True),
+    )
+    # 24 + 24 prompt tokens against a 32-token budget: `a` finishes prefilling in
+    # step 1, `b` spills into step 2 — so step 2 has a forward to run while a's
+    # copy is still going, if the gate lets it through
+    coordinator.add_request(EngineRequest("a", tuple(range(1, 25)), max_new_tokens=2))
+    coordinator.add_request(EngineRequest("b", tuple(range(50, 74)), max_new_tokens=2))
+    base = torch.cuda.Event(enable_timing=True)
+    base.record()
+
+    coordinator.run_to_completion()
+
+    torch.cuda.synchronize()
+    assert len(provider.spans) >= 1, "the handoff never deferred"
+    assert len(prefill_runner.spans) >= 2, "no second prefill forward to overlap with"
+    copy_start, copy_end = (base.elapsed_time(e) for e in provider.spans[0])
+    next_start, next_end = (base.elapsed_time(e) for e in prefill_runner.spans[1])
+    assert copy_start < next_end and next_start < copy_end, (
+        f"copy ran [{copy_start:.3f}, {copy_end:.3f}] ms and the next prefill "
+        f"forward ran [{next_start:.3f}, {next_end:.3f}] ms: the two never "
+        "overlapped, so the gate is still fencing the producer"
+    )
+
+
 def test_the_production_coordinator_defers_on_a_device_pool():
     """[P1] there was no production caller that enabled the deferred path."""
     from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
