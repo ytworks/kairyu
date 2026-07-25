@@ -145,11 +145,49 @@ async def test_judge_sends_its_own_reasoning_effort():
         ("[1, 2]", "must be a JSON object"),
         ('{"model": "sneaky"}', "may not override model"),
         ('{"messages": [], "stream": true}', "may not override messages, stream"),
+        # merged last, so these would silently beat the adapter's request...
+        ('{"max_tokens": 1}', "may not override max_tokens"),
+        ('{"temperature": 1.5}', "may not override temperature"),
+        # ...and these would beat the typed policy the fingerprint records
+        ('{"reasoning_effort": "low"}', "may not override reasoning_effort"),
+        ('{"top_p": 0.1}', "may not override top_p"),
+        ('{"seed": 9}', "may not override seed"),
     ],
 )
 def test_extra_body_is_validated_at_load_time(value, message):
     with pytest.raises(ValueError, match=message):
         BenchTarget(base_url="http://gw", model="m", extra_body_json=value)
+
+
+async def test_extra_body_cannot_silently_replace_the_adapter_request():
+    """Whatever extra_body carries, the adapter's own fields survive."""
+    client, seen = _capture_body()
+    target = make_target(
+        reasoning_effort="high",
+        extra_body_json='{"chat_template_kwargs": {"enable_thinking": false}}',
+    )
+    async with client:
+        await call_chat(
+            client,
+            target,
+            ChatRequestSpec(
+                messages=({"role": "user", "content": "q"},), max_tokens=64, temperature=0.0
+            ),
+            retries=0,
+            timeout_s=5,
+        )
+    body = seen[0]
+    assert body["max_tokens"] == 64
+    assert body["temperature"] == 0.0
+    assert body["reasoning_effort"] == "high"
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_judge_extra_body_is_validated_too():
+    with pytest.raises(ValueError, match="may not override reasoning_effort"):
+        JudgeConfig(
+            base_url="http://gw", model="j", extra_body_json='{"reasoning_effort": "x"}'
+        )
 
 
 def test_top_p_bounds_are_enforced():

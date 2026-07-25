@@ -15,8 +15,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 SCHEMA_VERSION = 1
 
 # `extra_body` is an escape hatch for vendor knobs, not a way to silently
-# retarget or reshape the benchmark request.
-_RESERVED_BODY_KEYS = frozenset({"model", "messages", "stream"})
+# retarget or reshape the benchmark request. It is merged LAST, so anything
+# built elsewhere would win if it were allowed through: the adapter's prompt and
+# token budget (`messages`, `max_tokens`, `temperature`) and the typed sampling
+# fields below. Allowing those would let the effective request disagree with the
+# configuration that the run fingerprint and methodology record.
+_RESERVED_BODY_KEYS = frozenset(
+    {
+        "model",
+        "messages",
+        "stream",
+        "temperature",
+        "max_tokens",
+        "reasoning_effort",
+        "top_p",
+        "seed",
+    }
+)
 
 
 def _validate_extra_body(value: str | None) -> str | None:
@@ -30,7 +45,11 @@ def _validate_extra_body(value: str | None) -> str | None:
         raise ValueError("extra_body_json must be a JSON object")
     clashes = sorted(_RESERVED_BODY_KEYS & set(parsed))
     if clashes:
-        raise ValueError(f"extra_body_json may not override {', '.join(clashes)}")
+        raise ValueError(
+            f"extra_body_json may not override {', '.join(clashes)}: those fields "
+            "are built from the adapter's request and this endpoint's typed "
+            "sampling policy, which the run fingerprint records"
+        )
     return value
 
 
@@ -41,6 +60,11 @@ class SamplingOptions(BaseModel):
     user simulator ran at `low`; reproducing either needs the effort (and, for
     vendors that spell it differently, `extra_body`) to reach the wire.
     Adapters own prompts and `max_tokens`; the target owns sampling.
+
+    Slots that issue their own chat requests pick this up through `call_chat`.
+    The three external-harness slots (SWE-Bench Pro, Terminal-Bench, τ³) cannot:
+    they drive a separate CLI, so each maps whatever its harness exposes and
+    annotates what it cannot forward — see `wire_overrides()` callers.
     """
 
     reasoning_effort: str | None = None
