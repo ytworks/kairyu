@@ -37,7 +37,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
 | M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
-| M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. |
+| M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26). |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
@@ -111,6 +111,25 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [amendment] m16 D6 records sequence parallelism; the §3 call-site non-goal is lifted
+- What: the entry below landed sequence parallelism but updated PROGRESS only, leaving the
+  binding design doc contradicting it — m16's D1 amendment still said SP was "a design
+  change this milestone does not specify" and §3 still listed USING `reduce_scatter` at the
+  `RowParallelLinear` call site as a non-goal, which is exactly what shipped. Reconciled in
+  `docs/design/m16-distributed.md`: new **D6** records the `SequenceParallelContext`
+  contract (`scatter`/`gather`/`reduce_scatter`), the wrapper placement over D2's tree, the
+  rule that padding lives at the shard boundary ONLY (attention builds its mask from the
+  real length), the activation-memory-not-latency framing, and the scope — dense
+  `build_tp_model` only, NOT EP/PP/the SPMD worker. §3's non-goal is narrowed to those
+  unwired paths and to making SP the default; D1's closing paragraph now points at D6; the
+  Status line and §5 verification list the gates. No code change.
+- Why: repo rule — a design change must move the D-IDs in `docs/design/` and PROGRESS in the
+  SAME change. A design doc that denies what the code does is worse than silence: the next
+  agent reads §3, believes the call site is untouched, and reasons from a false premise.
+  Recorded as an amendment rather than by editing the entry below, which stays as written.
+- Refs: m16 D1/D2/D6 + §3/§5 (`docs/design/m16-distributed.md`), PR #139 review [P2],
+  commit 4d1f9f0
 
 ### 2026-07-26 — [design] Sequence parallelism (Megatron TP+SP) behind an opt-in flag
 - What: `build_tp_model(..., sequence_parallel=True)` shards the residual stream between
