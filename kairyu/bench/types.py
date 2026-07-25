@@ -7,14 +7,95 @@ and re-read for resume, so round-tripping through JSON must be lossless.
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SCHEMA_VERSION = 1
 
+# `extra_body` is an escape hatch for vendor knobs, not a way to silently
+# retarget or reshape the benchmark request. It is merged LAST, so anything
+# built elsewhere would win if it were allowed through: the adapter's prompt and
+# token budget (`messages`, `max_tokens`, `temperature`) and the typed sampling
+# fields below. Allowing those would let the effective request disagree with the
+# configuration that the run fingerprint and methodology record.
+_RESERVED_BODY_KEYS = frozenset(
+    {
+        "model",
+        "messages",
+        "stream",
+        "temperature",
+        "max_tokens",
+        "reasoning_effort",
+        "top_p",
+        "seed",
+    }
+)
 
-class BenchTarget(BaseModel):
+
+def _validate_extra_body(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"extra_body_json is not valid JSON: {error}") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("extra_body_json must be a JSON object")
+    clashes = sorted(_RESERVED_BODY_KEYS & set(parsed))
+    if clashes:
+        raise ValueError(
+            f"extra_body_json may not override {', '.join(clashes)}: those fields "
+            "are built from the adapter's request and this endpoint's typed "
+            "sampling policy, which the run fingerprint records"
+        )
+    return value
+
+
+class SamplingOptions(BaseModel):
+    """Request knobs that belong to an endpoint, not to a benchmark.
+
+    Fugu reports scores at each model's maximum reasoning effort, and its τ³
+    user simulator ran at `low`; reproducing either needs the effort (and, for
+    vendors that spell it differently, `extra_body`) to reach the wire.
+    Adapters own prompts and `max_tokens`; the target owns sampling.
+
+    Slots that issue their own chat requests pick this up through `call_chat`.
+    The three external-harness slots (SWE-Bench Pro, Terminal-Bench, τ³) cannot:
+    they drive a separate CLI, so each maps whatever its harness exposes and
+    annotates what it cannot forward — see `wire_overrides()` callers.
+    """
+
+    reasoning_effort: str | None = None
+    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    seed: int | None = None
+    # JSON object string: hashable, so the frozen models stay hashable, and
+    # validated once at config load instead of at request time.
+    extra_body_json: str | None = None
+
+    @field_validator("extra_body_json")
+    @classmethod
+    def _check_extra_body(cls, value: str | None) -> str | None:
+        return _validate_extra_body(value)
+
+    def extra_body(self) -> dict:
+        return json.loads(self.extra_body_json) if self.extra_body_json else {}
+
+    def wire_overrides(self) -> dict:
+        """Body fields this endpoint adds to every request."""
+        body: dict = {}
+        if self.reasoning_effort is not None:
+            body["reasoning_effort"] = self.reasoning_effort
+        if self.top_p is not None:
+            body["top_p"] = self.top_p
+        if self.seed is not None:
+            body["seed"] = self.seed
+        body.update(self.extra_body())
+        return body
+
+
+class BenchTarget(SamplingOptions):
     """One scoreboard column: a model name on an OpenAI-compatible endpoint.
 
     Single models and orchestrations are both just model names ("llama-70b"
@@ -35,8 +116,12 @@ class BenchTarget(BaseModel):
         return self.name or self.model
 
 
-class JudgeConfig(BaseModel):
-    """LLM judge endpoint (any OpenAI-compatible server, incl. kairyu itself)."""
+class JudgeConfig(SamplingOptions):
+    """LLM judge endpoint (any OpenAI-compatible server, incl. kairyu itself).
+
+    Also serves as the τ-bench user simulator, which Fugu ran at `low` reasoning
+    effort — hence the shared sampling knobs.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -63,6 +148,10 @@ class BenchConfig(BaseModel):
     only: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     seed: int = 0
+    # Trials per task for the agentic harnesses (Terminal-Bench `-k`, tau
+    # `--num-trials`). Fugu reports tau-3 Banking as pass@4; the default stays 1
+    # because each extra attempt is another full docker/agent run.
+    attempts: int = Field(default=1, ge=1)
     concurrency: int = Field(default=8, ge=1)  # in-flight requests per pair
     request_timeout_s: float = Field(default=600.0, gt=0)
     retries: int = Field(default=2, ge=0)
@@ -71,6 +160,7 @@ class BenchConfig(BaseModel):
     run_id: str | None = None  # reuse an id to resume
     rerun: bool = False  # ignore existing pair results
     download: bool = True  # auto-download missing datasets before running
+    progress: bool = True  # live per-slot progress (bars on a TTY, lines in logs)
 
 
 SMOKE_LIMIT = 20

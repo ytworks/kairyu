@@ -55,7 +55,9 @@ class LongBenchV2Adapter(GenerativeAdapter):
     def normalize(self, ctx: DownloadContext) -> list[dict]:
         from kairyu.bench.hub import load_hf_rows
 
-        rows = load_hf_rows(self.info.hf_dataset, split="train")
+        rows = load_hf_rows(
+            self.info.hf_dataset, split="train", revision=self.info.hf_revision
+        )
         return [
             {
                 "id": row["_id"],

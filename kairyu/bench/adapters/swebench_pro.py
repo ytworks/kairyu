@@ -30,6 +30,23 @@ from kairyu.bench.types import BenchTarget, DownloadReport, ItemResult, PairResu
 
 _STAGE_TIMEOUT_S = 8 * 3600
 _DATASET = "ScaleAI/SWE-bench_Pro"
+# Fugu runs mini-swe-agent with a 1,000-turn budget; the harness default
+# (config/benchmarks/swebench.yaml) is agent.step_limit: 250, so a long trace
+# would be cut off four times earlier than the published condition.
+_STEP_LIMIT = 1000
+# mini-swe-agent merges -c specs recursively but DROPS its default config as
+# soon as -c is given, so the default file has to be restated by name.
+_BASE_CONFIG = "swebench.yaml"
+
+
+def _model_kwargs(target: BenchTarget) -> dict[str, object]:
+    """Named sampling fields the harness can forward to its LLM client."""
+    fields = {
+        "reasoning_effort": target.reasoning_effort,
+        "top_p": target.top_p,
+        "seed": target.seed,
+    }
+    return {name: value for name, value in fields.items() if value is not None}
 
 
 def harness_missing() -> str | None:
@@ -64,7 +81,13 @@ class SweBenchProAdapter:
         hf_dataset=_DATASET,
         needs_docker=True,
         agentic=True,
-        annotations=("scaffold: mini-swe-agent (matches Fugu's published methodology)",),
+        annotations=(
+            "scaffold: mini-swe-agent (matches Fugu's published methodology), "
+            f"agent.step_limit={_STEP_LIMIT}",
+            "the target's named sampling fields are forwarded as "
+            "model.model_kwargs.*; vendor extra_body has no harness equivalent "
+            "and is NOT forwarded",
+        ),
     )
 
     def download(self, ctx: DownloadContext) -> DownloadReport:
@@ -99,7 +122,16 @@ class SweBenchProAdapter:
             str(output),
             "--workers",
             str(ctx.concurrency),
+            "--config",
+            _BASE_CONFIG,
+            "--config",
+            f"agent.step_limit={_STEP_LIMIT}",
         ]
+        # The harness forwards `model.model_kwargs.*` to its LLM client, so the
+        # endpoint's named sampling policy can reach the agent's requests. Vendor
+        # `extra_body` has no equivalent key and is annotated instead of guessed.
+        for field, value in _model_kwargs(target).items():
+            command += ["--config", f"model.model_kwargs.{field}={value}"]
         if ctx.limit is not None:
             command += ["--slice", f"0:{ctx.limit}"]
         return command
@@ -179,7 +211,11 @@ class SweBenchProAdapter:
                 "metric": self.info.metric,
                 "dataset": _DATASET,
                 "scaffold": "mini-swe-agent",
+                "step_limit": _STEP_LIMIT,
                 "evaluation": "swebench.harness.run_evaluation (docker)",
+                "generate_command": " ".join(
+                    self._generate_command(target, ctx, Path("preds.json"))
+                ),
             },
             annotations=self.info.annotations,
             started_at=started_at,

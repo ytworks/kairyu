@@ -5,11 +5,16 @@ saturates a shared gateway; sequential pairs keep per-cell numbers
 uncontended and comparable). Resume: same --run-id reuses every stored pair
 whose run fingerprint matches and status is not "failed". Exit code 1 only
 when a pair hard-failed.
+
+Live per-pair output belongs to the progress reporter (stderr); stdout carries
+the artifacts — download notes and the final scoreboard — so a run can be piped
+without the play-by-play interleaving into it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -23,6 +28,7 @@ from kairyu.bench.adapters import suite_adapters
 from kairyu.bench.adapters.base import (
     DownloadContext,
     RunContext,
+    cache_pins,
     skipped_pair,
     utc_now,
 )
@@ -32,8 +38,12 @@ from kairyu.bench.compare import build_comparison, render_comparison_markdown
 from kairyu.bench.store import ResultStore
 from kairyu.bench.types import SMOKE_LIMIT, BenchConfig, PairResult
 
+# How often a running pair reports that it is still alive.
+_HEARTBEAT_INTERVAL_S = 15.0
+
 _FINGERPRINT_EXCLUSIONS = frozenset(
-    {"run_id", "results_dir", "cache_dir", "rerun", "download"}
+    # location, resume and display controls: none of them change a score
+    {"run_id", "results_dir", "cache_dir", "rerun", "download", "progress"}
 )
 
 
@@ -74,9 +84,9 @@ def _adapter_identity(adapter, cache: BenchCache, *, offline_fixtures: bool) -> 
         "dataset": info.hf_dataset,
         "revision": info.hf_revision,
     }
-    if offline_fixtures or not cache.is_ready(
-        info.name, info.hf_dataset, info.hf_revision
-    ):
+    pins = cache_pins(info)
+    identity = {**identity, "sources": pins["sources"]}
+    if offline_fixtures or not cache.is_ready(info.name, **pins):
         return {**identity, "unavailable": True}
     try:
         manifest = cache.read_manifest(info.name)
@@ -156,12 +166,27 @@ def _stamp_run_reasons(
 
 
 class SuiteRunner:
-    def __init__(self, config: BenchConfig, *, http_factory=None, probe_docker=None) -> None:
+    def __init__(
+        self,
+        config: BenchConfig,
+        *,
+        http_factory=None,
+        probe_docker=None,
+        progress=None,
+    ) -> None:
         self.config = config
         self._http_factory = http_factory or (lambda: httpx.AsyncClient())
         self._probe_docker = probe_docker
+        from kairyu.bench.progress import SafeReporter, make_reporter
 
-    def _build_context(self, cache: BenchCache) -> RunContext:
+        if progress is None:
+            progress = make_reporter(enabled=config.progress)
+        # An injected reporter is guarded too: no reporter may end a run.
+        self._progress = (
+            progress if isinstance(progress, SafeReporter) else SafeReporter(progress)
+        )
+
+    def _build_context(self, cache: BenchCache, run_id: str = "") -> RunContext:
         config = self.config
         limit = config.limit
         if config.smoke:
@@ -183,23 +208,42 @@ class SuiteRunner:
             judge=judge,
             limit=limit,
             seed=config.seed,
+            attempts=config.attempts,
+            run_id=run_id,
             concurrency=config.concurrency,
             retries=config.retries,
             request_timeout_s=config.request_timeout_s,
             offline_fixtures=config.offline_fixtures,
             smoke=config.smoke,
             docker=docker,
+            progress=self._progress,
             exec_semaphore=asyncio.Semaphore(max(1, (os.cpu_count() or 4) - 1)),
         )
+
+    async def _run_pair(self, adapter, target, ctx: RunContext):
+        """Run one pair, keeping the log moving while it is in progress.
+
+        External harnesses never report items and their subprocess output is
+        captured, so a heartbeat is the only thing distinguishing an 8-hour run
+        from a hung one in a non-TTY log.
+        """
+        heartbeat = asyncio.create_task(self._heartbeat())
+        try:
+            return await adapter.run(target, ctx)
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+
+    async def _heartbeat(self) -> None:
+        while True:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+            self._progress.pair_heartbeat()
 
     def _download_missing(self, adapters, cache: BenchCache, ctx: RunContext) -> None:
         download_ctx = DownloadContext(cache=cache)
         for adapter in adapters:
-            if cache.is_ready(
-                adapter.info.name,
-                adapter.info.hf_dataset,
-                adapter.info.hf_revision,
-            ):
+            if cache.is_ready(adapter.info.name, **cache_pins(adapter.info)):
                 continue
             report = adapter.download(download_ctx)
             if report.status in ("gated", "unavailable", "extras_missing"):
@@ -209,13 +253,20 @@ class SuiteRunner:
                 print(f"[download] {adapter.info.name}: {report.status} {report.detail}")
 
     async def run(self) -> int:
+        """Run the suite; the reporter is closed even on failure or cancellation."""
+        try:
+            return await self._run()
+        finally:
+            self._progress.close()
+
+    async def _run(self) -> int:
         config = self.config
         adapters = suite_adapters(config.suite, only=config.only, exclude=config.exclude)
         cache = BenchCache(resolve_cache_root(config.cache_dir))
         run_id = config.run_id or _default_run_id()
         store = ResultStore(config.results_dir, run_id)
 
-        ctx = self._build_context(cache)
+        ctx = self._build_context(cache, run_id)
         if config.download and not config.offline_fixtures:
             self._download_missing(adapters, cache, ctx)
 
@@ -249,6 +300,7 @@ class SuiteRunner:
         targets = [target.label() for target in config.targets]
         run_reasons = run_level_incomparable_reasons(config, ctx.limit)
         pairs: list[PairResult] = []
+        self._progress.suite_start(len(adapters) * len(config.targets))
         for adapter in adapters:
             for target in config.targets:
                 label = target.label()
@@ -268,7 +320,10 @@ class SuiteRunner:
                         expected_fingerprint=fingerprint,
                     )
                     if existing is not None and existing.status != "failed":
-                        print(f"[cached] {adapter.info.name} × {label}: {existing.status}")
+                        self._progress.pair_start(adapter.info.name, label)
+                        self._progress.pair_done(
+                            existing.status, existing.score, cached=True
+                        )
                         # A pair stored before these fields existed validates with
                         # comparable=True by model default and carries the same
                         # fingerprint, so without this a resumed subset or fixture
@@ -280,7 +335,11 @@ class SuiteRunner:
                             store.save_pair(stamped)
                         pairs.append(stamped)
                         continue
-                print(f"[run] {adapter.info.name} × {label} ...")
+                self._progress.pair_start(
+                    adapter.info.name,
+                    label,
+                    note="agentic harness" if adapter.info.agentic else "",
+                )
                 if dataset_identity_changed:
                     result = skipped_pair(
                         adapter.info.name,
@@ -290,7 +349,7 @@ class SuiteRunner:
                     )
                 else:
                     try:
-                        result = await adapter.run(target, ctx)
+                        result = await self._run_pair(adapter, target, ctx)
                     except Exception as error:  # noqa: BLE001 - isolate each pair
                         result = PairResult(
                             benchmark=adapter.info.name,
@@ -304,8 +363,7 @@ class SuiteRunner:
                         )
                 result = _stamp_run_reasons(result, fingerprint, run_reasons)
                 store.save_pair(result)
-                score = f"{result.score * 100:.1f}" if result.score is not None else "n/a"
-                print(f"       -> {result.status} (score={score})")
+                self._progress.pair_done(result.status, result.score)
                 pairs.append(result)
 
         scoreboard = build_scoreboard(
