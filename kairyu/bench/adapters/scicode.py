@@ -366,6 +366,10 @@ class SciCodeAdapter(GenerativeAdapter):
 
         dest = ctx.cache.assets_dir(self.info.name) / _H5_NAME
         for repo_id, revision in _H5_SOURCES:
+            # the upstream repo is the slot's own dataset, so it uses the slot's
+            # pin; the mirror carries its own
+            if revision is None and repo_id == self.info.hf_dataset:
+                revision = self.info.hf_revision
             path = download_file(repo_id, _H5_NAME, dest, revision=revision)
             if path is None:
                 continue
