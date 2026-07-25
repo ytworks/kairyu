@@ -63,6 +63,12 @@ def add_bench_parser(subparsers) -> None:
         help="Use the committed tiny fixtures (no network, no cache)",
     )
     run.add_argument("--seed", type=int, default=None)
+    run.add_argument(
+        "--attempts",
+        type=int,
+        default=None,
+        help="Trials per task for the agentic harnesses (Fugu reports tau-3 as pass@4)",
+    )
     run.add_argument("--judge-base-url", default=None)
     run.add_argument("--judge-model", default=None)
     run.add_argument("--judge-api-key-env", default=None)

@@ -103,6 +103,7 @@ def build_config(args) -> BenchConfig:
         "suite": args.suite,
         "limit": args.limit,
         "seed": args.seed,
+        "attempts": getattr(args, "attempts", None),
         "concurrency": args.concurrency,
         "results_dir": args.results_dir,
         "run_id": args.run_id,
