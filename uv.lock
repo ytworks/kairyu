@@ -1562,7 +1562,6 @@ bench = [
     { name = "huggingface-hub" },
     { name = "pillow" },
     { name = "tiktoken" },
-
     { name = "tqdm" },
 ]
 bench-agentic = [

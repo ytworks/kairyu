@@ -324,9 +324,6 @@ class SuiteRunner:
                         self._progress.pair_done(
                             existing.status, existing.score, cached=True
                         )
-                        pairs.append(existing)
-
-                        print(f"[cached] {adapter.info.name} × {label}: {existing.status}")
                         # A pair stored before these fields existed validates with
                         # comparable=True by model default and carries the same
                         # fingerprint, so without this a resumed subset or fixture

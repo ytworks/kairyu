@@ -52,7 +52,6 @@ bench = [
     "pillow>=10",
     "h5py>=3.11",  # SciCode golden data (test_data.h5)
     "tiktoken>=0.7",  # official o200k_base bins for the MRCRv2 slice
-
     "tqdm>=4.66",  # interactive progress bars; absence degrades to log lines
 ]
 # Official agentic harnesses (SWE-Bench Pro, Terminal-Bench 2.1); need docker.

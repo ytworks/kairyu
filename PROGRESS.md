@@ -102,13 +102,7 @@ before the kind CPU deployment/HTTP drill; it does not schedule the GPU pod.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
 deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
-footnoted scoreboard (G6 P-C1). Each slot's acquisition and conditions are aligned
-with Fugu's published methodology at pinned dataset revisions that reach every fetch,
-targets carry a sampling policy (reasoning effort), runs report live per-slot progress,
-and every run also writes an accuracy report against the published Fugu scores that
-withholds a delta for anything that is not a full-suite measurement.
-`examples/qwen3-32b-multi-gpu/run-fugu-benchmark.sh` runs the whole flow against the
-all-GPU Qwen3-32B example in one command (still unvalidated on the GPU host).
+footnoted scoreboard (G6 P-C1).
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -158,41 +152,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   (all 11 slots, progress, vision skips, subset banner, accuracy report); the GPU host run
   is still pending.
 
-
-### 2026-07-25 — [amendment] Bench dataset revisions are pinned in one registry
-- What: Added `kairyu/bench/pins.py` mapping adapter name → (dataset id, commit sha) for
-  HLE, GPQA Diamond, CharXiv, SciCode, MRCRv2, LongBench-v2, and LiveCodeBench Pro;
-  `all_adapters()` fills each adapter's unset `hf_revision` from it per instance. A pin
-  applies only when the recorded dataset id still matches, and an adapter that declares
-  its own revision keeps it. Agentic slots stay unpinned because their harnesses fetch
-  their own data with no revision knob — recorded as a limitation in `docs/benchmarks.md`.
-- Why: `openai/mrcr` was corrected in December 2025 and HLE's item count has shifted since
-  release, so unpinned cells were comparable to neither Fugu's numbers nor to earlier
-  kairyu runs. Revisions are already part of the run fingerprint, so repinning now refuses
-  resume instead of reinterpreting stored evidence.
-- Refs: `kairyu/bench/pins.py`, `kairyu/bench/adapters/__init__.py`,
-  `tests/bench/{test_bench_pins,test_bench_runner}.py`, `docs/benchmarks.md`.
-
-### 2026-07-25 — [amendment] LiveCodeBench and LiveCodeBench Pro datasets are actually reachable
-- What: Both code slots could never load their data, so their scoreboard cells were
-  permanently blank. LiveCodeBench passed the *config name* `release_v6` as a git
-  revision to a repo that has only `main` and no tags, and its script-loader path also
-  needs `trust_remote_code` (removed in `datasets` 4.x); it now reads the
-  `test.jsonl`…`test6.jsonl` shards directly at a pinned commit and fails closed unless
-  `release_v6` yields exactly 1,055 problems. LiveCodeBench Pro asked for a `train`
-  split that does not exist and expected a tabular testcase repo; it now pins Fugu's
-  2025 Q2 slice (`quater_2025_4_6`, 167 problems), is declared `gated` (it needs
-  HF_TOKEN), and joins each `problem_id` to a `<problem_id>.zip` of
-  `testdata/<n>.in`/`.ans`. Stdin grading became per-line whitespace-normalized so a
-  correct solution emitting trailing spaces or CRLF is no longer a false negative.
-- Why: A permanently blank cell is worse than a documented approximation — the suite
-  claimed to cover 11 Fugu slots while silently covering 9. The Pro archives ship a
-  per-problem testlib `checker.cpp` that kairyu does not compile, so that cell is now
-  annotated as a LOWER BOUND rather than presented as the official Accepted rate.
-- Refs: `kairyu/bench/hub.py` (`load_jsonl_files`, `revision` on `download_file`),
-  `kairyu/bench/adapters/{livecodebench,livecodebench_pro}.py`,
-  `tests/bench/test_bench_lcb_datasets.py`, `docs/benchmarks.md`.
-
 ### 2026-07-25 — [amendment] MRCRv2 scores Fugu's 8-needle / 128K slice
 - What: The MRCR adapter averaged all 2,400 published rows, which mix 2-, 4- and
   8-needle items across context lengths up to 1M tokens. It now selects only
@@ -206,26 +165,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   variables this benchmark exists to vary.
 - Refs: `kairyu/bench/adapters/mrcr.py`, `kairyu/bench/fixtures/mrcr-v2.jsonl`,
   `tests/bench/test_bench_mcq_adapters.py`, `docs/benchmarks.md`.
-
-### 2026-07-25 — [amendment] SciCode runs sequentially and can reach its golden data
-- What: The SciCode slot could not produce a meaningful number. `SciCode1/SciCode` ships
-  no reference code at all (every `ground_truth_code` and `general_solution` is null), so
-  the adapter's "gold prior-step code" was always the empty string and any sub-step
-  calling an earlier step's helper could only raise `NameError`. Separately, 288 of the
-  291 test-split sub-steps compare against `target` golden data from `test_data.h5`,
-  which the HF export does not contain, so those items were all `unjudged` — leaving
-  three scoreable sub-steps. Sub-steps now run SEQUENTIALLY per problem with the model's
-  own earlier code carried into both the prompt and the executed program; `--limit`
-  selects whole problems; the golden data is fetched from upstream first and otherwise
-  from a pinned public mirror, accepted only on HDF5 magic bytes; and prompts now include
-  problem-level and step-level background (Fugu's with-background condition). Extracted
-  `attempt_item()` in `adapters/base.py` so the sequential loop and the shared generative
-  loop classify request failures identically.
-- Why: 288 is exactly the denominator Fugu reports, and the sequential setting is
-  SciCode's main one — evaluating steps in isolation without any prior implementation
-  measures nothing the benchmark is about.
-- Refs: `kairyu/bench/adapters/{scicode,base}.py`, `kairyu/bench/fixtures/scicode.jsonl`,
-  `tests/bench/test_bench_scicode_sequential.py`, `docs/benchmarks.md`.
 
 ### 2026-07-25 — [amendment] Agentic bench harnesses use real flags and Fugu's turn/trial limits
 - What: All three agentic wrappers built commands the installed harnesses reject, so those
@@ -264,6 +203,60 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   the same escape hatch.
 - Refs: `kairyu/bench/{types,config,cli,judge}.py`, `kairyu/bench/adapters/base.py`,
   `tests/bench/test_bench_sampling.py`, `docs/benchmarks.md`, `examples/bench_fugu.yaml`.
+
+### 2026-07-25 — [amendment] Bench dataset revisions are pinned in one registry
+- What: Added `kairyu/bench/pins.py` mapping adapter name → (dataset id, commit sha) for
+  HLE, GPQA Diamond, CharXiv, SciCode, MRCRv2, LongBench-v2, and LiveCodeBench Pro;
+  `all_adapters()` fills each adapter's unset `hf_revision` from it per instance. A pin
+  applies only when the recorded dataset id still matches, and an adapter that declares
+  its own revision keeps it. Agentic slots stay unpinned because their harnesses fetch
+  their own data with no revision knob — recorded as a limitation in `docs/benchmarks.md`.
+- Why: `openai/mrcr` was corrected in December 2025 and HLE's item count has shifted since
+  release, so unpinned cells were comparable to neither Fugu's numbers nor to earlier
+  kairyu runs. Revisions are already part of the run fingerprint, so repinning now refuses
+  resume instead of reinterpreting stored evidence.
+- Refs: `kairyu/bench/pins.py`, `kairyu/bench/adapters/__init__.py`,
+  `tests/bench/{test_bench_pins,test_bench_runner}.py`, `docs/benchmarks.md`.
+
+### 2026-07-25 — [amendment] LiveCodeBench and LiveCodeBench Pro datasets are actually reachable
+- What: Both code slots could never load their data, so their scoreboard cells were
+  permanently blank. LiveCodeBench passed the *config name* `release_v6` as a git
+  revision to a repo that has only `main` and no tags, and its script-loader path also
+  needs `trust_remote_code` (removed in `datasets` 4.x); it now reads the
+  `test.jsonl`…`test6.jsonl` shards directly at a pinned commit and fails closed unless
+  `release_v6` yields exactly 1,055 problems. LiveCodeBench Pro asked for a `train`
+  split that does not exist and expected a tabular testcase repo; it now pins Fugu's
+  2025 Q2 slice (`quater_2025_4_6`, 167 problems), is declared `gated` (it needs
+  HF_TOKEN), and joins each `problem_id` to a `<problem_id>.zip` of
+  `testdata/<n>.in`/`.ans`. Stdin grading became per-line whitespace-normalized so a
+  correct solution emitting trailing spaces or CRLF is no longer a false negative.
+- Why: A permanently blank cell is worse than a documented approximation — the suite
+  claimed to cover 11 Fugu slots while silently covering 9. The Pro archives ship a
+  per-problem testlib `checker.cpp` that kairyu does not compile, so that cell is now
+  annotated as a LOWER BOUND rather than presented as the official Accepted rate.
+- Refs: `kairyu/bench/hub.py` (`load_jsonl_files`, `revision` on `download_file`),
+  `kairyu/bench/adapters/{livecodebench,livecodebench_pro}.py`,
+  `tests/bench/test_bench_lcb_datasets.py`, `docs/benchmarks.md`.
+
+### 2026-07-25 — [amendment] SciCode runs sequentially and can reach its golden data
+- What: The SciCode slot could not produce a meaningful number. `SciCode1/SciCode` ships
+  no reference code at all (every `ground_truth_code` and `general_solution` is null), so
+  the adapter's "gold prior-step code" was always the empty string and any sub-step
+  calling an earlier step's helper could only raise `NameError`. Separately, 288 of the
+  291 test-split sub-steps compare against `target` golden data from `test_data.h5`,
+  which the HF export does not contain, so those items were all `unjudged` — leaving
+  three scoreable sub-steps. Sub-steps now run SEQUENTIALLY per problem with the model's
+  own earlier code carried into both the prompt and the executed program; `--limit`
+  selects whole problems; the golden data is fetched from upstream first and otherwise
+  from a pinned public mirror, accepted only on HDF5 magic bytes; and prompts now include
+  problem-level and step-level background (Fugu's with-background condition). Extracted
+  `attempt_item()` in `adapters/base.py` so the sequential loop and the shared generative
+  loop classify request failures identically.
+- Why: 288 is exactly the denominator Fugu reports, and the sequential setting is
+  SciCode's main one — evaluating steps in isolation without any prior implementation
+  measures nothing the benchmark is about.
+- Refs: `kairyu/bench/adapters/{scicode,base}.py`, `kairyu/bench/fixtures/scicode.jsonl`,
+  `tests/bench/test_bench_scicode_sequential.py`, `docs/benchmarks.md`.
 
 ### 2026-07-25 — [progress] Live progress display for bench runs
 - What: Added `kairyu/bench/progress.py` with three reporters behind one protocol —
@@ -360,7 +353,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   chat execution, and deployed GPU gateways did not serve any orchestrator even though local mock did.
 - Refs: M1 D3/D6, M4 router learning; `kairyu/orchestration/`,
   `kairyu/entrypoints/server/app.py`, `deploy/compose/`.
-
 
 ### 2026-07-16 — [progress] GET /backends introspection endpoint (m13)
 - What: Added an open `GET /backends` reporting the resolved attention backend

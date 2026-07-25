@@ -91,10 +91,12 @@ vs `kairyu-auto-max` in one run.
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
-| SciCode | `SciCode1/SciCode` | sequential sub-step tests (+`test_data.h5` golden data) | numpy in venv |
 | τ³-Bench Banking | tau3/tau2 `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
+
+| SciCode | `SciCode1/SciCode` | sequential sub-step tests (+`test_data.h5` golden data) | numpy in venv |
+| τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
-| MRCRv2 | `openai/mrcr` (8-needle, ≤128K official bins) | official prepend + SequenceMatcher ratio | long-context target |
+| MRCRv2 | `openai/mrcr` (8-needle, ≤128K) | official prepend + SequenceMatcher ratio | long-context target |
 
 Annotated caveats appear as scoreboard footnotes automatically, notably:
 the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
