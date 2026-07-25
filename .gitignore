@@ -219,5 +219,12 @@ __marimo__/
 
 # Benchmark artifacts (kairyu bench): results are per-run evidence, data is
 # downloaded to the cache dir — neither belongs in the repo.
-bench/results/
+# The CONTENTS are ignored, not the directory: git does not descend into an
+# excluded directory, so a negation under `bench/results/` would never match and
+# the next evidence file would silently vanish from `git status`.
+bench/results/*
 bench/data/
+# G2 §8 requires that any number a DECISION rests on be reviewable next to the
+# config that produced it.
+!bench/results/env-*.json
+!bench/results/parity-tp-*.json
