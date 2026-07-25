@@ -1,10 +1,16 @@
-"""Stream-overlapped KV handoff (m18 D3): extraction on a side stream.
+"""Side-stream KV handoff (m18 D3): extraction on a stream of its own.
 
-``StreamProvider`` is the CUDA seam: ``CpuNoopStream`` here,
-``CudaStreamProvider`` on deploy day (a context manager over
-``torch.cuda.stream`` + ``synchronize``). ``StreamCopyKVHandoff`` pins the
-ordering: enter stream → inner.transfer (which extracts+copies) →
+``StreamProvider`` is the CUDA seam, with ``CpuNoopStream`` and
+``CudaStreamProvider`` as its two implementations. ``StreamCopyKVHandoff`` pins
+the ordering: enter stream → inner.transfer (which extracts+copies) →
 synchronize → return. A recording fake tests the order.
+
+Scope, because the name invites a bigger reading: this runs the copy on its own
+stream. It does NOT overlap the copy with the next forward. ``transfer()`` blocks
+the host before returning and ``PDCoordinator`` commits before stepping decode,
+so nothing is queued alongside it, and no production path constructs a
+``CudaStreamProvider`` yet. Both need the consumer to take a completion EVENT in
+place of the host-wide wait.
 """
 
 from __future__ import annotations
@@ -45,15 +51,18 @@ class CudaStreamProvider:
     handoff's commit point publishes the allocation to other threads, and the m18
     D3 ordering rule is that it must never run ahead of the copy.
 
-    What this does and does NOT buy, stated plainly because the first version of
-    this docstring overclaimed. It isolates the extraction copy on its own
-    stream, so it neither serialises behind unrelated work already queued on the
-    caller's stream nor blocks it. It does NOT yet overlap the copy with the next
-    forward: ``StreamCopyKVHandoff`` blocks the host before returning, and
-    ``PDCoordinator`` commits and only then runs the decode step, so nothing is
-    queued alongside the copy. Getting that requires separating the correctness
-    commit from the host-wide wait — handing the consumer a completion EVENT so
-    the producer can queue the next step — which is not in this seam.
+    What this buys, stated precisely because two earlier versions of this
+    docstring got it wrong. ``begin()`` waits on everything ALREADY queued on the
+    caller's stream — including work unrelated to the pages, which the copy
+    therefore still follows. What it gains is the other direction: work the
+    caller queues AFTER that point runs independently of the copy, because the
+    two are on separate streams.
+
+    It does NOT overlap the copy with the next forward. ``StreamCopyKVHandoff``
+    blocks the host before returning and ``PDCoordinator`` commits before
+    stepping decode, so nothing is queued alongside it. That needs the consumer
+    to take a completion EVENT instead of the host-wide wait, which is not in
+    this seam.
     """
 
     def __init__(self, device: object | None = None) -> None:

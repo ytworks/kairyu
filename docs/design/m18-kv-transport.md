@@ -48,26 +48,31 @@ mark computed, ACK with allocation info. Failure paths: transport error →
 
 ### D3 — `handoff_stream.py`: `StreamCopyKVHandoff` + StreamProvider
 
-The GPU-phase copy pipeline shape: extraction happens on a side stream so
-decode compute overlaps the copy. `StreamProvider` protocol (`stream()`,
-`synchronize()`): `CpuNoopStream` (tests) and `CudaStreamProvider`
+The GPU-phase copy pipeline shape: extraction happens on a side stream.
+`StreamProvider` protocol (`begin()`, `synchronize()`): `CpuNoopStream` (tests)
+and `CudaStreamProvider`. `StreamCopyKVHandoff` wraps any KVHandoff:
+enter-stream → inner.transfer (extract+copy) → synchronize — ordering pinned by
+a recording fake.
 
-> **Amended 2026-07-25.** `CudaStreamProvider` is implemented, and `_to_bytes`
-> now copies to host before `.numpy()` — without that the real handoff could not
-> read a CUDA `PagedKVPool` at all (`TypeError: can't convert cuda:0 device type
-> tensor to numpy`), so the seam had never run against a device pool. Scope of
-> what landed: the extraction copy is isolated on a side stream that waits on the
-> caller's stream for the device it was built for. End-to-end overlap with the
-> next forward is NOT delivered — `StreamCopyKVHandoff` blocks the host before
-> returning and `PDCoordinator` commits before stepping decode, so nothing is
-> queued alongside the copy. That needs a completion event handed to the
-> consumer instead of a host-wide wait, and production wiring
-> (`StreamCopyKVHandoff(inner, CudaStreamProvider(...))` selected by placement)
-> is likewise still absent.
-
-(`*_gpu`-style deferred, tiny). `StreamCopyKVHandoff` wraps any KVHandoff:
-extract-on-stream → synchronize → inner.transfer — ordering pinned by a
-recording fake.
+> **Amended 2026-07-25.** `CudaStreamProvider` is implemented; the original
+> "decode compute overlaps the copy" and the "deferred" marker on the class are
+> both replaced by this paragraph rather than left standing beside it.
+>
+> `kv_serde._to_bytes` now copies to host before `.numpy()`. Without that the
+> real handoff could not read a CUDA `PagedKVPool` at all (`TypeError: can't
+> convert cuda:0 device type tensor to numpy`), so this seam had never run
+> against a device pool.
+>
+> What landed: the extraction copy runs on its own stream, which waits on the
+> caller's stream FOR THE DEVICE THE PROVIDER WAS BUILT FOR. Work the caller
+> queues after that point is independent of the copy.
+>
+> What did NOT land, and remains open: decode compute does not overlap the copy.
+> `StreamCopyKVHandoff` blocks the host before returning and `PDCoordinator`
+> commits before stepping decode, so nothing is queued alongside it. No
+> production path constructs a `CudaStreamProvider` either — `PDCoordinator`,
+> serve and placement all still build the plain handoff. Both need the consumer
+> to take a completion EVENT in place of the host-wide wait.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 
