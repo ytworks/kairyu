@@ -161,3 +161,87 @@ def test_pp2_greedy_matches_single_process(spawn2, llama_dir):
     results = spawn2(dist_targets.pp_greedy_parity, llama_dir, prompt, 10)
     assert results[0]["outputs"] == reference
     assert results[1]["outputs"] == reference
+
+
+def test_tp_speculative_matches_single_process_greedy(llama_dir):
+    # spec == greedy is pinned single-process (m8 D4); it must survive sharding.
+    # SpeculativeRunner composes over DistTPModelRunner, so each scoring pass it
+    # issues is broadcast like any other step and every rank replays the same
+    # draft — the m5 D1 agreement invariant is untouched.
+    from kairyu.engine.core.engine_core import EngineCore
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+    from kairyu.engine.core.spec_runner import SpeculativeRunner
+    from kairyu.engine.core.worker import DistTPLauncher
+
+    torch.manual_seed(83)
+    prompt = torch.randint(0, 256, (11,)).tolist()
+    reference = _single_process_greedy(llama_dir, prompt, max_new=12)
+
+    launcher = DistTPLauncher(
+        llama_dir, tp=2, num_pages=64, page_size=4, vocab=TP_VOCAB, force_cpu=True
+    )
+    try:
+        scheduler = Scheduler(
+            RadixKVCache(num_pages=64, page_size=4),
+            max_num_batched_tokens=6,
+            page_size=4,
+            speculative_tokens=4,
+        )
+        engine = EngineCore(scheduler, SpeculativeRunner(launcher.runner))
+        engine.add_request(
+            EngineRequest("a", tuple(prompt), max_new_tokens=12, sampling=EngineSampling())
+        )
+        outputs = list(engine.run_to_completion()["a"])
+    finally:
+        launcher.shutdown()
+    assert outputs == reference
+
+
+class _TinyTokenizer:
+    """256 ids, matching the fixture's vocab_size (the toy tokenizer's 50k
+    would trip the vocab-agreement guard before the wiring is reached)."""
+
+    eos_token_id = None
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return tuple(ord(ch) % 256 for ch in text)
+
+    def decode(self, token_ids) -> str:
+        return "".join(chr(int(t) % 128) for t in token_ids)
+
+    def vocab(self) -> list[str]:
+        return [f"t{i}" for i in range(256)]
+
+
+def test_build_engine_loop_accepts_speculative_with_real_model_tp(llama_dir):
+    from kairyu.engine.core.spec_runner import SpeculativeRunner
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    loop, _cache, scheduler = build_engine_loop(
+        model_path=llama_dir,
+        tensor_parallel_size=2,
+        num_pages=64,
+        page_size=4,
+        max_num_batched_tokens=6,
+        tokenizer=_TinyTokenizer(),
+        speculative="ngram",
+        speculative_tokens=4,
+    )
+    try:
+        assert isinstance(loop._runner, SpeculativeRunner)
+        # the scheduler must reserve for the draft, or every speculative chunk
+        # is silently downgraded to a single token
+        assert scheduler._spec_k == 4
+    finally:
+        loop.tp_launcher.shutdown()
+
+
+def test_in_process_tp_still_rejects_speculative():
+    # the toy path shares ONE runner across ranks: drafting there would score
+    # against itself, so the guard stays for that case
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    with pytest.raises(ValueError, match="requires a real model"):
+        build_engine_loop(tensor_parallel_size=2, speculative="ngram")
