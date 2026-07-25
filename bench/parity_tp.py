@@ -127,7 +127,40 @@ _TEXT_PROMPTS: tuple[str, ...] = (
     "To read a file line by line in Python, you would use",
     "The currency of Japan is the",
     "A stack is a data structure that follows the principle of",
+    "The boiling point of water at sea level in Celsius is",
+    "A palindrome is a word that reads the same",
+    "The command to list files in a directory on Linux is",
+    "Photosynthesis takes place in the part of the plant cell called the",
+    "If a train travels 60 km in 45 minutes, its average speed is",
+    "The Great Wall of China was built primarily to",
+    "In Python, a dictionary maps keys to",
+    "The smallest prime number greater than 20 is",
+    "Mount Everest is located on the border between Nepal and",
+    "An algorithm with O(n log n) complexity is typically associated with",
+    "The human body has how many pairs of chromosomes? The answer is",
+    "To create a virtual environment in Python you run",
+    "The Declaration of Independence was signed in the year",
+    "A JSON object begins with the character",
+    "The square root of 144 is",
+    "Photons are the elementary particles of",
+    "In SQL, the clause used to filter grouped rows is",
+    "The largest desert in the world by area is the",
+    "A linked list differs from an array because it does not require",
+    "The inventor of the telephone is generally credited as",
+    "In Git, the command that shows the commit history is",
+    "The chemical formula for table salt is",
+    "A regular hexagon has interior angles measuring",
+    "The capital city of Australia is",
+    "In machine learning, overfitting means the model has learned",
+    "The Fibonacci sequence begins 0, 1, 1, 2, 3, 5,",
+    "TCP differs from UDP mainly because TCP guarantees",
+    "The element with atomic number 1 is",
+    "To sort a list in reverse order in Python, pass the argument",
+    "The Amazon rainforest is located primarily in the country of",
+    "A byte consists of how many bits? The answer is",
+    "The Pythagorean theorem relates the sides of a",
 )
+
 
 
 def _real_prompts(model_path: str, count: int, max_new: int) -> list[EngineRequest]:
@@ -136,6 +169,8 @@ def _real_prompts(model_path: str, count: int, max_new: int) -> list[EngineReque
 
     resolved = resolve_tokenizer(model_path)
     _check_vocab_agreement(model_path, len(resolved.vocab()))
+    if count <= 0:
+        raise SystemExit(f"--num-prompts must be positive, got {count}")
     if count > len(_TEXT_PROMPTS):
         raise SystemExit(
             f"--num-prompts {count} exceeds the {len(_TEXT_PROMPTS)} fixed prompts; "
@@ -200,7 +235,19 @@ def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
     runner = PagedModelRunner(
         model, pool, sampler=Sampler(vocab_provider=lambda: vocab)
     )
-    return runner, lambda: None
+
+    def teardown() -> None:
+        """Drop this degree's weights. The CALLER must clear its own references
+        first; this only releases the ones the builder still holds."""
+        nonlocal model, pool, runner
+        del runner, pool, model
+        import gc
+
+        gc.collect()
+        if gpu:
+            torch.cuda.empty_cache()
+
+    return runner, teardown
 
 
 def _run(
@@ -221,9 +268,34 @@ def _run(
         core = OverlapEngineCore(scheduler, runner) if overlap else EngineCore(scheduler, runner)
         for request in prompts:
             core.add_request(request)
-        return core.run_to_completion()
+        outputs = core.run_to_completion()
     finally:
+        # the caller's own references keep the model alive, so teardown cannot
+        # free it on its own — a degree sweep otherwise carries every previous
+        # degree's weights (observed: 67 GB still on cuda:0 from the tp=1 pass
+        # while tp=4 ran)
+        core = None
+        runner = None
+        scheduler = None
+        kv = None
         teardown()
+    # A request the scheduler REJECTED (KV exhaustion) comes back as an empty
+    # tuple, and two empty tuples compare equal — so a run that inferred nothing
+    # at all scored a perfect match. Verified: --num-pages 1 --page-size 1 gave
+    # match_rate 1.0 with tokens 0 and exit 0 (review [P1] on #130).
+    short = {
+        request.request_id: len(outputs.get(request.request_id, ()))
+        for request in prompts
+        if len(outputs.get(request.request_id, ())) < request.max_new_tokens
+    }
+    if short:
+        raise SystemExit(
+            f"{len(short)} of {len(prompts)} requests produced fewer than "
+            f"max_new_tokens at tp={tp} (overlap={'on' if overlap else 'off'}): "
+            f"{dict(list(short.items())[:5])}... — the KV pool is too small or the "
+            "scheduler rejected them; a parity score over these is meaningless"
+        )
+    return outputs
 
 
 def main() -> int:
@@ -255,6 +327,22 @@ def main() -> int:
         prompts = _fixed_prompts(args.num_prompts)
 
     overlap_modes = (False,) if args.no_overlap_sweep else (False, True)
+    overlap_note = None
+    if args.model_path and True in overlap_modes:
+        # OverlapEngineCore's contract (m2 §2.2) is that the runner never needs a
+        # previously-committed token from the host, because the last-token slot is
+        # patched DEVICE-SIDE. That patch was never implemented, and
+        # PagedModelRunner._decode_inputs reads `state.outputs[position - 1]`
+        # directly — so a real runner raises IndexError on the first decode of the
+        # pipelined step. The toy runner ignores outputs entirely, which is why no
+        # CPU test sees it.
+        overlap_modes = (False,)
+        overlap_note = (
+            "overlap ON not measured: the device-side future-token patch (m2 §2.2) "
+            "is unimplemented, so PagedModelRunner raises IndexError under "
+            "OverlapEngineCore. A1's overlap-ON half is NOT covered by this run."
+        )
+        print(f"WARNING: {overlap_note}")
     results = {}
     for overlap in overlap_modes:
         base = _run(
@@ -320,9 +408,10 @@ def main() -> int:
         "hardware": hardware,
         "model_path": args.model_path,
         "tp_degrees": degrees,
-        "num_prompts": args.num_prompts,
+        "num_prompts": len(prompts),
         "max_new_tokens": args.max_new_tokens,
-        "overlap_modes": ["off"] if args.no_overlap_sweep else ["off", "on"],
+        "overlap_modes": ["on" if mode else "off" for mode in overlap_modes],
+        "overlap_on_gap": overlap_note,
         "seed": _SEED,
     }
     payload = {"config": config, "parity": results}
@@ -332,12 +421,23 @@ def main() -> int:
         args.out.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"written: {args.out}")
     worst = min(entry["match_rate"] for entry in results.values())
-    # A1 (CPU, deterministic) demands exact; A2 allows >=0.99 once real GPU
-    # kernels make the reduction order vary with the TP degree
-    threshold = 0.99 if args.model_path and hardware["arch"] == "cuda" else 1.0
-    verdict = "OK" if worst >= threshold else "FAIL"
-    print(f"worst match rate: {worst:.4f} (threshold {threshold}) -> {verdict}")
-    return 0 if worst >= threshold else 1
+    if args.model_path:
+        # G2 §7 (amended 2026-07-25): free-running greedy sequence equality is NOT
+        # a correctness gate. One flipped token fails a whole prompt and every
+        # token after it, so these rates cannot separate a broken shard from a
+        # moved near-tie — `bench/parity_hf.py` is what gates. Reported for
+        # orientation; no verdict is claimed.
+        print(
+            f"worst free-running match rate: {worst:.4f} (orientation only — "
+            "the correctness bar is the teacher-forced agreement in "
+            "bench/parity_hf.py)"
+        )
+        return 0
+    # The toy harness IS deterministic, so exactness here is a real invariant:
+    # sharding over FakeCommunicator ranks must not change a single token.
+    verdict = "OK" if worst == 1.0 else "FAIL"
+    print(f"worst match rate: {worst:.4f} (toy harness must be exact) -> {verdict}")
+    return 0 if worst == 1.0 else 1
 
 
 if __name__ == "__main__":
