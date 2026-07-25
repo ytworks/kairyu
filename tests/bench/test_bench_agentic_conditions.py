@@ -192,7 +192,26 @@ async def test_terminal_bench_reads_the_real_harbor_output(tmp_path, monkeypatch
     assert pair.status == "partial"  # the crashed trial keeps it honest
     assert pair.metrics["n_total"] == 4
     assert pair.metrics["n_failed"] == 1
-    assert pair.score == pytest.approx((1.0 + 0.0 + 0.5) / 3)
+    # Harbor's own Mean maps a missing reward to zero, so the errored trial is a
+    # zero in the denominator -- not an exclusion that would inflate the score
+    assert pair.score == pytest.approx((1.0 + 0.0 + 0.5 + 0.0) / 4)
+    assert "errored ones as zero" in pair.methodology["denominator"]
+
+
+def test_harbor_mean_counts_every_trial():
+    from kairyu.bench.adapters.terminal_bench import harbor_mean
+    from kairyu.bench.types import ItemResult
+
+    items = [
+        ItemResult(item_id="a", status="completed", score=1.0),
+        ItemResult(item_id="b", status="completed", score=0.0),
+        ItemResult(item_id="c", status="completed", score=0.5),
+        ItemResult(item_id="d", status="failed", error="timeout"),
+    ]
+    assert harbor_mean(items) == pytest.approx(0.375)
+    # excluding the error would report a crashed run as a better score
+    assert harbor_mean(items) < (1.0 + 0.0 + 0.5) / 3
+    assert harbor_mean([]) is None
 
 
 # -- τ³ Banking ----------------------------------------------------------------

@@ -55,6 +55,18 @@ def trial_reward(rewards: dict) -> float | None:
     return None
 
 
+def harbor_mean(items: list[ItemResult]) -> float | None:
+    """Harbor's own `Mean`: every trial counts, a missing reward as zero.
+
+    `aggregate_reward_dicts()` maps `None` to zero before averaging, so a trial
+    that raised is a zero in the denominator, not an exclusion from it. Averaging
+    only the completed trials would report a crashed run as a better score.
+    """
+    if not items:
+        return None
+    return sum(item.score or 0.0 for item in items) / len(items)
+
+
 def _trial_name(entry: dict, index: int) -> str:
     """Prefer `trial_name`: with `-k > 1` it distinguishes attempts of one task."""
     if entry.get("trial_name"):
@@ -144,6 +156,7 @@ class TerminalBenchAdapter:
             "the target's sampling policy (reasoning effort, top_p, seed) is NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "documents no sampling passthrough",
+            "score is Harbor's Mean over EVERY trial, errored trials as zero",
         ),
     )
 
@@ -241,10 +254,15 @@ class TerminalBenchAdapter:
                 "agent": _AGENT,
                 "max_turns": _MAX_TURNS,
                 "attempts": ctx.attempts,
+                "denominator": (
+                    "every trial, errored ones as zero (Harbor's own Mean maps a "
+                    "missing reward to zero before averaging)"
+                ),
                 "command": " ".join(command),
             },
             annotations=self.info.annotations,
             started_at=started_at,
+            score_fn=harbor_mean,
         )
 
     @staticmethod

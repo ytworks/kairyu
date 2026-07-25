@@ -261,7 +261,10 @@ Harness output and sampling, verified against the pinned harnesses:
   The adapter prefers the conventional keys (`reward`, `resolved`, `accuracy`,
   `score`, `passed`), accepts a single-key dict whatever it is called, and
   records an ambiguous dict as a **failed** item listing the keys rather than
-  guessing. `trial_name` is the item id so `-k > 1` keeps attempts distinct.
+  guessing. `trial_name` is the item id so `-k > 1` keeps attempts distinct. The
+  score is Harbor's own `Mean` — **every** trial counts, an errored one as zero,
+  because `aggregate_reward_dicts()` maps a missing reward to zero before
+  averaging; excluding errors would report a crashed run as a better score.
 - **τ** resolves its data directory itself (`TAU2_DATA_DIR`, else a path *beside*
   `site-packages`), so the adapter imports the harness's own `DATA_DIR` instead
   of reconstructing that layout. `--save-to` is unique per invocation and carries
