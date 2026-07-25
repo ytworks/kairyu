@@ -85,8 +85,6 @@ vs `kairyu-auto-max` in one run.
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
 | SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
-| Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), accuracy | docker, `[bench-agentic]` |
-
 | Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), Harbor Mean | docker, `[bench-agentic]` |
 | LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
 | LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro` split `quater_2025_4_6` + `-Testcase` ZIPs | sandboxed pass@1 (lower bound: no testlib checker) | HF token |
@@ -115,9 +113,6 @@ Pro is scored by the local sandbox, not the official judge.
   problems) and joins each `problem_id` to a `<problem_id>.zip` in the testcase
   repo (`testdata/<n>.in` / `.ans`). Acquisition **fails closed**: the split must
   yield exactly 167 problems, every archive must download, and each archive's
-  usable cases must match the `sum(subtasks[].n_cases)` it declares with no
-  unpaired input. `download_file()` turns a timeout, a 401 and a 404 alike into
-
   usable cases must match the `sum(subtasks[].n_cases)` it declares, with no
   unpaired half in either direction. An archive that declares **no** count is not
   "as complete as whatever arrived" — that declaration is the only denominator
@@ -146,10 +141,6 @@ exactly 100 rows in *each* of them — 500 in total weighted 99/101/100/100/100
 would be a different population reported as the official slice. An approximation such as chars/4 over the prompt alone cannot reproduce
 those boundaries, and averaging the whole 2,400-row split would score an easier,
 shorter population against Fugu's number.
-
-The target's own `max_context_tokens` gate is separate: it uses the prompt-only
-estimate, matching the official runner's `n_tokens(messages) > MAX_CONTEXT_WINDOW`
-check.
 
 The target's own `max_context_tokens` gate is separate: it uses the exact
 prompt-only token count, matching the official runner's
