@@ -90,11 +90,14 @@ class SciCodeAdapter(GenerativeAdapter):
     def normalize(self, ctx: DownloadContext) -> list[dict]:
         from kairyu.bench.hub import download_file, load_hf_rows
 
-        rows = load_hf_rows(self.info.hf_dataset, split="test")
+        rows = load_hf_rows(
+            self.info.hf_dataset, split="test", revision=self.info.hf_revision
+        )
         golden = download_file(
             self.info.hf_dataset,
             _H5_NAME,
             ctx.cache.assets_dir(self.info.name) / _H5_NAME,
+            revision=self.info.hf_revision,
         )
         normalized = []
         for row in rows:
