@@ -112,6 +112,20 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] MRCRv2 scores Fugu's 8-needle / 128K slice
+- What: The MRCR adapter averaged all 2,400 published rows, which mix 2-, 4- and
+  8-needle items across context lengths up to 1M tokens. It now selects only
+  `n_needles == 8` rows whose estimated prompt tokens are <= 131,072 — Fugu's reported
+  conditions — preferring the dataset's own `n_chars` over the chars/4 heuristic,
+  recording the per-row estimate, printing how many rows each filter excluded, and
+  failing closed if the slice is empty. The `n_needles` field was already carried in the
+  payload but never used.
+- Why: The scoreboard cell claimed comparability with Fugu's MRCRv2 number while
+  measuring an easier, shorter population; needle count and context length are the two
+  variables this benchmark exists to vary.
+- Refs: `kairyu/bench/adapters/mrcr.py`, `kairyu/bench/fixtures/mrcr-v2.jsonl`,
+  `tests/bench/test_bench_mcq_adapters.py`, `docs/benchmarks.md`.
+
 ### 2026-07-25 — [amendment] Agentic bench harnesses use real flags and Fugu's turn/trial limits
 - What: All three agentic wrappers built commands the installed harnesses reject, so those
   cells could only report `failed`. `harbor run` has no `--output-dir` (that belongs to
