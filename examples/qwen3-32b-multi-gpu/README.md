@@ -103,7 +103,7 @@ OFFLINE_FIXTURES=1 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh     # plumbi
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BENCH_LIMIT` | `20` | Items per benchmark; `0` runs everything |
+| `BENCH_LIMIT` | `20` | Items per benchmark; `0` runs everything. Rejected unless a non-negative integer — a typo must not silently become a full run |
 | `BENCH_ONLY` / `BENCH_EXCLUDE` | — | Comma-separated slot names |
 | `ATTEMPTS` | `1` | Trials per task for the agentic slots (Fugu reports τ³ as pass@4) |
 | `REASONING_EFFORT` | — | `reasoning_effort` sent with every request (Fugu reports max effort) |

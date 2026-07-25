@@ -20,6 +20,25 @@ concurrency="${BENCH_CONCURRENCY:-8}"
 results_dir="${RESULTS_DIR:-$(pwd)/results/fugu}"
 run_id="${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 
+# Validated before anything slow happens. `[ "$x" -gt 0 ]` returns status 2 on a
+# non-integer, and inside an `if` condition that does NOT trip `set -e`, so an
+# unvalidated BENCH_LIMIT=typo would fall through to the else branch and launch a
+# FULL RUN -- hours and tens of thousands of judged items, which is exactly what
+# the default cap exists to avoid.
+require_non_negative_integer() {
+  case "$2" in
+    '' | *[!0-9]*)
+      printf '%s must be a non-negative integer, got %s\n' "$1" "$2" >&2
+      exit 2
+      ;;
+  esac
+}
+
+require_non_negative_integer BENCH_LIMIT "$bench_limit"
+require_non_negative_integer ATTEMPTS "$attempts"
+require_non_negative_integer BENCH_CONCURRENCY "$concurrency"
+require_non_negative_integer PORT "$port"
+
 # Qwen/Qwen3-32B is a text-generation causal LM -- the vision family is the
 # separate Qwen3-VL. Declaring the target vision-capable would let CharXiv and
 # HLE's image rows be "measured" on prompts whose image parts the text-only chat
@@ -58,7 +77,24 @@ served="$(curl --fail --silent "${base_url}/models")" || {
   echo "could not read ${base_url}/models" >&2
   exit 1
 }
-if ! printf '%s' "$served" | grep -q "\"id\"[[:space:]]*:[[:space:]]*\"${model}\""; then
+# The ids are extracted with a regex over the RESPONSE, then compared as
+# strings: interpolating MODEL into the pattern would make the "exact id" check
+# a glob, so MODEL=qwen3.32b would accept a deployment serving qwen3X32b.
+served_ids="$(
+  printf '%s' "$served" |
+    grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' |
+    sed 's/.*"\([^"]*\)"$/\1/'
+)"
+found=0
+while IFS= read -r served_id; do
+  if [ "$served_id" = "$model" ]; then
+    found=1
+    break
+  fi
+done <<SERVED_IDS
+$served_ids
+SERVED_IDS
+if [ "$found" -ne 1 ]; then
   printf 'model %s is not served at %s\n' "$model" "$base_url" >&2
   printf '%s\n' "$served" >&2
   exit 1

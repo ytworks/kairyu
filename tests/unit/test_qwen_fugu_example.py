@@ -84,10 +84,10 @@ def test_readiness_is_waited_for_before_benchmarking(fugu_text, run_fugu_text):
 def test_served_model_is_preflighted_by_exact_id(fugu_text):
     """A healthy gateway can pass readyz while serving a different model."""
     assert "/models" in fugu_text
-    # grepped as a JSON id field, so a substring match on another model's name
-    # cannot pass the preflight
-    assert '\\"id\\"' in fugu_text
-    assert "${model}" in fugu_text
+    # ids come out of the response, then compare as STRINGS: MODEL must never be
+    # interpolated into the pattern, or the "exact id" check is a glob
+    assert '[ "$served_id" = "$model" ]' in fugu_text
+    assert "${model}" not in fugu_text.split("served_ids=")[1].split("found=0")[0]
     # and the run stops rather than benchmarking the wrong deployment
     assert re.search(r"is not served at.*\n.*exit 1", fugu_text, re.S)
 
@@ -215,3 +215,134 @@ def test_readme_documents_the_quality_suite():
     assert "run-fugu-benchmark.sh" in readme
     assert "BENCH_LIMIT" in readme
     assert "comparison.md" in readme
+
+
+# -- runtime boundaries (executed, not only grepped) ---------------------------
+
+
+def _stub_uv(tmp_path: Path) -> Path:
+    """A PATH where `uv` records that it ran, so "never reached" is provable."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    marker = tmp_path / "uv-was-invoked"
+    (bindir / "uv").write_text(
+        f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8"
+    )
+    (bindir / "uv").chmod(0o755)
+    return bindir
+
+
+def _run_script(tmp_path: Path, env: dict[str, str], *, port: int | None = None):
+    """Run fugu-benchmark.sh with a stub uv; returns (CompletedProcess, marker)."""
+    import os
+    import subprocess
+
+    bindir = _stub_uv(tmp_path)
+    marker = tmp_path / "uv-was-invoked"
+    environ = dict(os.environ)
+    environ["PATH"] = f"{bindir}{os.pathsep}{environ['PATH']}"
+    environ.update(env)
+    if port is not None:
+        environ["PORT"] = str(port)
+    completed = subprocess.run(
+        ["sh", str(FUGU)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=environ,
+        check=False,
+    )
+    return completed, marker
+
+
+@pytest.mark.parametrize("value", ["invalid", "-5", "1.5", "20x", " "])
+def test_a_bad_bench_limit_never_reaches_the_benchmark(tmp_path, value):
+    """`[ "$x" -gt 0 ]` returns 2 on a non-integer, and inside an `if` that does
+    not trip `set -e`: an unvalidated typo would fall through to the else branch
+    and launch a FULL RUN of tens of thousands of judged items."""
+    completed, marker = _run_script(tmp_path, {"BENCH_LIMIT": value})
+    assert completed.returncode != 0
+    assert "BENCH_LIMIT must be a non-negative integer" in completed.stderr
+    assert "FULL RUN" not in completed.stdout
+    assert not marker.exists(), "the benchmark must not have been launched"
+
+
+@pytest.mark.parametrize("name", ["ATTEMPTS", "BENCH_CONCURRENCY", "PORT"])
+def test_other_numeric_inputs_are_validated_too(tmp_path, name):
+    completed, marker = _run_script(tmp_path, {name: "nope"})
+    assert completed.returncode != 0
+    assert f"{name} must be a non-negative integer" in completed.stderr
+    assert not marker.exists()
+
+
+def _serve_models(ids: list[str]):
+    """A minimal gateway exposing /readyz and /v1/models on an ephemeral port."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = _json.dumps(
+        {"object": "list", "data": [{"id": model_id} for model_id in ids]}
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            body = b'{"status":"ready"}' if self.path == "/readyz" else payload
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_model_preflight_compares_ids_exactly(tmp_path):
+    """MODEL must never be interpolated into the match pattern.
+
+    `qwen3.32b` as a regex matches `qwen3X32b`, which would silently benchmark
+    the wrong deployment.
+    """
+    server = _serve_models(["qwen3X32b"])
+    try:
+        port = server.server_address[1]
+        completed, marker = _run_script(
+            tmp_path, {"MODEL": "qwen3.32b"}, port=port
+        )
+        assert completed.returncode != 0
+        assert "is not served" in completed.stderr
+        assert not marker.exists()
+    finally:
+        server.shutdown()
+
+
+def test_model_preflight_accepts_the_exact_id(tmp_path):
+    server = _serve_models(["other-model", "qwen3-32b"])
+    try:
+        port = server.server_address[1]
+        completed, marker = _run_script(
+            tmp_path,
+            {"MODEL": "qwen3-32b", "BENCH_LIMIT": "1", "RESULTS_DIR": str(tmp_path / "r")},
+            port=port,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "serving qwen3-32b" in completed.stdout
+        assert marker.exists(), "the benchmark should have been launched"
+    finally:
+        server.shutdown()
+
+
+def test_model_preflight_rejects_a_prefix_of_a_served_id(tmp_path):
+    server = _serve_models(["qwen3-32b-instruct"])
+    try:
+        port = server.server_address[1]
+        completed, _ = _run_script(tmp_path, {"MODEL": "qwen3-32b"}, port=port)
+        assert completed.returncode != 0
+        assert "is not served" in completed.stderr
+    finally:
+        server.shutdown()
