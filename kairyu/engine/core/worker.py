@@ -283,21 +283,56 @@ class DistTPLauncher:
             nprocs=tp - 1,
             join=False,
         )
-        if placement.backend == "nccl":
-            torch.cuda.set_device(0)
-        init_distributed(
-            0,
-            tp,
-            f"file://{self._init_file}",
-            backend=placement.backend,
-            timeout_s=_SERVE_RENDEZVOUS_TIMEOUT_S,
-        )
-        self._comm = TorchDistCommunicator(device=placement.device)
-        runner, self.full_config = build_tp_runner(
-            model_dir, tp, 0, self._comm, num_pages, page_size, vocab, placement
-        )
-        self._comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
-        self.runner = DistTPModelRunner(self._comm, runner)
+        # Everything past the spawn can raise — an indivisible TP degree, a
+        # missing tensor, not enough GPUs. Without this the workers and the
+        # process group outlive the failed constructor: the caller sees the real
+        # error, then a "destroy_process_group() was not called" warning, and the
+        # next launcher in the same process cannot rendezvous at all.
+        try:
+            if placement.backend == "nccl":
+                torch.cuda.set_device(0)
+            init_distributed(
+                0,
+                tp,
+                f"file://{self._init_file}",
+                backend=placement.backend,
+                timeout_s=_SERVE_RENDEZVOUS_TIMEOUT_S,
+            )
+            self._comm = TorchDistCommunicator(device=placement.device)
+            runner, self.full_config = build_tp_runner(
+                model_dir, tp, 0, self._comm, num_pages, page_size, vocab, placement
+            )
+            self._comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
+            self.runner = DistTPModelRunner(self._comm, runner)
+        except BaseException:
+            self._abandon_start()
+            raise
+
+    def _abandon_start(self) -> None:
+        """Tear down a half-built group without waiting on it.
+
+        The normal shutdown broadcasts a sentinel and joins; neither works here.
+        The workers are either dead of the same error or blocked in a collective
+        nobody will complete, so they are terminated rather than asked. Every
+        step is best-effort: this runs while an exception is in flight and must
+        not replace it with one of its own.
+        """
+        import contextlib
+        import os
+
+        import torch.distributed as dist
+
+        for process in self._ctx.processes:
+            if process.is_alive():
+                process.terminate()
+        for process in self._ctx.processes:
+            with contextlib.suppress(Exception):
+                process.join(timeout=10)
+        if dist.is_initialized():
+            with contextlib.suppress(Exception):
+                dist.destroy_process_group()
+        with contextlib.suppress(OSError):
+            os.unlink(self._init_file)
 
     def shutdown(self) -> None:
         import contextlib
