@@ -96,6 +96,50 @@ class PagedKVPool:
         if self.v_head_dim:  # MLA pools have no v payload (width 0)
             self.v[layer].reshape(-1, self.num_kv_heads, self.v_head_dim)[flat] = values
 
+    def write_batched(
+        self,
+        layer: int,
+        page_tables: torch.Tensor,  # [B, P] int, one row per sequence
+        positions: torch.Tensor,  # [B] absolute position of each new token
+        keys: torch.Tensor,  # [B, num_kv_heads, head_dim]
+        values: torch.Tensor,
+    ) -> None:
+        """Batched single-token write, entirely on device.
+
+        `write()` takes a Python page list and so needs the page ids on the host;
+        a captured CUDA graph cannot see a Python list change between replays.
+        Here the slot is computed from the page-table TENSOR, so the same kernels
+        write wherever the buffers currently point (m17 D1's static-buffer rule).
+        """
+        page_index = torch.div(positions, self.page_size, rounding_mode="floor")
+        slot = positions - page_index * self.page_size
+        pages = page_tables.gather(1, page_index.unsqueeze(1).long()).squeeze(1)
+        flat = pages.long() * self.page_size + slot.long()
+        self.k[layer].reshape(-1, self.num_kv_heads, self.head_dim)[flat] = keys
+        if self.v_head_dim:
+            self.v[layer].reshape(-1, self.num_kv_heads, self.v_head_dim)[flat] = values
+
+    def gather_batched(
+        self, layer: int, page_tables: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Every page of every row, flattened to tokens: [B, P*page_size, H, D].
+
+        No `seq_len` slicing — that is a host value, and slicing on it would make
+        the output shape depend on data a graph cannot re-read. Callers mask the
+        tail instead, which is shape-stable across replays.
+        """
+        index = page_tables.long()
+        keys = self.k[layer, index].reshape(
+            index.shape[0], -1, self.num_kv_heads, self.head_dim
+        )
+        if self.v_head_dim:
+            values = self.v[layer, index].reshape(
+                index.shape[0], -1, self.num_kv_heads, self.v_head_dim
+            )
+        else:  # MLA: the latent lives in k
+            values = keys[:, :, :, :0]
+        return keys, values
+
     def gather(
         self, layer: int, page_table: list[int], seq_len: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
