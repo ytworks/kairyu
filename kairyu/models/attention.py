@@ -89,15 +89,21 @@ class Attention(nn.Module):
         kv_pool,
         page_tables: torch.Tensor,  # [B, P]
         seq_lens: torch.Tensor,  # [B]
+        *,
+        q_dtype: torch.dtype,
     ) -> None:
         """Run the backend's step-boundary host phase (``GraphDecodeBackend``).
 
         ``forward_decode_tensors`` is the captured half and may not touch the
         host, so whatever the backend needs to plan on the CPU has to happen
         here — outside any capture, once per step, over the buffers the step is
-        about to attend over. The query the plan describes is the one
-        ``forward_decode_tensors`` will build, hence ``q_proj``'s head count and
-        dtype rather than anything sampled from a live tensor.
+        about to attend over. The plan must describe the query
+        ``forward_decode_tensors`` will build, so the head count comes from this
+        module and ``q_dtype`` from the caller: it is the ACTIVATION dtype, not
+        ``q_proj``'s. A quantized ``q_proj`` dequantizes to the input's dtype
+        (and AWQ/GPTQ have no ``.weight`` to ask in the first place), so reading
+        it off the projection would be wrong for exactly the deployments that
+        most want a captured decode.
         """
         plan = getattr(self.backend, "plan_decode", None)
         if plan is None:  # a backend outside the graph contract; nothing to do
@@ -107,7 +113,7 @@ class Attention(nn.Module):
             page_tables,
             seq_lens,
             num_qo_heads=self.num_heads,
-            q_dtype=self.q_proj.weight.dtype,
+            q_dtype=q_dtype,
         )
 
     def forward_decode_tensors(
