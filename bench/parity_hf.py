@@ -82,18 +82,52 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
 
     import transformers
 
-    config_path = Path(model_path) / "config.json"
+    root = Path(model_path)
+    # config.json alone does NOT identify a checkpoint: a fine-tune, or any other
+    # weights with the same architecture, hashes identically (review [P1] on
+    # #131). Weight file names, sizes and mtimes pin the actual bytes without
+    # reading 60 GB; the index file pins the shard map where one exists.
+    weight_files = sorted(
+        list(root.glob("*.safetensors")) + list(root.glob("*.safetensors.index.json"))
+    )
+    if not weight_files:
+        raise SystemExit(f"{model_path} has no safetensors weights to fingerprint")
+    weight_id = hashlib.sha256(
+        json.dumps(
+            [
+                [f.name, f.stat().st_size, int(f.stat().st_mtime)]
+                for f in weight_files
+            ],
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()[:16]
+    config_path = root / "config.json"
     checkpoint = hashlib.sha256(config_path.read_bytes()).hexdigest()[:16]
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
+    # the tokenizer's SERIALIZATION, not just its vocab: normalizer and
+    # pre-tokenizer differences change tokenization while leaving get_vocab()
+    # identical
+    tokenizer_files = sorted(
+        root.glob("tokenizer*.json")
+    ) + sorted(root.glob("special_tokens_map.json"))
     tokenizer_id = hashlib.sha256(
+        b"".join(f.read_bytes() for f in tokenizer_files)
+    ).hexdigest()[:16] if tokenizer_files else None
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
+    vocab_id = hashlib.sha256(
         json.dumps(tokenizer.get_vocab(), sort_keys=True).encode()
     ).hexdigest()[:16]
-    prompt_hash = hashlib.sha256("\u0000".join(prompts).encode()).hexdigest()[:16]
+    # the actual ids the run will feed, so a tokenizer change that alters
+    # tokenization is caught even if every file hash somehow matched
+    prompt_hash = hashlib.sha256(
+        json.dumps([list(tokenizer(text).input_ids) for text in prompts]).encode()
+    ).hexdigest()[:16]
     return {
         "schema": _REFERENCE_SCHEMA,
         "checkpoint_config_sha256": checkpoint,
-        "tokenizer_vocab_sha256": tokenizer_id,
-        "prompt_set_sha256": prompt_hash,
+        "checkpoint_weights_sha256": weight_id,
+        "tokenizer_files_sha256": tokenizer_id,
+        "tokenizer_vocab_sha256": vocab_id,
+        "prompt_token_ids_sha256": prompt_hash,
         "num_prompts": len(prompts),
         "positions": positions,
         # pinned so a checkpoint's own generation_config cannot quietly turn the
@@ -135,6 +169,24 @@ def _load_reference(path: Path, expected: dict) -> dict:
                 f"tokens, expected {expected['positions']} — a short cache would be "
                 "scored while config.positions still reported the requested count"
             )
+        rows = entry.get("hf_top_logprobs")
+        # Without this the noise floor and the tolerance both go vacuous: empty
+        # rows give positions=0, self-agreement 1.0, zero logprob samples and a
+        # max delta of 0.0 — which reads as a clean PASS (review [P1] on #131).
+        if not isinstance(rows, list) or len(rows) != expected["positions"]:
+            raise SystemExit(
+                f"{path}: {name} has {len(rows) if isinstance(rows, list) else 'no'} "
+                f"top-logprob rows, expected {expected['positions']}"
+            )
+        for index, (row, token) in enumerate(zip(rows, entry["continuation"], strict=True)):
+            if not row:
+                raise SystemExit(f"{path}: {name} position {index} has an empty row")
+            if str(token) not in row:
+                raise SystemExit(
+                    f"{path}: {name} position {index} does not rank its own "
+                    f"reference token {token} — the gap for a disagreement there "
+                    "could not be computed, so it would score as a free pass"
+                )
     return entries
 
 
@@ -191,6 +243,42 @@ def _build_reference(model_path: str, prompts: list[str], positions: int) -> dic
     del model
     torch.cuda.empty_cache()
     return reference
+
+
+def decide(
+    *,
+    agreed: int,
+    total: int,
+    reference_self_agreement: float,
+    max_abs_delta: float,
+    substantive: int,
+    missing_samples: int,
+) -> tuple[bool, str]:
+    """The verdict, as a pure function so it can be tested on its own inputs.
+
+    Extracted because the first tests for these rules asserted that certain
+    STRINGS appeared in the source — which cannot tell a live rule from dead code
+    (review [P2] on #131). Every comparison here is on raw values; rounding is
+    display only.
+    """
+    rate = agreed / total if total else 0.0
+    if rate < reference_self_agreement:
+        return False, (
+            f"agreement {rate:.6f} is below the reference's own "
+            f"{reference_self_agreement:.6f}"
+        )
+    if substantive:
+        return False, f"{substantive} substantive disagreement(s)"
+    if max_abs_delta > _MAX_LOGPROB_DELTA:
+        return False, (
+            f"max |logprob delta| {max_abs_delta} exceeds {_MAX_LOGPROB_DELTA}"
+        )
+    if missing_samples:
+        return False, (
+            f"{missing_samples} agreeing position(s) had no comparable logprob; "
+            "a comparison that could not be made is not one that passed"
+        )
+    return True, "within the reference's noise floor on both halves"
 
 
 def _reference_noise_floor(reference: dict) -> dict:
@@ -359,6 +447,7 @@ def main() -> int:
     per_prompt = {}
     disagreements = []
     logprob_deltas: list[float] = []
+    missing_deltas: list[dict] = []
     for name, entry in reference.items():
         expected = entry["continuation"]
         actual = predicted[name]
@@ -371,12 +460,15 @@ def main() -> int:
             engine_token = token.token_id if token is not None else None
             if engine_token == hf_token:
                 hits += 1
-                # agreement is not the whole story: the same choice can still
-                # sit on a differently-shaped distribution
-                if token is not None and token.logprob is not None:
-                    hf_value = hf_row.get(str(hf_token))
-                    if hf_value is not None:
-                        logprob_deltas.append(abs(token.logprob - hf_value))
+                # agreement is not the whole story: the same choice can still sit
+                # on a differently-shaped distribution. A MISSING sample is not a
+                # free pass — silently skipping it is how a run with zero deltas
+                # reported max_abs_delta 0.0 and PASSed.
+                hf_value = hf_row.get(str(hf_token))
+                if token is None or token.logprob is None or hf_value is None:
+                    missing_deltas.append({"prompt": name, "position": position})
+                else:
+                    logprob_deltas.append(abs(token.logprob - hf_value))
                 continue
             hf_best = hf_row.get(str(hf_token))
             hf_for_engine_choice = hf_row.get(str(engine_token))
@@ -416,6 +508,17 @@ def main() -> int:
     substantive = [d for d in disagreements if not d["tie_break"]]
     raw_max_delta = max(logprob_deltas) if logprob_deltas else 0.0
     max_delta = round(raw_max_delta, 5)
+    passed, verdict_reason = decide(
+        agreed=agreed,
+        total=total,
+        reference_self_agreement=noise_floor["raw_self_agreement_rate"],
+        max_abs_delta=raw_max_delta,
+        substantive=len(substantive),
+        missing_samples=len(missing_deltas),
+    )
+    tolerance_ok = not substantive and not missing_deltas and (
+        raw_max_delta <= _MAX_LOGPROB_DELTA
+    )
     mean_delta = (
         round(sum(logprob_deltas) / len(logprob_deltas), 5) if logprob_deltas else 0.0
     )
@@ -456,9 +559,7 @@ def main() -> int:
             "threshold": noise_floor["raw_self_agreement_rate"],
             "threshold_source": "the reference's own self-agreement (G2 A2, amended 2026-07-25)",
             "historical_fixed_threshold": _REPORTED_REFERENCE_RATE,
-            "verdict": (
-                "PASS" if raw_rate >= noise_floor["raw_self_agreement_rate"] else "FAIL"
-            ),
+            "verdict": "PASS" if raw_rate >= noise_floor["raw_self_agreement_rate"] else "FAIL",
         },
         # A2 asks for a match rate AND a logprob tolerance. The rate alone cannot
         # separate "reduction order shifted a tie" from "the shard is wrong", and
@@ -480,13 +581,13 @@ def main() -> int:
             "substantive": len(substantive),
             "max_abs_delta_bound": _MAX_LOGPROB_DELTA,
             "within_delta_bound": raw_max_delta <= _MAX_LOGPROB_DELTA,
+            "expected_samples": agreed,
+            "collected_samples": len(logprob_deltas),
+            "missing_samples": missing_deltas,
             # BOTH halves: agreeing on every argmax while the distribution is far
             # off is not a logprob tolerance pass
-            "verdict": (
-                "PASS"
-                if not substantive and raw_max_delta <= _MAX_LOGPROB_DELTA
-                else "FAIL"
-            ),
+            # a comparison that could not be made is not a comparison that passed
+            "verdict": "PASS" if tolerance_ok else "FAIL",
         },
         "per_prompt": per_prompt,
         # kept in full: which positions disagree is the diagnostic, and a summary
@@ -516,13 +617,8 @@ def main() -> int:
     )
     # both halves must hold: a high rate with one badly-wrong pick is not a pass,
     # and neither half is a fixed number — each is measured against the reference
-    return (
-        0
-        if raw_rate >= noise_floor["raw_self_agreement_rate"]
-        and not substantive
-        and raw_max_delta <= _MAX_LOGPROB_DELTA
-        else 1
-    )
+    print(f"verdict: {verdict_reason}")
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

@@ -13,31 +13,65 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-def test_rounding_cannot_lift_a_rate_over_the_bar():
-    """296/299 = 0.98997 rounds to 0.99 and used to pass a >= 0.99 test."""
-    from bench import parity_hf
+def _decide(**overrides):
+    from bench.parity_hf import decide
 
+    base = dict(
+        agreed=100,
+        total=100,
+        reference_self_agreement=0.98,
+        max_abs_delta=0.0,
+        substantive=0,
+        missing_samples=0,
+    )
+    base.update(overrides)
+    return decide(**base)
+
+
+def test_a_clean_run_passes():
+    passed, _reason = _decide()
+    assert passed is True
+
+
+def test_rounding_cannot_lift_a_rate_over_the_bar():
+    """296/299 = 0.98997 rounds to 0.99 and used to clear a >= 0.99 bar."""
     raw = 296 / 299
-    assert round(raw, 4) == 0.99  # the display value
-    assert raw < 0.99  # the real one
-    # the module must compare the raw ratio; a rounded threshold is display only
-    source = Path(parity_hf.__file__).read_text()
-    assert "raw_rate >= noise_floor[\"raw_self_agreement_rate\"]" in source
-    assert "raw_max_delta <= _MAX_LOGPROB_DELTA" in source
+    assert round(raw, 4) == 0.99 and raw < 0.99  # display vs reality
+
+    passed, reason = _decide(agreed=296, total=299, reference_self_agreement=0.99)
+    assert passed is False
+    assert "below the reference" in reason
+
+    # and the same numbers pass when the reference really is that unstable
+    assert _decide(agreed=296, total=299, reference_self_agreement=raw)[0] is True
 
 
 def test_a_large_logprob_delta_fails_even_with_every_argmax_agreeing():
-    """A mock agreeing on every token while its logprobs are 99 nats off scored
-    `max_abs_delta: 99.0` and still reported PASS."""
-    from bench import parity_hf
+    """The reported false pass: agreement 1.0, max delta 99.0, verdict PASS."""
+    passed, reason = _decide(max_abs_delta=99.0)
+    assert passed is False
+    assert "logprob delta" in reason
 
-    assert parity_hf._MAX_LOGPROB_DELTA < 99.0
-    # both halves are required, so argmax agreement alone cannot carry a pass
-    source = Path(parity_hf.__file__).read_text()
-    assert (
-        '"PASS"\n                if not substantive and raw_max_delta <= _MAX_LOGPROB_DELTA'
-        in source
-    )
+
+def test_a_delta_at_the_bound_passes_and_just_over_it_fails():
+    from bench.parity_hf import _MAX_LOGPROB_DELTA
+
+    assert _decide(max_abs_delta=_MAX_LOGPROB_DELTA)[0] is True
+    assert _decide(max_abs_delta=_MAX_LOGPROB_DELTA + 1e-9)[0] is False
+
+
+def test_a_substantive_disagreement_fails():
+    passed, reason = _decide(substantive=1)
+    assert passed is False
+    assert "substantive" in reason
+
+
+def test_a_missing_logprob_sample_is_not_a_free_pass():
+    """Positions with no comparable logprob used to be dropped, so a run with
+    ZERO samples reported max delta 0.0 and passed."""
+    passed, reason = _decide(missing_samples=1)
+    assert passed is False
+    assert "could not be made" in reason
 
 
 def _reference_file(tmp_path: Path, provenance: dict, entries: dict) -> Path:
@@ -50,8 +84,10 @@ def _provenance(**overrides) -> dict:
     base = {
         "schema": 2,
         "checkpoint_config_sha256": "aaaa",
-        "tokenizer_vocab_sha256": "bbbb",
-        "prompt_set_sha256": "cccc",
+        "checkpoint_weights_sha256": "aaab",
+        "tokenizer_files_sha256": "bbbb",
+        "tokenizer_vocab_sha256": "bbbc",
+        "prompt_token_ids_sha256": "cccc",
         "num_prompts": 2,
         "positions": 4,
         "generation": {
@@ -71,7 +107,11 @@ def _entries(count: int, positions: int) -> dict:
             "prompt": f"prompt {i}",
             "prompt_ids": [1, 2],
             "continuation": list(range(positions)),
-            "hf_top_logprobs": [{"0": -0.1} for _ in range(positions)],
+            # each row must rank its own reference token, which is what a real
+            # teacher-forced reference always does
+            "hf_top_logprobs": [
+                {str(step): -0.1, "999": -3.0} for step in range(positions)
+            ],
         }
         for i in range(count)
     }
@@ -98,8 +138,10 @@ def test_a_cache_from_another_checkpoint_is_rejected(tmp_path):
 def test_a_cache_from_another_prompt_set_is_rejected(tmp_path):
     from bench import parity_hf
 
-    path = _reference_file(tmp_path, _provenance(prompt_set_sha256="dead"), _entries(2, 4))
-    with pytest.raises(SystemExit, match="prompt_set_sha256"):
+    path = _reference_file(
+        tmp_path, _provenance(prompt_token_ids_sha256="dead"), _entries(2, 4)
+    )
+    with pytest.raises(SystemExit, match="prompt_token_ids_sha256"):
         parity_hf._load_reference(path, _provenance())
 
 
@@ -133,6 +175,60 @@ def test_a_pre_envelope_cache_is_rejected(tmp_path):
 def test_the_harness_does_not_claim_to_be_the_formal_gate():
     from bench import parity_hf
 
-    source = Path(parity_hf.__file__).read_text()
-    assert "NOT runbook §1 Gate 1" in source
-    assert "DIAGNOSTIC" in source
+    assert "NOT runbook §1 Gate 1" in (parity_hf.__doc__ or "")
+
+
+def test_a_reference_row_missing_its_own_token_is_rejected(tmp_path):
+    """Without the token ranked, a disagreement there has no computable gap and
+    would score as a free pass."""
+    from bench import parity_hf
+
+    entries = _entries(2, 4)
+    entries["p0"]["hf_top_logprobs"][2] = {"999": -0.1}  # its own token 2 absent
+    path = _reference_file(tmp_path, _provenance(), entries)
+    with pytest.raises(SystemExit, match="does not rank its own"):
+        parity_hf._load_reference(path, _provenance())
+
+
+def test_a_reference_with_empty_logprob_rows_is_rejected(tmp_path):
+    """The minimal repro: empty rows gave positions=0 and self-agreement 1.0."""
+    from bench import parity_hf
+
+    entries = _entries(2, 4)
+    entries["p0"]["hf_top_logprobs"][0] = {}
+    path = _reference_file(tmp_path, _provenance(), entries)
+    with pytest.raises(SystemExit, match="empty row"):
+        parity_hf._load_reference(path, _provenance())
+
+
+def test_a_reference_with_too_few_logprob_rows_is_rejected(tmp_path):
+    from bench import parity_hf
+
+    entries = _entries(2, 4)
+    entries["p0"]["hf_top_logprobs"] = entries["p0"]["hf_top_logprobs"][:2]
+    path = _reference_file(tmp_path, _provenance(), entries)
+    with pytest.raises(SystemExit, match="top-logprob rows"):
+        parity_hf._load_reference(path, _provenance())
+
+
+def test_a_cache_from_other_weights_is_rejected(tmp_path):
+    """config.json alone does not identify a checkpoint — a fine-tune hashes the
+    same. The weight fingerprint is what separates them."""
+    from bench import parity_hf
+
+    path = _reference_file(
+        tmp_path, _provenance(checkpoint_weights_sha256="dead"), _entries(2, 4)
+    )
+    with pytest.raises(SystemExit, match="checkpoint_weights_sha256"):
+        parity_hf._load_reference(path, _provenance())
+
+
+def test_a_cache_from_another_tokenizer_serialization_is_rejected(tmp_path):
+    """Same vocab, different normalizer/pre-tokenizer: get_vocab() cannot see it."""
+    from bench import parity_hf
+
+    path = _reference_file(
+        tmp_path, _provenance(tokenizer_files_sha256="dead"), _entries(2, 4)
+    )
+    with pytest.raises(SystemExit, match="tokenizer_files_sha256"):
+        parity_hf._load_reference(path, _provenance())
