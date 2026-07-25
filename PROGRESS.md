@@ -112,6 +112,29 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
+- What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
+  `tensor_parallel_size > 1`, which happens BEFORE the `probe()` block that selects
+  `compute_device`/`compute_dtype` and calls `model.to(...)`. Every spawned rank therefore
+  kept the CPU/fp32 defaults of `DenseDecoder` and `PagedKVPool`, so the
+  `examples/qwen3-32b-multi-gpu` deployment ran Qwen3-32B on the host in fp32 over gloo —
+  8 GPUs at 0 MiB, ~153 GB of host RAM, and generation that never returned. Added
+  `TPPlacement`/`tp_placement()` in `engine/core/worker.py`: one CUDA device per rank
+  (`cuda:<rank>`), bf16, and the NCCL backend, threaded through `build_tp_runner` →
+  `build_tp_model` → `PagedKVPool`. `torch.cuda.set_device(rank)` now precedes
+  `init_process_group`; `TorchDistCommunicator` takes the rank's device so its own
+  `all_reduce`/`barrier` do not hand NCCL host tensors; the attention backend is selected
+  from the PLACEMENT rather than the raw probe (a CPU-placed rank on a GPU box was getting
+  the flashinfer kernel and fp32 tensors); and the rendezvous timeout is raised from the
+  CI-tuned 120 s, which a cold multi-GB shard read trips before anything is deadlocked.
+- Why: the GPU half of M5 assumed the placement the single-process path performs; nothing
+  performed it for the multi-process path, and no CPU test could observe the difference
+  because on a CPU box the defaults are correct. This was the first real-hardware use of
+  `kairyu serve --tp N`.
+- Refs: m5 D1/D3, m16 D1/D2, `docs/gpu-runbook.md` §6.1; `kairyu/engine/core/worker.py`,
+  `kairyu/models/parallel.py`, `kairyu/engine/core/dist_comm.py`,
+  `tests/dist/test_distributed.py` (CPU parity now pins `force_cpu=True`).
+
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
   are now passed to every fetch (they were recorded but unused, so the cache and run
