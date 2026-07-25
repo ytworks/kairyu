@@ -36,21 +36,34 @@ call sites use all_reduce (+ local slice).
 > **Amended 2026-07-25 (measured).** `tensor_reduce_scatter` is now implemented
 > (NCCL's real collective; gloo keeps all_reduce + local slice, identical
 > result). It is **not** a same-call-site optimization, and the earlier note
-> saying so was wrong. Measured on 8× RTX PRO 6000 Blackwell, 8192×5120 bf16
-> (`bench/reduce_scatter_bench.py`, `bench/results/reduce-scatter-2026-07-25.json`):
+> saying so was wrong.
 >
-> | | ms | vs all_reduce |
-> |---|---|---|
-> | `all_reduce` | 3.848 | 1.00× |
-> | `reduce_scatter` + `all_gather` | 4.003 | **0.96× — slower** |
-> | `reduce_scatter` alone | 2.035 | **1.89×** |
+> Method (`bench/reduce_scatter_bench.py`): per-trial **worst-rank** elapsed via
+> CUDA events, barrier-bounded so ranks start together, MAX-reduced across ranks
+> — a collective finishes when its slowest participant does, so a per-rank
+> minimum measures nothing about it. Buffers are prepared outside the timed
+> region and the three paths are interleaved within each round. 5 rounds x 20
+> trials = 100 samples per path.
 >
-> Swapping one for the other at the `RowParallelLinear` call site moves the same
-> bytes and adds a launch, so it loses. The 1.89× is real but only available if
-> the consumer accepts a **shard** — i.e. sequence parallelism, where the shard
-> survives the norm and the next column-parallel matmul re-gathers it. That is a
-> design change this milestone does not specify, and it should be justified by
-> activation memory as much as by comm time.
+> 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch 2.12.1+cu130 / NCCL 2.29.7
+> (`bench/results/reduce-scatter-2026-07-25.json`, raw samples included):
+>
+> | | median ms | min | p95 | vs all_reduce |
+> |---|---|---|---|---|
+> | `all_reduce` | 3.785 | 3.770 | 3.909 | 1.00x |
+> | `reduce_scatter` + `all_gather` | 3.946 | 3.929 | 3.979 | **0.96x — slower** |
+> | `reduce_scatter` alone | 1.988 | 1.975 | 2.002 | **1.90x** |
+>
+> The ~4% loss is not straggler noise: all_reduce's p95 (3.909) sits below
+> rs+ag's minimum (3.929), so the distributions do not overlap. Swapping one for
+> the other at the `RowParallelLinear` call site moves the same bytes and adds a
+> launch.
+>
+> The 1.90x is real but only available if the consumer accepts a **shard** —
+> i.e. sequence parallelism, where the shard survives the norm and the next
+> column-parallel matmul re-gathers it. That is a design change this milestone
+> does not specify, and it should be justified by activation memory as much as by
+> comm time.
 
 ### D2 — Tensor-parallel sharding (`models/parallel.py`)
 
@@ -101,8 +114,10 @@ functions.
 
 ## 3. Non-goals
 
-- NCCL execution/tuning, reduce_scatter/symmetric-memory optimizations, P2P
-  matrices (deploy day; constructor arg + env scripts).
+- symmetric-memory optimizations (deploy day). NCCL execution, the P2P matrix
+  and `reduce_scatter` itself landed 2026-07-25 — see the D1 amendment; what
+  remains non-goal is USING reduce_scatter at the RowParallelLinear call site,
+  which needs sequence parallelism.
 - Cross-node rendezvous (`kairyu.launch` — G5 F3); DeepEP/UCCL adapters
   (deploy-day EP fast path; the all_to_all path is the portable baseline).
 - Overlap of comm/compute streams (GPU-only).

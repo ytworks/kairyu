@@ -112,6 +112,27 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] m16 D1: reduce_scatter implemented; "same-call-site optimization" withdrawn
+- What: `TorchDistCommunicator.tensor_reduce_scatter` added — NCCL's real collective, and
+  all_reduce + a local slice under gloo, which has none. The D1 note calling NCCL's
+  reduce_scatter "a same-call-site optimization recorded for deploy day" is withdrawn as
+  incorrect, and the m16 §3 non-goal is narrowed to USING it at the `RowParallelLinear`
+  call site (which needs sequence parallelism), not to the primitive.
+- Why: measured, not assumed. On 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch
+  2.12.1+cu130 / NCCL 2.29.7 — per-trial worst-rank elapsed via CUDA events,
+  barrier-bounded, MAX-reduced across ranks, buffers outside the timed region, paths
+  interleaved, 100 samples each — `all_reduce` medians 3.785 ms while
+  `reduce_scatter`+`all_gather` medians 3.946 ms. Swapping one for the other at the same
+  call site moves the same bytes and adds a launch, so it LOSES; all_reduce's p95 (3.909)
+  sits below rs+ag's minimum (3.929), so this is not straggler noise. `reduce_scatter`
+  alone medians 1.988 ms (1.90x), but its output is a shard, so realising that win means
+  sequence parallelism — a design change m16 does not specify and one that should be
+  argued on activation memory as much as on comm time. The call site is deliberately
+  unchanged.
+- Refs: m16 D1 + §3 (amended), `kairyu/engine/core/dist_comm.py`,
+  `bench/reduce_scatter_bench.py`, `bench/results/reduce-scatter-2026-07-25.json`
+  (raw per-trial samples committed)
+
 ### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
 - What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
   `tensor_parallel_size > 1`, which happens BEFORE the `probe()` block that selects

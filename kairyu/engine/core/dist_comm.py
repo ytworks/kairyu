@@ -1,9 +1,11 @@
 """torch.distributed-backed Communicator: gloo locally, NCCL by constructor (m16 D1).
 
 Satisfies the m5 object-level ``Communicator`` protocol AND the tensor
-extension real parallelism needs. gloo has no reduce_scatter (verified) — all
-call sites use all_reduce; NCCL's reduce_scatter is a same-call-site
-optimization recorded for deploy day.
+extension real parallelism needs. gloo has no reduce_scatter (verified), so
+`tensor_reduce_scatter` is all_reduce + a local slice there and the real
+collective under NCCL. It is NOT a drop-in for the RowParallelLinear all_reduce:
+measured 2026-07-25, rs+ag is ~4% SLOWER than ar at that call site, and the 1.9x
+win from rs alone requires sequence parallelism (m16 D1 amendment).
 """
 
 from __future__ import annotations
