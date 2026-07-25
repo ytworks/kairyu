@@ -138,6 +138,13 @@ class PairResult(BaseModel):
     items: tuple[ItemResult, ...] = ()  # per-item evidence (roadmap §6)
     methodology: dict = Field(default_factory=dict)
     annotations: tuple[str, ...] = ()
+    # Whether this cell may be compared with a published full-suite score, and
+    # why not. Static substitutions (LongBench for Long Context Reasoning),
+    # run-time ones (the tau2 fallback) and run-level ones (a subset run, fixture
+    # data) all land here, so the report never has to infer comparability from a
+    # benchmark-name allow list.
+    comparable: bool = True
+    incomparable_reasons: tuple[str, ...] = ()
     started_at: str = ""
     finished_at: str = ""
 

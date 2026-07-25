@@ -119,11 +119,19 @@ re-reading those images.
 What the report refuses to do:
 
 - **Invent a number.** A skipped cell is `—`, never 0.
-- **Hide a denominator.** `partial` cells and their deltas carry `*`, `failed`
-  carries `!`, and the reason is reprinted.
-- **Print a delta for a row measured differently.** Long Context Reasoning is a
-  LongBench v2 substitute, so its delta is `n/c` rather than a number with a
-  caveat somewhere further down.
+- **Hide a denominator.** Every score carries its item count, `partial` carries
+  `*`, `failed` carries `!` (**even without a score**, so a failed cell never
+  reads as merely absent), and the reason is reprinted.
+- **Print a delta for anything that is not a full-suite measurement of the same
+  thing.** Comparability is carried per cell, so all of these render `n/c`:
+  a substituted dataset (Long Context Reasoning → LongBench v2), a *run-time*
+  substitution (the τ2 harness standing in for τ³), a partial or failed cell, and
+  a **subset or fixture run** — `--limit`/`--smoke` cells are legitimately
+  `completed`, so without this a 20-item run would print an unmarked delta
+  against a full-suite published score.
+- **Bury the caveat.** When a reason applies to every cell, both `scoreboard.md`
+  and `comparison.md` open with a banner saying so, because a shell warning does
+  not survive into the file an operator opens hours later.
 - **Imply the baselines are comparable.** The page states that every non-Fugu
   score is *provider-reported*; the report repeats that, so those columns read
   as orientation rather than as measurements made under this harness.

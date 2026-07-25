@@ -88,6 +88,8 @@ def build_scoreboard(
             notes = [footnote(f"{benchmark}: {text}") for text in pair.annotations]
             if pair.status in ("skipped", "partial", "failed") and pair.reason:
                 notes.append(footnote(f"{benchmark}/{target}: {pair.status} — {pair.reason}"))
+            for reason in pair.incomparable_reasons:
+                notes.append(footnote(f"{benchmark}/{target}: NOT COMPARABLE — {reason}"))
             if target in self_judged:
                 notes.append(
                     footnote(
@@ -106,7 +108,12 @@ def build_scoreboard(
                 "status": pair.status,
                 "score": pair.score,
                 "n": pair.metrics.get("n_total"),
+                "n_scored": pair.metrics.get("n_scored"),
                 "reason": pair.reason,
+                # structured comparability travels with the cell so the accuracy
+                # report never has to infer it from a benchmark-name allow list
+                "comparable": pair.comparable,
+                "incomparable_reasons": list(pair.incomparable_reasons),
                 "footnotes": notes,
             }
 
@@ -138,11 +145,30 @@ def _cell_text(cell: dict) -> str:
     return f"{text}{marks}"
 
 
+def run_banner(scoreboard: dict) -> list[str]:
+    """Loud, artifact-resident notice when no cell is a full-suite measurement.
+
+    A shell warning does not survive into the file an operator opens hours later.
+    """
+    cells = scoreboard.get("cells") or {}
+    shared: list[str] | None = None
+    for by_target in cells.values():
+        for cell in by_target.values():
+            reasons = list(cell.get("incomparable_reasons") or [])
+            shared = reasons if shared is None else [r for r in shared if r in reasons]
+    if not shared:
+        return []
+    return ["> **This run is not a full-suite measurement.**", ">"] + [
+        f"> - {reason}" for reason in shared
+    ] + [""]
+
+
 def render_markdown(scoreboard: dict) -> str:
     targets = scoreboard["targets"]
     lines = [
         f"# Fugu benchmark scoreboard — run {scoreboard['run_id']}",
         "",
+        *run_banner(scoreboard),
         "Scores are percentages; — = skipped, * = partial/failed (see footnotes).",
         "",
         "| Benchmark | " + " | ".join(targets) + " |",

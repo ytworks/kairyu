@@ -40,13 +40,24 @@ def build_comparison(scoreboard: dict) -> dict:
         for target in targets:
             cell = cells.get(target) or {}
             score = cell.get("score")
+            # Comparability is carried by the cell (static substitution, run-time
+            # substitution, subset/fixture run); the static map below is only a
+            # fallback for scoreboards written before that field existed.
+            declared = cell.get("comparable")
+            reasons = list(cell.get("incomparable_reasons") or [])
+            if declared is None:
+                declared = benchmark not in NOT_COMPARABLE
+                if benchmark in NOT_COMPARABLE:
+                    reasons = [NOT_COMPARABLE[benchmark]]
             measured[target] = {
                 "score": None if score is None else round(score * 100, 1),
                 "status": cell.get("status", "skipped"),
                 "n": cell.get("n"),
+                "n_scored": cell.get("n_scored"),
                 "reason": cell.get("reason"),
-                "comparable": cell.get("status") == "completed"
-                and benchmark not in NOT_COMPARABLE,
+                "incomparable_reasons": reasons,
+                "comparable": bool(declared)
+                and cell.get("status") == "completed",
             }
         rows.append(
             {
@@ -60,7 +71,7 @@ def build_comparison(scoreboard: dict) -> dict:
                 "variant": PUBLISHED_VARIANTS.get(benchmark),
                 "not_comparable": NOT_COMPARABLE.get(benchmark),
                 "deltas": {
-                    target: _delta(values, reference, benchmark)
+                    target: _delta(values, reference)
                     for target, values in measured.items()
                 },
             }
@@ -78,35 +89,47 @@ def build_comparison(scoreboard: dict) -> dict:
     }
 
 
-def _delta(values: dict, reference: dict[str, float], benchmark: str) -> float | None:
-    """Measured minus published `Fugu`, or None when the comparison is unsound."""
+def _delta(values: dict, reference: dict[str, float]) -> float | None:
+    """Measured minus published `Fugu`, or None when the comparison is unsound.
+
+    "Unsound" covers every way a cell can fail to be a full-suite measurement:
+    no score, a partial or failed cell, a substituted dataset or harness, and a
+    subset or fixture run.
+    """
     baseline = reference.get(DELTA_AGAINST)
     if values["score"] is None or baseline is None:
         return None
-    if benchmark in NOT_COMPARABLE:
+    if not values["comparable"]:
         return None
     return round(values["score"] - baseline, 1)
 
 
 def _measured_text(values: dict) -> str:
-    if values["score"] is None:
-        return "—"
-    text = f"{values['score']:.1f}"
-    if values["status"] == "partial":
-        text += "*"
-    elif values["status"] == "failed":
-        text += "!"
+    """Score with its status marker; status stays visible without a score."""
+    score = values["score"]
+    marker = {"partial": "*", "failed": "!"}.get(values["status"], "")
+    if score is None:
+        # a failed cell usually has no score; without the marker it would read
+        # identically to a cell that was never measured
+        return f"—{marker}" if marker else "—"
+    text = f"{score:.1f}{marker}"
+    if values["n"]:
+        scored = values.get("n_scored")
+        if scored is not None and scored != values["n"]:
+            text += f" ({scored}/{values['n']})"
+        else:
+            text += f" (n={values['n']})"
     return text
 
 
-def _delta_text(delta: float | None, values: dict, not_comparable: str | None) -> str:
-    if not_comparable is not None:
-        return "n/c"
+def _delta_text(delta: float | None, values: dict) -> str:
+    """A delta only for a cell that is comparable; otherwise why not."""
     if delta is None:
-        return "—"
+        if values["score"] is None:
+            return "—"
+        return "n/c"
     sign = "+" if delta > 0 else ""
-    text = f"{sign}{delta:.1f}"
-    return text if values["status"] == "completed" else f"{text}*"
+    return f"{sign}{delta:.1f}"
 
 
 def render_comparison_markdown(comparison: dict) -> str:
@@ -119,11 +142,13 @@ def render_comparison_markdown(comparison: dict) -> str:
         f"{reference['retrieved_on']} (the page publishes them as images, so they "
         "cannot be fetched programmatically).",
         "",
-        f"`Δ` is measured minus published **{comparison['delta_against']}**. "
-        "`—` = not measured, `*` = partial cell or partial denominator, "
-        "`!` = failed, `n/c` = kairyu measures this row differently.",
+        f"`Δ` is measured minus published **{comparison['delta_against']}**, and "
+        "only for a cell that is a full-suite measurement of the same thing. "
+        "`—` = not measured, `*` = partial, `!` = failed, `n/c` = measured but "
+        "not comparable (see below). Item counts are shown next to each score.",
         "",
     ]
+    lines += _banner(comparison)
 
     header = ["Benchmark"] + list(targets)
     published_columns: list[str] = []
@@ -142,7 +167,7 @@ def render_comparison_markdown(comparison: dict) -> str:
             value = row["published"].get(model)
             cells.append("—" if value is None else f"{value:.1f}")
         cells += [
-            _delta_text(row["deltas"][target], row["measured"][target], row["not_comparable"])
+            _delta_text(row["deltas"][target], row["measured"][target])
             for target in targets
         ]
         lines.append("| " + " | ".join(cells) + " |")
@@ -170,6 +195,24 @@ def render_comparison_markdown(comparison: dict) -> str:
     return "\n".join(lines)
 
 
+def _banner(comparison: dict) -> list[str]:
+    """Reasons that apply to every cell, stated once and up front."""
+    shared: list[str] | None = None
+    for row in comparison["rows"]:
+        for values in row["measured"].values():
+            reasons = list(values.get("incomparable_reasons") or [])
+            shared = reasons if shared is None else [r for r in shared if r in reasons]
+    if not shared:
+        return []
+    return [
+        "> **This run is not a full-suite measurement**, so no cell is compared "
+        "with a published score.",
+        ">",
+    ] + [
+        f"> - {reason}" for reason in shared
+    ] + [""]
+
+
 def _caveats(comparison: dict) -> list[str]:
     """Per-row reasons a delta is not a like-for-like comparison."""
     caveats: list[str] = []
@@ -177,6 +220,9 @@ def _caveats(comparison: dict) -> list[str]:
         name = row["display_name"]
         if row["not_comparable"]:
             caveats.append(f"**{name}**: NOT COMPARABLE — {row['not_comparable']}.")
+        for target, values in row["measured"].items():
+            for reason in values.get("incomparable_reasons") or []:
+                caveats.append(f"**{name}** × {target}: NOT COMPARABLE — {reason}.")
         variant = row["variant"]
         if variant:
             published_variant = ", ".join(

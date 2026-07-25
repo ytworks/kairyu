@@ -130,10 +130,17 @@ class TauBenchBankingAdapter:
             )
         flavor = detect_harness()
         annotations = self.info.annotations
+        incomparable: tuple[str, ...] = ()
         if flavor == "tau2":
             annotations = annotations + (
                 "tau2 banking substitute — the tau3 harness is not installed; "
                 "scores are NOT directly comparable to Fugu's τ³ number",
+            )
+            # A run-time substitution: the comparison report must withhold this
+            # cell's delta, not merely footnote it.
+            incomparable = (
+                "the tau2 banking harness stood in for tau3; scores are not "
+                "directly comparable to Fugu's τ³ number",
             )
 
         import os
@@ -167,6 +174,8 @@ class TauBenchBankingAdapter:
                     reason=f"{flavor} harness timed out after {_HARNESS_TIMEOUT_S}s",
                     metrics={"score": None, "n_total": 0},
                     annotations=annotations,
+                    comparable=not incomparable,
+                    incomparable_reasons=incomparable,
                     started_at=started_at,
                     finished_at=utc_now(),
                 )
@@ -179,6 +188,8 @@ class TauBenchBankingAdapter:
                     reason=f"{flavor} harness failed (rc={completed.returncode}): {stderr}",
                     metrics={"score": None, "n_total": 0},
                     annotations=annotations,
+                    comparable=not incomparable,
+                    incomparable_reasons=incomparable,
                     started_at=started_at,
                     finished_at=utc_now(),
                 )
@@ -197,5 +208,7 @@ class TauBenchBankingAdapter:
                 "command": " ".join(command),
             },
             annotations=annotations,
+            comparable=not incomparable,
+            incomparable_reasons=incomparable,
             started_at=started_at,
         )

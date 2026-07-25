@@ -45,6 +45,11 @@ class LongBenchV2Adapter(GenerativeAdapter):
             "LongBench v2 substitute — Fugu's 'Long Context Reasoning' suite is "
             "unpublished; scores are NOT directly comparable to Fugu's number",
         ),
+        comparable_to_published=False,
+        incomparable_reason=(
+            "kairyu substitutes LongBench v2; Fugu's Long Context Reasoning suite "
+            "is unpublished"
+        ),
     )
 
     def normalize(self, ctx: DownloadContext) -> list[dict]:

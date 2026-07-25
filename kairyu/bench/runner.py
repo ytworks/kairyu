@@ -112,6 +112,27 @@ def _run_fingerprint(identity: dict) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+
+def run_level_incomparable_reasons(config: BenchConfig, ctx_limit: int | None) -> tuple[str, ...]:
+    """Reasons a whole run cannot be compared with a published full-suite score.
+
+    A limited run legitimately reports `completed` -- the limit is applied before
+    aggregation -- so without this a 20-item smoke cell renders as a plain number
+    with an unmarked delta against Fugu's full-suite result.
+    """
+    reasons: list[str] = []
+    if ctx_limit is not None:
+        reasons.append(
+            f"subset run: at most {ctx_limit} items per benchmark, not the full set"
+        )
+    if config.offline_fixtures:
+        reasons.append(
+            "synthetic offline fixtures stood in for the real datasets; scores are "
+            "not measurements"
+        )
+    return tuple(reasons)
+
+
 class SuiteRunner:
     def __init__(self, config: BenchConfig, *, http_factory=None, probe_docker=None) -> None:
         self.config = config
@@ -204,6 +225,7 @@ class SuiteRunner:
         }
 
         targets = [target.label() for target in config.targets]
+        run_reasons = run_level_incomparable_reasons(config, ctx.limit)
         pairs: list[PairResult] = []
         for adapter in adapters:
             for target in config.targets:
@@ -249,7 +271,14 @@ class SuiteRunner:
                             started_at=utc_now(),
                             finished_at=utc_now(),
                         )
-                result = result.model_copy(update={"run_fingerprint": fingerprint})
+                reasons = tuple(result.incomparable_reasons) + run_reasons
+                result = result.model_copy(
+                    update={
+                        "run_fingerprint": fingerprint,
+                        "comparable": result.comparable and not run_reasons,
+                        "incomparable_reasons": reasons,
+                    }
+                )
                 store.save_pair(result)
                 score = f"{result.score * 100:.1f}" if result.score is not None else "n/a"
                 print(f"       -> {result.status} (score={score})")
