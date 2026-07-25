@@ -308,6 +308,58 @@ def _code_provenance() -> dict:
     }
 
 
+def _compare(base: dict, candidate: dict) -> dict:
+    """Compare two runs' outputs prompt by prompt.
+
+    Reports the counts the verdict uses, plus the FIRST disagreeing request and
+    position. Aggregate rates alone cannot distinguish two runs that diverge on
+    different prompts but happen to land on the same totals, so the identity of
+    the first divergence is recorded rather than only its median depth.
+    """
+    matches = 0
+    token_total = 0
+    token_matched = 0
+    first_divergence: list[int] = []
+    first_mismatch = None
+    for rid, expected in base.items():
+        actual = candidate.get(rid, ())
+        if actual == expected:
+            matches += 1
+        token_total += len(expected)
+        agreed = 0
+        for position, token in enumerate(expected):
+            if position < len(actual) and actual[position] == token:
+                agreed += 1
+            else:
+                first_divergence.append(position)
+                if first_mismatch is None:
+                    first_mismatch = {
+                        "request_id": rid,
+                        "position": position,
+                        "expected": token,
+                        "actual": actual[position] if position < len(actual) else None,
+                    }
+                break
+        else:
+            agreed = len(expected)
+        token_matched += agreed
+    return {
+        "prompts": len(base),
+        "exact_match": matches,
+        # match_rate is DISPLAY only: 20000/20001 rounds to 1.0 at four places
+        # and would clear an `== 1.0` gate. The verdict compares the counts.
+        "match_rate": round(matches / len(base), 4) if base else 0.0,
+        "tokens": token_total,
+        "token_match_rate": round(token_matched / token_total, 4) if token_total else 0.0,
+        "median_first_divergence": (
+            sorted(first_divergence)[len(first_divergence) // 2]
+            if first_divergence
+            else None
+        ),
+        "first_mismatch": first_mismatch,
+    }
+
+
 def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
     """The runner a deployment actually gets at this TP degree.
 
@@ -454,50 +506,33 @@ def main() -> int:
     overlap_modes = (False,) if args.no_overlap_sweep else (False, True)
     overlap_note = None
     results = {}
+    runs: dict[tuple[int, bool], dict] = {}
     for overlap in overlap_modes:
         base = _run(
             degrees[0], overlap, prompts, args.model_path, args.num_pages, args.page_size
         )
+        runs[(degrees[0], overlap)] = base
         for degree in degrees[1:]:
             candidate = _run(
                 degree, overlap, prompts, args.model_path, args.num_pages, args.page_size
             )
-            matches = sum(base[rid] == candidate[rid] for rid in base)
-            # Sequence-exact is unforgiving: one flipped token fails the whole
-            # prompt and every token after it. The per-token rate up to the first
-            # divergence is what separates "the shard is wrong" from "bf16
-            # reduction order moved one near-tie".
-            token_total = 0
-            token_matched = 0
-            first_divergence: list[int] = []
-            for rid, expected in base.items():
-                actual = candidate[rid]
-                token_total += len(expected)
-                agreed = 0
-                for position, token in enumerate(expected):
-                    if position < len(actual) and actual[position] == token:
-                        agreed += 1
-                    else:
-                        first_divergence.append(position)
-                        break
-                else:
-                    agreed = len(expected)
-                token_matched += agreed
-            results[f"tp{degree}_vs_tp{degrees[0]}_overlap_{'on' if overlap else 'off'}"] = {
-                "prompts": len(base),
-                "exact_match": matches,
-                # match_rate is DISPLAY only: 20000/20001 rounds to 1.0 at four
-                # places and would clear an `== 1.0` gate. The verdict compares
-                # the counts.
-                "match_rate": round(matches / len(base), 4),
-                "tokens": token_total,
-                "token_match_rate": round(token_matched / token_total, 4) if token_total else 0.0,
-                "median_first_divergence": (
-                    sorted(first_divergence)[len(first_divergence) // 2]
-                    if first_divergence
-                    else None
-                ),
-            }
+            runs[(degree, overlap)] = candidate
+            results[f"tp{degree}_vs_tp{degrees[0]}_overlap_{'on' if overlap else 'off'}"] = (
+                _compare(base, candidate)
+            )
+
+    # A1 wants parity with the pipeline ON *and* OFF, and the loop above cannot
+    # give it: each mode is compared against its own TP1 base, and the outputs
+    # are dropped when the next mode overwrites them. Two modes can land on the
+    # same exact_match and token_match_rate while diverging on DIFFERENT prompts
+    # -- equal aggregates are not sequence equality. So the ON-vs-OFF comparison
+    # is made directly, per TP degree, and recorded.
+    overlap_equality = {}
+    if True in overlap_modes and False in overlap_modes:
+        for degree in degrees:
+            overlap_equality[f"tp{degree}_overlap_on_vs_off"] = _compare(
+                runs[(degree, False)], runs[(degree, True)]
+            )
 
     # the harness label is part of the evidence: a CPU-toy 1.0 and a real-ranks
     # 1.0 are not the same claim, and G2 §8 forbids a number without its config
@@ -528,7 +563,7 @@ def main() -> int:
         "overlap_on_gap": overlap_note,
         "seed": _SEED,
     }
-    payload = {"config": config, "parity": results}
+    payload = {"config": config, "parity": results, "overlap_equality": overlap_equality}
     print(json.dumps(payload, indent=2))
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -538,6 +573,31 @@ def main() -> int:
     all_exact = all(
         entry["exact_match"] == entry["prompts"] for entry in results.values()
     )
+    # This one IS a gate, on both harnesses. Cross-TP differences are reduction
+    # order; overlap ON vs OFF is the SAME ranks in the same order, so any
+    # difference is the pipeline changing an answer. Reported as a verdict
+    # because the claim "the pipeline changes no output" is only earned by
+    # comparing the outputs, not by two aggregate rows agreeing.
+    overlap_exact = all(
+        entry["exact_match"] == entry["prompts"] for entry in overlap_equality.values()
+    )
+    for name, entry in overlap_equality.items():
+        status = "OK" if entry["exact_match"] == entry["prompts"] else "FAIL"
+        detail = ""
+        if entry["first_mismatch"] is not None:
+            first = entry["first_mismatch"]
+            detail = (
+                f" first mismatch: {first['request_id']} at position "
+                f"{first['position']} ({first['expected']} -> {first['actual']})"
+            )
+        print(
+            f"overlap ON vs OFF {name}: {entry['exact_match']}/{entry['prompts']} "
+            f"exact -> {status}{detail}"
+        )
+    if overlap_equality and not overlap_exact:
+        print("overlap ON changed the output -- the pipeline is not transparent")
+        return 1
+
     if args.model_path:
         # G2 §7 (amended 2026-07-25): free-running greedy sequence equality is NOT
         # a correctness gate. One flipped token fails a whole prompt and every
