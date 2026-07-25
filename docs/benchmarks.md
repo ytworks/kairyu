@@ -83,9 +83,9 @@ vs `kairyu-auto-max` in one run.
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
 | SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
-| Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), accuracy | docker, `[bench-agentic]` |
-| LiveCodeBench | `livecodebench/code_generation_lite` | sandboxed pass@1 (public+private tests) | — |
-| LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro(+-Testcase)` | sandboxed pass@1 (community mirror, not the official OJ) | — |
+| Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), Harbor Mean | docker, `[bench-agentic]` |
+| LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
+| LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro` split `quater_2025_4_6` + `-Testcase` ZIPs | sandboxed pass@1 (lower bound: no testlib checker) | HF token |
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
@@ -98,6 +98,31 @@ Annotated caveats appear as scoreboard footnotes automatically, notably:
 the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
 suite is unpublished; numbers are not directly comparable), and LiveCodeBench
 Pro is scored by the local sandbox, not the official judge.
+
+### Dataset acquisition notes
+
+- **LiveCodeBench** reads the repo's `test.jsonl`…`test6.jsonl` shards directly
+  at a pinned commit. `release_vN` is a *config name*, not a git ref, and the
+  loading-script path needs `trust_remote_code` (gone in `datasets` 4.x), so
+  going through the files is what keeps the slot working. `release_v6` must
+  yield exactly 1,055 problems; any other count fails closed as `unavailable`
+  rather than scoring a silent subset.
+- **LiveCodeBench Pro** pins Fugu's 2025 Q2 slice (`quater_2025_4_6`, 167
+  problems) and joins each `problem_id` to a `<problem_id>.zip` in the testcase
+  repo (`testdata/<n>.in` / `.ans`). Acquisition **fails closed**: the split must
+  yield exactly 167 problems, every archive must download, and each archive's
+  usable cases must match the `sum(subtasks[].n_cases)` it declares, with no
+  unpaired half in either direction. An archive that declares **no** count is not
+  "as complete as whatever arrived" — that declaration is the only denominator
+  evidence there is, so a missing or malformed `config.yaml` fails closed too. `download_file()` turns a timeout, a 401 and a 404 alike into
+  `None`, so excluding a problem would cache a smaller denominator permanently —
+  and a rate over a shrunken set is not even a lower bound on the full 167. The
+  testcase repo's pin is part of the cache identity (`AdapterInfo.extra_sources`)
+  so repinning it rebuilds rather than leaving stale bytes "ready" under a new
+  methodology. The archives also ship a per-problem testlib `checker.cpp` that
+  kairyu does **not** compile: grading is per-line whitespace-normalized
+  comparison, so multi-answer problems can only lose points and the cell is a
+  **lower bound**.
 
 ## Degradation model (why one command always completes)
 
@@ -167,7 +192,30 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   after run initialization are skipped rather than scored as valid input.
 - Download deps are an extra: `uv sync --extra bench` (or
   `pip install 'kairyu[bench]'`).
-- **Gated datasets** (GPQA Diamond, HLE): accept the license on the dataset
+- **Pinned revisions.** Every slot whose data kairyu downloads is pinned to a
+  commit in `kairyu/bench/pins.py`, and that commit is passed to the fetch — a pin
+  recorded in the manifest while the bytes came from a moving `main` would make
+  the cache and run fingerprint attest something false. `revision` is a git ref,
+  so a declared value that is not a commit sha (a config name such as
+  `release_v6`) is replaced by the registry pin; the config name goes to `name=`.
+  Secondary artifacts that decide a slot's tests or expected answers — the
+  LiveCodeBench Pro testcase archives, SciCode's `test_data.h5` — are registered
+  in `SECONDARY_PINS` and carried in the adapter's `extra_sources`, so cache
+  invalidation and provenance cover them too. This matters: `openai/mrcr` was corrected in
+  December 2025 and HLE's item count has shifted since release, so a score taken
+  against "whatever `main` was that day" is comparable to neither Fugu's number
+  nor an earlier kairyu run. A pin only applies when the recorded dataset id
+  still matches, and an adapter that declares its own revision keeps it.
+  Refreshing a pin changes the run fingerprint, so stored runs are refused for
+  resume rather than silently reinterpreted — the procedure is in that module's
+  docstring.
+  The **agentic** slots are the exception: mini-swe-agent, Harbor and the τ
+  harness fetch their own datasets and expose no revision knob, so SWE-Bench Pro
+  in particular tracks upstream (which has had post-release test fixes). That is
+  a real limitation of those harnesses, not something this suite can pin.
+
+
+- **Gated datasets** (GPQA Diamond, HLE, LiveCodeBench Pro): accept the license on the dataset
   page (e.g. <https://huggingface.co/datasets/Idavidrein/gpqa>) and set
   `HF_TOKEN`. Without it those cells report `skipped (gated)` and the run
   continues.
