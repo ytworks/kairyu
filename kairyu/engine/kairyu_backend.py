@@ -73,8 +73,6 @@ def build_engine_loop(
     """
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
-    if speculative is not None and tensor_parallel_size > 1:
-        raise ValueError("speculative decoding with tensor_parallel_size > 1 is not supported")
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
 
@@ -86,6 +84,16 @@ def build_engine_loop(
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
             tokenizer=tokenizer,
+            speculative=speculative,
+            speculative_tokens=speculative_tokens,
+        )
+    if speculative is not None and tensor_parallel_size > 1:
+        # the toy/FakeCommunicator TP path shares ONE runner object across every
+        # rank, so a SpeculativeRunner over it would draft once and score
+        # against itself; the real multi-process path above has no such problem
+        raise ValueError(
+            "speculative decoding with tensor_parallel_size > 1 requires a real "
+            "model (model_path); the in-process TP path shares one runner"
         )
 
     default_eos: int | None = None
@@ -177,6 +185,8 @@ def _build_dist_tp_loop(
     page_size: int,
     max_num_batched_tokens: int,
     tokenizer: str | Tokenizer | None,
+    speculative: str | None = None,
+    speculative_tokens: int = 4,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -204,12 +214,23 @@ def _build_dist_tp_loop(
     generation = load_generation_defaults(model_path)
     cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(
-        cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
+        cache,
+        max_num_batched_tokens=max_num_batched_tokens,
+        page_size=page_size,
+        speculative_tokens=speculative_tokens if speculative else 0,
     )
+    # SpeculativeRunner composes over any ModelRunner, and DistTPModelRunner is
+    # one: each scoring pass it issues is broadcast like any other step, so every
+    # rank replays the identical draft and the m5 D1 agreement invariant holds
+    # unchanged. A rejected draft shortens the overlay's outputs, which StateSync
+    # already handles — a shrinking output list re-sends the full snapshot.
+    active: object = launcher.runner
+    if speculative == "ngram":
+        active = SpeculativeRunner(active)
     loop = EngineLoop(
         resolved,
         scheduler,
-        launcher.runner,
+        active,
         default_eos_token_id=generation.eos_token_id,
         default_stop_token_ids=generation.stop_token_ids,
     )
