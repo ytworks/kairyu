@@ -9,92 +9,92 @@
     },
     "checkpoint": {
       "name": "qwen3",
-      "weights_sha256": "6ad97559e21857dff62deea10ab1942cf9cc02a20f657bd8b8dad8aa55ff888f",
+      "weights_sha256": "6aa37b7da4e37d45b277d0bca47b00c2bfb58bb60986ba93e4c3e667df123955",
       "weights": [
         {
           "file": "model-00001-of-00017.safetensors",
           "bytes": 3957109648,
-          "header_sha256": "62499bb1ef8c581f076939b6492ea0d746eae592ab9c69a81215e79306977e46"
+          "sha256": "52562b2ff97b61764260273e71bf5b4cf8a66f569399398f26dec0300fcf1316"
         },
         {
           "file": "model-00002-of-00017.safetensors",
           "bytes": 3900791760,
-          "header_sha256": "c2a865b68d52b97f2c861b36dc2d2063df0d017cc788460dd617a2949a714644"
+          "sha256": "e26764b2c6878e3fb7198895fa833ec62838d84a19665e6abfbae43c6daf02b3"
         },
         {
           "file": "model-00003-of-00017.safetensors",
           "bytes": 3900791760,
-          "header_sha256": "96a5bff788c04634ad5a9ab63e5fe789aca05b0de14e2e83888b355cc363e37b"
+          "sha256": "6c5ba7bed9c52bc121e75cbe8a7be46936d0006cc80f42a6d5886ed40b4c2a62"
         },
         {
           "file": "model-00004-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "5310ec9fac6a086eaf6d3610948f74ccbd7cd3859cd2f328df7c4d203184c116"
+          "sha256": "f736f6ac4d8c30866107fb1185a05b3c3cfce9717720082f466fa44e691bcec8"
         },
         {
           "file": "model-00005-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "233cc3cd22e257c713efc8c45e68ebe45f768839077f20db32ab2d5d93a1c6b0"
+          "sha256": "a52ed375c083209c54d42ac510afeb1fbb5af4f193be2dc7d103f665a0f212d3"
         },
         {
           "file": "model-00006-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "0f8cbea79faddebdd62a90b469b8e4d0f6ab561ca90fce0ac12343b41b30a464"
+          "sha256": "37fae28990b0e4a70228549d040c0393e87bee3820d59e58e47844974d8dff5b"
         },
         {
           "file": "model-00007-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "57facda1d3fcfa8306bb7c0da51e3b7508c7dde3fa2a1863513f10a1059b2ddf"
+          "sha256": "37776006aeaba29eca8bc73b2b963fe3477e1c2e3f6a27cb9527be75b905e1bf"
         },
         {
           "file": "model-00008-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "476c47ac7da499d9192ce2e98c1ccccfc3bc35a058a304bfe04d39ab0d57d907"
+          "sha256": "73e74e9129674fe330948005075d70ab4fa0b92b68fb220c5a693f9cea553730"
         },
         {
           "file": "model-00009-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "44893f2b88aba54cdb047a0487390de45081e2a1ec34cc43ca50f40c6c051c31"
+          "sha256": "a044b3602a01bd8ea62ff51badf9cc038ab1d73d97399480e6a55b4c86fa7fa6"
         },
         {
           "file": "model-00010-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "4256a49ac78f70db0e441f0ff6560a1228ac4729a8c1664859fee683c3017420"
+          "sha256": "9966612ba7ecfc2cd2e592fb95224b86d743271ff88e172cc272a4b26382aa75"
         },
         {
           "file": "model-00011-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "bc1cb9440f95b4db6123bf210f33dd70a03aa7b339da92e93637f2b0d6db59e6"
+          "sha256": "e2a058a0ac7d4b992b731c29221ecfb4b76b8a48d9004d0e8a62ba44f699845c"
         },
         {
           "file": "model-00012-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "c7a4d45c87bcc528a394016ea2914f657322746166c10bbe00372d5d304bb83f"
+          "sha256": "58a1aa89093fea07325f787072a468e3482a470ff4b7fe5ead5f749683907c40"
         },
         {
           "file": "model-00013-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "d9e481ceee4d5c3efb5a6d6cdd50e4669ff29c5d886d5ffdbb07eb5aa72aff27"
+          "sha256": "35f3381bab31a23370c37d922290aeecdf603418336058fb86fe42d8f51ac40c"
         },
         {
           "file": "model-00014-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "417ea6520eeac84488fa5686a6aa15251b8c0376ddc2d835df99f84c00ce297c"
+          "sha256": "8713b062ddc178acf5917610b7f4b64eede833b2ea4aa37bd562dcf2f3a3339d"
         },
         {
           "file": "model-00015-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "18de9a605ddc33e8f30a73de7fd399570198ea465fd9faaffe2f8bd6d0861478"
+          "sha256": "bec439d23931821a236d8f62fa79deecf5551bd25602278aa2ae0ce432b378cf"
         },
         {
           "file": "model-00016-of-00017.safetensors",
           "bytes": 3900791800,
-          "header_sha256": "b1b6225a92667ad134ff1e268e970062ae3db37c298c9ff54ce93ea8582f3873"
+          "sha256": "e569139fadd61fe7c8f9eb1c976d9a627cae48c57ddf228cfbd0593c59c64ff7"
         },
         {
           "file": "model-00017-of-00017.safetensors",
           "bytes": 3055341992,
-          "header_sha256": "29b918518283e12711f4184c99bfa61743c63bd5e447b32e0f1fb9973ef9e3de"
+          "sha256": "1f47c318fcd7797c0f85b4233cb754438b10e795b8bc874889090c416a94bd38"
         }
       ],
       "metadata_sha256": {
@@ -110,7 +110,7 @@
       "read_from": "/var/lib/docker/volumes/kairyu-qwen3-32b_qwen3-32b/_data/qwen3-32b"
     },
     "code": {
-      "commit": "31a238690c1334852356574eb722bde0f1878cca",
+      "commit": "ea0acfed6775403d064073fa7e0bd826342c9a76",
       "dirty": false,
       "untracked_files": 0
     },
@@ -136,7 +136,13 @@
       "match_rate": 0.8906,
       "tokens": 512,
       "token_match_rate": 0.9277,
-      "median_first_divergence": 2
+      "median_first_divergence": 2,
+      "first_mismatch": {
+        "request_id": "p5",
+        "position": 5,
+        "expected": 374,
+        "actual": 4041
+      }
     },
     "tp4_vs_tp1_overlap_off": {
       "prompts": 64,
@@ -144,7 +150,13 @@
       "match_rate": 0.9062,
       "tokens": 512,
       "token_match_rate": 0.9473,
-      "median_first_divergence": 6
+      "median_first_divergence": 6,
+      "first_mismatch": {
+        "request_id": "p19",
+        "position": 2,
+        "expected": 13,
+        "actual": 389
+      }
     },
     "tp8_vs_tp1_overlap_off": {
       "prompts": 64,
@@ -152,7 +164,13 @@
       "match_rate": 0.8281,
       "tokens": 512,
       "token_match_rate": 0.9023,
-      "median_first_divergence": 2
+      "median_first_divergence": 2,
+      "first_mismatch": {
+        "request_id": "p0",
+        "position": 2,
+        "expected": 220,
+        "actual": 3555
+      }
     },
     "tp2_vs_tp1_overlap_on": {
       "prompts": 64,
@@ -160,7 +178,13 @@
       "match_rate": 0.8906,
       "tokens": 512,
       "token_match_rate": 0.9277,
-      "median_first_divergence": 2
+      "median_first_divergence": 2,
+      "first_mismatch": {
+        "request_id": "p5",
+        "position": 5,
+        "expected": 374,
+        "actual": 4041
+      }
     },
     "tp4_vs_tp1_overlap_on": {
       "prompts": 64,
@@ -168,7 +192,13 @@
       "match_rate": 0.9062,
       "tokens": 512,
       "token_match_rate": 0.9473,
-      "median_first_divergence": 6
+      "median_first_divergence": 6,
+      "first_mismatch": {
+        "request_id": "p19",
+        "position": 2,
+        "expected": 13,
+        "actual": 389
+      }
     },
     "tp8_vs_tp1_overlap_on": {
       "prompts": 64,
@@ -176,7 +206,51 @@
       "match_rate": 0.8281,
       "tokens": 512,
       "token_match_rate": 0.9023,
-      "median_first_divergence": 2
+      "median_first_divergence": 2,
+      "first_mismatch": {
+        "request_id": "p0",
+        "position": 2,
+        "expected": 220,
+        "actual": 3555
+      }
+    }
+  },
+  "overlap_equality": {
+    "tp1_overlap_on_vs_off": {
+      "prompts": 64,
+      "exact_match": 64,
+      "match_rate": 1.0,
+      "tokens": 512,
+      "token_match_rate": 1.0,
+      "median_first_divergence": null,
+      "first_mismatch": null
+    },
+    "tp2_overlap_on_vs_off": {
+      "prompts": 64,
+      "exact_match": 64,
+      "match_rate": 1.0,
+      "tokens": 512,
+      "token_match_rate": 1.0,
+      "median_first_divergence": null,
+      "first_mismatch": null
+    },
+    "tp4_overlap_on_vs_off": {
+      "prompts": 64,
+      "exact_match": 64,
+      "match_rate": 1.0,
+      "tokens": 512,
+      "token_match_rate": 1.0,
+      "median_first_divergence": null,
+      "first_mismatch": null
+    },
+    "tp8_overlap_on_vs_off": {
+      "prompts": 64,
+      "exact_match": 64,
+      "match_rate": 1.0,
+      "tokens": 512,
+      "token_match_rate": 1.0,
+      "median_first_divergence": null,
+      "first_mismatch": null
     }
   }
 }
