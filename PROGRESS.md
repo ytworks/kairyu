@@ -112,6 +112,28 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] m16 D1: reduce_scatter implemented; "same-call-site optimization" withdrawn
+- What: `TorchDistCommunicator.tensor_reduce_scatter` added — NCCL's real collective, and
+  all_reduce + a local slice under gloo, which has none. The D1 note calling NCCL's
+  reduce_scatter "a same-call-site optimization recorded for deploy day" is withdrawn as
+  incorrect, and the m16 §3 non-goal is narrowed to USING it at the `RowParallelLinear`
+  call site (which needs sequence parallelism), not to the primitive.
+- Why: measured, not assumed. On 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch
+  2.12.1+cu130 / NCCL 2.29.7 — per-trial worst-rank elapsed via CUDA events,
+  barrier-bounded, MAX-reduced across ranks, buffers outside the timed region, paths
+  interleaved, 120 samples each (6 rounds x 20 trials) — `all_reduce` medians 3.784 ms while
+  `reduce_scatter`+`all_gather` medians 3.944 ms. Swapping one for the other at the same
+  call site moves the same bytes and adds a launch, so it LOSES; all_reduce's p95 sits
+  below rs+ag's MINIMUM, so this is not straggler noise (the full supports do overlap — a
+  few all_reduce samples land above rs+ag's floor — so the claim is about the bulk). `reduce_scatter`
+  alone medians 1.988 ms (1.90x), but its output is a shard, so realising that win means
+  sequence parallelism — a design change m16 does not specify and one that should be
+  argued on activation memory as much as on comm time. The call site is deliberately
+  unchanged.
+- Refs: m16 D1 + §3 (amended), `kairyu/engine/core/dist_comm.py`,
+  `bench/reduce_scatter_bench.py`, `bench/results/reduce-scatter-2026-07-25.json`
+  (raw per-trial samples committed)
+
 ### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
 - What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
   `tensor_parallel_size > 1`, which happens BEFORE the `probe()` block that selects
@@ -731,6 +753,21 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: `Dockerfile.cuda`; supersedes the base image recorded in the
   2026-07-03 M19 deploy-packaging entry (m19 D1).
 
+### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
+- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
+  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
+  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
+  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
+  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
+  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
+- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
+  from the serve entrypoint — so real tensor-parallel models could not be
+  deployed. Now `kairyu serve --tp 2` runs end to end.
+- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
+  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
+  `kairyu/models/loader.py`, test
+  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
+
 ### 2026-07-04 — [design] Review remediation Phase 6: GPU-day seam changes (CPU design + C5 contract test)
 - What: Captured the five GPU-day seam changes from the full-repo review in
   `docs/design/gpu-day-seams.md` (C5 CUDA-graph static buffers, C4 batched
@@ -749,20 +786,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: review report; `docs/design/gpu-day-seams.md`,
   `kairyu/engine/core/step_executor.py` (`SnapshotGraphBackend`),
   `tests/unit/test_step_executor.py`.
-### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
-- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
-  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
-  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
-  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
-  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
-  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
-- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
-  from the serve entrypoint — so real tensor-parallel models could not be
-  deployed. Now `kairyu serve --tp 2` runs end to end.
-- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
-  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
-  `kairyu/models/loader.py`, test
-  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
 
 ### 2026-07-04 — [progress] Review remediation Phase 8: packaging + doc accuracy
 - What: Fixed the cross-cutting packaging/doc defects from the full-repo review.
@@ -787,6 +810,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   **Deferred follow-up:** `kairyu validate` cross-artifact command, typed
   `GenerationRequest.prompt` (token-ids/multimodal), `deploy/spec.py`
   ServerSection compose-not-inherit, and the `kairyu/bench/` package boundary.
+
 ### 2026-07-04 — [progress] Review remediation Phase 7: host-path performance (safe subset)
 - What: Fixed the provably-safe, output-preserving host-path hot spots from the
   full-repo review. **P5**: `prompt_chunks` re-hashed the whole prompt prefix per
@@ -809,6 +833,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   — file-handle lifecycle), P6 (eviction leaf heap), P7 (batched spec verify),
   and the MEDIUM-perf items (sampler penalty state, stop-string offset, queue
   coalescing, scheduler deque, KV-event hash chain, page-table cache).
+
 ### 2026-07-04 — [progress] Review remediation Phase 5: bench scoring correctness + security
 - What: Fixed the scoring-integrity and security defects in the Fugu bench suite.
   **B1**: the MCQ answer-extraction regex matched "answer" + the first letter of
@@ -834,6 +859,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   per-pair config hash), B4 + denominator policy (skipped/unjudged as 0 or n/a,
   show per-target n_scored), LCB per-line/tolerant scoring, sandbox NPROC/session
   hardening, self-judge (judge==target) scoreboard flag, judge prompt delimiters.
+
 ### 2026-07-04 — [progress] Review remediation Phase 4: model + quant parity
 - What: Fixed the parity-affecting model/quant defects from the full-repo review.
   **M3 (rope)**: unsupported `rope_scaling` kinds (linear/dynamic/longrope) now
@@ -862,6 +888,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   RATE only, not output correctness (verification is by the target), so no CPU
   test can validate a fix; plus the design items (linear_factory context,
   forward_fused wiring, HF-name-preserving TP/EP wrappers, draft-head quant).
+
 ### 2026-07-04 — [progress] Review remediation Phase 3: orchestration + fleet reliability
 - What: Fixed the L2 fleet/orchestration HIGH defects from the full-repo review.
   **O1**: request errors were all counted as replica failures — a new
@@ -888,6 +915,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   tests under `tests/unit/`. Deferred follow-up: M1 (verifier non-target deps +
   _SafeDict masking), M3 (MoA path Budget/cost wiring), M8 (run_chat periodic
   keep-alive), and the KvEventIndex↔ReplicaPool integration (design item).
+
 ### 2026-07-04 — [progress] Review remediation Phase 2: API security + tenant isolation
 - What: Fixed the CRITICAL/HIGH L3-server defects from the full-repo review.
   **C3 (CRITICAL) batch/file tenant isolation**: File/Batch objects gained an
