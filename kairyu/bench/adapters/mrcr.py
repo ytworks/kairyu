@@ -181,22 +181,6 @@ class MrcrAdapter(GenerativeAdapter):
         )
         return normalized
 
-
-
-        rows = load_hf_rows(
-            self.info.hf_dataset, split="train", revision=self.info.hf_revision
-        )
-        return [
-            {
-                "id": f"mrcr-{index:05d}",
-                "messages": json.loads(row["prompt"]),
-                "answer": row["answer"],
-                "prepend": row["random_string_to_prepend"],
-                "n_needles": row.get("n_needles"),
-            }
-            for index, row in enumerate(rows)
-        ]
-
     def build_request(
         self, item: BenchItem, target: BenchTarget, ctx: RunContext
     ) -> ChatRequestSpec | SkipItem:
