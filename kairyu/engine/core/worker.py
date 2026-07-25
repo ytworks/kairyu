@@ -130,12 +130,18 @@ def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
 
     ``force_cpu`` is for the CPU parity tests, which compare TP output against a
     single-process fp32 host reference and so must not follow the probe onto a
-    GPU. Deployment never sets it.
+    GPU. ``KAIRYU_TP_FORCE_CPU`` is the same switch for callers that cannot pass
+    the argument — notably `build_engine_loop`, whose spawned ranks read it from
+    the inherited environment, so rank 0 and the workers cannot end up on
+    different backends and deadlock the first collective. Deployment sets neither.
     """
+    import os
+
     import torch
 
     from kairyu.engine.core.hw_profile import probe
 
+    force_cpu = force_cpu or bool(os.environ.get("KAIRYU_TP_FORCE_CPU"))
     profile = probe()
     if force_cpu or profile.arch != "cuda":
         return TPPlacement("cpu", torch.float32, "gloo")
