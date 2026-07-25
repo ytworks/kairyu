@@ -200,6 +200,17 @@ class ResultStore:
         self._atomic_write(markdown_path, markdown)
         return markdown_path
 
+    def save_comparison(self, comparison: dict, markdown: str) -> Path:
+        """Accuracy report next to the scoreboard it was derived from."""
+        self.ensure()
+        json_path = self.run_dir / "comparison.json"
+        markdown_path = self.run_dir / "comparison.md"
+        for path in (json_path, markdown_path):
+            self._preflight_atomic_write(path)
+        self._atomic_write(json_path, json.dumps(comparison, indent=2))
+        self._atomic_write(markdown_path, markdown)
+        return markdown_path
+
     def _atomic_write(self, path: Path, text: str) -> None:
         self._preflight_atomic_write(path)
         fd: int | None = None
