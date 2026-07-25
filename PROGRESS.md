@@ -15,10 +15,13 @@ PCIe throughout, P2P 30–37 GB/s against ~1450 GB/s device-local.
 Gate A1/A2 has a real-ranks harness for the first time. Teacher-forced agreement
 against HF is measured and within the reference's own noise floor at TP=1 and
 TP=8 (`bench/parity_hf.py`), but that is a DIAGNOSTIC, not A1: the formal gate
-needs full greedy continuations with the overlap pipeline ON, and the
-device-side future-token patch (m2 §2.2) is unimplemented, so
-`PagedModelRunner` raises IndexError under `OverlapEngineCore`. A1 stays open
-with that work named.
+needs full greedy continuations on Llama-3.1-8B. The overlap pipeline is no
+longer what blocks it: the in-flight token buffer removed the IndexError
+`PagedModelRunner` used to raise under `OverlapEngineCore`, and overlap ON is
+measured to reproduce overlap OFF exactly at TP1/2/4/8
+(`bench/results/parity-tp-qwen3-32b-2026-07-26.json`). A1 stays open on the
+model and the continuations; the device-side half of m2 §2.2 stays open as a
+performance invariant, not as a gate.
 Performance and production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-26_
@@ -167,6 +170,41 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: G2 §7 amendment (2026-07-25), `docs/design/m2-engine.md` §2.5, `bench/parity_hf.py`,
   `bench/results/gate1-hf-parity-tp{1,8}-2026-07-25.json`,
   `bench/results/hf-reference-qwen3-32b.json`
+### 2026-07-26 — [amendment] A1's overlap ON/OFF equality is measured, not inferred
+- What: corrects the entry below it. `bench/parity_tp.py` compared each overlap mode
+  against its OWN TP1 base and dropped the outputs when the next mode overwrote them,
+  so ON and OFF were never compared to each other; "ON reproduces OFF exactly" was read
+  off two aggregate rows agreeing. Outputs are now retained per (degree, mode) and
+  compared directly, recording the first disagreeing request id, position and token
+  pair, and the harness exits non-zero when they differ. Re-measured on the 8x
+  RTX PRO 6000 host: TP1/2/4/8 all 64/64 exact, token rate 1.0, no first mismatch.
+- Why: two runs can diverge on DIFFERENT prompts at the same depth and land on identical
+  exact_match, tokens, token_match_rate and median_first_divergence — equal aggregates
+  are not sequence equality. Unlike the cross-TP rates (reduction order, orientation
+  only per G2 §7), ON vs OFF is the same ranks in the same order, so a difference is the
+  pipeline changing an answer. That makes it a verdict rather than a report.
+  The evidence also carries the corrected checkpoint provenance: the previous digest
+  hashed only safetensors headers plus file sizes, which a base model and a fine-tune of
+  it share, so it identified layout rather than weights.
+- Refs: G2 A1, m2 §2.2, `bench/parity_tp.py`,
+  `bench/results/parity-tp-qwen3-32b-2026-07-26.json`
+
+### 2026-07-26 — [progress] G2 A1's overlap-ON half is measured, and it matches OFF
+- What: `bench/parity_tp.py` no longer forces `overlap_modes` to OFF when a real model is
+  loaded, so the A1 sweep runs both halves. On the 8x RTX PRO 6000 host, Qwen3-32B, 64
+  fixed prompts x 8 new tokens, overlap ON reproduces overlap OFF exactly at every TP
+  degree: TP2 57/64 (token 0.9277), TP4 58/64 (0.9473), TP8 53/64 (0.9023) in both modes.
+  Evidence: `bench/results/parity-tp-qwen3-32b-2026-07-26.json`.
+- Why: A1 requires parity with the overlap pipeline ON *and* OFF, and only OFF had ever
+  been measured — `PagedModelRunner` read `state.outputs[position - 1]`, which an overlap
+  snapshot is one entry short of, so a real runner raised IndexError and the harness
+  recorded the gap instead of a number. The in-flight token buffer removed that
+  precondition; this run is what shows the pipeline changes no output rather than
+  asserting it. The rates themselves are orientation only, per G2 §7 (amended
+  2026-07-25): free-running greedy equality is not the correctness bar, because one
+  flipped token fails a prompt and every token after it. What A1 gets from this run is
+  the ON-vs-OFF equality, which is exact.
+- Refs: G2 A1, m2 §2.2, `bench/parity_tp.py`, `bench/results/parity-tp-qwen3-32b-2026-07-26.json`
 
 ### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
 - What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
@@ -190,6 +228,26 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m5 D1/D3, m16 D1/D2, `docs/gpu-runbook.md` §6.1; `kairyu/engine/core/worker.py`,
   `kairyu/models/parallel.py`, `kairyu/engine/core/dist_comm.py`,
   `tests/dist/test_distributed.py` (CPU parity now pins `force_cpu=True`).
+### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
+- What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
+  `position - 1` before that token is committed. `OverlapEngineCore` takes the snapshot
+  for step N+1 before step N commits, so `state.outputs` is one short — every real-model
+  overlap run raised `IndexError: tuple index out of range`. Committed outputs still win
+  over the in-flight value, so a speculative rollback is not shadowed, and only the newest
+  position is retained (a decode reads exactly one).
+- Why: `overlap.py` already specified this — "decode chunks carry an explicit position so
+  the runner never needs previously-committed token values from the host (on GPU, the
+  last-token slot is patched device-side)" — and nothing implemented it. The toy runner
+  honours the contract by ignoring outputs entirely, which is why no CPU test could see
+  the gap. It blocked the overlap-ON half of G2 A1 and runbook §1 Gate 1, both of which
+  require overlap ON and OFF.
+  Scope: this is the HOST-SIDE half of m2 §2.2. That section specifies patching the
+  placeholder slot device-to-device from the sampled tensor with no host sync in the hot
+  path; this keeps Python ints and rebuilds the input tensor each step. Correctness is
+  restored — overlap ON now runs and matches OFF — but the device-side technique and the
+  zero-host-sync invariant remain OPEN, along with the perf gate that would show them.
+- Refs: m2 §2.2 (partially), G2 A1, `kairyu/engine/core/model_runner.py`,
+  `tests/unit/test_overlap_future_token.py`, `tests/gpu/test_overlap_future_token_gpu.py`
 
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions

@@ -184,3 +184,68 @@ def test_toy_results_record_the_running_commit(tmp_path):
     assert code["dirty"] in (True, False)
     # untracked scratch dirs must not be reported as modified code
     assert isinstance(code["untracked_files"], int)
+
+
+def _parity_tp():
+    sys.path.insert(0, str(REPO / "bench"))
+    try:
+        import parity_tp
+
+        return parity_tp
+    finally:
+        sys.path.pop(0)
+
+
+def test_equal_aggregates_are_not_sequence_equality():
+    """Review [P1] on #145: the harness compared each overlap mode against its
+    own TP1 base and dropped the outputs, then the PR concluded "ON reproduces
+    OFF exactly" from two aggregate rows agreeing.
+
+    These two runs diverge on DIFFERENT prompts at the same depth, so every
+    aggregate the old result recorded — exact_match, tokens, token_match_rate,
+    median_first_divergence — is identical. Only comparing the outputs sees it.
+    """
+    parity_tp = _parity_tp()
+
+    base = {"p0": (1, 2, 3), "p1": (4, 5, 6)}
+    off = {"p0": (1, 9, 9), "p1": (4, 5, 6)}   # p0 diverges at position 1
+    on = {"p0": (1, 2, 3), "p1": (4, 9, 9)}    # p1 diverges at position 1
+
+    against_base_off = parity_tp._compare(base, off)
+    against_base_on = parity_tp._compare(base, on)
+    for field in ("exact_match", "prompts", "tokens", "token_match_rate",
+                  "median_first_divergence"):
+        assert against_base_off[field] == against_base_on[field], field
+
+    # ...and yet the two modes did not produce the same output
+    direct = parity_tp._compare(off, on)
+    assert direct["exact_match"] == 0
+    assert direct["first_mismatch"]["request_id"] == "p0"
+    assert direct["first_mismatch"]["position"] == 1
+
+
+def test_identical_runs_compare_exact():
+    parity_tp = _parity_tp()
+    same = {"p0": (1, 2, 3), "p1": (4, 5, 6)}
+    result = parity_tp._compare(same, dict(same))
+    assert result["exact_match"] == result["prompts"] == 2
+    assert result["first_mismatch"] is None
+    assert result["token_match_rate"] == 1.0
+
+
+def test_the_sweep_records_and_gates_the_overlap_comparison(tmp_path):
+    """The ON-vs-OFF comparison must reach the evidence file, not just stdout."""
+    out = tmp_path / "result.json"
+    result = _run(
+        "--tp", "1,2", "--num-prompts", "2", "--max-new-tokens", "2",
+        "--out", str(out),
+    )
+    assert result.returncode == 0, result.stderr
+
+    payload = json.loads(out.read_text())
+    equality = payload["overlap_equality"]
+    assert set(equality) == {"tp1_overlap_on_vs_off", "tp2_overlap_on_vs_off"}
+    for entry in equality.values():
+        assert entry["exact_match"] == entry["prompts"]
+        assert entry["first_mismatch"] is None
+    assert "overlap ON vs OFF" in result.stdout
