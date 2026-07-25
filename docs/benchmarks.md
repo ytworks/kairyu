@@ -89,8 +89,10 @@ vs `kairyu-auto-max` in one run.
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
-| SciCode | `SciCode1/SciCode` | sandboxed sub-step tests (+`test_data.h5` golden data) | numpy in venv |
 | τ³-Bench Banking | tau3/tau2 `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
+
+| SciCode | `SciCode1/SciCode` | sequential sub-step tests (+`test_data.h5` golden data) | numpy in venv |
+| τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
 | MRCRv2 | `openai/mrcr` (8-needle, ≤128K) | official prepend + SequenceMatcher ratio | long-context target |
 
@@ -145,6 +147,48 @@ prompt-only token count, matching the official runner's
 `n_tokens(messages) > MAX_CONTEXT_WINDOW` check. (The chars/4 heuristic survives
 only as a fallback for rows normalized before that field existed; near a target's
 limit the two disagree and would skip a fitting row or send an oversized one.)
+
+### SciCode: sequential sub-steps and golden data
+
+The published `SciCode1/SciCode` export ships **no reference code** — every
+sub-step's `ground_truth_code` and every problem's `general_solution` is null.
+There is therefore no "gold previous steps" setting to run, so sub-steps execute
+**sequentially per problem** and each step sees the model's *own* earlier code in
+both its prompt and its executed program (SciCode's main setting, which is what
+makes the cascade visible). Grading a later step in isolation could only raise
+`NameError` on the helper an earlier step was meant to define.
+
+Two consequences:
+
+- `--limit` / `--smoke` select **whole problems**, never a truncated chain.
+- The scored population is **288 of the 291** test-split sub-steps. The official
+  evaluator `continue`s past three of them (problem 13 step 6, 62 step 1, 76
+  step 3) and instead supplies their implementation as a text file, because later
+  steps of those problems call the helpers they define. kairyu does the same: those
+  three are excluded from scoring and their pinned-by-hash implementation is
+  carried into the context. 288 is also the denominator Fugu reports, and
+  acquisition fails closed unless it lands on 291 sub-steps / 288 scoreable — and
+  also if any of those three implementations cannot be fetched at its pinned hash,
+  because scoring their dependents without them would charge the model for a
+  missing harness file.
+- Nearly all of those compare against golden data (`target`) from `test_data.h5`,
+  which the HF export does not contain. It is fetched from the upstream repo first
+  and otherwise from a public mirror (`Srimadh/Scicode-test-data-h5`), and is
+  accepted only when its size and **SHA-256 content hash** match the pin: magic
+  bytes alone prove the file format, so a different-but-valid HDF5 would otherwise
+  be trusted as every expected value in the benchmark. The check runs again when a
+  cached asset is reused (once per pair, since the file is ~1 GB), so a replaced or
+  truncated file cannot become the expected-answer source under a manifest that
+  still advertises the pin. The pin says *which* bytes
+  were scored against — it has **not** been cross-checked against the official
+  Google Drive artifact, and the methodology says so. Sub-steps left without the
+  file are `unjudged`, never guessed.
+
+Prompts include the problem-level and step-level background, matching Fugu's
+with-background condition, and each prior step is rendered the way the official
+`process_problem_steps()` does: its description, its background, then its code,
+with steps separated by `------`. Passing only the concatenated code would lose
+the statement of what each helper was for.
 
 ## Degradation model (why one command always completes)
 
