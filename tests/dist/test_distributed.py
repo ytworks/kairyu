@@ -161,3 +161,20 @@ def test_pp2_greedy_matches_single_process(spawn2, llama_dir):
     results = spawn2(dist_targets.pp_greedy_parity, llama_dir, prompt, 10)
     assert results[0]["outputs"] == reference
     assert results[1]["outputs"] == reference
+
+
+def test_reduce_scatter_matches_all_reduce_sliced(spawn2):
+    # the primitive m16 D1 recorded as missing (gloo has none). Under gloo it is
+    # all_reduce + a local slice; this pins the contract the NCCL path honours.
+    results = spawn2(dist_targets.reduce_scatter_equivalence)
+    for rank, result in enumerate(results):
+        assert result["shape"] == [4, 3], rank
+        assert result["max_error"] == 0.0, rank
+        assert result["regathered_matches"] is True, rank
+
+
+def test_reduce_scatter_rejects_an_indivisible_first_dimension(spawn2):
+    results = spawn2(dist_targets.reduce_scatter_rejects_indivisible)
+    for result in results:
+        assert result["raised"] is True
+        assert "divisible" in result["message"]

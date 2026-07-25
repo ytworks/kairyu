@@ -31,8 +31,26 @@ Implements the existing object-level `Communicator` protocol
 `tensor_all_reduce(t)`, `tensor_all_to_all_single(out, in, out_splits,
 in_splits)`, `tensor_send/recv(t, peer)` — thin over `torch.distributed`
 with an optional group arg. gloo gap (verified): **no reduce_scatter** — all
-call sites use all_reduce (+ local slice); NCCL's reduce_scatter is a
-same-call-site optimization recorded for deploy day.
+call sites use all_reduce (+ local slice).
+
+> **Amended 2026-07-25 (measured).** `tensor_reduce_scatter` is now implemented
+> (NCCL's real collective; gloo keeps all_reduce + local slice, identical
+> result). It is **not** a same-call-site optimization, and the earlier note
+> saying so was wrong. Measured on 8× RTX PRO 6000 Blackwell, 8192×5120 bf16
+> (`bench/reduce_scatter_bench.py`, `bench/results/reduce-scatter-2026-07-25.json`):
+>
+> | | ms | vs all_reduce |
+> |---|---|---|
+> | `all_reduce` | 3.848 | 1.00× |
+> | `reduce_scatter` + `all_gather` | 4.003 | **0.96× — slower** |
+> | `reduce_scatter` alone | 2.035 | **1.89×** |
+>
+> Swapping one for the other at the `RowParallelLinear` call site moves the same
+> bytes and adds a launch, so it loses. The 1.89× is real but only available if
+> the consumer accepts a **shard** — i.e. sequence parallelism, where the shard
+> survives the norm and the next column-parallel matmul re-gathers it. That is a
+> design change this milestone does not specify, and it should be justified by
+> activation memory as much as by comm time.
 
 ### D2 — Tensor-parallel sharding (`models/parallel.py`)
 
