@@ -115,6 +115,29 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] A1/A2 and m2 §2.5 restated against measured quantities
+- What: G2 A2's "greedy output-match rate >=99%" and m2 §2.5's "greedy-decode token-level
+  parity with HF transformers" are replaced by two measured criteria, both computed by the
+  new `bench/parity_hf.py`: (a) zero substantive disagreements — every disagreement inside
+  the reference's top-k and within a tie gap measured from the reference's own
+  self-disagreements; (b) agreement at or above the reference's self-agreement rate. The
+  gate is teacher-forced (identical prefix at every position, next token only); free-running
+  greedy sequence equality is explicitly no longer a correctness gate.
+- Why: the fixed 99% is not achievable by any implementation, including the reference's own.
+  On Qwen3-32B/bf16/8x RTX PRO 6000, HF transformers agrees with ITSELF — `generate()`
+  against a teacher-forced forward over the same sequence — on only 251/256 = 0.9805
+  positions, while kairyu agrees with HF on 253/256 = 0.9883 at TP=1 and 251/256 at TP=8.
+  A gate demanding an engine match a reference more closely than the reference matches
+  itself measures the reference's instability. The same applies to the logprob half: a 0.1
+  nat tolerance sits below bf16's ~0.125 quantization of these gaps, and one observed gap
+  was negative (HF's forward scoring kairyu's pick above HF's own choice). Separately,
+  free-running comparison scored the same engine at 0.786 against 0.988 teacher-forced —
+  once one token differs, every later token is compared against a prefix the other side
+  never produced, so a single moved near-tie is indistinguishable from a broken shard.
+- Refs: G2 §7 amendment (2026-07-25), `docs/design/m2-engine.md` §2.5, `bench/parity_hf.py`,
+  `bench/results/gate1-hf-parity-tp{1,8}-2026-07-25.json`,
+  `bench/results/hf-reference-qwen3-32b.json`
+
 ### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
 - What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
   `tensor_parallel_size > 1`, which happens BEFORE the `probe()` block that selects

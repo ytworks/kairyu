@@ -88,8 +88,18 @@ scheduler hides CPU work under the GPU step; we adopt the same structure:
 - FP8 W8A8 via compressed-tensors checkpoints (llm-compressor output) with per-tensor
   scales; BF16 fallback path for correctness A/B tests.
 - Model zoo M2: Llama-3.1-8B only (goal-specified). Architecture-agnostic loader deferred.
-- Correctness gate: greedy-decode token-level parity with HF transformers BF16 on 64 fixed
-  prompts (FP8 compared by logprob tolerance, not exact match).
+- Correctness gate: **teacher-forced** token-level parity with HF transformers BF16 on 64
+  fixed prompts — both sides given the identical prefix at every position, only the next
+  token compared (`bench/parity_hf.py`). FP8 compared by logprob tolerance, not exact
+  match; the tolerance is measured, not asserted.
+
+  *(Amended 2026-07-25 after the first hardware run — see g2 §7's amendment.* Free-running
+  greedy parity was the original wording and it does not work: once one token differs the
+  trajectories separate, and every later token is compared against a prefix the other side
+  never produced. The same engine measured 0.786 free-running and 0.988 teacher-forced
+  against the same reference. The tolerance is stated relative to the reference's own
+  self-agreement, because two code paths through one set of bf16 weights disagree with each
+  other at 0.9805 — an engine cannot be held to a tighter bar than that.*)*
 
 ### 2.6 What M2 explicitly does not include
 

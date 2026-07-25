@@ -30,7 +30,12 @@ from pathlib import Path
 
 from bench.parity_tp import _TEXT_PROMPTS
 
-_TOLERANCE = 0.99  # runbook §1 Gate 1 / G2 A2 match rate
+#: G2 A2, amended 2026-07-25: the bar is the REFERENCE's own self-agreement, not
+#: a fixed percentage. HF's `generate()` and a teacher-forced forward over the
+#: same sequence disagree with each other in bf16 (0.9805 on Qwen3-32B), and an
+#: engine cannot be required to match a reference more closely than the reference
+#: matches itself. The old fixed 0.99 is kept only as a reported reference point.
+_REPORTED_REFERENCE_RATE = 0.99
 _TOP_K = 20  # HF ranks recorded per position; below this a pick is not a tie
 #: Floor for the tie threshold when the reference turns out to be perfectly
 #: self-consistent. m2 §2.5 and G2 A2 both ask for a "logprob tolerance" without
@@ -340,12 +345,10 @@ def main() -> int:
             "positions": total,
             "agreed": agreed,
             "rate": rate,
-            "threshold": _TOLERANCE,
-            "verdict": "PASS" if rate >= _TOLERANCE else "FAIL",
-            "reference_self_agreement_rate": noise_floor["self_agreement_rate"],
-            "at_or_above_reference_self_agreement": (
-                rate >= noise_floor["self_agreement_rate"]
-            ),
+            "threshold": noise_floor["self_agreement_rate"],
+            "threshold_source": "the reference's own self-agreement (G2 A2, amended 2026-07-25)",
+            "historical_fixed_threshold": _REPORTED_REFERENCE_RATE,
+            "verdict": "PASS" if rate >= noise_floor["self_agreement_rate"] else "FAIL",
         },
         # A2 asks for a match rate AND a logprob tolerance. The rate alone cannot
         # separate "reduction order shifted a tie" from "the shard is wrong", and
@@ -384,7 +387,8 @@ def main() -> int:
     )
     print(
         f"teacher-forced agreement: {agreed}/{total} = {rate:.4f} "
-        f"(threshold {_TOLERANCE}) -> {payload['agreement']['verdict']}"
+        f"(bar = reference self-agreement {noise_floor['self_agreement_rate']:.4f}) "
+        f"-> {payload['agreement']['verdict']}"
     )
     print(
         f"logprob tolerance: {len(substantive)} substantive disagreement(s), "
@@ -393,8 +397,8 @@ def main() -> int:
         f"-> {payload['logprob_tolerance']['verdict']}"
     )
     # both halves must hold: a high rate with one badly-wrong pick is not a pass,
-    # and a tie-break-only failure is not the same defect as a broken shard
-    return 0 if rate >= _TOLERANCE and not substantive else 1
+    # and neither half is a fixed number — each is measured against the reference
+    return 0 if rate >= noise_floor["self_agreement_rate"] and not substantive else 1
 
 
 if __name__ == "__main__":

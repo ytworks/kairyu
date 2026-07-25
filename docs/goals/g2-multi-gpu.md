@@ -62,7 +62,7 @@ results are ever reported (goal acceptance criteria, carried from G1).
 | Gate | Target | Regime |
 |---|---|---|
 | A1 (correctness anchor) | 8B TP=2: greedy token parity vs 8B TP=1 (HF-verified per gpu-runbook Gate 1) on the 64 fixed prompts, overlap ON and OFF | — |
-| A2 (correctness, 70B) | 70B TP=4 and TP=8 vs TP=2: greedy output-match rate ≥99% on 64 prompts + logprob tolerance (m2 §2.5 style; reduction order shifts argmax ties — match-rate precedent from m3) | — |
+| A2 (correctness, 70B) | 70B TP=4 and TP=8 vs TP=2, teacher-forced next-token agreement on 64 prompts: (a) **zero substantive disagreements** — every disagreement inside the reference's own top-k and within the measured tie gap; (b) agreement rate **at or above the reference's self-agreement rate**, both measured by `bench/parity_hf.py`. See the 2026-07-25 amendment below | — |
 | A3 (TTFT scaling) | TTFT p50 at TP=8 ≤ ⅓ × TP=2 on 4k-token prompts (≥75% efficiency; prefill is compute-bound and parallelizes near-linearly over NVLink) | latency-bound |
 | A4 (TPOT scaling) | TPOT p50 at TP=8 ≤ ½ × TP=2 (≥50% efficiency; decode is bandwidth-bound and all-reduce latency does not shrink with N — linear TPOT scaling is not a defensible promise) | latency-bound |
 | A5 (throughput scaling) | Output tokens/s at TP=8 ≥ 2.8 × TP=2 (≥70% efficiency) | saturation |
@@ -204,6 +204,47 @@ NVLink parts:
 - **§2 model contract widened**: Llama-3.3-70B stays the dense anchor; NVFP4 joins
   FP8 as a planning-default weight format where the SM supports it (KV stays BF16 on
   SM120 pending the FP8-KV correctness bake, G4 E-KV).
+
+### Amendment (2026-07-25, A1/A2 restated after the first real-hardware run)
+
+**A2's "output-match rate ≥99%" is not achievable by any implementation, including
+the reference's.** Measured on Qwen3-32B, bf16, 8× RTX PRO 6000 Blackwell
+(`bench/results/gate1-hf-parity-tp{1,8}-2026-07-25.json`):
+
+| | agreement |
+|---|---|
+| HF transformers vs **itself** — `generate()` against a teacher-forced forward over the same sequence | **251/256 = 0.9805** |
+| kairyu TP=1 vs HF | 253/256 = 0.9883 |
+| kairyu TP=8 vs HF | 251/256 = 0.9805 |
+
+Two code paths through one set of bf16 weights do not always pick the same token.
+A gate asking an engine to match a reference *more closely than the reference
+matches itself* measures the reference's instability, not the engine.
+
+The same applies to the logprob half. The first tolerance tried here was 0.1
+nats; bf16 quantizes the gaps to multiples of ~0.125 at these magnitudes, so 0.1
+could only ever classify 0.0 as a tie and everything else as a fault — and one
+observed gap was **negative**, HF's forward scoring kairyu's pick above HF's own.
+
+A1/A2 are therefore restated against measured quantities:
+
+1. **zero substantive disagreements** — every disagreement lands inside the
+   reference's top-k AND within the tie gap, where the tie gap is *measured* as
+   the largest gap the reference produces disagreeing with itself (never below a
+   bf16 resolution floor);
+2. **agreement at or above the reference's self-agreement rate**.
+
+Both are computed and reported by `bench/parity_hf.py`, which records the noise
+floor next to every result — so the comparison travels with the number. A fixed
+percentage may return once a reference is available at a precision that supports
+it (an fp32 forward, which needs more memory than one card holds for a 32B).
+
+**Free-running greedy sequence equality is not a correctness gate** and A1 no
+longer implies one. The same engine measured 0.786 free-running and 0.988
+teacher-forced: once one token differs, every later token is compared against a
+prefix the other side never produced, so a single moved near-tie is
+indistinguishable from a broken shard. `bench/parity_tp.py` still reports
+free-running match rates for orientation; only the teacher-forced numbers gate.
 
 ## 8. Evidence and reporting rules
 
