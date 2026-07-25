@@ -54,10 +54,11 @@ call sites use all_reduce (+ local slice).
 > | `reduce_scatter` + `all_gather` | 3.946 | 3.929 | 3.979 | **0.96x — slower** |
 > | `reduce_scatter` alone | 1.988 | 1.975 | 2.002 | **1.90x** |
 >
-> The ~4% loss is not straggler noise: all_reduce's p95 (3.909) sits below
-> rs+ag's minimum (3.929), so the distributions do not overlap. Swapping one for
-> the other at the `RowParallelLinear` call site moves the same bytes and adds a
-> launch.
+> The ~4% loss is not straggler noise: all_reduce's p95 sits below rs+ag's
+> MINIMUM. The full distributions do overlap — all_reduce has a handful of
+> samples above rs+ag's floor — so the claim is about the bulk of the
+> distributions, not their supports. Swapping one for the other at the
+> `RowParallelLinear` call site moves the same bytes and adds a launch.
 >
 > The 1.90x is real but only available if the consumer accepts a **shard** —
 > i.e. sequence parallelism, where the shard survives the norm and the next

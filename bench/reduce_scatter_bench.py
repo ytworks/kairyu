@@ -24,7 +24,31 @@ import torch
 import torch.distributed as dist
 
 
-def _time(fn, iters: int, warmup: int = 5) -> list[float]:
+def _driver_version() -> str | None:
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            check=True, capture_output=True, text=True, timeout=30,
+        ).stdout.splitlines()[0].strip()
+    except Exception:  # noqa: BLE001 - provenance is best-effort
+        return None
+
+
+def _topology() -> str | None:
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["nvidia-smi", "topo", "-m"],
+            check=True, capture_output=True, text=True, timeout=60,
+        ).stdout
+    except Exception:  # noqa: BLE001 - provenance is best-effort
+        return None
+
+
+def _time(fn, iters: int, warmup: int = 5) -> list[tuple[int, float]]:
     """Per-trial WORST-RANK elapsed, in ms.
 
     A collective finishes when its slowest participant does, so a per-rank
@@ -40,7 +64,7 @@ def _time(fn, iters: int, warmup: int = 5) -> list[float]:
     samples = []
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
-    for _ in range(iters):
+    for trial in range(iters):
         dist.barrier()
         torch.cuda.synchronize()
         start_event.record()
@@ -51,19 +75,26 @@ def _time(fn, iters: int, warmup: int = 5) -> list[float]:
             [start_event.elapsed_time(end_event)], device=torch.cuda.current_device()
         )
         dist.all_reduce(elapsed, op=dist.ReduceOp.MAX)
-        samples.append(float(elapsed.item()))
+        samples.append((trial, float(elapsed.item())))
     return samples
 
 
-def _summary(samples: list[float]) -> dict:
-    ordered = sorted(samples)
-    count = len(ordered)
+def _summary(records: list[dict]) -> dict:
+    """Aggregates, plus the raw records in EXECUTION order.
+
+    Sorting the samples before saving them destroyed the round/order/trial
+    correspondence, so drift or a fixed-position bias could not be checked from
+    the result — while a comment in this same file claimed a fixed order was the
+    thing being controlled for (review [P2] on #134).
+    """
+    values = sorted(record["elapsed_ms"] for record in records)
+    count = len(values)
     return {
-        "median_ms": round(ordered[count // 2], 4),
-        "min_ms": round(ordered[0], 4),
-        "p95_ms": round(ordered[min(count - 1, int(count * 0.95))], 4),
-        "max_ms": round(ordered[-1], 4),
-        "samples": [round(value, 4) for value in ordered],
+        "median_ms": round(values[count // 2], 4),
+        "min_ms": round(values[0], 4),
+        "p95_ms": round(values[min(count - 1, int(count * 0.95))], 4),
+        "max_ms": round(values[-1], 4),
+        "records": records,  # round / order / trial / elapsed, unsorted
     }
 
 
@@ -108,11 +139,23 @@ def main() -> int:
             "reduce_scatter_all_gather": reduce_scatter_all_gather,
             "reduce_scatter": reduce_scatter_only,
         }
-        samples: dict[str, list[float]] = {name: [] for name in cases}
-        for _ in range(args.rounds):
-            for name, fn in cases.items():
+        names = list(cases)
+        samples: dict[str, list[dict]] = {name: [] for name in names}
+        for round_index in range(args.rounds):
+            # ROTATED, not fixed: a constant order lets drift or a first-position
+            # effect land on the same path every time
+            order = names[round_index % len(names) :] + names[: round_index % len(names)]
+            for position, name in enumerate(order):
                 buffer.copy_(payload)  # untimed: identical input for every path
-                samples[name].extend(_time(fn, args.iters))
+                samples[name].extend(
+                    {
+                        "round": round_index,
+                        "order_position": position,
+                        "trial": trial,
+                        "elapsed_ms": round(elapsed, 4),
+                    }
+                    for trial, elapsed in _time(cases[name], args.iters)
+                )
 
         if rank == 0:
             bytes_moved = payload.numel() * payload.element_size()
@@ -132,6 +175,15 @@ def main() -> int:
                     "nccl": ".".join(str(v) for v in torch.cuda.nccl.version()),
                     "device_name": torch.cuda.get_device_name(0),
                     "device_count": torch.cuda.device_count(),
+                    # collective latency depends on the fabric and on NCCL's own
+                    # configuration, so neither can be left to the reader
+                    "driver": _driver_version(),
+                    "topology": _topology(),
+                    "nccl_env": {
+                        key: value
+                        for key, value in sorted(os.environ.items())
+                        if key.startswith("NCCL_")
+                    },
                 },
                 "method": (
                     "per-trial WORST-RANK elapsed via CUDA events, barrier-bounded, "

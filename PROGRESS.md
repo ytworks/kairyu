@@ -123,8 +123,9 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   barrier-bounded, MAX-reduced across ranks, buffers outside the timed region, paths
   interleaved, 100 samples each — `all_reduce` medians 3.785 ms while
   `reduce_scatter`+`all_gather` medians 3.946 ms. Swapping one for the other at the same
-  call site moves the same bytes and adds a launch, so it LOSES; all_reduce's p95 (3.909)
-  sits below rs+ag's minimum (3.929), so this is not straggler noise. `reduce_scatter`
+  call site moves the same bytes and adds a launch, so it LOSES; all_reduce's p95 sits
+  below rs+ag's MINIMUM, so this is not straggler noise (the full supports do overlap — a
+  few all_reduce samples land above rs+ag's floor — so the claim is about the bulk). `reduce_scatter`
   alone medians 1.988 ms (1.90x), but its output is a shard, so realising that win means
   sequence parallelism — a design change m16 does not specify and one that should be
   argued on activation memory as much as on comm time. The call site is deliberately
