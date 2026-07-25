@@ -84,6 +84,11 @@ def add_bench_parser(subparsers) -> None:
     run.add_argument("--rerun", action="store_true", help="Ignore stored pair results")
     run.add_argument("--cache-dir", default=None)
     run.add_argument("--no-download", action="store_true")
+    run.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable the live progress display (scoreboard output is unchanged)",
+    )
 
     download = commands.add_parser(
         "download", help="Fetch and normalize the suite's datasets into the cache."

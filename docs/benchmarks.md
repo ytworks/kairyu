@@ -187,6 +187,40 @@ with-background condition, and each prior step is rendered the way the official
 with steps separated by `------`. Passing only the concatenated code would lose
 the statement of what each helper was for.
 
+## Live progress
+
+A full run is thousands of judged items across eleven slots and can take hours,
+so the runner reports what it is doing:
+
+- **On a TTY** — a `tqdm` bar for the suite (pairs) plus one for the current
+  benchmark×target (items). `tqdm` comes with `kairyu[bench]`; without it the
+  run falls back to log lines rather than failing to import.
+- **In a log** (CI, `docker compose logs`, nohup) — one self-contained line per
+  event plus a throttled item counter, so a 2,500-item slot emits a handful of
+  lines instead of 2,500 and no line depends on the previous one being visible:
+
+  ```
+  [bench] 22 benchmark×target pairs to run
+  [bench 7/22] hle × qwen3-32b
+  [bench 7/22] hle × qwen3-32b: 2500 items
+  [bench 7/22] hle × qwen3-32b: 412/2500 items (15s)
+  [bench 7/22] hle × qwen3-32b: done — partial (score=8.4)
+  ```
+
+- `--no-progress` disables it. The reporter is a pure observer: `progress` is
+  excluded from the run fingerprint, and scoreboard/pair evidence is identical
+  either way. Every callback is wrapped so a closed stream, a broken pipe or a
+  bar bug cannot end a run that is producing evidence, and the reporter is closed
+  in a `finally` so cancellation does not leak it.
+- Agentic slots have no item count until their harness returns, so they are
+  labelled `agentic harness` and emit a **heartbeat** every 15s. Without it an
+  8-hour SWE-Bench Pro or Terminal-Bench run would print one line and go silent —
+  the exact case where "working" and "hung" must stay distinguishable.
+
+The play-by-play goes to **stderr** and the artifacts (download notes, the
+scoreboard, the accuracy report) to **stdout**, so
+`kairyu bench run … > scoreboard.txt` keeps the two apart.
+
 ## Degradation model (why one command always completes)
 
 Every unmet precondition becomes data, never a crash. Per (benchmark, target)
@@ -220,8 +254,8 @@ SHA-256 fingerprint in `run.json`. The identity contains:
   policy. Changing the reasoning effort is therefore a different experiment,
   not a resumable run.
 
-Exactly five execution or location controls are excluded: `run_id`,
-`results_dir`, `cache_dir`, `rerun`, and `download`. API-key *environment
+Exactly six execution, location or display controls are excluded: `run_id`,
+`results_dir`, `cache_dir`, `rerun`, `download`, and `progress`. API-key *environment
 variable names* remain part of the endpoint identity, but resolved secret
 values are never read into or hashed by the fingerprint. Environment metadata
 such as the timestamp, git commit, Python version, and kairyu version remains
