@@ -121,7 +121,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Why: measured, not assumed. On 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch
   2.12.1+cu130 / NCCL 2.29.7 — per-trial worst-rank elapsed via CUDA events,
   barrier-bounded, MAX-reduced across ranks, buffers outside the timed region, paths
-  interleaved, 100 samples each — `all_reduce` medians 3.784 ms while
+  interleaved, 120 samples each (6 rounds x 20 trials) — `all_reduce` medians 3.784 ms while
   `reduce_scatter`+`all_gather` medians 3.944 ms. Swapping one for the other at the same
   call site moves the same bytes and adds a launch, so it LOSES; all_reduce's p95 sits
   below rs+ag's MINIMUM, so this is not straggler noise (the full supports do overlap — a

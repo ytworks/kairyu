@@ -115,11 +115,15 @@ def main() -> int:
     )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
-    if args.rounds % 3 != 0:
+    # `% 3` alone accepts 0 and negatives: 0 runs nothing and reports a summary
+    # over an empty sample set, which reads as a completed measurement
+    if args.rounds <= 0 or args.rounds % 3 != 0:
         raise SystemExit(
-            "--rounds must be a multiple of 3 so the three paths are fully "
-            f"counterbalanced across order positions; got {args.rounds}"
+            "--rounds must be a POSITIVE multiple of 3 so the three paths are "
+            f"fully counterbalanced across order positions; got {args.rounds}"
         )
+    if args.iters <= 0:
+        raise SystemExit(f"--iters must be positive, got {args.iters}")
 
     rank = int(os.environ["RANK"])
     world = int(os.environ["WORLD_SIZE"])

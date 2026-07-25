@@ -42,8 +42,9 @@ call sites use all_reduce (+ local slice).
 > CUDA events, barrier-bounded so ranks start together, MAX-reduced across ranks
 > — a collective finishes when its slowest participant does, so a per-rank
 > minimum measures nothing about it. Buffers are prepared outside the timed
-> region and the three paths are interleaved within each round. 5 rounds x 20
-> trials = 100 samples per path.
+> region, and the path order is ROTATED per round so each occupies every position
+> equally. 6 rounds x 20 trials = 120 samples per path, kept as raw per-trial
+> records.
 >
 > 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch 2.12.1+cu130 / NCCL 2.29.7,
 > driver 595.84, PCIe (topology recorded in the result). 6 rounds x 20 trials,
