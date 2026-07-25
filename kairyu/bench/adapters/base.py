@@ -219,6 +219,54 @@ async def call_chat(
         raise RequestFailed(response.status_code, response.text)
 
 
+@dataclass(frozen=True)
+class ItemAttempt:
+    """One backend call: either text (+latency) or a terminal ItemResult."""
+
+    text: str | None = None
+    latency_s: float = 0.0
+    failure: ItemResult | None = None
+
+
+async def attempt_item(
+    client: httpx.AsyncClient,
+    target: BenchTarget,
+    request: ChatRequestSpec,
+    *,
+    item_id: str,
+    ctx: RunContext,
+    api_key: str | None,
+) -> ItemAttempt:
+    """Call the target for one item, converting request failures into data.
+
+    A 400 that names an image/context problem is the target refusing input it
+    cannot represent, so the item is `skipped`; anything else is `failed`.
+    """
+    start = time.perf_counter()
+    try:
+        text = await call_chat(
+            client,
+            target,
+            request,
+            retries=ctx.retries,
+            timeout_s=ctx.request_timeout_s,
+            api_key=api_key,
+        )
+    except RequestFailed as error:
+        lowered = error.body.lower()
+        unrepresentable = error.status_code == 400 and (
+            "image" in lowered or "context" in lowered or "too long" in lowered
+        )
+        return ItemAttempt(
+            failure=ItemResult(
+                item_id=item_id,
+                status="skipped" if unrepresentable else "failed",
+                error=str(error),
+            )
+        )
+    return ItemAttempt(text=text, latency_s=time.perf_counter() - start)
+
+
 def select_items(items: list[BenchItem], limit: int | None, seed: int) -> list[BenchItem]:
     """Deterministic subset: seeded sample keeps subsets comparable across runs."""
     if limit is None or limit >= len(items):
@@ -438,28 +486,13 @@ class GenerativeAdapter(ABC):
                 if isinstance(request, SkipItem):
                     return ItemResult(item_id=item.id, status="skipped", error=request.reason)
                 async with semaphore:
-                    start = time.perf_counter()
-                    try:
-                        text = await call_chat(
-                            client,
-                            target,
-                            request,
-                            retries=ctx.retries,
-                            timeout_s=ctx.request_timeout_s,
-                            api_key=api_key,
-                        )
-                    except RequestFailed as error:
-                        lowered = error.body.lower()
-                        if error.status_code == 400 and (
-                            "image" in lowered or "context" in lowered or "too long" in lowered
-                        ):
-                            return ItemResult(
-                                item_id=item.id, status="skipped", error=str(error)
-                            )
-                        return ItemResult(item_id=item.id, status="failed", error=str(error))
-                    latency = time.perf_counter() - start
-                result = await self.score(item, text, ctx)
-                return result.model_copy(update={"latency_s": round(latency, 3)})
+                    attempt = await attempt_item(
+                        client, target, request, item_id=item.id, ctx=ctx, api_key=api_key
+                    )
+                if attempt.failure is not None:
+                    return attempt.failure
+                result = await self.score(item, attempt.text or "", ctx)
+                return result.model_copy(update={"latency_s": round(attempt.latency_s, 3)})
 
             results = await asyncio.gather(*(run_item(item) for item in items))
 

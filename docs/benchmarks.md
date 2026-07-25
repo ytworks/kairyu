@@ -89,7 +89,7 @@ vs `kairyu-auto-max` in one run.
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
-| SciCode | `SciCode1/SciCode` | sandboxed sub-step tests (+`test_data.h5` golden data) | numpy in venv |
+| SciCode | `SciCode1/SciCode` | sequential sub-step tests (+`test_data.h5` golden data) | numpy in venv |
 | τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
 | MRCRv2 | `openai/mrcr` | official prepend + SequenceMatcher ratio | long-context target |
@@ -98,6 +98,30 @@ Annotated caveats appear as scoreboard footnotes automatically, notably:
 the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
 suite is unpublished; numbers are not directly comparable), and LiveCodeBench
 Pro is scored by the local sandbox, not the official judge.
+
+### SciCode: sequential sub-steps and golden data
+
+The published `SciCode1/SciCode` export ships **no reference code** — every
+sub-step's `ground_truth_code` and every problem's `general_solution` is null.
+There is therefore no "gold previous steps" setting to run, so sub-steps execute
+**sequentially per problem** and each step sees the model's *own* earlier code in
+both its prompt and its executed program (SciCode's main setting, which is what
+makes the cascade visible). Grading a later step in isolation could only raise
+`NameError` on the helper an earlier step was meant to define.
+
+Two consequences:
+
+- `--limit` / `--smoke` select **whole problems**, never a truncated chain.
+- **288 of the 291** test-split sub-steps compare against golden data (`target`)
+  from `test_data.h5`, which the HF export does not contain — 288 is also the
+  denominator Fugu reports. The file is fetched from the upstream repo first and
+  otherwise from a pinned public mirror
+  (`Srimadh/Scicode-test-data-h5`), and is accepted only if its HDF5 magic bytes
+  are present, so an LFS pointer or an HTML error page can never masquerade as
+  golden data. Sub-steps left without it are `unjudged`, never guessed.
+
+Prompts include the problem-level and step-level background, matching Fugu's
+with-background condition.
 
 ## Degradation model (why one command always completes)
 
