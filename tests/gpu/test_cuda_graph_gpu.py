@@ -139,30 +139,51 @@ def test_oversize_batch_falls_back_to_eager():
 
 
 def test_invalidate_forces_recapture():
+    """A weight SWAP, not an in-place update.
+
+    `weights.mul_(2.0)` rebinds nothing — the captured graph reads the same
+    storage, so it sees the new values and the assertions pass even when
+    `invalidate()` is a no-op (verified: changed_without_invalidate=True).
+    Only rebinding to a NEW tensor is invisible to a stale graph.
+    """
     from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
     from kairyu.engine.core.step_executor import GraphStepExecutor
 
     _require_cuda()
     torch.manual_seed(23)
-    weights = torch.randn(32, 8, device="cuda:0")
-    decode = _decode_fn(weights)
+    holder = {"weights": torch.randn(32, 8, device="cuda:0")}
+
+    def decode(batch):
+        return _decode_fn(holder["weights"])(batch)
+
+    backend = CudaGraphBackend()
     executor = GraphStepExecutor(
-        decode, CudaGraphBackend(), max_batch=8, max_pages=MAX_PAGES, device="cuda:0"
+        decode, backend, max_batch=8, max_pages=MAX_PAGES, device="cuda:0"
     )
 
     batch = _batch(4, "cuda:0")
-    executor.execute_decode(batch)
-    before = decode(batch).clone()
+    first = executor.execute_decode(batch).clone()
+    captures_after_first = len(executor._captured)
 
-    # a weight swap the stale graph would not see, because its kernels closed
-    # over the old tensor's memory
-    with torch.no_grad():
-        weights.mul_(2.0)
+    # new storage: the captured kernels still point at the old one. The old
+    # tensor is kept alive on purpose — freeing it lets the caching allocator
+    # hand the same block to the new randn, and the graph then reads the NEW
+    # values through the old pointer (observed: only row 0 differed).
+    _pinned = holder["weights"]
+    holder["weights"] = torch.randn(32, 8, device="cuda:0")
+    eager_after_swap = decode(batch).clone()
+
+    stale = executor.execute_decode(batch)
+    assert torch.allclose(stale, first), "the graph was not actually captured"
+    assert not torch.allclose(stale, eager_after_swap)
+
     executor.invalidate()
+    assert not executor._captured, "invalidate() left a capture behind"
 
-    after = executor.execute_decode(batch)
-    assert not torch.allclose(after, before)
-    assert torch.allclose(after, decode(batch))
+    fresh = executor.execute_decode(batch)
+    assert torch.allclose(fresh, eager_after_swap), "no recapture after invalidate"
+    assert len(executor._captured) == captures_after_first
+    assert _pinned is not holder["weights"]
 
 
 def test_static_buffers_live_on_the_capture_device():
