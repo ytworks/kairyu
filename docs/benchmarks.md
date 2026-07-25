@@ -111,8 +111,10 @@ Pro is scored by the local sandbox, not the official judge.
   problems) and joins each `problem_id` to a `<problem_id>.zip` in the testcase
   repo (`testdata/<n>.in` / `.ans`). Acquisition **fails closed**: the split must
   yield exactly 167 problems, every archive must download, and each archive's
-  usable cases must match the `sum(subtasks[].n_cases)` it declares with no
-  unpaired input. `download_file()` turns a timeout, a 401 and a 404 alike into
+  usable cases must match the `sum(subtasks[].n_cases)` it declares, with no
+  unpaired half in either direction. An archive that declares **no** count is not
+  "as complete as whatever arrived" — that declaration is the only denominator
+  evidence there is, so a missing or malformed `config.yaml` fails closed too. `download_file()` turns a timeout, a 401 and a 404 alike into
   `None`, so excluding a problem would cache a smaller denominator permanently —
   and a rate over a shrunken set is not even a lower bound on the full 167. The
   testcase repo's pin is part of the cache identity (`AdapterInfo.extra_sources`)

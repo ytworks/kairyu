@@ -44,14 +44,23 @@ class TestcaseArchive:
 
     tests: list[dict]
     declared_cases: int | None
+    #: input or output halves with no counterpart, either direction
     unpaired: tuple[str, ...] = ()
 
     @property
     def complete(self) -> bool:
+        """Complete only when the archive's OWN declared count is met.
+
+        `sum(subtasks[].n_cases)` is the only denominator evidence there is, so a
+        missing, renamed or malformed `config.yaml` cannot be treated as "as many
+        cases as happened to arrive": that would let a truncated or
+        schema-drifted archive pass as a valid benchmark. Every archive in the
+        pinned source declares it.
+        """
         if self.unpaired:
             return False
         if self.declared_cases is None:
-            return bool(self.tests)
+            return False
         return len(self.tests) == self.declared_cases
 
 
@@ -86,15 +95,22 @@ def read_testcase_archive(data: bytes) -> TestcaseArchive:
         stems: list[tuple[float, str, str]] = []
         unpaired: list[str] = []
         for name in names:
-            if not name.endswith(input_suffix) or name.endswith("/"):
+            if name.endswith("/"):
                 continue
-            stem = name[: -len(input_suffix)]
-            if f"{stem}{output_suffix}" not in names:
-                unpaired.append(name)
-                continue
-            leaf = stem.rsplit("/", maxsplit=1)[-1]
-            order = float(leaf) if leaf.isdigit() else float("inf")
-            stems.append((order, leaf, stem))
+            if name.endswith(input_suffix):
+                stem = name[: -len(input_suffix)]
+                if f"{stem}{output_suffix}" not in names:
+                    unpaired.append(name)
+                    continue
+                leaf = stem.rsplit("/", maxsplit=1)[-1]
+                order = float(leaf) if leaf.isdigit() else float("inf")
+                stems.append((order, leaf, stem))
+            elif name.endswith(output_suffix):
+                # an expected output with no input is drift too, in the other
+                # direction: the case exists but can never be run
+                stem = name[: -len(output_suffix)]
+                if f"{stem}{input_suffix}" not in names:
+                    unpaired.append(name)
 
         tests = []
         for _, _, stem in sorted(stems):
@@ -191,10 +207,14 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
             parsed = read_testcase_archive(archive.read_bytes())
             archive.unlink(missing_ok=True)  # keep only the normalized JSONL
             if not parsed.complete:
+                declared = (
+                    "no n_cases declared in config.yaml"
+                    if parsed.declared_cases is None
+                    else f"{parsed.declared_cases} declared in config.yaml"
+                )
                 raise DatasetUnavailable(
                     f"{self._TESTCASE_DATASET} archive for problem {key} is "
-                    f"incomplete: {len(parsed.tests)} usable cases, "
-                    f"{parsed.declared_cases} declared in config.yaml"
+                    f"incomplete: {len(parsed.tests)} usable cases, {declared}"
                     + (f", unpaired {list(parsed.unpaired)}" if parsed.unpaired else "")
                 )
             normalized.append(

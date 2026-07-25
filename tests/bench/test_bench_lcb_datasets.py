@@ -307,11 +307,59 @@ def test_read_testcase_archive_reports_declared_cases():
     assert len(parsed.tests) == 3
     assert parsed.unpaired == ()
     assert parsed.complete
-
-    # no config.yaml: completeness can only mean "some cases parsed"
-    bare = read_testcase_archive(_zip_bytes({"testdata/1.in": "a", "testdata/1.ans": "A"}))
-    assert bare.declared_cases is None and bare.complete
     assert not read_testcase_archive(_zip_bytes({"README": "x"})).complete
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        None,  # no config.yaml at all
+        "type: default\ninput_suffix: .in\noutput_suffix: .ans\n",  # no subtasks
+        "subtasks:\n  - score: 100\n",  # subtasks without n_cases
+        "subtasks: not-a-list\n",  # malformed
+    ],
+)
+def test_archive_without_a_declared_count_is_never_complete(config):
+    """`sum(subtasks[].n_cases)` is the only denominator evidence there is.
+
+    Treating "as many cases as arrived" as complete would let a truncated or
+    schema-drifted archive pass as a valid benchmark.
+    """
+    from kairyu.bench.adapters.livecodebench_pro import read_testcase_archive
+
+    data = _zip_bytes({"testdata/1.in": "a\n", "testdata/1.ans": "A\n"}, config=config)
+    parsed = read_testcase_archive(data)
+    assert parsed.tests  # the case parsed fine...
+    assert parsed.declared_cases is None
+    assert not parsed.complete  # ...but nothing vouches for the count
+
+
+def test_output_without_an_input_is_unpaired_too():
+    """A case that exists but can never be run is drift in the other direction."""
+    from kairyu.bench.adapters.livecodebench_pro import read_testcase_archive
+
+    parsed = read_testcase_archive(
+        _zip_bytes(
+            {"testdata/1.in": "a\n", "testdata/1.ans": "A\n", "testdata/2.ans": "B\n"},
+            config=(
+                "input_suffix: .in\noutput_suffix: .ans\n"
+                "subtasks:\n  - score: 100\n    n_cases: 1\n"
+            ),
+        )
+    )
+    assert parsed.unpaired == ("testdata/2.ans",)
+    assert not parsed.complete
+
+
+def test_livecodebench_pro_fails_closed_on_an_undeclared_archive(tmp_path, monkeypatch):
+    problems = _full_split()
+    archives = {f"{row['problem_id']}.zip": _complete_archive() for row in problems}
+    archives["p0042.zip"] = _zip_bytes(
+        {"testdata/1.in": "1\n", "testdata/1.ans": "1\n"}
+    )  # no config.yaml
+    _patch_pro_hub(monkeypatch, problems, archives)
+    with pytest.raises(DatasetUnavailable, match="no n_cases declared"):
+        LiveCodeBenchProAdapter().normalize(_ctx(tmp_path))
 
 
 def test_livecodebench_pro_records_the_testcase_pin_in_cache_identity():
