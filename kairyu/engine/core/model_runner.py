@@ -216,8 +216,26 @@ class PagedModelRunner:
         page_table = list(state.allocation.pages) + list(state.decode_pages)
         return input_token, absolute, page_table, cached
 
+    def _retire_decode_slots(self) -> None:
+        """Drain the in-flight staging DMA before its buffers can be dropped.
+
+        A growth replaces `_slot_staging` and the device slots wholesale, and the
+        event recorded by the last `_decode_input_slots` is the ONLY handle on the
+        transfer that may still be reading them. Overwriting `_slot_copy_done`
+        first destroys that handle: what remains is a freshly recorded event that
+        says nothing about the old DMA. Freeing pinned host memory is not
+        stream-ordered, so the source rows could go back to the allocator while
+        the copy engine is still reading them. Wait here, BEFORE anything is
+        released. Growth doubles, so this blocking wait is amortized away.
+        """
+        if self._slot_copy_done is not None:
+            self._slot_copy_done.synchronize()
+        self._slot_staging = None
+        self._slot_copy_done = None
+
     def _allocate_decode_slots(self, size: int) -> None:
         """(Re)allocate the persistent slots, doubling so growth is amortized."""
+        self._retire_decode_slots()
         current = 0 if self._decode_slots is None else self._decode_slots.numel()
         capacity = max(8, size, 2 * current)
         self._decode_slots = torch.zeros(capacity, dtype=torch.long, device=self._device)
@@ -266,7 +284,9 @@ class PagedModelRunner:
             # the previous step's DMA must have drained before its source rows are
             # overwritten; in practice it long since has (the sampler syncs once
             # per step), so this is a completed-event check, not a stall — but it
-            # does not DEPEND on the sampler still syncing
+            # does not DEPEND on the sampler still syncing. The other way the
+            # source rows stop being valid is a capacity growth, and that path
+            # waits on THIS event in `_retire_decode_slots` before replacing it.
             self._slot_copy_done.synchronize()
             self._slot_staging[0, :size].copy_(host_tokens)
             self._slot_staging[1, :size].copy_(host_positions)

@@ -112,6 +112,26 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] Growing the decode slots waits for the in-flight staging DMA
+- What: `PagedModelRunner._allocate_decode_slots` now calls `_retire_decode_slots()`
+  first, which synchronizes the OLD `_slot_copy_done` event and drops the old pinned
+  staging buffer only afterwards. A new CUDA gate
+  (`test_growing_the_slots_waits_for_the_in_flight_staging_dma`) keeps a real transfer
+  outstanding (`torch.cuda._sleep` ahead of the H2D) and asserts that no replacement
+  buffer is allocated while the old event is unfinished.
+- Why: PR #143 review [P2] on the staging lifecycle. `_decode_input_slots` grew capacity
+  BEFORE it synchronized, and the growth overwrote `_slot_staging` and `_slot_copy_done`
+  together — so the `synchronize()` that followed was on a freshly recorded, empty event
+  and the handle on the outstanding DMA was already gone. Freeing pinned host memory is
+  not stream-ordered, so the source rows could be returned to the allocator while the copy
+  engine was still reading them. Ordinary generation only survived because the host
+  sampler pulls logits to CPU every step — exactly the dependency the previous entry
+  claimed the event had removed. An active decode batch can grow (8 → 9+) mid-run, so the
+  claim in the 2026-07-26 [progress] entry below ("ordered against reuse by a CUDA event")
+  did not hold across a growth until this change; it holds now.
+- Refs: m2 §2.2 + §5, PR #143 review, `kairyu/engine/core/model_runner.py`,
+  `tests/gpu/test_decode_input_slots_gpu.py`
+
 ### 2026-07-26 — [progress] m2 §2.2: persistent decode input slots, and the honest scope
 - What: the decode inputs (token ids and positions) live in persistent device tensors
   allocated once and written IN PLACE every step
