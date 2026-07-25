@@ -294,11 +294,17 @@ def _code_provenance() -> dict:
         return done.stdout.strip() if done.returncode == 0 else None
 
     commit = _git("rev-parse", "HEAD")
-    status = _git("status", "--porcelain")
+    tracked = _git("status", "--porcelain", "--untracked-files=no")
+    untracked = _git("ls-files", "--others", "--exclude-standard")
     return {
         "commit": commit,
-        # a dirty tree means the commit alone does not describe the run
-        "dirty": None if status is None else bool(status),
+        # a modified tracked file means the commit alone does not describe the run
+        "dirty": None if tracked is None else bool(tracked),
+        # untracked files are reported separately rather than folded into `dirty`:
+        # scratch dirs and agent worktrees sit in the tree during a run without
+        # changing the code that produced the numbers, but a reader still gets to
+        # see that something unversioned was present.
+        "untracked_files": None if untracked is None else len(untracked.splitlines()),
     }
 
 
