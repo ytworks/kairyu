@@ -158,8 +158,8 @@ def test_adapter_cache_checks_pass_pins_and_do_not_read_failed_manifest():
         def __init__(self):
             self.calls = []
 
-        def is_ready(self, *args):
-            self.calls.append(args)
+        def is_ready(self, adapter, **pins):
+            self.calls.append((adapter, pins))
             return False
 
         def read_manifest(self, adapter):
@@ -172,10 +172,8 @@ def test_adapter_cache_checks_pass_pins_and_do_not_read_failed_manifest():
 
     assert "dataset not in cache" in adapter.check_preconditions(target, ctx)
     assert "manifest" not in adapter.methodology(ctx)
-    assert cache.calls == [
-        ("pinned", "org/pinned", "rev-1"),
-        ("pinned", "org/pinned", "rev-1"),
-    ]
+    expected = ("pinned", {"dataset": "org/pinned", "revision": "rev-1", "sources": []})
+    assert cache.calls == [expected, expected]
 
 
 async def test_adapter_skips_cache_mutated_between_download_and_execution(tmp_path):

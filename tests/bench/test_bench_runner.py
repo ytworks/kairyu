@@ -250,11 +250,17 @@ async def test_run_initializes_canonical_identity_and_stamps_pairs(
         set(config.model_dump(mode="json")) - set(identity["config"])
         == _FINGERPRINT_EXCLUSIONS
     )
+    from kairyu.bench.pins import DATASET_PINS
+
     assert identity["adapters"] == [
         {
             "name": "gpqa-diamond",
             "dataset": "Idavidrein/gpqa",
-            "revision": None,
+            # the pinned revision is part of the identity, so repinning refuses
+            # resume instead of reinterpreting stored evidence
+            "revision": DATASET_PINS["gpqa-diamond"][1],
+            # secondary sources are part of the identity even when empty
+            "sources": [],
             "unavailable": True,
         }
     ]

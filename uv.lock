@@ -1561,6 +1561,7 @@ bench = [
     { name = "h5py" },
     { name = "huggingface-hub" },
     { name = "pillow" },
+    { name = "tiktoken" },
     { name = "tqdm" },
 ]
 bench-agentic = [
@@ -1633,6 +1634,7 @@ requires-dist = [
     { name = "safetensors", marker = "extra == 'engine'", specifier = ">=0.5" },
     { name = "safetensors", marker = "extra == 'hf'", specifier = ">=0.5" },
     { name = "swebench", marker = "extra == 'bench-agentic'", specifier = ">=4" },
+    { name = "tiktoken", marker = "extra == 'bench'", specifier = ">=0.7" },
     { name = "tokenizers", marker = "extra == 'engine'", specifier = ">=0.20" },
     { name = "tokenizers", marker = "extra == 'hf'", specifier = ">=0.20" },
     { name = "torch", marker = "extra == 'engine'", specifier = ">=2.6" },
