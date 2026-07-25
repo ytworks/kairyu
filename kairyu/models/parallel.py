@@ -90,20 +90,131 @@ def shard_dim_for(name: str, spec: dict[str, int | None]) -> int | None:
     return None
 
 
-class RowParallelLinear(nn.Module):
-    """Wraps a rank-local Linear: all_reduce the partial output, bias once."""
+class SequenceParallelContext:
+    """Shared state for one model's sequence-parallel region (Megatron TP+SP).
 
-    def __init__(self, local: nn.Linear, comm) -> None:
+    The residual stream between blocks is sharded along TOKENS, so the norms
+    hold S/tp rows instead of S. Attention and the MLP still need every token,
+    so a norm's output is all_gathered on the way in and the row-parallel output
+    is reduce_scattered on the way out. Traffic is unchanged — all_gather +
+    reduce_scatter moves what one all_reduce does, and `bench/reduce_scatter_bench.py`
+    measures the pair at ~0.96x an all_reduce here. The gain is ACTIVATION
+    MEMORY, not latency, and enabling this for speed would be a mistake.
+
+    ``padding`` tracks the rows added to make the token count divisible, so the
+    final gather can trim back to the real sequence.
+    """
+
+    def __init__(self, comm) -> None:
+        self.comm = comm
+        self.padding = 0
+
+    @property
+    def world_size(self) -> int:
+        return self.comm.world_size
+
+    def scatter(self, x: torch.Tensor) -> torch.Tensor:
+        """Full [S, H] -> this rank's [ceil(S/tp), H], padding when ragged."""
+        world = self.world_size
+        remainder = x.shape[0] % world
+        self.padding = (world - remainder) % world
+        if self.padding:
+            x = torch.cat([x, x.new_zeros((self.padding, *x.shape[1:]))], dim=0)
+        span = x.shape[0] // world
+        start = self.comm.rank * span
+        return x[start : start + span].contiguous()
+
+    def gather(self, x: torch.Tensor) -> torch.Tensor:
+        """This rank's shard -> the REAL sequence, padding removed.
+
+        The TP region has to see the true token count: attention builds its mask
+        from it, and the residual add downstream is against a real-length
+        tensor. The padding only exists to make the shard split even, so it is
+        added on the way in and removed on the way out.
+        """
+        full = self.comm.tensor_all_gather(x.contiguous())
+        return full[: full.shape[0] - self.padding] if self.padding else full
+
+    def reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
+        """Full [S, H] partial sums -> this rank's reduced token shard.
+
+        Re-pads first: reduce_scatter needs a count divisible by the world size,
+        and S is whatever the caller's real sequence is.
+        """
+        if self.padding:
+            x = torch.cat([x, x.new_zeros((self.padding, *x.shape[1:]))], dim=0)
+        return self.comm.tensor_reduce_scatter(x.contiguous())
+
+
+class SequenceParallelNorm(nn.Module):
+    """Norm on the token shard, then all_gather for the TP region.
+
+    RMSNorm/LayerNorm are per-token, so running them on a shard is exactly the
+    same arithmetic — that is what makes the sharded residual stream valid.
+    """
+
+    def __init__(self, norm: nn.Module, context: SequenceParallelContext) -> None:
+        super().__init__()
+        self.norm = norm
+        self._context = context
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._context.gather(self.norm(x))
+
+
+class ScatterAfterEmbedding(nn.Module):
+    """Entry to the sequence-parallel region: full embedding -> token shard."""
+
+    def __init__(self, embedding: nn.Module, context: SequenceParallelContext) -> None:
+        super().__init__()
+        self.embedding = embedding
+        self._context = context
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self._context.scatter(self.embedding(token_ids))
+
+    @property
+    def weight(self) -> torch.Tensor:  # tie_word_embeddings reads this
+        return self.embedding.weight
+
+
+class GatherBeforeNorm(nn.Module):
+    """Exit: the final norm sees the whole sequence again, for the lm_head."""
+
+    def __init__(self, norm: nn.Module, context: SequenceParallelContext) -> None:
+        super().__init__()
+        self.norm = norm
+        self._context = context
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._context.gather(self.norm(x))
+
+
+class RowParallelLinear(nn.Module):
+    """Wraps a rank-local Linear: reduce the partial output, bias once.
+
+    ``context`` switches the reduction from all_reduce to reduce_scatter, which
+    both sums across ranks AND re-shards along tokens — the exit from the TP
+    region back into the sequence-parallel one.
+    """
+
+    def __init__(
+        self, local: nn.Linear, comm, context: SequenceParallelContext | None = None
+    ) -> None:
         super().__init__()
         self.local = local
         self._comm = comm
+        self._context = context
         # detach bias from the local matmul: it must be added AFTER the reduce
         self._bias = local.bias
         local.bias = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         partial = self.local(x)
-        reduced = self._comm.tensor_all_reduce(partial.contiguous())
+        if self._context is None:
+            reduced = self._comm.tensor_all_reduce(partial.contiguous())
+        else:
+            reduced = self._context.reduce_scatter(partial)
         if self._bias is not None:
             reduced = reduced + self._bias
         return reduced
@@ -143,8 +254,22 @@ def load_tp_shard(model: nn.Module, config: ModelConfig, reader, tp: int, rank: 
     model.eval()
 
 
-def build_tp_model(model_dir: str, tp: int, rank: int, comm):
-    """Rank-sharded DenseDecoder: tp_view config + row-parallel/gathered wrappers."""
+def build_tp_model(
+    model_dir: str,
+    tp: int,
+    rank: int,
+    comm,
+    dtype: torch.dtype = torch.float32,
+    device: str = "cpu",
+    attention_backend=None,
+    sequence_parallel: bool = False,
+):
+    """Rank-sharded DenseDecoder: tp_view config + row-parallel/gathered wrappers.
+
+    ``dtype``/``device`` place the shard exactly like the single-process path
+    places the whole model (bf16 on-device for GPU, fp32 on host for CPU); the
+    defaults keep every CPU test byte-for-byte unchanged.
+    """
     import json
     from pathlib import Path
 
@@ -157,11 +282,26 @@ def build_tp_model(model_dir: str, tp: int, rank: int, comm):
         raise ValueError("quantized checkpoints with tensor parallelism arrive later (m16 A10)")
     full_config = parse_model_config(raw)
     local_config = tp_view(full_config, tp, rank)
-    model = DenseDecoder(local_config)
+    if sequence_parallel and tp < 2:
+        raise ValueError("sequence parallelism needs tp >= 2")
+    model = DenseDecoder(local_config, attention_backend=attention_backend)
     reader = CheckpointReader(model_dir)
-    load_tp_shard(model, full_config, reader, tp, rank)
+    # dtype is applied while loading, so a bf16 target never materializes the
+    # fp32 shard on the host first
+    load_tp_shard(model, full_config, reader, tp, rank, dtype=dtype)
     # add communication: o_proj/down_proj partial sums (lm_head replicated)
+    context = SequenceParallelContext(comm) if sequence_parallel else None
     for layer in model.model.layers:
-        layer.self_attn.o_proj = RowParallelLinear(layer.self_attn.o_proj, comm)
-        layer.mlp.down_proj = RowParallelLinear(layer.mlp.down_proj, comm)
-    return model, local_config, full_config
+        layer.self_attn.o_proj = RowParallelLinear(layer.self_attn.o_proj, comm, context)
+        layer.mlp.down_proj = RowParallelLinear(layer.mlp.down_proj, comm, context)
+        if context is not None:
+            # norms run on the shard and gather on the way into the TP region
+            layer.input_layernorm = SequenceParallelNorm(layer.input_layernorm, context)
+            layer.post_attention_layernorm = SequenceParallelNorm(
+                layer.post_attention_layernorm, context
+            )
+    if context is not None:
+        model.model.embed_tokens = ScatterAfterEmbedding(model.model.embed_tokens, context)
+        model.model.norm = GatherBeforeNorm(model.model.norm, context)
+    # after the wrappers, so RowParallelLinear's detached bias moves too
+    return model.to(device), local_config, full_config

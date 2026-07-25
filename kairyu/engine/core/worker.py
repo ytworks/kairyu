@@ -19,6 +19,18 @@ from kairyu.engine.core.step_input import StateSync, StepDelta
 
 _SHUTDOWN = None
 
+#: Ranks load their shard between the rendezvous and the handshake, so the
+#: CI-tuned 120s default would fire on a cold multi-GB read long before anything
+#: is actually deadlocked. This covers ONLY startup.
+_STARTUP_TIMEOUT_S = 1800.0
+#: Every collective once the group is serving. `init_process_group(timeout=)` is
+#: the timeout for EVERY operation on that group, not just the rendezvous, so
+#: giving the startup allowance to the default group would let one wedged rank
+#: hold an in-flight generation for half an hour. The step loop therefore runs on
+#: a SECOND group created with this bound, while the startup handshake — the one
+#: collective that legitimately has to absorb load skew — keeps the long one.
+_SERVE_OP_TIMEOUT_S = 120.0
+
 
 @dataclass(frozen=True)
 class ReleaseRequest:
@@ -104,6 +116,69 @@ def worker_step_loop(comm, local_runner) -> int:
         steps += 1
 
 
+@dataclass(frozen=True)
+class TPPlacement:
+    """Where one TP rank computes: the multi-process twin of the single-process
+    ``probe()`` block in ``kairyu_backend.build_engine_loop``.
+
+    That block never runs for ``model_path`` + ``tp > 1`` — ``build_engine_loop``
+    returns into ``_build_dist_tp_loop`` before it — so without this the spawned
+    ranks silently kept the CPU/fp32 defaults of ``DenseDecoder`` and
+    ``PagedKVPool`` on a machine full of GPUs.
+    """
+
+    device: str
+    dtype: object  # torch.dtype; annotated loosely to keep this import-light
+    backend: str  # torch.distributed backend matching the device
+
+
+def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
+    """Rank-local placement: one GPU per rank, else CPU (m8 D5 probe rules).
+
+    ``force_cpu`` is for the CPU parity tests, which compare TP output against a
+    single-process fp32 host reference and so must not follow the probe onto a
+    GPU. ``KAIRYU_TP_FORCE_CPU`` is the same switch for callers that cannot pass
+    the argument — notably `build_engine_loop`, whose spawned ranks read it from
+    the inherited environment, so rank 0 and the workers cannot end up on
+    different backends and deadlock the first collective. Deployment sets neither.
+    """
+    import os
+
+    import torch
+
+    from kairyu.engine.core.hw_profile import probe
+
+    force_cpu = force_cpu or bool(os.environ.get("KAIRYU_TP_FORCE_CPU"))
+    profile = probe()
+    if force_cpu or profile.arch != "cuda":
+        return TPPlacement("cpu", torch.float32, "gloo")
+    if profile.device_count < tp:
+        # one rank per device: overcommitting would put two shards on one GPU
+        # and silently halve the memory each expects
+        raise RuntimeError(
+            f"tensor_parallel_size={tp} needs {tp} CUDA devices; "
+            f"found {profile.device_count}"
+        )
+    # gloo would move every RowParallelLinear all_reduce through host memory
+    return TPPlacement(f"cuda:{rank}", torch.bfloat16, "nccl")
+
+
+def serving_group(backend: str):
+    """A second process group carrying the OPERATIONAL collective timeout.
+
+    Every rank must call this at the same point — it is itself a collective — so
+    it is created right after the rendezvous, before the slow shard load, while
+    the ranks are still in lockstep.
+    """
+    from datetime import timedelta
+
+    import torch.distributed as dist
+
+    return dist.new_group(
+        timeout=timedelta(seconds=_SERVE_OP_TIMEOUT_S), backend=backend
+    )
+
+
 def build_tp_runner(
     model_dir: str,
     tp: int,
@@ -112,20 +187,43 @@ def build_tp_runner(
     num_pages: int,
     page_size: int,
     vocab: list[str],
+    placement: TPPlacement | None = None,
 ):
-    """The per-rank sharded PagedModelRunner (pool sized from the tp_view config)."""
+    """The per-rank sharded PagedModelRunner (pool sized from the tp_view config).
+
+    ``placement`` defaults to CPU/fp32 so the CPU-only callers (tests, gloo
+    parity targets) are unchanged.
+    """
+    import torch
+
+    from kairyu.engine.core.attention import select_backend
+    from kairyu.engine.core.hw_profile import probe
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
     from kairyu.engine.core.sampler import Sampler
     from kairyu.models.parallel import build_tp_model
 
-    model, local_config, full_config = build_tp_model(model_dir, tp, rank, comm)
+    if placement is None:
+        placement = TPPlacement("cpu", torch.float32, "gloo")
+    model, local_config, full_config = build_tp_model(
+        model_dir,
+        tp,
+        rank,
+        comm,
+        dtype=placement.dtype,
+        device=placement.device,
+        # keyed off the PLACEMENT, not the raw probe: a CPU-placed rank on a GPU
+        # box would otherwise get the flashinfer kernel and hand it fp32 tensors
+        attention_backend=select_backend(probe() if placement.device != "cpu" else None),
+    )
     pool = PagedKVPool(
         num_layers=local_config.num_hidden_layers,
         num_pages=num_pages,
         page_size=page_size,
         num_kv_heads=local_config.kv_cache_num_heads,
         head_dim=local_config.kv_cache_head_dim,
+        dtype=placement.dtype,
+        device=placement.device,
     )
     vocab_table = list(vocab)
     runner = PagedModelRunner(
@@ -139,6 +237,7 @@ def build_tp_runner(
 def _tp_worker_entry(
     spawn_index: int, world_size: int, init_file: str,
     model_dir: str, num_pages: int, page_size: int, vocab: list[str],
+    force_cpu: bool = False,
 ) -> None:
     """Spawned worker (rank = spawn_index + 1; rank 0 is the driver process).
 
@@ -151,19 +250,36 @@ def _tp_worker_entry(
 
     rank = spawn_index + 1
     torch.set_num_threads(1)
-    init_distributed(rank, world_size, f"file://{init_file}")
-    comm = TorchDistCommunicator()
-    runner, _ = build_tp_runner(
-        model_dir, world_size, rank, comm, num_pages, page_size, vocab
+    placement = tp_placement(world_size, rank, force_cpu)
+    if placement.backend == "nccl":
+        # must precede init_process_group: NCCL binds the rank to the current
+        # device, and object collectives stage their buffers on it
+        torch.cuda.set_device(rank)
+    init_distributed(
+        rank,
+        world_size,
+        f"file://{init_file}",
+        backend=placement.backend,
+        timeout_s=_STARTUP_TIMEOUT_S,
     )
-    handshake = comm.broadcast(None, src=0)
+    startup_comm = TorchDistCommunicator(device=placement.device)
+    # created before the slow shard load, while every rank is still in lockstep
+    comm = TorchDistCommunicator(
+        group=serving_group(placement.backend), device=placement.device
+    )
+    runner, _ = build_tp_runner(
+        model_dir, world_size, rank, comm, num_pages, page_size, vocab, placement
+    )
+    # the handshake is the collective that absorbs load skew, so it — and only it
+    # — runs on the long-timeout startup group
+    handshake = startup_comm.broadcast(None, src=0)
     validate_handshake(handshake, model_dir, num_pages, page_size)
     try:
         worker_step_loop(comm, runner)
     finally:
         import torch.distributed as dist
 
-        dist.destroy_process_group()
+        dist.destroy_process_group()  # tears down the serving subgroup too
 
 
 class DistTPLauncher:
@@ -181,38 +297,78 @@ class DistTPLauncher:
         num_pages: int,
         page_size: int,
         vocab: list[str],
+        force_cpu: bool = False,
     ) -> None:
         import tempfile
 
+        import torch
         import torch.multiprocessing as mp
 
         from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
 
-        # a fresh, not-yet-created path is the gloo file:// rendezvous point
+        # a fresh, not-yet-created path is the file:// rendezvous point
         self._init_file = tempfile.mktemp(prefix="kairyu-tp-")  # noqa: S306
+        placement = tp_placement(tp, 0, force_cpu)
+        # force_cpu travels to the workers: rank 0 on host memory while the
+        # spawned ranks probed their way onto GPUs would deadlock the first
+        # all_reduce on mismatched backends
         self._ctx = mp.spawn(
             _tp_worker_entry,
-            args=(tp, self._init_file, model_dir, num_pages, page_size, vocab),
+            args=(tp, self._init_file, model_dir, num_pages, page_size, vocab, force_cpu),
             nprocs=tp - 1,
             join=False,
         )
-        init_distributed(0, tp, f"file://{self._init_file}")
-        self._comm = TorchDistCommunicator()
-        runner, self.full_config = build_tp_runner(
-            model_dir, tp, 0, self._comm, num_pages, page_size, vocab
+        if placement.backend == "nccl":
+            torch.cuda.set_device(0)
+        init_distributed(
+            0,
+            tp,
+            f"file://{self._init_file}",
+            backend=placement.backend,
+            timeout_s=_STARTUP_TIMEOUT_S,
         )
-        self._comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
+        startup_comm = TorchDistCommunicator(device=placement.device)
+        # created before the slow shard load, while every rank is still in lockstep
+        self._comm = TorchDistCommunicator(
+            group=serving_group(placement.backend), device=placement.device
+        )
+        runner, self.full_config = build_tp_runner(
+            model_dir, tp, 0, self._comm, num_pages, page_size, vocab, placement
+        )
+        # the one collective that legitimately absorbs load skew
+        startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
         self.runner = DistTPModelRunner(self._comm, runner)
 
+    def dead_ranks(self) -> tuple[int, ...]:
+        """Spawned ranks that are no longer running (rank 0 is this process).
+
+        A dead rank leaves the group unable to complete a single collective, but
+        rank 0 stays up and keeps answering health checks — on hardware this
+        presented as a served model that accepted requests and never returned a
+        token. Cheap enough for `/readyz`: `is_alive()` is a waitpid, no IPC.
+        """
+        return tuple(
+            index + 1
+            for index, process in enumerate(self._ctx.processes)
+            if not process.is_alive()
+        )
+
     def shutdown(self) -> None:
-        self.runner.shutdown()  # broadcasts None -> workers leave worker_step_loop
-        self._ctx.join()
         import contextlib
         import os
 
         import torch.distributed as dist
 
+        self.runner.shutdown()  # broadcasts None -> workers leave worker_step_loop
+        # BEFORE the join, not after: NCCL's destroy_process_group waits for every
+        # rank to reach it, so joining first deadlocks rank 0 against workers that
+        # are already sitting in their own destroy. gloo never blocks here, which
+        # is why the CPU parity gates could not see this.
         if dist.is_initialized():
+            # no argument: torch tears down the serving subgroup along with the
+            # default one, and destroying them individually is registration-order
+            # dependent across backends
             dist.destroy_process_group()
+        self._ctx.join()
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self._init_file)

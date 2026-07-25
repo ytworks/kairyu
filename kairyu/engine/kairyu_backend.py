@@ -18,7 +18,12 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
+from kairyu.engine.backend import (
+    EngineReadiness,
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+)
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.pd_loop import PDLoopAdapter
 from kairyu.engine.core.radix_kv import RadixKVCache
@@ -75,8 +80,6 @@ def build_engine_loop(
     """
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
-    if speculative is not None and tensor_parallel_size > 1:
-        raise ValueError("speculative decoding with tensor_parallel_size > 1 is not supported")
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
     if pd_separation:
@@ -106,6 +109,16 @@ def build_engine_loop(
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
             tokenizer=tokenizer,
+            speculative=speculative,
+            speculative_tokens=speculative_tokens,
+        )
+    if speculative is not None and tensor_parallel_size > 1:
+        # the toy/FakeCommunicator TP path shares ONE runner object across every
+        # rank, so a SpeculativeRunner over it would draft once and score
+        # against itself; the real multi-process path above has no such problem
+        raise ValueError(
+            "speculative decoding with tensor_parallel_size > 1 requires a real "
+            "model (model_path); the in-process TP path shares one runner"
         )
 
     default_eos: int | None = None
@@ -246,6 +259,8 @@ def _build_dist_tp_loop(
     page_size: int,
     max_num_batched_tokens: int,
     tokenizer: str | Tokenizer | None,
+    speculative: str | None = None,
+    speculative_tokens: int = 4,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -273,12 +288,23 @@ def _build_dist_tp_loop(
     generation = load_generation_defaults(model_path)
     cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(
-        cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
+        cache,
+        max_num_batched_tokens=max_num_batched_tokens,
+        page_size=page_size,
+        speculative_tokens=speculative_tokens if speculative else 0,
     )
+    # SpeculativeRunner composes over any ModelRunner, and DistTPModelRunner is
+    # one: each scoring pass it issues is broadcast like any other step, so every
+    # rank replays the identical draft and the m5 D1 agreement invariant holds
+    # unchanged. A rejected draft shortens the overlay's outputs, which StateSync
+    # already handles — a shrinking output list re-sends the full snapshot.
+    active: object = launcher.runner
+    if speculative == "ngram":
+        active = SpeculativeRunner(active)
     loop = EngineLoop(
         resolved,
         scheduler,
-        launcher.runner,
+        active,
         default_eos_token_id=generation.eos_token_id,
         default_stop_token_ids=generation.stop_token_ids,
     )
@@ -316,6 +342,7 @@ class KairyuBackend:
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
+        self._engine_error: Exception | None = None  # last step failure, for readiness()
 
     def validate_request(self, request: GenerationRequest) -> None:
         self._loop.tokenize_prompt(request.prompt)
@@ -325,13 +352,24 @@ class KairyuBackend:
         try:
             while self._loop.has_work():
                 updates = await asyncio.to_thread(self._loop.step)
+                # a completed step is the only proof the engine still runs, so it
+                # is also what clears a previous failure (transient faults must
+                # not strand the node out of rotation forever)
+                self._engine_error = None
                 for request_id, update in updates:
                     queue = self._queues.get(request_id)
                     if queue is not None:
                         queue.put_nowait(update)
         except Exception as error:
+            # recorded FIRST: purge itself runs through the same broken transport
+            # that just failed, and when it raises too the original error escapes
+            # as an unretrieved task exception and nothing observes the fault
+            self._engine_error = error
             request_ids = tuple(self._queues)
-            await asyncio.to_thread(self._loop.purge, request_ids)
+            try:
+                await asyncio.to_thread(self._loop.purge, request_ids)
+            except Exception:  # noqa: BLE001 - already failing; report the first cause
+                pass
             failure = StreamUpdate((), "", True, None, error)
             for request_id in request_ids:
                 queue = self._queues.get(request_id)
@@ -342,6 +380,38 @@ class KairyuBackend:
             self._pump_task = None
             if restart_after_exit:
                 self._ensure_pump()
+
+    def readiness(self) -> EngineReadiness:
+        """Cheap liveness for `/readyz`: KNOWN-FATAL state only, no probe.
+
+        Dead TP ranks are the one condition this can assert. The group cannot
+        complete a single collective without them and nothing in-process can
+        bring them back, so the node needs replacing — `fatal` says so, and
+        `/health` turns that into a restart signal.
+
+        A step exception deliberately does NOT flip readiness. It is reported for
+        diagnosis but cannot be told apart from one bad request, and marking the
+        node unready for it is a trap: the load balancer stops sending work, so
+        the successful step that would clear the flag never arrives and the node
+        stays out of rotation until someone notices (review [P1] on #126).
+        """
+        launcher = getattr(self._loop, "tp_launcher", None)
+        if launcher is not None:
+            dead = launcher.dead_ranks()
+            if dead:
+                return EngineReadiness(
+                    False,
+                    f"tensor-parallel ranks not running: {sorted(dead)}",
+                    fatal=True,
+                )
+        return EngineReadiness(True, self._last_error_detail())
+
+    def _last_error_detail(self) -> str:
+        """Class name only — this reaches an unauthenticated endpoint, and an
+        exception's message can carry an upstream URL or a path (review [P2])."""
+        if self._engine_error is None:
+            return ""
+        return f"last step error: {type(self._engine_error).__name__}"
 
     def _ensure_pump(self) -> None:
         if not self._loop.has_work():

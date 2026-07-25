@@ -125,6 +125,16 @@ class Sampler:
         # (m8 D2, spec ≡ greedy) are defined by the CPU RNG stream — a CUDA
         # generator would diverge. On GPU this pulls the [vocab] logits row to host
         # (cheap); on CPU it is the pre-existing no-op + private clone.
+        #
+        # CONSEQUENCE for m2 §2.2, stated here because it is decided here: the
+        # chosen index only ever exists on the HOST. There is no device tensor to
+        # hand back — manufacturing one (`torch.as_tensor(token_id, device=cuda)`)
+        # would be a fresh scalar H2D copy per row wearing a device-resident
+        # costume, strictly worse than one batched copy. The runner therefore owns
+        # a persistent device slot and copies the ids into it once per step
+        # (`PagedModelRunner._decode_input_slots`). A genuinely device-to-device
+        # patch requires the DECISION to move to the device, which redefines what
+        # the reproducibility pins mean — a separate decision, not an oversight.
         logits = logits.detach().to(device="cpu", dtype=torch.float32).clone()
 
         raw_logsoftmax: torch.Tensor | None = None
