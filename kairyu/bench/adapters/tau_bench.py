@@ -284,6 +284,8 @@ class TauBenchBankingAdapter:
                 reason=reason,
                 metrics={"score": None, "n_total": 0},
                 annotations=annotations,
+                comparable=not incomparable,
+                incomparable_reasons=incomparable,
                 started_at=started_at,
                 finished_at=utc_now(),
             )
@@ -303,37 +305,6 @@ class TauBenchBankingAdapter:
             )
             return failed(f"{flavor} produced no results file; looked in: {searched}")
         data = json.loads(results.read_text(encoding="utf-8"))
-
-            try:
-                completed = await asyncio.to_thread(_invoke)
-            except subprocess.TimeoutExpired:
-                return PairResult(
-                    benchmark=self.info.name,
-                    target=target.label(),
-                    status="failed",
-                    reason=f"{flavor} harness timed out after {_HARNESS_TIMEOUT_S}s",
-                    metrics={"score": None, "n_total": 0},
-                    annotations=annotations,
-                    comparable=not incomparable,
-                    incomparable_reasons=incomparable,
-                    started_at=started_at,
-                    finished_at=utc_now(),
-                )
-            if completed.returncode != 0 or not output.exists():
-                stderr = completed.stderr.decode(errors="replace")[-500:]
-                return PairResult(
-                    benchmark=self.info.name,
-                    target=target.label(),
-                    status="failed",
-                    reason=f"{flavor} harness failed (rc={completed.returncode}): {stderr}",
-                    metrics={"score": None, "n_total": 0},
-                    annotations=annotations,
-                    comparable=not incomparable,
-                    incomparable_reasons=incomparable,
-                    started_at=started_at,
-                    finished_at=utc_now(),
-                )
-            data = json.loads(output.read_text(encoding="utf-8"))
 
         items = parse_tau_results(data)
         metric = (
