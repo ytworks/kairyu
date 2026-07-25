@@ -112,6 +112,42 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] A1's overlap ON/OFF equality is measured, not inferred
+- What: corrects the entry below it. `bench/parity_tp.py` compared each overlap mode
+  against its OWN TP1 base and dropped the outputs when the next mode overwrote them,
+  so ON and OFF were never compared to each other; "ON reproduces OFF exactly" was read
+  off two aggregate rows agreeing. Outputs are now retained per (degree, mode) and
+  compared directly, recording the first disagreeing request id, position and token
+  pair, and the harness exits non-zero when they differ. Re-measured on the 8x
+  RTX PRO 6000 host: TP1/2/4/8 all 64/64 exact, token rate 1.0, no first mismatch.
+- Why: two runs can diverge on DIFFERENT prompts at the same depth and land on identical
+  exact_match, tokens, token_match_rate and median_first_divergence — equal aggregates
+  are not sequence equality. Unlike the cross-TP rates (reduction order, orientation
+  only per G2 §7), ON vs OFF is the same ranks in the same order, so a difference is the
+  pipeline changing an answer. That makes it a verdict rather than a report.
+  The evidence also carries the corrected checkpoint provenance: the previous digest
+  hashed only safetensors headers plus file sizes, which a base model and a fine-tune of
+  it share, so it identified layout rather than weights.
+- Refs: G2 A1, m2 §2.2, `bench/parity_tp.py`,
+  `bench/results/parity-tp-qwen3-32b-2026-07-26.json`
+
+### 2026-07-26 — [progress] G2 A1's overlap-ON half is measured, and it matches OFF
+- What: `bench/parity_tp.py` no longer forces `overlap_modes` to OFF when a real model is
+  loaded, so the A1 sweep runs both halves. On the 8x RTX PRO 6000 host, Qwen3-32B, 64
+  fixed prompts x 8 new tokens, overlap ON reproduces overlap OFF exactly at every TP
+  degree: TP2 57/64 (token 0.9277), TP4 58/64 (0.9473), TP8 53/64 (0.9023) in both modes.
+  Evidence: `bench/results/parity-tp-qwen3-32b-2026-07-26.json`.
+- Why: A1 requires parity with the overlap pipeline ON *and* OFF, and only OFF had ever
+  been measured — `PagedModelRunner` read `state.outputs[position - 1]`, which an overlap
+  snapshot is one entry short of, so a real runner raised IndexError and the harness
+  recorded the gap instead of a number. The in-flight token buffer removed that
+  precondition; this run is what shows the pipeline changes no output rather than
+  asserting it. The rates themselves are orientation only, per G2 §7 (amended
+  2026-07-25): free-running greedy equality is not the correctness bar, because one
+  flipped token fails a prompt and every token after it. What A1 gets from this run is
+  the ON-vs-OFF equality, which is exact.
+- Refs: G2 A1, m2 §2.2, `bench/parity_tp.py`, `bench/results/parity-tp-qwen3-32b-2026-07-26.json`
+
 ### 2026-07-26 — [amendment] Growing the decode slots waits for the in-flight staging DMA
 - What: `PagedModelRunner._allocate_decode_slots` now calls `_retire_decode_slots()`
   first, which synchronizes the OLD `_slot_copy_done` event and drops the old pinned
