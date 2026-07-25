@@ -37,7 +37,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
 | M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
-| M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. |
+| M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26). |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
@@ -156,6 +156,42 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m2 §2.2 + §5, PR #143 review, `kairyu/engine/core/model_runner.py`,
   `kairyu/engine/core/sampler.py`, `tests/unit/test_decode_input_slots.py`,
   `tests/gpu/test_decode_input_slots_gpu.py`
+
+### 2026-07-26 — [amendment] m16 D6 records sequence parallelism; the §3 call-site non-goal is lifted
+- What: the entry below landed sequence parallelism but updated PROGRESS only, leaving the
+  binding design doc contradicting it — m16's D1 amendment still said SP was "a design
+  change this milestone does not specify" and §3 still listed USING `reduce_scatter` at the
+  `RowParallelLinear` call site as a non-goal, which is exactly what shipped. Reconciled in
+  `docs/design/m16-distributed.md`: new **D6** records the `SequenceParallelContext`
+  contract (`scatter`/`gather`/`reduce_scatter`), the wrapper placement over D2's tree, the
+  rule that padding lives at the shard boundary ONLY (attention builds its mask from the
+  real length), the activation-memory-not-latency framing, and the scope — dense
+  `build_tp_model` only, NOT EP/PP/the SPMD worker. §3's non-goal is narrowed to those
+  unwired paths and to making SP the default; D1's closing paragraph now points at D6; the
+  Status line and §5 verification list the gates. No code change.
+- Why: repo rule — a design change must move the D-IDs in `docs/design/` and PROGRESS in the
+  SAME change. A design doc that denies what the code does is worse than silence: the next
+  agent reads §3, believes the call site is untouched, and reasons from a false premise.
+  Recorded as an amendment rather than by editing the entry below, which stays as written.
+- Refs: m16 D1/D2/D6 + §3/§5 (`docs/design/m16-distributed.md`), PR #139 review [P2],
+  commit 4d1f9f0
+
+### 2026-07-26 — [design] Sequence parallelism (Megatron TP+SP) behind an opt-in flag
+- What: `build_tp_model(..., sequence_parallel=True)` shards the residual stream between
+  blocks along TOKENS. The norms run on the shard, their output is all_gathered into the
+  TP region, and the row-parallel `o_proj`/`down_proj` exit with a reduce_scatter instead
+  of an all_reduce. Ragged token counts are padded at the shard boundary and trimmed on the
+  way out, so the TP region always sees the real sequence length (attention builds its mask
+  from it). Off by default; `tp >= 2` required.
+- Why: m16 §3 listed reduce_scatter at the RowParallelLinear call site as a non-goal
+  because a bare swap loses — measured at ~0.96x an all_reduce (m16 D1 amendment,
+  2026-07-25). The 1.90x that `reduce_scatter` alone shows is only reachable if the
+  consumer accepts a shard, which is what this makes true. The honest framing, recorded
+  here so nobody enables it for the wrong reason: all_gather + reduce_scatter moves what
+  one all_reduce moves, so this does NOT reduce comm time. The gain is ACTIVATION MEMORY —
+  the norms and the inter-block residual hold S/tp rows instead of S.
+- Refs: m16 D1/D2 (+2026-07-25 amendment), `kairyu/models/parallel.py`,
+  `tests/dist/test_distributed.py`, `tests/gpu/test_sequence_parallel_nccl.py`
 
 ### 2026-07-26 — [amendment] FlashInfer declares graph capture and is planned by the runner
 - What: `FlashInferBackend` now sets `supports_graph_capture = True`, so the
