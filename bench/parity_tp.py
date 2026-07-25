@@ -421,12 +421,23 @@ def main() -> int:
         args.out.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"written: {args.out}")
     worst = min(entry["match_rate"] for entry in results.values())
-    # A1 (CPU, deterministic) demands exact; A2 allows >=0.99 once real GPU
-    # kernels make the reduction order vary with the TP degree
-    threshold = 0.99 if args.model_path and hardware["arch"] == "cuda" else 1.0
-    verdict = "OK" if worst >= threshold else "FAIL"
-    print(f"worst match rate: {worst:.4f} (threshold {threshold}) -> {verdict}")
-    return 0 if worst >= threshold else 1
+    if args.model_path:
+        # G2 §7 (amended 2026-07-25): free-running greedy sequence equality is NOT
+        # a correctness gate. One flipped token fails a whole prompt and every
+        # token after it, so these rates cannot separate a broken shard from a
+        # moved near-tie — `bench/parity_hf.py` is what gates. Reported for
+        # orientation; no verdict is claimed.
+        print(
+            f"worst free-running match rate: {worst:.4f} (orientation only — "
+            "the correctness bar is the teacher-forced agreement in "
+            "bench/parity_hf.py)"
+        )
+        return 0
+    # The toy harness IS deterministic, so exactness here is a real invariant:
+    # sharding over FakeCommunicator ranks must not change a single token.
+    verdict = "OK" if worst == 1.0 else "FAIL"
+    print(f"worst match rate: {worst:.4f} (toy harness must be exact) -> {verdict}")
+    return 0 if worst == 1.0 else 1
 
 
 if __name__ == "__main__":
