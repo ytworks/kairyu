@@ -1,7 +1,23 @@
 {
-  "gate": "runbook \u00a71 Gate 1 \u2014 teacher-forced next-token agreement vs HF transformers",
+  "measurement": "teacher-forced next-token agreement vs HF transformers (DIAGNOSTIC \u2014 not runbook \u00a71 Gate 1 / G2 A1, which require full greedy continuations with overlap ON and OFF)",
   "config": {
     "model_path": "/var/lib/docker/volumes/kairyu-qwen3-32b_qwen3-32b/_data/qwen3-32b",
+    "reference_provenance": {
+      "schema": 2,
+      "checkpoint_config_sha256": "97e295b632839357",
+      "checkpoint_weights_sha256": "4c7c5341aec4768d",
+      "tokenizer_files_sha256": "0d96ecc916745b3a",
+      "tokenizer_vocab_sha256": "3ec3c124e02b7ace",
+      "prompt_token_ids_sha256": "c835f3900683e3c6",
+      "num_prompts": 16,
+      "positions": 16,
+      "generation": {
+        "do_sample": false,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null
+      }
+    },
     "tensor_parallel_size": 1,
     "num_prompts": 16,
     "positions": 16,
@@ -17,6 +33,7 @@
     "positions": 256,
     "self_inconsistent": 5,
     "self_agreement_rate": 0.9805,
+    "raw_self_agreement_rate": 0.98046875,
     "max_gap_at_self_disagreement": 0.125,
     "method": "HF greedy generate() vs HF teacher-forced argmax over the same sequence: two paths through one set of weights"
   },
@@ -24,7 +41,7 @@
     "positions": 256,
     "agreed": 253,
     "rate": 0.9883,
-    "threshold": 0.9805,
+    "threshold": 0.98046875,
     "threshold_source": "the reference's own self-agreement (G2 A2, amended 2026-07-25)",
     "historical_fixed_threshold": 0.99,
     "verdict": "PASS"
@@ -38,6 +55,11 @@
     "disagreements": 3,
     "tie_breaks": 3,
     "substantive": 0,
+    "max_abs_delta_bound": 0.25,
+    "within_delta_bound": true,
+    "expected_samples": 253,
+    "collected_samples": 253,
+    "missing_samples": [],
     "verdict": "PASS"
   },
   "per_prompt": {
