@@ -72,13 +72,87 @@ a recording fake.
 > commits before stepping decode, so nothing is queued alongside it. That needs
 > the consumer to take a completion EVENT in place of the host-wide wait.
 >
-> On "production wiring": there is nothing to wire into yet. `PDCoordinator` is
-> constructed only by `tests/unit/test_pd.py` — `kairyu/deploy/` and
-> `kairyu/entrypoints/` contain no P-D path at all, so no deployment reaches a
-> `KVHandoff` of any kind, let alone selects a stream provider for one. Adding a
-> placement-aware handoff factory now would be unused code choosing between two
-> paths nobody takes. The prerequisite is G2 stage 5.3 — wiring P-D
-> disaggregation into serve — and the provider selection belongs with it.
+> **Production wiring landed 2026-07-26.** `PDCoordinator` previously had no
+> production constructor — it existed only in `tests/unit/test_pd.py`, so no
+> deployment could reach a `KVHandoff`, which is why the provider had no caller.
+> `engine/core/pd_factory.py` now supplies both halves:
+> `build_pd_coordinator()` assembles a prefill/decode pair from a checkpoint with
+> both engines placed by the same probe the single-process path uses (overridable
+> per component, so tests inject a placement instead of probing), and
+> `build_kv_handoff()` picks the handoff from where the KV lives — plain for a
+> host pool, `StreamCopyKVHandoff` over a `CudaStreamProvider` bound to the
+> pool's own device for a device pool.
+>
+> **Amended 2026-07-26 (review [P1]).** The first version of that constructor
+> wrapped `LocalKVHandoff`, which allocates in the destination cache and marks it
+> computed without touching either pool. The two halves own separate pools, so it
+> published the decode pool's untouched pages as computed and decode continued
+> from KV that was never written — silently, since nothing raises and the token
+> counts are unchanged. `pd.LocalCopyKVHandoff` is the corrected inner handoff:
+> destination allocate → skip the leading `len(cached_pages)` source pages
+> (receiver-side dedup skips the COPY, not the pages) → direct pool-to-pool page
+> copy → mark computed, releasing the allocation instead of publishing a
+> half-written prefix if the copy raises. It is a direct tensor copy rather than
+> `RemoteKVHandoff`'s serde round-trip because in-process there is no wire: a
+> device pair stays D2D instead of paying D2H + H2D. `LocalKVHandoff` is now
+> documented as a test double, not a deployment option.
+>
+> **Overlap landed 2026-07-26.** `StreamCopyKVHandoff(..., defer=True)` records a
+> completion event instead of blocking. The producer can queue its next step
+> while the copy runs — measured on device: the deferred form returns strictly
+> faster than the blocking one on the same work, the copied values are correct
+> once the event is settled, and on the coordinator the copy's device-time
+> interval overlaps the next prefill forward's
+> (`test_the_copy_overlaps_the_next_prefill_forward_on_the_coordinator`).
+>
+> Deferring is a CONSUMER CONTRACT with two halves, not one. Nothing may read the
+> destination pages before the event — and nothing may reuse the SOURCE pages
+> before it either. `PDCoordinator`'s m6 D4 rule releases the prefill-side
+> allocation the moment the transfer returns (`update()` → `commit_and_release`
+> pool-frees the tail page, `abort()` → `release_preempted` frees all of it), so
+> a deferred copy would be reading pages the next prefill step can allocate and
+> overwrite on the caller's stream. Waiting on the destination side does not stop
+> that; it is a source-side read/write race.
+>
+> The coordinator therefore owns the lease. `PDCoordinator._settle_handover` is
+> the single point where a transfer is completed — the prefill-side commit, the
+> abort on a failed copy, and the decode-side `resume_with_kv` all go through it
+> — and it calls `gate_pending()` first. The gate is stream-ordered, not a host
+> block (`event.wait(current_stream)`). A deferring handoff that exposes no
+> `gate_pending()` is refused at construction rather than releasing pages under a
+> copy the coordinator cannot order against. Events ACCUMULATE: a prefill step
+> transfers every prompt that completed in it, and a single-slot `pending_event`
+> would silently drop the ordering for all but the last copy.
+>
+> **Amended 2026-07-26 (review [P1]): where the gate sits is the whole point.**
+> The first version settled at the end of the very step that recorded the copy.
+> Correct, and no host block — but the next GPU work of any kind (the decode step,
+> then the next prefill forward) was queued *after* the gate, so the device
+> timeline stayed exactly as serial as the blocking form. Measured on device:
+> copy `[11.651, 12.342] ms`, next prefill forward `[12.898, 13.369] ms`.
+>
+> The settlement is therefore PIPELINED one producer step. `_step_prefill` plans,
+> runs its forward, and only THEN settles the previous step's transfers, so the
+> gate lands with that forward — and the decode step queued before it — already
+> in front of it. `_Handover` is what carries a step's `commit` / `adopt` /
+> `retries` across that boundary. Adoption has to travel with the release: it is
+> what puts the destination pages in front of the decode runner, which is the
+> other half of the m6 D4 rule. The source pages stay leased for the extra step,
+> which costs prefill KV capacity — never correctness, because a page the prefill
+> scheduler still owns cannot be handed to anyone else. When a step has nothing
+> to schedule the settlement happens up front instead: there is no overlap left to
+> win, and the leased pages may be exactly what the next prompt needs.
+>
+> This applies to the deferring path ONLY. A blocking handoff has already finished
+> its copy inside `transfer()`, so `_step_prefill` settles it in its own step and
+> the request starts decoding immediately, as before.
+>
+> Production wiring: `build_pd_coordinator(defer_handoff=True)` — the default,
+> and the only caller that turns it on, because it is the only one that settles
+> it. `build_kv_handoff(..., defer=...)` defaults off for everyone else.
+>
+> Still open: serving-layer exposure (a `pd_separation` deployment option) is G2
+> stage 5.3 work on top of `pd_factory.build_pd_coordinator()`.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 
