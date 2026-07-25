@@ -1,15 +1,23 @@
 """HLE / LongBench v2 / MRCR adapters: scoring, context gating, degradation."""
 
+import json
+
+import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters.base import RunContext
+from kairyu.bench.adapters.base import DownloadContext, RunContext
 from kairyu.bench.adapters.hle import HleAdapter
 from kairyu.bench.adapters.longbench_v2 import LongBenchV2Adapter
 from kairyu.bench.adapters.mrcr import MrcrAdapter, mrcr_grade
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.runner import SuiteRunner
 from kairyu.bench.store import ResultStore
-from kairyu.bench.types import BenchItem, ChatRequestSpec, SkipItem
+from kairyu.bench.types import (
+    BenchItem,
+    ChatRequestSpec,
+    DatasetUnavailable,
+    SkipItem,
+)
 
 
 def _ctx(tmp_path, **overrides) -> RunContext:
@@ -142,6 +150,116 @@ def test_mrcr_context_gate(tmp_path):
     )
     gated = adapter.build_request(item, make_target(max_context_tokens=100), ctx)
     assert isinstance(gated, SkipItem)
+
+
+class _FakeEncoder:
+    """Stand-in for o200k_base: one token per character, exactly counted."""
+
+    def encode(self, text: str) -> list[int]:
+        return [0] * len(text)
+
+
+def _mrcr_row(needles: int, *, tokens: int = 5000, answer_tokens: int = 96) -> dict:
+    """A row whose exact prompt+answer token count is `tokens + answer_tokens`."""
+    return {
+        "prompt": json.dumps([{"role": "user", "content": "x" * tokens}]),
+        "answer": "P" * answer_tokens,
+        "random_string_to_prepend": "P",
+        "n_needles": needles,
+        "n_chars": tokens,
+    }
+
+
+def _patch_mrcr(monkeypatch, rows):
+    import kairyu.bench.adapters.mrcr as mrcr_mod
+    import kairyu.bench.hub as hub
+
+    monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(mrcr_mod, "_encoder", _FakeEncoder)
+
+
+def _official_slice() -> list[dict]:
+    """100 8-needle rows in each official bin at or below 128K."""
+    from kairyu.bench.adapters.mrcr import selected_bins
+
+    rows = []
+    for bound in selected_bins():
+        for _ in range(100):
+            rows.append(_mrcr_row(8, tokens=bound - 100, answer_tokens=100))
+    return rows
+
+
+def test_token_bin_matches_the_published_boundaries():
+    from kairyu.bench.adapters.mrcr import expected_rows, selected_bins, token_bin
+
+    assert token_bin(4095) is None  # below the first bin
+    assert token_bin(4096) == 8192
+    assert token_bin(8192) == 8192  # boundaries are inclusive upper bounds
+    assert token_bin(8193) == 16384
+    assert token_bin(131_072) == 131_072
+    assert token_bin(131_073) == 262_144
+    assert token_bin(2_000_000) is None
+    assert selected_bins() == (8192, 16384, 32768, 65536, 131_072)
+    assert expected_rows() == 500  # 100 samples per bin, per the dataset card
+
+
+def test_count_tokens_includes_the_answer():
+    from kairyu.bench.adapters.mrcr import count_tokens
+
+    messages = [{"role": "user", "content": "abc"}, {"role": "assistant", "content": "de"}]
+    assert count_tokens(_FakeEncoder(), messages) == 5
+    assert count_tokens(_FakeEncoder(), messages, "fgh") == 8
+
+
+def test_mrcr_normalize_selects_the_official_bins(tmp_path, monkeypatch, capsys):
+    """Fugu reports 8-needle up to 128K: the five bins at or below 131,072."""
+    rows = _official_slice()
+    rows += [_mrcr_row(2), _mrcr_row(4)]  # wrong needle counts
+    rows += [_mrcr_row(8, tokens=200_000)]  # a longer official bin
+    rows += [_mrcr_row(8, tokens=100, answer_tokens=10)]  # below the first bin
+    _patch_mrcr(monkeypatch, rows)
+
+    normalized = MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+    assert len(normalized) == 500
+    assert {row["n_needles"] for row in normalized} == {8}
+    assert {row["token_bin"] for row in normalized} == {8192, 16384, 32768, 65536, 131_072}
+    assert all(row["total_tokens"] <= 131_072 for row in normalized)
+    out = capsys.readouterr().out
+    assert "kept 500/" in out and "per-bin counts" in out
+
+
+def test_mrcr_normalize_fails_closed_when_the_bins_do_not_match(tmp_path, monkeypatch):
+    """A moved population must not be averaged as if it were Fugu's slice."""
+    _patch_mrcr(monkeypatch, _official_slice()[:-1])
+    with pytest.raises(DatasetUnavailable, match="expected 500"):
+        MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+
+def test_mrcr_normalize_requires_the_official_tokenizer(tmp_path, monkeypatch):
+    """Approximating would select a different population than the bins define."""
+    import kairyu.bench.adapters.mrcr as mrcr_mod
+    import kairyu.bench.hub as hub
+
+    monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: _official_slice())
+    monkeypatch.setattr(
+        mrcr_mod,
+        "_encoder",
+        lambda: (_ for _ in ()).throw(DatasetUnavailable("needs tiktoken")),
+    )
+    with pytest.raises(DatasetUnavailable, match="tiktoken"):
+        MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+
+def test_mrcr_methodology_discloses_the_slice(tmp_path):
+    methodology = MrcrAdapter().methodology(_ctx(tmp_path))
+    assert methodology["needles"] == 8
+    assert methodology["max_context_tokens"] == 131_072
+    assert methodology["tokenizer"] == "o200k_base"
+    assert methodology["selected_bins"] == [8192, 16384, 32768, 65536, 131_072]
+    assert methodology["expected_rows"] == 500
+    assert "prompt+answer" in methodology["selection"]
+    assert any("8-needle" in note for note in MrcrAdapter().info.annotations)
 
 
 async def test_mrcr_runs_end_to_end(tmp_path, http_factory):

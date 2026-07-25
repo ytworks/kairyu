@@ -92,7 +92,7 @@ vs `kairyu-auto-max` in one run.
 | SciCode | `SciCode1/SciCode` | sandboxed sub-step tests (+`test_data.h5` golden data) | numpy in venv |
 | τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
-| MRCRv2 | `openai/mrcr` | official prepend + SequenceMatcher ratio | long-context target |
+| MRCRv2 | `openai/mrcr` (8-needle, ≤128K) | official prepend + SequenceMatcher ratio | long-context target |
 
 Annotated caveats appear as scoreboard footnotes automatically, notably:
 the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
@@ -121,6 +121,25 @@ Pro is scored by the local sandbox, not the official judge.
   kairyu does **not** compile: grading is per-line whitespace-normalized
   comparison, so multi-answer problems can only lose points and the cell is a
   **lower bound**.
+
+**MRCRv2 population.** The published `openai/mrcr` split mixes 2-, 4- and
+8-needle items across eight length bins up to 1M tokens, with **100 samples per
+(needle count, bin)**. The card defines those bins by the tokens used by
+**prompt + answer** under `o200k_base`, with boundaries `[4096, 8192]`,
+`(8192, 16384]`, … `(524288, 1048576]`.
+
+Fugu reports the **8-needle** subset at up to **128K**, which is the five bins at
+or below 131,072 — exactly **500 rows**. The adapter counts tokens with the
+official encoder (so `tiktoken` is required; without it the cell is skipped
+rather than approximated), assigns each row to its official bin, keeps the
+selected bins, prints the per-bin counts, and **fails closed** unless it lands on
+500. An approximation such as chars/4 over the prompt alone cannot reproduce
+those boundaries, and averaging the whole 2,400-row split would score an easier,
+shorter population against Fugu's number.
+
+The target's own `max_context_tokens` gate is separate: it uses the prompt-only
+estimate, matching the official runner's `n_tokens(messages) > MAX_CONTEXT_WINDOW`
+check.
 
 ## Degradation model (why one command always completes)
 
