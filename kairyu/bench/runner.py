@@ -117,7 +117,7 @@ class SuiteRunner:
         self._http_factory = http_factory or (lambda: httpx.AsyncClient())
         self._probe_docker = probe_docker
 
-    def _build_context(self, cache: BenchCache) -> RunContext:
+    def _build_context(self, cache: BenchCache, run_id: str = "") -> RunContext:
         config = self.config
         limit = config.limit
         if config.smoke:
@@ -140,6 +140,7 @@ class SuiteRunner:
             limit=limit,
             seed=config.seed,
             attempts=config.attempts,
+            run_id=run_id,
             concurrency=config.concurrency,
             retries=config.retries,
             request_timeout_s=config.request_timeout_s,
@@ -172,7 +173,7 @@ class SuiteRunner:
         run_id = config.run_id or _default_run_id()
         store = ResultStore(config.results_dir, run_id)
 
-        ctx = self._build_context(cache)
+        ctx = self._build_context(cache, run_id)
         if config.download and not config.offline_fixtures:
             self._download_missing(adapters, cache, ctx)
 

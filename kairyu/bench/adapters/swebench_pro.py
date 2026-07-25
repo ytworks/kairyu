@@ -39,6 +39,16 @@ _STEP_LIMIT = 1000
 _BASE_CONFIG = "swebench.yaml"
 
 
+def _model_kwargs(target: BenchTarget) -> dict[str, object]:
+    """Named sampling fields the harness can forward to its LLM client."""
+    fields = {
+        "reasoning_effort": target.reasoning_effort,
+        "top_p": target.top_p,
+        "seed": target.seed,
+    }
+    return {name: value for name, value in fields.items() if value is not None}
+
+
 def harness_missing() -> str | None:
     for module, package in (("minisweagent", "mini-swe-agent"), ("swebench", "swebench")):
         if importlib.util.find_spec(module) is None:
@@ -74,6 +84,9 @@ class SweBenchProAdapter:
         annotations=(
             "scaffold: mini-swe-agent (matches Fugu's published methodology), "
             f"agent.step_limit={_STEP_LIMIT}",
+            "the target's named sampling fields are forwarded as "
+            "model.model_kwargs.*; vendor extra_body has no harness equivalent "
+            "and is NOT forwarded",
         ),
     )
 
@@ -114,6 +127,11 @@ class SweBenchProAdapter:
             "--config",
             f"agent.step_limit={_STEP_LIMIT}",
         ]
+        # The harness forwards `model.model_kwargs.*` to its LLM client, so the
+        # endpoint's named sampling policy can reach the agent's requests. Vendor
+        # `extra_body` has no equivalent key and is annotated instead of guessed.
+        for field, value in _model_kwargs(target).items():
+            command += ["--config", f"model.model_kwargs.{field}={value}"]
         if ctx.limit is not None:
             command += ["--slice", f"0:{ctx.limit}"]
         return command

@@ -95,6 +95,106 @@ def test_terminal_bench_limit_is_a_task_cap(tmp_path):
     assert _flag_value(command, "--n-tasks") == "3"
 
 
+# -- Harbor result schema ------------------------------------------------------
+
+# Shape of Harbor 0.17's job-level result.json: JobResult.trial_results, each
+# TrialResult carrying its verdict under verifier_result.rewards (a task-defined
+# dict) or an exception_info.
+HARBOR_JOB_RESULT = {
+    "id": "3f1b0e6a-0000-4000-8000-000000000000",
+    "started_at": "2026-07-25T00:00:00",
+    "n_total_trials": 4,
+    "stats": {"n_completed_trials": 3, "n_errored_trials": 1},
+    "trial_results": [
+        {
+            "trial_name": "build-tool.1",
+            "task_id": {"name": "build-tool"},
+            "verifier_result": {"rewards": {"reward": 1}},
+        },
+        {
+            "trial_name": "fix-perms.1",
+            "task_id": {"name": "fix-perms"},
+            "verifier_result": {"rewards": {"reward": 0}},
+        },
+        {
+            "trial_name": "partial-credit.1",
+            "task_id": {"name": "partial-credit"},
+            "verifier_result": {"rewards": {"accuracy": 0.5}},
+        },
+        {
+            "trial_name": "crashed.1",
+            "task_id": {"name": "crashed"},
+            "exception_info": {"exception_type": "TimeoutError"},
+        },
+    ],
+}
+
+
+def test_parse_harbor_job_result_schema():
+    from kairyu.bench.adapters.terminal_bench import parse_harbor_results
+
+    items = {item.item_id: item for item in parse_harbor_results(HARBOR_JOB_RESULT)}
+    assert items["build-tool.1"].score == 1.0
+    assert items["fix-perms.1"].score == 0.0
+    assert items["partial-credit.1"].score == 0.5
+    assert items["crashed.1"].status == "failed"
+    assert "TimeoutError" in items["crashed.1"].error
+
+
+def test_ambiguous_reward_dict_is_failed_not_guessed():
+    from kairyu.bench.adapters.terminal_bench import parse_harbor_results, trial_reward
+
+    assert trial_reward({"tests_passed": 3, "tests_total": 4}) is None
+    assert trial_reward({"anything": 1}) == 1.0  # a single key is unambiguous
+    assert trial_reward({"resolved": True}) == 1.0
+
+    items = parse_harbor_results(
+        {
+            "trial_results": [
+                {
+                    "trial_name": "t",
+                    "verifier_result": {"rewards": {"a": 1, "b": 2}},
+                }
+            ]
+        }
+    )
+    assert items[0].status == "failed"
+    assert "ambiguous reward keys" in items[0].error
+
+
+async def test_terminal_bench_reads_the_real_harbor_output(tmp_path, monkeypatch):
+    """A successful `harbor run` must not report 'no harbor results file found'."""
+    import json as _json
+
+    import kairyu.bench.adapters.terminal_bench as tb
+
+    monkeypatch.setattr(tb.shutil, "which", lambda name: "/usr/bin/harbor")
+
+    def fake_run(command, capture_output, timeout, env, check):
+        jobs_dir = Path(command[command.index("--jobs-dir") + 1])
+        job = jobs_dir / "job-1"
+        (job / "trials" / "build-tool.1").mkdir(parents=True)
+        # a per-trial artifact exists too; the job-level file must win
+        (job / "trials" / "build-tool.1" / "result.json").write_text(
+            _json.dumps(HARBOR_JOB_RESULT["trial_results"][0]), encoding="utf-8"
+        )
+        (job / "result.json").write_text(_json.dumps(HARBOR_JOB_RESULT), encoding="utf-8")
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(tb.subprocess, "run", fake_run)
+    pair = await TerminalBenchAdapter().run(_target(), _ctx(tmp_path))
+    assert pair.status == "partial"  # the crashed trial keeps it honest
+    assert pair.metrics["n_total"] == 4
+    assert pair.metrics["n_failed"] == 1
+    assert pair.score == pytest.approx((1.0 + 0.0 + 0.5) / 3)
+
+
 # -- τ³ Banking ----------------------------------------------------------------
 
 
@@ -164,3 +264,80 @@ def test_tau_annotations_disclose_conditions():
     notes = TauBenchBankingAdapter().info.annotations
     assert any("banking_knowledge" in note for note in notes)
     assert any("pass@4" in note for note in notes)
+
+
+def test_tau_save_to_is_unique_per_invocation(tmp_path):
+    """A fixed name makes the harness prompt to resume, or resume stale work."""
+    adapter = TauBenchBankingAdapter()
+    ctx = _ctx(tmp_path, judge=_judge(), run_id="run-a")
+    names = set()
+    for _ in range(3):
+        # the name is built inside run(); rebuild it the same way the adapter does
+        names.add(adapter._save_to_name(_target(), ctx))
+    assert len(names) == 3
+    assert all(name.startswith("kairyu-tau-bench-banking-m-run-a-") for name in names)
+
+
+def test_tau_data_dir_prefers_the_harness_resolution(tmp_path, monkeypatch):
+    """The harness computes DATA_DIR beside site-packages, not inside it."""
+    import kairyu.bench.adapters.tau_bench as tau
+
+    monkeypatch.setenv("TAU2_DATA_DIR", str(tmp_path / "from-env"))
+    monkeypatch.setattr(tau, "harness_data_dir", lambda flavor: tmp_path / "from-harness")
+    candidates = tau.data_dir_candidates("tau2")
+    assert candidates[0] == tmp_path / "from-harness"
+    assert tmp_path / "from-env" in candidates
+
+
+def test_tau_data_dir_falls_back_when_harness_import_fails(tmp_path, monkeypatch):
+    import kairyu.bench.adapters.tau_bench as tau
+
+    monkeypatch.delenv("TAU2_DATA_DIR", raising=False)
+    monkeypatch.setattr(tau, "harness_data_dir", lambda flavor: None)
+    candidates = tau.data_dir_candidates("tau2")
+    assert candidates  # still offers the package/cwd layouts
+    assert Path.cwd() / "data" in candidates
+
+
+def test_harness_data_dir_reads_the_module_attribute(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    import kairyu.bench.adapters.tau_bench as tau
+
+    module = types.ModuleType("tau2.utils.utils")
+    module.DATA_DIR = tmp_path / "installed" / "data"
+    monkeypatch.setitem(sys.modules, "tau2.utils.utils", module)
+    assert tau.harness_data_dir("tau2") == tmp_path / "installed" / "data"
+
+
+# -- SWE-Bench Pro sampling ----------------------------------------------------
+
+
+def test_swebench_forwards_named_sampling_to_model_kwargs(tmp_path):
+    command = SweBenchProAdapter()._generate_command(
+        _target(reasoning_effort="high", top_p=0.9, seed=7),
+        _ctx(tmp_path),
+        Path("preds.json"),
+    )
+    configs = [command[i + 1] for i, part in enumerate(command) if part == "--config"]
+    assert "model.model_kwargs.reasoning_effort=high" in configs
+    assert "model.model_kwargs.top_p=0.9" in configs
+    assert "model.model_kwargs.seed=7" in configs
+
+
+def test_swebench_omits_model_kwargs_when_unset(tmp_path):
+    command = SweBenchProAdapter()._generate_command(
+        _target(), _ctx(tmp_path), Path("preds.json")
+    )
+    assert not any("model_kwargs" in part for part in command)
+
+
+def test_swebench_annotates_what_it_cannot_forward():
+    notes = SweBenchProAdapter().info.annotations
+    assert any("extra_body" in note and "NOT forwarded" in note for note in notes)
+
+
+def test_terminal_bench_annotates_that_sampling_is_not_forwarded():
+    notes = TerminalBenchAdapter().info.annotations
+    assert any("NOT" in note and "sampling" in note for note in notes)

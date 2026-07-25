@@ -15,11 +15,14 @@ user simulator's sampling is set through `--user-llm-args` JSON.
 from __future__ import annotations
 
 import asyncio
+import importlib
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 from kairyu.bench.adapters.base import (
     AdapterInfo,
@@ -56,27 +59,48 @@ def detect_harness() -> str | None:
     return None
 
 
+def harness_data_dir(flavor: str) -> Path | None:
+    """The harness's own resolved `DATA_DIR`, asked of the harness itself.
+
+    `TAU2_DATA_DIR` wins there; otherwise it is `Path(utils.__file__).parents[3]
+    / "data"`, which for an installed package sits beside `site-packages` — not
+    under it. Guessing that layout is how a successful run gets reported as
+    producing no results, so the value is imported rather than reconstructed.
+    """
+    for module in dict.fromkeys((f"{flavor}.utils.utils", "tau2.utils.utils")):
+        try:
+            imported = importlib.import_module(module)
+        except Exception:  # noqa: BLE001 - a missing/partial harness is not fatal
+            continue
+        data_dir = getattr(imported, "DATA_DIR", None)
+        if data_dir is not None:
+            return Path(data_dir)
+    return None
+
+
 def data_dir_candidates(flavor: str) -> list[Path]:
     """Roots that may hold `simulations/<save_to>/results.json`.
 
-    The harness resolves its data directory from `TAU2_DATA_DIR`, falling back
-    to a directory inside the installed package, so the results file is not at
-    a path the caller chose.
+    The harness's own `DATA_DIR` comes first; the rest are fallbacks for when it
+    cannot be imported (a partially installed harness, or a flavor that renamed
+    the module).
     """
     roots: list[Path] = []
+    resolved = harness_data_dir(flavor)
+    if resolved is not None:
+        roots.append(resolved)
     env_dir = os.environ.get("TAU2_DATA_DIR")
     if env_dir:
         roots.append(Path(env_dir))
     for module in dict.fromkeys((flavor, "tau2")):
         try:
-            import importlib.util
-
             spec = importlib.util.find_spec(module)
         except (ImportError, ValueError):
             spec = None
         for location in getattr(spec, "submodule_search_locations", None) or []:
             package = Path(location)
-            roots += [package / "data", package.parent / "data"]
+            # source checkout: <root>/src/tau2 -> <root>/data
+            roots += [package / "data", package.parent / "data", package.parents[1] / "data"]
     roots.append(Path.cwd() / "data")
     return list(dict.fromkeys(roots))
 
@@ -152,6 +176,26 @@ class TauBenchBankingAdapter:
             )
         return None
 
+    def _save_to_name(self, target: BenchTarget, ctx: RunContext) -> str:
+        """Unique per invocation, with the kairyu run id for traceability.
+
+        The harness PROMPTS before resuming when the results file already
+        exists, so a fixed name makes a second run interactive — or, if
+        accepted, resumes simulations produced under a different configuration.
+        kairyu's own pair-level resume is what reuses finished work.
+        """
+        return "-".join(
+            part
+            for part in (
+                "kairyu",
+                self.info.name,
+                target.label().replace("/", "_"),
+                ctx.run_id or None,
+                uuid4().hex[:8],
+            )
+            if part
+        )
+
     def _command(
         self, flavor: str, target: BenchTarget, ctx: RunContext, save_to: str
     ) -> list[str]:
@@ -213,7 +257,7 @@ class TauBenchBankingAdapter:
         env["OPENAI_API_BASE"] = base
         env["OPENAI_API_KEY"] = target_api_key(target) or "sk-local"
 
-        save_to = f"kairyu-{self.info.name}-{target.label()}".replace("/", "_")
+        save_to = self._save_to_name(target, ctx)
         command = self._command(flavor, target, ctx, save_to)
 
         def _invoke() -> subprocess.CompletedProcess:

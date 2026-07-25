@@ -254,6 +254,26 @@ Fugu's published turn and trial conditions are pinned in the invocations:
 | Terminal-Bench 2.1 | terminus-2, 500 turns | `-a terminus-2 --ak max_turns=500`, dataset `-d terminal-bench@2.1`, results in `--jobs-dir` |
 | τ³ Banking | `banking_knowledge`, all retrieval tools, low-effort user simulator | `--domain banking_knowledge --retrieval-config alltools --user-llm-args '{"reasoning_effort":"low"}'` (from the judge's sampling policy), results addressed by `--save-to <name>` under the harness data dir |
 
+Harness output and sampling, verified against the pinned harnesses:
+
+- **Harbor** writes a job-level `result.json` holding `trial_results`, each trial
+  carrying its verdict under `verifier_result.rewards` — a *task-defined* dict.
+  The adapter prefers the conventional keys (`reward`, `resolved`, `accuracy`,
+  `score`, `passed`), accepts a single-key dict whatever it is called, and
+  records an ambiguous dict as a **failed** item listing the keys rather than
+  guessing. `trial_name` is the item id so `-k > 1` keeps attempts distinct.
+- **τ** resolves its data directory itself (`TAU2_DATA_DIR`, else a path *beside*
+  `site-packages`), so the adapter imports the harness's own `DATA_DIR` instead
+  of reconstructing that layout. `--save-to` is unique per invocation and carries
+  the kairyu run id: the harness prompts before resuming an existing results
+  file, so a fixed name would make a second run interactive or resume
+  simulations from another configuration.
+- **Sampling**: τ takes `--agent-llm-args` / `--user-llm-args`, and mini-swe-agent
+  takes `model.model_kwargs.*`, so the named fields reach both. Vendor
+  `extra_body` has no equivalent in either, and Harbor exposes no documented
+  sampling passthrough for terminus-2 — both are annotated on the cell rather
+  than silently dropped.
+
 `--attempts N` sets trials per task (`-k` for Harbor, `--num-trials` for τ).
 It defaults to **1** because each attempt is another full container run; Fugu
 reports τ³ Banking as **pass@4** and the Terminal-Bench leaderboard requires at
