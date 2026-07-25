@@ -112,6 +112,23 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [progress] G2 A1's overlap-ON half is measured, and it matches OFF
+- What: `bench/parity_tp.py` no longer forces `overlap_modes` to OFF when a real model is
+  loaded, so the A1 sweep runs both halves. On the 8x RTX PRO 6000 host, Qwen3-32B, 64
+  fixed prompts x 8 new tokens, overlap ON reproduces overlap OFF exactly at every TP
+  degree: TP2 57/64 (token 0.9277), TP4 58/64 (0.9473), TP8 53/64 (0.9023) in both modes.
+  Evidence: `bench/results/parity-tp-qwen3-32b-2026-07-26.json`.
+- Why: A1 requires parity with the overlap pipeline ON *and* OFF, and only OFF had ever
+  been measured — `PagedModelRunner` read `state.outputs[position - 1]`, which an overlap
+  snapshot is one entry short of, so a real runner raised IndexError and the harness
+  recorded the gap instead of a number. The in-flight token buffer removed that
+  precondition; this run is what shows the pipeline changes no output rather than
+  asserting it. The rates themselves are orientation only, per G2 §7 (amended
+  2026-07-25): free-running greedy equality is not the correctness bar, because one
+  flipped token fails a prompt and every token after it. What A1 gets from this run is
+  the ON-vs-OFF equality, which is exact.
+- Refs: G2 A1, m2 §2.2, `bench/parity_tp.py`, `bench/results/parity-tp-qwen3-32b-2026-07-26.json`
+
 ### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
 - What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
   `tensor_parallel_size > 1`, which happens BEFORE the `probe()` block that selects

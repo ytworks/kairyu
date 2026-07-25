@@ -1,0 +1,182 @@
+{
+  "config": {
+    "harness": "real-model ranks on cuda",
+    "hardware": {
+      "arch": "cuda",
+      "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "device_count": 8,
+      "sm": 120
+    },
+    "checkpoint": {
+      "name": "qwen3",
+      "weights_sha256": "6ad97559e21857dff62deea10ab1942cf9cc02a20f657bd8b8dad8aa55ff888f",
+      "weights": [
+        {
+          "file": "model-00001-of-00017.safetensors",
+          "bytes": 3957109648,
+          "header_sha256": "62499bb1ef8c581f076939b6492ea0d746eae592ab9c69a81215e79306977e46"
+        },
+        {
+          "file": "model-00002-of-00017.safetensors",
+          "bytes": 3900791760,
+          "header_sha256": "c2a865b68d52b97f2c861b36dc2d2063df0d017cc788460dd617a2949a714644"
+        },
+        {
+          "file": "model-00003-of-00017.safetensors",
+          "bytes": 3900791760,
+          "header_sha256": "96a5bff788c04634ad5a9ab63e5fe789aca05b0de14e2e83888b355cc363e37b"
+        },
+        {
+          "file": "model-00004-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "5310ec9fac6a086eaf6d3610948f74ccbd7cd3859cd2f328df7c4d203184c116"
+        },
+        {
+          "file": "model-00005-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "233cc3cd22e257c713efc8c45e68ebe45f768839077f20db32ab2d5d93a1c6b0"
+        },
+        {
+          "file": "model-00006-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "0f8cbea79faddebdd62a90b469b8e4d0f6ab561ca90fce0ac12343b41b30a464"
+        },
+        {
+          "file": "model-00007-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "57facda1d3fcfa8306bb7c0da51e3b7508c7dde3fa2a1863513f10a1059b2ddf"
+        },
+        {
+          "file": "model-00008-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "476c47ac7da499d9192ce2e98c1ccccfc3bc35a058a304bfe04d39ab0d57d907"
+        },
+        {
+          "file": "model-00009-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "44893f2b88aba54cdb047a0487390de45081e2a1ec34cc43ca50f40c6c051c31"
+        },
+        {
+          "file": "model-00010-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "4256a49ac78f70db0e441f0ff6560a1228ac4729a8c1664859fee683c3017420"
+        },
+        {
+          "file": "model-00011-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "bc1cb9440f95b4db6123bf210f33dd70a03aa7b339da92e93637f2b0d6db59e6"
+        },
+        {
+          "file": "model-00012-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "c7a4d45c87bcc528a394016ea2914f657322746166c10bbe00372d5d304bb83f"
+        },
+        {
+          "file": "model-00013-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "d9e481ceee4d5c3efb5a6d6cdd50e4669ff29c5d886d5ffdbb07eb5aa72aff27"
+        },
+        {
+          "file": "model-00014-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "417ea6520eeac84488fa5686a6aa15251b8c0376ddc2d835df99f84c00ce297c"
+        },
+        {
+          "file": "model-00015-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "18de9a605ddc33e8f30a73de7fd399570198ea465fd9faaffe2f8bd6d0861478"
+        },
+        {
+          "file": "model-00016-of-00017.safetensors",
+          "bytes": 3900791800,
+          "header_sha256": "b1b6225a92667ad134ff1e268e970062ae3db37c298c9ff54ce93ea8582f3873"
+        },
+        {
+          "file": "model-00017-of-00017.safetensors",
+          "bytes": 3055341992,
+          "header_sha256": "29b918518283e12711f4184c99bfa61743c63bd5e447b32e0f1fb9973ef9e3de"
+        }
+      ],
+      "metadata_sha256": {
+        "config.json": "97e295b63283935788fac5e4f8860862a56d4089538cafc93f0431f2ebe483bb",
+        "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+      },
+      "read_from": "/var/lib/docker/volumes/kairyu-qwen3-32b_qwen3-32b/_data/qwen3-32b"
+    },
+    "code": {
+      "commit": "31a238690c1334852356574eb722bde0f1878cca",
+      "dirty": false,
+      "untracked_files": 0
+    },
+    "tp_degrees": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "num_prompts": 64,
+    "max_new_tokens": 8,
+    "overlap_modes": [
+      "off",
+      "on"
+    ],
+    "overlap_on_gap": null,
+    "seed": 20260702
+  },
+  "parity": {
+    "tp2_vs_tp1_overlap_off": {
+      "prompts": 64,
+      "exact_match": 57,
+      "match_rate": 0.8906,
+      "tokens": 512,
+      "token_match_rate": 0.9277,
+      "median_first_divergence": 2
+    },
+    "tp4_vs_tp1_overlap_off": {
+      "prompts": 64,
+      "exact_match": 58,
+      "match_rate": 0.9062,
+      "tokens": 512,
+      "token_match_rate": 0.9473,
+      "median_first_divergence": 6
+    },
+    "tp8_vs_tp1_overlap_off": {
+      "prompts": 64,
+      "exact_match": 53,
+      "match_rate": 0.8281,
+      "tokens": 512,
+      "token_match_rate": 0.9023,
+      "median_first_divergence": 2
+    },
+    "tp2_vs_tp1_overlap_on": {
+      "prompts": 64,
+      "exact_match": 57,
+      "match_rate": 0.8906,
+      "tokens": 512,
+      "token_match_rate": 0.9277,
+      "median_first_divergence": 2
+    },
+    "tp4_vs_tp1_overlap_on": {
+      "prompts": 64,
+      "exact_match": 58,
+      "match_rate": 0.9062,
+      "tokens": 512,
+      "token_match_rate": 0.9473,
+      "median_first_divergence": 6
+    },
+    "tp8_vs_tp1_overlap_on": {
+      "prompts": 64,
+      "exact_match": 53,
+      "match_rate": 0.8281,
+      "tokens": 512,
+      "token_match_rate": 0.9023,
+      "median_first_divergence": 2
+    }
+  }
+}
