@@ -246,10 +246,14 @@ it (an fp32 forward, which needs more memory than one card holds for a 32B).
 full-continuation, overlap-ON-and-OFF definition; what changes is that its
 verdict is the teacher-forced agreement above rather than sequence equality.
 `bench/parity_hf.py` measures that agreement today but does NOT yet satisfy A1:
-it runs single-token requests through `EngineCore` only, because the overlap
-path needs the device-side future-token patch (m2 §2.2), which is unimplemented
-— `PagedModelRunner` raises IndexError under `OverlapEngineCore`. A1 is
-therefore still open, with the remaining work named. The same engine measured 0.786 free-running and 0.988
+it runs single-token requests through `EngineCore` only, so it covers neither
+the full continuations nor Llama-3.1-8B. The overlap path is no longer what
+blocks it: the in-flight token buffer removed the IndexError `PagedModelRunner`
+used to raise under `OverlapEngineCore`, and A1's overlap-ON half is measured —
+`bench/results/parity-tp-qwen3-32b-2026-07-26.json` records overlap ON
+reproducing overlap OFF exactly at TP2/4/8. A1 is therefore still open on the
+model and the continuations, with the remaining work named; the device-side
+half of m2 §2.2 stays open as a performance invariant, not as a gate. The same engine measured 0.786 free-running and 0.988
 teacher-forced: once one token differs, every later token is compared against a
 prefix the other side never produced, so a single moved near-tie is
 indistinguishable from a broken shard. `bench/parity_tp.py` still reports

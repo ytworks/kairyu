@@ -4,9 +4,12 @@ NOT runbook §1 Gate 1 / G2 A1, and deliberately not named as one. Those are
 defined as Llama-3.1-8B, 64 fixed prompts, full greedy CONTINUATIONS, with the
 overlap pipeline ON and OFF. This runs each prefix as an independent
 `max_new_tokens=1` request through `EngineCore` only, so it exercises neither a
-continuation nor the overlap future-token path. Running the formal gate
-additionally needs the device-side future-token patch (m2 §2.2), which is
-unimplemented — `PagedModelRunner` raises IndexError under `OverlapEngineCore`.
+continuation nor the overlap future-token path. What still separates this from
+the formal gate is the model (Llama-3.1-8B) and the full continuations — NOT the
+overlap path: `PagedModelRunner`'s in-flight token buffer removed the IndexError
+it used to raise under `OverlapEngineCore`, and A1's overlap-ON half is measured
+in `bench/results/parity-tp-qwen3-32b-2026-07-26.json`. The device-side half of
+m2 §2.2 remains open, but it is a performance invariant, not a blocker here.
 
 What it IS: the diagnostic that free-running comparison cannot provide.
 
