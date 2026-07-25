@@ -161,3 +161,40 @@ def test_pp2_greedy_matches_single_process(spawn2, llama_dir):
     results = spawn2(dist_targets.pp_greedy_parity, llama_dir, prompt, 10)
     assert results[0]["outputs"] == reference
     assert results[1]["outputs"] == reference
+
+
+def test_serving_collectives_do_not_inherit_the_startup_timeout(tmp_path):
+    """Review [P1] on #124: `init_process_group(timeout=)` bounds EVERY operation
+    on that group, so the cold-load allowance must not become the operational one.
+
+    Single process on purpose — this is a property of how the groups are built,
+    and a spawn adds teardown-ordering noise without testing anything more."""
+    import torch.distributed as dist
+
+    from kairyu.engine.core import worker as worker_module
+
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{tmp_path / 'rdv-timeout'}",
+        rank=0,
+        world_size=1,
+        timeout=__import__("datetime").timedelta(
+            seconds=worker_module._STARTUP_TIMEOUT_S
+        ),
+    )
+    try:
+        group = worker_module.serving_group("gloo")
+        host = torch.device("cpu")
+        serving = group._get_backend(host).options._timeout.total_seconds()
+        startup = (
+            dist.distributed_c10d._get_default_group()
+            ._get_backend(host)
+            .options._timeout.total_seconds()
+        )
+        assert startup == worker_module._STARTUP_TIMEOUT_S == 1800.0
+        assert serving == worker_module._SERVE_OP_TIMEOUT_S == 120.0
+        assert serving < startup, "the step loop inherited the startup allowance"
+    finally:
+        dist.destroy_process_group()
+
+
