@@ -1,8 +1,12 @@
 """Build the P-D handoff a deployment should use for its placement (m18 D3).
 
-The stream seam had no production caller because nothing chose between the plain
-handoff and the side-stream one. This is that choice, in one place, keyed off
-where the KV actually lives:
+Two decisions live here. *What* is copied: the two engines own separate pools,
+so the inner handoff is ``LocalCopyKVHandoff`` — the accounting-only
+``LocalKVHandoff`` would publish the destination's untouched pages as computed
+and decode from KV that was never written. *Where* the copy runs: the stream
+seam had no production caller because nothing chose between the plain handoff
+and the side-stream one. This is that choice, in one place, keyed off where the
+KV actually lives:
 
 - host pools get the plain handoff — `CudaStreamProvider` requires CUDA, and
   wrapping a host copy in a stream window buys nothing;
@@ -19,8 +23,15 @@ and therefore keeps the source pages leased for the copy's whole lifetime.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
 from kairyu.engine.core.kv_pool import PagedKVPool
+
+if TYPE_CHECKING:  # pragma: no cover
+    import torch
+
+    from kairyu.engine.core.hw_profile import HardwareProfile
 
 
 def build_kv_handoff(
@@ -73,6 +84,10 @@ def build_pd_coordinator(
     max_transfer_retries: int = 1,
     force_side_stream: bool | None = None,
     defer_handoff: bool = True,
+    profile: HardwareProfile | None = None,
+    device: str | None = None,
+    dtype: torch.dtype | None = None,
+    attention_backend=None,
 ):
     """Assemble a prefill/decode pair from a checkpoint (G2 stage 5.3 entry).
 
@@ -81,8 +96,14 @@ def build_pd_coordinator(
     provider for one. This is the missing seam: two engines over one checkpoint,
     with the handoff chosen by where their KV lives.
 
-    Both halves are placed by the same probe the single-process path uses, so a
-    GPU host gets bf16 on-device pools and therefore the side-stream handoff.
+    Placement defaults to the same probe the single-process path uses, so a GPU
+    host gets bf16 on-device pools and therefore the side-stream handoff.
+    `profile` / `device` / `dtype` / `attention_backend` override each half of
+    that decision: unit tests inject a CPU placement instead of depending on
+    whatever hardware and optional kernels the machine happens to have.
+
+    The two halves own separate pools, so the handoff must move BYTES —
+    `LocalCopyKVHandoff`, not the accounting-only `LocalKVHandoff`.
 
     `defer_handoff` defaults ON here, and only here: this is the one caller that
     both enables the deferred copy and settles it. `PDCoordinator` keeps the
@@ -96,22 +117,26 @@ def build_pd_coordinator(
     from kairyu.engine.core.attention import select_backend
     from kairyu.engine.core.hw_profile import probe
     from kairyu.engine.core.model_runner import PagedModelRunner
-    from kairyu.engine.core.pd import LocalKVHandoff, PDCoordinator
+    from kairyu.engine.core.pd import LocalCopyKVHandoff, PDCoordinator
     from kairyu.engine.core.radix_kv import RadixKVCache
     from kairyu.engine.core.sampler import Sampler
     from kairyu.engine.core.scheduler import Scheduler
     from kairyu.engine.tokenizer import resolve_tokenizer
     from kairyu.models.loader import load_model
 
-    profile = probe()
+    profile = probe() if profile is None else profile
     gpu = profile.arch == "cuda"
-    device = "cuda:0" if gpu else "cpu"
-    dtype = torch.bfloat16 if gpu else torch.float32
+    if device is None:
+        device = "cuda:0" if gpu else "cpu"
+    if dtype is None:
+        dtype = torch.bfloat16 if gpu else torch.float32
+    if attention_backend is None:
+        attention_backend = select_backend(profile)
     resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
 
     def half():
         model, config, _generation = load_model(
-            model_path, dtype=dtype, attention_backend=select_backend(profile)
+            model_path, dtype=dtype, attention_backend=attention_backend
         )
         cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
         scheduler = Scheduler(
@@ -125,10 +150,10 @@ def build_pd_coordinator(
         return cache, scheduler, runner, pool
 
     _prefill_cache, prefill_scheduler, prefill_runner, prefill_pool = half()
-    decode_cache, decode_scheduler, decode_runner, _decode_pool = half()
+    decode_cache, decode_scheduler, decode_runner, decode_pool = half()
 
     handoff = build_kv_handoff(
-        LocalKVHandoff(decode_cache),
+        LocalCopyKVHandoff(decode_cache, prefill_pool, decode_pool),
         prefill_pool,
         force_side_stream=force_side_stream,
         defer=defer_handoff,

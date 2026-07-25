@@ -137,6 +137,33 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   `tests/unit/test_pd.py`, `tests/unit/test_pd_factory.py`,
   `tests/gpu/test_handoff_stream_gpu.py`
 
+### 2026-07-26 — [amendment] m18 D3: a production P-D constructor, and a handoff that actually copies KV
+- What: `kairyu/engine/core/pd_factory.py` gives `PDCoordinator` its first production
+  constructor — `build_pd_coordinator()` assembles a prefill/decode pair from one
+  checkpoint, and `build_kv_handoff()` selects the handoff from where the KV lives (host
+  pool → plain, device pool → `StreamCopyKVHandoff` over a `CudaStreamProvider` bound to
+  that pool's device). Review [P1] then found the constructor wrapped `LocalKVHandoff`,
+  which copies no bytes; `pd.LocalCopyKVHandoff` replaces it as the inner handoff.
+  Review [P2]: placement (`profile`/`device`/`dtype`/`attention_backend`) is now
+  injectable, so unit tests no longer probe hardware or require optional FlashInfer.
+- Why: the stream seam had no production caller because nothing could reach a `KVHandoff`
+  at all — `PDCoordinator` existed only in `tests/unit/test_pd.py`. Correctness: the two
+  halves own separate `PagedKVPool`s, so the accounting-only `LocalKVHandoff` published
+  the decode pool's untouched (zeroed) pages as *computed*. Decode continued from KV that
+  was never written and the radix tree served that wrong prefix to later matches —
+  silently, since nothing raises and the token counts are unchanged.
+  `LocalCopyKVHandoff` does a direct pool-to-pool page copy (D2D on a device pair, rather
+  than `RemoteKVHandoff`'s D2H+H2D serde round-trip, since in-process there is no wire),
+  skipping only the destination's already-cached prefix pages, and releases the allocation
+  rather than publishing a half-written one if the copy fails. `LocalKVHandoff` is now
+  documented as a test double, not a deployment option. Tests assert destination KV byte
+  parity with the source and P-D/single-engine greedy token parity, both of which fail
+  without the copy. Still open: overlap with the next forward (needs a completion event
+  instead of the host-wide wait), and the serving-layer `pd_separation` option (G2 5.3).
+- Refs: m18 D3 (amended twice), `kairyu/engine/core/pd_factory.py`,
+  `kairyu/engine/core/pd.py`, `tests/unit/test_pd_factory.py`,
+  `tests/gpu/test_handoff_stream_gpu.py`
+
 ### 2026-07-25 — [amendment] m18 D3: CudaStreamProvider landed; KV serde can read a device pool
 - What: `CudaStreamProvider` implemented (the deploy-day half of the m18 D3 stream seam),
   and `kv_serde._to_bytes` now copies to host before `.numpy()`.

@@ -77,10 +77,25 @@ a recording fake.
 > deployment could reach a `KVHandoff`, which is why the provider had no caller.
 > `engine/core/pd_factory.py` now supplies both halves:
 > `build_pd_coordinator()` assembles a prefill/decode pair from a checkpoint with
-> both engines placed by the same probe the single-process path uses, and
+> both engines placed by the same probe the single-process path uses (overridable
+> per component, so tests inject a placement instead of probing), and
 > `build_kv_handoff()` picks the handoff from where the KV lives — plain for a
 > host pool, `StreamCopyKVHandoff` over a `CudaStreamProvider` bound to the
 > pool's own device for a device pool.
+>
+> **Amended 2026-07-26 (review [P1]).** The first version of that constructor
+> wrapped `LocalKVHandoff`, which allocates in the destination cache and marks it
+> computed without touching either pool. The two halves own separate pools, so it
+> published the decode pool's untouched pages as computed and decode continued
+> from KV that was never written — silently, since nothing raises and the token
+> counts are unchanged. `pd.LocalCopyKVHandoff` is the corrected inner handoff:
+> destination allocate → skip the leading `len(cached_pages)` source pages
+> (receiver-side dedup skips the COPY, not the pages) → direct pool-to-pool page
+> copy → mark computed, releasing the allocation instead of publishing a
+> half-written prefix if the copy raises. It is a direct tensor copy rather than
+> `RemoteKVHandoff`'s serde round-trip because in-process there is no wire: a
+> device pair stays D2D instead of paying D2H + H2D. `LocalKVHandoff` is now
+> documented as a test double, not a deployment option.
 >
 > **Overlap landed 2026-07-26.** `StreamCopyKVHandoff(..., defer=True)` records a
 > completion event instead of blocking. The producer can queue its next step
