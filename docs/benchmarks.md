@@ -82,15 +82,15 @@ vs `kairyu-auto-max` in one run.
 
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
-| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent scaffold + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
-| Terminal-Bench 2.1 | Harbor registry | `harbor run` (terminus-2), accuracy | docker, `[bench-agentic]` |
-| LiveCodeBench | `livecodebench/code_generation_lite` | sandboxed pass@1 (public+private tests) | — |
-| LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro(+-Testcase)` | sandboxed pass@1 (community mirror, not the official OJ) | — |
+| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
+| Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), Harbor Mean | docker, `[bench-agentic]` |
+| LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
+| LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro` split `quater_2025_4_6` + `-Testcase` ZIPs | sandboxed pass@1 (lower bound: no testlib checker) | HF token |
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
 | SciCode | `SciCode1/SciCode` | sandboxed sub-step tests (+`test_data.h5` golden data) | numpy in venv |
-| τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
+| τ³-Bench Banking | tau3/tau2 `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
 | MRCRv2 | `openai/mrcr` (8-needle, ≤128K) | official prepend + SequenceMatcher ratio | long-context target |
 
@@ -98,6 +98,31 @@ Annotated caveats appear as scoreboard footnotes automatically, notably:
 the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
 suite is unpublished; numbers are not directly comparable), and LiveCodeBench
 Pro is scored by the local sandbox, not the official judge.
+
+### Dataset acquisition notes
+
+- **LiveCodeBench** reads the repo's `test.jsonl`…`test6.jsonl` shards directly
+  at a pinned commit. `release_vN` is a *config name*, not a git ref, and the
+  loading-script path needs `trust_remote_code` (gone in `datasets` 4.x), so
+  going through the files is what keeps the slot working. `release_v6` must
+  yield exactly 1,055 problems; any other count fails closed as `unavailable`
+  rather than scoring a silent subset.
+- **LiveCodeBench Pro** pins Fugu's 2025 Q2 slice (`quater_2025_4_6`, 167
+  problems) and joins each `problem_id` to a `<problem_id>.zip` in the testcase
+  repo (`testdata/<n>.in` / `.ans`). Acquisition **fails closed**: the split must
+  yield exactly 167 problems, every archive must download, and each archive's
+  usable cases must match the `sum(subtasks[].n_cases)` it declares, with no
+  unpaired half in either direction. An archive that declares **no** count is not
+  "as complete as whatever arrived" — that declaration is the only denominator
+  evidence there is, so a missing or malformed `config.yaml` fails closed too. `download_file()` turns a timeout, a 401 and a 404 alike into
+  `None`, so excluding a problem would cache a smaller denominator permanently —
+  and a rate over a shrunken set is not even a lower bound on the full 167. The
+  testcase repo's pin is part of the cache identity (`AdapterInfo.extra_sources`)
+  so repinning it rebuilds rather than leaving stale bytes "ready" under a new
+  methodology. The archives also ship a per-problem testlib `checker.cpp` that
+  kairyu does **not** compile: grading is per-line whitespace-normalized
+  comparison, so multi-answer problems can only lose points and the cell is a
+  **lower bound**.
 
 **MRCRv2 population.** The published `openai/mrcr` split mixes 2-, 4- and
 8-needle items across eight length bins up to 1M tokens, with **100 samples per
@@ -148,8 +173,11 @@ SHA-256 fingerprint in `run.json`. The identity contains:
   `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`, `concurrency`,
   `request_timeout_s`, and `retries`. `targets` includes every target's name,
   base URL, model, API-key environment-variable name, context/output limits,
-  and vision capability; `judge` likewise includes its endpoint/model,
-  API-key environment-variable name, concurrency, and retry limit.
+  vision capability, and sampling policy (`reasoning_effort`, `top_p`, `seed`,
+  `extra_body_json`); `judge` likewise includes its endpoint/model, API-key
+  environment-variable name, concurrency, retry limit, and the same sampling
+  policy. Changing the reasoning effort is therefore a different experiment,
+  not a resumable run.
 
 Exactly five execution or location controls are excluded: `run_id`,
 `results_dir`, `cache_dir`, `rerun`, and `download`. API-key *environment
@@ -186,10 +214,74 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   after run initialization are skipped rather than scored as valid input.
 - Download deps are an extra: `uv sync --extra bench` (or
   `pip install 'kairyu[bench]'`).
-- **Gated datasets** (GPQA Diamond, HLE): accept the license on the dataset
+- **Pinned revisions.** Every slot whose data kairyu downloads is pinned to a
+  commit in `kairyu/bench/pins.py`, and that commit is passed to the fetch — a pin
+  recorded in the manifest while the bytes came from a moving `main` would make
+  the cache and run fingerprint attest something false. `revision` is a git ref,
+  so a declared value that is not a commit sha (a config name such as
+  `release_v6`) is replaced by the registry pin; the config name goes to `name=`.
+  Secondary artifacts that decide a slot's tests or expected answers — the
+  LiveCodeBench Pro testcase archives, SciCode's `test_data.h5` — are registered
+  in `SECONDARY_PINS` and carried in the adapter's `extra_sources`, so cache
+  invalidation and provenance cover them too. This matters: `openai/mrcr` was corrected in
+  December 2025 and HLE's item count has shifted since release, so a score taken
+  against "whatever `main` was that day" is comparable to neither Fugu's number
+  nor an earlier kairyu run. A pin only applies when the recorded dataset id
+  still matches, and an adapter that declares its own revision keeps it.
+  Refreshing a pin changes the run fingerprint, so stored runs are refused for
+  resume rather than silently reinterpreted — the procedure is in that module's
+  docstring.
+  The **agentic** slots are the exception: mini-swe-agent, Harbor and the τ
+  harness fetch their own datasets and expose no revision knob, so SWE-Bench Pro
+  in particular tracks upstream (which has had post-release test fixes). That is
+  a real limitation of those harnesses, not something this suite can pin.
+
+- **Gated datasets** (GPQA Diamond, HLE, LiveCodeBench Pro): accept the license on the dataset
   page (e.g. <https://huggingface.co/datasets/Idavidrein/gpqa>) and set
   `HF_TOKEN`. Without it those cells report `skipped (gated)` and the run
   continues.
+
+## Sampling policy (reasoning effort)
+
+Fugu reports every model at its **maximum reasoning effort**, and ran the τ³
+user simulator at **low**. Sampling belongs to the endpoint, not to a
+benchmark, so it is configured per target (and per judge) and applies to every
+slot:
+
+```bash
+kairyu bench run --base-url http://localhost:8000/v1 --model qwen3-32b \
+    --reasoning-effort high --top-p 0.95 --sampling-seed 0 \
+    --extra-body '{"chat_template_kwargs": {"enable_thinking": true}}' \
+    --judge-model qwen3-32b --judge-reasoning-effort low
+```
+
+```yaml
+targets:
+  - name: qwen3-32b
+    base_url: http://localhost:8001/v1
+    model: qwen3-32b
+    reasoning_effort: high
+    extra_body_json: '{"chat_template_kwargs": {"enable_thinking": true}}'
+judge:
+  base_url: http://localhost:8001/v1
+  model: qwen3-32b
+  reasoning_effort: low
+```
+
+`--sampling-seed` is the request `seed`; `--seed` remains the *item sampling*
+seed. Unset knobs are simply absent from the request body, so endpoints that
+reject them are unaffected.
+
+`extra_body_json` is merged **last**, so it is validated at load time: it must be
+a JSON object, and it may not override `model`, `messages`, `stream`,
+`temperature`, `max_tokens`, `reasoning_effort`, `top_p`, or `seed`. Those come
+from the adapter's request and this endpoint's typed policy — the values the run
+fingerprint and methodology record — so letting them through would make the
+effective request disagree with the recorded configuration.
+
+This policy reaches every slot that issues its own chat requests. The three
+external-harness slots (SWE-Bench Pro, Terminal-Bench, τ³) drive a separate CLI,
+so each maps what its harness exposes and annotates what it cannot forward.
 
 ## Judge configuration
 
@@ -222,6 +314,43 @@ SWE-Bench Pro and Terminal-Bench evaluate inside per-task docker containers.
 two rows report `skipped: docker unavailable` and everything else completes.
 The τ-bench harness needs the user simulator (judge) served by the **same
 gateway** as the target (single `OPENAI_BASE_URL`).
+
+Fugu's published turn and trial conditions are pinned in the invocations:
+
+| Slot | Condition | How it is passed |
+|---|---|---|
+| SWE-Bench Pro | 1,000 agent steps (harness default is 250) | `-c swebench.yaml -c agent.step_limit=1000` — the harness drops its default config as soon as `-c` is given, so the default file is restated |
+| Terminal-Bench 2.1 | terminus-2, 500 turns | `-a terminus-2 --ak max_turns=500`, dataset `-d terminal-bench@2.1`, results in `--jobs-dir` |
+| τ³ Banking | `banking_knowledge`, all retrieval tools, low-effort user simulator | `--domain banking_knowledge --retrieval-config alltools --user-llm-args '{"reasoning_effort":"low"}'` (from the judge's sampling policy), results addressed by `--save-to <name>` under the harness data dir |
+
+Harness output and sampling, verified against the pinned harnesses:
+
+- **Harbor** writes a job-level `result.json` holding `trial_results`, each trial
+  carrying its verdict under `verifier_result.rewards` — a *task-defined* dict.
+  The adapter prefers the conventional keys (`reward`, `resolved`, `accuracy`,
+  `score`, `passed`), accepts a single-key dict whatever it is called, and
+  records an ambiguous dict as a **failed** item listing the keys rather than
+  guessing. `trial_name` is the item id so `-k > 1` keeps attempts distinct. The
+  score is Harbor's own `Mean` — **every** trial counts, an errored one as zero,
+  because `aggregate_reward_dicts()` maps a missing reward to zero before
+  averaging; excluding errors would report a crashed run as a better score.
+- **τ** resolves its data directory itself (`TAU2_DATA_DIR`, else a path *beside*
+  `site-packages`), so the adapter imports the harness's own `DATA_DIR` instead
+  of reconstructing that layout. `--save-to` is unique per invocation and carries
+  the kairyu run id: the harness prompts before resuming an existing results
+  file, so a fixed name would make a second run interactive or resume
+  simulations from another configuration.
+- **Sampling**: τ takes `--agent-llm-args` / `--user-llm-args`, and mini-swe-agent
+  takes `model.model_kwargs.*`, so the named fields reach both. Vendor
+  `extra_body` has no equivalent in either, and Harbor exposes no documented
+  sampling passthrough for terminus-2 — both are annotated on the cell rather
+  than silently dropped.
+
+`--attempts N` sets trials per task (`-k` for Harbor, `--num-trials` for τ).
+It defaults to **1** because each attempt is another full container run; Fugu
+reports τ³ Banking as **pass@4** and the Terminal-Bench leaderboard requires at
+least five, and both facts are annotated on the cell so a single-attempt number
+is never mistaken for either.
 
 ## Scale and cost
 

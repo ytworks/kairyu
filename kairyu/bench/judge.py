@@ -72,6 +72,10 @@ class JudgeClient:
             base_url=self.config.base_url,
             model=self.config.model,
             api_key_env=self.config.api_key_env,
+            reasoning_effort=self.config.reasoning_effort,
+            top_p=self.config.top_p,
+            seed=self.config.seed,
+            extra_body_json=self.config.extra_body_json,
         )
         request = ChatRequestSpec(
             messages=({"role": "user", "content": prompt},), max_tokens=_JUDGE_MAX_TOKENS

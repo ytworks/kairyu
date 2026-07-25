@@ -23,6 +23,12 @@ FUGU_ROW_ORDER: tuple[str, ...] = (
 
 
 def all_adapters() -> dict[str, BenchmarkAdapter]:
+    """Fresh adapter instances with pinned dataset revisions applied.
+
+    Pins are attached per instance (see `kairyu.bench.pins`), so this is the
+    entry point the runner, downloader and CLI must use; constructing an adapter
+    class directly yields an unpinned instance.
+    """
     from kairyu.bench.adapters.charxiv import CharXivAdapter
     from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
     from kairyu.bench.adapters.hle import HleAdapter
@@ -48,7 +54,9 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
         TauBenchBankingAdapter(),
         TerminalBenchAdapter(),
     ]
-    return {adapter.info.name: adapter for adapter in adapters}
+    from kairyu.bench.pins import apply_pins
+
+    return {adapter.info.name: adapter for adapter in apply_pins(adapters)}
 
 
 def suite_adapters(

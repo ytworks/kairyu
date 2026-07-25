@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 _ENV_VAR = "KAIRYU_BENCH_CACHE"
@@ -48,9 +49,19 @@ class BenchCache:
         return self.adapter_dir(adapter) / "manifest.json"
 
     def is_ready(
-        self, adapter: str, dataset: str | None = None, revision: str | None = None
+        self,
+        adapter: str,
+        dataset: str | None = None,
+        revision: str | None = None,
+        sources: Sequence[Sequence[str]] | None = None,
     ) -> bool:
-        """Return whether the cached bytes and optional dataset pins still match."""
+        """Return whether the cached bytes and optional dataset pins still match.
+
+        `sources` are the adapter's secondary pins (testcase archives, golden
+        data). They determine the tests and expected answers, so a cache built
+        under different ones is not ready even when `data.jsonl` still hashes
+        correctly.
+        """
         if not (self.manifest_path(adapter).exists() and self.data_path(adapter).exists()):
             return False
         try:
@@ -72,6 +83,12 @@ class BenchCache:
             return False
         if revision is not None and manifest.get("revision") != revision:
             return False
+        if sources:
+            recorded = manifest.get("sources")
+            if not isinstance(recorded, list):
+                return False  # pre-`sources` cache: rebuild rather than trust it
+            if [list(entry) for entry in recorded] != [list(entry) for entry in sources]:
+                return False
         return True
 
     def read_manifest(self, adapter: str) -> dict:

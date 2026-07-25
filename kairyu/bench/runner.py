@@ -23,6 +23,7 @@ from kairyu.bench.adapters import suite_adapters
 from kairyu.bench.adapters.base import (
     DownloadContext,
     RunContext,
+    cache_pins,
     skipped_pair,
     utc_now,
 )
@@ -73,9 +74,9 @@ def _adapter_identity(adapter, cache: BenchCache, *, offline_fixtures: bool) -> 
         "dataset": info.hf_dataset,
         "revision": info.hf_revision,
     }
-    if offline_fixtures or not cache.is_ready(
-        info.name, info.hf_dataset, info.hf_revision
-    ):
+    pins = cache_pins(info)
+    identity = {**identity, "sources": pins["sources"]}
+    if offline_fixtures or not cache.is_ready(info.name, **pins):
         return {**identity, "unavailable": True}
     try:
         manifest = cache.read_manifest(info.name)
@@ -117,7 +118,7 @@ class SuiteRunner:
         self._http_factory = http_factory or (lambda: httpx.AsyncClient())
         self._probe_docker = probe_docker
 
-    def _build_context(self, cache: BenchCache) -> RunContext:
+    def _build_context(self, cache: BenchCache, run_id: str = "") -> RunContext:
         config = self.config
         limit = config.limit
         if config.smoke:
@@ -139,6 +140,8 @@ class SuiteRunner:
             judge=judge,
             limit=limit,
             seed=config.seed,
+            attempts=config.attempts,
+            run_id=run_id,
             concurrency=config.concurrency,
             retries=config.retries,
             request_timeout_s=config.request_timeout_s,
@@ -151,11 +154,7 @@ class SuiteRunner:
     def _download_missing(self, adapters, cache: BenchCache, ctx: RunContext) -> None:
         download_ctx = DownloadContext(cache=cache)
         for adapter in adapters:
-            if cache.is_ready(
-                adapter.info.name,
-                adapter.info.hf_dataset,
-                adapter.info.hf_revision,
-            ):
+            if cache.is_ready(adapter.info.name, **cache_pins(adapter.info)):
                 continue
             report = adapter.download(download_ctx)
             if report.status in ("gated", "unavailable", "extras_missing"):
@@ -171,7 +170,7 @@ class SuiteRunner:
         run_id = config.run_id or _default_run_id()
         store = ResultStore(config.results_dir, run_id)
 
-        ctx = self._build_context(cache)
+        ctx = self._build_context(cache, run_id)
         if config.download and not config.offline_fixtures:
             self._download_missing(adapters, cache, ctx)
 
