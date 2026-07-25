@@ -188,7 +188,15 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
 - Download deps are an extra: `uv sync --extra bench` (or
   `pip install 'kairyu[bench]'`).
 - **Pinned revisions.** Every slot whose data kairyu downloads is pinned to a
-  commit in `kairyu/bench/pins.py`. This matters: `openai/mrcr` was corrected in
+  commit in `kairyu/bench/pins.py`, and that commit is passed to the fetch — a pin
+  recorded in the manifest while the bytes came from a moving `main` would make
+  the cache and run fingerprint attest something false. `revision` is a git ref,
+  so a declared value that is not a commit sha (a config name such as
+  `release_v6`) is replaced by the registry pin; the config name goes to `name=`.
+  Secondary artifacts that decide a slot's tests or expected answers — the
+  LiveCodeBench Pro testcase archives, SciCode's `test_data.h5` — are registered
+  in `SECONDARY_PINS` and carried in the adapter's `extra_sources`, so cache
+  invalidation and provenance cover them too. This matters: `openai/mrcr` was corrected in
   December 2025 and HLE's item count has shifted since release, so a score taken
   against "whatever `main` was that day" is comparable to neither Fugu's number
   nor an earlier kairyu run. A pin only applies when the recorded dataset id

@@ -25,7 +25,10 @@ refused for resume against the new pin.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
+
+_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 # adapter name -> (expected dataset id, commit sha)
 # The dataset id is part of the record so a pin can never silently attach to a
@@ -43,6 +46,13 @@ DATASET_PINS: dict[str, tuple[str, str]] = {
         "QAQAQAQAQ/LiveCodeBench-Pro",
         "adebffce047dddb7768a86bace6aea4f7425e3bc",
     ),
+    # `release_v6` is this repo's CONFIG name, not a git ref: its refs endpoint
+    # lists only `main` and /revision/release_v6 is a 404. The config name goes
+    # to `name=`; the revision must be a commit.
+    "livecodebench": (
+        "livecodebench/code_generation_lite",
+        "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+    ),
     # Corrected upstream in December 2025; unpinned runs straddle that change.
     "mrcr-v2": ("openai/mrcr", "f4c69fae7cf81f7ca26b9fee34b392a50f6b8a1d"),
     "long-context-reasoning": (
@@ -50,6 +60,21 @@ DATASET_PINS: dict[str, tuple[str, str]] = {
         "2b48e494f2c7a2f0af81aae178e05c7e1dde0fe9",
     ),
 }
+
+
+#: Secondary artifacts that decide a slot's tests or expected answers. The
+#: adapters own the fetching (and, for a raw file, its content hash); this is the
+#: single place that answers "what data produced this scoreboard", and the
+#: adapters' `extra_sources` must agree with it.
+SECONDARY_PINS: dict[str, tuple[tuple[str, str], ...]] = {
+    "livecodebench-pro": (
+        ("QAQAQAQAQ/LiveCodeBench-Pro-Testcase", "5257736c0a4e30ba0949d41c56a257c323d9c600"),
+    ),
+}
+
+
+def is_commit_sha(revision: str | None) -> bool:
+    return bool(revision and _COMMIT_SHA.match(revision))
 
 
 def pinned_revision(adapter_name: str, dataset: str | None) -> str | None:
@@ -62,14 +87,16 @@ def pinned_revision(adapter_name: str, dataset: str | None) -> str | None:
 
 
 def apply_pins(adapters: list) -> list:
-    """Fill each adapter's unset `hf_revision` from the pin table.
+    """Fill each adapter's `hf_revision` from the pin table where it is not a commit.
 
-    An adapter that already declares a revision keeps it: it knows something the
-    table does not (which shards exist at which commit, for instance).
+    An adapter that declares a real commit keeps it: it may know which shard set
+    exists at which revision. A declared value that is NOT a commit sha (a config
+    name, a branch) is replaced, because `revision` is passed to the Hub as a git
+    ref and a non-ref there cannot be fetched.
     """
     for adapter in adapters:
         info = adapter.info
-        if info.hf_revision is not None:
+        if is_commit_sha(info.hf_revision):
             continue
         revision = pinned_revision(info.name, info.hf_dataset)
         if revision is not None:

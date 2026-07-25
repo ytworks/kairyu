@@ -11,7 +11,13 @@ import re
 import pytest
 
 from kairyu.bench.adapters import all_adapters, suite_adapters
-from kairyu.bench.pins import DATASET_PINS, apply_pins, pinned_revision
+from kairyu.bench.pins import (
+    DATASET_PINS,
+    SECONDARY_PINS,
+    apply_pins,
+    is_commit_sha,
+    pinned_revision,
+)
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -33,6 +39,155 @@ def test_pin_requires_the_dataset_to_match():
 def test_registry_adapters_are_pinned():
     for name, (_, revision) in DATASET_PINS.items():
         assert all_adapters()[name].info.hf_revision == revision
+
+
+def test_every_pinned_slot_declares_a_commit_sha():
+    """`revision` is a git ref: a config name there simply cannot be fetched."""
+    for adapter in suite_adapters("fugu"):
+        revision = adapter.info.hf_revision
+        if revision is None:
+            continue
+        assert _SHA.match(revision), f"{adapter.info.name}: {revision!r}"
+
+
+def test_non_commit_declarations_are_replaced_by_the_pin():
+    """`release_v6` is a config name; the Hub 404s on it as a revision."""
+    from kairyu.bench.adapters.base import AdapterInfo
+
+    class Fake:
+        info = AdapterInfo(
+            name="livecodebench",
+            display_name="LiveCodeBench",
+            metric="pass@1",
+            hf_dataset="livecodebench/code_generation_lite",
+            hf_revision="release_v6",
+        )
+
+    adapter = Fake()
+    apply_pins([adapter])
+    assert adapter.info.hf_revision == DATASET_PINS["livecodebench"][1]
+    assert is_commit_sha(adapter.info.hf_revision)
+    assert not is_commit_sha("release_v6")
+
+
+def test_secondary_pins_match_the_adapters():
+    """The registry answers "what data produced this scoreboard" completely."""
+    registry = all_adapters()
+    for name, sources in SECONDARY_PINS.items():
+        declared = registry[name].info.extra_sources
+        assert tuple(tuple(source) for source in declared) == sources, name
+        for _, revision in sources:
+            assert _SHA.match(revision)
+
+
+def test_every_secondary_source_an_adapter_uses_is_registered():
+    for adapter in suite_adapters("fugu"):
+        for source in adapter.info.extra_sources:
+            assert source in SECONDARY_PINS.get(adapter.info.name, ()), (
+                f"{adapter.info.name} fetches {source[0]} without a registry entry"
+            )
+
+
+# -- the pin must reach the actual fetch ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "split_kwarg"),
+    [
+        ("hle", "test"),
+        ("gpqa-diamond", "train"),
+        ("scicode", "test"),
+        ("mrcr-v2", "train"),
+        ("long-context-reasoning", "train"),
+    ],
+)
+def test_normalize_passes_the_pinned_revision_to_the_hub(
+    name, split_kwarg, tmp_path, monkeypatch
+):
+    """Recording a pin in the manifest while fetching `main` attests a lie."""
+    import kairyu.bench.hub as hub
+    from kairyu.bench.adapters.base import DownloadContext
+    from kairyu.bench.cache import BenchCache
+
+    seen: list[dict] = []
+
+    def fake_rows(dataset, *, name=None, split, revision=None, gated=False):
+        seen.append({"dataset": dataset, "split": split, "revision": revision})
+        raise RuntimeError("stop after recording the call")
+
+    monkeypatch.setattr(hub, "load_hf_rows", fake_rows)
+    monkeypatch.setattr(hub, "download_file", lambda *a, **k: None)
+    monkeypatch.setenv("HF_TOKEN", "test-token")  # gated slots
+
+    adapter = all_adapters()[name]
+    with pytest.raises(RuntimeError, match="stop after recording"):
+        adapter.normalize(DownloadContext(cache=BenchCache(tmp_path / "cache")))
+
+    assert seen, f"{name} never called the hub"
+    assert seen[0]["dataset"] == adapter.info.hf_dataset
+    assert seen[0]["revision"] == adapter.info.hf_revision
+    assert _SHA.match(seen[0]["revision"])
+
+
+def test_charxiv_passes_the_pin_on_both_split_attempts(tmp_path, monkeypatch):
+    """The val/validation fallback must not drop the pin."""
+    import kairyu.bench.hub as hub
+    from kairyu.bench.adapters.base import DownloadContext
+    from kairyu.bench.cache import BenchCache
+    from kairyu.bench.types import DatasetUnavailable
+
+    seen: list[tuple[str, str | None]] = []
+
+    def fake_rows(dataset, *, name=None, split, revision=None, gated=False):
+        seen.append((split, revision))
+        raise DatasetUnavailable("no such split")
+
+    monkeypatch.setattr(hub, "load_hf_rows", fake_rows)
+    adapter = all_adapters()["charxiv-reasoning"]
+    with pytest.raises(DatasetUnavailable):
+        adapter.normalize(DownloadContext(cache=BenchCache(tmp_path / "cache")))
+
+    assert [split for split, _ in seen] == ["validation", "val"]
+    assert {revision for _, revision in seen} == {adapter.info.hf_revision}
+
+
+def test_scicode_golden_data_fetch_carries_the_pin(tmp_path, monkeypatch):
+    import kairyu.bench.hub as hub
+    from kairyu.bench.adapters.base import DownloadContext
+    from kairyu.bench.cache import BenchCache
+
+    seen: list[dict] = []
+
+    def fake_download(repo_id, filename, dest, *, repo_type="dataset", revision=None):
+        seen.append({"repo": repo_id, "file": filename, "revision": revision})
+        return None
+
+    monkeypatch.setattr(hub, "download_file", fake_download)
+    monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: [])
+    adapter = all_adapters()["scicode"]
+    adapter.normalize(DownloadContext(cache=BenchCache(tmp_path / "cache")))
+
+    assert seen and seen[0]["file"] == "test_data.h5"
+    assert seen[0]["revision"] == adapter.info.hf_revision
+
+
+def test_livecodebench_shard_fetch_carries_the_pin(tmp_path, monkeypatch):
+    import kairyu.bench.hub as hub
+    from kairyu.bench.adapters.base import DownloadContext
+    from kairyu.bench.cache import BenchCache
+
+    seen: list[dict] = []
+
+    def fake_jsonl(repo_id, filenames, *, revision=None, gated=False):
+        seen.append({"repo": repo_id, "revision": revision})
+        return []
+
+    monkeypatch.setattr(hub, "load_jsonl_files", fake_jsonl)
+    adapter = all_adapters()["livecodebench"]
+    with pytest.raises(Exception, match="expected 1055"):
+        adapter.normalize(DownloadContext(cache=BenchCache(tmp_path / "cache")))
+    assert seen[0]["revision"] == adapter.info.hf_revision
+    assert _SHA.match(seen[0]["revision"])
 
 
 def test_every_cache_backed_slot_has_a_revision():
