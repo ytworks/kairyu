@@ -300,14 +300,18 @@ class DistTPLauncher:
         self.runner = DistTPModelRunner(self._comm, runner)
 
     def shutdown(self) -> None:
-        self.runner.shutdown()  # broadcasts None -> workers leave worker_step_loop
-        self._ctx.join()
         import contextlib
         import os
 
         import torch.distributed as dist
 
+        self.runner.shutdown()  # broadcasts None -> workers leave worker_step_loop
+        # BEFORE the join, not after: NCCL's destroy_process_group waits for every
+        # rank to reach it, so joining first deadlocks rank 0 against workers that
+        # are already sitting in their own destroy. gloo never blocks here, which
+        # is why the CPU parity gates could not see this.
         if dist.is_initialized():
             dist.destroy_process_group()
+        self._ctx.join()
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self._init_file)
