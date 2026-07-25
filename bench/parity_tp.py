@@ -381,6 +381,9 @@ def main() -> int:
             results[f"tp{degree}_vs_tp{degrees[0]}_overlap_{'on' if overlap else 'off'}"] = {
                 "prompts": len(base),
                 "exact_match": matches,
+                # match_rate is DISPLAY only: 20000/20001 rounds to 1.0 at four
+                # places and would clear an `== 1.0` gate. The verdict compares
+                # the counts.
                 "match_rate": round(matches / len(base), 4),
                 "tokens": token_total,
                 "token_match_rate": round(token_matched / token_total, 4) if token_total else 0.0,
@@ -426,6 +429,9 @@ def main() -> int:
         args.out.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"written: {args.out}")
     worst = min(entry["match_rate"] for entry in results.values())
+    all_exact = all(
+        entry["exact_match"] == entry["prompts"] for entry in results.values()
+    )
     if args.model_path:
         # G2 §7 (amended 2026-07-25): free-running greedy sequence equality is NOT
         # a correctness gate. One flipped token fails a whole prompt and every
@@ -440,9 +446,9 @@ def main() -> int:
         return 0
     # The toy harness IS deterministic, so exactness here is a real invariant:
     # sharding over FakeCommunicator ranks must not change a single token.
-    verdict = "OK" if worst == 1.0 else "FAIL"
+    verdict = "OK" if all_exact else "FAIL"
     print(f"worst match rate: {worst:.4f} (toy harness must be exact) -> {verdict}")
-    return 0 if worst == 1.0 else 1
+    return 0 if all_exact else 1
 
 
 if __name__ == "__main__":
