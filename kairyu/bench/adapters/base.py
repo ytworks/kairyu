@@ -194,6 +194,9 @@ async def call_chat(
     }
     if request.max_tokens is not None:
         body["max_tokens"] = request.max_tokens
+    # Endpoint-level sampling policy (reasoning effort, top_p, seed, vendor
+    # knobs) applies to every slot; reserved keys are rejected at config load.
+    body.update(target.wire_overrides())
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     attempt = 0

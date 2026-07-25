@@ -126,8 +126,11 @@ SHA-256 fingerprint in `run.json`. The identity contains:
   `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`, `concurrency`,
   `request_timeout_s`, and `retries`. `targets` includes every target's name,
   base URL, model, API-key environment-variable name, context/output limits,
-  and vision capability; `judge` likewise includes its endpoint/model,
-  API-key environment-variable name, concurrency, and retry limit.
+  vision capability, and sampling policy (`reasoning_effort`, `top_p`, `seed`,
+  `extra_body_json`); `judge` likewise includes its endpoint/model, API-key
+  environment-variable name, concurrency, retry limit, and the same sampling
+  policy. Changing the reasoning effort is therefore a different experiment,
+  not a resumable run.
 
 Exactly five execution or location controls are excluded: `run_id`,
 `results_dir`, `cache_dir`, `rerun`, and `download`. API-key *environment
@@ -168,6 +171,38 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   page (e.g. <https://huggingface.co/datasets/Idavidrein/gpqa>) and set
   `HF_TOKEN`. Without it those cells report `skipped (gated)` and the run
   continues.
+
+## Sampling policy (reasoning effort)
+
+Fugu reports every model at its **maximum reasoning effort**, and ran the τ³
+user simulator at **low**. Sampling belongs to the endpoint, not to a
+benchmark, so it is configured per target (and per judge) and applies to every
+slot:
+
+```bash
+kairyu bench run --base-url http://localhost:8000/v1 --model qwen3-32b \
+    --reasoning-effort high --top-p 0.95 --sampling-seed 0 \
+    --extra-body '{"chat_template_kwargs": {"enable_thinking": true}}' \
+    --judge-model qwen3-32b --judge-reasoning-effort low
+```
+
+```yaml
+targets:
+  - name: qwen3-32b
+    base_url: http://localhost:8001/v1
+    model: qwen3-32b
+    reasoning_effort: high
+    extra_body_json: '{"chat_template_kwargs": {"enable_thinking": true}}'
+judge:
+  base_url: http://localhost:8001/v1
+  model: qwen3-32b
+  reasoning_effort: low
+```
+
+`--sampling-seed` is the request `seed`; `--seed` remains the *item sampling*
+seed. `extra_body_json` is validated at load time: it must be a JSON object and
+may not override `model`, `messages`, or `stream`. Unset knobs are simply
+absent from the request body, so endpoints that reject them are unaffected.
 
 ## Judge configuration
 
