@@ -45,14 +45,16 @@ call sites use all_reduce (+ local slice).
 > region and the three paths are interleaved within each round. 5 rounds x 20
 > trials = 100 samples per path.
 >
-> 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch 2.12.1+cu130 / NCCL 2.29.7
-> (`bench/results/reduce-scatter-2026-07-25.json`, raw samples included):
+> 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch 2.12.1+cu130 / NCCL 2.29.7,
+> driver 595.84, PCIe (topology recorded in the result). 6 rounds x 20 trials,
+> path order rotated per round, raw per-trial records retained
+> (`bench/results/reduce-scatter-2026-07-25.json`):
 >
 > | | median ms | min | p95 | vs all_reduce |
 > |---|---|---|---|---|
-> | `all_reduce` | 3.785 | 3.770 | 3.909 | 1.00x |
-> | `reduce_scatter` + `all_gather` | 3.946 | 3.929 | 3.979 | **0.96x — slower** |
-> | `reduce_scatter` alone | 1.988 | 1.975 | 2.002 | **1.90x** |
+> | `all_reduce` | 3.784 | 3.760 | 3.910 | 1.00x |
+> | `reduce_scatter` + `all_gather` | 3.944 | 3.926 | 3.960 | **0.96x — slower** |
+> | `reduce_scatter` alone | 1.988 | 1.979 | 2.008 | **1.90x** |
 >
 > The ~4% loss is not straggler noise: all_reduce's p95 sits below rs+ag's
 > MINIMUM. The full distributions do overlap — all_reduce has a handful of
