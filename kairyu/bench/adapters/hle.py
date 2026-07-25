@@ -38,7 +38,12 @@ class HleAdapter(GenerativeAdapter):
     def normalize(self, ctx: DownloadContext) -> list[dict]:
         from kairyu.bench.hub import load_hf_rows, save_asset
 
-        rows = load_hf_rows(self.info.hf_dataset, split="test", gated=True)
+        rows = load_hf_rows(
+            self.info.hf_dataset,
+            split="test",
+            revision=self.info.hf_revision,
+            gated=True,
+        )
         normalized = []
         assets = ctx.cache.assets_dir(self.info.name)
         for row in rows:

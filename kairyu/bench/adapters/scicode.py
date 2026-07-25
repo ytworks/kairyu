@@ -278,6 +278,16 @@ class SciCodeAdapter(GenerativeAdapter):
         rows = load_hf_rows(self.info.hf_dataset, split="test")
         golden = self._fetch_golden(ctx)
         provided = self._fetch_provided_steps()
+
+        rows = load_hf_rows(
+            self.info.hf_dataset, split="test", revision=self.info.hf_revision
+        )
+        golden = download_file(
+            self.info.hf_dataset,
+            _H5_NAME,
+            ctx.cache.assets_dir(self.info.name) / _H5_NAME,
+            revision=self.info.hf_revision,
+        )
         normalized = []
         seen_substeps = 0
         for row in rows:
