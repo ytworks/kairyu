@@ -21,7 +21,7 @@ device-side future-token patch (m2 §2.2) is unimplemented, so
 with that work named.
 Performance and production/fabric drills remain untouched.**
 
-_Last updated: 2026-07-25_
+_Last updated: 2026-07-26_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -118,6 +118,30 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [amendment] Checkpoint provenance is an exact content digest, not a sampled one
+- What: `bench/parity_hf.py` now fingerprints a checkpoint by the complete SHA-256 of every
+  weight file, recorded per file as `checkpoint_weight_files` with a rollup in
+  `checkpoint_weights_sha256` (reference schema 2 → 3). The reference and both TP results
+  were regenerated under it and the pre-schema-3 files removed; the corrected paths are
+  `bench/results/gate1-hf-parity-tp{1,8}-2026-07-26.json`, superseding the
+  `-2026-07-25` names in the Refs of the entry below. All 17 recorded shard digests are
+  byte-identical to the LFS oids Hugging Face publishes for `Qwen/Qwen3-32B@main`, so the
+  evidence identifies its checkpoint against an upstream immutable revision. Numbers are
+  unchanged: TP=1 253/256 = 0.9883, TP=8 251/256 = 0.9805, 0 substantive, all samples
+  collected — and the HF reference regenerated bit-identically outside the provenance block.
+- Why: the fingerprint it replaces hashed each shard's safetensors header plus four fixed
+  4 KB windows. A weight edit anywhere between those windows left it unchanged, so a
+  reference cache built from DIFFERENT weights was accepted while the field claimed to pin
+  the bytes (review [P2] on #131). A sampled fingerprint cannot be the basis for cache
+  safety: the bytes it skips are exactly the ones a swap changes. G2 §8 requires a number a
+  decision rests on to be reviewable next to the config that produced it, which a
+  machine-local path plus a partial hash does not deliver. Reading all 64 GB costs ~20 s
+  against a run that loads the same bytes onto a GPU anyway.
+- Refs: `bench/parity_hf.py`, `tests/unit/test_parity_hf_gates.py`,
+  `bench/results/hf-reference-qwen3-32b.json`,
+  `bench/results/gate1-hf-parity-tp{1,8}-2026-07-26.json`,
+  `docs/goals/g2-multi-gpu.md` §8 + A1/A2 amendment
 
 ### 2026-07-25 — [amendment] A1/A2 and m2 §2.5 restated against measured quantities
 - What: G2 A2's "greedy output-match rate >=99%" and m2 §2.5's "greedy-decode token-level

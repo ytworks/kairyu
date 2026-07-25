@@ -67,7 +67,54 @@ _MIN_TIE_GAP = 0.125
 _MAX_LOGPROB_DELTA = 0.25
 
 
-_REFERENCE_SCHEMA = 2
+_REFERENCE_SCHEMA = 3
+#: Read size for the checkpoint digest. Large enough that hashlib releases the
+#: GIL for the update, which is what makes the thread pool below worth having.
+_HASH_CHUNK = 8 << 20
+
+
+def _checkpoint_weight_digests(root: Path) -> dict[str, str]:
+    """SHA-256 of every weight file's COMPLETE contents, one digest per file.
+
+    The previous version hashed each shard's safetensors header plus four fixed
+    4 KB windows through the payload, on the theory that different weights differ
+    in the sampled bytes. They need not: an edit anywhere in the ~99.99% of a
+    shard that no window covers leaves the fingerprint identical, so a reference
+    cache built from DIFFERENT weights was accepted (review [P2] on #131). A
+    sampled fingerprint cannot be the basis for cache safety, because the bytes it
+    skips are exactly the ones a swap changes.
+
+    So the whole file is read. On the 64 GB Qwen3-32B checkpoint this is ~20 s
+    against a run that loads the same bytes onto a GPU anyway.
+
+    Kept per file rather than merged into one opaque number: a safetensors
+    shard's SHA-256 is the same digest the Hub publishes as that blob's LFS oid,
+    so every entry below can be checked against the upstream revision with
+    `sha256sum` and nothing from this repo. That is what makes committed evidence
+    identify its checkpoint reproducibly (G2 §8) rather than by a path on one
+    machine.
+    """
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    weight_files = sorted(
+        list(root.glob("*.safetensors")) + list(root.glob("*.safetensors.index.json"))
+    )
+    if not weight_files:
+        raise SystemExit(f"{root} has no safetensors weights to fingerprint")
+
+    def digest(path: Path) -> str:
+        accumulator = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(_HASH_CHUNK):
+                accumulator.update(chunk)
+        return accumulator.hexdigest()
+
+    with ThreadPoolExecutor(max_workers=min(8, len(weight_files))) as pool:
+        digests = list(pool.map(digest, weight_files))
+    return {
+        path.name: value for path, value in zip(weight_files, digests, strict=True)
+    }
 
 
 def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
@@ -87,35 +134,17 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
     # weights with the same architecture, hashes identically. Neither do names,
     # sizes and second-precision mtimes — a swap preserving those reads as the
     # same checkpoint, which is what the first attempt did while claiming to pin
-    # "the actual bytes" (review [P2] on #131).
-    #
-    # safetensors puts a JSON header at the front of every shard listing each
-    # tensor's name, dtype, shape and byte range. Hashing the headers plus a
-    # sampled window of the DATA identifies the contents without reading 60 GB:
-    # different weights differ in the sampled bytes with overwhelming likelihood,
-    # and any shape/dtype/layout change shows up in the header alone.
-    weight_files = sorted(
-        list(root.glob("*.safetensors")) + list(root.glob("*.safetensors.index.json"))
-    )
-    if not weight_files:
-        raise SystemExit(f"{model_path} has no safetensors weights to fingerprint")
-    digest = hashlib.sha256()
-    for path in weight_files:
-        digest.update(path.name.encode())
-        with path.open("rb") as handle:
-            if path.suffix == ".json":
-                digest.update(handle.read())
-                continue
-            header_length = int.from_bytes(handle.read(8), "little")
-            digest.update(handle.read(header_length))  # full tensor manifest
-            size = path.stat().st_size
-            # four windows through the payload: a targeted edit anywhere in a
-            # shard has to miss all of them to go unnoticed
-            for fraction in (0.0, 0.33, 0.66, 0.99):
-                offset = 8 + header_length + int((size - 8 - header_length) * fraction)
-                handle.seek(min(offset, max(size - 4096, 0)))
-                digest.update(handle.read(4096))
-    weight_id = digest.hexdigest()[:16]
+    # "the actual bytes"; nor do sampled byte windows, which the second attempt
+    # used and which miss any edit that falls between them (review [P2] on #131).
+    weight_digests = _checkpoint_weight_digests(root)
+    # a rollup for the console and for a quick eyeball across result files; the
+    # per-file digests above are the identity, and are what `_load_reference`
+    # actually compares
+    weight_id = hashlib.sha256(
+        "".join(
+            f"{name}:{value}\n" for name, value in sorted(weight_digests.items())
+        ).encode()
+    ).hexdigest()[:16]
     config_path = root / "config.json"
     checkpoint = hashlib.sha256(config_path.read_bytes()).hexdigest()[:16]
     # the tokenizer's SERIALIZATION, not just its vocab: normalizer and
@@ -139,7 +168,12 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
     return {
         "schema": _REFERENCE_SCHEMA,
         "checkpoint_config_sha256": checkpoint,
-        "checkpoint_weights_sha256": weight_id,  # headers + sampled data windows
+        # rollup of the per-file digests below, not an independent measurement
+        "checkpoint_weights_sha256": weight_id,
+        # full SHA-256 per weight file: checkable against the Hub's LFS oid for
+        # the same blob, so the evidence names its checkpoint without depending
+        # on `model_path` pointing at the same bytes tomorrow
+        "checkpoint_weight_files": weight_digests,
         "tokenizer_files_sha256": tokenizer_id,
         "tokenizer_vocab_sha256": vocab_id,
         "prompt_token_ids_sha256": prompt_hash,
@@ -165,7 +199,28 @@ def _load_reference(path: Path, expected: dict) -> dict:
             "delete it and let the run rebuild the reference"
         )
     found = payload["provenance"]
+    # checked first and by name: it is the identity of the weights, and a raw
+    # dict-vs-dict message would be seventeen unreadable digests
+    want_files = expected.get("checkpoint_weight_files") or {}
+    found_files = found.get("checkpoint_weight_files") or {}
+    if found_files != want_files:
+        differing = sorted(
+            (set(want_files) ^ set(found_files))
+            | {
+                name
+                for name in set(want_files) & set(found_files)
+                if want_files[name] != found_files[name]
+            }
+        )
+        raise SystemExit(
+            f"{path} was built from different checkpoint weights: "
+            f"{', '.join(differing[:4])}{' …' if len(differing) > 4 else ''} "
+            "differ from the checkpoint being scored. A reference is HF's output "
+            "for a specific set of weights and cannot survive a swap."
+        )
     for key, want in expected.items():
+        if key == "checkpoint_weight_files":
+            continue
         if found.get(key) != want:
             raise SystemExit(
                 f"{path} does not match this run: {key} is {found.get(key)!r}, "

@@ -82,9 +82,10 @@ def _reference_file(tmp_path: Path, provenance: dict, entries: dict) -> Path:
 
 def _provenance(**overrides) -> dict:
     base = {
-        "schema": 2,
+        "schema": 3,
         "checkpoint_config_sha256": "aaaa",
         "checkpoint_weights_sha256": "aaab",
+        "checkpoint_weight_files": {"model.safetensors": "a" * 64},
         "tokenizer_files_sha256": "bbbb",
         "tokenizer_vocab_sha256": "bbbc",
         "prompt_token_ids_sha256": "cccc",
@@ -269,6 +270,20 @@ def _write_local_tokenizer(directory) -> None:
     )
 
 
+def test_a_cache_from_other_weight_files_is_rejected(tmp_path):
+    """The per-file digests are the checkpoint's identity, so a difference in any
+    one of them stops the reference being scored — and says which file."""
+    from bench import parity_hf
+
+    path = _reference_file(
+        tmp_path,
+        _provenance(checkpoint_weight_files={"model.safetensors": "b" * 64}),
+        _entries(2, 4),
+    )
+    with pytest.raises(SystemExit, match="model.safetensors"):
+        parity_hf._load_reference(path, _provenance())
+
+
 @pytest.fixture(scope="module")
 def two_checkpoints(tmp_path_factory):
     """Same architecture and config, different weights, size and mtime preserved.
@@ -329,3 +344,124 @@ def test_the_same_checkpoint_fingerprints_stably(two_checkpoints):
 
     first, _second = two_checkpoints
     assert _provenance(first, ["hello"], 1) == _provenance(first, ["hello"], 1)
+
+
+def test_every_weight_file_digest_is_the_whole_file(two_checkpoints):
+    """Not a sample of it.
+
+    The recorded digest must equal `sha256sum` over the file — which is also the
+    oid the Hub publishes for that safetensors blob, so committed evidence can be
+    tied back to a revision by anyone, without this script.
+    """
+    import hashlib
+
+    from bench.parity_hf import _provenance
+
+    first, _second = two_checkpoints
+    digests = _provenance(first, ["hello"], 1)["checkpoint_weight_files"]
+    assert digests, "no weight file was fingerprinted at all"
+    for name, digest in digests.items():
+        expected = hashlib.sha256((Path(first) / name).read_bytes()).hexdigest()
+        assert digest == expected, f"{name} is not a full-content digest"
+
+
+def _withdrawn_sampled_windows(path: Path) -> list[tuple[int, int]]:
+    """The byte ranges the withdrawn sampling fingerprint actually read.
+
+    Header, then 4 KB at 0%/33%/66%/99% of the payload. Reproduced here so the
+    test can prove the byte it edits is one that fingerprint never looked at,
+    rather than asserting it.
+    """
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        header_length = int.from_bytes(handle.read(8), "little")
+    windows = [(0, 8 + header_length)]
+    for fraction in (0.0, 0.33, 0.66, 0.99):
+        offset = 8 + header_length + int((size - 8 - header_length) * fraction)
+        start = min(offset, max(size - 4096, 0))
+        windows.append((start, start + 4096))
+    return windows
+
+
+@pytest.fixture(scope="module")
+def checkpoint_edited_between_the_windows(tmp_path_factory):
+    """One payload byte changed, in a region no sampled window covered.
+
+    `two_checkpoints` re-initialises every tensor, so the sampled windows move
+    too and a sampling fingerprint separates them anyway. This is the case it
+    does NOT catch, and the one review [P2] on #131 raised: a targeted edit
+    between the windows left `checkpoint_weights_sha256` identical, so a
+    reference cache built from different weights was accepted.
+
+    The model is sized so the payload is megabytes — with a few kilobytes of
+    weights the four windows cover the whole file and there is nothing to miss.
+    """
+    import os
+    import shutil
+
+    import torch
+
+    transformers = pytest.importorskip("transformers")
+
+    config = transformers.LlamaConfig(
+        vocab_size=4096, hidden_size=256, intermediate_size=256, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=64,
+    )
+    root = tmp_path_factory.mktemp("windows")
+    original, edited = root / "a", root / "b"
+
+    torch.manual_seed(3)
+    transformers.LlamaForCausalLM(config).to(torch.float32).eval().save_pretrained(
+        original, safe_serialization=True
+    )
+    _write_local_tokenizer(original)
+    shutil.copytree(original, edited)
+
+    target = edited / "model.safetensors"
+    before = target.stat()
+    with target.open("rb") as handle:
+        header_length = int.from_bytes(handle.read(8), "little")
+    payload_start = 8 + header_length
+    # halfway through the payload: between the 33% and 66% windows
+    offset = payload_start + (before.st_size - payload_start) // 2
+    with target.open("r+b") as handle:
+        handle.seek(offset)
+        (byte,) = handle.read(1)
+        handle.seek(offset)
+        handle.write(bytes([byte ^ 0xFF]))
+    os.utime(target, (before.st_atime, before.st_mtime))
+    assert target.stat().st_size == before.st_size
+    return str(original), str(edited), offset
+
+
+def test_a_weight_edit_between_the_sampled_windows_is_still_a_different_checkpoint(
+    checkpoint_edited_between_the_windows,
+):
+    from bench.parity_hf import _provenance
+
+    original, edited, offset = checkpoint_edited_between_the_windows
+    windows = _withdrawn_sampled_windows(Path(original) / "model.safetensors")
+    # the premise: this byte is one the sampling fingerprint never read, so it
+    # reported the two checkpoints as identical
+    assert not any(start <= offset < end for start, end in windows)
+
+    a = _provenance(original, ["hello"], 1)
+    b = _provenance(edited, ["hello"], 1)
+    assert a["checkpoint_config_sha256"] == b["checkpoint_config_sha256"]
+    assert a["checkpoint_weights_sha256"] != b["checkpoint_weights_sha256"]
+    assert a["checkpoint_weight_files"] != b["checkpoint_weight_files"]
+
+
+def test_such_a_cache_is_refused_rather_than_scored(
+    checkpoint_edited_between_the_windows, tmp_path
+):
+    """End to end: the reference from one of them cannot be scored against the
+    other, which is the safety the fingerprint exists to provide."""
+    from bench import parity_hf
+
+    original, edited, _offset = checkpoint_edited_between_the_windows
+    built = parity_hf._provenance(original, ["hello"], 4)
+    path = _reference_file(tmp_path, built, _entries(1, 4))
+
+    with pytest.raises(SystemExit, match="different checkpoint weights"):
+        parity_hf._load_reference(path, parity_hf._provenance(edited, ["hello"], 4))

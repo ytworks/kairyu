@@ -209,7 +209,10 @@ NVLink parts:
 
 **A2's "output-match rate ≥99%" is not achievable by any implementation, including
 the reference's.** Measured on Qwen3-32B, bf16, 8× RTX PRO 6000 Blackwell
-(`bench/results/gate1-hf-parity-tp{1,8}-2026-07-25.json`):
+(`bench/results/gate1-hf-parity-tp{1,8}-2026-07-26.json`, whose provenance carries
+the full SHA-256 of every weight file — the same digests Hugging Face publishes as
+the LFS oids of `Qwen/Qwen3-32B@main`, so §8's "reviewable next to the config that
+produced it" holds against an upstream revision and not a path on one machine):
 
 | | agreement |
 |---|---|
