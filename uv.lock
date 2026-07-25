@@ -1562,6 +1562,8 @@ bench = [
     { name = "huggingface-hub" },
     { name = "pillow" },
     { name = "tiktoken" },
+
+    { name = "tqdm" },
 ]
 bench-agentic = [
     { name = "harbor", marker = "python_full_version >= '3.12'" },
@@ -1637,6 +1639,7 @@ requires-dist = [
     { name = "tokenizers", marker = "extra == 'engine'", specifier = ">=0.20" },
     { name = "tokenizers", marker = "extra == 'hf'", specifier = ">=0.20" },
     { name = "torch", marker = "extra == 'engine'", specifier = ">=2.6" },
+    { name = "tqdm", marker = "extra == 'bench'", specifier = ">=4.66" },
     { name = "triton", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=3.0" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "xgrammar", marker = "extra == 'engine'", specifier = ">=0.2.3" },

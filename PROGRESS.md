@@ -218,6 +218,23 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: `kairyu/bench/{types,config,cli,judge}.py`, `kairyu/bench/adapters/base.py`,
   `tests/bench/test_bench_sampling.py`, `docs/benchmarks.md`, `examples/bench_fugu.yaml`.
 
+### 2026-07-25 — [progress] Live progress display for bench runs
+- What: Added `kairyu/bench/progress.py` with three reporters behind one protocol —
+  `TqdmProgress` (suite bar + per-pair item bar on a TTY), `LineProgress` (one
+  self-contained, throttled line per event for logs), and `NullProgress` — selected by
+  `make_reporter()` from TTY-ness and the new `--no-progress` flag. `RunContext.progress`
+  defaults to silence, the shared generative loop advances it for every item including
+  skips and failures, and the runner announces each benchmark×target (labelling agentic
+  slots, which have no item count until their harness returns). `progress` is excluded
+  from the run fingerprint. `tqdm` joins the `bench` extra and its absence degrades to
+  lines instead of raising.
+- Why: A full Fugu run is thousands of judged items over hours; with no output, a working
+  run and a hung one looked identical, and a redrawing bar is unusable in
+  `docker compose logs`.
+- Refs: `kairyu/bench/{progress,runner,types,cli,config}.py`,
+  `kairyu/bench/adapters/base.py`, `pyproject.toml`,
+  `tests/bench/{test_bench_progress,test_bench_runner}.py`, `docs/benchmarks.md`.
+
 ### 2026-07-23 — [progress] Versioned structured orchestration trace for evaluation tooling
 - What: Added additive, opt-in `kairyu_trace_v2` on unary orchestrated chat responses while
   preserving `kairyu_trace`. Direct, Conductor, and MoA paths emit a common versioned envelope
