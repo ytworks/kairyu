@@ -15,6 +15,28 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 
 
 class TorchAttentionBackend:
+    #: ``GraphDecodeBackend`` (m17 D1): ``attend_decode`` below is pure tensor
+    #: algebra — ``gather_batched``, an ``arange`` compare and SDPA. Nothing
+    #: reads a device value into Python, so a capture of it is sound.
+    supports_graph_capture = True
+
+    def plan_decode(
+        self,
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        num_qo_heads: int,
+        q_dtype: torch.dtype,
+    ) -> None:
+        """No host phase: nothing to plan (``GraphDecodeBackend``).
+
+        ``attend_decode`` reads the page-table and length BUFFERS at run time,
+        so there is no schedule to refresh between replays. Implemented anyway
+        so the executor's step-boundary hook is unconditionally callable.
+        """
+        return None
+
     def attend(
         self,
         query: torch.Tensor,

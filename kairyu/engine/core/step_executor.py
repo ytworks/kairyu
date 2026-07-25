@@ -49,10 +49,16 @@ def build_decode_batch(
     seq_lens: Sequence[int],
     max_pages: int,
     *,
-    scratch_page: int = 0,
+    scratch_page: int,
     device: str | torch.device = "cpu",
 ) -> DecodeBatch:
-    """Pad ragged per-sequence page lists into a [B, max_pages] int32 tensor."""
+    """Pad ragged per-sequence page lists into a [B, max_pages] int32 tensor.
+
+    ``scratch_page`` is REQUIRED and has no default: page 0 is the first page a
+    ``PagePool`` hands out, so a defaulted 0 silently aliases a live request's KV
+    (m17 A5). Callers over a real pool must pass a page id the allocator can
+    never return; callers with no pool behind the ids pass whatever is unused.
+    """
     batch = len(seq_lens)
     page_tables = torch.full(
         (batch, max_pages), scratch_page, dtype=torch.int32, device=device
@@ -71,6 +77,7 @@ def build_decode_batch(
 
 
 DecodeFn = Callable[[DecodeBatch], torch.Tensor]  # -> logits/hidden [B, ...]
+PlanFn = Callable[[DecodeBatch], None]  # host phase, OUTSIDE the captured region
 
 
 class EagerStepExecutor:
@@ -143,11 +150,32 @@ class GraphStepExecutor:
         decode_fn: DecodeFn,
         graph_backend,
         max_batch: int,
+        *,
+        scratch_page: int,
         max_pages: int = 1,
-        scratch_page: int = 0,
         device: str | torch.device = "cpu",
+        plan_fn: PlanFn | None = None,
     ) -> None:
+        """``scratch_page`` is REQUIRED (m17 A5, review [P1]).
+
+        Every replay executes the FULL bucket: the rows past the real batch still
+        run their KV write, and it lands on whatever page id the padded page
+        table holds. A defaulted 0 pointed those writes at the first page a
+        ``PagePool`` hands out, so a partial bucket overwrote a live request's
+        K/V at slot 0 — and the capture warmup did it even for a full batch.
+        There is no safe default; the owner of the pool must name a page its
+        allocator can never return.
+        """
         self._decode_fn = decode_fn
+        # The step-boundary host hook (``GraphDecodeBackend``, review [P1]).
+        # An attention backend that plans on the CPU — FlashInfer builds its
+        # split-KV schedule there and cannot do it under capture — needs the
+        # step boundary to reach it, and this executor is the only object that
+        # knows where those boundaries are: it owns the static buffers, so it
+        # is the only one that knows WHICH tensors the next replay will read.
+        # Optional, so a decode_fn whose backends have no host phase (every
+        # FakeGraphBackend test) constructs exactly as before.
+        self._plan_fn = plan_fn
         self._backend = graph_backend
         self._buckets = decode_buckets(max_batch)
         self._max_pages = max_pages
@@ -166,17 +194,28 @@ class GraphStepExecutor:
         # oversize batch OR a page table wider than the captured static buffer:
         # never crash, run eager (D2)
         if bucket is None or batch.max_pages > self._max_pages:
+            self._plan(batch)  # eager still needs a live plan for THESE buffers
             return self._decode_fn(batch)
         if bucket not in self._captured:
             self._capture(bucket)
         replayable, static = self._captured[bucket]
         self._copy_in(static, batch)
+        # AFTER copy-in, BEFORE replay: the plan describes the page table and
+        # lengths the kernels are about to read, and _copy_in just rewrote both
+        # (including the padding rows). Planning before the copy would schedule
+        # the PREVIOUS step. This ordering is the whole point of the hook.
+        self._plan(static)
         out = replayable.replay()
         return out[: batch.batch_size]  # padding rows dropped
 
     def invalidate(self) -> None:
         """Weight swap / pool resize: every capture is stale."""
         self._captured.clear()
+
+    def _plan(self, batch: DecodeBatch) -> None:
+        """Backend host phase over ``batch``'s buffers — never under capture."""
+        if self._plan_fn is not None:
+            self._plan_fn(batch)
 
     def _capture(self, bucket: int) -> None:
         static = DecodeBatch(
@@ -190,6 +229,11 @@ class GraphStepExecutor:
             ),
             seq_lens=torch.ones(bucket, dtype=torch.int32, device=self._device),
         )
+        # Plan BEFORE the backend captures: the warmup passes and the capture
+        # itself run decode_fn, which reaches attend_decode, which under capture
+        # may not plan for itself. Without this the very first capture of a
+        # planning backend dies with "no live plan".
+        self._plan(static)
         replayable = self._backend.capture(self._decode_fn, static)
         self._captured[bucket] = (replayable, static)
 

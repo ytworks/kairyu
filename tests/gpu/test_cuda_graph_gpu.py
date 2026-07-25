@@ -14,6 +14,10 @@ import torch
 pytestmark = pytest.mark.gpu
 
 MAX_PAGES = 4
+# Synthetic decode fns here: no KV pool sits behind these page ids, so no id
+# can corrupt a request. GraphStepExecutor still requires the choice to be
+# explicit (m17 A5) — the runner gates pin the real reservation.
+SCRATCH = 0
 
 
 def _require_cuda() -> None:
@@ -51,6 +55,7 @@ def _batch(size: int, device: str, *, max_pages: int = MAX_PAGES, offset: int = 
         page_lists=[[(i + offset + j) % 5 for j in range(2)] for i in range(size)],
         seq_lens=[i + offset + 1 for i in range(size)],
         max_pages=max_pages,
+        scratch_page=SCRATCH,
         device=device,
     )
 
@@ -64,7 +69,8 @@ def test_capture_and_replay_match_eager():
     weights = torch.randn(32, 8, device="cuda:0")
     decode = _decode_fn(weights)
     executor = GraphStepExecutor(
-        decode, CudaGraphBackend(), max_batch=8, max_pages=MAX_PAGES, device="cuda:0"
+        decode, CudaGraphBackend(), max_batch=8, max_pages=MAX_PAGES,
+        scratch_page=SCRATCH, device="cuda:0",
     )
 
     batch = _batch(4, "cuda:0")
@@ -85,7 +91,8 @@ def test_replay_reflects_new_inputs_not_the_captured_ones():
     weights = torch.randn(32, 8, device="cuda:0")
     decode = _decode_fn(weights)
     executor = GraphStepExecutor(
-        decode, CudaGraphBackend(), max_batch=8, max_pages=MAX_PAGES, device="cuda:0"
+        decode, CudaGraphBackend(), max_batch=8, max_pages=MAX_PAGES,
+        scratch_page=SCRATCH, device="cuda:0",
     )
 
     first = _batch(4, "cuda:0")
@@ -107,7 +114,8 @@ def test_padding_rows_do_not_leak_into_the_result():
     weights = torch.randn(32, 8, device="cuda:0")
     decode = _decode_fn(weights)
     executor = GraphStepExecutor(
-        decode, CudaGraphBackend(), max_batch=8, max_pages=MAX_PAGES, device="cuda:0"
+        decode, CudaGraphBackend(), max_batch=8, max_pages=MAX_PAGES,
+        scratch_page=SCRATCH, device="cuda:0",
     )
 
     for size in (1, 2, 3, 5, 8):
@@ -126,7 +134,8 @@ def test_oversize_batch_falls_back_to_eager():
     weights = torch.randn(32, 8, device="cuda:0")
     decode = _decode_fn(weights)
     executor = GraphStepExecutor(
-        decode, CudaGraphBackend(), max_batch=4, max_pages=MAX_PAGES, device="cuda:0"
+        decode, CudaGraphBackend(), max_batch=4, max_pages=MAX_PAGES,
+        scratch_page=SCRATCH, device="cuda:0",
     )
 
     # beyond the largest bucket: must run, not crash (D2)
@@ -158,7 +167,8 @@ def test_invalidate_forces_recapture():
 
     backend = CudaGraphBackend()
     executor = GraphStepExecutor(
-        decode, backend, max_batch=8, max_pages=MAX_PAGES, device="cuda:0"
+        decode, backend, max_batch=8, max_pages=MAX_PAGES,
+        scratch_page=SCRATCH, device="cuda:0",
     )
 
     batch = _batch(4, "cuda:0")
@@ -197,6 +207,7 @@ def test_static_buffers_live_on_the_capture_device():
         CudaGraphBackend(),
         max_batch=8,
         max_pages=MAX_PAGES,
+        scratch_page=SCRATCH,
         device="cuda:0",
     )
     executor.execute_decode(_batch(4, "cuda:0"))
