@@ -13,4 +13,8 @@ case "$gpu_count" in
 esac
 
 echo "Using all $gpu_count visible GPUs"
+# exported so the compose port mapping honours a custom PORT
+PORT="${PORT:-8001}"
+export PORT
+echo "Serving the OpenAI-compatible API on http://127.0.0.1:$PORT/v1"
 exec docker compose up --build "$@"

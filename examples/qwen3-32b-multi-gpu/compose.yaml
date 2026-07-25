@@ -43,7 +43,10 @@ services:
         echo "Starting Qwen3-32B with tensor_parallel_size=$$gpu_count"
         exec kairyu serve /tmp/kairyu.yaml
     ports:
-      - "127.0.0.1:8001:8000"
+      # PORT is the host port the example's scripts probe and benchmark; it must
+      # reach the mapping or a custom value would start a healthy service on 8001
+      # and then time out waiting somewhere else.
+      - "127.0.0.1:${PORT:-8001}:8000"
     volumes:
       - ./kairyu.template.yaml:/etc/kairyu/config.template.yaml:ro
       - ../../bench:/bench:ro
