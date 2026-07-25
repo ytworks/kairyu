@@ -9,10 +9,12 @@ Three properties of the published dataset shape this adapter:
    That is SciCode's main setting, and it is the only faithful one here:
    grading a later step in isolation just raises NameError on the helper the
    earlier step was supposed to define.
-2. 288 of the 291 test-split sub-steps compare against golden data (`target`),
-   which lives in `test_data.h5` — a file the HF export does not contain. It is
-   fetched from the sources below and verified by HDF5 magic bytes; without it
-   those sub-steps are recorded "unjudged", never guessed.
+2. The official evaluator skips three sub-steps and supplies their code, so the
+   scored population -- and Fugu's denominator -- is 288 of 291. Nearly all of
+   those compare against golden data (`target`) from `test_data.h5`, which the HF
+   export does not contain; it is fetched from the sources below and accepted
+   only at a pinned content hash. Without it those sub-steps are recorded
+   "unjudged", never guessed.
 3. Fugu evaluates **with background information**, so both the problem-level
    and step-level background are part of the prompt.
 """
@@ -20,7 +22,9 @@ Three properties of the published dataset shape this adapter:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
+from pathlib import Path
 
 from kairyu.bench.adapters.base import (
     AdapterInfo,
@@ -40,6 +44,7 @@ from kairyu.bench.types import (
     BenchItem,
     BenchTarget,
     ChatRequestSpec,
+    DatasetUnavailable,
     ItemResult,
     PairResult,
     SkipItem,
@@ -49,15 +54,48 @@ _TEST_TIMEOUT_S = 60.0
 _MEMORY_MB = 4096
 _H5_NAME = "test_data.h5"
 _HDF5_MAGIC = b"\x89HDF\r\n\x1a\n"
-# The golden data is not in the HF export; the second entry is a public,
-# ungated third-party mirror pinned to a commit. Provenance is recorded in the
-# methodology so a number is never traceable to an unknown file.
+# The golden data is not in the HF export. The mirror below is public and
+# ungated, pinned by BOTH its commit and the SHA-256 of its content: magic bytes
+# only prove the file format, so a different-but-valid HDF5 would otherwise be
+# accepted as every expected value in the benchmark.
+#
+# NOT independently cross-checked against the official Google Drive artifact —
+# this pins WHICH bytes were used, not that they are the upstream ones. The
+# methodology says so, and `--h5-source` style overrides are deliberately absent.
 _H5_SOURCES: tuple[tuple[str, str | None], ...] = (
     ("SciCode1/SciCode", None),
     ("Srimadh/Scicode-test-data-h5", "72c247d3a8410921b2e848e046d71ed63d9a0ddb"),
 )
+_H5_SHA256 = "48b0272a88b17dbd29777c217e1b4fb2b019b92e11cc2add847409db9541b890"
+_H5_BYTES = 1_049_345_865
+
 _TEST_SPLIT_SUBSTEPS = 291
-_GOLDEN_SUBSTEPS = 288  # sub-steps whose tests use `target` (Fugu reports 288)
+# The official evaluator `continue`s past three sub-steps (0-based indices), so
+# its denominator -- and Fugu's -- is 288. They are not scored; instead the
+# repository ships their implementation as a text file, which later steps of the
+# same problem depend on.
+_EXCLUDED_STEPS: frozenset[tuple[str, int]] = frozenset(
+    {("13", 5), ("62", 0), ("76", 2)}
+)
+_GOLDEN_SUBSTEPS = _TEST_SPLIT_SUBSTEPS - len(_EXCLUDED_STEPS)
+# Pinned by content: these stand in for steps the model never generates.
+_PROVIDED_STEP_URL = (
+    "https://raw.githubusercontent.com/scicode-bench/SciCode/main/eval/data/{name}"
+)
+_PROVIDED_STEPS: dict[tuple[str, int], tuple[str, str]] = {
+    ("13", 5): (
+        "13.6.txt",
+        "795a2b57c2d9bb12ca4eaf16d6b8e1f202015a89a886628858abf42a1b18a94e",
+    ),
+    ("62", 0): (
+        "62.1.txt",
+        "bc9931d88a7d5950091b72a996a25b8be6c936fd136b01005e22c3d45b0008a2",
+    ),
+    ("76", 2): (
+        "76.3.txt",
+        "4758300d96ea726cdc0fbf749f1bc437030d2a3e8b43bde232ecdeaf636cd367",
+    ),
+}
 
 _PROMPT = """You are implementing one step of a scientific computing problem.
 
@@ -65,8 +103,10 @@ PROBLEM:
 {main_description}
 {main_background}
 Already-implemented steps of this problem (available in scope, do not repeat them):
+{previous_steps}
+Dependencies available in scope:
 ```python
-{context_code}
+{dependencies}
 ```
 
 Now implement the next step.
@@ -80,6 +120,16 @@ Function header (keep it exactly):
 {return_line}
 Write ONLY this function's implementation (plus any imports you need) in a
 single ```python code block```."""
+
+# The official `process_problem_steps()` gives each prior step its description
+# (plus background in the with-background condition) alongside its code, with the
+# steps separated by "------". Passing only the concatenated code loses the
+# statement of what each helper was for.
+_PREVIOUS_STEP = """{description}{background}
+```python
+{code}
+```"""
+_STEP_SEPARATOR = "\n------\n"
 
 # Compact reconstruction of the official process_hdf5_to_tuple loader:
 # dataset -> array/scalar, group -> tuple of children in key order.
@@ -111,9 +161,54 @@ def process_hdf5_to_tuple(step_id, test_num, h5file="test_data.h5"):
 """
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def golden_data_is_authentic(path: Path) -> bool:
+    """The file is HDF5 AND hashes to the pinned digest at the pinned size."""
+    try:
+        if path.stat().st_size != _H5_BYTES:
+            return False
+        with path.open("rb") as handle:
+            if handle.read(len(_HDF5_MAGIC)) != _HDF5_MAGIC:
+                return False
+        return sha256_file(path) == _H5_SHA256
+    except OSError:
+        return False
+
+
 def _section(label: str, text: object) -> str:
     body = str(text or "").strip()
     return f"\n{label}:\n{body}\n" if body else ""
+
+
+def render_previous_steps(payload: dict) -> str:
+    """Prior steps as the official prompt renders them: description + code.
+
+    Falls back to the concatenated code when no per-step history is available
+    (a directly constructed item, or a fixture row).
+    """
+    history = payload.get("prior_steps")
+    if not history:
+        code = (payload.get("prior_code") or "").strip()
+        return f"```python\n{code}\n```" if code else "# (none)"
+    blocks = []
+    for step in history:
+        blocks.append(
+            _PREVIOUS_STEP.format(
+                description=str(step.get("step_description") or "").strip(),
+                background=_section(
+                    "STEP BACKGROUND", step.get("step_background")
+                ).rstrip(),
+                code=step.get("code") or "",
+            )
+        )
+    return _STEP_SEPARATOR.join(blocks)
 
 
 def group_by_problem(items: list[BenchItem]) -> list[list[BenchItem]]:
@@ -165,10 +260,13 @@ class SciCodeAdapter(GenerativeAdapter):
             "sub-steps run sequentially per problem on the model's OWN earlier "
             "code: the published dataset ships no reference code, so a "
             "gold-previous-steps setting is not available",
-            f"{_GOLDEN_SUBSTEPS} of {_TEST_SPLIT_SUBSTEPS} test-split sub-steps "
-            "need test_data.h5 golden data; it is absent from the HF export and "
-            "fetched from a pinned public mirror, and any sub-step left without "
-            "it is unjudged rather than scored",
+            f"scored population is {_GOLDEN_SUBSTEPS} of {_TEST_SPLIT_SUBSTEPS} "
+            "test-split sub-steps: the official evaluator skips three, whose "
+            "implementation it supplies instead (Fugu also reports "
+            f"{_GOLDEN_SUBSTEPS})",
+            "test_data.h5 golden data is absent from the HF export; it is fetched "
+            "from a content-hash-pinned public mirror, NOT cross-checked against "
+            "the official artifact, and any sub-step left without it is unjudged",
             "prompts include problem-level and step-level background (Fugu's "
             "with-background condition)",
         ),
@@ -179,15 +277,20 @@ class SciCodeAdapter(GenerativeAdapter):
 
         rows = load_hf_rows(self.info.hf_dataset, split="test")
         golden = self._fetch_golden(ctx)
+        provided = self._fetch_provided_steps()
         normalized = []
+        seen_substeps = 0
         for row in rows:
             deps = row.get("required_dependencies") or ""
+            problem_id = str(row["problem_id"])
             for step_index, step in enumerate(row.get("sub_steps") or []):
-                step_id = f"{row['problem_id']}.{step['step_number'].split('.')[-1]}"
+                seen_substeps += 1
+                step_id = f"{problem_id}.{step['step_number'].split('.')[-1]}"
+                excluded = (problem_id, step_index) in _EXCLUDED_STEPS
                 normalized.append(
                     {
                         "id": f"scicode-{step_id}",
-                        "problem_id": str(row["problem_id"]),
+                        "problem_id": problem_id,
                         "step_index": step_index,
                         "step_id": step["step_number"],
                         "main_description": row.get("problem_description_main") or "",
@@ -199,12 +302,64 @@ class SciCodeAdapter(GenerativeAdapter):
                         "return_line": step.get("return_line") or "",
                         "test_cases": list(step.get("test_cases") or []),
                         "has_golden_data": golden is not None,
+                        # Not scored by the official evaluator; its implementation
+                        # is provided so later steps of this problem still have it.
+                        "excluded": excluded,
+                        "provided_code": provided.get((problem_id, step_index), ""),
                     }
                 )
+        if seen_substeps != _TEST_SPLIT_SUBSTEPS:
+            raise DatasetUnavailable(
+                f"{self.info.hf_dataset}@{self.info.hf_revision} test split has "
+                f"{seen_substeps} sub-steps, expected {_TEST_SPLIT_SUBSTEPS}"
+            )
+        scoreable = sum(1 for row in normalized if not row["excluded"])
+        if scoreable != _GOLDEN_SUBSTEPS:
+            raise DatasetUnavailable(
+                f"{self.info.hf_dataset} yielded {scoreable} scoreable sub-steps, "
+                f"expected {_GOLDEN_SUBSTEPS} (the official evaluator skips "
+                f"{sorted(_EXCLUDED_STEPS)})"
+            )
+        missing = [
+            key for key in _PROVIDED_STEPS if key not in provided
+        ]
+        if missing:
+            print(
+                "[scicode] could not fetch the provided implementation for "
+                f"{missing}; later steps of those problems will be missing that "
+                "helper and are recorded unjudged"
+            )
         return normalized
 
+    def _fetch_provided_steps(self) -> dict[tuple[str, int], str]:
+        """The three implementations the official evaluator supplies, by content hash.
+
+        Later steps of problems 13/62/76 call helpers these steps define, so
+        without them those steps could only raise NameError.
+        """
+        import urllib.error
+        import urllib.request
+
+        fetched: dict[tuple[str, int], str] = {}
+        for key, (name, digest) in _PROVIDED_STEPS.items():
+            try:
+                with urllib.request.urlopen(  # noqa: S310 - fixed https URL
+                    _PROVIDED_STEP_URL.format(name=name), timeout=30
+                ) as response:
+                    body = response.read()
+            except (urllib.error.URLError, OSError, ValueError):
+                continue
+            if hashlib.sha256(body).hexdigest() != digest:
+                continue  # not the pinned artifact
+            fetched[key] = body.decode("utf-8", errors="replace")
+        return fetched
+
     def _fetch_golden(self, ctx: DownloadContext):
-        """First source that yields a real HDF5 file wins; None if none do."""
+        """First source whose bytes hash to the pinned digest wins.
+
+        HDF5 magic bytes only prove the format; the content hash is what makes
+        "these are the expected values I scored against" checkable.
+        """
         from kairyu.bench.hub import download_file
 
         dest = ctx.cache.assets_dir(self.info.name) / _H5_NAME
@@ -212,10 +367,11 @@ class SciCodeAdapter(GenerativeAdapter):
             path = download_file(repo_id, _H5_NAME, dest, revision=revision)
             if path is None:
                 continue
-            with open(path, "rb") as handle:
-                if handle.read(len(_HDF5_MAGIC)) == _HDF5_MAGIC:
-                    return path
-            path.unlink(missing_ok=True)  # not HDF5: an LFS pointer or an error page
+            if golden_data_is_authentic(path):
+                return path
+            # not the pinned artifact: an LFS pointer, an error page, or a
+            # different HDF5 file entirely
+            path.unlink(missing_ok=True)
         return None
 
     def check_preconditions(self, target: BenchTarget, ctx: RunContext) -> str | None:
@@ -232,12 +388,12 @@ class SciCodeAdapter(GenerativeAdapter):
         self, item: BenchItem, target: BenchTarget, ctx: RunContext
     ) -> ChatRequestSpec | SkipItem:
         payload = item.payload
-        context_code = f"{payload['dependencies']}\n\n{payload.get('prior_code') or ''}".strip()
         return_line = payload["return_line"]
         prompt = _PROMPT.format(
             main_description=payload["main_description"],
             main_background=_section("BACKGROUND", payload.get("main_background")),
-            context_code=context_code or "# (none)",
+            previous_steps=render_previous_steps(payload),
+            dependencies=payload["dependencies"] or "# (none)",
             step_description=payload["step_description"],
             step_background=_section("STEP BACKGROUND", payload.get("step_background")),
             function_header=payload["function_header"],
@@ -271,10 +427,23 @@ class SciCodeAdapter(GenerativeAdapter):
             async def run_problem(steps: list[BenchItem]) -> list[ItemResult]:
                 results: list[ItemResult] = []
                 prior: list[str] = []
+                history: list[dict] = []
                 for item in steps:
+                    if item.payload.get("excluded"):
+                        # The official evaluator does not score these; it supplies
+                        # their implementation so later steps can build on it.
+                        provided = item.payload.get("provided_code") or ""
+                        if provided:
+                            prior.append(provided)
+                            history.append({**item.payload, "code": provided})
+                        continue
                     staged = item.model_copy(
                         update={
-                            "payload": {**item.payload, "prior_code": "\n\n".join(prior)}
+                            "payload": {
+                                **item.payload,
+                                "prior_code": "\n\n".join(prior),
+                                "prior_steps": list(history),
+                            }
                         }
                     )
                     request = self.build_request(staged, target, ctx)
@@ -303,6 +472,7 @@ class SciCodeAdapter(GenerativeAdapter):
                         # carried forward pass or fail: SciCode measures the
                         # cascade, so a wrong step stays in the context.
                         prior.append(code)
+                        history.append({**item.payload, "code": code})
                     result = await self.score(staged, text, ctx)
                     results.append(
                         result.model_copy(update={"latency_s": round(attempt.latency_s, 3)})
@@ -400,8 +570,21 @@ class SciCodeAdapter(GenerativeAdapter):
         base["golden_data_sources"] = [
             f"{repo}@{revision or 'main'}" for repo, revision in _H5_SOURCES
         ]
+        base["golden_data_sha256"] = _H5_SHA256
+        base["golden_data_provenance"] = (
+            "content-hash pinned; NOT independently cross-checked against the "
+            "official Google Drive artifact"
+        )
         base["test_split_substeps"] = _TEST_SPLIT_SUBSTEPS
-        base["golden_backed_substeps"] = _GOLDEN_SUBSTEPS
+        base["scored_substeps"] = _GOLDEN_SUBSTEPS
+        base["excluded_substeps"] = [
+            f"problem {problem} step {index + 1}"
+            for problem, index in sorted(_EXCLUDED_STEPS)
+        ]
+        base["previous_step_prompt"] = (
+            "description + background + generated code per prior step, separated "
+            "by ------ (official process_problem_steps)"
+        )
         base["execution"] = (
             "dataset test_cases executed in the local sandbox; target-based "
             "tests use test_data.h5 via a compact reimplementation of the "

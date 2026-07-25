@@ -7,6 +7,8 @@ NameError on helpers an earlier step was meant to define. These tests pin the
 sequential contract instead.
 """
 
+import hashlib
+
 import httpx
 import pytest
 from conftest import make_config, make_target
@@ -219,20 +221,27 @@ def test_fetch_golden_rejects_non_hdf5_payloads(tmp_path, monkeypatch):
     assert not (ctx.cache.assets_dir("scicode") / "test_data.h5").exists()
 
 
-def test_fetch_golden_accepts_hdf5_magic(tmp_path, monkeypatch):
+def test_fetch_golden_requires_the_pinned_content_hash(tmp_path, monkeypatch):
+    """Magic bytes prove only the format; a different valid HDF5 must be rejected."""
+    import kairyu.bench.adapters.scicode as scicode_mod
     import kairyu.bench.hub as hub
 
     tried: list[tuple[str, str | None]] = []
+    authentic = b"\x89HDF\r\n\x1a\n" + b"\x01" * 16
 
     def fake_download(repo_id, filename, dest, *, repo_type="dataset", revision=None):
         tried.append((repo_id, revision))
         if repo_id == "SciCode1/SciCode":
             return None  # the HF export does not ship it
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\x00" * 16)
+        dest.write_bytes(authentic)
         return dest
 
     monkeypatch.setattr(hub, "download_file", fake_download)
+    monkeypatch.setattr(scicode_mod, "_H5_BYTES", len(authentic))
+    monkeypatch.setattr(
+        scicode_mod, "_H5_SHA256", hashlib.sha256(authentic).hexdigest()
+    )
     ctx = DownloadContext(cache=BenchCache(tmp_path / "cache"))
     path = SciCodeAdapter()._fetch_golden(ctx)
     assert path is not None and path.name == "test_data.h5"
@@ -243,12 +252,207 @@ def test_fetch_golden_accepts_hdf5_magic(tmp_path, monkeypatch):
     ]
     assert tried[1][1] is not None and len(tried[1][1]) == 40
 
+    # a valid HDF5 file with different contents is not the pinned artifact
+    monkeypatch.setattr(
+        scicode_mod, "_H5_SHA256", hashlib.sha256(b"something else").hexdigest()
+    )
+    assert SciCodeAdapter()._fetch_golden(ctx) is None
+    assert not (ctx.cache.assets_dir("scicode") / "test_data.h5").exists()
+
+
+def test_golden_data_pin_is_a_sha256_and_size(tmp_path):
+    from kairyu.bench.adapters.scicode import (
+        _H5_BYTES,
+        _H5_SHA256,
+        golden_data_is_authentic,
+    )
+
+    assert len(_H5_SHA256) == 64 and _H5_BYTES > 0
+    # a right-sized non-HDF5 blob still fails
+    decoy = tmp_path / "decoy.h5"
+    decoy.write_bytes(b"\x00" * 8)
+    assert not golden_data_is_authentic(decoy)
+    assert not golden_data_is_authentic(tmp_path / "missing.h5")
+
+
+# -- the official 288-sub-step population --------------------------------------
+
+
+def _substep(step_number: str, *, background: str = "") -> dict:
+    return {
+        "step_number": step_number,
+        "step_description_prompt": f"do {step_number}",
+        "step_background": background,
+        "function_header": f"def f{step_number.replace('.', '_')}():",
+        "return_line": "",
+        "test_cases": ["assert True"],
+    }
+
+
+def _problem(problem_id: str, steps: int) -> dict:
+    return {
+        "problem_id": problem_id,
+        "problem_description_main": f"problem {problem_id}",
+        "problem_background_main": "",
+        "required_dependencies": "import numpy as np",
+        "sub_steps": [_substep(f"{problem_id}.{i + 1}") for i in range(steps)],
+    }
+
+
+def _official_shaped_rows() -> list[dict]:
+    """65 problems / 291 sub-steps, including the three the evaluator skips."""
+    rows = [_problem("13", 6), _problem("62", 1), _problem("76", 3)]
+    remaining = 291 - (6 + 1 + 3)
+    for index in range(remaining):
+        rows.append(_problem(f"p{index}", 1))
+    return rows
+
+
+def _patch_scicode(monkeypatch, rows, *, provided=None):
+    import kairyu.bench.adapters.scicode as scicode_mod
+    import kairyu.bench.hub as hub
+
+    monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(SciCodeAdapter, "_fetch_golden", lambda self, ctx: None)
+    monkeypatch.setattr(
+        SciCodeAdapter,
+        "_fetch_provided_steps",
+        lambda self: (
+            provided
+            if provided is not None
+            else dict.fromkeys(scicode_mod._PROVIDED_STEPS, "def provided():\n    return 1")
+        ),
+    )
+
+
+def test_normalize_marks_the_three_steps_the_evaluator_skips(tmp_path, monkeypatch):
+    """Fugu's denominator is 288: the official evaluator `continue`s past 3 steps."""
+    from kairyu.bench.adapters.scicode import _EXCLUDED_STEPS
+
+    _patch_scicode(monkeypatch, _official_shaped_rows())
+    rows = SciCodeAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+    assert len(rows) == 291
+    excluded = [row for row in rows if row["excluded"]]
+    assert {(row["problem_id"], row["step_index"]) for row in excluded} == set(
+        _EXCLUDED_STEPS
+    )
+    assert len(rows) - len(excluded) == 288
+    # the excluded steps carry the implementation later steps depend on
+    assert all(row["provided_code"] for row in excluded)
+
+
+def test_normalize_fails_closed_if_the_population_moved(tmp_path, monkeypatch):
+    rows = _official_shaped_rows()
+    rows.append(_problem("extra", 2))
+    _patch_scicode(monkeypatch, rows)
+    with pytest.raises(Exception, match="expected 291"):
+        SciCodeAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+
+async def test_excluded_steps_are_not_scored_but_are_carried_forward(tmp_path):
+    """The skipped step never reaches the model, yet its helper is in scope."""
+    prompts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        prompts.append(_json.loads(request.content)["messages"][0]["content"])
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "```python\ndef later():\n    return provided()\n```",
+                        },
+                    }
+                ]
+            },
+        )
+
+    adapter = SciCodeAdapter()
+    items = [
+        BenchItem(
+            id="scicode-62.1",
+            payload={
+                **_item("62", 0).payload,
+                "excluded": True,
+                "provided_code": "def provided():\n    return 7",
+                "test_cases": [],
+            },
+        ),
+        BenchItem(
+            id="scicode-62.2",
+            payload={**_item("62", 1).payload, "excluded": False, "test_cases": []},
+        ),
+    ]
+    ctx = _ctx(
+        tmp_path,
+        http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    from unittest.mock import patch
+
+    with patch.object(SciCodeAdapter, "load_items", return_value=items):
+        pair = await adapter.run(make_target(), ctx)
+
+    assert pair.metrics["n_total"] == 1  # only the scoreable step
+    assert len(prompts) == 1
+    assert "def provided():" in prompts[0]  # the provided helper is in the context
+    assert "scicode-62.1" not in {item.item_id for item in pair.items}
+
+
+def test_previous_steps_carry_their_description_and_background(tmp_path):
+    """Official `process_problem_steps` passes description + background + code."""
+    adapter = SciCodeAdapter()
+    item = BenchItem(
+        id="x",
+        payload={
+            "main_description": "d",
+            "main_background": "",
+            "dependencies": "import numpy as np",
+            "step_description": "write step three",
+            "step_background": "",
+            "function_header": "def three():",
+            "return_line": "",
+            "prior_code": "def one():\n    return 1\n\ndef two():\n    return 2",
+            "prior_steps": [
+                {
+                    "step_description": "write step one",
+                    "step_background": "Background: one is the base case",
+                    "code": "def one():\n    return 1",
+                },
+                {
+                    "step_description": "write step two",
+                    "step_background": "",
+                    "code": "def two():\n    return 2",
+                },
+            ],
+        },
+    )
+    prompt = adapter.build_request(item, make_target(), _ctx(tmp_path)).messages[0]["content"]
+    assert "write step one" in prompt
+    assert "Background: one is the base case" in prompt
+    assert "write step two" in prompt
+    assert "def one():" in prompt and "def two():" in prompt
+    assert "------" in prompt  # the official separator between prior steps
+
 
 def test_methodology_records_denominator_and_sources(tmp_path):
     methodology = SciCodeAdapter().methodology(_ctx(tmp_path))
     assert methodology["test_split_substeps"] == 291
-    assert methodology["golden_backed_substeps"] == 288  # Fugu's 288
+    assert methodology["scored_substeps"] == 288  # Fugu's 288
+    assert methodology["excluded_substeps"] == [
+        "problem 13 step 6",
+        "problem 62 step 1",
+        "problem 76 step 3",
+    ]
     assert any("Srimadh" in source for source in methodology["golden_data_sources"])
+    assert len(methodology["golden_data_sha256"]) == 64
+    assert "NOT independently cross-checked" in methodology["golden_data_provenance"]
+    assert "process_problem_steps" in methodology["previous_step_prompt"]
     assert methodology["background"].startswith("problem-level and step-level")
 
 

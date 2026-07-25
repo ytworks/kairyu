@@ -112,16 +112,28 @@ makes the cascade visible). Grading a later step in isolation could only raise
 Two consequences:
 
 - `--limit` / `--smoke` select **whole problems**, never a truncated chain.
-- **288 of the 291** test-split sub-steps compare against golden data (`target`)
-  from `test_data.h5`, which the HF export does not contain — 288 is also the
-  denominator Fugu reports. The file is fetched from the upstream repo first and
-  otherwise from a pinned public mirror
-  (`Srimadh/Scicode-test-data-h5`), and is accepted only if its HDF5 magic bytes
-  are present, so an LFS pointer or an HTML error page can never masquerade as
-  golden data. Sub-steps left without it are `unjudged`, never guessed.
+- The scored population is **288 of the 291** test-split sub-steps. The official
+  evaluator `continue`s past three of them (problem 13 step 6, 62 step 1, 76
+  step 3) and instead supplies their implementation as a text file, because later
+  steps of those problems call the helpers they define. kairyu does the same: those
+  three are excluded from scoring and their pinned-by-hash implementation is
+  carried into the context. 288 is also the denominator Fugu reports, and
+  acquisition fails closed unless it lands on 291 sub-steps / 288 scoreable.
+- Nearly all of those compare against golden data (`target`) from `test_data.h5`,
+  which the HF export does not contain. It is fetched from the upstream repo first
+  and otherwise from a public mirror (`Srimadh/Scicode-test-data-h5`), and is
+  accepted only when its size and **SHA-256 content hash** match the pin: magic
+  bytes alone prove the file format, so a different-but-valid HDF5 would otherwise
+  be trusted as every expected value in the benchmark. The pin says *which* bytes
+  were scored against — it has **not** been cross-checked against the official
+  Google Drive artifact, and the methodology says so. Sub-steps left without the
+  file are `unjudged`, never guessed.
 
 Prompts include the problem-level and step-level background, matching Fugu's
-with-background condition.
+with-background condition, and each prior step is rendered the way the official
+`process_problem_steps()` does: its description, its background, then its code,
+with steps separated by `------`. Passing only the concatenated code would lose
+the statement of what each helper was for.
 
 ## Degradation model (why one command always completes)
 
