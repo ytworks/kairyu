@@ -84,6 +84,18 @@ if [ "$unexpected" -ne 0 ]; then
   exit 1
 fi
 gpu_count="$(printf '%s\n' "$gpu_list" | awk 'NF && /^[0-9]+$/ { n++ } END { print n + 0 }')"
+# run.sh and the compose startup both gate on this; without it here an empty GPU
+# list parses cleanly to 0 and is then printed in the benchmark header AND passed
+# as `--tensor-parallel 0` — the wrong-number-next-to-real-measurements case this
+# whole change exists to prevent
+case "$gpu_count" in
+  2|4|8) ;;
+  *)
+    echo "Qwen3-32B requires 2, 4, or 8 visible NVIDIA GPUs; found $gpu_count" >&2
+    printf '%s\n' "$gpu_list" >&2
+    exit 1
+    ;;
+esac
 image_id="$(docker compose images -q kairyu)"
 if [ -z "$image_id" ]; then
   echo "Kairyu image not found; start the service first" >&2

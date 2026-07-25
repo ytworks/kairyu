@@ -226,3 +226,63 @@ def test_no_site_counts_with_a_digit_anywhere_match():
         text = (EXAMPLE / name).read_text(encoding="utf-8")
         assert "grep -c '[0-9]'" not in text, name
     assert "grep -c '[0-9]'" not in (EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
+
+
+def _benchmark_stubs(tmp_path: Path, gpu_output: str, *, gpu_ok: bool = True) -> Path:
+    """`docker` and `curl` stubs so benchmark.sh reaches its GPU-count guard.
+
+    `docker compose exec ... nvidia-smi` is the only docker call before the
+    guard; curl serves the readyz probe.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    status = "0" if gpu_ok else "1"
+    (bin_dir / "docker").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *nvidia-smi*)\n"
+        f"    cat <<'EOF'\n{gpu_output}\nEOF\n"
+        f"    exit {status}\n"
+        "    ;;\n"
+        "  *images*) echo sha256:stub ;;\n"
+        "  *) : ;;\n"
+        "esac\n"
+    )
+    (bin_dir / "curl").write_text("#!/bin/sh\nexit 0\n")
+    for name in ("docker", "curl"):
+        (bin_dir / name).chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.parametrize(
+    ("gpu_output", "expected"),
+    [("", "found 0"), ("0\n1\n2", "found 3")],
+    ids=["empty", "unsupported-count"],
+)
+def test_benchmark_refuses_to_record_a_bad_gpu_count(tmp_path, gpu_output, expected):
+    # review [P1] on #127: benchmark.sh parsed an empty list cleanly to 0 and then
+    # printed "GPUs/TP=0" in the header AND passed --tensor-parallel 0
+    bin_dir = _benchmark_stubs(tmp_path, gpu_output)
+    result = _run(EXAMPLE / "benchmark.sh", bin_dir)
+
+    assert result.returncode != 0
+    assert expected in result.stderr, result.stderr
+    assert "GPUs/TP=" not in result.stdout
+
+
+def test_benchmark_rejects_a_digit_bearing_line_from_the_container(tmp_path):
+    bin_dir = _benchmark_stubs(tmp_path, f"{NOISY_WARNING}\n0\n1")
+    result = _run(EXAMPLE / "benchmark.sh", bin_dir)
+
+    assert result.returncode != 0
+    assert "not GPU indices" in result.stderr
+    assert "found 3" not in result.stderr
+
+
+def test_benchmark_accepts_a_supported_count(tmp_path):
+    bin_dir = _benchmark_stubs(tmp_path, "0\n1")
+    result = _run(EXAMPLE / "benchmark.sh", bin_dir)
+
+    # it gets past the guard (and then fails later on the stubbed environment)
+    assert "found 0" not in result.stderr
+    assert "requires 2, 4, or 8" not in result.stderr
