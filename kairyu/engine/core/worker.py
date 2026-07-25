@@ -19,10 +19,17 @@ from kairyu.engine.core.step_input import StateSync, StepDelta
 
 _SHUTDOWN = None
 
-#: Serving ranks load their shard between the rendezvous and the first
-#: collective, so the CI-tuned 120s default would fire on a cold multi-GB read
-#: long before anything is actually deadlocked.
-_SERVE_RENDEZVOUS_TIMEOUT_S = 1800.0
+#: Ranks load their shard between the rendezvous and the handshake, so the
+#: CI-tuned 120s default would fire on a cold multi-GB read long before anything
+#: is actually deadlocked. This covers ONLY startup.
+_STARTUP_TIMEOUT_S = 1800.0
+#: Every collective once the group is serving. `init_process_group(timeout=)` is
+#: the timeout for EVERY operation on that group, not just the rendezvous, so
+#: giving the startup allowance to the default group would let one wedged rank
+#: hold an in-flight generation for half an hour. The step loop therefore runs on
+#: a SECOND group created with this bound, while the startup handshake — the one
+#: collective that legitimately has to absorb load skew — keeps the long one.
+_SERVE_OP_TIMEOUT_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -156,6 +163,22 @@ def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
     return TPPlacement(f"cuda:{rank}", torch.bfloat16, "nccl")
 
 
+def serving_group(backend: str):
+    """A second process group carrying the OPERATIONAL collective timeout.
+
+    Every rank must call this at the same point — it is itself a collective — so
+    it is created right after the rendezvous, before the slow shard load, while
+    the ranks are still in lockstep.
+    """
+    from datetime import timedelta
+
+    import torch.distributed as dist
+
+    return dist.new_group(
+        timeout=timedelta(seconds=_SERVE_OP_TIMEOUT_S), backend=backend
+    )
+
+
 def build_tp_runner(
     model_dir: str,
     tp: int,
@@ -237,20 +260,26 @@ def _tp_worker_entry(
         world_size,
         f"file://{init_file}",
         backend=placement.backend,
-        timeout_s=_SERVE_RENDEZVOUS_TIMEOUT_S,
+        timeout_s=_STARTUP_TIMEOUT_S,
     )
-    comm = TorchDistCommunicator(device=placement.device)
+    startup_comm = TorchDistCommunicator(device=placement.device)
+    # created before the slow shard load, while every rank is still in lockstep
+    comm = TorchDistCommunicator(
+        group=serving_group(placement.backend), device=placement.device
+    )
     runner, _ = build_tp_runner(
         model_dir, world_size, rank, comm, num_pages, page_size, vocab, placement
     )
-    handshake = comm.broadcast(None, src=0)
+    # the handshake is the collective that absorbs load skew, so it — and only it
+    # — runs on the long-timeout startup group
+    handshake = startup_comm.broadcast(None, src=0)
     validate_handshake(handshake, model_dir, num_pages, page_size)
     try:
         worker_step_loop(comm, runner)
     finally:
         import torch.distributed as dist
 
-        dist.destroy_process_group()
+        dist.destroy_process_group()  # tears down the serving subgroup too
 
 
 class DistTPLauncher:
@@ -296,13 +325,18 @@ class DistTPLauncher:
             tp,
             f"file://{self._init_file}",
             backend=placement.backend,
-            timeout_s=_SERVE_RENDEZVOUS_TIMEOUT_S,
+            timeout_s=_STARTUP_TIMEOUT_S,
         )
-        self._comm = TorchDistCommunicator(device=placement.device)
+        startup_comm = TorchDistCommunicator(device=placement.device)
+        # created before the slow shard load, while every rank is still in lockstep
+        self._comm = TorchDistCommunicator(
+            group=serving_group(placement.backend), device=placement.device
+        )
         runner, self.full_config = build_tp_runner(
             model_dir, tp, 0, self._comm, num_pages, page_size, vocab, placement
         )
-        self._comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
+        # the one collective that legitimately absorbs load skew
+        startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
         self.runner = DistTPModelRunner(self._comm, runner)
 
     def shutdown(self) -> None:
@@ -317,6 +351,9 @@ class DistTPLauncher:
         # are already sitting in their own destroy. gloo never blocks here, which
         # is why the CPU parity gates could not see this.
         if dist.is_initialized():
+            # no argument: torch tears down the serving subgroup along with the
+            # default one, and destroying them individually is registration-order
+            # dependent across backends
             dist.destroy_process_group()
         self._ctx.join()
         with contextlib.suppress(FileNotFoundError):

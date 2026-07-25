@@ -53,6 +53,11 @@ class TorchDistCommunicator:
         )
 
     @property
+    def group(self) -> dist.ProcessGroup | None:
+        """The group these collectives run on; None means the default group."""
+        return self._group
+
+    @property
     def rank(self) -> int:
         return dist.get_rank(self._group)
 
