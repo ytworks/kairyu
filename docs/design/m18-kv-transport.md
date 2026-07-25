@@ -82,10 +82,17 @@ a recording fake.
 > host pool, `StreamCopyKVHandoff` over a `CudaStreamProvider` bound to the
 > pool's own device for a device pool.
 >
-> Still open: overlap with the next forward. `StreamCopyKVHandoff` blocks the
-> host before returning, so the consumer needs a completion EVENT rather than a
-> host-wide wait. Serving-layer exposure (a `pd_separation` deployment option) is
-> also still G2 stage 5.3 work; this is the engine-level constructor it needs.
+> **Overlap landed 2026-07-26.** `StreamCopyKVHandoff(..., defer=True)` records a
+> completion event instead of blocking, exposes it on `pending_event`, and offers
+> `wait_for_pending()` for the consumer. The producer can queue its next step
+> while the copy runs — measured on device: the deferred form returns strictly
+> faster than the blocking one on the same work, and the copied values are
+> correct once the event is awaited. The DEFAULT is still blocking, because
+> deferring moves the m6 D4 ordering responsibility to the caller and a caller
+> that forgets it reads half-written KV.
+>
+> Still open: serving-layer exposure (a `pd_separation` deployment option) is G2
+> stage 5.3 work on top of `pd_factory.build_pd_coordinator()`.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 

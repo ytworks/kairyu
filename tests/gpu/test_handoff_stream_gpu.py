@@ -227,3 +227,80 @@ def test_the_provider_follows_the_pool_onto_a_second_device():
     )
     wrapped = build_kv_handoff(_Inner(), pool)
     assert wrapped._provider._stream.device == torch.device("cuda", 1)
+
+
+def test_a_deferred_transfer_returns_before_the_copy_finishes():
+    """The overlap this seam is named for.
+
+    With `defer=True` the host is not blocked, so the producer can queue its next
+    step while the copy runs. Timed against the blocking form on the same work.
+    """
+    import time
+
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+
+    _require_cuda()
+    payload = torch.randn(1 << 24, device="cuda:0")  # 64 MB, long enough to time
+
+    class _SlowCopy:
+        def transfer(self, tokens, first_token, pages=()):
+            out = payload.clone()
+            for _ in range(20):
+                out = out * 1.000001
+            return out
+
+    torch.cuda.synchronize()
+    blocking = StreamCopyKVHandoff(_SlowCopy(), CudaStreamProvider())
+    start = time.perf_counter()
+    blocking.transfer((1,), 0)
+    blocking_elapsed = time.perf_counter() - start
+
+    torch.cuda.synchronize()
+    deferred = StreamCopyKVHandoff(_SlowCopy(), CudaStreamProvider(), defer=True)
+    start = time.perf_counter()
+    result = deferred.transfer((1,), 0)
+    deferred_elapsed = time.perf_counter() - start
+
+    assert deferred.pending_event is not None, "no completion event was recorded"
+    assert deferred_elapsed < blocking_elapsed, (
+        f"deferred {deferred_elapsed:.4f}s did not beat blocking {blocking_elapsed:.4f}s"
+    )
+
+    # and the values are correct once the consumer waits
+    deferred.wait_for_pending()
+    assert deferred.pending_event is None
+    assert torch.isfinite(result).all()
+
+
+def test_waiting_on_the_event_makes_the_copy_visible():
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+
+    _require_cuda()
+    source = torch.zeros(1 << 22, device="cuda:0")
+    with torch.no_grad():
+        for _ in range(50):
+            source.add_(1.0)
+
+    class _Copying:
+        def transfer(self, tokens, first_token, pages=()):
+            return source.clone()
+
+    handoff = StreamCopyKVHandoff(_Copying(), CudaStreamProvider(), defer=True)
+    copied = handoff.transfer((1,), 0)
+    handoff.wait_for_pending()
+    assert torch.equal(copied, torch.full_like(copied, 50.0))
+
+
+def test_wait_for_pending_is_safe_with_nothing_pending():
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+
+    _require_cuda()
+
+    class _Inner:
+        def transfer(self, tokens, first_token, pages=()):
+            return "allocation"
+
+    handoff = StreamCopyKVHandoff(_Inner(), CudaStreamProvider())  # blocking form
+    handoff.transfer((1,), 0)
+    assert handoff.pending_event is None
+    handoff.wait_for_pending()  # must not raise

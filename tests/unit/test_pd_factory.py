@@ -102,3 +102,44 @@ def test_the_coordinator_assembles_and_generates(model_dir):
     outputs = coordinator.run_to_completion()
     assert len(outputs["a"]) == 4
     assert not coordinator.failed_requests
+
+
+def test_the_deferred_handoff_records_an_event_instead_of_blocking():
+    """The ordering contract, on the recording provider."""
+    from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
+
+    provider = CpuNoopStream()
+    handoff = StreamCopyKVHandoff(_Inner(), provider, defer=True)
+    handoff.transfer((1, 2), 0)
+
+    assert provider.events == ["begin", "record"], provider.events
+    assert handoff.pending_event is not None
+    handoff.wait_for_pending()
+    assert provider.events == ["begin", "record", "wait"]
+    assert handoff.pending_event is None
+
+
+def test_the_default_handoff_still_blocks_before_returning():
+    """m6 D4: the commit point must not run ahead of the copy unless the caller
+    explicitly takes that responsibility."""
+    from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
+
+    provider = CpuNoopStream()
+    handoff = StreamCopyKVHandoff(_Inner(), provider)
+    handoff.transfer((1, 2), 0)
+
+    assert provider.events == ["begin", "synchronize"]
+    assert handoff.pending_event is None
+
+
+def test_a_raising_deferred_transfer_still_closes_the_window():
+    from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
+
+    class _Boom:
+        def transfer(self, tokens, first_token, pages=()):
+            raise RuntimeError("transfer failed")
+
+    provider = CpuNoopStream()
+    with pytest.raises(RuntimeError, match="transfer failed"):
+        StreamCopyKVHandoff(_Boom(), provider, defer=True).transfer((1,), 0)
+    assert provider.events == ["begin", "record"]
