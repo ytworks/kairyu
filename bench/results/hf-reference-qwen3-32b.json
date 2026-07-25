@@ -2,7 +2,7 @@
   "provenance": {
     "schema": 2,
     "checkpoint_config_sha256": "97e295b632839357",
-    "checkpoint_weights_sha256": "4c7c5341aec4768d",
+    "checkpoint_weights_sha256": "fd13ba85a115c9e8",
     "tokenizer_files_sha256": "0d96ecc916745b3a",
     "tokenizer_vocab_sha256": "3ec3c124e02b7ace",
     "prompt_token_ids_sha256": "c835f3900683e3c6",
