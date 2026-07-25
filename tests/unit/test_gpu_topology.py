@@ -124,3 +124,27 @@ def test_record_env_marks_a_skipped_measurement_instead_of_implying_zero(monkeyp
     assert "skipped" in record.notes
     # the topology is still authoritative for interconnect even without timing
     assert record.profile.interconnect == "pcie"
+
+
+def test_environment_records_are_not_ignored_by_git():
+    """Review [P2] on #128: `!bench/results/env-*.json` under `bench/results/`
+    never matched, because git does not descend into an excluded directory. The
+    files already committed with `-f` stayed, but the NEXT env record would have
+    vanished from `git status` and the evidence gap would have recurred."""
+    import subprocess
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+
+    def ignored(relative: str) -> bool:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", relative],
+            cwd=repo, capture_output=True, timeout=30,
+        )
+        return result.returncode == 0
+
+    # a future environment record must be tracked without `git add -f`
+    assert not ignored("bench/results/env-2099-01-01.json")
+    # while routine per-run output stays ignored
+    assert ignored("bench/results/parity-tp-2099-01-01.json")
+    assert ignored("bench/data/whatever.bin")
