@@ -46,9 +46,21 @@ def _run(script: Path, bin_dir: Path, cwd: Path | None = None):
     )
 
 
-def _gpu_list_stub(count: int) -> str:
+def _gpu_list_stub(count: int, *, warning: str | None = None) -> str:
     lines = "\n".join(str(index) for index in range(count))
-    return f"#!/bin/sh\ncat <<'EOF'\n{lines}\nEOF\n"
+    body = "#!/bin/sh\n"
+    if warning is not None:
+        # nvidia-smi warns on stderr; merging it into the captured list is how a
+        # date or bus id becomes an extra "GPU"
+        body += f"echo {warning!r} >&2\n"
+    body += f"cat <<'EOF'\n{lines}\nEOF\n" if count else "true\n"
+    return body
+
+
+# verbatim shape of a real nvidia-smi warning: every field here contains digits
+NOISY_WARNING = (
+    "WARNING: infoROM is corrupted at gpu 0000:16:00.0 (driver 595.84, 2026-07-25)"
+)
 
 
 @pytest.fixture
@@ -143,3 +155,74 @@ def test_compose_startup_does_not_count_through_a_swallowing_pipeline():
 def test_scripts_are_executable():
     for name in ("run.sh", "benchmark.sh"):
         assert shutil.which(str(EXAMPLE / name)) or os.access(EXAMPLE / name, os.X_OK)
+
+
+def test_a_digit_bearing_warning_is_not_counted_as_a_gpu(tmp_path, docker_stub_dir):
+    # review [P1] on #127: `grep -c '[0-9]'` counted any line containing a digit,
+    # so a warning line plus indices 0 and 1 reported THREE GPUs and the script
+    # refused to start a perfectly good 2-GPU host
+    _stub_bin(tmp_path, "nvidia-smi", _gpu_list_stub(2, warning=NOISY_WARNING))
+    record = tmp_path / "docker-calls"
+    os.environ["RECORD"] = str(record)
+    try:
+        result = _run(EXAMPLE / "run.sh", docker_stub_dir)
+    finally:
+        os.environ.pop("RECORD", None)
+
+    assert result.returncode == 0, result.stderr
+    assert "Using all 2 visible GPUs" in result.stdout
+    assert "found 3" not in result.stderr
+
+
+def test_a_warning_on_stdout_fails_loudly_rather_than_miscounting(
+    tmp_path, docker_stub_dir
+):
+    _stub_bin(
+        tmp_path,
+        "nvidia-smi",
+        f"#!/bin/sh\necho '{NOISY_WARNING}'\nprintf '0\\n1\\n'\n",
+    )
+    result = _run(EXAMPLE / "run.sh", docker_stub_dir)
+
+    assert result.returncode != 0
+    assert "not GPU indices" in result.stderr
+    assert "found 3" not in result.stderr
+
+
+def test_empty_output_reports_zero_instead_of_dying_on_set_e(tmp_path, docker_stub_dir):
+    # `grep -c` exits 1 with no matches, and `set -e` killed the script before the
+    # found-0 diagnostic could run
+    _stub_bin(tmp_path, "nvidia-smi", _gpu_list_stub(0))
+    result = _run(EXAMPLE / "run.sh", docker_stub_dir)
+
+    assert result.returncode != 0
+    assert "found 0" in result.stderr, result.stderr
+
+
+def test_container_startup_command_counts_the_same_way(tmp_path):
+    """The compose command must not diverge from run.sh — it is the one that
+    actually decides tensor_parallel_size."""
+    yaml = pytest.importorskip("yaml")
+
+    spec = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
+    command = spec["services"]["kairyu"]["command"][0].replace("$$", "$")
+    bin_dir = _stub_bin(tmp_path, "nvidia-smi", _gpu_list_stub(2, warning=NOISY_WARNING))
+    result = subprocess.run(
+        ["sh", "-ec", command],
+        env=dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}"),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    # it gets PAST the count guard (and then fails on the container-only config
+    # template, which is as far as this can run outside the image)
+    assert "found 3" not in result.stderr, result.stderr
+    assert "not GPU indices" not in result.stderr
+    assert "config.template.yaml" in result.stderr
+
+
+def test_no_site_counts_with_a_digit_anywhere_match():
+    for name in ("run.sh", "benchmark.sh"):
+        text = (EXAMPLE / name).read_text(encoding="utf-8")
+        assert "grep -c '[0-9]'" not in text, name
+    assert "grep -c '[0-9]'" not in (EXAMPLE / "compose.yaml").read_text(encoding="utf-8")

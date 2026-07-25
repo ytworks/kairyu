@@ -33,12 +33,22 @@ services:
         # a pipeline into wc -l would report a failed nvidia-smi as "0 GPUs" and
         # blame the count for what is really an unusable driver inside the
         # container (stale CDI spec, driver/library mismatch, missing devices)
-        if ! gpu_list="$$(nvidia-smi --query-gpu=index --format=csv,noheader 2>&1)"; then
+        # stderr is NOT captured into the list: a warning carrying a date or bus
+        # id would be counted as another GPU
+        if ! gpu_list="$$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null)"; then
           echo "nvidia-smi failed inside the container; GPUs are not usable here:" >&2
-          echo "$$gpu_list" >&2
+          nvidia-smi --query-gpu=index --format=csv,noheader >&2 2>&1 || true
           exit 1
         fi
-        gpu_count="$$(printf '%s\n' "$$gpu_list" | grep -c '[0-9]')"
+        # awk, not `grep -c`: grep exits 1 on no matches and `set -e` would kill
+        # this before the found-0 diagnostic runs
+        unexpected="$$(printf '%s\n' "$$gpu_list" | awk 'NF && !/^[0-9]+$$/ { n++ } END { print n + 0 }')"
+        if [ "$$unexpected" -ne 0 ]; then
+          echo "nvidia-smi returned $$unexpected line(s) that are not GPU indices:" >&2
+          printf '%s\n' "$$gpu_list" >&2
+          exit 1
+        fi
+        gpu_count="$$(printf '%s\n' "$$gpu_list" | awk 'NF && /^[0-9]+$$/ { n++ } END { print n + 0 }')"
         case "$$gpu_count" in
           2|4|8) ;;
           *)

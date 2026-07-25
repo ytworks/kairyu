@@ -69,13 +69,21 @@ curl --fail --silent --show-error http://127.0.0.1:8001/readyz >/dev/null
 # a wrong number recorded next to real measurements
 if ! gpu_list="$(
   docker compose exec -T kairyu sh -ec \
-    "nvidia-smi --query-gpu=index --format=csv,noheader" 2>&1
+    "nvidia-smi --query-gpu=index --format=csv,noheader" 2>/dev/null
 )"; then
   echo "nvidia-smi failed inside the kairyu container:" >&2
-  echo "$gpu_list" >&2
+  docker compose exec -T kairyu sh -ec \
+    "nvidia-smi --query-gpu=index --format=csv,noheader" >&2 2>&1 || true
   exit 1
 fi
-gpu_count="$(printf '%s\n' "$gpu_list" | grep -c '[0-9]')"
+# a wrong GPU/TP count would be recorded in the header next to real measurements
+unexpected="$(printf '%s\n' "$gpu_list" | awk 'NF && !/^[0-9]+$/ { n++ } END { print n + 0 }')"
+if [ "$unexpected" -ne 0 ]; then
+  echo "nvidia-smi returned $unexpected line(s) that are not GPU indices:" >&2
+  printf '%s\n' "$gpu_list" >&2
+  exit 1
+fi
+gpu_count="$(printf '%s\n' "$gpu_list" | awk 'NF && /^[0-9]+$/ { n++ } END { print n + 0 }')"
 image_id="$(docker compose images -q kairyu)"
 if [ -z "$image_id" ]; then
   echo "Kairyu image not found; start the service first" >&2
