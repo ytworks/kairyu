@@ -210,6 +210,106 @@ def test_a_device_pool_gets_the_side_stream_handoff():
     assert wrapped.transfer((1, 2), 0, (0,)) == "allocation"
 
 
+def test_a_device_to_device_page_copy_lands_inside_the_stream_window():
+    """The production handoff on hardware: `LocalCopyKVHandoff` is what
+    `StreamCopyKVHandoff` wraps, so the D2D copy must be complete — and correct —
+    by the time transfer() returns, with no synchronize of our own."""
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.pd import LocalCopyKVHandoff
+    from kairyu.engine.core.pd_factory import build_kv_handoff
+    from kairyu.engine.core.radix_kv import RadixKVCache
+
+    _require_cuda()
+
+    def pool():
+        return PagedKVPool(
+            num_layers=2, num_pages=8, page_size=4, num_kv_heads=2, head_dim=64,
+            dtype=torch.bfloat16, device="cuda:0",
+        )
+
+    source_pool, dest_pool = pool(), pool()
+    source_cache = RadixKVCache(num_pages=8, page_size=4)
+    dest_cache = RadixKVCache(num_pages=8, page_size=4)
+
+    tokens = tuple(range(1, 10))  # 3 pages
+    source_allocation = source_cache.allocate(tokens)
+    source_cache.mark_computed(source_allocation)
+    with torch.no_grad():
+        for page in source_allocation.pages:
+            source_pool.k[:, page] = torch.randn_like(source_pool.k[:, page])
+            source_pool.v[:, page] = torch.randn_like(source_pool.v[:, page])
+
+    handoff = build_kv_handoff(
+        LocalCopyKVHandoff(dest_cache, source_pool, dest_pool), source_pool
+    )
+    assert isinstance(handoff, StreamCopyKVHandoff)
+    # no synchronize here on purpose: the commit point must never run ahead of
+    # the copy (m18 D3), so the destination must already hold the bytes
+    allocation = handoff.transfer(tokens, 7, tuple(source_allocation.pages))
+
+    for source, dest in zip(source_allocation.pages, allocation.pages, strict=True):
+        assert torch.equal(dest_pool.k[:, dest], source_pool.k[:, source])
+        assert torch.equal(dest_pool.v[:, dest], source_pool.v[:, source])
+
+
+def test_the_probed_default_places_the_pair_on_the_gpu(tmp_path):
+    """The live path the unit tests deliberately do not take: no injected
+    placement, so probe() picks the device and the selector picks FlashInfer.
+
+    head_dim 64 is deliberate — FlashInfer's MMA tiles reject a 16-wide head
+    outright, so a smaller fixture would only exercise the torch fallback.
+    """
+    import json
+
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.core.pd import LocalCopyKVHandoff
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+    from kairyu.engine.core.scheduler import EngineRequest
+
+    _require_cuda()
+    transformers = pytest.importorskip("transformers")
+
+    torch.manual_seed(71)
+    transformers.LlamaForCausalLM(
+        transformers.LlamaConfig(
+            vocab_size=256, hidden_size=256, intermediate_size=512,
+            num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+            max_position_embeddings=512,
+        )
+    ).to(torch.float32).eval().save_pretrained(tmp_path, safe_serialization=True)
+    (tmp_path / "tokenizer.json").write_text(
+        json.dumps(
+            {
+                "version": "1.0", "truncation": None, "padding": None,
+                "added_tokens": [], "normalizer": None,
+                "pre_tokenizer": {"type": "Whitespace"},
+                "post_processor": None, "decoder": None,
+                "model": {
+                    "type": "WordLevel",
+                    "vocab": {f"<{index}>": index for index in range(256)},
+                    "unk_token": "<0>",
+                },
+            }
+        )
+    )
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "PreTrainedTokenizerFast", "unk_token": "<0>"})
+    )
+
+    coordinator = build_pd_coordinator(
+        model_path=str(tmp_path), num_pages=64, page_size=16
+    )
+    handoff = coordinator._handoff
+    assert isinstance(handoff, StreamCopyKVHandoff), "a device pool got the plain handoff"
+    assert isinstance(handoff._inner, LocalCopyKVHandoff), "no byte copy behind it"
+
+    coordinator.add_request(EngineRequest("a", tuple(range(9)), max_new_tokens=4))
+    outputs = coordinator.run_to_completion()
+    assert len(outputs["a"]) == 4
+    assert not coordinator.failed_requests
+
+
 def test_the_provider_follows_the_pool_onto_a_second_device():
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.pd_factory import build_kv_handoff
@@ -306,32 +406,93 @@ def test_wait_for_pending_is_safe_with_nothing_pending():
     handoff.wait_for_pending()  # must not raise
 
 
-def test_the_paged_handoff_copies_device_pages_inside_the_stream_window():
-    """The deploy-day shape of the P-D handoff: two device pools, the copy on
-    the side stream. An accounting-only handoff would leave the destination
-    zero-initialised and decode would attend over empty KV."""
+def test_gating_orders_a_source_reuse_after_the_copy():
+    """The use-after-free this seam's defer opened, in miniature.
+
+    `PDCoordinator` hands the prefill-side pages back once the transfer returns;
+    with `defer=True` the copy is still READING them, and the next prefill step
+    allocates the same page and writes it on the caller's stream. `gate_pending()`
+    is what orders that rewrite after the copy — without stopping the host, so the
+    step the producer already queued keeps running.
+    """
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+
+    _require_cuda()
+    source = torch.full((1 << 24,), 7.0, device="cuda:0")  # 64 MB "source page"
+
+    class _SlowCopy:
+        def transfer(self, tokens, first_token, pages=()):
+            out = source.clone()
+            for _ in range(20):  # keep READING the source, widening the window
+                out = out + source
+            return out
+
+    handoff = StreamCopyKVHandoff(_SlowCopy(), CudaStreamProvider(), defer=True)
+    torch.cuda.synchronize()
+    copied = handoff.transfer((1,), 0)
+
+    handoff.gate_pending()  # the gate PDCoordinator applies before releasing
+    source.fill_(-1.0)  # the next step, reusing the page it just got back
+    torch.cuda.synchronize()
+
+    assert torch.equal(copied, torch.full_like(copied, 7.0 * 21))
+
+
+def test_gating_does_not_stop_the_host_the_way_waiting_does():
+    """Both settle the copy; only one of them gives up the overlap to do it."""
+    import time
+
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+
+    _require_cuda()
+    payload = torch.randn(1 << 24, device="cuda:0")
+
+    class _SlowCopy:
+        def transfer(self, tokens, first_token, pages=()):
+            out = payload.clone()
+            for _ in range(20):
+                out = out * 1.000001
+            return out
+
+    def _settle(settle_name):
+        torch.cuda.synchronize()
+        handoff = StreamCopyKVHandoff(_SlowCopy(), CudaStreamProvider(), defer=True)
+        handoff.transfer((1,), 0)
+        start = time.perf_counter()
+        getattr(handoff, settle_name)()
+        return time.perf_counter() - start
+
+    _settle("gate_pending")  # warm up allocator/kernels before timing
+    blocking = _settle("wait_for_pending")
+    gated = _settle("gate_pending")
+
+    assert gated < blocking, (
+        f"gate_pending {gated:.4f}s did not beat wait_for_pending {blocking:.4f}s; "
+        "it is supposed to express the dependency, not wait on it"
+    )
+    torch.cuda.synchronize()
+
+
+def test_the_production_coordinator_defers_on_a_device_pool():
+    """[P1] there was no production caller that enabled the deferred path."""
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
     from kairyu.engine.core.kv_pool import PagedKVPool
-    from kairyu.engine.core.pd_factory import PagedCopyKVHandoff, build_kv_handoff
-    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.pd_factory import build_kv_handoff
 
     _require_cuda()
 
-    def pool():
-        return PagedKVPool(
-            num_layers=2, num_pages=4, page_size=4, num_kv_heads=1, head_dim=4,
-            device="cuda:0",
-        )
+    class _Inner:
+        def transfer(self, tokens, first_token, pages=()):
+            return "allocation"
 
-    source, destination = pool(), pool()
-    source.k.copy_(torch.randn_like(source.k))
-    source.v.copy_(torch.randn_like(source.v))
-    cache = RadixKVCache(num_pages=4, page_size=4)
-    handoff = build_kv_handoff(
-        PagedCopyKVHandoff(cache, source, destination), source
+    pool = PagedKVPool(
+        num_layers=1, num_pages=4, page_size=4, num_kv_heads=1, head_dim=4,
+        device="cuda:0",
     )
-
-    allocation = handoff.transfer(tuple(range(8)), first_token=1, pages=(3, 0))
-
-    for target, origin in zip(allocation.pages, (3, 0), strict=True):
-        assert torch.equal(destination.k[:, target], source.k[:, origin])
-        assert torch.equal(destination.v[:, target], source.v[:, origin])
+    handoff = build_kv_handoff(_Inner(), pool, defer=True)
+    assert isinstance(handoff, StreamCopyKVHandoff)
+    assert handoff.defers
+    assert handoff.transfer((1, 2), 0, (0,)) == "allocation"
+    assert handoff.pending_events, "no completion event to gate on"
+    handoff.gate_pending()
+    assert handoff.pending_events == ()

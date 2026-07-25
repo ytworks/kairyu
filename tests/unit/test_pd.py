@@ -268,6 +268,145 @@ def test_transfer_failure_exhausts_retries_and_reports() -> None:
     assert coordinator.failed_requests == ("r",)
 
 
+# --- deferred handoff: the prefill-side lease (m18 D3 under m6 D4) ------------
+
+
+class _WatchedKVCache(RadixKVCache):
+    """Records every point at which prefill-side pages go back to the pool.
+
+    Sharing the stream provider's event list puts releases and stream calls on
+    ONE timeline, which is the only way to see the ordering bug: a release that
+    lands while a deferred copy is still reading the page it hands back.
+    """
+
+    def __init__(self, log: list[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._log = log
+
+    def commit_and_release(self, *args, **kwargs):
+        self._log.append("release")
+        return super().commit_and_release(*args, **kwargs)
+
+    def release_preempted(self, *args, **kwargs):
+        self._log.append("release")
+        return super().release_preempted(*args, **kwargs)
+
+    def free(self, *args, **kwargs):
+        self._log.append("release")
+        return super().free(*args, **kwargs)
+
+
+def _deferred_coordinator(*, failures: int = 0, max_transfer_retries: int = 1):
+    """A PDCoordinator whose handoff returns before its copy has finished."""
+    from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
+
+    provider = CpuNoopStream()
+    log = provider.events
+    prefill_kv = _WatchedKVCache(log, num_pages=64, page_size=4)
+    prefill_sched = Scheduler(prefill_kv, max_num_batched_tokens=32, page_size=4)
+    decode_sched, decode_kv = _make_pair()
+    inner = LocalKVHandoff(decode_kv)
+    coordinator = PDCoordinator(
+        prefill_scheduler=prefill_sched,
+        prefill_runner=_ToyRunner(),
+        decode_scheduler=decode_sched,
+        decode_runner=_ToyRunner(),
+        handoff=StreamCopyKVHandoff(
+            _FlakyHandoff(inner, failures) if failures else inner, provider, defer=True
+        ),
+        max_transfer_retries=max_transfer_retries,
+    )
+    return coordinator, log
+
+
+def _assert_no_release_under_a_running_copy(log: list[str]) -> None:
+    """The invariant: no prefill-side page is handed back while a copy is live.
+
+    ``record`` opens a copy whose source pages are still being read; ``wait``
+    (the gate, or a host wait) settles every copy outstanding at that point. A
+    ``release`` in between returns a page the copy has not finished reading, and
+    the next prefill step may allocate and overwrite it.
+    """
+    outstanding = 0
+    for index, event in enumerate(log):
+        if event == "record":
+            outstanding += 1
+        elif event == "wait":
+            outstanding -= 1
+        elif event == "release":
+            assert outstanding == 0, (
+                f"released prefill pages at {index} with {outstanding} copy(s) "
+                f"still reading them: {log}"
+            )
+    assert outstanding == 0, f"a deferred copy was never settled: {log}"
+    assert "record" in log, "the handoff never deferred; the test proves nothing"
+    assert "release" in log, "no prefill-side release happened; the test proves nothing"
+
+
+def test_the_deferred_copy_is_settled_before_the_source_pages_are_released() -> None:
+    coordinator, log = _deferred_coordinator()
+    request = EngineRequest("r", prompt_token_ids=(1, 2, 3, 4, 5, 6), max_new_tokens=3)
+    coordinator.add_request(request)
+
+    outputs = coordinator.run_to_completion()
+
+    assert outputs == _single_core_reference([request])
+    _assert_no_release_under_a_running_copy(log)
+
+
+def test_a_failed_deferred_transfer_settles_before_aborting_the_source() -> None:
+    """The failure path releases too, and a raising transfer may already have
+    queued part of the copy — so it has to be settled just the same."""
+    coordinator, log = _deferred_coordinator(failures=1)
+    request = EngineRequest("r", prompt_token_ids=(1, 2, 3, 4, 5, 6), max_new_tokens=3)
+    coordinator.add_request(request)
+
+    outputs = coordinator.run_to_completion()
+
+    assert outputs == _single_core_reference([request])
+    assert coordinator.failed_requests == ()
+    _assert_no_release_under_a_running_copy(log)
+
+
+def test_every_copy_in_a_batched_prefill_step_is_settled() -> None:
+    """One prefill step transfers every prompt that completed in it; keeping only
+    the last event would leave the earlier copies unordered."""
+    coordinator, log = _deferred_coordinator()
+    requests = [
+        EngineRequest(name, prompt_token_ids=prompt, max_new_tokens=2)
+        for name, prompt in (("a", (1, 2, 3, 4, 5, 6)), ("b", (7, 8, 9, 10, 11, 12)))
+    ]
+    for request in requests:
+        coordinator.add_request(request)
+
+    outputs = coordinator.run_to_completion()
+
+    assert outputs == _single_core_reference(requests)
+    assert log.count("record") == 2, f"expected one copy per prompt: {log}"
+    _assert_no_release_under_a_running_copy(log)
+
+
+def test_a_deferring_handoff_that_cannot_be_gated_is_refused() -> None:
+    """Silently skipping the gate would release pages under a live copy."""
+
+    class _UngatedDeferring:
+        defers = True
+
+        def transfer(self, tokens, first_token, pages=()):  # pragma: no cover
+            raise AssertionError("must not be reachable")
+
+    prefill_sched, _ = _make_pair()
+    decode_sched, decode_kv = _make_pair()
+    with pytest.raises(ValueError, match="gate_pending"):
+        PDCoordinator(
+            prefill_scheduler=prefill_sched,
+            prefill_runner=_ToyRunner(),
+            decode_scheduler=decode_sched,
+            decode_runner=_ToyRunner(),
+            handoff=_UngatedDeferring(),
+        )
+
+
 # --- PDLoopAdapter: the EngineLoop-facing seam --------------------------------
 
 

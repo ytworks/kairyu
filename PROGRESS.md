@@ -112,6 +112,31 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] one copying KV handoff in the P-D stack, not two
+- What: corrects two claims in the entry "the `pd_separation` serving path, corrected
+  after review" below. (1) It named `pd_factory.PagedCopyKVHandoff` as the handoff that
+  moves the KV bytes. The same [P1] had already been fixed one PR down the stack as
+  `pd.LocalCopyKVHandoff` (see "a production P-D constructor, and a handoff that actually
+  copies KV" below), on a branch this one had forked before. The duplicate is deleted and
+  `build_kv_handoff` / `build_pd_coordinator` wire `LocalCopyKVHandoff`, now the single
+  copying handoff in the stack. (2) It said the serving path takes the blocking handoff
+  because nothing settled a deferred copy. The entry "the deferred KV copy keeps its
+  source lease, and gets a caller" landed exactly that consumer, so the serving path now
+  inherits `build_pd_coordinator(defer_handoff=True)`: `PDLoopAdapter.schedule()` drives
+  `PDCoordinator.step_prefill`, whose `_release_source_pages` gates every prefill-side
+  release on the copy's completion event.
+- Why: two branches of one stack fixed the same P1 independently and only met at the
+  merge. Two implementations of the same Protocol are a place for the two to drift, and
+  the serving path would otherwise have used whichever one the merge happened to leave
+  wired. `LocalCopyKVHandoff` is the one kept because it validates more at the seam: pool
+  geometry AND cache/pool page-size agreement at construction, plus a source page count
+  that matches the prompt at transfer, where the duplicate only checked that some pages
+  were passed. Its tests subsume the duplicate's, so no coverage is dropped with it.
+  Correcting rather than editing the entries below, per the append-only rule.
+- Refs: m18 D3, `kairyu/engine/core/pd.py`, `kairyu/engine/core/pd_factory.py`,
+  `kairyu/engine/core/pd_loop.py`, `tests/unit/test_pd_factory.py`,
+  `tests/gpu/test_handoff_stream_gpu.py`, PRs #140 / #142 / #144
+
 ### 2026-07-26 — [amendment] the `pd_separation` serving path, corrected after review
 - What: corrects the entry below it, which claimed the P-D serving chain was complete.
   It was not: the loop it described could not execute even its first request, and would
@@ -150,6 +175,58 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   are rejected with pd_separation rather than silently serving a different topology.
 - Refs: m18 D3 (amended), `kairyu/engine/core/pd_factory.py`,
   `kairyu/engine/core/handoff_stream.py`, `kairyu/engine/kairyu_backend.py`
+
+### 2026-07-26 — [amendment] m18 D3: the deferred KV copy keeps its source lease, and gets a caller
+- What: `StreamCopyKVHandoff(defer=True)` records the copy's completion event instead of
+  blocking, and `PDCoordinator` is now the consumer that settles it.
+  `_release_source_pages` became the single point where prefill-side pages go back —
+  commit and abort alike — and it calls `gate_pending()` first. The gate is stream-ordered
+  (`event.wait(current_stream)`), not a host block. Deferred events now ACCUMULATE rather
+  than occupying one slot. `PDCoordinator` refuses a deferring handoff that exposes no
+  `gate_pending()`. `pd_factory.build_pd_coordinator(defer_handoff=True)` is the default
+  and the only caller that enables deferring; `build_kv_handoff(..., defer=...)` stays off
+  for everyone else.
+- Why: two [P1]s on PR #142. (1) Deferring returned while the copy was still READING the
+  prefill-side pages, and the coordinator's m6 D4 release ran immediately after — so the
+  next prefill step could allocate the same page and overwrite it on the caller's stream
+  under the running copy. Waiting on the destination does not prevent that; it is a
+  source-side read/write race, and the failure path (`abort()` → `release_preempted`) had
+  it too, since a raising transfer may already have queued part of the copy. A single
+  `pending_event` slot compounded it: a prefill step transfers every prompt that completed
+  in it, so all but the last copy went unordered. (2) Nothing in production enabled or
+  settled the deferred path — `build_kv_handoff` constructed the blocking form and no
+  caller used `wait_for_pending` — so "overlap landed" was not true of any shipped path.
+- Refs: m18 D3 (amended), `kairyu/engine/core/handoff_stream.py`,
+  `kairyu/engine/core/pd.py`, `kairyu/engine/core/pd_factory.py`,
+  `tests/unit/test_pd.py`, `tests/unit/test_pd_factory.py`,
+  `tests/gpu/test_handoff_stream_gpu.py`
+
+### 2026-07-26 — [amendment] m18 D3: a production P-D constructor, and a handoff that actually copies KV
+- What: `kairyu/engine/core/pd_factory.py` gives `PDCoordinator` its first production
+  constructor — `build_pd_coordinator()` assembles a prefill/decode pair from one
+  checkpoint, and `build_kv_handoff()` selects the handoff from where the KV lives (host
+  pool → plain, device pool → `StreamCopyKVHandoff` over a `CudaStreamProvider` bound to
+  that pool's device). Review [P1] then found the constructor wrapped `LocalKVHandoff`,
+  which copies no bytes; `pd.LocalCopyKVHandoff` replaces it as the inner handoff.
+  Review [P2]: placement (`profile`/`device`/`dtype`/`attention_backend`) is now
+  injectable, so unit tests no longer probe hardware or require optional FlashInfer.
+- Why: the stream seam had no production caller because nothing could reach a `KVHandoff`
+  at all — `PDCoordinator` existed only in `tests/unit/test_pd.py`. Correctness: the two
+  halves own separate `PagedKVPool`s, so the accounting-only `LocalKVHandoff` published
+  the decode pool's untouched (zeroed) pages as *computed*. Decode continued from KV that
+  was never written and the radix tree served that wrong prefix to later matches —
+  silently, since nothing raises and the token counts are unchanged.
+  `LocalCopyKVHandoff` does a direct pool-to-pool page copy (D2D on a device pair, rather
+  than `RemoteKVHandoff`'s D2H+H2D serde round-trip, since in-process there is no wire),
+  skipping only the destination's already-cached prefix pages, and releases the allocation
+  rather than publishing a half-written one if the copy fails. `LocalKVHandoff` is now
+  documented as a test double, not a deployment option. Tests assert destination KV byte
+  parity with the source and P-D/single-engine greedy token parity, both of which fail
+  without the copy. Still open: overlap with the next forward (needs a completion event
+  instead of the host-wide wait), and the serving-layer `pd_separation` option (G2 5.3).
+- Refs: m18 D3 (amended twice), `kairyu/engine/core/pd_factory.py`,
+  `kairyu/engine/core/pd.py`, `tests/unit/test_pd_factory.py`,
+  `tests/gpu/test_handoff_stream_gpu.py`
 
 ### 2026-07-25 — [amendment] m18 D3: CudaStreamProvider landed; KV serde can read a device pool
 - What: `CudaStreamProvider` implemented (the deploy-day half of the m18 D3 stream seam),

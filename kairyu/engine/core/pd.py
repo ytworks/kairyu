@@ -5,9 +5,19 @@ is ever scheduled there; the coordinator intercepts at execute-completion —
 after the KV is written, before ``update()`` commits — transfers the prompt KV
 plus token 0 to the decode core, and only then commits (copy-before-commit:
 ``commit_and_release`` must not pool-free the tail page under the copy). The
-decode core adopts via ``Scheduler.resume_with_kv``. On CPU the "copy" is page
-adoption in the destination cache; the GPU phase swaps in a device copy behind
-the same ``KVHandoff`` seam, and M6 swaps in a network transport.
+decode core adopts via ``Scheduler.resume_with_kv``.
+
+Three handoffs sit behind the ``KVHandoff`` seam: ``LocalCopyKVHandoff`` (same
+process, real page bytes — what a deployment gets, on host or device),
+``RemoteKVHandoff`` (m18, over a transport), and ``LocalKVHandoff``, which does
+the accounting and nothing else and is a test double, not a deployment option.
+
+A handoff that DEFERS (m18 D3, ``StreamCopyKVHandoff(defer=True)``) returns while
+its copy is still running. The coordinator then holds the prefill-side lease
+itself: no commit, no abort, no release happens until ``_release_source_pages``
+has gated on the copy's completion event. Without that, the released source page
+is re-allocated by the next prefill step and overwritten on the caller's stream
+while the side stream is still reading it.
 """
 
 from __future__ import annotations
@@ -15,11 +25,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from kairyu.engine.core.engine_core import ModelRunner, token_ids
 from kairyu.engine.core.radix_kv import KVAllocation, KVCacheFull, RadixKVCache
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+
+if TYPE_CHECKING:  # pragma: no cover
+    from kairyu.engine.core.kv_pool import PagedKVPool
 
 _PREFILL_ID_SEPARATOR = "#p"
 
@@ -42,11 +55,15 @@ class KVHandoff(Protocol):
 
 
 class LocalKVHandoff:
-    """Same-process handoff: adopt the prompt's pages in the destination cache.
+    """Accounting-only handoff: adopt the prompt's pages in the destination cache.
 
-    Page *contents* exist only on devices (GPU phase); CPU-side the transfer is
-    the accounting half — allocate in the destination (skipping pages already
-    cached there, the receiver-side dedup of design m6 D4) and mark computed.
+    NOT a production handoff. It allocates in the destination (skipping pages
+    already cached there, the receiver-side dedup of design m6 D4) and marks
+    computed WITHOUT touching either pool, so it is correct only when both
+    halves index the same ``PagedKVPool`` — which a real prefill/decode pair
+    never does. Deployments build ``LocalCopyKVHandoff`` (same process, real
+    bytes) or ``RemoteKVHandoff`` (over a transport); this one exists so the
+    protocol tests can drive ordering with a runner that has no pool at all.
     """
 
     def __init__(self, dest_kv: RadixKVCache) -> None:
@@ -61,6 +78,101 @@ class LocalKVHandoff:
             raise KVHandoffError(f"destination cache full: {error}") from error
         self._dest.mark_computed(allocation)
         return allocation
+
+
+def _geometry(pool: PagedKVPool) -> tuple:
+    """Everything a page copy has to agree on; device deliberately excluded."""
+    return (
+        pool.num_layers,
+        pool.page_size,
+        pool.num_kv_heads,
+        pool.head_dim,
+        pool.v_head_dim,
+        pool.k.dtype,
+    )
+
+
+class LocalCopyKVHandoff:
+    """Same-process handoff that moves the KV BYTES, not just the accounting.
+
+    The failure this exists to prevent: with ``LocalKVHandoff`` between two
+    engines that own separate pools, ``transfer()`` publishes the destination
+    allocation as *computed* while its pages still hold whatever was in them —
+    zeros on a fresh pool. Decode then continues from KV that was never
+    written, and the radix tree hands that wrong prefix to every later request
+    that matches it. Nothing raises; the tokens are simply wrong.
+
+    Same shape as ``RemoteKVReceiver`` minus the wire: allocate in the
+    destination, skip the leading ``len(cached_pages)`` source pages (radix
+    matches are prefix-only, so receiver-side dedup skips the COPY, not the
+    pages — design m6 D4), copy the rest page-for-page, and only then mark
+    computed. A failed copy releases the allocation instead of publishing a
+    half-written prefix.
+
+    The copy is a direct pool-to-pool tensor copy rather than the serde
+    round-trip ``RemoteKVHandoff`` uses: within one process there is no wire, so
+    a device pair stays device-to-device instead of paying D2H + H2D. That copy
+    is exactly the work ``StreamCopyKVHandoff`` puts on a side stream.
+    """
+
+    def __init__(
+        self, dest_kv: RadixKVCache, source_pool: PagedKVPool, dest_pool: PagedKVPool
+    ) -> None:
+        if _geometry(source_pool) != _geometry(dest_pool):
+            raise ValueError(
+                "prefill and decode pools must have the same geometry: "
+                f"{_geometry(source_pool)} != {_geometry(dest_pool)}"
+            )
+        if dest_pool.page_size != dest_kv.page_size:
+            raise ValueError(
+                f"pool page_size {dest_pool.page_size} != cache page_size "
+                f"{dest_kv.page_size}"
+            )
+        self._dest = dest_kv
+        self._source_pool = source_pool
+        self._dest_pool = dest_pool
+
+    def transfer(
+        self, tokens: tuple[int, ...], first_token: int, pages: tuple[int, ...] = ()
+    ) -> KVAllocation:
+        tokens = tuple(tokens)
+        if not tokens:
+            raise KVHandoffError("local copy handoff requires a non-empty prompt")
+        page_size = self._dest_pool.page_size
+        expected = -(-len(tokens) // page_size)
+        if len(pages) != expected:
+            raise KVHandoffError(
+                f"expected {expected} source pages for {len(tokens)} tokens, "
+                f"got {len(pages)} — the source allocation is not this prompt's"
+            )
+        try:
+            allocation = self._dest.allocate(tokens)
+        except KVCacheFull as error:
+            raise KVHandoffError(f"destination cache full: {error}") from error
+        try:
+            targets = tuple(
+                page
+                for page in (*allocation.new_full_pages, allocation.tail_page)
+                if page is not None
+            )
+            incoming = tuple(pages)[len(allocation.cached_pages) :]
+            if len(incoming) != len(targets):
+                raise KVHandoffError(
+                    f"{len(incoming)} source pages for {len(targets)} destination slots"
+                )
+            for source_page, dest_page in zip(incoming, targets, strict=True):
+                self._copy_page(source_page, dest_page)
+            self._dest.mark_computed(allocation)
+            return allocation
+        except Exception:
+            self._dest.release_preempted(allocation)
+            raise
+
+    def _copy_page(self, source_page: int, dest_page: int) -> None:
+        """All layers of one logical page; ``k[:, page]`` is a strided view."""
+        self._dest_pool.k[:, dest_page].copy_(self._source_pool.k[:, source_page])
+        if self._dest_pool.v_head_dim:  # MLA keeps the latent in k (m15 A7)
+            self._dest_pool.v[:, dest_page].copy_(self._source_pool.v[:, source_page])
 
 
 class PDCoordinator:
@@ -92,6 +204,20 @@ class PDCoordinator:
         # the request while it is still prefill-side, and to reclaim the clone's
         # scheduler/runner state when the request is forgotten.
         self._internal: dict[str, str] = {}
+        self._retries: list[tuple[str, EngineRequest, int]] = []
+        # A deferring handoff (m18 D3) returns while the copy is still reading the
+        # prefill-side pages, so this coordinator owns the lease on them until the
+        # copy's completion event says otherwise. Refuse one that cannot be gated
+        # rather than releasing pages under a copy we have no way to order against.
+        self._gate_pending = None
+        if getattr(handoff, "defers", False):
+            gate = getattr(handoff, "gate_pending", None)
+            if gate is None:
+                raise ValueError(
+                    "a deferring KVHandoff must expose gate_pending(); without it "
+                    "the prefill-side pages would be released under a running copy"
+                )
+            self._gate_pending = gate
 
     @property
     def decode_scheduler(self) -> Scheduler:
@@ -169,7 +295,14 @@ class PDCoordinator:
         self._outputs.pop(request_id, None)
 
     def _handoff_or_retry(self, internal_id: str, token0: int) -> bool:
-        """Transfer one prompt's KV; return True if the commit may proceed."""
+        """Transfer one prompt's KV; return True if the commit may proceed.
+
+        A failure is QUEUED here, not acted on: aborting frees the prefill-side
+        pages, and with a deferring handoff the copy may still be reading them
+        even though ``transfer()`` raised — a partially queued copy still has to
+        finish before its source is handed back. ``_release_source_pages`` is the
+        single place that gates first and releases second.
+        """
         original, attempt = self._pending.pop(internal_id)
         state = self._prefill.states.get(internal_id)
         source_pages: tuple[int, ...] = ()
@@ -180,6 +313,35 @@ class PDCoordinator:
                 original.prompt_token_ids, token0, source_pages
             )
         except KVHandoffError:
+            self._retries.append((internal_id, original, attempt))
+            return False
+        finished = self._decode.resume_with_kv(original, allocation, token0)
+        if finished:
+            self._outputs[original.request_id] = self._decode.output_tokens(
+                original.request_id
+            )
+        return True
+
+    def _release_source_pages(self, commit: dict[str, int]) -> None:
+        """Hand the prefill-side pages back — never before the copy has read them.
+
+        Both exits release: ``update()`` finishes the max_new_tokens=1 clone and
+        ``commit_and_release`` pool-frees its tail page, and ``abort()``
+        release-preempts the whole allocation. Either way the pages return to the
+        prefill pool, and the very next prefill step can allocate them again and
+        overwrite them on the caller's stream.
+
+        With the blocking handoff that is safe because ``transfer()`` did not
+        return until the copy finished. With a deferring one it is not, so the
+        release is ordered after the copy's completion event first (m6 D4 under
+        m18 D3's defer). The gate is stream-ordered, not a host block: the step
+        the producer queued while the copy ran keeps running, and the same
+        dependency also covers the decode core's read of the destination pages,
+        which is queued on that stream after this point.
+        """
+        if self._gate_pending is not None:
+            self._gate_pending()
+        for internal_id, original, attempt in self._retries:
             # copy failed before commit: the prefill-side KV is released
             # un-marked and the request recomputes from scratch (design m6 D4)
             self._prefill.abort(internal_id)
@@ -191,13 +353,9 @@ class PDCoordinator:
                 self._enqueue(original, attempt + 1)
             else:
                 self._failed.append(original.request_id)
-            return False
-        finished = self._decode.resume_with_kv(original, allocation, token0)
-        if finished:
-            self._outputs[original.request_id] = self._decode.output_tokens(
-                original.request_id
-            )
-        return True
+        self._retries.clear()
+        if commit:
+            self._prefill.update(commit)
 
     def step_prefill(self, *, reject_on_stall: bool = False) -> None:
         """One prefill step: schedule, execute, hand the KV off, then commit.
@@ -223,8 +381,7 @@ class PDCoordinator:
             for internal_id, tokens in sampled.items()
             if self._handoff_or_retry(internal_id, token0 := tokens[0].token_id)
         }
-        if commit:
-            self._prefill.update(commit)
+        self._release_source_pages(commit)
 
     def _step_decode(self) -> None:
         plan = self._decode.schedule()
