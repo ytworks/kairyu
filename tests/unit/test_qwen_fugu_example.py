@@ -1,0 +1,348 @@
+"""Static contract for the Qwen3-32B Fugu-suite example scripts.
+
+The scripts cannot be executed here (they need GPUs and a served model), so the
+properties that would silently produce a wrong or misleading number are pinned
+statically: the model is preflighted by exact id, a subset run announces itself,
+and the accuracy report is what the operator is pointed at.
+"""
+
+import re
+import stat
+from pathlib import Path
+
+import pytest
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "qwen3-32b-multi-gpu"
+
+
+def _run_args(**overrides):
+    """Minimal `kairyu bench run` namespace for config assembly."""
+    import argparse
+
+    defaults = dict(
+        config=None,
+        base_url="http://gw/v1",
+        model=["qwen3-32b"],
+        target=None,
+        api_key_env=None,
+        no_vision=False,
+        reasoning_effort=None,
+        top_p=None,
+        sampling_seed=None,
+        extra_body=None,
+        suite=None,
+        only=None,
+        exclude=None,
+        limit=None,
+        attempts=None,
+        smoke=False,
+        offline_fixtures=False,
+        seed=None,
+        judge_base_url=None,
+        judge_model=None,
+        judge_api_key_env=None,
+        judge_reasoning_effort=None,
+        judge_extra_body=None,
+        concurrency=None,
+        results_dir=None,
+        run_id=None,
+        rerun=False,
+        cache_dir=None,
+        no_download=False,
+        no_progress=False,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+FUGU = EXAMPLE / "fugu-benchmark.sh"
+RUN_FUGU = EXAMPLE / "run-fugu-benchmark.sh"
+
+
+@pytest.fixture(scope="module")
+def fugu_text() -> str:
+    return FUGU.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def run_fugu_text() -> str:
+    return RUN_FUGU.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("script", [FUGU, RUN_FUGU])
+def test_scripts_are_executable_posix_sh(script):
+    assert script.is_file(), script
+    assert script.read_text(encoding="utf-8").startswith("#!/bin/sh")
+    assert stat.S_IMODE(script.stat().st_mode) & stat.S_IXUSR
+    # fail fast on unset variables and errors, like the sibling scripts
+    assert "set -eu" in script.read_text(encoding="utf-8")
+
+
+def test_readiness_is_waited_for_before_benchmarking(fugu_text, run_fugu_text):
+    for text in (fugu_text, run_fugu_text):
+        assert "/readyz" in text
+
+
+def test_served_model_is_preflighted_by_exact_id(fugu_text):
+    """A healthy gateway can pass readyz while serving a different model."""
+    assert "/models" in fugu_text
+    # ids come out of the response, then compare as STRINGS: MODEL must never be
+    # interpolated into the pattern, or the "exact id" check is a glob
+    assert '[ "$served_id" = "$model" ]' in fugu_text
+    assert "${model}" not in fugu_text.split("served_ids=")[1].split("found=0")[0]
+    # and the run stops rather than benchmarking the wrong deployment
+    assert re.search(r"is not served at.*\n.*exit 1", fugu_text, re.S)
+
+
+def test_judge_defaults_to_the_same_gateway(fugu_text):
+    """The tau user simulator must share one OPENAI_BASE_URL with the target."""
+    assert "--judge-base-url" in fugu_text
+    assert 'judge_model="${JUDGE_MODEL:-$model}"' in fugu_text
+
+
+def test_subset_and_full_runs_are_both_announced(fugu_text):
+    """A capped run must never be mistaken for a full-suite number."""
+    assert "SUBSET RUN" in fugu_text
+    assert "FULL RUN" in fugu_text
+    assert 'bench_limit="${BENCH_LIMIT:-20}"' in fugu_text
+    assert "--limit" in fugu_text
+
+
+def test_fixture_mode_says_its_scores_are_meaningless(fugu_text):
+    assert "OFFLINE FIXTURES" in fugu_text
+    assert "not meaningful" in fugu_text
+    assert "--offline-fixtures" in fugu_text
+
+
+def test_fugu_conditions_are_reachable_from_the_environment(fugu_text):
+    for flag in (
+        "--reasoning-effort",
+        "--judge-reasoning-effort",
+        "--extra-body",
+        "--attempts",
+        "--only",
+        "--exclude",
+    ):
+        assert flag in fugu_text, flag
+
+
+def test_operator_is_pointed_at_both_artifacts(fugu_text):
+    assert "scoreboard.md" in fugu_text
+    assert "comparison.md" in fugu_text
+
+
+def test_dataset_extra_is_installed_for_the_run(fugu_text):
+    """The serving image has no dataset deps; the suite runs on the host."""
+    assert "uv run --extra bench kairyu bench run" in fugu_text
+    assert "command -v uv" in fugu_text
+
+
+def test_one_command_entry_point_starts_then_benchmarks(run_fugu_text):
+    assert "./run.sh --detach" in run_fugu_text
+    assert "exec ./fugu-benchmark.sh" in run_fugu_text
+    # an already-running service is reused rather than restarted
+    assert "already ready" in run_fugu_text
+
+
+def test_text_only_target_is_declared_text_only(fugu_text):
+    """Qwen3-32B is a causal LM; the vision family is the separate Qwen3-VL.
+
+    Declaring it vision-capable would let CharXiv and HLE image rows be measured
+    on prompts whose image parts the text-only chat template drops.
+    """
+    assert "--no-vision" in fugu_text
+    assert 'vision_flag="--no-vision"' in fugu_text
+    assert "VISION" in fugu_text  # an opt-in for a genuinely multimodal deployment
+    assert "$vision_flag" in fugu_text
+
+
+def test_no_vision_flag_narrows_the_target():
+    from kairyu.bench.config import build_config
+
+    assert build_config(_run_args(no_vision=True)).targets[0].supports_vision is False
+    assert build_config(_run_args()).targets[0].supports_vision is True
+
+
+def test_vision_slots_skip_on_a_text_only_target(tmp_path):
+    """The honest outcome: skipped, not a score from an image-free prompt."""
+    import httpx
+
+    from kairyu.bench.adapters.base import RunContext
+    from kairyu.bench.adapters.charxiv import CharXivAdapter
+    from kairyu.bench.adapters.hle import HleAdapter
+    from kairyu.bench.cache import BenchCache
+    from kairyu.bench.judge import JudgeClient
+    from kairyu.bench.types import BenchItem, BenchTarget, JudgeConfig, SkipItem
+
+    target = BenchTarget(base_url="http://gw/v1", model="qwen3-32b", supports_vision=False)
+    ctx = RunContext(
+        cache=BenchCache(tmp_path / "cache"),
+        http_factory=lambda: httpx.AsyncClient(),
+        offline_fixtures=True,
+        # a judge is configured, so vision is the only unmet precondition left
+        judge=JudgeClient(
+            JudgeConfig(base_url="http://gw/v1", model="j"),
+            http_factory=lambda: httpx.AsyncClient(),
+        ),
+    )
+    assert "vision" in CharXivAdapter().check_preconditions(target, ctx)
+
+    image_item = BenchItem(
+        id="x",
+        payload={
+            "question": "Q",
+            "answer": "A",
+            "answer_type": "multipleChoice",
+            "image": "data:image/png;base64,AAAA",
+        },
+    )
+    assert isinstance(HleAdapter().build_request(image_item, target, ctx), SkipItem)
+
+
+def test_subset_warning_is_said_to_survive_into_the_artifacts(fugu_text):
+    assert "scoreboard.md and comparison.md" in fugu_text
+    assert "withhold every delta" in fugu_text
+
+
+def test_port_reaches_the_compose_mapping(run_fugu_text):
+    """PORT=9000 must not start a healthy service on 8001 and then time out."""
+    compose = (EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
+    assert '"127.0.0.1:${PORT:-8001}:8000"' in compose
+    assert 'export PORT="$port"' in run_fugu_text
+    assert "export PORT" in (EXAMPLE / "run.sh").read_text(encoding="utf-8")
+
+
+def test_readme_documents_the_quality_suite():
+    readme = (EXAMPLE / "README.md").read_text(encoding="utf-8")
+    assert "run-fugu-benchmark.sh" in readme
+    assert "BENCH_LIMIT" in readme
+    assert "comparison.md" in readme
+
+
+# -- runtime boundaries (executed, not only grepped) ---------------------------
+
+
+def _stub_uv(tmp_path: Path) -> Path:
+    """A PATH where `uv` records that it ran, so "never reached" is provable."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    marker = tmp_path / "uv-was-invoked"
+    (bindir / "uv").write_text(
+        f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8"
+    )
+    (bindir / "uv").chmod(0o755)
+    return bindir
+
+
+def _run_script(tmp_path: Path, env: dict[str, str], *, port: int | None = None):
+    """Run fugu-benchmark.sh with a stub uv; returns (CompletedProcess, marker)."""
+    import os
+    import subprocess
+
+    bindir = _stub_uv(tmp_path)
+    marker = tmp_path / "uv-was-invoked"
+    environ = dict(os.environ)
+    environ["PATH"] = f"{bindir}{os.pathsep}{environ['PATH']}"
+    environ.update(env)
+    if port is not None:
+        environ["PORT"] = str(port)
+    completed = subprocess.run(
+        ["sh", str(FUGU)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=environ,
+        check=False,
+    )
+    return completed, marker
+
+
+@pytest.mark.parametrize("value", ["invalid", "-5", "1.5", "20x", " "])
+def test_a_bad_bench_limit_never_reaches_the_benchmark(tmp_path, value):
+    """`[ "$x" -gt 0 ]` returns 2 on a non-integer, and inside an `if` that does
+    not trip `set -e`: an unvalidated typo would fall through to the else branch
+    and launch a FULL RUN of tens of thousands of judged items."""
+    completed, marker = _run_script(tmp_path, {"BENCH_LIMIT": value})
+    assert completed.returncode != 0
+    assert "BENCH_LIMIT must be a non-negative integer" in completed.stderr
+    assert "FULL RUN" not in completed.stdout
+    assert not marker.exists(), "the benchmark must not have been launched"
+
+
+@pytest.mark.parametrize("name", ["ATTEMPTS", "BENCH_CONCURRENCY", "PORT"])
+def test_other_numeric_inputs_are_validated_too(tmp_path, name):
+    completed, marker = _run_script(tmp_path, {name: "nope"})
+    assert completed.returncode != 0
+    assert f"{name} must be a non-negative integer" in completed.stderr
+    assert not marker.exists()
+
+
+def _serve_models(ids: list[str]):
+    """A minimal gateway exposing /readyz and /v1/models on an ephemeral port."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = _json.dumps(
+        {"object": "list", "data": [{"id": model_id} for model_id in ids]}
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            body = b'{"status":"ready"}' if self.path == "/readyz" else payload
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_model_preflight_compares_ids_exactly(tmp_path):
+    """MODEL must never be interpolated into the match pattern.
+
+    `qwen3.32b` as a regex matches `qwen3X32b`, which would silently benchmark
+    the wrong deployment.
+    """
+    server = _serve_models(["qwen3X32b"])
+    try:
+        port = server.server_address[1]
+        completed, marker = _run_script(
+            tmp_path, {"MODEL": "qwen3.32b"}, port=port
+        )
+        assert completed.returncode != 0
+        assert "is not served" in completed.stderr
+        assert not marker.exists()
+    finally:
+        server.shutdown()
+
+
+def test_model_preflight_accepts_the_exact_id(tmp_path):
+    server = _serve_models(["other-model", "qwen3-32b"])
+    try:
+        port = server.server_address[1]
+        completed, marker = _run_script(
+            tmp_path,
+            {"MODEL": "qwen3-32b", "BENCH_LIMIT": "1", "RESULTS_DIR": str(tmp_path / "r")},
+            port=port,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "serving qwen3-32b" in completed.stdout
+        assert marker.exists(), "the benchmark should have been launched"
+    finally:
+        server.shutdown()
+
+
+def test_model_preflight_rejects_a_prefix_of_a_served_id(tmp_path):
+    server = _serve_models(["qwen3-32b-instruct"])
+    try:
+        port = server.server_address[1]
+        completed, _ = _run_script(tmp_path, {"MODEL": "qwen3-32b"}, port=port)
+        assert completed.returncode != 0
+        assert "is not served" in completed.stderr
+    finally:
+        server.shutdown()

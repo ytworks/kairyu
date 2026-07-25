@@ -26,12 +26,14 @@ def parse_target_flag(spec: str, **sampling) -> BenchTarget:
 
 
 def _cli_sampling(args) -> dict:
-    """CLI sampling knobs, applied to every CLI-declared target."""
+    """CLI target overrides, applied to every CLI-declared target."""
     options = {
         "reasoning_effort": getattr(args, "reasoning_effort", None),
         "top_p": getattr(args, "top_p", None),
         "seed": getattr(args, "sampling_seed", None),
         "extra_body_json": getattr(args, "extra_body", None),
+        # only ever narrows the default; `--no-vision` absent means "unspecified"
+        "supports_vision": False if getattr(args, "no_vision", False) else None,
     }
     return {key: value for key, value in options.items() if value is not None}
 

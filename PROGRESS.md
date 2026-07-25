@@ -112,6 +112,46 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
+- What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
+  are now passed to every fetch (they were recorded but unused, so the cache and run
+  fingerprint attested unpinned bytes as pinned); LiveCodeBench Pro fails closed on any
+  partial fetch instead of caching a shrunken denominator; MRCRv2 selects the official
+  `o200k_base` prompt+answer bins (exactly 500 rows) rather than a chars/4 approximation;
+  SciCode scores the official 288 sub-steps, supplies the three the evaluator skips, and
+  pins `test_data.h5` by content hash; Harbor/τ commands match the real 0.17/tau2
+  contracts (`trial_results` + `verifier_result.rewards`, imported `DATA_DIR`, unique
+  `--save-to`); `extra_body` can no longer override built request or sampling fields; the
+  progress reporter can no longer abort a run and heartbeats agentic slots; comparability
+  is decided per cell so subset/fixture/dynamic-substitution runs withhold their deltas;
+  and the Qwen example declares its text-only target so vision slots skip honestly.
+- Why: Each finding let a number look like something it was not — a false provenance
+  attestation, a shrunken denominator, a different population, or an unmarked delta
+  against a published full-suite score.
+- Refs: PRs #115–#123 review comments; `kairyu/bench/**`, `tests/bench/**`,
+  `tests/unit/test_qwen_fugu_example.py`, `examples/qwen3-32b-multi-gpu/**`,
+  `docs/benchmarks.md`.
+
+### 2026-07-25 — [progress] One-command Fugu quality benchmark for the Qwen3-32B example
+- What: Added `examples/qwen3-32b-multi-gpu/{run-,}fugu-benchmark.sh`. The first starts the
+  all-GPU service (reusing one already running), waits for readiness, and chains into the
+  second, which preflights the served model by exact id, declares the text-only target
+  with `--no-vision`, runs `kairyu bench run` from the repository with the `bench` extra,
+  and points the operator at both `scoreboard.md` and `comparison.md`. Every Fugu
+  condition is reachable by environment variable (`REASONING_EFFORT`,
+  `JUDGE_REASONING_EFFORT`, `EXTRA_BODY`, `ATTEMPTS`, `BENCH_ONLY`); `BENCH_LIMIT` defaults
+  to 20 items per slot and announces itself as a subset run, with `BENCH_LIMIT=0` for the
+  full suite. `PORT` reaches the Compose mapping. A static test pins the properties that
+  would otherwise silently produce a misleading number.
+- Why: The existing example only measured throughput. The quality suite runs on the host
+  rather than in the serving image because the image carries no dataset dependencies —
+  documented rather than worked around.
+- Refs: `examples/qwen3-32b-multi-gpu/{fugu-benchmark.sh,run-fugu-benchmark.sh,README.md,
+  compose.yaml,run.sh}`, `kairyu/bench/{cli,config}.py`,
+  `tests/unit/test_qwen_fugu_example.py`. Verified end-to-end against a mock gateway
+  (all 11 slots, progress, vision skips, subset banner, accuracy report); the GPU host run
+  is still pending.
+
 ### 2026-07-25 — [amendment] MRCRv2 scores Fugu's 8-needle / 128K slice
 - What: The MRCR adapter averaged all 2,400 published rows, which mix 2-, 4- and
   8-needle items across context lengths up to 1M tokens. It now selects only

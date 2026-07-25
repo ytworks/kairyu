@@ -35,6 +35,12 @@ def add_bench_parser(subparsers) -> None:
     )
     run.add_argument("--api-key-env", default=None, help="Env VAR holding the API key")
     run.add_argument(
+        "--no-vision",
+        action="store_true",
+        help="Declare the target text-only, so vision slots skip instead of being "
+        "measured on prompts with the image silently dropped",
+    )
+    run.add_argument(
         "--reasoning-effort",
         default=None,
         help="reasoning_effort sent to every target (Fugu reports max effort)",
