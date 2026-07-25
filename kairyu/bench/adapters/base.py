@@ -46,6 +46,12 @@ class AdapterInfo:
     metric: str  # human name of the score ("accuracy", "pass@1", ...)
     hf_dataset: str | None = None
     hf_revision: str | None = None
+    # Secondary sources this slot's rows depend on — testcase archives, golden
+    # data — as (identifier, pin). They decide the tests and expected answers, so
+    # they belong in cache invalidation and provenance next to the main dataset:
+    # otherwise repinning one leaves a stale cache "ready" while the methodology
+    # advertises the new pin.
+    extra_sources: tuple[tuple[str, str], ...] = ()
     gated: bool = False
     needs_docker: bool = False
     needs_execution: bool = False
@@ -70,6 +76,8 @@ class RunContext:
     judge: JudgeClient | None = None
     limit: int | None = None
     seed: int = 0
+    attempts: int = 1  # agentic trials per task (Terminal-Bench -k, tau --num-trials)
+    run_id: str = ""  # provenance for artifacts the external harnesses name themselves
     concurrency: int = 8
     retries: int = 2
     request_timeout_s: float = 600.0
@@ -94,6 +102,15 @@ class RequestFailed(RuntimeError):
         super().__init__(f"HTTP {status_code}: {body[:300]}")
         self.status_code = status_code
         self.body = body
+
+
+def cache_pins(info: AdapterInfo) -> dict:
+    """The pins every readiness check and identity record must agree on."""
+    return {
+        "dataset": info.hf_dataset,
+        "revision": info.hf_revision,
+        "sources": [list(source) for source in info.extra_sources],
+    }
 
 
 def utc_now() -> str:
@@ -194,6 +211,9 @@ async def call_chat(
     }
     if request.max_tokens is not None:
         body["max_tokens"] = request.max_tokens
+    # Endpoint-level sampling policy (reasoning effort, top_p, seed, vendor
+    # knobs) applies to every slot; reserved keys are rejected at config load.
+    body.update(target.wire_overrides())
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     attempt = 0
@@ -387,7 +407,7 @@ class GenerativeAdapter(ABC):
         if self.info.needs_vision and not target.supports_vision:
             return f"target {target.label()!r} does not support vision inputs"
         if not ctx.offline_fixtures and not ctx.cache.is_ready(
-            self.info.name, self.info.hf_dataset, self.info.hf_revision
+            self.info.name, **cache_pins(self.info)
         ):
             detail = ctx.download_failures.get(self.info.name, "run `kairyu bench download`")
             return f"dataset not in cache ({detail})"
@@ -402,11 +422,12 @@ class GenerativeAdapter(ABC):
             "source": "fixtures" if ctx.offline_fixtures else "cache",
         }
         if not ctx.offline_fixtures and ctx.cache.is_ready(
-            self.info.name, self.info.hf_dataset, self.info.hf_revision
+            self.info.name, **cache_pins(self.info)
         ):
             manifest = ctx.cache.read_manifest(self.info.name)
             base["manifest"] = {
-                key: manifest.get(key) for key in ("dataset", "revision", "rows", "sha256")
+                key: manifest.get(key)
+                for key in ("dataset", "revision", "sources", "rows", "sha256")
             }
         return base
 
@@ -435,7 +456,7 @@ class GenerativeAdapter(ABC):
         from kairyu.bench.types import BenchExtrasMissing, DatasetGated, DatasetUnavailable
 
         if not ctx.force and ctx.cache.is_ready(
-            self.info.name, self.info.hf_dataset, self.info.hf_revision
+            self.info.name, **cache_pins(self.info)
         ):
             return DownloadReport(adapter=self.info.name, status="cached")
         try:
@@ -460,11 +481,7 @@ class GenerativeAdapter(ABC):
                 status="unavailable",
                 detail=f"{type(error).__name__}: {error}",
             )
-        ctx.cache.write_rows(
-            self.info.name,
-            rows,
-            {"dataset": self.info.hf_dataset, "revision": self.info.hf_revision},
-        )
+        ctx.cache.write_rows(self.info.name, rows, cache_pins(self.info))
         return DownloadReport(adapter=self.info.name, status="ok", detail=f"{len(rows)} rows")
 
     async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:

@@ -42,9 +42,15 @@ class CharXivAdapter(GenerativeAdapter):
         from kairyu.bench.hub import load_hf_rows, save_asset
 
         try:
-            rows = load_hf_rows(self.info.hf_dataset, split="validation")
+            rows = load_hf_rows(
+                self.info.hf_dataset,
+                split="validation",
+                revision=self.info.hf_revision,
+            )
         except DatasetUnavailable:
-            rows = load_hf_rows(self.info.hf_dataset, split="val")
+            rows = load_hf_rows(
+                self.info.hf_dataset, split="val", revision=self.info.hf_revision
+            )
         assets = ctx.cache.assets_dir(self.info.name)
         normalized = []
         for index, row in enumerate(rows):

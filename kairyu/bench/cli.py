@@ -34,6 +34,24 @@ def add_bench_parser(subparsers) -> None:
         help="Full target: name=base_url=model[=api_key_env] (repeatable)",
     )
     run.add_argument("--api-key-env", default=None, help="Env VAR holding the API key")
+    run.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help="reasoning_effort sent to every target (Fugu reports max effort)",
+    )
+    run.add_argument("--top-p", type=float, default=None, help="top_p sent to every target")
+    run.add_argument(
+        "--sampling-seed",
+        type=int,
+        default=None,
+        help="seed sent to every target (distinct from --seed, which samples items)",
+    )
+    run.add_argument(
+        "--extra-body",
+        default=None,
+        help='JSON object merged into every target request, e.g. \'{"chat_template_kwargs":'
+        ' {"enable_thinking": true}}\'',
+    )
     run.add_argument("--suite", default=None, help="Benchmark suite (default: fugu)")
     run.add_argument("--only", action="append", default=None, help="Comma-separated names")
     run.add_argument("--exclude", action="append", default=None, help="Comma-separated names")
@@ -45,9 +63,21 @@ def add_bench_parser(subparsers) -> None:
         help="Use the committed tiny fixtures (no network, no cache)",
     )
     run.add_argument("--seed", type=int, default=None)
+    run.add_argument(
+        "--attempts",
+        type=int,
+        default=None,
+        help="Trials per task for the agentic harnesses (Fugu reports tau-3 as pass@4)",
+    )
     run.add_argument("--judge-base-url", default=None)
     run.add_argument("--judge-model", default=None)
     run.add_argument("--judge-api-key-env", default=None)
+    run.add_argument(
+        "--judge-reasoning-effort",
+        default=None,
+        help="reasoning_effort for the judge / tau user simulator (Fugu used low)",
+    )
+    run.add_argument("--judge-extra-body", default=None, help="JSON object for judge requests")
     run.add_argument("--concurrency", type=int, default=None)
     run.add_argument("--results-dir", default=None)
     run.add_argument("--run-id", default=None, help="Reuse an id to resume a run")

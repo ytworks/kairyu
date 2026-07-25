@@ -275,7 +275,9 @@ class SciCodeAdapter(GenerativeAdapter):
     def normalize(self, ctx: DownloadContext) -> list[dict]:
         from kairyu.bench.hub import load_hf_rows
 
-        rows = load_hf_rows(self.info.hf_dataset, split="test")
+        rows = load_hf_rows(
+            self.info.hf_dataset, split="test", revision=self.info.hf_revision
+        )
         golden = self._fetch_golden(ctx)
         provided = self._fetch_provided_steps()
         normalized = []
