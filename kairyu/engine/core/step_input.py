@@ -42,6 +42,17 @@ class RequestSnapshot:
     max_new_tokens: int
     num_cached_tokens: int = 0
     sampling: EngineSampling = field(default_factory=EngineSampling)
+    # P-D runs prefill under an internal clone id while decode uses the public
+    # one, so the id a sampler keys state under is NOT always `request_id`
+    # (m5 D5). The snapshot has to carry it: the overlap path and the TP workers
+    # sample from a snapshot, never from the EngineRequest, and keying those on
+    # `request_id` would put the clone's tokens on a different RNG stream.
+    sampling_id: str | None = None
+
+    @property
+    def sampling_identity(self) -> str:
+        """The id every sampler must key this request's state under."""
+        return self.sampling_id or self.request_id
 
     @property
     def output_len(self) -> int:
@@ -98,6 +109,7 @@ def _snapshot_state(state: object) -> RequestSnapshot:
         max_new_tokens=request.max_new_tokens,
         num_cached_tokens=allocation.num_cached_tokens if allocation is not None else 0,
         sampling=getattr(request, "sampling", EngineSampling()),
+        sampling_id=getattr(request, "sampling_id", None),
     )
 
 
