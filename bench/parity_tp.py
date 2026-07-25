@@ -51,13 +51,18 @@ class _ToyRunner:
         return sampled
 
 
-def _fixed_prompts(count: int) -> list[EngineRequest]:
+def _fixed_prompts(count: int, max_new: int) -> list[EngineRequest]:
+    """Toy prompts. `max_new` is honoured rather than hardcoded: the config
+    recorded the CLI value while the run produced 16 tokens regardless, so the
+    result described a run that never happened."""
+    if count <= 0:
+        raise SystemExit(f"--num-prompts must be positive, got {count}")
     rng = random.Random(_SEED)
     return [
         EngineRequest(
             request_id=f"p{i}",
             prompt_token_ids=tuple(rng.randrange(_VOCAB) for _ in range(rng.randrange(8, 96))),
-            max_new_tokens=16,
+            max_new_tokens=max_new,
         )
         for i in range(count)
     ]
@@ -324,7 +329,7 @@ def main() -> int:
     if args.model_path:
         prompts = _real_prompts(args.model_path, args.num_prompts, args.max_new_tokens)
     else:
-        prompts = _fixed_prompts(args.num_prompts)
+        prompts = _fixed_prompts(args.num_prompts, args.max_new_tokens)
 
     overlap_modes = (False,) if args.no_overlap_sweep else (False, True)
     overlap_note = None
