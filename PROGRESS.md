@@ -112,6 +112,22 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [progress] m2 §2.2 future tokens: overlap ON works with a real runner
+- What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
+  `position - 1` before that token is committed. `OverlapEngineCore` takes the snapshot
+  for step N+1 before step N commits, so `state.outputs` is one short — every real-model
+  overlap run raised `IndexError: tuple index out of range`. Committed outputs still win
+  over the in-flight value, so a speculative rollback is not shadowed, and only the newest
+  position is retained (a decode reads exactly one).
+- Why: `overlap.py` already specified this — "decode chunks carry an explicit position so
+  the runner never needs previously-committed token values from the host (on GPU, the
+  last-token slot is patched device-side)" — and nothing implemented it. The toy runner
+  honours the contract by ignoring outputs entirely, which is why no CPU test could see
+  the gap. It blocked the overlap-ON half of G2 A1 and runbook §1 Gate 1, both of which
+  require overlap ON and OFF.
+- Refs: m2 §2.2, G2 A1, `kairyu/engine/core/model_runner.py`,
+  `tests/unit/test_overlap_future_token.py`, `tests/gpu/test_overlap_future_token_gpu.py`
+
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
   are now passed to every fetch (they were recorded but unused, so the cache and run

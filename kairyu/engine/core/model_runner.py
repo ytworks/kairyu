@@ -47,11 +47,18 @@ class PagedModelRunner:
         # Input tensors (token ids, positions) must be built on the model's device
         # so the GPU forward never mixes CPU inputs with on-device weights/KV.
         self._device = next(model.parameters()).device
+        # m2 §2.2 future tokens: under OverlapEngineCore the snapshot for step
+        # N+1 is taken BEFORE step N's token is committed, so `state.outputs` is
+        # one short and reading `outputs[position - 1]` raised IndexError. The
+        # runner already produced that token; it just never kept it. Keyed by
+        # (request_id, position) and dropped when the request finishes.
+        self._future_tokens: dict[str, dict[int, int]] = {}
 
     def release(self, request_id: str) -> None:
         """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
         if self._sampler is not None:
             self._sampler.release(request_id)
+        self._future_tokens.pop(request_id, None)
 
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
         if self._sampler is None:
@@ -97,12 +104,44 @@ class PagedModelRunner:
         )
         if state.prefill_done and end == len(prompt):
             logits = self._model.logits(hidden[-1])
-            sampled[chunk.request_id] = (self._sample(state, logits, position=0),)
+            token = self._sample(state, logits, position=0)
+            self._remember(chunk.request_id, 0, token)
+            sampled[chunk.request_id] = (token,)
+
+    def _remember(self, request_id: str, position: int, token: SampledToken) -> None:
+        """Keep this step's token so the NEXT step can read it before commit.
+
+        Only the newest position is retained. A decode reads exactly
+        ``position - 1``, so keeping the whole history would be an unbounded
+        per-request dict — `EngineLoop` calls `release()` on finish but a bare
+        `EngineCore` does not, and the buffer grew for the length of every
+        request.
+        """
+        self._future_tokens[request_id] = {position: token.token_id}
+
+    def _previous_token(self, state, position: int) -> int:
+        """The token at ``position - 1``, committed or still in flight.
+
+        Committed outputs win: after `update()` they are the authority, and a
+        speculative rollback replaces in-flight values that the future buffer
+        would otherwise still hold.
+        """
+        index = position - 1
+        outputs = state.outputs
+        if index < len(outputs):
+            return outputs[index]
+        pending = self._future_tokens.get(state.request.request_id, {})
+        if index in pending:
+            return pending[index]
+        raise RuntimeError(
+            f"no token for {state.request.request_id} at position {index}: "
+            f"{len(outputs)} committed, in-flight {sorted(pending)}"
+        )
 
     def _decode_inputs(self, chunk: ScheduledChunk, state):
         prompt = state.request.prompt_token_ids
         position = chunk.position
-        input_token = state.outputs[position - 1] if position > 0 else prompt[-1]
+        input_token = self._previous_token(state, position) if position > 0 else prompt[-1]
         absolute = len(prompt) + position - 1
         cached = state.allocation.num_cached_tokens if state.allocation else 0
         page_table = list(state.allocation.pages) + list(state.decode_pages)
@@ -116,7 +155,9 @@ class PagedModelRunner:
             self._pool, page_table, seq_len=absolute + 1, write_from=cached,
         )
         logits = self._model.logits(hidden[-1])
-        sampled[chunk.request_id] = (self._sample(state, logits, position=chunk.position),)
+        token = self._sample(state, logits, position=chunk.position)
+        self._remember(chunk.request_id, chunk.position, token)
+        sampled[chunk.request_id] = (token,)
 
     def _execute_decode_batch(
         self, chunks: list[ScheduledChunk], states: Mapping[str, object], sampled: dict
@@ -139,6 +180,6 @@ class PagedModelRunner:
         logits = self._model.logits(hidden)  # [B, vocab]
         for i, chunk in enumerate(chunks):
             state = states[chunk.request_id]
-            sampled[chunk.request_id] = (
-                self._sample(state, logits[i], position=chunk.position),
-            )
+            token = self._sample(state, logits[i], position=chunk.position)
+            self._remember(chunk.request_id, chunk.position, token)
+            sampled[chunk.request_id] = (token,)
