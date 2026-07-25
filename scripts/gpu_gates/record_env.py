@@ -4,12 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import importlib.metadata
 import subprocess
 from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
 
+from kairyu.engine.core.gpu_topology import (
+    interconnect_from_topology,
+    measure_device_bandwidth,
+    measure_p2p_matrix,
+    parse_topology_matrix,
+)
 from kairyu.engine.core.hw_profile import (
     EnvRecord,
     HardwareProfile,
@@ -38,6 +45,9 @@ def build_env_record(
     profile: HardwareProfile,
     record_date: str,
     run_command: CommandRunner = _run,
+    # off by default: measuring allocates GB on every visible GPU, so callers opt
+    # in. `main()` turns it on, which is where the hardware actually is.
+    measure: bool = False,
 ) -> EnvRecord:
     import torch
 
@@ -52,9 +62,31 @@ def build_env_record(
             "--format=csv,noheader",
         ]
     )
+    # probe() hardcodes "pcie" because it runs on every engine start and cannot
+    # shell out; the topology matrix is the authority, and this is the one place
+    # that pays for reading it (runbook §6.1)
+    links = parse_topology_matrix(topology)
+    profile = dataclasses.replace(
+        profile, interconnect=interconnect_from_topology(links) or profile.interconnect
+    )
+    if measure:
+        profile = dataclasses.replace(
+            profile,
+            measured_bandwidth_gbs=round(measure_device_bandwidth(torch), 2),
+            p2p_matrix=measure_p2p_matrix(torch, profile.device_count),
+        )
+        measurement_note = (
+            "Bandwidth and P2P are MEASURED (GB/s): p2p_matrix[i][j] is a "
+            "device-to-device copy from i to j, the diagonal is a device-local "
+            "copy counting read+write."
+        )
+    else:
+        measurement_note = (
+            "Numeric bandwidth/P2P measurements were skipped (--no-measure) and "
+            "remain null."
+        )
     notes = (
-        "GPU topology and inventory audit follows. Numeric bandwidth/P2P "
-        "measurements are unmeasured and remain null.\n\n"
+        f"{measurement_note}\n\nGPU topology and inventory audit follows.\n\n"
         f"topology:\n{topology}\n\ninventory:\n{inventory}"
     )
     return EnvRecord(
@@ -81,12 +113,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", default=date.today().isoformat())
     parser.add_argument("--results-dir", type=Path, default=Path("bench/results"))
+    parser.add_argument(
+        "--no-measure",
+        action="store_true",
+        help="record topology only; leaves bandwidth/P2P null (fast, and safe to "
+        "run while the GPUs are serving)",
+    )
     args = parser.parse_args(argv)
 
     profile = probe()
     if profile.arch != "cuda":
         parser.error("CUDA hardware is required")
-    record = build_env_record(profile=profile, record_date=args.date)
+    record = build_env_record(
+        profile=profile, record_date=args.date, measure=not args.no_measure
+    )
     path = write_env_record(record, args.results_dir)
     print(path)
     return 0
