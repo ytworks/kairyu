@@ -64,8 +64,3 @@ class SampledToken:
     logprob: float | None = None
     top_logprobs: tuple[tuple[int, float], ...] | None = None
     grammar_terminated: bool = False
-    #: The same id, still on the device that produced it (m2 §2.2). Carrying it
-    #: lets the next step's input slot be patched DEVICE-to-device instead of
-    #: being rebuilt from the host int. None on paths that never had one — the
-    #: toy runner, and any sampler that decides on the host.
-    device_token: object | None = None

@@ -6,14 +6,17 @@ in-flight token accounting in Scheduler: decode chunks carry an explicit
 committed (``PagedModelRunner._future_tokens``), so a snapshot one step behind
 still resolves both the decode input and the sampler's penalty history.
 
-The last-token slot IS patched device-side (m2 §2.2): `SampledToken` carries the
-id on the device that produced it, and the runner stacks those tensors instead of
-rebuilding the input from a host list each step.
+The last-token SLOT is a persistent device tensor patched in place
+(``PagedModelRunner._decode_input_slots``, batched and single-request alike), so
+no decode step allocates a device tensor. What fills it is still a host value:
+the sampling DECISION runs on CPU because the reproducibility pins (m8 D2,
+spec == greedy) are defined by the CPU RNG stream, so the chosen id exists only
+as a Python int and crosses H2D once per step.
 
-Still OPEN: the sampling DECISION stays on the host — by design, since the
-reproducibility pins (m8 D2, spec == greedy) are defined by the CPU RNG stream —
-so `.item()` per token remains. Removing that sync means moving the RNG and the
-stop conditions onto the device, which changes what those pins mean.
+Still OPEN (m2 §2.2), and NOT closed by anything here: the device-to-device fill,
+and the invariant that the step loop never blocks on ``.item()``/``.cpu()``. Both
+follow from moving the sampling decision onto the device, which changes what
+those pins mean — a separate decision.
 
 Sampled tokens are committed via update() while the next step is already
 running, so the device never waits on host bookkeeping.

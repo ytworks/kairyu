@@ -112,19 +112,30 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
-### 2026-07-26 — [progress] m2 §2.2: the decode input slot is patched device-side
-- What: `SampledToken` carries `device_token` — the sampled id resident on the device that
-  produced the logits — and `PagedModelRunner` stacks those tensors for the next decode
-  input instead of rebuilding it from a Python list. `torch.tensor(ints, device=...)` was
-  a host-to-device copy of values the device had produced one step earlier.
-- Why: this is the half of m2 §2.2 that #136 explicitly left open. It closes the
-  round trip on the input path. What remains open, and is now stated in `overlap.py`
-  rather than implied: the sampling DECISION stays on the host by design — the
-  reproducibility pins (m8 D2, spec == greedy) are defined by the CPU RNG stream — so the
-  per-token `.item()` remains. Removing it means moving the RNG and stop conditions onto
-  the device, which changes what those pins mean.
-- Refs: m2 §2.2, `kairyu/engine/core/sampler.py`, `kairyu/engine/core/model_runner.py`,
-  `tests/gpu/test_device_future_token_gpu.py`
+### 2026-07-26 — [progress] m2 §2.2: persistent decode input slots, and the honest scope
+- What: the decode inputs (token ids and positions) live in persistent device tensors
+  allocated once and written IN PLACE every step
+  (`PagedModelRunner._decode_input_slots`), used by the batched AND the single-request
+  decode path. No decode step allocates a device tensor, and the one-request tail of a
+  workload no longer takes a different, host-rebuilding path. On CUDA the ids are staged
+  through pinned memory and copied as one async DMA per step, ordered against reuse by a
+  CUDA event.
+  NOT done, and now stated as OPEN in `overlap.py`, `model_runner.py` and m2 §2.2 instead
+  of claimed: filling those slots DEVICE-to-device, and §2.2's "step loop never blocks on
+  `.item()`/`.cpu()`" invariant.
+- Why: the sampler decides on the CPU because m8 D2 pins reproducibility (incl. spec ≡
+  greedy) to the CPU RNG stream. The chosen id therefore exists only as a Python int and
+  there is nothing on the device to copy from; one batched H2D per step is the floor until
+  the sampling DECISION itself moves onto the device, which redefines what those pins mean.
+  An earlier revision of this entry claimed the device-to-device patch was done, on the
+  strength of a `SampledToken.device_token` that was `torch.as_tensor(int, device=cuda)` —
+  a fresh scalar H2D per row, i.e. the same round trip B times over rather than once. That
+  claim and that field are withdrawn (PR #143 review, [P1]); the single-request path gap is
+  [P2] of the same review. A second, independent violation of the same invariant remains in
+  `models/attention.py::forward_decode_batch` (`int(positions[i])` per row per layer).
+- Refs: m2 §2.2 + §5, PR #143 review, `kairyu/engine/core/model_runner.py`,
+  `kairyu/engine/core/sampler.py`, `tests/unit/test_decode_input_slots.py`,
+  `tests/gpu/test_decode_input_slots_gpu.py`
 
 ### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
 - What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
