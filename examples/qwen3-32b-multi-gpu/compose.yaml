@@ -30,7 +30,15 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        gpu_count="$$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d '[:space:]')"
+        # a pipeline into wc -l would report a failed nvidia-smi as "0 GPUs" and
+        # blame the count for what is really an unusable driver inside the
+        # container (stale CDI spec, driver/library mismatch, missing devices)
+        if ! gpu_list="$$(nvidia-smi --query-gpu=index --format=csv,noheader 2>&1)"; then
+          echo "nvidia-smi failed inside the container; GPUs are not usable here:" >&2
+          echo "$$gpu_list" >&2
+          exit 1
+        fi
+        gpu_count="$$(printf '%s\n' "$$gpu_list" | grep -c '[0-9]')"
         case "$$gpu_count" in
           2|4|8) ;;
           *)

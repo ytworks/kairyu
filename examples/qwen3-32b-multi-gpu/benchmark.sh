@@ -64,10 +64,18 @@ stop_progress_monitor() {
 
 curl --fail --silent --show-error http://127.0.0.1:8001/readyz >/dev/null
 
-gpu_count="$(
+# `sh -ec "... | wc -l"` returns wc's status, so a failed nvidia-smi inside the
+# container would be reported as a GPU/TP count of 0 in the benchmark header —
+# a wrong number recorded next to real measurements
+if ! gpu_list="$(
   docker compose exec -T kairyu sh -ec \
-    "nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d '[:space:]'"
-)"
+    "nvidia-smi --query-gpu=index --format=csv,noheader" 2>&1
+)"; then
+  echo "nvidia-smi failed inside the kairyu container:" >&2
+  echo "$gpu_list" >&2
+  exit 1
+fi
+gpu_count="$(printf '%s\n' "$gpu_list" | grep -c '[0-9]')"
 image_id="$(docker compose images -q kairyu)"
 if [ -z "$image_id" ]; then
   echo "Kairyu image not found; start the service first" >&2
