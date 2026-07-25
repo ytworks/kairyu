@@ -112,6 +112,33 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [design] GraphDecodeBackend: the CUDA-graph decode capability contract
+- What: a backend is capture-eligible only if it DECLARES it, and the decode step
+  boundary now reaches it. Defined once in `kairyu/engine/core/attention/__init__.py`
+  as the `GraphDecodeBackend` protocol plus its single enforcement point
+  `graph_capture_gap()`: `supports_graph_capture` (declared, not inferred),
+  `plan_decode(kv_pool, page_tables, seq_lens, *, num_qo_heads, q_dtype)` (the
+  step-boundary HOST phase, a no-op where there is none), and the capture-safe
+  `attend_decode`. `GraphStepExecutor` gained an optional `plan_fn`, called before
+  each capture and after every `_copy_in` BEFORE `replay()`; `PagedModelRunner`
+  supplies it via the new `DenseDecoder.plan_decode_tensors()`, which plans once per
+  backend INSTANCE per step (not per layer). `_tensor_decode_gap()` now asks
+  `graph_capture_gap()` instead of `hasattr(backend, "attend_decode")`.
+- Why: method presence is not capture-safety. FlashInfer (PR #141) owns
+  `attend_decode` and would have passed the old check, but its `plan()` copies
+  `indptr` to the host and cannot run under capture at all — so the runner would
+  construct successfully and the FIRST capture would die with a D2H `RuntimeError`,
+  defeating the fail-fast the gate exists for. And planning outside capture is
+  useless if nothing calls it: `forward_decode_tensors` reaches `attend_decode` per
+  layer with no seam for a host phase, and only the executor knows which static
+  buffers the next replay will read — the plan must therefore be taken after
+  copy-in, or the replay attends over the previous step's pages.
+- Refs: m17 D1/D2, PR #138 review [P1], PR #141 review [P1];
+  `kairyu/engine/core/attention/{__init__,torch_backend}.py`,
+  `kairyu/engine/core/{model_runner,step_executor}.py`,
+  `kairyu/models/{attention,llama}.py`, `tests/unit/test_step_executor.py`,
+  `tests/unit/test_graph_decode_wiring.py`.
+
 ### 2026-07-26 — [amendment] CUDA-graph decode: reserved scratch page + backend fail-fast
 - What: `PagedModelRunner(graph_backend=...)` now wires the m17 D1 capture seam into
   batched decode (PR #138), with two review blockers fixed before merge. [P1] the

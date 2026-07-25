@@ -18,6 +18,7 @@ from collections.abc import Mapping
 
 import torch
 
+from kairyu.engine.core.attention import graph_capture_gap
 from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import SampledToken
@@ -29,15 +30,30 @@ def _tensor_decode_gap(model: DenseDecoder) -> str | None:
     """Why this model cannot run the tensor decode contract, or None (m17 [P2]).
 
     ``_graph_decode`` calls ``forward_decode_tensors``, which unconditionally
-    calls ``backend.attend_decode``. Only ``TorchAttentionBackend`` implements
-    that today, and ``MlaAttention`` has no tensor decode form at all — so a
-    FlashInfer or MLA model used to construct fine and then die with an
+    calls ``backend.attend_decode``. ``MlaAttention`` has no tensor decode form
+    at all, so an MLA model used to construct fine and then die with an
     ``AttributeError`` on the first BATCHED decode, arbitrarily far into a run.
+
+    Presence of ``attend_decode`` is NOT the question, though (review [P1]).
+    A backend can own that method and still be uncapturable, because what
+    breaks a capture is host synchronization inside it — FlashInfer's
+    ``plan()`` copies ``indptr`` to the CPU and cannot run under capture at
+    all. Checking the method existed would have let such a backend construct
+    and then fail on the FIRST capture with a D2H ``RuntimeError``, which is
+    exactly the late failure this gate exists to prevent. So the question is
+    the declared ``GraphDecodeBackend`` capability, enforced in one place by
+    ``graph_capture_gap``.
+
     Checked once, at construction, where the operator can still act on it.
     """
     layers = getattr(getattr(model, "model", None), "layers", None)
     if layers is None:
         return f"{type(model).__name__} exposes no model.layers to check"
+    if not callable(getattr(model, "plan_decode_tensors", None)):
+        return (
+            f"{type(model).__name__} has no plan_decode_tensors, so the step "
+            "boundary never reaches its attention backends"
+        )
     for index, layer in enumerate(layers):
         attention = getattr(layer, "self_attn", None)
         if not hasattr(attention, "forward_decode_tensors"):
@@ -45,12 +61,9 @@ def _tensor_decode_gap(model: DenseDecoder) -> str | None:
                 f"layer {index}'s attention ({type(attention).__name__}) has no "
                 "forward_decode_tensors"
             )
-        backend = getattr(attention, "backend", None)
-        if not hasattr(backend, "attend_decode"):
-            return (
-                f"layer {index}'s attention backend ({type(backend).__name__}) "
-                "has no attend_decode"
-            )
+        gap = graph_capture_gap(getattr(attention, "backend", None))
+        if gap is not None:
+            return f"layer {index}'s attention backend {gap}"
     return None
 
 
@@ -96,9 +109,9 @@ class PagedModelRunner:
             if gap is not None:  # [P2]: fail here, not on the first batched decode
                 raise ValueError(
                     f"graph decode needs the tensor decode contract but {gap}. "
-                    "Only the torch attention backend implements it today "
-                    "(flashinfer and MLA are m13 work) — build this runner "
-                    "without graph_backend."
+                    "A backend must declare supports_graph_capture and provide "
+                    "a plan_decode step hook (see GraphDecodeBackend) — build "
+                    "this runner without graph_backend."
                 )
             # [P1]: the padding rows of every replay write KV somewhere. That
             # page has to come OUT of the scheduler's allocator, so take it from
@@ -119,7 +132,20 @@ class PagedModelRunner:
                 max_pages=graph_max_pages,
                 scratch_page=self._graph_scratch_page,
                 device=self._device,
+                plan_fn=self._plan_graph_decode,
             )
+
+    def _plan_graph_decode(self, batch) -> None:
+        """Step-boundary host phase, run OUTSIDE the captured region ([P1]).
+
+        The executor calls this before it captures and again after every
+        copy-in, so the attention backends plan against the very buffers the
+        next ``replay()`` will read. Without it a planning backend such as
+        FlashInfer has no live plan at capture time, and every later replay
+        would attend over the pages that happened to be in the static buffers
+        when the graph was recorded.
+        """
+        self._model.plan_decode_tensors(self._pool, batch.page_tables, batch.seq_lens)
 
     def _graph_decode(self, batch) -> torch.Tensor:
         """The captured region: embed -> layers -> norm -> logits, tensors only."""

@@ -58,6 +58,10 @@ class DecoderLayer(nn.Module):
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
+    def plan_decode_tensors(self, kv_pool, page_tables, seq_lens):
+        """Step-boundary host phase for this layer's attention backend."""
+        self.self_attn.plan_decode_tensors(kv_pool, page_tables, seq_lens)
+
     def forward_decode_tensors(
         self, hidden, cos, sin, kv_pool, layer, page_tables, positions, seq_lens
     ):
@@ -170,6 +174,33 @@ class DenseDecoder(nn.Module):
                 hidden, cos, sin, kv_pool, index, page_tables, positions, seq_lens
             )
         return self.model.norm(hidden)
+
+    @torch.no_grad()
+    def plan_decode_tensors(
+        self,
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,  # [B, P]
+        seq_lens: torch.Tensor,  # [B]
+    ) -> None:
+        """Host phase of ONE tensor decode step (``GraphDecodeBackend``).
+
+        The model-level end of the hook the step executor calls before capture
+        and before every replay. Backends are shared across layers BY DESIGN
+        (m13: one FlashInfer instance owns the workspace and the plan), and the
+        plan depends only on the page tables, the lengths and the head/dtype
+        metadata — never on which layer is running. So planning is per BACKEND
+        INSTANCE, not per layer: calling it once per layer would re-do the whole
+        host schedule ``num_hidden_layers`` times a step, which is precisely the
+        per-layer host sync the tensor decode contract exists to remove.
+        """
+        planned: set[int] = set()
+        for layer in self.model.layers:
+            attention = getattr(layer, "self_attn", None)
+            backend = getattr(attention, "backend", None)
+            if backend is None or id(backend) in planned:
+                continue
+            planned.add(id(backend))
+            layer.plan_decode_tensors(kv_pool, page_tables, seq_lens)
 
     @torch.no_grad()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:

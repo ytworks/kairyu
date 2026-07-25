@@ -84,6 +84,32 @@ class Attention(nn.Module):
         )
         return self.o_proj(context)
 
+    def plan_decode_tensors(
+        self,
+        kv_pool,
+        page_tables: torch.Tensor,  # [B, P]
+        seq_lens: torch.Tensor,  # [B]
+    ) -> None:
+        """Run the backend's step-boundary host phase (``GraphDecodeBackend``).
+
+        ``forward_decode_tensors`` is the captured half and may not touch the
+        host, so whatever the backend needs to plan on the CPU has to happen
+        here — outside any capture, once per step, over the buffers the step is
+        about to attend over. The query the plan describes is the one
+        ``forward_decode_tensors`` will build, hence ``q_proj``'s head count and
+        dtype rather than anything sampled from a live tensor.
+        """
+        plan = getattr(self.backend, "plan_decode", None)
+        if plan is None:  # a backend outside the graph contract; nothing to do
+            return
+        plan(
+            kv_pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=self.num_heads,
+            q_dtype=self.q_proj.weight.dtype,
+        )
+
     def forward_decode_tensors(
         self,
         hidden: torch.Tensor,  # [B, H]
