@@ -304,3 +304,95 @@ def test_wait_for_pending_is_safe_with_nothing_pending():
     handoff.transfer((1,), 0)
     assert handoff.pending_event is None
     handoff.wait_for_pending()  # must not raise
+
+
+def test_gating_orders_a_source_reuse_after_the_copy():
+    """The use-after-free this seam's defer opened, in miniature.
+
+    `PDCoordinator` hands the prefill-side pages back once the transfer returns;
+    with `defer=True` the copy is still READING them, and the next prefill step
+    allocates the same page and writes it on the caller's stream. `gate_pending()`
+    is what orders that rewrite after the copy — without stopping the host, so the
+    step the producer already queued keeps running.
+    """
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+
+    _require_cuda()
+    source = torch.full((1 << 24,), 7.0, device="cuda:0")  # 64 MB "source page"
+
+    class _SlowCopy:
+        def transfer(self, tokens, first_token, pages=()):
+            out = source.clone()
+            for _ in range(20):  # keep READING the source, widening the window
+                out = out + source
+            return out
+
+    handoff = StreamCopyKVHandoff(_SlowCopy(), CudaStreamProvider(), defer=True)
+    torch.cuda.synchronize()
+    copied = handoff.transfer((1,), 0)
+
+    handoff.gate_pending()  # the gate PDCoordinator applies before releasing
+    source.fill_(-1.0)  # the next step, reusing the page it just got back
+    torch.cuda.synchronize()
+
+    assert torch.equal(copied, torch.full_like(copied, 7.0 * 21))
+
+
+def test_gating_does_not_stop_the_host_the_way_waiting_does():
+    """Both settle the copy; only one of them gives up the overlap to do it."""
+    import time
+
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+
+    _require_cuda()
+    payload = torch.randn(1 << 24, device="cuda:0")
+
+    class _SlowCopy:
+        def transfer(self, tokens, first_token, pages=()):
+            out = payload.clone()
+            for _ in range(20):
+                out = out * 1.000001
+            return out
+
+    def _settle(settle_name):
+        torch.cuda.synchronize()
+        handoff = StreamCopyKVHandoff(_SlowCopy(), CudaStreamProvider(), defer=True)
+        handoff.transfer((1,), 0)
+        start = time.perf_counter()
+        getattr(handoff, settle_name)()
+        return time.perf_counter() - start
+
+    _settle("gate_pending")  # warm up allocator/kernels before timing
+    blocking = _settle("wait_for_pending")
+    gated = _settle("gate_pending")
+
+    assert gated < blocking, (
+        f"gate_pending {gated:.4f}s did not beat wait_for_pending {blocking:.4f}s; "
+        "it is supposed to express the dependency, not wait on it"
+    )
+    torch.cuda.synchronize()
+
+
+def test_the_production_coordinator_defers_on_a_device_pool():
+    """[P1] there was no production caller that enabled the deferred path."""
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.pd_factory import build_kv_handoff
+
+    _require_cuda()
+
+    class _Inner:
+        def transfer(self, tokens, first_token, pages=()):
+            return "allocation"
+
+    pool = PagedKVPool(
+        num_layers=1, num_pages=4, page_size=4, num_kv_heads=1, head_dim=4,
+        device="cuda:0",
+    )
+    handoff = build_kv_handoff(_Inner(), pool, defer=True)
+    assert isinstance(handoff, StreamCopyKVHandoff)
+    assert handoff.defers
+    assert handoff.transfer((1, 2), 0, (0,)) == "allocation"
+    assert handoff.pending_events, "no completion event to gate on"
+    handoff.gate_pending()
+    assert handoff.pending_events == ()

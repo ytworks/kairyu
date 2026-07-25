@@ -112,6 +112,31 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] m18 D3: the deferred KV copy keeps its source lease, and gets a caller
+- What: `StreamCopyKVHandoff(defer=True)` records the copy's completion event instead of
+  blocking, and `PDCoordinator` is now the consumer that settles it.
+  `_release_source_pages` became the single point where prefill-side pages go back —
+  commit and abort alike — and it calls `gate_pending()` first. The gate is stream-ordered
+  (`event.wait(current_stream)`), not a host block. Deferred events now ACCUMULATE rather
+  than occupying one slot. `PDCoordinator` refuses a deferring handoff that exposes no
+  `gate_pending()`. `pd_factory.build_pd_coordinator(defer_handoff=True)` is the default
+  and the only caller that enables deferring; `build_kv_handoff(..., defer=...)` stays off
+  for everyone else.
+- Why: two [P1]s on PR #142. (1) Deferring returned while the copy was still READING the
+  prefill-side pages, and the coordinator's m6 D4 release ran immediately after — so the
+  next prefill step could allocate the same page and overwrite it on the caller's stream
+  under the running copy. Waiting on the destination does not prevent that; it is a
+  source-side read/write race, and the failure path (`abort()` → `release_preempted`) had
+  it too, since a raising transfer may already have queued part of the copy. A single
+  `pending_event` slot compounded it: a prefill step transfers every prompt that completed
+  in it, so all but the last copy went unordered. (2) Nothing in production enabled or
+  settled the deferred path — `build_kv_handoff` constructed the blocking form and no
+  caller used `wait_for_pending` — so "overlap landed" was not true of any shipped path.
+- Refs: m18 D3 (amended), `kairyu/engine/core/handoff_stream.py`,
+  `kairyu/engine/core/pd.py`, `kairyu/engine/core/pd_factory.py`,
+  `tests/unit/test_pd.py`, `tests/unit/test_pd_factory.py`,
+  `tests/gpu/test_handoff_stream_gpu.py`
+
 ### 2026-07-25 — [amendment] m18 D3: CudaStreamProvider landed; KV serde can read a device pool
 - What: `CudaStreamProvider` implemented (the deploy-day half of the m18 D3 stream seam),
   and `kv_serde._to_bytes` now copies to host before `.numpy()`.

@@ -8,6 +8,13 @@ plus token 0 to the decode core, and only then commits (copy-before-commit:
 decode core adopts via ``Scheduler.resume_with_kv``. On CPU the "copy" is page
 adoption in the destination cache; the GPU phase swaps in a device copy behind
 the same ``KVHandoff`` seam, and M6 swaps in a network transport.
+
+A handoff that DEFERS (m18 D3, ``StreamCopyKVHandoff(defer=True)``) returns while
+its copy is still running. The coordinator then holds the prefill-side lease
+itself: no commit, no abort, no release happens until ``_release_source_pages``
+has gated on the copy's completion event. Without that, the released source page
+is re-allocated by the next prefill step and overwritten on the caller's stream
+while the side stream is still reading it.
 """
 
 from __future__ import annotations
@@ -85,6 +92,20 @@ class PDCoordinator:
         self._pending: dict[str, tuple[EngineRequest, int]] = {}
         self._outputs: dict[str, tuple[int, ...]] = {}
         self._failed: list[str] = []
+        self._retries: list[tuple[str, EngineRequest, int]] = []
+        # A deferring handoff (m18 D3) returns while the copy is still reading the
+        # prefill-side pages, so this coordinator owns the lease on them until the
+        # copy's completion event says otherwise. Refuse one that cannot be gated
+        # rather than releasing pages under a copy we have no way to order against.
+        self._gate_pending = None
+        if getattr(handoff, "defers", False):
+            gate = getattr(handoff, "gate_pending", None)
+            if gate is None:
+                raise ValueError(
+                    "a deferring KVHandoff must expose gate_pending(); without it "
+                    "the prefill-side pages would be released under a running copy"
+                )
+            self._gate_pending = gate
 
     @property
     def failed_requests(self) -> tuple[str, ...]:
@@ -101,7 +122,14 @@ class PDCoordinator:
         self._prefill.add_request(clone)
 
     def _handoff_or_retry(self, internal_id: str, token0: int) -> bool:
-        """Transfer one prompt's KV; return True if the commit may proceed."""
+        """Transfer one prompt's KV; return True if the commit may proceed.
+
+        A failure is QUEUED here, not acted on: aborting frees the prefill-side
+        pages, and with a deferring handoff the copy may still be reading them
+        even though ``transfer()`` raised — a partially queued copy still has to
+        finish before its source is handed back. ``_release_source_pages`` is the
+        single place that gates first and releases second.
+        """
         original, attempt = self._pending.pop(internal_id)
         state = self._prefill.states.get(internal_id)
         source_pages: tuple[int, ...] = ()
@@ -112,13 +140,7 @@ class PDCoordinator:
                 original.prompt_token_ids, token0, source_pages
             )
         except KVHandoffError:
-            # copy failed before commit: the prefill-side KV is released
-            # un-marked and the request recomputes from scratch (design m6 D4)
-            self._prefill.abort(internal_id)
-            if attempt < self._max_retries:
-                self._enqueue(original, attempt + 1)
-            else:
-                self._failed.append(original.request_id)
+            self._retries.append((internal_id, original, attempt))
             return False
         finished = self._decode.resume_with_kv(original, allocation, token0)
         if finished:
@@ -126,6 +148,37 @@ class PDCoordinator:
                 original.request_id
             )
         return True
+
+    def _release_source_pages(self, commit: dict[str, int]) -> None:
+        """Hand the prefill-side pages back — never before the copy has read them.
+
+        Both exits release: ``update()`` finishes the max_new_tokens=1 clone and
+        ``commit_and_release`` pool-frees its tail page, and ``abort()``
+        release-preempts the whole allocation. Either way the pages return to the
+        prefill pool, and the very next prefill step can allocate them again and
+        overwrite them on the caller's stream.
+
+        With the blocking handoff that is safe because ``transfer()`` did not
+        return until the copy finished. With a deferring one it is not, so the
+        release is ordered after the copy's completion event first (m6 D4 under
+        m18 D3's defer). The gate is stream-ordered, not a host block: the step
+        the producer queued while the copy ran keeps running, and the same
+        dependency also covers the decode core's read of the destination pages,
+        which is queued on that stream after this point.
+        """
+        if self._gate_pending is not None:
+            self._gate_pending()
+        for internal_id, original, attempt in self._retries:
+            # copy failed before commit: the prefill-side KV is released
+            # un-marked and the request recomputes from scratch (design m6 D4)
+            self._prefill.abort(internal_id)
+            if attempt < self._max_retries:
+                self._enqueue(original, attempt + 1)
+            else:
+                self._failed.append(original.request_id)
+        self._retries.clear()
+        if commit:
+            self._prefill.update(commit)
 
     def _step_prefill(self) -> None:
         plan = self._prefill.schedule()
@@ -141,8 +194,7 @@ class PDCoordinator:
             for internal_id, tokens in sampled.items()
             if self._handoff_or_retry(internal_id, token0 := tokens[0].token_id)
         }
-        if commit:
-            self._prefill.update(commit)
+        self._release_source_pages(commit)
 
     def _step_decode(self) -> None:
         plan = self._decode.schedule()

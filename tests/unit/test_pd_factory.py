@@ -50,6 +50,18 @@ def model_dir(tmp_path_factory):
     return str(path)
 
 
+def _require_selected_backend() -> None:
+    """`build_pd_coordinator` places both halves with the PRODUCTION probe, so on
+    a GPU host it selects FlashInfer — an optional `[gpu]` extra. Not having it
+    installed is an environment gap, like `transformers` above, not a failure of
+    this seam."""
+    from kairyu.engine.core.attention_selector import select_backend_name
+    from kairyu.engine.core.hw_profile import probe
+
+    if select_backend_name(probe()) == "flashinfer":
+        pytest.importorskip("flashinfer")
+
+
 def _pool(device="cpu"):
     from kairyu.engine.core.kv_pool import PagedKVPool
 
@@ -93,6 +105,7 @@ def test_the_coordinator_assembles_and_generates(model_dir):
     from kairyu.engine.core.sampling_types import EngineSampling
     from kairyu.engine.core.scheduler import EngineRequest
 
+    _require_selected_backend()
     coordinator = build_pd_coordinator(
         model_path=model_dir, num_pages=64, page_size=16
     )
@@ -143,3 +156,111 @@ def test_a_raising_deferred_transfer_still_closes_the_window():
     with pytest.raises(RuntimeError, match="transfer failed"):
         StreamCopyKVHandoff(_Boom(), provider, defer=True).transfer((1,), 0)
     assert provider.events == ["begin", "record"]
+
+
+def test_every_deferred_copy_is_settled_not_just_the_last():
+    """A prefill step transfers every prompt that completed in it, so several
+    copies can be in flight at once; keeping one slot drops the earlier ones."""
+    from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
+
+    provider = CpuNoopStream()
+    handoff = StreamCopyKVHandoff(_Inner(), provider, defer=True)
+    handoff.transfer((1,), 0)
+    handoff.transfer((2,), 0)
+
+    assert len(handoff.pending_events) == 2
+    handoff.gate_pending()
+    assert provider.events.count("wait") == 2, provider.events
+    assert handoff.pending_events == ()
+
+
+def test_gating_settles_the_copies_without_a_host_wait():
+    """`gate_pending` expresses the dependency on the caller's stream — that is
+    what leaves the producer's already-queued step running."""
+    from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
+
+    provider = CpuNoopStream()
+    handoff = StreamCopyKVHandoff(_Inner(), provider, defer=True)
+    handoff.transfer((1, 2), 0)
+    handoff.gate_pending()
+
+    assert provider.events == ["begin", "record", "wait"]
+    # never the blocking form's stream-wide stop
+    assert "synchronize" not in provider.events
+
+
+def test_deferring_is_opt_in_because_it_is_a_consumer_contract():
+    from kairyu.engine.core.pd_factory import build_cpu_kv_handoff
+
+    assert build_cpu_kv_handoff(_Inner()).defers is False
+    assert build_cpu_kv_handoff(_Inner(), defer=True).defers is True
+
+
+def test_a_host_pool_stays_plain_even_when_deferring_is_asked_for():
+    from kairyu.engine.core.pd_factory import build_kv_handoff
+
+    inner = _Inner()
+    assert build_kv_handoff(inner, _pool(), defer=True) is inner
+
+
+def test_the_production_coordinator_enables_and_settles_the_deferred_copy(model_dir):
+    """The finding this closes: nothing enabled or waited on the deferred path.
+
+    `build_pd_coordinator` is that caller — it turns defer on wherever a side
+    stream exists, and `PDCoordinator` is what holds the prefill-side lease until
+    the copy's completion event releases it.
+    """
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+
+    _require_selected_backend()
+    coordinator = build_pd_coordinator(model_path=model_dir, num_pages=64, page_size=16)
+    handoff = coordinator._handoff
+
+    if torch.cuda.is_available():
+        assert isinstance(handoff, StreamCopyKVHandoff)
+        assert handoff.defers, "the one caller that settles the copy did not enable it"
+        assert coordinator._gate_pending is not None
+    else:
+        # a host pool has no side stream to defer onto; the plain handoff blocks
+        assert not isinstance(handoff, StreamCopyKVHandoff)
+        assert coordinator._gate_pending is None
+
+
+def test_the_deferred_copy_can_be_declined(model_dir):
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+
+    _require_selected_backend()
+    coordinator = build_pd_coordinator(
+        model_path=model_dir, num_pages=64, page_size=16, defer_handoff=False
+    )
+    handoff = coordinator._handoff
+    assert not isinstance(handoff, StreamCopyKVHandoff) or not handoff.defers
+    assert coordinator._gate_pending is None
+
+
+def test_the_deferred_and_blocking_copies_generate_the_same_tokens(model_dir):
+    """The end-to-end gate: on a GPU host this runs the real deferred handoff
+    through `PDCoordinator`, and overlap must not change the answer."""
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import EngineRequest
+
+    _require_selected_backend()
+
+    def _generate(defer_handoff: bool):
+        coordinator = build_pd_coordinator(
+            model_path=model_dir, num_pages=64, page_size=16,
+            defer_handoff=defer_handoff,
+        )
+        coordinator.add_request(
+            EngineRequest(
+                "a", tuple(range(9)), max_new_tokens=4, sampling=EngineSampling()
+            )
+        )
+        outputs = coordinator.run_to_completion()
+        assert not coordinator.failed_requests
+        return outputs
+
+    assert _generate(True) == _generate(False)

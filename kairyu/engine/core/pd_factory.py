@@ -9,9 +9,12 @@ where the KV actually lives:
 - device pools get `StreamCopyKVHandoff` over a `CudaStreamProvider` bound to
   the pool's own device, so the extraction copy runs on its own stream.
 
-What this does NOT do, and the docstrings say so at the seam: overlap the copy
-with the next forward. `StreamCopyKVHandoff` blocks the host before returning, so
-the consumer would need a completion event instead of a host-wide wait.
+The device path also DEFERS (m18 D3): the copy's completion event is recorded
+instead of blocking the host, so the producer's next step is queued alongside it.
+That is only offered where the consumer honours it — `build_pd_coordinator`
+returns a `PDCoordinator`, which gates every prefill-side release on the event
+and therefore keeps the source pages leased for the copy's whole lifetime.
+`build_kv_handoff` defaults to the blocking form for any other caller.
 """
 
 from __future__ import annotations
@@ -20,12 +23,24 @@ from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
 from kairyu.engine.core.kv_pool import PagedKVPool
 
 
-def build_kv_handoff(inner, pool: PagedKVPool, *, force_side_stream: bool | None = None):
+def build_kv_handoff(
+    inner,
+    pool: PagedKVPool,
+    *,
+    force_side_stream: bool | None = None,
+    defer: bool = False,
+):
     """Wrap ``inner`` for the device ``pool`` lives on.
 
     ``force_side_stream`` overrides the placement decision — True demands the
     side stream (and raises without CUDA rather than silently degrading), False
     keeps the plain handoff. Deployment leaves it None.
+
+    ``defer`` is opt-in and defaults off because it is a CONSUMER contract, not a
+    performance knob: the returned handoff comes back while the copy still holds
+    the source pages, so its caller must gate before reading the destination or
+    releasing the source. ``build_pd_coordinator`` turns it on because
+    ``PDCoordinator`` does exactly that.
     """
     on_device = pool.k.device.type == "cuda"
     wanted = on_device if force_side_stream is None else force_side_stream
@@ -38,12 +53,14 @@ def build_kv_handoff(inner, pool: PagedKVPool, *, force_side_stream: bool | None
         )
     from kairyu.engine.core.handoff_stream import CudaStreamProvider
 
-    return StreamCopyKVHandoff(inner, CudaStreamProvider(device=pool.k.device))
+    return StreamCopyKVHandoff(
+        inner, CudaStreamProvider(device=pool.k.device), defer=defer
+    )
 
 
-def build_cpu_kv_handoff(inner):
+def build_cpu_kv_handoff(inner, *, defer: bool = False):
     """The host-side equivalent, for tests that want the recording provider."""
-    return StreamCopyKVHandoff(inner, CpuNoopStream())
+    return StreamCopyKVHandoff(inner, CpuNoopStream(), defer=defer)
 
 
 def build_pd_coordinator(
@@ -55,6 +72,7 @@ def build_pd_coordinator(
     tokenizer=None,
     max_transfer_retries: int = 1,
     force_side_stream: bool | None = None,
+    defer_handoff: bool = True,
 ):
     """Assemble a prefill/decode pair from a checkpoint (G2 stage 5.3 entry).
 
@@ -65,6 +83,13 @@ def build_pd_coordinator(
 
     Both halves are placed by the same probe the single-process path uses, so a
     GPU host gets bf16 on-device pools and therefore the side-stream handoff.
+
+    `defer_handoff` defaults ON here, and only here: this is the one caller that
+    both enables the deferred copy and settles it. `PDCoordinator` keeps the
+    prefill-side allocation leased and gates every release on the copy's
+    completion event, so the producer's next step overlaps the copy without the
+    source pages ever being reusable under it. Pass False to fall back to the
+    blocking copy (bisecting a suspected ordering bug against it, for instance).
     """
     import torch
 
@@ -103,7 +128,10 @@ def build_pd_coordinator(
     decode_cache, decode_scheduler, decode_runner, _decode_pool = half()
 
     handoff = build_kv_handoff(
-        LocalKVHandoff(decode_cache), prefill_pool, force_side_stream=force_side_stream
+        LocalKVHandoff(decode_cache),
+        prefill_pool,
+        force_side_stream=force_side_stream,
+        defer=defer_handoff,
     )
     return PDCoordinator(
         prefill_scheduler=prefill_scheduler,

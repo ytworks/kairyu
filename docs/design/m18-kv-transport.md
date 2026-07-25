@@ -83,13 +83,34 @@ a recording fake.
 > pool's own device for a device pool.
 >
 > **Overlap landed 2026-07-26.** `StreamCopyKVHandoff(..., defer=True)` records a
-> completion event instead of blocking, exposes it on `pending_event`, and offers
-> `wait_for_pending()` for the consumer. The producer can queue its next step
+> completion event instead of blocking. The producer can queue its next step
 > while the copy runs — measured on device: the deferred form returns strictly
 > faster than the blocking one on the same work, and the copied values are
-> correct once the event is awaited. The DEFAULT is still blocking, because
-> deferring moves the m6 D4 ordering responsibility to the caller and a caller
-> that forgets it reads half-written KV.
+> correct once the event is settled.
+>
+> Deferring is a CONSUMER CONTRACT with two halves, not one. Nothing may read the
+> destination pages before the event — and nothing may reuse the SOURCE pages
+> before it either. `PDCoordinator`'s m6 D4 rule releases the prefill-side
+> allocation the moment the transfer returns (`update()` → `commit_and_release`
+> pool-frees the tail page, `abort()` → `release_preempted` frees all of it), so
+> a deferred copy would be reading pages the next prefill step can allocate and
+> overwrite on the caller's stream. Waiting on the destination side does not stop
+> that; it is a source-side read/write race.
+>
+> The coordinator therefore owns the lease. `PDCoordinator._release_source_pages`
+> is the single point where prefill-side pages go back — commit and abort alike —
+> and it calls `gate_pending()` first. The gate is stream-ordered, not a host
+> block (`event.wait(current_stream)`), so the step queued while the copy ran
+> keeps running, and the same dependency covers the decode core's read of the
+> destination pages, which is queued after it. A deferring handoff that exposes
+> no `gate_pending()` is refused at construction rather than releasing pages
+> under a copy the coordinator cannot order against. Events ACCUMULATE: a prefill
+> step transfers every prompt that completed in it, and a single-slot
+> `pending_event` would silently drop the ordering for all but the last copy.
+>
+> Production wiring: `build_pd_coordinator(defer_handoff=True)` — the default,
+> and the only caller that turns it on, because it is the only one that settles
+> it. `build_kv_handoff(..., defer=...)` defaults off for everyone else.
 >
 > Still open: serving-layer exposure (a `pd_separation` deployment option) is G2
 > stage 5.3 work on top of `pd_factory.build_pd_coordinator()`.

@@ -5,12 +5,17 @@
 the ordering: enter stream → inner.transfer (which extracts+copies) →
 synchronize → return. A recording fake tests the order.
 
-Scope, because the name invites a bigger reading: this runs the copy on its own
-stream. It does NOT overlap the copy with the next forward. ``transfer()`` blocks
-the host before returning and ``PDCoordinator`` commits before stepping decode,
-so nothing is queued alongside it, and no production path constructs a
-``CudaStreamProvider`` yet. Both need the consumer to take a completion EVENT in
-place of the host-wide wait.
+With ``defer=True`` the handoff returns while the copy is still running and
+records its completion event instead. That is only safe for a consumer that
+takes on the whole m6 D4 ordering rule, which has two halves and not one:
+
+1. nothing may READ the destination pages before the event, and
+2. nothing may REUSE the source pages before the event either — the copy is
+   still reading them, and releasing them lets the next step allocate the same
+   page and overwrite it on the caller's stream.
+
+``PDCoordinator`` is the consumer that implements both, by gating every
+prefill-side release on ``gate_pending()``. ``pd_factory`` is what wires it.
 """
 
 from __future__ import annotations
@@ -58,6 +63,9 @@ class CpuNoopStream:
         self.events.append("record")
         return CpuNoopEvent(self.events)
 
+    def gate(self, event: CpuNoopEvent) -> None:
+        event.wait()
+
 
 class CudaStreamProvider:
     """The GPU half of the seam (m18 D3): extraction runs on a side stream.
@@ -67,9 +75,11 @@ class CudaStreamProvider:
     finished writing — and then makes it current. ``synchronize()`` leaves that
     window and blocks until the copy has actually completed.
 
-    A full ``stream.synchronize()`` is deliberate rather than an event wait: the
+    A full ``stream.synchronize()`` is the BLOCKING form's deliberate choice: the
     handoff's commit point publishes the allocation to other threads, and the m18
-    D3 ordering rule is that it must never run ahead of the copy.
+    D3 ordering rule is that it must never run ahead of the copy. ``record()`` +
+    ``gate()`` are the deferred form of the same rule, expressed in stream order
+    rather than by stopping the host.
 
     What this buys, stated precisely because two earlier versions of this
     docstring got it wrong. ``begin()`` waits on everything ALREADY queued on the
@@ -77,12 +87,6 @@ class CudaStreamProvider:
     therefore still follows. What it gains is the other direction: work the
     caller queues AFTER that point runs independently of the copy, because the
     two are on separate streams.
-
-    It does NOT overlap the copy with the next forward. ``StreamCopyKVHandoff``
-    blocks the host before returning and ``PDCoordinator`` commits before
-    stepping decode, so nothing is queued alongside it. That needs the consumer
-    to take a completion EVENT instead of the host-wide wait, which is not in
-    this seam.
     """
 
     def __init__(self, device: object | None = None) -> None:
@@ -107,13 +111,16 @@ class CudaStreamProvider:
         window.__enter__()
         self._window = window
 
-    def synchronize(self) -> None:
+    def _close_window(self) -> None:
         window, self._window = self._window, None
         if window is not None:
             # runs from StreamCopyKVHandoff's finally, so it must close the
             # window even when the transfer raised — a leaked stream context
             # would silently redirect every later op on this thread
             window.__exit__(None, None, None)
+
+    def synchronize(self) -> None:
+        self._close_window()
         self._stream.synchronize()
 
     def record(self) -> object:
@@ -123,32 +130,72 @@ class CudaStreamProvider:
         immediately, and whoever consumes the copied pages waits on the event.
         ``synchronize()`` remains for callers that want the simple ordering.
         """
-        window, self._window = self._window, None
-        if window is not None:
-            window.__exit__(None, None, None)
+        self._close_window()
         event = self._torch.cuda.Event()
         event.record(self._stream)
         return event
+
+    def gate(self, event) -> None:
+        """Order everything the caller queues NEXT after ``event``.
+
+        The host is not stopped: the dependency is expressed on the caller's
+        stream, so both halves of the m6 D4 rule hold for stream-ordered work —
+        reads of the destination pages and rewrites of the released source pages
+        alike are queued behind the copy.
+        """
+        event.wait(self._torch.cuda.current_stream(device=self._stream.device))
 
 
 class StreamCopyKVHandoff:
     """Wraps any KVHandoff: copy work happens inside the stream window.
 
-    ``defer=True`` returns without blocking the host and exposes the copy's
-    completion event on ``pending_event``. The producer can then queue its next
-    step while the copy is still running — the overlap this seam is named for —
-    provided the CONSUMER waits on the event before reading the pages.
+    ``defer=True`` returns without blocking the host and records the copy's
+    completion event. The producer can then queue its next step while the copy is
+    still running — the overlap this seam is named for — provided the consumer
+    closes the window it opens, with either:
+
+    - ``gate_pending()``: order the caller's stream after the copy without
+      stopping the host. This is what ``PDCoordinator`` uses, and it covers BOTH
+      halves of m6 D4 — the decode read of the destination pages, and the reuse
+      of the prefill-side source pages the release hands back to the pool.
+    - ``wait_for_pending()``: block the host until the copy has landed. Simpler,
+      and what a caller doing non-stream-ordered work with the pages needs.
 
     Default stays ``defer=False``: block before returning, so the commit point
-    cannot run ahead of the copy (m6 D4). Deferring moves that responsibility to
-    the caller, and a caller that forgets it reads half-written KV.
+    cannot run ahead of the copy. Deferring moves that responsibility to the
+    caller, and a caller that forgets it reads half-written KV — or lets the next
+    forward overwrite the pages the copy is reading.
+
+    Events accumulate: a prefill step transfers every prompt that finished in it,
+    so one deferred event per transfer is pending until the consumer settles them
+    together. Keeping only the last would silently drop the ordering for every
+    earlier copy in the step.
     """
 
     def __init__(self, inner, provider: StreamProvider, *, defer: bool = False) -> None:
         self._inner = inner
         self._provider = provider
         self._defer = defer
-        self.pending_event: object | None = None
+        self._pending: list[object] = []
+
+    @property
+    def defers(self) -> bool:
+        """True when ``transfer()`` returns before the copy has completed.
+
+        The consumer contract switch: a deferring handoff obliges its caller to
+        settle ``gate_pending()``/``wait_for_pending()`` before reading the
+        destination or releasing the source.
+        """
+        return self._defer
+
+    @property
+    def pending_event(self) -> object | None:
+        """The most recent unsettled completion event, or None."""
+        return self._pending[-1] if self._pending else None
+
+    @property
+    def pending_events(self) -> tuple[object, ...]:
+        return tuple(self._pending)
 
     def transfer(
         self, tokens: tuple[int, ...], first_token: int, pages: tuple[int, ...] = ()
@@ -159,16 +206,36 @@ class StreamCopyKVHandoff:
         finally:
             if self._defer:
                 record = getattr(self._provider, "record", None)
-                self.pending_event = (
-                    record() if record is not None else self._provider.synchronize()
-                )
+                # a raising transfer may already have queued part of the copy, so
+                # its event is recorded too: the caller still has to gate before
+                # aborting and releasing the source pages
+                event = record() if record is not None else self._provider.synchronize()
+                if event is not None:
+                    self._pending.append(event)
             else:
                 # the commit point must never run ahead of the copy (m6 D4)
                 self._provider.synchronize()
         return allocation
 
+    def _take_pending(self) -> tuple[object, ...]:
+        events, self._pending = tuple(self._pending), []
+        return events
+
     def wait_for_pending(self) -> None:
-        """Block until the deferred copy has landed; a no-op when nothing is."""
-        event, self.pending_event = self.pending_event, None
-        if event is not None:
+        """Block until every deferred copy has landed; a no-op when none is."""
+        for event in self._take_pending():
             event.synchronize()
+
+    def gate_pending(self) -> None:
+        """Order the caller's subsequent stream work after every deferred copy.
+
+        Unlike ``wait_for_pending()`` this does not stop the host, so the step the
+        producer already queued keeps running. Providers without a ``gate`` fall
+        back to the host wait rather than skipping the ordering.
+        """
+        gate = getattr(self._provider, "gate", None)
+        for event in self._take_pending():
+            if gate is not None:
+                gate(event)
+            else:  # pragma: no cover - every shipped provider has gate()
+                event.synchronize()
