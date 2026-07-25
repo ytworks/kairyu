@@ -1,15 +1,23 @@
 """HLE / LongBench v2 / MRCR adapters: scoring, context gating, degradation."""
 
+import json
+
+import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters.base import RunContext
+from kairyu.bench.adapters.base import DownloadContext, RunContext
 from kairyu.bench.adapters.hle import HleAdapter
 from kairyu.bench.adapters.longbench_v2 import LongBenchV2Adapter
 from kairyu.bench.adapters.mrcr import MrcrAdapter, mrcr_grade
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.runner import SuiteRunner
 from kairyu.bench.store import ResultStore
-from kairyu.bench.types import BenchItem, ChatRequestSpec, SkipItem
+from kairyu.bench.types import (
+    BenchItem,
+    ChatRequestSpec,
+    DatasetUnavailable,
+    SkipItem,
+)
 
 
 def _ctx(tmp_path, **overrides) -> RunContext:
@@ -142,6 +150,78 @@ def test_mrcr_context_gate(tmp_path):
     )
     gated = adapter.build_request(item, make_target(max_context_tokens=100), ctx)
     assert isinstance(gated, SkipItem)
+
+
+def _mrcr_row(needles: int, *, content: str = "hi", n_chars: int | None = None) -> dict:
+    row = {
+        "prompt": json.dumps([{"role": "user", "content": content}]),
+        "answer": "PREFIXok",
+        "random_string_to_prepend": "PREFIX",
+        "n_needles": needles,
+    }
+    if n_chars is not None:
+        row["n_chars"] = n_chars
+    return row
+
+
+def _patch_mrcr_rows(monkeypatch, rows):
+    import kairyu.bench.hub as hub
+
+    monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: rows)
+
+
+def test_mrcr_normalize_keeps_only_the_fugu_slice(tmp_path, monkeypatch, capsys):
+    """Fugu reports 8-needle at up to 128K; the split also ships 2/4-needle."""
+    from kairyu.bench.adapters.mrcr import _MAX_CONTEXT_TOKENS
+
+    over_budget = "x" * ((_MAX_CONTEXT_TOKENS + 10) * 4)
+    _patch_mrcr_rows(
+        monkeypatch,
+        [
+            _mrcr_row(2),  # wrong needle count
+            _mrcr_row(4),  # wrong needle count
+            _mrcr_row(8, content="keep me"),  # kept
+            _mrcr_row(8, content=over_budget),  # over 128K
+        ],
+    )
+    rows = MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+    assert len(rows) == 1
+    assert rows[0]["n_needles"] == 8
+    assert rows[0]["messages"][0]["content"] == "keep me"
+    assert rows[0]["est_prompt_tokens"] > 0
+    # the excluded counts are reported, never silently dropped
+    out = capsys.readouterr().out
+    assert "kept 1/4" in out and "not 8-needle" in out
+
+
+def test_mrcr_normalize_prefers_dataset_n_chars(tmp_path, monkeypatch):
+    """A short-looking row whose upstream n_chars exceeds 128K is excluded."""
+    from kairyu.bench.adapters.mrcr import _MAX_CONTEXT_TOKENS
+
+    _patch_mrcr_rows(
+        monkeypatch,
+        [
+            _mrcr_row(8, content="tiny", n_chars=(_MAX_CONTEXT_TOKENS + 100) * 4),
+            _mrcr_row(8, content="tiny", n_chars=4000),
+        ],
+    )
+    rows = MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+    assert [row["est_prompt_tokens"] for row in rows] == [1001]
+
+
+def test_mrcr_normalize_fails_closed_on_empty_slice(tmp_path, monkeypatch):
+    _patch_mrcr_rows(monkeypatch, [_mrcr_row(2), _mrcr_row(4)])
+    with pytest.raises(DatasetUnavailable, match="8-needle"):
+        MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+
+def test_mrcr_methodology_discloses_the_slice(tmp_path):
+    methodology = MrcrAdapter().methodology(_ctx(tmp_path))
+    assert methodology["needles"] == 8
+    assert methodology["max_context_tokens"] == 131_072
+    assert "n_needles == 8" in methodology["selection"]
+    assert any("8-needle" in note for note in MrcrAdapter().info.annotations)
 
 
 async def test_mrcr_runs_end_to_end(tmp_path, http_factory):

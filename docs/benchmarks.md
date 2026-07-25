@@ -92,12 +92,19 @@ vs `kairyu-auto-max` in one run.
 | SciCode | `SciCode1/SciCode` | sandboxed sub-step tests (+`test_data.h5` golden data) | numpy in venv |
 | τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
-| MRCRv2 | `openai/mrcr` | official prepend + SequenceMatcher ratio | long-context target |
+| MRCRv2 | `openai/mrcr` (8-needle, ≤128K) | official prepend + SequenceMatcher ratio | long-context target |
 
 Annotated caveats appear as scoreboard footnotes automatically, notably:
 the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
 suite is unpublished; numbers are not directly comparable), and LiveCodeBench
 Pro is scored by the local sandbox, not the official judge.
+
+**MRCRv2 population.** The published `openai/mrcr` split mixes 2-, 4- and
+8-needle items across context lengths up to 1M tokens. Fugu reports the
+**8-needle** subset at up to **128K** context, so the adapter selects exactly
+that slice (preferring the dataset's own `n_chars` for the length estimate) and
+prints how many rows each filter excluded. Averaging the whole 2,400-row split
+would score an easier, shorter population against Fugu's number.
 
 ## Degradation model (why one command always completes)
 
