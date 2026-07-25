@@ -199,6 +199,23 @@ def test_serving_collectives_do_not_inherit_the_startup_timeout(tmp_path):
 
 
 
+def test_reduce_scatter_matches_all_reduce_sliced(spawn2):
+    # the primitive m16 D1 recorded as missing (gloo has none). Under gloo it is
+    # all_reduce + a local slice; this pins the contract the NCCL path honours.
+    results = spawn2(dist_targets.reduce_scatter_equivalence)
+    for rank, result in enumerate(results):
+        assert result["shape"] == [4, 3], rank
+        assert result["max_error"] == 0.0, rank
+        assert result["regathered_matches"] is True, rank
+
+
+def test_reduce_scatter_rejects_an_indivisible_first_dimension(spawn2):
+    results = spawn2(dist_targets.reduce_scatter_rejects_indivisible)
+    for result in results:
+        assert result["raised"] is True
+        assert "divisible" in result["message"]
+
+
 class _AlwaysWrongDraft:
     """Proposes a token the model will never pick, so every draft is REJECTED.
 

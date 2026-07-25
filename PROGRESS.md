@@ -133,6 +133,44 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m2 §2.2 (partially), G2 A1, `kairyu/engine/core/model_runner.py`,
   `tests/unit/test_overlap_future_token.py`, `tests/gpu/test_overlap_future_token_gpu.py`
 
+### 2026-07-25 — [amendment] m18 D3: CudaStreamProvider landed; KV serde can read a device pool
+- What: `CudaStreamProvider` implemented (the deploy-day half of the m18 D3 stream seam),
+  and `kv_serde._to_bytes` now copies to host before `.numpy()`.
+- Why: the seam had never run against a CUDA pool. `_to_bytes` called `.numpy()` on the
+  tensor directly, so `extract_page` on a device `PagedKVPool` raised `TypeError: can't
+  convert cuda:0 device type tensor to numpy` — the real handoff could not read GPU KV at
+  all, which a side stream does not help with. Scope is recorded honestly: the extraction
+  copy is now isolated on a side stream that waits on the caller's stream FOR THE DEVICE
+  THE PROVIDER WAS BUILT FOR (an argument-less `current_stream()` follows the thread's
+  current device instead). End-to-end overlap with the next forward is NOT delivered —
+  `StreamCopyKVHandoff` blocks the host before returning and `PDCoordinator` commits
+  before stepping decode — and neither is production wiring; both need a completion event
+  handed to the consumer rather than a host-wide wait.
+- Refs: m18 D3 (amended), `kairyu/engine/core/handoff_stream.py`,
+  `kairyu/engine/core/kv_serde.py`, `tests/gpu/test_handoff_stream_gpu.py`
+
+### 2026-07-25 — [amendment] m16 D1: reduce_scatter implemented; "same-call-site optimization" withdrawn
+- What: `TorchDistCommunicator.tensor_reduce_scatter` added — NCCL's real collective, and
+  all_reduce + a local slice under gloo, which has none. The D1 note calling NCCL's
+  reduce_scatter "a same-call-site optimization recorded for deploy day" is withdrawn as
+  incorrect, and the m16 §3 non-goal is narrowed to USING it at the `RowParallelLinear`
+  call site (which needs sequence parallelism), not to the primitive.
+- Why: measured, not assumed. On 8x RTX PRO 6000 Blackwell, 8192x5120 bf16, torch
+  2.12.1+cu130 / NCCL 2.29.7 — per-trial worst-rank elapsed via CUDA events,
+  barrier-bounded, MAX-reduced across ranks, buffers outside the timed region, paths
+  interleaved, 120 samples each (6 rounds x 20 trials) — `all_reduce` medians 3.784 ms while
+  `reduce_scatter`+`all_gather` medians 3.944 ms. Swapping one for the other at the same
+  call site moves the same bytes and adds a launch, so it LOSES; all_reduce's p95 sits
+  below rs+ag's MINIMUM, so this is not straggler noise (the full supports do overlap — a
+  few all_reduce samples land above rs+ag's floor — so the claim is about the bulk). `reduce_scatter`
+  alone medians 1.988 ms (1.90x), but its output is a shard, so realising that win means
+  sequence parallelism — a design change m16 does not specify and one that should be
+  argued on activation memory as much as on comm time. The call site is deliberately
+  unchanged.
+- Refs: m16 D1 + §3 (amended), `kairyu/engine/core/dist_comm.py`,
+  `bench/reduce_scatter_bench.py`, `bench/results/reduce-scatter-2026-07-25.json`
+  (raw per-trial samples committed)
+
 ### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
 - What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
   `tensor_parallel_size > 1`, which happens BEFORE the `probe()` block that selects
