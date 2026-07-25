@@ -10,7 +10,10 @@ So the question this answers is narrow and worth having a number for: on THIS
 fabric, does rs+ag beat ar? If it does not, sequence parallelism buys activation
 memory and sharded norms, not comm time, and the design note should say so.
 
-Run: uv run torchrun --nproc-per-node 8 bench/reduce_scatter_bench.py
+Run (the command that produced the committed evidence):
+  uv run torchrun --nproc-per-node 8 bench/reduce_scatter_bench.py \\
+      --rows 8192 --hidden 5120 --iters 20 --rounds 6 \\
+      --out bench/results/reduce-scatter-<date>.json
 """
 
 from __future__ import annotations
@@ -103,9 +106,20 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=8192, help="tokens in the batch")
     parser.add_argument("--hidden", type=int, default=5120, help="Qwen3-32B hidden size")
     parser.add_argument("--iters", type=int, default=20, help="trials per round")
-    parser.add_argument("--rounds", type=int, default=5, help="interleaved repeats")
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=6,
+        help="counterbalanced repeats; must be a multiple of the 3 paths so each "
+        "occupies every order position equally (the committed evidence used 6)",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
+    if args.rounds % 3 != 0:
+        raise SystemExit(
+            "--rounds must be a multiple of 3 so the three paths are fully "
+            f"counterbalanced across order positions; got {args.rounds}"
+        )
 
     rank = int(os.environ["RANK"])
     world = int(os.environ["WORLD_SIZE"])
