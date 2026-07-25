@@ -331,23 +331,12 @@ def main() -> int:
     else:
         prompts = _fixed_prompts(args.num_prompts, args.max_new_tokens)
 
+    # A1 requires overlap ON and OFF. The ON half used to be skipped here:
+    # `PagedModelRunner` read `state.outputs[position - 1]`, which an overlap
+    # snapshot is one short of, so a real runner raised IndexError. The in-flight
+    # token buffer fixes that, so both halves run.
     overlap_modes = (False,) if args.no_overlap_sweep else (False, True)
     overlap_note = None
-    if args.model_path and True in overlap_modes:
-        # OverlapEngineCore's contract (m2 §2.2) is that the runner never needs a
-        # previously-committed token from the host, because the last-token slot is
-        # patched DEVICE-SIDE. That patch was never implemented, and
-        # PagedModelRunner._decode_inputs reads `state.outputs[position - 1]`
-        # directly — so a real runner raises IndexError on the first decode of the
-        # pipelined step. The toy runner ignores outputs entirely, which is why no
-        # CPU test sees it.
-        overlap_modes = (False,)
-        overlap_note = (
-            "overlap ON not measured: the device-side future-token patch (m2 §2.2) "
-            "is unimplemented, so PagedModelRunner raises IndexError under "
-            "OverlapEngineCore. A1's overlap-ON half is NOT covered by this run."
-        )
-        print(f"WARNING: {overlap_note}")
     results = {}
     for overlap in overlap_modes:
         base = _run(
