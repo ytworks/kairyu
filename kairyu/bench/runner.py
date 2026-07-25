@@ -139,6 +139,7 @@ class SuiteRunner:
             judge=judge,
             limit=limit,
             seed=config.seed,
+            attempts=config.attempts,
             concurrency=config.concurrency,
             retries=config.retries,
             request_timeout_s=config.request_timeout_s,

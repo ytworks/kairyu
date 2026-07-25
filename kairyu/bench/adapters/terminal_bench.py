@@ -27,7 +27,13 @@ from kairyu.bench.adapters.base import (
 from kairyu.bench.types import BenchTarget, DownloadReport, ItemResult, PairResult
 
 _HARNESS_TIMEOUT_S = 8 * 3600
-_DATASET = "terminal-bench/terminal-bench-2-1"
+# Harbor selects datasets as `name@version`; a slug like
+# "terminal-bench/terminal-bench-2-1" is not a form `-d` accepts.
+_DATASET = "terminal-bench@2.1"
+_AGENT = "terminus-2"
+# Fugu's condition. Harbor's terminus-2 default turn budget is lower, which
+# truncates long traces well before the published limit.
+_MAX_TURNS = 500
 
 
 def parse_harbor_results(data) -> list[ItemResult]:
@@ -59,7 +65,12 @@ class TerminalBenchAdapter:
         metric="accuracy",
         needs_docker=True,
         agentic=True,
-        annotations=("agent scaffold: terminus-2 via the Harbor harness",),
+        annotations=(
+            f"agent scaffold: {_AGENT} via the Harbor harness, "
+            f"max_turns={_MAX_TURNS} (Fugu's condition)",
+            "one attempt per task by default (--attempts); the official "
+            "leaderboard requires at least five",
+        ),
     )
 
     def download(self, ctx: DownloadContext) -> DownloadReport:
@@ -84,11 +95,17 @@ class TerminalBenchAdapter:
             "-d",
             _DATASET,
             "-a",
-            "terminus-2",
+            _AGENT,
             "-m",
             f"openai/{target.model}",
-            "--output-dir",
+            # `harbor run` writes into --jobs-dir; --output-dir belongs to
+            # `harbor jobs download` and is rejected here.
+            "--jobs-dir",
             str(output_dir),
+            "--ak",
+            f"max_turns={_MAX_TURNS}",
+            "-k",
+            str(ctx.attempts),
         ]
         if ctx.limit is not None:
             command += ["--n-tasks", str(ctx.limit)]
@@ -147,7 +164,9 @@ class TerminalBenchAdapter:
                 "metric": self.info.metric,
                 "dataset": _DATASET,
                 "harness": "harbor",
-                "agent": "terminus-2",
+                "agent": _AGENT,
+                "max_turns": _MAX_TURNS,
+                "attempts": ctx.attempts,
                 "command": " ".join(command),
             },
             annotations=self.info.annotations,

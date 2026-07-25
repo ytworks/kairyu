@@ -82,15 +82,15 @@ vs `kairyu-auto-max` in one run.
 
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
-| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent scaffold + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
-| Terminal-Bench 2.1 | Harbor registry | `harbor run` (terminus-2), accuracy | docker, `[bench-agentic]` |
+| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
+| Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), accuracy | docker, `[bench-agentic]` |
 | LiveCodeBench | `livecodebench/code_generation_lite` | sandboxed pass@1 (public+private tests) | — |
 | LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro(+-Testcase)` | sandboxed pass@1 (community mirror, not the official OJ) | — |
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
 | SciCode | `SciCode1/SciCode` | sandboxed sub-step tests (+`test_data.h5` golden data) | numpy in venv |
-| τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
+| τ³-Bench Banking | tau3/tau2 `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
 | MRCRv2 | `openai/mrcr` | official prepend + SequenceMatcher ratio | long-context target |
 
@@ -235,6 +235,20 @@ SWE-Bench Pro and Terminal-Bench evaluate inside per-task docker containers.
 two rows report `skipped: docker unavailable` and everything else completes.
 The τ-bench harness needs the user simulator (judge) served by the **same
 gateway** as the target (single `OPENAI_BASE_URL`).
+
+Fugu's published turn and trial conditions are pinned in the invocations:
+
+| Slot | Condition | How it is passed |
+|---|---|---|
+| SWE-Bench Pro | 1,000 agent steps (harness default is 250) | `-c swebench.yaml -c agent.step_limit=1000` — the harness drops its default config as soon as `-c` is given, so the default file is restated |
+| Terminal-Bench 2.1 | terminus-2, 500 turns | `-a terminus-2 --ak max_turns=500`, dataset `-d terminal-bench@2.1`, results in `--jobs-dir` |
+| τ³ Banking | `banking_knowledge`, all retrieval tools, low-effort user simulator | `--domain banking_knowledge --retrieval-config alltools --user-llm-args '{"reasoning_effort":"low"}'` (from the judge's sampling policy), results addressed by `--save-to <name>` under the harness data dir |
+
+`--attempts N` sets trials per task (`-k` for Harbor, `--num-trials` for τ).
+It defaults to **1** because each attempt is another full container run; Fugu
+reports τ³ Banking as **pass@4** and the Terminal-Bench leaderboard requires at
+least five, and both facts are annotated on the cell so a single-attempt number
+is never mistaken for either.
 
 ## Scale and cost
 
