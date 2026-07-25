@@ -112,6 +112,22 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] m18 D3: CudaStreamProvider landed; KV serde can read a device pool
+- What: `CudaStreamProvider` implemented (the deploy-day half of the m18 D3 stream seam),
+  and `kv_serde._to_bytes` now copies to host before `.numpy()`.
+- Why: the seam had never run against a CUDA pool. `_to_bytes` called `.numpy()` on the
+  tensor directly, so `extract_page` on a device `PagedKVPool` raised `TypeError: can't
+  convert cuda:0 device type tensor to numpy` — the real handoff could not read GPU KV at
+  all, which a side stream does not help with. Scope is recorded honestly: the extraction
+  copy is now isolated on a side stream that waits on the caller's stream FOR THE DEVICE
+  THE PROVIDER WAS BUILT FOR (an argument-less `current_stream()` follows the thread's
+  current device instead). End-to-end overlap with the next forward is NOT delivered —
+  `StreamCopyKVHandoff` blocks the host before returning and `PDCoordinator` commits
+  before stepping decode — and neither is production wiring; both need a completion event
+  handed to the consumer rather than a host-wide wait.
+- Refs: m18 D3 (amended), `kairyu/engine/core/handoff_stream.py`,
+  `kairyu/engine/core/kv_serde.py`, `tests/gpu/test_handoff_stream_gpu.py`
+
 ### 2026-07-25 — [amendment] m16 D1: reduce_scatter implemented; "same-call-site optimization" withdrawn
 - What: `TorchDistCommunicator.tensor_reduce_scatter` added — NCCL's real collective, and
   all_reduce + a local slice under gloo, which has none. The D1 note calling NCCL's

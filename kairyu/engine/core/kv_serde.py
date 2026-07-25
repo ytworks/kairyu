@@ -29,8 +29,12 @@ def pool_fingerprint(pool: PagedKVPool) -> str:
 
 def _to_bytes(tensor: torch.Tensor) -> bytes:
     # dtype-agnostic raw bytes via a uint8 view, so bfloat16 (which numpy cannot
-    # represent) serializes like every other dtype (Phase 6 KVTransport)
-    return tensor.contiguous().flatten().view(torch.uint8).numpy().tobytes()
+    # represent) serializes like every other dtype (Phase 6 KVTransport).
+    # `.cpu()` is what makes a CUDA pool work at all: `.numpy()` raises
+    # "can't convert cuda:0 device type tensor to numpy", so the real handoff
+    # could not extract from a device pool. It is a no-op for host tensors, and
+    # on a device pool this is the D2H copy the side stream exists to isolate.
+    return tensor.contiguous().flatten().view(torch.uint8).cpu().numpy().tobytes()
 
 
 def _from_bytes(data: bytes, target: torch.Tensor) -> torch.Tensor:

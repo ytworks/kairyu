@@ -48,12 +48,37 @@ mark computed, ACK with allocation info. Failure paths: transport error →
 
 ### D3 — `handoff_stream.py`: `StreamCopyKVHandoff` + StreamProvider
 
-The GPU-phase copy pipeline shape: extraction happens on a side stream so
-decode compute overlaps the copy. `StreamProvider` protocol (`stream()`,
-`synchronize()`): `CpuNoopStream` (tests) and `CudaStreamProvider`
-(`*_gpu`-style deferred, tiny). `StreamCopyKVHandoff` wraps any KVHandoff:
-extract-on-stream → synchronize → inner.transfer — ordering pinned by a
-recording fake.
+The GPU-phase copy pipeline shape: extraction happens on a side stream.
+`StreamProvider` protocol (`begin()`, `synchronize()`): `CpuNoopStream` (tests)
+and `CudaStreamProvider`. `StreamCopyKVHandoff` wraps any KVHandoff:
+enter-stream → inner.transfer (extract+copy) → synchronize — ordering pinned by
+a recording fake.
+
+> **Amended 2026-07-25.** `CudaStreamProvider` is implemented; the original
+> "decode compute overlaps the copy" and the "deferred" marker on the class are
+> both replaced by this paragraph rather than left standing beside it.
+>
+> `kv_serde._to_bytes` now copies to host before `.numpy()`. Without that the
+> real handoff could not read a CUDA `PagedKVPool` at all (`TypeError: can't
+> convert cuda:0 device type tensor to numpy`), so this seam had never run
+> against a device pool.
+>
+> What landed: the extraction copy runs on its own stream, which waits on the
+> caller's stream FOR THE DEVICE THE PROVIDER WAS BUILT FOR. Work the caller
+> queues after that point is independent of the copy.
+>
+> What did NOT land, and remains open: decode compute does not overlap the copy.
+> `StreamCopyKVHandoff` blocks the host before returning and `PDCoordinator`
+> commits before stepping decode, so nothing is queued alongside it. That needs
+> the consumer to take a completion EVENT in place of the host-wide wait.
+>
+> On "production wiring": there is nothing to wire into yet. `PDCoordinator` is
+> constructed only by `tests/unit/test_pd.py` — `kairyu/deploy/` and
+> `kairyu/entrypoints/` contain no P-D path at all, so no deployment reaches a
+> `KVHandoff` of any kind, let alone selects a stream provider for one. Adding a
+> placement-aware handoff factory now would be unused code choosing between two
+> paths nobody takes. The prerequisite is G2 stage 5.3 — wiring P-D
+> disaggregation into serve — and the provider selection belongs with it.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 
