@@ -159,6 +159,60 @@ class FlashInferBackend:
         out = wrapper.run(query, paged_kv)  # [T, H, D]
         return out.reshape(query.shape[0], -1)
 
+    def attend_decode(
+        self,
+        query: torch.Tensor,  # [B, heads, head_dim]
+        kv_pool: PagedKVPool,
+        layer: int,
+        page_tables: torch.Tensor,  # [B, P] int
+        seq_lens: torch.Tensor,  # [B] int
+    ) -> torch.Tensor:
+        """Tensor-input decode, the same contract the torch backend implements.
+
+        The paged arrays FlashInfer plans over are derived on DEVICE from the
+        page-table and length tensors, so the caller never has to hand over
+        Python lists. ``plan()`` itself still runs on the host — capturing this
+        whole call in a CUDA graph needs FlashInfer's ``use_cuda_graph``
+        wrappers with pinned indptr/indices buffers, which is a separate step;
+        eagerly, this is a drop-in for ``TorchAttentionBackend.attend_decode``.
+        """
+        page_size = kv_pool.page_size
+        pages_per_row = torch.div(
+            seq_lens + page_size - 1, page_size, rounding_mode="floor"
+        ).to(torch.int32)
+        offsets = torch.zeros(
+            pages_per_row.shape[0] + 1, dtype=torch.int32, device=pages_per_row.device
+        )
+        offsets[1:] = torch.cumsum(pages_per_row, dim=0)
+        # only the pages each row actually uses, concatenated in row order
+        span = torch.arange(page_tables.shape[1], device=page_tables.device)
+        used = span[None, :] < pages_per_row[:, None]
+        indices = page_tables[used].to(torch.int32)
+        last_page_len = ((seq_lens - 1) % page_size + 1).to(torch.int32)
+
+        key = (
+            "decode_tensors",
+            tuple(indices.tolist()),
+            tuple(seq_lens.tolist()),
+        )
+        if key != self._plan_key or not self._planned_decode:
+            self._decode.plan(
+                offsets.cpu(),
+                indices,
+                last_page_len.cpu(),
+                query.shape[1],
+                kv_pool.num_kv_heads,
+                kv_pool.head_dim,
+                page_size,
+                q_data_type=query.dtype,
+                kv_data_type=kv_pool.k.dtype,
+            )
+            self._plan_key = key
+            self._planned_decode = True
+
+        out = self._decode.run(query, (kv_pool.k[layer], kv_pool.v[layer]))
+        return out.reshape(query.shape[0], -1)
+
     def attend_batched(
         self,
         queries: list[torch.Tensor],
