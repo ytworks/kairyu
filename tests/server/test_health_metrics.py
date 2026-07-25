@@ -232,10 +232,48 @@ async def test_readyz_reports_unready_when_the_readiness_check_itself_raises():
     # that cannot answer is not evidence the engine is fine
     class _Exploding(MockBackend):
         def readiness(self):
-            raise RuntimeError("boom")
+            raise RuntimeError("connect https://internal:8443 failed")
 
     app = create_app(engines={"m": _Exploding()})
     async with _client(app) as client:
         ready = await client.get("/readyz")
     assert ready.status_code == 503
-    assert "boom" in ready.json()["engines"]["m"]
+    detail = ready.json()["engines"]["m"]
+    assert "RuntimeError" in detail
+    # unauthenticated endpoint: the exception MESSAGE must not travel (review [P2])
+    assert "internal" not in detail
+
+
+async def test_health_stays_ok_for_a_recoverable_engine_fault():
+    from kairyu.engine.backend import EngineReadiness
+
+    app = create_app(
+        engines={"m": _ReadinessBackend(EngineReadiness(False, "degraded"))}
+    )
+    async with _client(app) as client:
+        health = await client.get("/health")
+        ready = await client.get("/readyz")
+    # stop sending work, but do not ask to be replaced
+    assert health.status_code == 200
+    assert ready.status_code == 503
+
+
+async def test_health_503s_on_a_fatal_engine_fault():
+    # nothing in-process can undo dead TP ranks; without this the container stays
+    # up forever serving nothing, which is exactly what happened on hardware
+    from kairyu.engine.backend import EngineReadiness
+
+    app = create_app(
+        engines={
+            "m": _ReadinessBackend(
+                EngineReadiness(False, "ranks not running: [1, 2]", fatal=True)
+            )
+        }
+    )
+    async with _client(app) as client:
+        health = await client.get("/health")
+    assert health.status_code == 503
+    assert health.json() == {
+        "status": "fatal",
+        "engines": {"m": "ranks not running: [1, 2]"},
+    }

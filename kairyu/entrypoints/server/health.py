@@ -57,8 +57,37 @@ def add_health_routes(
             },
         )
 
+    def _engine_readiness() -> dict[str, EngineReadiness]:
+        """Per-engine self-report; engines without the optional hook are skipped."""
+        reported = {}
+        for name, engine in engines.items():
+            probe_readiness = getattr(engine, "readiness", None)
+            if probe_readiness is None:
+                continue
+            try:
+                reported[name] = probe_readiness()
+            except Exception as error:  # introspection must never 500
+                # class name only: this reaches an unauthenticated endpoint and
+                # an exception message can carry a path or an upstream URL
+                reported[name] = EngineReadiness(
+                    False, f"readiness check raised {type(error).__name__}"
+                )
+        return reported
+
     @app.get("/health")
-    async def health() -> dict:
+    async def health():
+        """Liveness. A FATAL engine fault answers 503 so an orchestrator replaces
+        the process — nothing in-process can undo dead tensor-parallel ranks, and
+        without this the container stays up forever serving nothing."""
+        fatal = {
+            name: status.detail
+            for name, status in _engine_readiness().items()
+            if status.fatal
+        }
+        if fatal:
+            return JSONResponse(
+                status_code=503, content={"status": "fatal", "engines": fatal}
+            )
         return {"status": "ok"}
 
     @app.post("/admin/drain")
@@ -115,17 +144,11 @@ def add_health_routes(
         # constructed, so without this the endpoint reports ready while the node
         # cannot emit a token — which is exactly how a benchmark ran against a
         # dead 8-GPU deployment for 14 minutes before anyone noticed.
-        failed = {}
-        for name, engine in engines.items():
-            probe_readiness = getattr(engine, "readiness", None)
-            if probe_readiness is None:
-                continue
-            try:
-                status = probe_readiness()
-            except Exception as error:  # introspection must never 500
-                status = EngineReadiness(False, f"readiness check failed: {error!r}")
-            if not status.ready:
-                failed[name] = status.detail
+        failed = {
+            name: status.detail
+            for name, status in _engine_readiness().items()
+            if not status.ready
+        }
         if failed:
             return JSONResponse(
                 status_code=503, content={"status": "unready", "engines": failed}

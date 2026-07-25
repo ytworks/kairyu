@@ -290,24 +290,36 @@ class KairyuBackend:
                 self._ensure_pump()
 
     def readiness(self) -> EngineReadiness:
-        """Cheap, honest liveness for `/readyz` (no probe generation).
+        """Cheap liveness for `/readyz`: KNOWN-FATAL state only, no probe.
 
-        Covers the two ways a hardware deployment has been observed to keep
-        answering `/readyz` with "ready" while unable to emit a single token: the
-        step loop died, or the spawned TP ranks did.
+        Dead TP ranks are the one condition this can assert. The group cannot
+        complete a single collective without them and nothing in-process can
+        bring them back, so the node needs replacing — `fatal` says so, and
+        `/health` turns that into a restart signal.
+
+        A step exception deliberately does NOT flip readiness. It is reported for
+        diagnosis but cannot be told apart from one bad request, and marking the
+        node unready for it is a trap: the load balancer stops sending work, so
+        the successful step that would clear the flag never arrives and the node
+        stays out of rotation until someone notices (review [P1] on #126).
         """
         launcher = getattr(self._loop, "tp_launcher", None)
         if launcher is not None:
             dead = launcher.dead_ranks()
             if dead:
                 return EngineReadiness(
-                    False, f"tensor-parallel ranks not running: {sorted(dead)}"
+                    False,
+                    f"tensor-parallel ranks not running: {sorted(dead)}",
+                    fatal=True,
                 )
-        if self._engine_error is not None:
-            return EngineReadiness(
-                False, f"engine step failed: {type(self._engine_error).__name__}"
-            )
-        return EngineReadiness(True)
+        return EngineReadiness(True, self._last_error_detail())
+
+    def _last_error_detail(self) -> str:
+        """Class name only — this reaches an unauthenticated endpoint, and an
+        exception's message can carry an upstream URL or a path (review [P2])."""
+        if self._engine_error is None:
+            return ""
+        return f"last step error: {type(self._engine_error).__name__}"
 
     def _ensure_pump(self) -> None:
         if not self._loop.has_work():
