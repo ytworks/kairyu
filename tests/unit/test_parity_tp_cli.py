@@ -68,3 +68,85 @@ def test_the_result_carries_the_counts_the_gate_uses(tmp_path):
     for entry in payload["parity"].values():
         assert entry["prompts"] == 5
         assert entry["exact_match"] == 5
+
+
+def _fake_checkpoint(root: Path) -> Path:
+    """A checkpoint-shaped directory: one safetensors shard plus the config and
+    tokenizer files provenance is derived from."""
+    root.mkdir(parents=True, exist_ok=True)
+    header = json.dumps(
+        {"w": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]}}
+    ).encode()
+    (root / "model.safetensors").write_bytes(
+        len(header).to_bytes(8, "little") + header + b"\0" * 16
+    )
+    (root / "config.json").write_text(json.dumps({"_name_or_path": "acme/toy-1b"}))
+    (root / "tokenizer_config.json").write_text(json.dumps({"model_max_length": 8}))
+    return root
+
+
+def test_provenance_identifies_the_checkpoint_by_content_not_path(tmp_path):
+    """Review [P2] on #130: the result recorded only a machine-local
+    `model_path`, which identifies nothing once the run leaves the box. G2 §8
+    wants the checkpoint, tokenizer and running commit recorded instead."""
+    sys.path.insert(0, str(REPO / "bench"))
+    try:
+        import parity_tp
+    finally:
+        sys.path.pop(0)
+
+    first = _fake_checkpoint(tmp_path / "a")
+    provenance = parity_tp._checkpoint_provenance(str(first))
+
+    assert provenance["name"] == "acme/toy-1b"
+    assert provenance["tokenizer_sha256"]["tokenizer_config.json"]
+    assert provenance["metadata_sha256"]["config.json"]
+    assert len(provenance["weights_sha256"]) == 64
+
+    # the same bytes under a different path are the same checkpoint
+    same = _fake_checkpoint(tmp_path / "b")
+    assert parity_tp._checkpoint_provenance(str(same))["weights_sha256"] == (
+        provenance["weights_sha256"]
+    )
+
+    # different weights are a different checkpoint even at the same path
+    (first / "model.safetensors").write_bytes(
+        (first / "model.safetensors").read_bytes() + b"\1"
+    )
+    assert parity_tp._checkpoint_provenance(str(first))["weights_sha256"] != (
+        provenance["weights_sha256"]
+    )
+
+
+def test_a_checkpoint_without_weights_is_rejected(tmp_path):
+    """Silently writing evidence with no checkpoint identity is what the review
+    objected to, so the harness refuses rather than recording a bare path."""
+    sys.path.insert(0, str(REPO / "bench"))
+    try:
+        import parity_tp
+    finally:
+        sys.path.pop(0)
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for bad in (str(empty), str(tmp_path / "missing")):
+        try:
+            parity_tp._checkpoint_provenance(bad)
+        except SystemExit as exit_:
+            assert "provenance" in str(exit_) or "not a directory" in str(exit_)
+        else:
+            raise AssertionError(f"expected a refusal for {bad}")
+
+
+def test_toy_results_record_the_running_commit(tmp_path):
+    """Even the toy harness has to say which code produced the numbers."""
+    out = tmp_path / "result.json"
+    result = _run(
+        "--tp", "1,2", "--num-prompts", "1", "--max-new-tokens", "2",
+        "--out", str(out),
+    )
+    assert result.returncode == 0, result.stderr
+
+    code = json.loads(out.read_text())["config"]["code"]
+    assert code["commit"] and len(code["commit"]) == 40
+    assert code["dirty"] in (True, False)
