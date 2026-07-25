@@ -28,6 +28,7 @@ from kairyu.bench.adapters.base import (
 )
 from kairyu.bench.aggregate import build_scoreboard, render_markdown
 from kairyu.bench.cache import BenchCache, resolve_cache_root
+from kairyu.bench.compare import build_comparison, render_comparison_markdown
 from kairyu.bench.store import ResultStore
 from kairyu.bench.types import SMOKE_LIMIT, BenchConfig, PairResult
 
@@ -268,5 +269,11 @@ class SuiteRunner:
         path = store.save_scoreboard(scoreboard, markdown)
         print()
         print(markdown)
+
+        comparison = build_comparison(scoreboard)
+        comparison_markdown = render_comparison_markdown(comparison)
+        store.save_comparison(comparison, comparison_markdown)
+        print(comparison_markdown)
+
         print(f"results: {path.parent}")
         return 1 if any(pair.status == "failed" for pair in pairs) else 0

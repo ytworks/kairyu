@@ -112,6 +112,22 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [progress] Accuracy report compares a run against the published Fugu scores
+- What: Added `kairyu/bench/reference.py` (the sakana.ai/fugu-release table and
+  per-benchmark figure as committed constants, with source URLs, both asset paths, the
+  2026-07-25 retrieval date, the page's own footnotes, and the HLE text-only variant) and
+  `kairyu/bench/compare.py`, which renders measured-vs-published with `Δ` against
+  published `Fugu`. Every run now writes and prints `comparison.md`/`comparison.json`
+  alongside the scoreboard; `kairyu bench report` rebuilds it (`--no-comparison` to skip).
+- Why: G6's frontier scoreboard needs the published numbers next to ours, but a bare delta
+  invites an apples-to-apples reading the data does not support. The report therefore
+  refuses to print 0 for an unmeasured cell, marks partial denominators, withholds the
+  delta entirely for the substituted Long Context Reasoning row, and repeats the release
+  page's own statement that all non-Fugu scores are provider-reported. The page renders
+  its table as a PNG, so the values are transcribed, not fetched — recorded as such.
+- Refs: `kairyu/bench/{reference,compare,store,runner,cli}.py`,
+  `tests/bench/test_bench_compare.py`, `docs/benchmarks.md`.
+
 ### 2026-07-23 — [progress] Versioned structured orchestration trace for evaluation tooling
 - What: Added additive, opt-in `kairyu_trace_v2` on unary orchestrated chat responses while
   preserving `kairyu_trace`. Direct, Conductor, and MoA paths emit a common versioned envelope
