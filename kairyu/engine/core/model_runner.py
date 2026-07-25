@@ -48,6 +48,11 @@ class PagedModelRunner:
         # so the GPU forward never mixes CPU inputs with on-device weights/KV.
         self._device = next(model.parameters()).device
 
+    @property
+    def sampler(self) -> Sampler | None:
+        """The per-request sampling state a P-D handoff has to carry across."""
+        return self._sampler
+
     def release(self, request_id: str) -> None:
         """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
         if self._sampler is not None:
@@ -57,7 +62,7 @@ class PagedModelRunner:
         if self._sampler is None:
             return SampledToken(int(torch.argmax(logits).item()))
         return self._sampler.sample(
-            state.request.request_id,
+            state.request.sampling_identity,
             state.request.sampling,
             position,
             logits,

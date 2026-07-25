@@ -14,8 +14,11 @@ takes on the whole m6 D4 ordering rule, which has two halves and not one:
    still reading them, and releasing them lets the next step allocate the same
    page and overwrite it on the caller's stream.
 
-``PDCoordinator`` is the consumer that implements both, by gating every
-prefill-side release on ``gate_pending()``. ``pd_factory`` is what wires it.
+``PDCoordinator`` is the consumer that implements both, by gating a whole
+prefill step's settlement — releases and decode-side adoption alike — on
+``gate_pending()``. WHERE it applies that gate is what turns a non-blocking host
+into actual overlap: one producer step later, so the next prefill forward is
+already queued in front of it. ``pd_factory`` is what wires it.
 """
 
 from __future__ import annotations
@@ -157,7 +160,10 @@ class StreamCopyKVHandoff:
     - ``gate_pending()``: order the caller's stream after the copy without
       stopping the host. This is what ``PDCoordinator`` uses, and it covers BOTH
       halves of m6 D4 — the decode read of the destination pages, and the reuse
-      of the prefill-side source pages the release hands back to the pool.
+      of the prefill-side source pages the release hands back to the pool. Note
+      that not stopping the host is necessary but not sufficient: a gate applied
+      before the producer has queued anything is a fence, and the copy stays on
+      the critical path. The consumer picks the position, not this class.
     - ``wait_for_pending()``: block the host until the copy has landed. Simpler,
       and what a caller doing non-stream-ordered work with the pages needs.
 
@@ -229,9 +235,10 @@ class StreamCopyKVHandoff:
     def gate_pending(self) -> None:
         """Order the caller's subsequent stream work after every deferred copy.
 
-        Unlike ``wait_for_pending()`` this does not stop the host, so the step the
-        producer already queued keeps running. Providers without a ``gate`` fall
-        back to the host wait rather than skipping the ordering.
+        Unlike ``wait_for_pending()`` this does not stop the host, so work the
+        producer queued BEFORE this call keeps running against the copy — which
+        is why the caller is expected to have queued some. Providers without a
+        ``gate`` fall back to the host wait rather than skipping the ordering.
         """
         gate = getattr(self._provider, "gate", None)
         for event in self._take_pending():

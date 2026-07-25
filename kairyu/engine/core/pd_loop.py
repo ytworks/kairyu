@@ -104,7 +104,7 @@ class PDLoopAdapter:
 
     def has_unfinished(self) -> bool:
         return (
-            self._coordinator.prefill_scheduler.has_unfinished()
+            self._coordinator.has_prefill_work()
             or self._coordinator.decode_scheduler.has_unfinished()
         )
 
@@ -115,13 +115,27 @@ class PDLoopAdapter:
     def schedule(self) -> SchedulerOutput:
         """Advance prefill (including the KV handoff), then plan decode.
 
-        Ordering is the m5 D5 protocol: a prompt that finishes prefilling in
-        this step is transferred and resumed under decode before decode plans,
-        so it starts generating in the same engine step.
+        Ordering is the m5 D5 protocol: prefill runs, transfers and settles
+        before decode plans. With the BLOCKING handoff a prompt that finishes
+        prefilling here starts generating in this same engine step. With the
+        deferring one its settlement is held one step so the copy has the next
+        prefill forward to overlap (m18 D3), so it starts generating in the
+        next — the copy has to finish either way, and this way it does so
+        alongside work instead of in front of it.
         """
-        if self._coordinator.prefill_scheduler.has_unfinished():
+        if self._coordinator.has_prefill_work():
             self._coordinator.step_prefill(reject_on_stall=True)
         return self._coordinator.decode_scheduler.schedule()
+
+    def drain_carried_tokens(self) -> dict[str, SampledToken]:
+        """Token 0s the adoption committed; no ``execute()`` ever reports them.
+
+        ``EngineLoop`` builds a completion's logprob stream out of what the
+        runner returns, and token 0 is sampled on the PREFILL runner and
+        committed by ``resume_with_kv`` — with ``max_tokens=1`` there is not even
+        a decode step it could ride back on.
+        """
+        return self._coordinator.drain_carried_tokens()
 
     def drain_rejected(self) -> tuple[str, ...]:
         prefill_rejected = self._coordinator.prefill_scheduler.drain_rejected()
@@ -131,7 +145,7 @@ class PDLoopAdapter:
         return prefill_rejected + decode_rejected
 
     def reject_waiting_head(self) -> str | None:
-        if self._coordinator.prefill_scheduler.has_unfinished():
+        if self._coordinator.has_prefill_work():
             # an empty decode plan is normal while a prompt is still prefilling
             # (chunked prefill spans steps) — nothing is stuck
             return None

@@ -100,8 +100,10 @@ a recording fake.
 > **Overlap landed 2026-07-26.** `StreamCopyKVHandoff(..., defer=True)` records a
 > completion event instead of blocking. The producer can queue its next step
 > while the copy runs — measured on device: the deferred form returns strictly
-> faster than the blocking one on the same work, and the copied values are
-> correct once the event is settled.
+> faster than the blocking one on the same work, the copied values are correct
+> once the event is settled, and on the coordinator the copy's device-time
+> interval overlaps the next prefill forward's
+> (`test_the_copy_overlaps_the_next_prefill_forward_on_the_coordinator`).
 >
 > Deferring is a CONSUMER CONTRACT with two halves, not one. Nothing may read the
 > destination pages before the event — and nothing may reuse the SOURCE pages
@@ -112,16 +114,38 @@ a recording fake.
 > overwrite on the caller's stream. Waiting on the destination side does not stop
 > that; it is a source-side read/write race.
 >
-> The coordinator therefore owns the lease. `PDCoordinator._release_source_pages`
-> is the single point where prefill-side pages go back — commit and abort alike —
-> and it calls `gate_pending()` first. The gate is stream-ordered, not a host
-> block (`event.wait(current_stream)`), so the step queued while the copy ran
-> keeps running, and the same dependency covers the decode core's read of the
-> destination pages, which is queued after it. A deferring handoff that exposes
-> no `gate_pending()` is refused at construction rather than releasing pages
-> under a copy the coordinator cannot order against. Events ACCUMULATE: a prefill
-> step transfers every prompt that completed in it, and a single-slot
-> `pending_event` would silently drop the ordering for all but the last copy.
+> The coordinator therefore owns the lease. `PDCoordinator._settle_handover` is
+> the single point where a transfer is completed — the prefill-side commit, the
+> abort on a failed copy, and the decode-side `resume_with_kv` all go through it
+> — and it calls `gate_pending()` first. The gate is stream-ordered, not a host
+> block (`event.wait(current_stream)`). A deferring handoff that exposes no
+> `gate_pending()` is refused at construction rather than releasing pages under a
+> copy the coordinator cannot order against. Events ACCUMULATE: a prefill step
+> transfers every prompt that completed in it, and a single-slot `pending_event`
+> would silently drop the ordering for all but the last copy.
+>
+> **Amended 2026-07-26 (review [P1]): where the gate sits is the whole point.**
+> The first version settled at the end of the very step that recorded the copy.
+> Correct, and no host block — but the next GPU work of any kind (the decode step,
+> then the next prefill forward) was queued *after* the gate, so the device
+> timeline stayed exactly as serial as the blocking form. Measured on device:
+> copy `[11.651, 12.342] ms`, next prefill forward `[12.898, 13.369] ms`.
+>
+> The settlement is therefore PIPELINED one producer step. `_step_prefill` plans,
+> runs its forward, and only THEN settles the previous step's transfers, so the
+> gate lands with that forward — and the decode step queued before it — already
+> in front of it. `_Handover` is what carries a step's `commit` / `adopt` /
+> `retries` across that boundary. Adoption has to travel with the release: it is
+> what puts the destination pages in front of the decode runner, which is the
+> other half of the m6 D4 rule. The source pages stay leased for the extra step,
+> which costs prefill KV capacity — never correctness, because a page the prefill
+> scheduler still owns cannot be handed to anyone else. When a step has nothing
+> to schedule the settlement happens up front instead: there is no overlap left to
+> win, and the leased pages may be exactly what the next prompt needs.
+>
+> This applies to the deferring path ONLY. A blocking handoff has already finished
+> its copy inside `transfer()`, so `_step_prefill` settles it in its own step and
+> the request starts decoding immediately, as before.
 >
 > Production wiring: `build_pd_coordinator(defer_handoff=True)` — the default,
 > and the only caller that turns it on, because it is the only one that settles
@@ -152,10 +176,38 @@ a recording fake.
 >   the serving loop as well as through the coordinator directly.
 > - Copy ordering. The serving path inherits `build_pd_coordinator`'s
 >   `defer_handoff=True`, which is safe for exactly the reason recorded above:
->   `PDCoordinator` holds the prefill-side lease and gates every release on the
+>   `PDCoordinator` holds the prefill-side lease and settles it only behind the
 >   copy's completion event. `PDLoopAdapter.schedule()` drives
 >   `PDCoordinator.step_prefill`, so the serving loop goes through that same
->   `_release_source_pages` gate rather than around it.
+>   `_settle_handover` gate rather than around it — and inherits its
+>   pipelining, so a deferred handoff starts decoding one step later than a
+>   blocking one.
+>
+> **Amended 2026-07-26 (review [P1]): token 0 keeps its sampling identity.**
+> The prefill clone ran under an INTERNAL id (`r#p0`) while decode ran under the
+> public one, on a different runner with a different `Sampler`. Three things
+> broke, none of them visible to a greedy parity test:
+>
+> - `Sampler._state_for` derives the base seed from the request id when
+>   `sampling.seed is None`, so with the default stochastic params token 0 and
+>   token 1 onward came off DIFFERENT RNG streams. `EngineRequest.sampling_id`
+>   is the fix: the clone keeps its own `request_id` for scheduler bookkeeping
+>   and carries the public id as its `sampling_identity`, which is what every
+>   runner now keys the sampler under.
+> - The grammar enforcer was rebuilt on the decode side from its INITIAL state,
+>   having never accepted token 0, so every later mask was computed against the
+>   wrong grammar position. `Sampler.hand_over()` moves the state object itself
+>   at adoption — seed and matcher together — because a matcher cannot be
+>   reconstructed from an id.
+> - Token 0's `SampledToken` was reduced to its `token_id`, so its `logprob`,
+>   `top_logprobs` and `grammar_terminated` never reached the driver.
+>   `resume_with_kv` commits it directly into the decode outputs, so no
+>   `execute()` ever reports it — and at `max_tokens=1` the request completes
+>   during the handoff with no decode step at all. `PDCoordinator` keeps the
+>   whole `SampledToken` and hands it over through `drain_carried_tokens()`,
+>   which `EngineLoop` drains and prepends to the request's metadata; grammar
+>   termination at token 0 finishes the request at adoption, before decode is
+>   planned, which is where the ordinary path's `finish_early` sits too.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 

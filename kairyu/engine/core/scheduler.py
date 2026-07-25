@@ -37,6 +37,17 @@ class EngineRequest:
     ignore_eos: bool = False
     priority: int = 0  # admission ordering lands in M11; field reserved here
     sampling: EngineSampling = field(default_factory=EngineSampling)
+    # Who this request IS as far as sampling is concerned. Normally itself; the
+    # P-D prefill clone sets it to the PUBLIC id, because ``request_id`` there is
+    # a scheduler bookkeeping name (``r#p0``) and the sampler derives its base
+    # seed from the id when ``seed is None`` — sampling token 0 under the clone's
+    # name would put it on a different RNG stream from token 1 onward (m5 D5).
+    sampling_id: str | None = None
+
+    @property
+    def sampling_identity(self) -> str:
+        """The id every sampler must key this request's state under."""
+        return self.sampling_id or self.request_id
 
 
 class _Status(Enum):

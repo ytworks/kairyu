@@ -89,6 +89,25 @@ class Sampler:
     def release(self, request_id: str) -> None:
         self._states.pop(request_id, None)
 
+    def hand_over(self, request_id: str, destination: Sampler) -> bool:
+        """Move one request's sampling state to another Sampler (P-D, m5 D5).
+
+        The P-D pair samples token 0 on the prefill engine and token 1 onward on
+        the decode engine, each with its own ``Sampler``. Recreating the state
+        there would restart the grammar matcher from its INITIAL state — one
+        that has not accepted token 0 — so every later mask would be computed
+        against the wrong position in the grammar. Moving the object instead
+        carries the matcher's accept state, and with it the base seed, exactly
+        as a single engine would have kept them. Returns False when there is
+        nothing to move (no grammar, no explicit state yet — a fresh state is
+        then equivalent, because the base seed derives from the same public id).
+        """
+        state = self._states.pop(request_id, None)
+        if state is None:
+            return False
+        destination._states[request_id] = state
+        return True
+
     def sample(
         self,
         request_id: str,

@@ -112,6 +112,58 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] m18 D3: token 0 keeps its sampling identity across the P-D handoff
+- What: the P-D prefill clone sampled under its INTERNAL id (`r#p0`) on a different
+  runner and `Sampler` from decode's. Three corrections. (1) `EngineRequest.sampling_id`
+  / `sampling_identity`: the clone keeps its own `request_id` for scheduler bookkeeping
+  but samples under the PUBLIC id, and `PagedModelRunner` / `TorchModelRunner` key the
+  sampler by that identity. (2) `Sampler.hand_over()` moves a request's sampling state
+  from the prefill half to the decode half at adoption, carrying the grammar matcher.
+  (3) `PDCoordinator` keeps token 0's full `SampledToken` and exposes it through
+  `drain_carried_tokens()`, which `PDLoopAdapter` forwards and `EngineLoop` prepends to
+  the request's logprob metadata; a token 0 that terminates the grammar finishes the
+  request at adoption, before decode is planned.
+- Why: [P1] on PR #144. `Sampler._state_for` derives the base seed from the request id
+  when `seed is None`, so with default stochastic sampling token 0 and token 1 onward
+  came off different RNG streams — greedy parity tests cannot see it, because argmax
+  never consults the seed. The grammar enforcer was rebuilt decode-side from its initial
+  state, having never accepted token 0, so every later mask was computed against the
+  wrong grammar position. And `resume_with_kv` commits token 0 straight into the decode
+  outputs, so no `execute()` reports it: its logprob/top_logprobs were dropped, and at
+  `max_tokens=1` there is no decode step at all, so a one-token completion reported no
+  logprobs whatsoever.
+- Refs: m18 D3 (amended), m5 D5, m8 D2, `kairyu/engine/core/scheduler.py`,
+  `kairyu/engine/core/sampler.py`, `kairyu/engine/core/model_runner.py`,
+  `kairyu/engine/core/torch_runner.py`, `kairyu/engine/core/pd.py`,
+  `kairyu/engine/core/pd_loop.py`, `kairyu/engine/engine_loop.py`,
+  `tests/unit/test_pd_factory.py`, `tests/unit/test_pd.py`
+
+### 2026-07-26 — [amendment] m18 D3: the deferred KV copy's gate is pipelined one producer step
+- What: `PDCoordinator` no longer settles a deferred transfer in the step that started it.
+  `_release_source_pages` is replaced by `_settle_handover`, which completes a whole
+  step's transfers at once — the prefill commit, the abort on a failed copy, AND the
+  decode-side `resume_with_kv` — behind one `gate_pending()`. `_step_prefill` plans, runs
+  its forward, and only then settles the PREVIOUS step's `_Handover`, so the gate lands
+  with that forward (and the decode step queued before it) already in front of it. A step
+  with nothing to schedule settles up front instead, so the leased pages come back rather
+  than deadlocking admission. Blocking handoffs are unaffected: they settle in their own
+  step, as before. Correction to the entry below, which claimed the gate gave the producer
+  overlap; it did not.
+- Why: [P1] on PR #142. The gate was stream-ordered rather than a host block, but it sat
+  immediately before every subsequent kernel — the decode step and the next prefill
+  forward were both queued after it — so the device timeline stayed exactly as serial as
+  the blocking form. Measured on the 8× RTX PRO 6000 host before the fix: copy
+  `[11.651, 12.342] ms`, next prefill forward `[12.898, 13.369] ms`; after it the two
+  intervals overlap. Adoption had to move with the release because it is the other half of
+  the m6 D4 rule (it is what puts the destination pages in front of the decode runner).
+  The cost is one extra step of prefill-side KV lease — capacity, never correctness, since
+  a page the prefill scheduler still owns cannot be handed to anyone else.
+- Refs: m18 D3 (amended), `kairyu/engine/core/pd.py`, `tests/unit/test_pd.py`
+  (`test_a_deferred_copy_has_engine_work_queued_alongside_it`,
+  `test_a_blocking_handoff_settles_inside_its_own_step`),
+  `tests/gpu/test_handoff_stream_gpu.py`
+  (`test_the_copy_overlaps_the_next_prefill_forward_on_the_coordinator`)
+
 ### 2026-07-26 — [amendment] one copying KV handoff in the P-D stack, not two
 - What: corrects two claims in the entry "the `pd_separation` serving path, corrected
   after review" below. (1) It named `pd_factory.PagedCopyKVHandoff` as the handoff that
