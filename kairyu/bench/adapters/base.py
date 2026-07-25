@@ -61,6 +61,10 @@ class AdapterInfo:
     judge_preferred: bool = False
     agentic: bool = False
     annotations: tuple[str, ...] = ()  # permanent footnotes (substitute slots)
+    # False for a slot that measures a different thing than the published row
+    # (a substituted dataset). Run-time reasons are added per pair.
+    comparable_to_published: bool = True
+    incomparable_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -310,6 +314,8 @@ def summarize_items(
     annotations: tuple[str, ...],
     started_at: str,
     score_fn: Callable[[list[ItemResult]], float | None] | None = None,
+    comparable: bool = True,
+    incomparable_reasons: tuple[str, ...] = (),
 ) -> PairResult:
     """Fold per-item results into the pair status per the suite-wide semantics."""
     n_total = len(items)
@@ -359,13 +365,21 @@ def summarize_items(
         items=tuple(items),
         methodology=methodology,
         annotations=annotations,
+        comparable=comparable,
+        incomparable_reasons=incomparable_reasons,
         started_at=started_at,
         finished_at=utc_now(),
     )
 
 
 def skipped_pair(
-    benchmark: str, target: str, reason: str, *, annotations: tuple[str, ...] = ()
+    benchmark: str,
+    target: str,
+    reason: str,
+    *,
+    annotations: tuple[str, ...] = (),
+    comparable: bool = True,
+    incomparable_reasons: tuple[str, ...] = (),
 ) -> PairResult:
     now = utc_now()
     return PairResult(
@@ -375,6 +389,8 @@ def skipped_pair(
         reason=reason,
         metrics={"score": None, "n_total": 0},
         annotations=annotations,
+        comparable=comparable,
+        incomparable_reasons=incomparable_reasons,
         started_at=now,
         finished_at=now,
     )
@@ -494,7 +510,16 @@ class GenerativeAdapter(ABC):
         skip_reason = self.check_preconditions(target, ctx)
         if skip_reason is not None:
             return skipped_pair(
-                self.info.name, target.label(), skip_reason, annotations=self.info.annotations
+                self.info.name,
+                target.label(),
+                skip_reason,
+                annotations=self.info.annotations,
+                comparable=self.info.comparable_to_published,
+                incomparable_reasons=(
+                    (self.info.incomparable_reason,)
+                    if self.info.incomparable_reason
+                    else ()
+                ),
             )
 
         items = select_items(self.load_items(ctx), ctx.limit, ctx.seed)
@@ -533,6 +558,12 @@ class GenerativeAdapter(ABC):
             methodology=self.methodology(ctx),
             annotations=self.info.annotations,
             started_at=started_at,
+            comparable=self.info.comparable_to_published,
+            incomparable_reasons=(
+                (self.info.incomparable_reason,)
+                if self.info.incomparable_reason
+                else ()
+            ),
         )
 
 

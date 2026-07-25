@@ -34,6 +34,7 @@ from kairyu.bench.adapters.base import (
 )
 from kairyu.bench.aggregate import build_scoreboard, render_markdown
 from kairyu.bench.cache import BenchCache, resolve_cache_root
+from kairyu.bench.compare import build_comparison, render_comparison_markdown
 from kairyu.bench.store import ResultStore
 from kairyu.bench.types import SMOKE_LIMIT, BenchConfig, PairResult
 
@@ -119,6 +120,27 @@ def _run_fingerprint(identity: dict) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+
+def run_level_incomparable_reasons(config: BenchConfig, ctx_limit: int | None) -> tuple[str, ...]:
+    """Reasons a whole run cannot be compared with a published full-suite score.
+
+    A limited run legitimately reports `completed` -- the limit is applied before
+    aggregation -- so without this a 20-item smoke cell renders as a plain number
+    with an unmarked delta against Fugu's full-suite result.
+    """
+    reasons: list[str] = []
+    if ctx_limit is not None:
+        reasons.append(
+            f"subset run: at most {ctx_limit} items per benchmark, not the full set"
+        )
+    if config.offline_fixtures:
+        reasons.append(
+            "synthetic offline fixtures stood in for the real datasets; scores are "
+            "not measurements"
+        )
+    return tuple(reasons)
 
 
 class SuiteRunner:
@@ -254,6 +276,7 @@ class SuiteRunner:
         }
 
         targets = [target.label() for target in config.targets]
+        run_reasons = run_level_incomparable_reasons(config, ctx.limit)
         pairs: list[PairResult] = []
         self._progress.suite_start(len(adapters) * len(config.targets))
         for adapter in adapters:
@@ -307,7 +330,14 @@ class SuiteRunner:
                             started_at=utc_now(),
                             finished_at=utc_now(),
                         )
-                result = result.model_copy(update={"run_fingerprint": fingerprint})
+                reasons = tuple(result.incomparable_reasons) + run_reasons
+                result = result.model_copy(
+                    update={
+                        "run_fingerprint": fingerprint,
+                        "comparable": result.comparable and not run_reasons,
+                        "incomparable_reasons": reasons,
+                    }
+                )
                 store.save_pair(result)
                 self._progress.pair_done(result.status, result.score)
                 pairs.append(result)
@@ -326,5 +356,11 @@ class SuiteRunner:
         path = store.save_scoreboard(scoreboard, markdown)
         print()
         print(markdown)
+
+        comparison = build_comparison(scoreboard)
+        comparison_markdown = render_comparison_markdown(comparison)
+        store.save_comparison(comparison, comparison_markdown)
+        print(comparison_markdown)
+
         print(f"results: {path.parent}")
         return 1 if any(pair.status == "failed" for pair in pairs) else 0
