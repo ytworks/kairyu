@@ -136,7 +136,8 @@ def test_the_in_flight_buffer_does_not_grow_with_the_request(llama_dir):
     _outputs, runner = _generate(llama_dir, EngineCore, [list(range(9))], 16)
     assert list(runner._future_tokens) == ["r0"]
     # bounded by the pipeline's reach, not by the request length
-    assert len(runner._future_tokens["r0"]) <= runner._MAX_IN_FLIGHT
+    # bounded by what is still uncommitted, not by the request length
+    assert len(runner._future_tokens["r0"]) <= 2
 
 
 def test_release_drops_the_buffer(llama_dir):
@@ -291,3 +292,33 @@ def test_the_runner_hands_the_sampler_the_in_flight_history(llama_dir):
 
     # the stale snapshot would have handed over (); the pick differs on that
     assert seen["outputs"] == (1,)
+
+
+@pytest.mark.parametrize("depth", [1, 2, 4, 10])
+def test_any_pipeline_depth_matches_eager(llama_dir, depth):
+    """Review [P2] on #136: a fixed in-flight cap does not track
+    `OverlapEngineCore(pipeline_depth=...)`, which accepts any depth >= 1. At a
+    depth deeper than the cap, the position a later step still needs had already
+    been trimmed."""
+    from functools import partial
+
+    from kairyu.engine.core.engine_core import EngineCore
+    from kairyu.engine.core.overlap import OverlapEngineCore
+
+    prompt = [list(range(11)), list(range(6, 19))]
+    eager, _ = _generate(llama_dir, EngineCore, prompt, 12)
+    overlapped, _ = _generate(
+        llama_dir, partial(OverlapEngineCore, pipeline_depth=depth), prompt, 12
+    )
+    assert overlapped == eager
+
+
+def test_the_buffer_holds_only_uncommitted_positions(llama_dir):
+    """Trimming follows what the scheduler committed, so it cannot drop a
+    position a deeper pipeline still needs, and it cannot grow with the request."""
+    from kairyu.engine.core.engine_core import EngineCore
+
+    _outputs, runner = _generate(llama_dir, EngineCore, [list(range(9))], 24)
+    pending = runner._future_tokens["r0"]
+    # eager commits every step, so at most the one just sampled remains
+    assert len(pending) <= 2, pending

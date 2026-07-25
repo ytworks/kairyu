@@ -141,24 +141,30 @@ class PagedModelRunner:
             self._remember(chunk.request_id, 0, token)
             sampled[chunk.request_id] = (token,)
 
-    #: How far behind the committed outputs a snapshot may lag. OverlapEngineCore
-    #: runs a bounded pipeline (depth 2), so at most this many tokens are ever in
-    #: flight; keeping more would be an unbounded per-request history —
-    #: `EngineLoop` calls `release()` on finish, but a bare `EngineCore` does not.
-    _MAX_IN_FLIGHT = 8
-
     def _remember(self, request_id: str, position: int, token: SampledToken) -> None:
         """Keep this step's token so later steps can read it before it commits.
 
         A decode input needs `position - 1`; the sampler's penalties need every
-        uncommitted token before `position`. Both are served from here, trimmed
-        to the pipeline's reach.
+        uncommitted token before `position`. Both are served from here.
+
+        Trimming is driven by what has been COMMITTED, not by a fixed depth.
+        `OverlapEngineCore` accepts any `pipeline_depth >= 1`, so a constant cap
+        would silently drop a position a deeper pipeline still needs — and the
+        symptom would be a RuntimeError mid-run, not a wrong answer, but only
+        because the lookup fails loudly. Anything at or below the committed
+        length is redundant: `_effective_outputs` and `_previous_token` both
+        prefer committed values there.
         """
         pending = self._future_tokens.setdefault(request_id, {})
         pending[position] = token.token_id
-        if len(pending) > self._MAX_IN_FLIGHT:
-            for stale in sorted(pending)[: -self._MAX_IN_FLIGHT]:
-                del pending[stale]
+
+    def _forget_committed(self, request_id: str, committed: int) -> None:
+        """Drop in-flight tokens the scheduler has since committed."""
+        pending = self._future_tokens.get(request_id)
+        if not pending:
+            return
+        for position in [key for key in pending if key < committed]:
+            del pending[position]
 
     def _previous_token(self, state, position: int) -> int:
         """The token at ``position - 1``, committed or still in flight.
@@ -182,6 +188,9 @@ class PagedModelRunner:
     def _decode_inputs(self, chunk: ScheduledChunk, state):
         prompt = state.request.prompt_token_ids
         position = chunk.position
+        # whatever the scheduler has committed is authoritative from here on, so
+        # the in-flight copies of it are dead weight
+        self._forget_committed(state.request.request_id, len(state.outputs))
         input_token = self._previous_token(state, position) if position > 0 else prompt[-1]
         absolute = len(prompt) + position - 1
         cached = state.allocation.num_cached_tokens if state.allocation else 0
