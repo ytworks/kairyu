@@ -200,9 +200,19 @@ judge:
 ```
 
 `--sampling-seed` is the request `seed`; `--seed` remains the *item sampling*
-seed. `extra_body_json` is validated at load time: it must be a JSON object and
-may not override `model`, `messages`, or `stream`. Unset knobs are simply
-absent from the request body, so endpoints that reject them are unaffected.
+seed. Unset knobs are simply absent from the request body, so endpoints that
+reject them are unaffected.
+
+`extra_body_json` is merged **last**, so it is validated at load time: it must be
+a JSON object, and it may not override `model`, `messages`, `stream`,
+`temperature`, `max_tokens`, `reasoning_effort`, `top_p`, or `seed`. Those come
+from the adapter's request and this endpoint's typed policy — the values the run
+fingerprint and methodology record — so letting them through would make the
+effective request disagree with the recorded configuration.
+
+This policy reaches every slot that issues its own chat requests. The three
+external-harness slots (SWE-Bench Pro, Terminal-Bench, τ³) drive a separate CLI,
+so each maps what its harness exposes and annotates what it cannot forward.
 
 ## Judge configuration
 
