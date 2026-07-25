@@ -133,6 +133,29 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m2 §2.2 (partially), G2 A1, `kairyu/engine/core/model_runner.py`,
   `tests/unit/test_overlap_future_token.py`, `tests/gpu/test_overlap_future_token_gpu.py`
 
+### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
+- What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
+  `tensor_parallel_size > 1`, which happens BEFORE the `probe()` block that selects
+  `compute_device`/`compute_dtype` and calls `model.to(...)`. Every spawned rank therefore
+  kept the CPU/fp32 defaults of `DenseDecoder` and `PagedKVPool`, so the
+  `examples/qwen3-32b-multi-gpu` deployment ran Qwen3-32B on the host in fp32 over gloo —
+  8 GPUs at 0 MiB, ~153 GB of host RAM, and generation that never returned. Added
+  `TPPlacement`/`tp_placement()` in `engine/core/worker.py`: one CUDA device per rank
+  (`cuda:<rank>`), bf16, and the NCCL backend, threaded through `build_tp_runner` →
+  `build_tp_model` → `PagedKVPool`. `torch.cuda.set_device(rank)` now precedes
+  `init_process_group`; `TorchDistCommunicator` takes the rank's device so its own
+  `all_reduce`/`barrier` do not hand NCCL host tensors; the attention backend is selected
+  from the PLACEMENT rather than the raw probe (a CPU-placed rank on a GPU box was getting
+  the flashinfer kernel and fp32 tensors); and the rendezvous timeout is raised from the
+  CI-tuned 120 s, which a cold multi-GB shard read trips before anything is deadlocked.
+- Why: the GPU half of M5 assumed the placement the single-process path performs; nothing
+  performed it for the multi-process path, and no CPU test could observe the difference
+  because on a CPU box the defaults are correct. This was the first real-hardware use of
+  `kairyu serve --tp N`.
+- Refs: m5 D1/D3, m16 D1/D2, `docs/gpu-runbook.md` §6.1; `kairyu/engine/core/worker.py`,
+  `kairyu/models/parallel.py`, `kairyu/engine/core/dist_comm.py`,
+  `tests/dist/test_distributed.py` (CPU parity now pins `force_cpu=True`).
+
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
   are now passed to every fetch (they were recorded but unused, so the cache and run
@@ -729,6 +752,21 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: `Dockerfile.cuda`; supersedes the base image recorded in the
   2026-07-03 M19 deploy-packaging entry (m19 D1).
 
+### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
+- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
+  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
+  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
+  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
+  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
+  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
+- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
+  from the serve entrypoint — so real tensor-parallel models could not be
+  deployed. Now `kairyu serve --tp 2` runs end to end.
+- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
+  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
+  `kairyu/models/loader.py`, test
+  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
+
 ### 2026-07-04 — [design] Review remediation Phase 6: GPU-day seam changes (CPU design + C5 contract test)
 - What: Captured the five GPU-day seam changes from the full-repo review in
   `docs/design/gpu-day-seams.md` (C5 CUDA-graph static buffers, C4 batched
@@ -747,20 +785,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: review report; `docs/design/gpu-day-seams.md`,
   `kairyu/engine/core/step_executor.py` (`SnapshotGraphBackend`),
   `tests/unit/test_step_executor.py`.
-### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
-- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
-  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
-  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
-  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
-  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
-  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
-- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
-  from the serve entrypoint — so real tensor-parallel models could not be
-  deployed. Now `kairyu serve --tp 2` runs end to end.
-- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
-  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
-  `kairyu/models/loader.py`, test
-  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
 
 ### 2026-07-04 — [progress] Review remediation Phase 8: packaging + doc accuracy
 - What: Fixed the cross-cutting packaging/doc defects from the full-repo review.
@@ -785,6 +809,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   **Deferred follow-up:** `kairyu validate` cross-artifact command, typed
   `GenerationRequest.prompt` (token-ids/multimodal), `deploy/spec.py`
   ServerSection compose-not-inherit, and the `kairyu/bench/` package boundary.
+
 ### 2026-07-04 — [progress] Review remediation Phase 7: host-path performance (safe subset)
 - What: Fixed the provably-safe, output-preserving host-path hot spots from the
   full-repo review. **P5**: `prompt_chunks` re-hashed the whole prompt prefix per
@@ -807,6 +832,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   — file-handle lifecycle), P6 (eviction leaf heap), P7 (batched spec verify),
   and the MEDIUM-perf items (sampler penalty state, stop-string offset, queue
   coalescing, scheduler deque, KV-event hash chain, page-table cache).
+
 ### 2026-07-04 — [progress] Review remediation Phase 5: bench scoring correctness + security
 - What: Fixed the scoring-integrity and security defects in the Fugu bench suite.
   **B1**: the MCQ answer-extraction regex matched "answer" + the first letter of
@@ -832,6 +858,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   per-pair config hash), B4 + denominator policy (skipped/unjudged as 0 or n/a,
   show per-target n_scored), LCB per-line/tolerant scoring, sandbox NPROC/session
   hardening, self-judge (judge==target) scoreboard flag, judge prompt delimiters.
+
 ### 2026-07-04 — [progress] Review remediation Phase 4: model + quant parity
 - What: Fixed the parity-affecting model/quant defects from the full-repo review.
   **M3 (rope)**: unsupported `rope_scaling` kinds (linear/dynamic/longrope) now
@@ -860,6 +887,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   RATE only, not output correctness (verification is by the target), so no CPU
   test can validate a fix; plus the design items (linear_factory context,
   forward_fused wiring, HF-name-preserving TP/EP wrappers, draft-head quant).
+
 ### 2026-07-04 — [progress] Review remediation Phase 3: orchestration + fleet reliability
 - What: Fixed the L2 fleet/orchestration HIGH defects from the full-repo review.
   **O1**: request errors were all counted as replica failures — a new
@@ -886,6 +914,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   tests under `tests/unit/`. Deferred follow-up: M1 (verifier non-target deps +
   _SafeDict masking), M3 (MoA path Budget/cost wiring), M8 (run_chat periodic
   keep-alive), and the KvEventIndex↔ReplicaPool integration (design item).
+
 ### 2026-07-04 — [progress] Review remediation Phase 2: API security + tenant isolation
 - What: Fixed the CRITICAL/HIGH L3-server defects from the full-repo review.
   **C3 (CRITICAL) batch/file tenant isolation**: File/Batch objects gained an
