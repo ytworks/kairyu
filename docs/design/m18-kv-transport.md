@@ -51,6 +51,20 @@ mark computed, ACK with allocation info. Failure paths: transport error →
 The GPU-phase copy pipeline shape: extraction happens on a side stream so
 decode compute overlaps the copy. `StreamProvider` protocol (`stream()`,
 `synchronize()`): `CpuNoopStream` (tests) and `CudaStreamProvider`
+
+> **Amended 2026-07-25.** `CudaStreamProvider` is implemented, and `_to_bytes`
+> now copies to host before `.numpy()` — without that the real handoff could not
+> read a CUDA `PagedKVPool` at all (`TypeError: can't convert cuda:0 device type
+> tensor to numpy`), so the seam had never run against a device pool. Scope of
+> what landed: the extraction copy is isolated on a side stream that waits on the
+> caller's stream for the device it was built for. End-to-end overlap with the
+> next forward is NOT delivered — `StreamCopyKVHandoff` blocks the host before
+> returning and `PDCoordinator` commits before stepping decode, so nothing is
+> queued alongside the copy. That needs a completion event handed to the
+> consumer instead of a host-wide wait, and production wiring
+> (`StreamCopyKVHandoff(inner, CudaStreamProvider(...))` selected by placement)
+> is likewise still absent.
+
 (`*_gpu`-style deferred, tiny). `StreamCopyKVHandoff` wraps any KVHandoff:
 extract-on-stream → synchronize → inner.transfer — ordering pinned by a
 recording fake.

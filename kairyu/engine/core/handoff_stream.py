@@ -41,11 +41,19 @@ class CudaStreamProvider:
     finished writing — and then makes it current. ``synchronize()`` leaves that
     window and blocks until the copy has actually completed.
 
-    A full ``stream.synchronize()`` is deliberate rather than an event wait. The
-    handoff's commit point publishes the allocation to other threads, and the
-    m18 D3 ordering rule is that it must never run ahead of the copy; a host-side
-    block is the version of that which cannot be got subtly wrong. The overlap
-    being bought is against the *next* forward, not against this caller.
+    A full ``stream.synchronize()`` is deliberate rather than an event wait: the
+    handoff's commit point publishes the allocation to other threads, and the m18
+    D3 ordering rule is that it must never run ahead of the copy.
+
+    What this does and does NOT buy, stated plainly because the first version of
+    this docstring overclaimed. It isolates the extraction copy on its own
+    stream, so it neither serialises behind unrelated work already queued on the
+    caller's stream nor blocks it. It does NOT yet overlap the copy with the next
+    forward: ``StreamCopyKVHandoff`` blocks the host before returning, and
+    ``PDCoordinator`` commits and only then runs the decode step, so nothing is
+    queued alongside the copy. Getting that requires separating the correctness
+    commit from the host-wide wait — handing the consumer a completion EVENT so
+    the producer can queue the next step — which is not in this seam.
     """
 
     def __init__(self, device: object | None = None) -> None:
@@ -60,7 +68,12 @@ class CudaStreamProvider:
     def begin(self) -> None:
         if self._window is not None:  # pragma: no cover - misuse guard
             raise RuntimeError("CudaStreamProvider.begin() is already open")
-        self._stream.wait_stream(self._torch.cuda.current_stream())
+        # the caller's stream ON THIS PROVIDER'S DEVICE: without the argument a
+        # thread whose current device is 0 would wait on cuda:0 while the pages
+        # were written on the cuda:1 stream this provider was built for
+        self._stream.wait_stream(
+            self._torch.cuda.current_stream(device=self._stream.device)
+        )
         window = self._torch.cuda.stream(self._stream)
         window.__enter__()
         self._window = window

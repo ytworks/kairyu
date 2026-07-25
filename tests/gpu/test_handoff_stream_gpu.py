@@ -94,3 +94,90 @@ def test_the_allocation_is_complete_when_transfer_returns():
     # no extra synchronize here on purpose: the commit point must never run ahead
     # of the copy (m18 D3), so the values must already be right
     assert torch.equal(returned, payload * 2)
+
+
+def test_a_cuda_kv_pool_round_trips_through_the_real_handoff():
+    """The failure the arbitrary-arithmetic test above could not see.
+
+    `RemoteKVHandoff.transfer()` reaches `kv_serde._to_bytes()`, which called
+    `.numpy()` on the tensor directly — `TypeError: can't convert cuda:0 device
+    type tensor to numpy`. A side stream is irrelevant if extraction cannot read
+    a device pool at all.
+    """
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.kv_serde import extract_pages, inject_page
+
+    _require_cuda()
+    source = PagedKVPool(
+        num_layers=2, num_pages=4, page_size=4, num_kv_heads=1, head_dim=2,
+        dtype=torch.bfloat16, device="cuda:0",
+    )
+    destination = PagedKVPool(
+        num_layers=2, num_pages=4, page_size=4, num_kv_heads=1, head_dim=2,
+        dtype=torch.bfloat16, device="cuda:0",
+    )
+    with torch.no_grad():
+        source.k.copy_(torch.randn_like(source.k))
+        source.v.copy_(torch.randn_like(source.v))
+
+    frames = extract_pages(source, (1, 2))
+    for frame in frames:
+        inject_page(destination, frame.page_id, frame)
+
+    for page in (1, 2):
+        assert torch.equal(destination.k[:, page], source.k[:, page]), page
+        assert torch.equal(destination.v[:, page], source.v[:, page]), page
+    # and an untouched page must NOT have been written
+    assert not torch.equal(destination.k[:, 0], source.k[:, 0])
+
+
+def test_extraction_inside_the_window_sees_pages_written_on_the_callers_stream():
+    """End to end: the D2H copy runs in the window and still reads the values the
+    caller's queued writes produced."""
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider, StreamCopyKVHandoff
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.kv_serde import extract_pages
+
+    _require_cuda()
+    pool = PagedKVPool(
+        num_layers=2, num_pages=4, page_size=4, num_kv_heads=1, head_dim=2,
+        dtype=torch.float32, device="cuda:0",
+    )
+
+    class _Extracting:
+        def transfer(self, tokens, first_token, pages=()):
+            return extract_pages(pool, pages)
+
+    with torch.no_grad():
+        for _ in range(50):  # queue enough that an unsynchronized read would race
+            pool.k.add_(1.0)
+
+    frames = StreamCopyKVHandoff(_Extracting(), CudaStreamProvider()).transfer(
+        (1, 2), 0, (1,)
+    )
+    restored = torch.frombuffer(bytearray(frames[0].fragments[0]), dtype=torch.uint8)
+    values = restored.view(torch.float32)
+    assert torch.equal(values, torch.full_like(values, 50.0))
+
+
+def test_a_provider_on_a_second_device_waits_on_that_devices_stream():
+    """Review [P2]: `current_stream()` with no argument follows the THREAD's
+    current device, not the provider's."""
+    from kairyu.engine.core.handoff_stream import CudaStreamProvider
+
+    if torch.cuda.device_count() < 2:  # pragma: no cover - single-GPU box
+        pytest.skip("needs 2 CUDA devices")
+
+    torch.cuda.set_device(0)  # thread is on cuda:0 ...
+    provider = CudaStreamProvider(device="cuda:1")  # ... provider is not
+
+    source = torch.zeros(1 << 20, device="cuda:1")
+    with torch.cuda.device(1):
+        for _ in range(50):
+            source.add_(1.0)
+
+    provider.begin()
+    copied = source.clone()
+    provider.synchronize()
+
+    assert torch.equal(copied, torch.full_like(copied, 50.0))
