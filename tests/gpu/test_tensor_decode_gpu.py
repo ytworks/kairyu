@@ -32,9 +32,9 @@ def model_and_config(tmp_path_factory):
     transformers.LlamaForCausalLM(transformers.LlamaConfig(**TINY)).to(
         torch.float32
     ).eval().save_pretrained(path, safe_serialization=True)
-    # the torch backend on purpose: flashinfer's attend_* still take Python
-    # lists, so the tensor path is only defined for this one until that contract
-    # changes
+    # the torch backend on purpose: this gate is about the MODEL-level tensor
+    # path, so it uses the backend that needs no plan step; FlashInfer's own
+    # half of the contract is gated in test_flashinfer_tensor_decode.py
     model, config, _ = load_model(
         str(path), dtype=torch.bfloat16, attention_backend=TorchAttentionBackend()
     )

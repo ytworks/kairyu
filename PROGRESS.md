@@ -112,6 +112,26 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] FlashInfer declares graph capture and is planned by the runner
+- What: `FlashInferBackend` now sets `supports_graph_capture = True`, so the
+  `GraphDecodeBackend` gate accepts it and `PagedModelRunner` will build a graph path
+  over it. Its `plan_decode()` already had the contract's signature and is now called
+  by production code — `GraphStepExecutor` -> `DenseDecoder.plan_decode_tensors()` ->
+  the backend — instead of only by tests. Gated on the 8× RTX PRO 6000 host by four
+  new integration tests in `tests/gpu/test_flashinfer_tensor_decode.py` that drive
+  real capture and replay through `PagedModelRunner` (growing seq_lens, pages swapped
+  mid-run, and a `warmup_iters=0` capture that only the pre-capture hook can save),
+  plus a CPU gate that FlashInfer satisfies `graph_capture_gap()`.
+- Why: PR #141's review found `plan_decode` had no production caller at all — the
+  decode path reached `attend_decode` per layer and the executor had no step-boundary
+  hook — so combined with #138's graph path the first capture raised "no live plan",
+  and a replay after `_copy_in` would have attended over the pages that were in the
+  static buffers at capture time. Removing the post-copy-in plan reproduces exactly
+  that: two steps over different pages return byte-identical logits.
+- Refs: PR #141 review [P1], PR #138 review [P1]; m17 D1, m13 D4;
+  `kairyu/engine/core/attention/flashinfer_gpu.py`,
+  `tests/gpu/test_flashinfer_tensor_decode.py`, `tests/unit/test_attention_backend.py`.
+
 ### 2026-07-26 — [design] GraphDecodeBackend: the CUDA-graph decode capability contract
 - What: a backend is capture-eligible only if it DECLARES it, and the decode step
   boundary now reaches it. Defined once in `kairyu/engine/core/attention/__init__.py`
@@ -159,6 +179,26 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m17 D1/D2/A5, `docs/gpu-runbook.md` §6.3, PR #138 review [P1]/[P2];
   `kairyu/engine/core/{model_runner,step_executor,radix_kv}.py`,
   `tests/unit/test_graph_decode_wiring.py`, `tests/gpu/test_cuda_graph_decode_gpu.py`.
+
+### 2026-07-26 — [amendment] FlashInfer decode is split into a host plan and a capture-safe run
+- What: `FlashInferBackend.attend_decode` no longer derives-and-plans inline. The adapter
+  now owns `plan_decode()` (the HOST phase: device-derived indptr/indices/last_page_len
+  handed to a `use_cuda_graph=True` wrapper whose paged buffers are persistent, one
+  wrapper per (batch, max_pages) shape and never replaced) and `attend_decode()` (a bare
+  `run()` over those buffers — no `.tolist()`, no `.cpu()`, no `plan()`). Inside a capture
+  the adapter refuses to plan and refuses to run unplanned; eagerly it still plans lazily,
+  now once per step instead of once per layer. Gated by a real `torch.cuda.CUDAGraph`
+  capture on the 8× RTX PRO 6000 host whose replay reflects an in-place page-table/seq-len
+  change after the step is re-planned, plus a CPU gate that forbids host synchronization
+  inside the capture region.
+- Why: the first cut of PR #141 claimed the m17 D1 tensor contract but converted the page
+  table and lengths with `.tolist()`/`.cpu()` on every layer, so capture died with
+  `cudaErrorStreamCaptureInvalidated` (reproduced on hardware) and the path was eager-only.
+  FlashInfer's `plan()` "cannot be used in Cuda Graph" by its own documentation — it builds
+  the split-KV schedule on the CPU — so the honest decomposition is plan-outside /
+  run-inside, which is what the wrapper's cudagraph buffers exist for.
+- Refs: PR #141 review [P1]; m17 D1, m13 D4; `kairyu/engine/core/attention/flashinfer_gpu.py`,
+  `tests/unit/test_attention_backend.py`, `tests/gpu/test_flashinfer_tensor_decode.py`.
 
 ### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
 - What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
