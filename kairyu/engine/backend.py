@@ -96,3 +96,27 @@ class EngineBackend(Protocol):
     def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]: ...
 
     async def shutdown(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class EngineReadiness:
+    """An engine's own answer to "could I serve a request right now?".
+
+    Optional: `/readyz` only consults engines that implement ``readiness()``, so
+    remote and mock backends are unaffected. It must stay CHEAP — the endpoint is
+    polled by load balancers — which means reporting known-fatal state, never
+    running a probe generation.
+
+    ``fatal`` separates "stop sending work" from "replace this process". Marking a
+    node unready for something it could recover from is a trap: the load balancer
+    stops sending work, so the traffic that would prove recovery never arrives.
+    An engine should therefore only report unready for a condition nothing
+    in-process can undo — and then say so, so `/health` can ask for a restart.
+
+    ``detail`` reaches an UNAUTHENTICATED endpoint. Exception classes and fixed
+    strings only; a message can carry an upstream URL, a path, or a credential.
+    """
+
+    ready: bool
+    detail: str = ""
+    fatal: bool = False
