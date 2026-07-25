@@ -181,3 +181,49 @@ def test_a_provider_on_a_second_device_waits_on_that_devices_stream():
     provider.synchronize()
 
     assert torch.equal(copied, torch.full_like(copied, 50.0))
+
+
+def test_a_device_pool_gets_the_side_stream_handoff():
+    """The production selection this seam existed without.
+
+    `PDCoordinator` had no production constructor, so nothing chose between the
+    plain and side-stream handoffs. `build_kv_handoff` is that choice, keyed off
+    where the KV actually lives.
+    """
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.pd_factory import build_kv_handoff
+
+    _require_cuda()
+
+    class _Inner:
+        def transfer(self, tokens, first_token, pages=()):
+            return "allocation"
+
+    device_pool = PagedKVPool(
+        num_layers=1, num_pages=4, page_size=4, num_kv_heads=1, head_dim=4,
+        device="cuda:0",
+    )
+    wrapped = build_kv_handoff(_Inner(), device_pool)
+    assert isinstance(wrapped, StreamCopyKVHandoff)
+    # and it works, rather than merely being constructed
+    assert wrapped.transfer((1, 2), 0, (0,)) == "allocation"
+
+
+def test_the_provider_follows_the_pool_onto_a_second_device():
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.pd_factory import build_kv_handoff
+
+    if torch.cuda.device_count() < 2:  # pragma: no cover - single-GPU box
+        pytest.skip("needs 2 CUDA devices")
+
+    class _Inner:
+        def transfer(self, tokens, first_token, pages=()):
+            return "allocation"
+
+    pool = PagedKVPool(
+        num_layers=1, num_pages=4, page_size=4, num_kv_heads=1, head_dim=4,
+        device="cuda:1",
+    )
+    wrapped = build_kv_handoff(_Inner(), pool)
+    assert wrapped._provider._stream.device == torch.device("cuda", 1)

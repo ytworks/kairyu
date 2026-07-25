@@ -72,13 +72,20 @@ a recording fake.
 > commits before stepping decode, so nothing is queued alongside it. That needs
 > the consumer to take a completion EVENT in place of the host-wide wait.
 >
-> On "production wiring": there is nothing to wire into yet. `PDCoordinator` is
-> constructed only by `tests/unit/test_pd.py` — `kairyu/deploy/` and
-> `kairyu/entrypoints/` contain no P-D path at all, so no deployment reaches a
-> `KVHandoff` of any kind, let alone selects a stream provider for one. Adding a
-> placement-aware handoff factory now would be unused code choosing between two
-> paths nobody takes. The prerequisite is G2 stage 5.3 — wiring P-D
-> disaggregation into serve — and the provider selection belongs with it.
+> **Production wiring landed 2026-07-26.** `PDCoordinator` previously had no
+> production constructor — it existed only in `tests/unit/test_pd.py`, so no
+> deployment could reach a `KVHandoff`, which is why the provider had no caller.
+> `engine/core/pd_factory.py` now supplies both halves:
+> `build_pd_coordinator()` assembles a prefill/decode pair from a checkpoint with
+> both engines placed by the same probe the single-process path uses, and
+> `build_kv_handoff()` picks the handoff from where the KV lives — plain for a
+> host pool, `StreamCopyKVHandoff` over a `CudaStreamProvider` bound to the
+> pool's own device for a device pool.
+>
+> Still open: overlap with the next forward. `StreamCopyKVHandoff` blocks the
+> host before returning, so the consumer needs a completion EVENT rather than a
+> host-wide wait. Serving-layer exposure (a `pd_separation` deployment option) is
+> also still G2 stage 5.3 work; this is the engine-level constructor it needs.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 
