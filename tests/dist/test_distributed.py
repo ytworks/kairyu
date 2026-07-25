@@ -216,6 +216,25 @@ def test_reduce_scatter_rejects_an_indivisible_first_dimension(spawn2):
         assert "divisible" in result["message"]
 
 
+def test_sequence_parallel_matches_plain_tp(spawn2, llama_dir):
+    # Megatron TP+SP: the residual stream between blocks is sharded along TOKENS
+    # and the norms run on the shard. Norms are per-token, so this is the SAME
+    # arithmetic — the gain is activation memory, not latency (rs+ag moves what
+    # one all_reduce does; bench/reduce_scatter_bench.py measures it at ~0.96x).
+    results = spawn2(dist_targets.sequence_parallel_parity, llama_dir)
+    for rank, result in enumerate(results):
+        assert result["max_error"] < 1e-4, f"rank {rank}: {result['max_error']}"
+        assert result["argmax_equal"] is True, rank
+
+
+def test_sequence_parallel_handles_a_ragged_token_count(spawn2, llama_dir):
+    """11 tokens across 2 ranks: padded to shard, trimmed on the way out."""
+    results = spawn2(dist_targets.sequence_parallel_ragged, llama_dir)
+    for rank, result in enumerate(results):
+        assert result["rows"] == result["expected_rows"], rank
+        assert result["max_error"] < 1e-4, f"rank {rank}: {result['max_error']}"
+
+
 class _AlwaysWrongDraft:
     """Proposes a token the model will never pick, so every draft is REJECTED.
 

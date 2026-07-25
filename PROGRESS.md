@@ -37,7 +37,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
 | M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
-| M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. |
+| M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26). |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
@@ -112,7 +112,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
-<<<<<<< HEAD
 ### 2026-07-26 — [amendment] A1's overlap ON/OFF equality is measured, not inferred
 - What: corrects the entry below it. `bench/parity_tp.py` compared each overlap mode
   against its OWN TP1 base and dropped the outputs when the next mode overwrote them,
@@ -148,7 +147,88 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   flipped token fails a prompt and every token after it. What A1 gets from this run is
   the ON-vs-OFF equality, which is exact.
 - Refs: G2 A1, m2 §2.2, `bench/parity_tp.py`, `bench/results/parity-tp-qwen3-32b-2026-07-26.json`
-=======
+
+### 2026-07-26 — [amendment] Growing the decode slots waits for the in-flight staging DMA
+- What: `PagedModelRunner._allocate_decode_slots` now calls `_retire_decode_slots()`
+  first, which synchronizes the OLD `_slot_copy_done` event and drops the old pinned
+  staging buffer only afterwards. A new CUDA gate
+  (`test_growing_the_slots_waits_for_the_in_flight_staging_dma`) keeps a real transfer
+  outstanding (`torch.cuda._sleep` ahead of the H2D) and asserts that no replacement
+  buffer is allocated while the old event is unfinished.
+- Why: PR #143 review [P2] on the staging lifecycle. `_decode_input_slots` grew capacity
+  BEFORE it synchronized, and the growth overwrote `_slot_staging` and `_slot_copy_done`
+  together — so the `synchronize()` that followed was on a freshly recorded, empty event
+  and the handle on the outstanding DMA was already gone. Freeing pinned host memory is
+  not stream-ordered, so the source rows could be returned to the allocator while the copy
+  engine was still reading them. Ordinary generation only survived because the host
+  sampler pulls logits to CPU every step — exactly the dependency the previous entry
+  claimed the event had removed. An active decode batch can grow (8 → 9+) mid-run, so the
+  claim in the 2026-07-26 [progress] entry below ("ordered against reuse by a CUDA event")
+  did not hold across a growth until this change; it holds now.
+- Refs: m2 §2.2 + §5, PR #143 review, `kairyu/engine/core/model_runner.py`,
+  `tests/gpu/test_decode_input_slots_gpu.py`
+
+### 2026-07-26 — [progress] m2 §2.2: persistent decode input slots, and the honest scope
+- What: the decode inputs (token ids and positions) live in persistent device tensors
+  allocated once and written IN PLACE every step
+  (`PagedModelRunner._decode_input_slots`), used by the batched AND the single-request
+  decode path. No decode step allocates a device tensor, and the one-request tail of a
+  workload no longer takes a different, host-rebuilding path. On CUDA the ids are staged
+  through pinned memory and copied as one async DMA per step, ordered against reuse by a
+  CUDA event.
+  NOT done, and now stated as OPEN in `overlap.py`, `model_runner.py` and m2 §2.2 instead
+  of claimed: filling those slots DEVICE-to-device, and §2.2's "step loop never blocks on
+  `.item()`/`.cpu()`" invariant.
+- Why: the sampler decides on the CPU because m8 D2 pins reproducibility (incl. spec ≡
+  greedy) to the CPU RNG stream. The chosen id therefore exists only as a Python int and
+  there is nothing on the device to copy from; one batched H2D per step is the floor until
+  the sampling DECISION itself moves onto the device, which redefines what those pins mean.
+  An earlier revision of this entry claimed the device-to-device patch was done, on the
+  strength of a `SampledToken.device_token` that was `torch.as_tensor(int, device=cuda)` —
+  a fresh scalar H2D per row, i.e. the same round trip B times over rather than once. That
+  claim and that field are withdrawn (PR #143 review, [P1]); the single-request path gap is
+  [P2] of the same review. A second, independent violation of the same invariant remains in
+  `models/attention.py::forward_decode_batch` (`int(positions[i])` per row per layer).
+- Refs: m2 §2.2 + §5, PR #143 review, `kairyu/engine/core/model_runner.py`,
+  `kairyu/engine/core/sampler.py`, `tests/unit/test_decode_input_slots.py`,
+  `tests/gpu/test_decode_input_slots_gpu.py`
+
+### 2026-07-26 — [amendment] m16 D6 records sequence parallelism; the §3 call-site non-goal is lifted
+- What: the entry below landed sequence parallelism but updated PROGRESS only, leaving the
+  binding design doc contradicting it — m16's D1 amendment still said SP was "a design
+  change this milestone does not specify" and §3 still listed USING `reduce_scatter` at the
+  `RowParallelLinear` call site as a non-goal, which is exactly what shipped. Reconciled in
+  `docs/design/m16-distributed.md`: new **D6** records the `SequenceParallelContext`
+  contract (`scatter`/`gather`/`reduce_scatter`), the wrapper placement over D2's tree, the
+  rule that padding lives at the shard boundary ONLY (attention builds its mask from the
+  real length), the activation-memory-not-latency framing, and the scope — dense
+  `build_tp_model` only, NOT EP/PP/the SPMD worker. §3's non-goal is narrowed to those
+  unwired paths and to making SP the default; D1's closing paragraph now points at D6; the
+  Status line and §5 verification list the gates. No code change.
+- Why: repo rule — a design change must move the D-IDs in `docs/design/` and PROGRESS in the
+  SAME change. A design doc that denies what the code does is worse than silence: the next
+  agent reads §3, believes the call site is untouched, and reasons from a false premise.
+  Recorded as an amendment rather than by editing the entry below, which stays as written.
+- Refs: m16 D1/D2/D6 + §3/§5 (`docs/design/m16-distributed.md`), PR #139 review [P2],
+  commit 4d1f9f0
+
+### 2026-07-26 — [design] Sequence parallelism (Megatron TP+SP) behind an opt-in flag
+- What: `build_tp_model(..., sequence_parallel=True)` shards the residual stream between
+  blocks along TOKENS. The norms run on the shard, their output is all_gathered into the
+  TP region, and the row-parallel `o_proj`/`down_proj` exit with a reduce_scatter instead
+  of an all_reduce. Ragged token counts are padded at the shard boundary and trimmed on the
+  way out, so the TP region always sees the real sequence length (attention builds its mask
+  from it). Off by default; `tp >= 2` required.
+- Why: m16 §3 listed reduce_scatter at the RowParallelLinear call site as a non-goal
+  because a bare swap loses — measured at ~0.96x an all_reduce (m16 D1 amendment,
+  2026-07-25). The 1.90x that `reduce_scatter` alone shows is only reachable if the
+  consumer accepts a shard, which is what this makes true. The honest framing, recorded
+  here so nobody enables it for the wrong reason: all_gather + reduce_scatter moves what
+  one all_reduce moves, so this does NOT reduce comm time. The gain is ACTIVATION MEMORY —
+  the norms and the inter-block residual hold S/tp rows instead of S.
+- Refs: m16 D1/D2 (+2026-07-25 amendment), `kairyu/models/parallel.py`,
+  `tests/dist/test_distributed.py`, `tests/gpu/test_sequence_parallel_nccl.py`
+
 ### 2026-07-26 — [amendment] FlashInfer declares graph capture and is planned by the runner
 - What: `FlashInferBackend` now sets `supports_graph_capture = True`, so the
   `GraphDecodeBackend` gate accepts it and `PagedModelRunner` will build a graph path
@@ -295,7 +375,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m16 D1 + §3 (amended), `kairyu/engine/core/dist_comm.py`,
   `bench/reduce_scatter_bench.py`, `bench/results/reduce-scatter-2026-07-25.json`
   (raw per-trial samples committed)
->>>>>>> origin/main
 
 ### 2026-07-25 — [progress] Multi-process TP places its shards on the GPU
 - What: `build_engine_loop` returns into `_build_dist_tp_loop` for `model_path` +
@@ -319,29 +398,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m5 D1/D3, m16 D1/D2, `docs/gpu-runbook.md` §6.1; `kairyu/engine/core/worker.py`,
   `kairyu/models/parallel.py`, `kairyu/engine/core/dist_comm.py`,
   `tests/dist/test_distributed.py` (CPU parity now pins `force_cpu=True`).
-<<<<<<< HEAD
-### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
-- What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
-  `position - 1` before that token is committed. `OverlapEngineCore` takes the snapshot
-  for step N+1 before step N commits, so `state.outputs` is one short — every real-model
-  overlap run raised `IndexError: tuple index out of range`. Committed outputs still win
-  over the in-flight value, so a speculative rollback is not shadowed, and only the newest
-  position is retained (a decode reads exactly one).
-- Why: `overlap.py` already specified this — "decode chunks carry an explicit position so
-  the runner never needs previously-committed token values from the host (on GPU, the
-  last-token slot is patched device-side)" — and nothing implemented it. The toy runner
-  honours the contract by ignoring outputs entirely, which is why no CPU test could see
-  the gap. It blocked the overlap-ON half of G2 A1 and runbook §1 Gate 1, both of which
-  require overlap ON and OFF.
-  Scope: this is the HOST-SIDE half of m2 §2.2. That section specifies patching the
-  placeholder slot device-to-device from the sampled tensor with no host sync in the hot
-  path; this keeps Python ints and rebuilds the input tensor each step. Correctness is
-  restored — overlap ON now runs and matches OFF — but the device-side technique and the
-  zero-host-sync invariant remain OPEN, along with the perf gate that would show them.
-- Refs: m2 §2.2 (partially), G2 A1, `kairyu/engine/core/model_runner.py`,
-  `tests/unit/test_overlap_future_token.py`, `tests/gpu/test_overlap_future_token_gpu.py`
-=======
->>>>>>> origin/main
 
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
