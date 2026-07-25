@@ -109,13 +109,45 @@ def test_provenance_identifies_the_checkpoint_by_content_not_path(tmp_path):
         provenance["weights_sha256"]
     )
 
-    # different weights are a different checkpoint even at the same path
-    (first / "model.safetensors").write_bytes(
-        (first / "model.safetensors").read_bytes() + b"\1"
-    )
-    assert parity_tp._checkpoint_provenance(str(first))["weights_sha256"] != (
-        provenance["weights_sha256"]
-    )
+    # A DIFFERENT WEIGHT VALUE is a different checkpoint. This edit changes one
+    # payload byte and nothing else -- same file size, same tensor names, dtypes,
+    # shapes and offsets. The previous implementation hashed only the safetensors
+    # header plus the size, so it reported this as the SAME checkpoint: a base
+    # model and a fine-tune of it were indistinguishable. Appending a byte (what
+    # this test used to do) changes the size and passes either way, which is why
+    # it never caught the defect.
+    shard = first / "model.safetensors"
+    payload = bytearray(shard.read_bytes())
+    header_len = int.from_bytes(payload[:8], "little")
+    edit_at = 8 + header_len  # first byte of tensor payload
+    assert edit_at < len(payload)
+    before = len(payload)
+    payload[edit_at] ^= 0xFF
+    shard.write_bytes(bytes(payload))
+    assert shard.stat().st_size == before, "the edit must not change the size"
+
+    mutated = parity_tp._checkpoint_provenance(str(first))
+    assert mutated["weights_sha256"] != provenance["weights_sha256"]
+    assert mutated["weights"][0]["sha256"] != provenance["weights"][0]["sha256"]
+
+
+def test_each_weight_digest_is_the_whole_file(tmp_path):
+    """The recorded digest must be the file's own SHA-256, so it can be checked
+    against an upstream manifest (a safetensors shard's sha256 is the oid
+    Hugging Face publishes for that LFS blob)."""
+    import hashlib
+
+    sys.path.insert(0, str(REPO / "bench"))
+    try:
+        import parity_tp
+    finally:
+        sys.path.pop(0)
+
+    root = _fake_checkpoint(tmp_path / "c")
+    recorded = parity_tp._checkpoint_provenance(str(root))["weights"][0]
+    shard = root / "model.safetensors"
+    assert recorded["sha256"] == hashlib.sha256(shard.read_bytes()).hexdigest()
+    assert recorded["bytes"] == shard.stat().st_size
 
 
 def test_a_checkpoint_without_weights_is_rejected(tmp_path):
