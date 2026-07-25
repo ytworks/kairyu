@@ -112,6 +112,23 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] Bench targets own a sampling policy (reasoning effort)
+- What: `BenchTarget` and `JudgeConfig` now share a `SamplingOptions` base carrying
+  `reasoning_effort`, `top_p`, `seed`, and `extra_body_json`; `call_chat` merges those
+  into every request body, and the judge client forwards its own. New flags:
+  `--reasoning-effort`, `--top-p`, `--sampling-seed`, `--extra-body`,
+  `--judge-reasoning-effort`, `--judge-extra-body`, all of which also override
+  YAML-declared targets. `extra_body_json` is validated at load time (JSON object; may
+  not override `model`/`messages`/`stream`) and stays a string so the frozen models
+  remain hashable. Every field is part of the run fingerprint.
+- Why: Fugu reports its table at each model's maximum reasoning effort and ran the τ³
+  user simulator at `low`. The request body previously carried only
+  model/messages/temperature/stream/max_tokens, so neither condition could reach the
+  wire — and for Qwen3 the thinking toggle lives in `chat_template_kwargs`, which needs
+  the same escape hatch.
+- Refs: `kairyu/bench/{types,config,cli,judge}.py`, `kairyu/bench/adapters/base.py`,
+  `tests/bench/test_bench_sampling.py`, `docs/benchmarks.md`, `examples/bench_fugu.yaml`.
+
 ### 2026-07-25 — [amendment] Bench dataset revisions are pinned in one registry
 - What: Added `kairyu/bench/pins.py` mapping adapter name → (dataset id, commit sha) for
   HLE, GPQA Diamond, CharXiv, SciCode, MRCRv2, LongBench-v2, and LiveCodeBench Pro;

@@ -18,12 +18,23 @@ targets:
     base_url: http://localhost:8000/v1
     model: kairyu-auto-max
 
+# Sampling policy belongs to the endpoint and applies to every slot. Fugu
+# reports its table at each model's maximum reasoning effort, so set it here
+# (per target) rather than per benchmark:
+#
+#   reasoning_effort: high
+#   top_p: 0.95
+#   seed: 0
+#   extra_body_json: '{"chat_template_kwargs": {"enable_thinking": true}}'
+
 # LLM judge for free-form grading (HLE, CharXiv) and the tau-bench user
 # simulator. Pointing it at the deployed gateway keeps judging self-hosted;
 # the judge model is disclosed in every scoreboard's methodology.
 judge:
   base_url: http://localhost:8000/v1
   model: kairyu-auto
+  # Fugu ran its tau-3 user simulator at low effort:
+  # reasoning_effort: low
 
 # limit: 50                  # optional: cap items per benchmark
 # smoke: true                # tiny deterministic subset (CI)
