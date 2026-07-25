@@ -145,6 +145,11 @@ def test_environment_records_are_not_ignored_by_git():
 
     # a future environment record must be tracked without `git add -f`
     assert not ignored("bench/results/env-2099-01-01.json")
-    # while routine per-run output stays ignored
-    assert ignored("bench/results/parity-tp-2099-01-01.json")
+    # so must a future A1 parity result: G2 §8 requires that a number a DECISION
+    # rests on be reviewable next to the config that produced it, and the
+    # overlap ON/OFF equality this milestone turns on is one of them. This
+    # assertion used to require the opposite, from before that evidence existed.
+    assert not ignored("bench/results/parity-tp-2099-01-01.json")
+    # while everything else under results, and the downloaded data, stays ignored
+    assert ignored("bench/results/serving-2099-01-01.json")
     assert ignored("bench/data/whatever.bin")
