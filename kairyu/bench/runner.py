@@ -133,6 +133,28 @@ def run_level_incomparable_reasons(config: BenchConfig, ctx_limit: int | None) -
     return tuple(reasons)
 
 
+
+def _stamp_run_reasons(
+    pair: PairResult, fingerprint: str, run_reasons: tuple[str, ...]
+) -> PairResult:
+    """Attach this run's fingerprint and run-level comparability to a pair.
+
+    Applied to freshly executed AND resumed pairs: a stored pair carries its own
+    reasons, but the run-level ones (subset, fixtures) belong to the run doing the
+    reporting.
+    """
+    reasons = tuple(
+        dict.fromkeys(tuple(pair.incomparable_reasons) + run_reasons)
+    )
+    return pair.model_copy(
+        update={
+            "run_fingerprint": fingerprint,
+            "comparable": pair.comparable and not run_reasons,
+            "incomparable_reasons": reasons,
+        }
+    )
+
+
 class SuiteRunner:
     def __init__(self, config: BenchConfig, *, http_factory=None, probe_docker=None) -> None:
         self.config = config
@@ -247,7 +269,16 @@ class SuiteRunner:
                     )
                     if existing is not None and existing.status != "failed":
                         print(f"[cached] {adapter.info.name} × {label}: {existing.status}")
-                        pairs.append(existing)
+                        # A pair stored before these fields existed validates with
+                        # comparable=True by model default and carries the same
+                        # fingerprint, so without this a resumed subset or fixture
+                        # run would be reported with a numeric published delta and
+                        # no banner. Re-stamped and re-saved so the evidence on
+                        # disk matches what the report says.
+                        stamped = _stamp_run_reasons(existing, fingerprint, run_reasons)
+                        if stamped != existing:
+                            store.save_pair(stamped)
+                        pairs.append(stamped)
                         continue
                 print(f"[run] {adapter.info.name} × {label} ...")
                 if dataset_identity_changed:
@@ -271,14 +302,7 @@ class SuiteRunner:
                             started_at=utc_now(),
                             finished_at=utc_now(),
                         )
-                reasons = tuple(result.incomparable_reasons) + run_reasons
-                result = result.model_copy(
-                    update={
-                        "run_fingerprint": fingerprint,
-                        "comparable": result.comparable and not run_reasons,
-                        "incomparable_reasons": reasons,
-                    }
-                )
+                result = _stamp_run_reasons(result, fingerprint, run_reasons)
                 store.save_pair(result)
                 score = f"{result.score * 100:.1f}" if result.score is not None else "n/a"
                 print(f"       -> {result.status} (score={score})")

@@ -337,3 +337,58 @@ def test_failed_cell_with_a_score_gets_no_delta():
     row = [line for line in markdown.splitlines() if line.startswith("| terminal-bench")][0]
     assert "20.0!" in row
     assert "n/c" in row  # not the "*" the legend reserves for partial
+
+
+async def test_resumed_legacy_pair_gets_this_runs_comparability(tmp_path, http_factory):
+    """A pair stored before these fields existed must not resume as comparable.
+
+    Its `comparable` defaults to True and its fingerprint still matches, so
+    without re-stamping a resumed subset/fixture run would report a numeric
+    published delta with no banner.
+    """
+    from kairyu.bench.runner import SuiteRunner
+    from kairyu.bench.store import ResultStore
+
+    config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",), smoke=True)
+    runner = SuiteRunner(config, http_factory=http_factory, probe_docker=lambda: (False, "t"))
+    assert await runner.run() == 0
+
+    store = ResultStore(tmp_path / "results", "test-run")
+    fresh = store.load_pair("gpqa-diamond", "m")
+    assert fresh.comparable is False
+
+    # rewrite it the way a pre-field artifact looks: comparable, no reasons
+    legacy = fresh.model_copy(update={"comparable": True, "incomparable_reasons": ()})
+    store.save_pair(legacy)
+    assert store.load_pair("gpqa-diamond", "m").comparable is True
+
+    # resuming the same run id must not carry that forward
+    runner = SuiteRunner(config, http_factory=http_factory, probe_docker=lambda: (False, "t"))
+    assert await runner.run() == 0
+
+    resumed = store.load_pair("gpqa-diamond", "m")
+    assert resumed.comparable is False  # re-stamped on disk, not only in memory
+    assert any("subset run" in reason for reason in resumed.incomparable_reasons)
+
+    comparison = json.loads(
+        (tmp_path / "results" / "test-run" / "comparison.json").read_text(encoding="utf-8")
+    )
+    assert comparison["rows"][0]["deltas"]["m"] is None
+    markdown = (tmp_path / "results" / "test-run" / "comparison.md").read_text(
+        encoding="utf-8"
+    )
+    assert "not a full-suite measurement" in markdown
+
+
+async def test_resumed_pair_reasons_are_not_duplicated(tmp_path, http_factory):
+    from kairyu.bench.runner import SuiteRunner
+    from kairyu.bench.store import ResultStore
+
+    config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",), smoke=True)
+    for _ in range(3):
+        runner = SuiteRunner(
+            config, http_factory=http_factory, probe_docker=lambda: (False, "t")
+        )
+        await runner.run()
+    pair = ResultStore(tmp_path / "results", "test-run").load_pair("gpqa-diamond", "m")
+    assert len(pair.incomparable_reasons) == len(set(pair.incomparable_reasons))

@@ -132,6 +132,11 @@ What the report refuses to do:
 - **Bury the caveat.** When a reason applies to every cell, both `scoreboard.md`
   and `comparison.md` open with a banner saying so, because a shell warning does
   not survive into the file an operator opens hours later.
+- **Let a resumed pair keep someone else's comparability.** Run-level reasons
+  belong to the run doing the reporting, so a reused pair is re-stamped (and
+  re-saved) with them. A pair written before these fields existed validates as
+  `comparable=True` by model default under an unchanged fingerprint, and would
+  otherwise resume into a subset run with a numeric delta and no banner.
 - **Imply the baselines are comparable.** The page states that every non-Fugu
   score is *provider-reported*; the report repeats that, so those columns read
   as orientation rather than as measurements made under this harness.
