@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import httpx
 
 from kairyu.bench.cache import BenchCache
+from kairyu.bench.progress import NullProgress
 from kairyu.bench.types import (
     BenchItem,
     BenchTarget,
@@ -34,6 +35,7 @@ from kairyu.bench.types import (
 
 if TYPE_CHECKING:  # judge lands in its own module; adapters only see the protocol
     from kairyu.bench.judge import JudgeClient
+    from kairyu.bench.progress import ProgressReporter
 
 _EXCERPT_CHARS = 2000
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -86,6 +88,9 @@ class RunContext:
     docker: tuple[bool, str] = (False, "docker not probed")
     exec_semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(4))
     download_failures: dict[str, str] = field(default_factory=dict)
+    # Observer for live output. Defaults to silence so programmatic use and
+    # tests behave exactly as before.
+    progress: ProgressReporter = field(default_factory=NullProgress)
 
 
 @runtime_checkable
@@ -493,12 +498,20 @@ class GenerativeAdapter(ABC):
             )
 
         items = select_items(self.load_items(ctx), ctx.limit, ctx.seed)
+        ctx.progress.items_total(len(items))
         semaphore = asyncio.Semaphore(ctx.concurrency)
         api_key = target_api_key(target)
 
         async with ctx.http_factory() as client:
 
             async def run_item(item: BenchItem) -> ItemResult:
+                try:
+                    return await run_one(item)
+                finally:
+                    # every item advances the bar, including skips and failures
+                    ctx.progress.item_done()
+
+            async def run_one(item: BenchItem) -> ItemResult:
                 request = self.build_request(item, target, ctx)
                 if isinstance(request, SkipItem):
                     return ItemResult(item_id=item.id, status="skipped", error=request.reason)

@@ -120,6 +120,8 @@ def build_config(args) -> BenchConfig:
         data["rerun"] = True
     if args.no_download:
         data["download"] = False
+    if getattr(args, "no_progress", False):
+        data["progress"] = False
     only = _split_csv(args.only)
     exclude = _split_csv(args.exclude)
     if only:
