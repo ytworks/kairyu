@@ -14,6 +14,7 @@ import torch
 pytestmark = pytest.mark.gpu
 
 WORLD_SIZE = 2
+OVERCOMMIT_TP = 4  # the tp the symmetric-failure gate launches
 # generous, but far below the 1800 s startup allowance a blocking destroy would
 # otherwise sit in; the point is that this returns at all
 DEADLINE_S = 120
@@ -47,7 +48,7 @@ def test_failed_nccl_start_leaves_nothing_behind(indivisible_model):
 
     from kairyu.engine.core.worker import DistTPLauncher
 
-    _require_devices(WORLD_SIZE)
+    _require_devices(OVERCOMMIT_TP)
     assert not dist.is_initialized()
 
     started = time.monotonic()
@@ -73,13 +74,59 @@ def test_the_process_can_still_launch_afterwards(indivisible_model):
 
     from kairyu.engine.core.worker import DistTPLauncher
 
-    _require_devices(WORLD_SIZE)
+    _require_devices(OVERCOMMIT_TP)
     with pytest.raises(ValueError, match="num_kv_heads"):
         DistTPLauncher(
             indivisible_model, tp=4, num_pages=64, page_size=4,
             vocab=[f"t{i}" for i in range(256)],
         )
 
+    launcher = DistTPLauncher(
+        indivisible_model, tp=WORLD_SIZE, num_pages=64, page_size=4,
+        vocab=[f"t{i}" for i in range(256)],
+    )
+    launcher.shutdown()
+    assert not dist.is_initialized()
+
+
+def test_a_rank_local_failure_still_returns_and_reaps(indivisible_model, monkeypatch):
+    """The case the symmetric gate cannot reach (review [P1] on #129).
+
+    `num_kv_heads` fails identically on every rank, so the peers are already gone
+    when rank 0 tears down. Patching `build_tp_runner` in THIS process only is
+    rank-local by construction — the spawned children import the module fresh —
+    so the workers survive, reach their handshake broadcast, and sit there while
+    rank 0 unwinds. If teardown waits on a collective, this never returns.
+    """
+    import torch.distributed as dist
+
+    from kairyu.engine.core import worker as worker_module
+    from kairyu.engine.core.worker import DistTPLauncher
+
+    _require_devices(WORLD_SIZE)
+    assert not dist.is_initialized()
+
+    def _rank0_only_failure(*args, **kwargs):
+        raise RuntimeError("injected rank-local failure")
+
+    monkeypatch.setattr(worker_module, "build_tp_runner", _rank0_only_failure)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="injected rank-local failure"):
+        DistTPLauncher(
+            indivisible_model,
+            tp=WORLD_SIZE,
+            num_pages=64,
+            page_size=4,
+            vocab=[f"t{i}" for i in range(256)],
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < DEADLINE_S, f"rank-local abandon took {elapsed:.1f}s"
+    assert not dist.is_initialized(), "process group survived a rank-local failure"
+
+    # every child reaped, and the process can still form a group
+    monkeypatch.undo()
     launcher = DistTPLauncher(
         indivisible_model, tp=WORLD_SIZE, num_pages=64, page_size=4,
         vocab=[f"t{i}" for i in range(256)],

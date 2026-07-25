@@ -157,6 +157,31 @@ def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
     return TPPlacement(f"cuda:{rank}", torch.bfloat16, "nccl")
 
 
+class _DeferredComm:
+    """Forwards to whichever communicator is bound to it.
+
+    The model's `RowParallelLinear` wrappers capture a communicator at build
+    time, but the serving group must not exist until every failure-prone startup
+    step has succeeded — otherwise a rank-local failure leaves an UNaborted
+    subgroup whose teardown waits on peers that will never arrive (review [P1] on
+    #129). Building against this proxy and binding afterwards keeps both: the
+    load happens on the startup group, the step loop runs on the serving one.
+    """
+
+    def __init__(self, target) -> None:
+        self._target = target
+
+    def bind(self, target) -> None:
+        self._target = target
+
+    @property
+    def group(self):
+        return self._target.group
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_target"), name)
+
+
 def serving_group(backend: str):
     """A second process group carrying the OPERATIONAL collective timeout.
 
@@ -257,10 +282,7 @@ def _tp_worker_entry(
         timeout_s=_STARTUP_TIMEOUT_S,
     )
     startup_comm = TorchDistCommunicator(device=placement.device)
-    # created before the slow shard load, while every rank is still in lockstep
-    comm = TorchDistCommunicator(
-        group=serving_group(placement.backend), device=placement.device
-    )
+    comm = _DeferredComm(startup_comm)
     runner, _ = build_tp_runner(
         model_dir, world_size, rank, comm, num_pages, page_size, vocab, placement
     )
@@ -268,6 +290,11 @@ def _tp_worker_entry(
     # — runs on the long-timeout startup group
     handshake = startup_comm.broadcast(None, src=0)
     validate_handshake(handshake, model_dir, num_pages, page_size)
+    comm.bind(
+        TorchDistCommunicator(
+            group=serving_group(placement.backend), device=placement.device
+        )
+    )
     try:
         worker_step_loop(comm, runner)
     finally:
@@ -328,15 +355,21 @@ class DistTPLauncher:
                 timeout_s=_STARTUP_TIMEOUT_S,
             )
             startup_comm = TorchDistCommunicator(device=placement.device)
-            # created before the slow shard load, while ranks are still in lockstep
-            self._comm = TorchDistCommunicator(
-                group=serving_group(placement.backend), device=placement.device
-            )
+            # the model is built against the startup group; nothing that can fail
+            # may leave a serving subgroup behind for _abandon_start to miss
+            self._comm = _DeferredComm(startup_comm)
             runner, self.full_config = build_tp_runner(
                 model_dir, tp, 0, self._comm, num_pages, page_size, vocab, placement
             )
             # the one collective that legitimately absorbs load skew
             startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
+            # every failure-prone step is done: now the step loop gets its own
+            # bounded-timeout group
+            self._comm.bind(
+                TorchDistCommunicator(
+                    group=serving_group(placement.backend), device=placement.device
+                )
+            )
             self.runner = DistTPModelRunner(self._comm, runner)
         except BaseException:
             self._abandon_start()
