@@ -112,6 +112,23 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [design] Sequence parallelism (Megatron TP+SP) behind an opt-in flag
+- What: `build_tp_model(..., sequence_parallel=True)` shards the residual stream between
+  blocks along TOKENS. The norms run on the shard, their output is all_gathered into the
+  TP region, and the row-parallel `o_proj`/`down_proj` exit with a reduce_scatter instead
+  of an all_reduce. Ragged token counts are padded at the shard boundary and trimmed on the
+  way out, so the TP region always sees the real sequence length (attention builds its mask
+  from it). Off by default; `tp >= 2` required.
+- Why: m16 §3 listed reduce_scatter at the RowParallelLinear call site as a non-goal
+  because a bare swap loses — measured at ~0.96x an all_reduce (m16 D1 amendment,
+  2026-07-25). The 1.90x that `reduce_scatter` alone shows is only reachable if the
+  consumer accepts a shard, which is what this makes true. The honest framing, recorded
+  here so nobody enables it for the wrong reason: all_gather + reduce_scatter moves what
+  one all_reduce moves, so this does NOT reduce comm time. The gain is ACTIVATION MEMORY —
+  the norms and the inter-block residual hold S/tp rows instead of S.
+- Refs: m16 D1/D2 (+2026-07-25 amendment), `kairyu/models/parallel.py`,
+  `tests/dist/test_distributed.py`, `tests/gpu/test_sequence_parallel_nccl.py`
+
 ### 2026-07-25 — [amendment] m16 D1: reduce_scatter implemented; "same-call-site optimization" withdrawn
 - What: `TorchDistCommunicator.tensor_reduce_scatter` added — NCCL's real collective, and
   all_reduce + a local slice under gloo, which has none. The D1 note calling NCCL's
