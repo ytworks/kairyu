@@ -131,7 +131,7 @@ a recording fake.
 > timeline stayed exactly as serial as the blocking form. Measured on device:
 > copy `[11.651, 12.342] ms`, next prefill forward `[12.898, 13.369] ms`.
 >
-> The settlement is therefore PIPELINED one producer step. `_step_prefill` plans,
+> The settlement is therefore PIPELINED one producer step. `step_prefill` plans,
 > runs its forward, and only THEN settles the previous step's transfers, so the
 > gate lands with that forward — and the decode step queued before it — already
 > in front of it. `_Handover` is what carries a step's `commit` / `adopt` /
@@ -144,7 +144,7 @@ a recording fake.
 > win, and the leased pages may be exactly what the next prompt needs.
 >
 > This applies to the deferring path ONLY. A blocking handoff has already finished
-> its copy inside `transfer()`, so `_step_prefill` settles it in its own step and
+> its copy inside `transfer()`, so `step_prefill` settles it in its own step and
 > the request starts decoding immediately, as before.
 >
 > Production wiring: `build_pd_coordinator(defer_handoff=True)` — the default,
