@@ -158,6 +158,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   (all 11 slots, progress, vision skips, subset banner, accuracy report); the GPU host run
   is still pending.
 
+
 ### 2026-07-25 — [amendment] Bench dataset revisions are pinned in one registry
 - What: Added `kairyu/bench/pins.py` mapping adapter name → (dataset id, commit sha) for
   HLE, GPQA Diamond, CharXiv, SciCode, MRCRv2, LongBench-v2, and LiveCodeBench Pro;

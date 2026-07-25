@@ -86,6 +86,8 @@ vs `kairyu-auto-max` in one run.
 |---|---|---|---|
 | SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
 | Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), accuracy | docker, `[bench-agentic]` |
+
+| Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), Harbor Mean | docker, `[bench-agentic]` |
 | LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
 | LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro` split `quater_2025_4_6` + `-Testcase` ZIPs | sandboxed pass@1 (lower bound: no testlib checker) | HF token |
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
@@ -94,7 +96,7 @@ vs `kairyu-auto-max` in one run.
 | SciCode | `SciCode1/SciCode` | sequential sub-step tests (+`test_data.h5` golden data) | numpy in venv |
 | τ³-Bench Banking | tau3/tau2 `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
-| MRCRv2 | `openai/mrcr` (8-needle, ≤128K) | official prepend + SequenceMatcher ratio | long-context target |
+| MRCRv2 | `openai/mrcr` (8-needle, ≤128K official bins) | official prepend + SequenceMatcher ratio | long-context target |
 
 Annotated caveats appear as scoreboard footnotes automatically, notably:
 the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
@@ -115,6 +117,11 @@ Pro is scored by the local sandbox, not the official judge.
   yield exactly 167 problems, every archive must download, and each archive's
   usable cases must match the `sum(subtasks[].n_cases)` it declares with no
   unpaired input. `download_file()` turns a timeout, a 401 and a 404 alike into
+
+  usable cases must match the `sum(subtasks[].n_cases)` it declares, with no
+  unpaired half in either direction. An archive that declares **no** count is not
+  "as complete as whatever arrived" — that declaration is the only denominator
+  evidence there is, so a missing or malformed `config.yaml` fails closed too. `download_file()` turns a timeout, a 401 and a 404 alike into
   `None`, so excluding a problem would cache a smaller denominator permanently —
   and a rate over a shrunken set is not even a lower bound on the full 167. The
   testcase repo's pin is part of the cache identity (`AdapterInfo.extra_sources`)
@@ -134,14 +141,21 @@ Fugu reports the **8-needle** subset at up to **128K**, which is the five bins a
 or below 131,072 — exactly **500 rows**. The adapter counts tokens with the
 official encoder (so `tiktoken` is required; without it the cell is skipped
 rather than approximated), assigns each row to its official bin, keeps the
-selected bins, prints the per-bin counts, and **fails closed** unless it lands on
-500. An approximation such as chars/4 over the prompt alone cannot reproduce
+selected bins, prints the per-bin counts, and **fails closed** unless there are
+exactly 100 rows in *each* of them — 500 in total weighted 99/101/100/100/100
+would be a different population reported as the official slice. An approximation such as chars/4 over the prompt alone cannot reproduce
 those boundaries, and averaging the whole 2,400-row split would score an easier,
 shorter population against Fugu's number.
 
 The target's own `max_context_tokens` gate is separate: it uses the prompt-only
 estimate, matching the official runner's `n_tokens(messages) > MAX_CONTEXT_WINDOW`
 check.
+
+The target's own `max_context_tokens` gate is separate: it uses the exact
+prompt-only token count, matching the official runner's
+`n_tokens(messages) > MAX_CONTEXT_WINDOW` check. (The chars/4 heuristic survives
+only as a fallback for rows normalized before that field existed; near a target's
+limit the two disagree and would skip a fitting row or send an oversized one.)
 
 ### SciCode: sequential sub-steps and golden data
 
@@ -162,13 +176,19 @@ Two consequences:
   steps of those problems call the helpers they define. kairyu does the same: those
   three are excluded from scoring and their pinned-by-hash implementation is
   carried into the context. 288 is also the denominator Fugu reports, and
-  acquisition fails closed unless it lands on 291 sub-steps / 288 scoreable.
+  acquisition fails closed unless it lands on 291 sub-steps / 288 scoreable — and
+  also if any of those three implementations cannot be fetched at its pinned hash,
+  because scoring their dependents without them would charge the model for a
+  missing harness file.
 - Nearly all of those compare against golden data (`target`) from `test_data.h5`,
   which the HF export does not contain. It is fetched from the upstream repo first
   and otherwise from a public mirror (`Srimadh/Scicode-test-data-h5`), and is
   accepted only when its size and **SHA-256 content hash** match the pin: magic
   bytes alone prove the file format, so a different-but-valid HDF5 would otherwise
-  be trusted as every expected value in the benchmark. The pin says *which* bytes
+  be trusted as every expected value in the benchmark. The check runs again when a
+  cached asset is reused (once per pair, since the file is ~1 GB), so a replaced or
+  truncated file cannot become the expected-answer source under a manifest that
+  still advertises the pin. The pin says *which* bytes
   were scored against — it has **not** been cross-checked against the official
   Google Drive artifact, and the methodology says so. Sub-steps left without the
   file are `unjudged`, never guessed.
@@ -244,6 +264,11 @@ What the report refuses to do:
 - **Bury the caveat.** When a reason applies to every cell, both `scoreboard.md`
   and `comparison.md` open with a banner saying so, because a shell warning does
   not survive into the file an operator opens hours later.
+- **Let a resumed pair keep someone else's comparability.** Run-level reasons
+  belong to the run doing the reporting, so a reused pair is re-stamped (and
+  re-saved) with them. A pair written before these fields existed validates as
+  `comparable=True` by model default under an unchanged fingerprint, and would
+  otherwise resume into a subset run with a numeric delta and no banner.
 - **Imply the baselines are comparable.** The page states that every non-Fugu
   score is *provider-reported*; the report repeats that, so those columns read
   as orientation rather than as measurements made under this harness.
@@ -437,7 +462,10 @@ Harness output and sampling, verified against the pinned harnesses:
   The adapter prefers the conventional keys (`reward`, `resolved`, `accuracy`,
   `score`, `passed`), accepts a single-key dict whatever it is called, and
   records an ambiguous dict as a **failed** item listing the keys rather than
-  guessing. `trial_name` is the item id so `-k > 1` keeps attempts distinct.
+  guessing. `trial_name` is the item id so `-k > 1` keeps attempts distinct. The
+  score is Harbor's own `Mean` — **every** trial counts, an errored one as zero,
+  because `aggregate_reward_dicts()` maps a missing reward to zero before
+  averaging; excluding errors would report a crashed run as a better score.
 - **τ** resolves its data directory itself (`TAU2_DATA_DIR`, else a path *beside*
   `site-packages`), so the adapter imports the harness's own `DATA_DIR` instead
   of reconstructing that layout. `--save-to` is unique per invocation and carries

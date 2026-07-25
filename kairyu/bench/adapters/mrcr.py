@@ -161,13 +161,16 @@ class MrcrAdapter(GenerativeAdapter):
                     "est_prompt_tokens": prompt_tokens(messages, row.get("n_chars")),
                 }
             )
-        expected = expected_rows()
-        if len(normalized) != expected:
+        # Per bin, not just in total: 500 rows weighted 99/101/100/100/100 is a
+        # different population than the official 100-per-bin slice, and it would
+        # otherwise be cached while the report claims the official one.
+        expected_per_bin = dict.fromkeys(selected_bins(), _SAMPLES_PER_BIN)
+        if per_bin != expected_per_bin:
             raise DatasetUnavailable(
-                f"{self.info.hf_dataset}@{self.info.hf_revision} yielded "
-                f"{len(normalized)} {_NEEDLES}-needle rows at or below "
-                f"{_MAX_CONTEXT_TOKENS} prompt+answer tokens, expected {expected} "
-                f"({_SAMPLES_PER_BIN} per official bin); per-bin counts {per_bin}"
+                f"{self.info.hf_dataset}@{self.info.hf_revision} did not yield the "
+                f"official {_NEEDLES}-needle slice: expected {_SAMPLES_PER_BIN} rows "
+                f"in each of {list(selected_bins())}, got "
+                f"{dict(sorted(per_bin.items()))} ({len(normalized)} rows total)"
             )
         # The excluded counts are the denominator story; never silent.
         print(
@@ -178,11 +181,35 @@ class MrcrAdapter(GenerativeAdapter):
         )
         return normalized
 
+
+
+        rows = load_hf_rows(
+            self.info.hf_dataset, split="train", revision=self.info.hf_revision
+        )
+        return [
+            {
+                "id": f"mrcr-{index:05d}",
+                "messages": json.loads(row["prompt"]),
+                "answer": row["answer"],
+                "prepend": row["random_string_to_prepend"],
+                "n_needles": row.get("n_needles"),
+            }
+            for index, row in enumerate(rows)
+        ]
+
     def build_request(
         self, item: BenchItem, target: BenchTarget, ctx: RunContext
     ) -> ChatRequestSpec | SkipItem:
         messages = item.payload["messages"]
-        est = item.payload.get("est_prompt_tokens")
+        # Exact o200k_base message-content tokens when normalization recorded
+        # them, matching the official runner's own
+        # `n_tokens(messages) > MAX_CONTEXT_WINDOW` gate. The chars/4 heuristic is
+        # only a fallback for rows normalized before that field existed; near a
+        # target's limit the two disagree and would skip a fitting row or send an
+        # oversized one.
+        est = item.payload.get("prompt_tokens")
+        if not isinstance(est, int):
+            est = item.payload.get("est_prompt_tokens")
         if not isinstance(est, int):
             est = prompt_tokens(messages)
         if target.max_context_tokens is not None and est > target.max_context_tokens:
@@ -219,7 +246,8 @@ class MrcrAdapter(GenerativeAdapter):
             f"{_MAX_CONTEXT_TOKENS} ({_SAMPLES_PER_BIN} samples per bin)"
         )
         base["truncation_policy"] = (
-            "items whose ~chars/4 estimated prompt tokens exceed the target's "
-            "max_context_tokens are skipped, never truncated"
+            f"items whose exact {_ENCODING} prompt tokens exceed the target's "
+            "max_context_tokens are skipped, never truncated (the official "
+            "runner's own gate; chars/4 only for legacy rows)"
         )
         return base

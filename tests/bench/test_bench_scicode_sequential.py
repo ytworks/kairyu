@@ -342,6 +342,50 @@ def test_normalize_marks_the_three_steps_the_evaluator_skips(tmp_path, monkeypat
     assert all(row["provided_code"] for row in excluded)
 
 
+def test_normalize_fails_closed_without_the_provided_implementations(tmp_path, monkeypatch):
+    """Later steps of 13/62/76 call helpers those steps define.
+
+    Scoring them without the official implementation would charge the model for
+    the harness's missing file and pollute the 288-step denominator.
+    """
+    _patch_scicode(monkeypatch, _official_shaped_rows(), provided={})
+    with pytest.raises(Exception, match="provided implementations are unavailable"):
+        SciCodeAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+
+def test_normalize_fails_closed_on_a_partially_provided_mapping(tmp_path, monkeypatch):
+    _patch_scicode(
+        monkeypatch,
+        _official_shaped_rows(),
+        provided={("13", 5): "def provided():\n    return 1"},
+    )
+    with pytest.raises(Exception, match="problem 62 step 1") as error:
+        SciCodeAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+    assert "problem 76 step 3" in str(error.value)
+
+
+async def test_cached_golden_data_is_revalidated_on_reuse(tmp_path):
+    """A replaced or truncated asset must not become the expected-answer source."""
+    adapter = SciCodeAdapter()
+    ctx = _ctx(tmp_path, offline_fixtures=False)
+    assets = ctx.cache.assets_dir("scicode")
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / "test_data.h5").write_bytes(b"corrupt")
+
+    item = BenchItem(
+        id="scicode-1.1",
+        payload={
+            "step_id": "1.1",
+            "dependencies": "",
+            "prior_code": "",
+            "test_cases": ["assert f(1) == target"],
+        },
+    )
+    result = await adapter.score(item, "```python\ndef f(x):\n    return x\n```", ctx)
+    assert result.status == "unjudged"
+    assert "pinned hash" in result.error
+
+
 def test_normalize_fails_closed_if_the_population_moved(tmp_path, monkeypatch):
     rows = _official_shaped_rows()
     rows.append(_problem("extra", 2))
