@@ -524,3 +524,71 @@ async def test_full_stack_openai_server_over_engine_core():
     data = response.json()
     assert data["choices"][0]["message"]["content"]
     assert data["choices"][0]["finish_reason"] == "length"
+
+
+class _AlwaysFailRunner:
+    def execute(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        raise RuntimeError("transport is gone")
+
+
+class _DeadRankLauncher:
+    def __init__(self, dead: tuple[int, ...]) -> None:
+        self._dead = dead
+
+    def dead_ranks(self) -> tuple[int, ...]:
+        return self._dead
+
+
+async def test_readiness_is_ready_before_any_work():
+    backend = KairyuBackend(runner=_SlowRunner())
+    assert backend.readiness().ready is True
+
+
+async def test_a_step_failure_reports_but_does_not_flip_readiness():
+    # review [P1] on #126: marking the node unready here is a trap. The load
+    # balancer stops sending work, so the successful step that would clear the
+    # flag never arrives and the node stays out of rotation until someone looks.
+    # A step error also cannot be told apart from one bad request.
+    backend = KairyuBackend(runner=_AlwaysFailRunner())
+    with pytest.raises(RuntimeError):
+        await backend.generate(_request("r1", "hello"))
+    status = backend.readiness()
+    assert status.ready is True
+    assert status.fatal is False
+    assert "RuntimeError" in status.detail  # reported for diagnosis
+
+
+async def test_the_reported_error_detail_carries_no_message():
+    # /readyz is unauthenticated; an exception message can carry a path or URL
+    class _LeakyRunner:
+        def execute(self, scheduled, states):
+            raise RuntimeError("connect https://internal:8443 failed for /etc/key")
+
+    backend = KairyuBackend(runner=_LeakyRunner())
+    with pytest.raises(RuntimeError):
+        await backend.generate(_request("r1", "hello"))
+    detail = backend.readiness().detail
+    assert "RuntimeError" in detail
+    assert "internal" not in detail
+    assert "/etc/key" not in detail
+
+
+async def test_readiness_reports_dead_tensor_parallel_ranks_as_fatal():
+    # nothing in-process can bring a dead rank back, so this is the one condition
+    # that both stops traffic AND asks for a restart
+    backend = KairyuBackend(runner=_SlowRunner())
+    backend._loop.tp_launcher = _DeadRankLauncher((2, 5))
+    status = backend.readiness()
+    assert status.ready is False
+    assert status.fatal is True
+    assert "[2, 5]" in status.detail
+
+
+async def test_live_tensor_parallel_ranks_stay_ready():
+    backend = KairyuBackend(runner=_SlowRunner())
+    backend._loop.tp_launcher = _DeadRankLauncher(())
+    assert backend.readiness().ready is True

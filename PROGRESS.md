@@ -148,6 +148,131 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: m16 D1/D2 (+2026-07-25 amendment), `kairyu/models/parallel.py`,
   `tests/dist/test_distributed.py`, `tests/gpu/test_sequence_parallel_nccl.py`
 
+### 2026-07-26 — [amendment] FlashInfer declares graph capture and is planned by the runner
+- What: `FlashInferBackend` now sets `supports_graph_capture = True`, so the
+  `GraphDecodeBackend` gate accepts it and `PagedModelRunner` will build a graph path
+  over it. Its `plan_decode()` already had the contract's signature and is now called
+  by production code — `GraphStepExecutor` -> `DenseDecoder.plan_decode_tensors()` ->
+  the backend — instead of only by tests. Gated on the 8× RTX PRO 6000 host by four
+  new integration tests in `tests/gpu/test_flashinfer_tensor_decode.py` that drive
+  real capture and replay through `PagedModelRunner` (growing seq_lens, pages swapped
+  mid-run, and a `warmup_iters=0` capture that only the pre-capture hook can save),
+  plus a CPU gate that FlashInfer satisfies `graph_capture_gap()`.
+- Why: PR #141's review found `plan_decode` had no production caller at all — the
+  decode path reached `attend_decode` per layer and the executor had no step-boundary
+  hook — so combined with #138's graph path the first capture raised "no live plan",
+  and a replay after `_copy_in` would have attended over the pages that were in the
+  static buffers at capture time. Removing the post-copy-in plan reproduces exactly
+  that: two steps over different pages return byte-identical logits.
+- Refs: PR #141 review [P1], PR #138 review [P1]; m17 D1, m13 D4;
+  `kairyu/engine/core/attention/flashinfer_gpu.py`,
+  `tests/gpu/test_flashinfer_tensor_decode.py`, `tests/unit/test_attention_backend.py`.
+
+### 2026-07-26 — [design] GraphDecodeBackend: the CUDA-graph decode capability contract
+- What: a backend is capture-eligible only if it DECLARES it, and the decode step
+  boundary now reaches it. Defined once in `kairyu/engine/core/attention/__init__.py`
+  as the `GraphDecodeBackend` protocol plus its single enforcement point
+  `graph_capture_gap()`: `supports_graph_capture` (declared, not inferred),
+  `plan_decode(kv_pool, page_tables, seq_lens, *, num_qo_heads, q_dtype)` (the
+  step-boundary HOST phase, a no-op where there is none), and the capture-safe
+  `attend_decode`. `GraphStepExecutor` gained an optional `plan_fn`, called before
+  each capture and after every `_copy_in` BEFORE `replay()`; `PagedModelRunner`
+  supplies it via the new `DenseDecoder.plan_decode_tensors()`, which plans once per
+  backend INSTANCE per step (not per layer). `_tensor_decode_gap()` now asks
+  `graph_capture_gap()` instead of `hasattr(backend, "attend_decode")`.
+- Why: method presence is not capture-safety. FlashInfer (PR #141) owns
+  `attend_decode` and would have passed the old check, but its `plan()` copies
+  `indptr` to the host and cannot run under capture at all — so the runner would
+  construct successfully and the FIRST capture would die with a D2H `RuntimeError`,
+  defeating the fail-fast the gate exists for. And planning outside capture is
+  useless if nothing calls it: `forward_decode_tensors` reaches `attend_decode` per
+  layer with no seam for a host phase, and only the executor knows which static
+  buffers the next replay will read — the plan must therefore be taken after
+  copy-in, or the replay attends over the previous step's pages.
+- Refs: m17 D1/D2, PR #138 review [P1], PR #141 review [P1];
+  `kairyu/engine/core/attention/{__init__,torch_backend}.py`,
+  `kairyu/engine/core/{model_runner,step_executor}.py`,
+  `kairyu/models/{attention,llama}.py`, `tests/unit/test_step_executor.py`,
+  `tests/unit/test_graph_decode_wiring.py`.
+
+### 2026-07-26 — [amendment] CUDA-graph decode: reserved scratch page + backend fail-fast
+- What: `PagedModelRunner(graph_backend=...)` now wires the m17 D1 capture seam into
+  batched decode (PR #138), with two review blockers fixed before merge. [P1] the
+  scratch page the graph's padding rows write KV to is now RESERVED out of the
+  allocator via the new `RadixKVCache.reserve_scratch_page()`, and a graph backend
+  without a cache is rejected; `GraphStepExecutor`/`build_decode_batch` no longer
+  default `scratch_page` to 0. [P2] the runner now checks at construction that every
+  layer's attention implements the tensor decode contract
+  (`forward_decode_tensors` + `backend.attend_decode`) and raises `ValueError`
+  naming the gap. The seam stays OFF unless a backend is passed.
+- Why: the scratch page defaulted to 0, which `PagePool` hands out as the FIRST
+  ordinary page — so the capture warmup and every partial-bucket replay wrote K/V
+  into a live request's page 0 slot 0, silently corrupting its cache whenever the
+  damage did not cross an argmax boundary. And a FlashInfer or MLA model constructed
+  fine and then died with `AttributeError` on the first batched decode, arbitrarily
+  deep into a run, rather than at build time. Capacity now drops by exactly one page
+  for the graph's lifetime — the documented cost of the reservation.
+- Refs: m17 D1/D2/A5, `docs/gpu-runbook.md` §6.3, PR #138 review [P1]/[P2];
+  `kairyu/engine/core/{model_runner,step_executor,radix_kv}.py`,
+  `tests/unit/test_graph_decode_wiring.py`, `tests/gpu/test_cuda_graph_decode_gpu.py`.
+
+### 2026-07-26 — [amendment] FlashInfer decode is split into a host plan and a capture-safe run
+- What: `FlashInferBackend.attend_decode` no longer derives-and-plans inline. The adapter
+  now owns `plan_decode()` (the HOST phase: device-derived indptr/indices/last_page_len
+  handed to a `use_cuda_graph=True` wrapper whose paged buffers are persistent, one
+  wrapper per (batch, max_pages) shape and never replaced) and `attend_decode()` (a bare
+  `run()` over those buffers — no `.tolist()`, no `.cpu()`, no `plan()`). Inside a capture
+  the adapter refuses to plan and refuses to run unplanned; eagerly it still plans lazily,
+  now once per step instead of once per layer. Gated by a real `torch.cuda.CUDAGraph`
+  capture on the 8× RTX PRO 6000 host whose replay reflects an in-place page-table/seq-len
+  change after the step is re-planned, plus a CPU gate that forbids host synchronization
+  inside the capture region.
+- Why: the first cut of PR #141 claimed the m17 D1 tensor contract but converted the page
+  table and lengths with `.tolist()`/`.cpu()` on every layer, so capture died with
+  `cudaErrorStreamCaptureInvalidated` (reproduced on hardware) and the path was eager-only.
+  FlashInfer's `plan()` "cannot be used in Cuda Graph" by its own documentation — it builds
+  the split-KV schedule on the CPU — so the honest decomposition is plan-outside /
+  run-inside, which is what the wrapper's cudagraph buffers exist for.
+- Refs: PR #141 review [P1]; m17 D1, m13 D4; `kairyu/engine/core/attention/flashinfer_gpu.py`,
+  `tests/unit/test_attention_backend.py`, `tests/gpu/test_flashinfer_tensor_decode.py`.
+
+### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
+- What: `PagedModelRunner` keeps the token it just sampled, so a decode can read
+  `position - 1` before that token is committed. `OverlapEngineCore` takes the snapshot
+  for step N+1 before step N commits, so `state.outputs` is one short — every real-model
+  overlap run raised `IndexError: tuple index out of range`. Committed outputs still win
+  over the in-flight value, so a speculative rollback is not shadowed, and only the newest
+  position is retained (a decode reads exactly one).
+- Why: `overlap.py` already specified this — "decode chunks carry an explicit position so
+  the runner never needs previously-committed token values from the host (on GPU, the
+  last-token slot is patched device-side)" — and nothing implemented it. The toy runner
+  honours the contract by ignoring outputs entirely, which is why no CPU test could see
+  the gap. It blocked the overlap-ON half of G2 A1 and runbook §1 Gate 1, both of which
+  require overlap ON and OFF.
+  Scope: this is the HOST-SIDE half of m2 §2.2. That section specifies patching the
+  placeholder slot device-to-device from the sampled tensor with no host sync in the hot
+  path; this keeps Python ints and rebuilds the input tensor each step. Correctness is
+  restored — overlap ON now runs and matches OFF — but the device-side technique and the
+  zero-host-sync invariant remain OPEN, along with the perf gate that would show them.
+- Refs: m2 §2.2 (partially), G2 A1, `kairyu/engine/core/model_runner.py`,
+  `tests/unit/test_overlap_future_token.py`, `tests/gpu/test_overlap_future_token_gpu.py`
+
+### 2026-07-25 — [amendment] m18 D3: CudaStreamProvider landed; KV serde can read a device pool
+- What: `CudaStreamProvider` implemented (the deploy-day half of the m18 D3 stream seam),
+  and `kv_serde._to_bytes` now copies to host before `.numpy()`.
+- Why: the seam had never run against a CUDA pool. `_to_bytes` called `.numpy()` on the
+  tensor directly, so `extract_page` on a device `PagedKVPool` raised `TypeError: can't
+  convert cuda:0 device type tensor to numpy` — the real handoff could not read GPU KV at
+  all, which a side stream does not help with. Scope is recorded honestly: the extraction
+  copy is now isolated on a side stream that waits on the caller's stream FOR THE DEVICE
+  THE PROVIDER WAS BUILT FOR (an argument-less `current_stream()` follows the thread's
+  current device instead). End-to-end overlap with the next forward is NOT delivered —
+  `StreamCopyKVHandoff` blocks the host before returning and `PDCoordinator` commits
+  before stepping decode — and neither is production wiring; both need a completion event
+  handed to the consumer rather than a host-wide wait.
+- Refs: m18 D3 (amended), `kairyu/engine/core/handoff_stream.py`,
+  `kairyu/engine/core/kv_serde.py`, `tests/gpu/test_handoff_stream_gpu.py`
+
 ### 2026-07-25 — [amendment] m16 D1: reduce_scatter implemented; "same-call-site optimization" withdrawn
 - What: `TorchDistCommunicator.tensor_reduce_scatter` added — NCCL's real collective, and
   all_reduce + a local slice under gloo, which has none. The D1 note calling NCCL's
@@ -789,6 +914,21 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: `Dockerfile.cuda`; supersedes the base image recorded in the
   2026-07-03 M19 deploy-packaging entry (m19 D1).
 
+### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
+- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
+  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
+  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
+  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
+  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
+  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
+- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
+  from the serve entrypoint — so real tensor-parallel models could not be
+  deployed. Now `kairyu serve --tp 2` runs end to end.
+- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
+  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
+  `kairyu/models/loader.py`, test
+  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
+
 ### 2026-07-04 — [design] Review remediation Phase 6: GPU-day seam changes (CPU design + C5 contract test)
 - What: Captured the five GPU-day seam changes from the full-repo review in
   `docs/design/gpu-day-seams.md` (C5 CUDA-graph static buffers, C4 batched
@@ -807,20 +947,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: review report; `docs/design/gpu-day-seams.md`,
   `kairyu/engine/core/step_executor.py` (`SnapshotGraphBackend`),
   `tests/unit/test_step_executor.py`.
-### 2026-07-05 — [progress] Real multi-process TP wired into `kairyu serve --tp N`
-- What: `build_engine_loop(model_path=…, tensor_parallel_size>1)` no longer
-  raises "not yet wired" — it spawns a `DistTPLauncher` group (rank 0 in the
-  serve process, ranks 1.. as workers running `worker_step_loop`) and drives it
-  through `DistTPModelRunner`. The loop carries a `.tp_launcher` handle that
-  `KairyuBackend.shutdown()` calls to stop the workers and destroy the group.
-  Added `load_generation_defaults` (public eos/stop loader for the sharded path).
-- Why: M16's distributed TP was spawn-tested only in `tests/dist` and unreachable
-  from the serve entrypoint — so real tensor-parallel models could not be
-  deployed. Now `kairyu serve --tp 2` runs end to end.
-- Refs: `kairyu/engine/kairyu_backend.py` (`_build_dist_tp_loop`),
-  `kairyu/engine/core/worker.py` (`DistTPLauncher`, `_tp_worker_entry`),
-  `kairyu/models/loader.py`, test
-  `tests/dist/test_distributed.py::test_dist_tp_launcher_serve_path_matches_single_process`.
 
 ### 2026-07-04 — [progress] Review remediation Phase 8: packaging + doc accuracy
 - What: Fixed the cross-cutting packaging/doc defects from the full-repo review.
@@ -845,6 +971,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   **Deferred follow-up:** `kairyu validate` cross-artifact command, typed
   `GenerationRequest.prompt` (token-ids/multimodal), `deploy/spec.py`
   ServerSection compose-not-inherit, and the `kairyu/bench/` package boundary.
+
 ### 2026-07-04 — [progress] Review remediation Phase 7: host-path performance (safe subset)
 - What: Fixed the provably-safe, output-preserving host-path hot spots from the
   full-repo review. **P5**: `prompt_chunks` re-hashed the whole prompt prefix per
@@ -867,6 +994,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   — file-handle lifecycle), P6 (eviction leaf heap), P7 (batched spec verify),
   and the MEDIUM-perf items (sampler penalty state, stop-string offset, queue
   coalescing, scheduler deque, KV-event hash chain, page-table cache).
+
 ### 2026-07-04 — [progress] Review remediation Phase 5: bench scoring correctness + security
 - What: Fixed the scoring-integrity and security defects in the Fugu bench suite.
   **B1**: the MCQ answer-extraction regex matched "answer" + the first letter of
@@ -892,6 +1020,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   per-pair config hash), B4 + denominator policy (skipped/unjudged as 0 or n/a,
   show per-target n_scored), LCB per-line/tolerant scoring, sandbox NPROC/session
   hardening, self-judge (judge==target) scoreboard flag, judge prompt delimiters.
+
 ### 2026-07-04 — [progress] Review remediation Phase 4: model + quant parity
 - What: Fixed the parity-affecting model/quant defects from the full-repo review.
   **M3 (rope)**: unsupported `rope_scaling` kinds (linear/dynamic/longrope) now
@@ -920,6 +1049,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   RATE only, not output correctness (verification is by the target), so no CPU
   test can validate a fix; plus the design items (linear_factory context,
   forward_fused wiring, HF-name-preserving TP/EP wrappers, draft-head quant).
+
 ### 2026-07-04 — [progress] Review remediation Phase 3: orchestration + fleet reliability
 - What: Fixed the L2 fleet/orchestration HIGH defects from the full-repo review.
   **O1**: request errors were all counted as replica failures — a new
@@ -946,6 +1076,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   tests under `tests/unit/`. Deferred follow-up: M1 (verifier non-target deps +
   _SafeDict masking), M3 (MoA path Budget/cost wiring), M8 (run_chat periodic
   keep-alive), and the KvEventIndex↔ReplicaPool integration (design item).
+
 ### 2026-07-04 — [progress] Review remediation Phase 2: API security + tenant isolation
 - What: Fixed the CRITICAL/HIGH L3-server defects from the full-repo review.
   **C3 (CRITICAL) batch/file tenant isolation**: File/Batch objects gained an
