@@ -58,9 +58,11 @@ class DecoderLayer(nn.Module):
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
-    def plan_decode_tensors(self, kv_pool, page_tables, seq_lens):
+    def plan_decode_tensors(self, kv_pool, page_tables, seq_lens, *, q_dtype):
         """Step-boundary host phase for this layer's attention backend."""
-        self.self_attn.plan_decode_tensors(kv_pool, page_tables, seq_lens)
+        self.self_attn.plan_decode_tensors(
+            kv_pool, page_tables, seq_lens, q_dtype=q_dtype
+        )
 
     def forward_decode_tensors(
         self, hidden, cos, sin, kv_pool, layer, page_tables, positions, seq_lens
@@ -193,6 +195,10 @@ class DenseDecoder(nn.Module):
         host schedule ``num_hidden_layers`` times a step, which is precisely the
         per-layer host sync the tensor decode contract exists to remove.
         """
+        # the dtype the plan must describe is the one the QUERY will have, and
+        # the query is a projection of `hidden` — which starts here, at the
+        # embedding, and keeps this dtype through every layer
+        q_dtype = self.model.embed_tokens.weight.dtype
         planned: set[int] = set()
         for layer in self.model.layers:
             attention = getattr(layer, "self_attn", None)
@@ -200,7 +206,9 @@ class DenseDecoder(nn.Module):
             if backend is None or id(backend) in planned:
                 continue
             planned.add(id(backend))
-            layer.plan_decode_tensors(kv_pool, page_tables, seq_lens)
+            layer.plan_decode_tensors(
+                kv_pool, page_tables, seq_lens, q_dtype=q_dtype
+            )
 
     @torch.no_grad()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:

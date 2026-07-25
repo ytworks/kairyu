@@ -363,10 +363,12 @@ class _PlanRequiredBackend:
         self._planned: tuple[torch.Tensor, torch.Tensor] | None = None
         self.plans = 0
         self.attends = 0
+        self.planned_dtype: torch.dtype | None = None
 
     def plan_decode(self, kv_pool, page_tables, seq_lens, *, num_qo_heads, q_dtype):
         assert num_qo_heads == TINY["num_attention_heads"]
         assert isinstance(q_dtype, torch.dtype)
+        self.planned_dtype = q_dtype
         self.plans += 1
         self._planned = (page_tables.clone(), seq_lens.clone())
 
@@ -438,3 +440,36 @@ def test_the_backend_is_planned_once_per_step_not_once_per_layer(llama_dir):
 
     assert config.num_hidden_layers > 1  # otherwise this proves nothing
     assert attention.plans == 1
+
+
+def test_the_planned_dtype_is_the_activation_dtype_not_the_projections(llama_dir):
+    """AWQ/GPTQ ``q_proj`` has no ``.weight`` at all (it carries ``qweight``),
+    and a quantized projection dequantizes to the INPUT's dtype — so reading the
+    plan's dtype off the projection is both a crash and, where it does not
+    crash, the wrong answer for exactly the deployments that want a captured
+    decode most."""
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.quant_config import QuantConfig, QuantMethod
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.models.llama import DenseDecoder
+    from kairyu.models.loader import load_model
+    from kairyu.quant.linear import linear_factory
+
+    _model, config, _ = load_model(llama_dir)
+    model = DenseDecoder(
+        config, linear_factory=linear_factory(QuantConfig(method=QuantMethod.AWQ))
+    )
+    attention = _PlanRequiredBackend()
+    for layer in model.model.layers:
+        layer.self_attn.backend = attention
+    assert not hasattr(model.model.layers[0].self_attn.q_proj, "weight")
+
+    cache = RadixKVCache(num_pages=16, page_size=4)
+    model.plan_decode_tensors(
+        PagedKVPool.for_cache(cache, config),
+        torch.zeros((2, 2), dtype=torch.int32),
+        torch.ones(2, dtype=torch.int32),
+    )
+
+    assert attention.plans == 1
+    assert attention.planned_dtype == model.model.embed_tokens.weight.dtype
