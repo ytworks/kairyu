@@ -1,9 +1,11 @@
 """torch.distributed-backed Communicator: gloo locally, NCCL by constructor (m16 D1).
 
 Satisfies the m5 object-level ``Communicator`` protocol AND the tensor
-extension real parallelism needs. gloo has no reduce_scatter (verified) — all
-call sites use all_reduce; NCCL's reduce_scatter is a same-call-site
-optimization recorded for deploy day.
+extension real parallelism needs. gloo has no reduce_scatter (verified), so
+`tensor_reduce_scatter` is all_reduce + a local slice there and the real
+collective under NCCL. It is NOT a drop-in for the RowParallelLinear all_reduce:
+measured 2026-07-25, rs+ag is ~4% SLOWER than ar at that call site, and the 1.9x
+win from rs alone requires sequence parallelism (m16 D1 amendment).
 """
 
 from __future__ import annotations
@@ -103,6 +105,41 @@ class TorchDistCommunicator:
     def tensor_all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(tensor, group=self._group)
         return tensor
+
+    def tensor_reduce_scatter(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Sum across ranks, keep only this rank's contiguous shard of dim 0.
+
+        The primitive m16 D1 recorded as missing. gloo genuinely has no
+        reduce_scatter, so there it is all_reduce + a local slice — identical
+        result, identical traffic. Under NCCL it is the real collective, which
+        moves (N-1)/N of the bytes an all_reduce does.
+
+        NOT a drop-in for the `RowParallelLinear` all_reduce: that call site
+        needs the FULL sum, and handing it a shard changes what the next layer
+        reads. Trading one for the other is sequence parallelism — the shard has
+        to survive the norm and be re-gathered by the next column-parallel
+        matmul — which m16 does not specify. See `bench/reduce_scatter_bench.py`
+        for what the swap is actually worth on a given fabric.
+        """
+        world = self.world_size
+        if tensor.shape[0] % world != 0:
+            raise ValueError(
+                f"reduce_scatter needs dim 0 ({tensor.shape[0]}) divisible by "
+                f"world_size ({world})"
+            )
+        if dist.get_backend(self._group) == "gloo":
+            reduced = tensor.clone()
+            dist.all_reduce(reduced, group=self._group)
+            span = tensor.shape[0] // world
+            start = self.rank * span
+            return reduced[start : start + span].contiguous()
+        output = torch.empty(
+            (tensor.shape[0] // world, *tensor.shape[1:]),
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        dist.reduce_scatter_tensor(output, tensor.contiguous(), group=self._group)
+        return output
 
     def tensor_all_gather(self, tensor: torch.Tensor) -> torch.Tensor:
         """Equal-shard gather, concatenated along dim 0 in rank order (gloo

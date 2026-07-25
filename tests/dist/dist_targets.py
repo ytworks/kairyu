@@ -500,3 +500,81 @@ def pd_two_process(rank: int, world_size: int, init_file: str, out_dir: str,
         pd_prefill_process(rank, world_size, init_file, out_dir, model_dir, prompt, max_new)
     else:
         pd_decode_process(rank, world_size, init_file, out_dir, model_dir, prompt, max_new)
+
+
+def reduce_scatter_equivalence(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """reduce_scatter must equal all_reduce sliced to this rank's shard.
+
+    On gloo the implementation IS that, so this pins the contract the NCCL path
+    has to honour; the GPU mirror runs the real collective.
+    """
+    comm = _setup(rank, world_size, init_file)
+    rows = 4 * world_size
+    payload = torch.arange(rows * 3, dtype=torch.float32).reshape(rows, 3) + 100 * rank
+
+    scattered = comm.tensor_reduce_scatter(payload)
+
+    summed = payload.clone()
+    comm.tensor_all_reduce(summed)
+    span = rows // world_size
+    expected = summed[rank * span : (rank + 1) * span]
+
+    _finish(out_dir, rank, {
+        "shape": list(scattered.shape),
+        "max_error": float((scattered - expected).abs().max()),
+        # re-gathering the shards must reconstruct the full all_reduce
+        "regathered_matches": bool(
+            torch.allclose(comm.tensor_all_gather(scattered.contiguous()), summed)
+        ),
+    })
+
+
+def reduce_scatter_rejects_indivisible(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """A ragged first dimension has no equal shard; fail loudly, not silently."""
+    comm = _setup(rank, world_size, init_file)
+    payload = torch.ones(world_size * 2 + 1, 2)
+    try:
+        comm.tensor_reduce_scatter(payload)
+        _finish(out_dir, rank, {"raised": False})
+    except ValueError as error:
+        _finish(out_dir, rank, {"raised": True, "message": str(error)})
+
+
+def reduce_scatter_nccl_equivalence(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """The real NCCL collective, against the same all_reduce-and-slice contract."""
+    import torch.distributed as dist
+
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+
+    torch.cuda.set_device(rank)
+    init_distributed(rank, world_size, f"file://{init_file}", backend="nccl")
+    try:
+        comm = TorchDistCommunicator(device=f"cuda:{rank}")
+        device = torch.device("cuda", rank)
+        rows = 4 * world_size
+        payload = (
+            torch.arange(rows * 3, dtype=torch.float32, device=device).reshape(rows, 3)
+            + 100 * rank
+        )
+        scattered = comm.tensor_reduce_scatter(payload)
+        summed = payload.clone()
+        comm.tensor_all_reduce(summed)
+        span = rows // world_size
+        expected = summed[rank * span : (rank + 1) * span]
+        Path(out_dir, f"rank{rank}.json").write_text(
+            json.dumps(
+                {
+                    "shape": list(scattered.shape),
+                    "max_error": float((scattered - expected).abs().max()),
+                    "device": str(scattered.device),
+                }
+            )
+        )
+    finally:
+        dist.destroy_process_group()
