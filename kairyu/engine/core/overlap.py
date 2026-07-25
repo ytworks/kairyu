@@ -13,8 +13,10 @@ rebuilding the input from a host list each step.
 Still OPEN: the sampling DECISION stays on the host — by design, since the
 reproducibility pins (m8 D2, spec == greedy) are defined by the CPU RNG stream —
 so `.item()` per token remains. Removing that sync means moving the RNG and the
-stop conditions onto the device, which changes what those pins mean. Sampled tokens are committed via update() while the
-next step is already running, so the device never waits on host bookkeeping.
+stop conditions onto the device, which changes what those pins mean.
+
+Sampled tokens are committed via update() while the next step is already
+running, so the device never waits on host bookkeeping.
 
 The pipeline structure (schedule-ahead, bounded depth, late finish commit) is
 what this module pins with CPU tests; the GPU runner slots into the same
