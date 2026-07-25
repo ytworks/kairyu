@@ -112,6 +112,26 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-25 — [amendment] LiveCodeBench and LiveCodeBench Pro datasets are actually reachable
+- What: Both code slots could never load their data, so their scoreboard cells were
+  permanently blank. LiveCodeBench passed the *config name* `release_v6` as a git
+  revision to a repo that has only `main` and no tags, and its script-loader path also
+  needs `trust_remote_code` (removed in `datasets` 4.x); it now reads the
+  `test.jsonl`…`test6.jsonl` shards directly at a pinned commit and fails closed unless
+  `release_v6` yields exactly 1,055 problems. LiveCodeBench Pro asked for a `train`
+  split that does not exist and expected a tabular testcase repo; it now pins Fugu's
+  2025 Q2 slice (`quater_2025_4_6`, 167 problems), is declared `gated` (it needs
+  HF_TOKEN), and joins each `problem_id` to a `<problem_id>.zip` of
+  `testdata/<n>.in`/`.ans`. Stdin grading became per-line whitespace-normalized so a
+  correct solution emitting trailing spaces or CRLF is no longer a false negative.
+- Why: A permanently blank cell is worse than a documented approximation — the suite
+  claimed to cover 11 Fugu slots while silently covering 9. The Pro archives ship a
+  per-problem testlib `checker.cpp` that kairyu does not compile, so that cell is now
+  annotated as a LOWER BOUND rather than presented as the official Accepted rate.
+- Refs: `kairyu/bench/hub.py` (`load_jsonl_files`, `revision` on `download_file`),
+  `kairyu/bench/adapters/{livecodebench,livecodebench_pro}.py`,
+  `tests/bench/test_bench_lcb_datasets.py`, `docs/benchmarks.md`.
+
 ### 2026-07-23 — [progress] Versioned structured orchestration trace for evaluation tooling
 - What: Added additive, opt-in `kairyu_trace_v2` on unary orchestrated chat responses while
   preserving `kairyu_trace`. Direct, Conductor, and MoA paths emit a common versioned envelope

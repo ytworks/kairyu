@@ -84,8 +84,8 @@ vs `kairyu-auto-max` in one run.
 |---|---|---|---|
 | SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent scaffold + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
 | Terminal-Bench 2.1 | Harbor registry | `harbor run` (terminus-2), accuracy | docker, `[bench-agentic]` |
-| LiveCodeBench | `livecodebench/code_generation_lite` | sandboxed pass@1 (public+private tests) | — |
-| LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro(+-Testcase)` | sandboxed pass@1 (community mirror, not the official OJ) | — |
+| LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
+| LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro` split `quater_2025_4_6` + `-Testcase` ZIPs | sandboxed pass@1 (lower bound: no testlib checker) | HF token |
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
@@ -98,6 +98,31 @@ Annotated caveats appear as scoreboard footnotes automatically, notably:
 the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
 suite is unpublished; numbers are not directly comparable), and LiveCodeBench
 Pro is scored by the local sandbox, not the official judge.
+
+### Dataset acquisition notes
+
+- **LiveCodeBench** reads the repo's `test.jsonl`…`test6.jsonl` shards directly
+  at a pinned commit. `release_vN` is a *config name*, not a git ref, and the
+  loading-script path needs `trust_remote_code` (gone in `datasets` 4.x), so
+  going through the files is what keeps the slot working. `release_v6` must
+  yield exactly 1,055 problems; any other count fails closed as `unavailable`
+  rather than scoring a silent subset.
+- **LiveCodeBench Pro** pins Fugu's 2025 Q2 slice (`quater_2025_4_6`, 167
+  problems) and joins each `problem_id` to a `<problem_id>.zip` in the testcase
+  repo (`testdata/<n>.in` / `.ans`). Acquisition **fails closed**: the split must
+  yield exactly 167 problems, every archive must download, and each archive's
+  usable cases must match the `sum(subtasks[].n_cases)` it declares, with no
+  unpaired half in either direction. An archive that declares **no** count is not
+  "as complete as whatever arrived" — that declaration is the only denominator
+  evidence there is, so a missing or malformed `config.yaml` fails closed too. `download_file()` turns a timeout, a 401 and a 404 alike into
+  `None`, so excluding a problem would cache a smaller denominator permanently —
+  and a rate over a shrunken set is not even a lower bound on the full 167. The
+  testcase repo's pin is part of the cache identity (`AdapterInfo.extra_sources`)
+  so repinning it rebuilds rather than leaving stale bytes "ready" under a new
+  methodology. The archives also ship a per-problem testlib `checker.cpp` that
+  kairyu does **not** compile: grading is per-line whitespace-normalized
+  comparison, so multi-answer problems can only lose points and the cell is a
+  **lower bound**.
 
 ## Degradation model (why one command always completes)
 
@@ -164,7 +189,7 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   after run initialization are skipped rather than scored as valid input.
 - Download deps are an extra: `uv sync --extra bench` (or
   `pip install 'kairyu[bench]'`).
-- **Gated datasets** (GPQA Diamond, HLE): accept the license on the dataset
+- **Gated datasets** (GPQA Diamond, HLE, LiveCodeBench Pro): accept the license on the dataset
   page (e.g. <https://huggingface.co/datasets/Idavidrein/gpqa>) and set
   `HF_TOKEN`. Without it those cells report `skipped (gated)` and the run
   continues.

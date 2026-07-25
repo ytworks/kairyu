@@ -253,6 +253,8 @@ async def test_run_initializes_canonical_identity_and_stamps_pairs(
             "name": "gpqa-diamond",
             "dataset": "Idavidrein/gpqa",
             "revision": None,
+            # secondary sources are part of the identity even when empty
+            "sources": [],
             "unavailable": True,
         }
     ]
