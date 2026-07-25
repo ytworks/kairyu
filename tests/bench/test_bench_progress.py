@@ -13,6 +13,7 @@ from conftest import make_config
 from kairyu.bench.progress import (
     LineProgress,
     NullProgress,
+    SafeReporter,
     TqdmProgress,
     make_reporter,
 )
@@ -26,16 +27,22 @@ class _Tty(io.StringIO):
 
 
 class _FakeBar:
-    """Minimal tqdm stand-in recording what the reporter drives."""
+    """Minimal tqdm stand-in recording what the reporter drives.
+
+    `write` is a *classmethod* honouring `file=`, like real tqdm: tqdm.write
+    defaults to stdout regardless of the bar's own stream, so the reporter must
+    pass its stream explicitly and the fake must be able to catch that.
+    """
 
     instances: list["_FakeBar"] = []
+    written: list[tuple[str, object]] = []
 
     def __init__(self, total=None, desc="", unit="", position=0, leave=True, file=None):
         self.total = total
         self.desc = desc
+        self.file = file
         self.updates = 0
         self.closed = False
-        self.written: list[str] = []
         self.refreshed = 0
         _FakeBar.instances.append(self)
 
@@ -45,8 +52,11 @@ class _FakeBar:
     def refresh(self):
         self.refreshed += 1
 
-    def write(self, text):
-        self.written.append(text)
+    @classmethod
+    def write(cls, text, file=None):
+        cls.written.append((text, file))
+        if file is not None:
+            print(text, file=file)
 
     def close(self):
         self.closed = True
@@ -55,8 +65,14 @@ class _FakeBar:
 # -- reporter selection --------------------------------------------------------
 
 
+def _inner(reporter):
+    """Every built reporter is wrapped so a display failure cannot end a run."""
+    assert isinstance(reporter, SafeReporter)
+    return reporter._inner
+
+
 def test_make_reporter_uses_lines_for_non_tty_streams():
-    assert isinstance(make_reporter(stream=io.StringIO()), LineProgress)
+    assert isinstance(_inner(make_reporter(stream=io.StringIO())), LineProgress)
 
 
 def test_make_reporter_is_silent_when_disabled():
@@ -75,7 +91,7 @@ def test_make_reporter_falls_back_to_lines_without_tqdm(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", no_tqdm)
-    assert isinstance(make_reporter(stream=_Tty()), LineProgress)
+    assert isinstance(_inner(make_reporter(stream=_Tty())), LineProgress)
 
 
 # -- line reporter -------------------------------------------------------------
@@ -138,7 +154,9 @@ def test_line_reporter_marks_cached_pairs():
 
 def test_tqdm_reporter_drives_suite_and_pair_bars():
     _FakeBar.instances.clear()
-    reporter = TqdmProgress(_FakeBar, io.StringIO())
+    _FakeBar.written.clear()
+    stream = io.StringIO()
+    reporter = TqdmProgress(_FakeBar, stream)
     reporter.suite_start(2)
     reporter.pair_start("scicode", "m")
     reporter.items_total(4)
@@ -151,7 +169,33 @@ def test_tqdm_reporter_drives_suite_and_pair_bars():
     assert suite.total == 2 and suite.updates == 1 and suite.closed
     assert pair.desc == "scicode × m"
     assert pair.total == 4 and pair.updates == 2 and pair.closed
-    assert any("partial" in line for line in suite.written)
+    assert any("partial" in text for text, _ in _FakeBar.written)
+
+
+def test_tqdm_completion_lines_go_to_the_reporter_stream(capsys):
+    """tqdm.write defaults to stdout even for a stderr bar; that would leak."""
+    _FakeBar.instances.clear()
+    _FakeBar.written.clear()
+    stream = io.StringIO()
+    reporter = TqdmProgress(_FakeBar, stream)
+    reporter.suite_start(1)
+    reporter.pair_start("gpqa-diamond", "m")
+    reporter.pair_done("completed", 0.42)
+    reporter.close()
+
+    assert all(file is stream for _, file in _FakeBar.written)
+    assert "completed" in stream.getvalue()
+    assert "completed" not in capsys.readouterr().out
+
+
+def test_tqdm_heartbeat_refreshes_the_pair_bar():
+    _FakeBar.instances.clear()
+    reporter = TqdmProgress(_FakeBar, io.StringIO())
+    reporter.suite_start(1)
+    reporter.pair_start("terminal-bench", "m", note="agentic harness")
+    reporter.pair_heartbeat()
+    assert _FakeBar.instances[1].refreshed >= 1
+    reporter.close()
 
 
 def test_tqdm_reporter_closes_the_previous_pair_bar():
@@ -258,3 +302,132 @@ async def test_progress_is_excluded_from_the_run_fingerprint(tmp_path, http_fact
         (tmp_path / "results" / "test-run" / "run.json").read_text(encoding="utf-8")
     )["fingerprint"]
     assert first == second
+
+
+class _ExplodingReporter:
+    """Fails at every callback, the way a closed stderr or a tqdm bug would."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def _boom(self, name: str):
+        self.calls.append(name)
+        raise RuntimeError(f"reporter failed in {name}")
+
+    def suite_start(self, pairs):
+        self._boom("suite_start")
+
+    def pair_start(self, benchmark, target, note=""):
+        self._boom("pair_start")
+
+    def items_total(self, total):
+        self._boom("items_total")
+
+    def item_done(self):
+        self._boom("item_done")
+
+    def pair_heartbeat(self):
+        self._boom("pair_heartbeat")
+
+    def pair_done(self, status, score, cached=False):
+        self._boom("pair_done")
+
+    def close(self):
+        self._boom("close")
+
+
+async def test_a_failing_reporter_cannot_change_the_run(tmp_path, http_factory):
+    """Display is not evidence: every callback may fail without cost."""
+    reporter = _ExplodingReporter()
+    config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",))
+    runner = SuiteRunner(
+        config,
+        http_factory=http_factory,
+        probe_docker=lambda: (False, "t"),
+        progress=reporter,
+    )
+    assert await runner.run() == 0
+
+    pair = ResultStore(tmp_path / "results", "test-run").load_pair("gpqa-diamond", "m")
+    assert pair.status == "completed"
+    assert pair.metrics["n_total"] == 3  # fixture size: no item lost to the reporter
+    assert all(item.status == "completed" for item in pair.items)
+    # and it really was exercised at every callback
+    assert {"suite_start", "pair_start", "items_total", "item_done", "pair_done"} <= set(
+        reporter.calls
+    )
+
+
+async def test_reporter_is_closed_even_when_the_run_raises(tmp_path, http_factory):
+    """close() belongs in a finally, or cancellation leaks the bar."""
+    closed: list[str] = []
+
+    class Recording(NullProgress):
+        def close(self) -> None:
+            closed.append("closed")
+
+    config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",))
+    runner = SuiteRunner(
+        config,
+        http_factory=http_factory,
+        probe_docker=lambda: (_ for _ in ()).throw(RuntimeError("probe failed")),
+        progress=Recording(),
+    )
+    import pytest as _pytest
+
+    with _pytest.raises(RuntimeError, match="probe failed"):
+        await runner.run()
+    assert closed == ["closed"]
+
+
+async def test_agentic_pairs_emit_a_heartbeat_while_they_run(tmp_path, monkeypatch):
+    """An 8-hour harness must not look identical to a hang in a log."""
+    import asyncio
+
+    import httpx
+
+    import kairyu.bench.runner as runner_mod
+    from kairyu.bench.adapters.base import AdapterInfo, DownloadContext
+    from kairyu.bench.types import DownloadReport, PairResult
+
+    monkeypatch.setattr(runner_mod, "_HEARTBEAT_INTERVAL_S", 0.01)
+
+    class SlowHarness:
+        info = AdapterInfo(
+            name="terminal-bench",
+            display_name="Terminal-Bench 2.1",
+            metric="accuracy",
+            agentic=True,
+        )
+
+        def download(self, ctx: DownloadContext) -> DownloadReport:
+            return DownloadReport(adapter=self.info.name, status="ok")
+
+        async def run(self, target, ctx) -> PairResult:
+            await asyncio.sleep(0.1)  # stands in for the subprocess
+            now = "2026-07-25T00:00:00+00:00"
+            return PairResult(
+                benchmark=self.info.name,
+                target=target.label(),
+                status="completed",
+                metrics={"score": 1.0, "n_total": 1},
+                started_at=now,
+                finished_at=now,
+            )
+
+    monkeypatch.setattr(
+        runner_mod, "suite_adapters", lambda *a, **k: [SlowHarness()]
+    )
+    stream = io.StringIO()
+    config = make_config(tmp_path, models=("m",))
+    runner = SuiteRunner(
+        config,
+        http_factory=lambda: httpx.AsyncClient(),
+        probe_docker=lambda: (True, "docker available"),
+        progress=LineProgress(stream, interval_s=0.0),
+    )
+    assert await runner.run() == 0
+
+    heartbeats = [line for line in stream.getvalue().splitlines() if "items (" in line]
+    assert heartbeats, stream.getvalue()
+    assert "terminal-bench × m" in heartbeats[0]

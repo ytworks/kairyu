@@ -32,9 +32,65 @@ class ProgressReporter(Protocol):
 
     def item_done(self) -> None: ...
 
+    def pair_heartbeat(self) -> None: ...
+
     def pair_done(self, status: str, score: float | None, cached: bool = False) -> None: ...
 
     def close(self) -> None: ...
+
+
+_METHODS = (
+    "suite_start",
+    "pair_start",
+    "items_total",
+    "item_done",
+    "pair_heartbeat",
+    "pair_done",
+    "close",
+)
+
+
+class SafeReporter:
+    """A reporter that cannot affect the run it is watching.
+
+    Display is not evidence. A closed stderr, a broken pipe, or a tqdm bug must
+    not abort a run before any pair executes — and an exception from
+    `item_done()` in a `finally` block would otherwise replace a valid item
+    result and turn the whole cell into "adapter crashed".
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def _call(self, name: str, *args, **kwargs) -> None:
+        method = getattr(self._inner, name, None)
+        if method is None:
+            return
+        try:
+            method(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - the run outranks its own progress bar
+            pass
+
+    def suite_start(self, pairs: int) -> None:
+        self._call("suite_start", pairs)
+
+    def pair_start(self, benchmark: str, target: str, note: str = "") -> None:
+        self._call("pair_start", benchmark, target, note)
+
+    def items_total(self, total: int) -> None:
+        self._call("items_total", total)
+
+    def item_done(self) -> None:
+        self._call("item_done")
+
+    def pair_heartbeat(self) -> None:
+        self._call("pair_heartbeat")
+
+    def pair_done(self, status: str, score: float | None, cached: bool = False) -> None:
+        self._call("pair_done", status, score, cached)
+
+    def close(self) -> None:
+        self._call("close")
 
 
 def _score_text(score: float | None) -> str:
@@ -54,6 +110,9 @@ class NullProgress:
         return None
 
     def item_done(self) -> None:
+        return None
+
+    def pair_heartbeat(self) -> None:
         return None
 
     def pair_done(self, status: str, score: float | None, cached: bool = False) -> None:
@@ -108,6 +167,23 @@ class LineProgress:
         if now - self._last_emit < self._interval_s and self._done != self._total:
             return
         self._last_emit = now
+        self._write_progress(now)
+
+    def pair_heartbeat(self) -> None:
+        """Keep a log moving while an external harness runs.
+
+        The agentic slots never call `item_done()` and their subprocess output is
+        captured, so without this an 8-hour SWE or Terminal-Bench run prints one
+        line and then goes silent — exactly the "working vs hung" ambiguity the
+        reporter exists to remove.
+        """
+        now = time.monotonic()
+        if now - self._last_emit < self._interval_s:
+            return
+        self._last_emit = now
+        self._write_progress(now)
+
+    def _write_progress(self, now: float) -> None:
         total = "?" if self._total is None else str(self._total)
         elapsed = int(now - self._started)
         self._write(
@@ -137,10 +213,16 @@ class TqdmProgress:
         self._label = ""
 
     def _log(self, text: str) -> None:
-        if self._suite is not None:
-            self._suite.write(text)
-        else:
-            print(text, file=self._stream, flush=True)
+        """Write above the bars, on the reporter's own stream.
+
+        `tqdm.write` defaults to **stdout** even when the bar was created with
+        stderr, which would put the play-by-play back into a piped scoreboard.
+        """
+        writer = getattr(self._tqdm, "write", None)
+        if writer is not None:
+            writer(text, file=self._stream)
+            return
+        print(text, file=self._stream, flush=True)
 
     def suite_start(self, pairs: int) -> None:
         self._suite = self._tqdm(
@@ -169,6 +251,10 @@ class TqdmProgress:
         if self._pair is not None:
             self._pair.update(1)
 
+    def pair_heartbeat(self) -> None:
+        if self._pair is not None:
+            self._pair.refresh()
+
     def pair_done(self, status: str, score: float | None, cached: bool = False) -> None:
         self._close_pair()
         prefix = "cached" if cached else "done"
@@ -193,6 +279,9 @@ def make_reporter(
 ) -> ProgressReporter:
     """Pick a reporter: bars on a TTY, lines in a log, silence when disabled.
 
+    Always wrapped in `SafeReporter`: a display failure must not be able to end
+    a run that is producing evidence.
+
     tqdm is optional (`kairyu[bench]`); without it an interactive run simply
     gets the line reporter rather than an import error.
     """
@@ -203,6 +292,6 @@ def make_reporter(
         try:
             from tqdm.auto import tqdm
         except ImportError:
-            return LineProgress(target)
-        return TqdmProgress(tqdm, target)
-    return LineProgress(target)
+            return SafeReporter(LineProgress(target))
+        return SafeReporter(TqdmProgress(tqdm, target))
+    return SafeReporter(LineProgress(target))

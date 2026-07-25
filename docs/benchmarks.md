@@ -121,8 +121,13 @@ so the runner reports what it is doing:
 
 - `--no-progress` disables it. The reporter is a pure observer: `progress` is
   excluded from the run fingerprint, and scoreboard/pair evidence is identical
-  either way. Agentic slots have no item count until their harness returns, so
-  they are labelled `agentic harness` and show an indeterminate bar.
+  either way. Every callback is wrapped so a closed stream, a broken pipe or a
+  bar bug cannot end a run that is producing evidence, and the reporter is closed
+  in a `finally` so cancellation does not leak it.
+- Agentic slots have no item count until their harness returns, so they are
+  labelled `agentic harness` and emit a **heartbeat** every 15s. Without it an
+  8-hour SWE-Bench Pro or Terminal-Bench run would print one line and go silent —
+  the exact case where "working" and "hung" must stay distinguishable.
 
 The play-by-play goes to **stderr** and the artifacts (download notes, the
 scoreboard, the accuracy report) to **stdout**, so
