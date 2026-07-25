@@ -143,8 +143,21 @@ def load_tp_shard(model: nn.Module, config: ModelConfig, reader, tp: int, rank: 
     model.eval()
 
 
-def build_tp_model(model_dir: str, tp: int, rank: int, comm):
-    """Rank-sharded DenseDecoder: tp_view config + row-parallel/gathered wrappers."""
+def build_tp_model(
+    model_dir: str,
+    tp: int,
+    rank: int,
+    comm,
+    dtype: torch.dtype = torch.float32,
+    device: str = "cpu",
+    attention_backend=None,
+):
+    """Rank-sharded DenseDecoder: tp_view config + row-parallel/gathered wrappers.
+
+    ``dtype``/``device`` place the shard exactly like the single-process path
+    places the whole model (bf16 on-device for GPU, fp32 on host for CPU); the
+    defaults keep every CPU test byte-for-byte unchanged.
+    """
     import json
     from pathlib import Path
 
@@ -157,11 +170,14 @@ def build_tp_model(model_dir: str, tp: int, rank: int, comm):
         raise ValueError("quantized checkpoints with tensor parallelism arrive later (m16 A10)")
     full_config = parse_model_config(raw)
     local_config = tp_view(full_config, tp, rank)
-    model = DenseDecoder(local_config)
+    model = DenseDecoder(local_config, attention_backend=attention_backend)
     reader = CheckpointReader(model_dir)
-    load_tp_shard(model, full_config, reader, tp, rank)
+    # dtype is applied while loading, so a bf16 target never materializes the
+    # fp32 shard on the host first
+    load_tp_shard(model, full_config, reader, tp, rank, dtype=dtype)
     # add communication: o_proj/down_proj partial sums (lm_head replicated)
     for layer in model.model.layers:
         layer.self_attn.o_proj = RowParallelLinear(layer.self_attn.o_proj, comm)
         layer.mlp.down_proj = RowParallelLinear(layer.mlp.down_proj, comm)
-    return model, local_config, full_config
+    # after the wrappers, so RowParallelLinear's detached bias moves too
+    return model.to(device), local_config, full_config

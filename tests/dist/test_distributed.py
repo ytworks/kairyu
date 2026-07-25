@@ -128,8 +128,10 @@ def test_dist_tp_launcher_serve_path_matches_single_process(llama_dir):
     prompt = torch.randint(0, 256, (11,)).tolist()
     reference = _single_process_greedy(llama_dir, prompt, max_new=12)
 
+    # force_cpu: the reference is a single-process fp32 HOST run, so on a GPU
+    # box the launcher must not follow the probe onto bf16 devices
     launcher = DistTPLauncher(
-        llama_dir, tp=2, num_pages=64, page_size=4, vocab=TP_VOCAB
+        llama_dir, tp=2, num_pages=64, page_size=4, vocab=TP_VOCAB, force_cpu=True
     )
     try:
         scheduler = Scheduler(
