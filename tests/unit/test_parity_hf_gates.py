@@ -234,6 +234,41 @@ def test_a_cache_from_another_tokenizer_serialization_is_rejected(tmp_path):
         parity_hf._load_reference(path, _provenance())
 
 
+def _write_local_tokenizer(directory) -> None:
+    """A minimal tokenizer written to disk, not fetched.
+
+    `AutoTokenizer.from_pretrained("gpt2")` put a Hub download inside an unmarked
+    unit test: with an empty cache and HF_HUB_OFFLINE=1 it errored with
+    LocalEntryNotFoundError (review [P1] on #131). The provenance fingerprint only
+    needs a tokenizer that loads and tokenizes deterministically.
+    """
+    import json
+
+    vocab = {f"<{index}>": index for index in range(64)}
+    (directory / "tokenizer.json").write_text(
+        json.dumps(
+            {
+                "version": "1.0",
+                "truncation": None,
+                "padding": None,
+                "added_tokens": [],
+                "normalizer": None,
+                "pre_tokenizer": {"type": "Whitespace"},
+                "post_processor": None,
+                "decoder": None,
+                "model": {
+                    "type": "WordLevel",
+                    "vocab": vocab,
+                    "unk_token": "<0>",
+                },
+            }
+        )
+    )
+    (directory / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "PreTrainedTokenizerFast", "unk_token": "<0>"})
+    )
+
+
 @pytest.fixture(scope="module")
 def two_checkpoints(tmp_path_factory):
     """Same architecture and config, different weights, size and mtime preserved.
@@ -259,8 +294,7 @@ def two_checkpoints(tmp_path_factory):
     transformers.LlamaForCausalLM(config).to(torch.float32).eval().save_pretrained(
         first, safe_serialization=True
     )
-    tokenizer = transformers.AutoTokenizer.from_pretrained("gpt2")
-    tokenizer.save_pretrained(first)
+    _write_local_tokenizer(first)
     shutil.copytree(first, second)
 
     original = (second / "model.safetensors").stat()

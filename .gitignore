@@ -217,16 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Benchmark artifacts (kairyu bench): results are per-run evidence, data is
-# downloaded to the cache dir — neither belongs in the repo.
-# The CONTENTS are ignored, not the directory: git does not descend into an
-# excluded directory, so a negation under `bench/results/` would never match and
-# the next evidence file would silently vanish from `git status`.
-bench/results/*
-bench/data/
-# G2 §8 requires that any number a DECISION rests on be reviewable next to the
-# config that produced it.
-!bench/results/env-*.json
+# Benchmark artifacts (kairyu bench): routine per-run results are noise and data
+# is downloaded to the cache dir — neither belongs in the repo.
+#
 # The CONTENTS are ignored, not the directory: git does not descend into an
 # excluded directory, so a negation under `bench/results/` would never match and
 # the next evidence file would silently vanish from `git status`.
