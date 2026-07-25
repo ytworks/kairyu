@@ -148,6 +148,10 @@ class BenchConfig(BaseModel):
     only: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     seed: int = 0
+    # Trials per task for the agentic harnesses (Terminal-Bench `-k`, tau
+    # `--num-trials`). Fugu reports tau-3 Banking as pass@4; the default stays 1
+    # because each extra attempt is another full docker/agent run.
+    attempts: int = Field(default=1, ge=1)
     concurrency: int = Field(default=8, ge=1)  # in-flight requests per pair
     request_timeout_s: float = Field(default=600.0, gt=0)
     retries: int = Field(default=2, ge=0)

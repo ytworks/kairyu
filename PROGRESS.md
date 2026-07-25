@@ -166,6 +166,27 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Refs: `kairyu/bench/adapters/{scicode,base}.py`, `kairyu/bench/fixtures/scicode.jsonl`,
   `tests/bench/test_bench_scicode_sequential.py`, `docs/benchmarks.md`.
 
+### 2026-07-25 — [amendment] Agentic bench harnesses use real flags and Fugu's turn/trial limits
+- What: All three agentic wrappers built commands the installed harnesses reject, so those
+  cells could only report `failed`. `harbor run` has no `--output-dir` (that belongs to
+  `harbor jobs download`) and selects datasets as `name@version`, not
+  `terminal-bench/terminal-bench-2-1`; the τ harness has no `--output` (results are
+  addressed by `--save-to <name>` under its `TAU2_DATA_DIR`) and has no `banking` domain
+  (only `banking_knowledge`). Fixed all of those, then pinned Fugu's conditions:
+  `agent.step_limit=1000` for SWE-Bench Pro (harness default 250, restating
+  `swebench.yaml` because `-c` discards the default config), `--ak max_turns=500` for
+  terminus-2, and `--retrieval-config alltools` plus `--user-llm-args` carrying the
+  judge's reasoning effort for τ³. New `--attempts` (default 1) drives Harbor `-k` and τ
+  `--num-trials`, with annotations recording that Fugu reports τ³ as pass@4 and the
+  Terminal-Bench leaderboard wants ≥5.
+- Why: A `failed` cell was indistinguishable from a genuinely bad score, and the
+  published turn budgets are the difference between a truncated trace and the reported
+  condition.
+- Refs: `kairyu/bench/adapters/{swebench_pro,terminal_bench,tau_bench}.py`,
+  `kairyu/bench/{types,cli,config,runner}.py`, `kairyu/bench/adapters/base.py`,
+  `tests/bench/{test_bench_agentic_conditions,test_bench_tau,test_bench_agentic}.py`,
+  `docs/benchmarks.md`.
+
 ### 2026-07-25 — [amendment] Bench targets own a sampling policy (reasoning effort)
 - What: `BenchTarget` and `JudgeConfig` now share a `SamplingOptions` base carrying
   `reasoning_effort`, `top_p`, `seed`, and `extra_body_json`; `call_chat` merges those

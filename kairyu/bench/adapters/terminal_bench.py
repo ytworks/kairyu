@@ -27,28 +27,117 @@ from kairyu.bench.adapters.base import (
 from kairyu.bench.types import BenchTarget, DownloadReport, ItemResult, PairResult
 
 _HARNESS_TIMEOUT_S = 8 * 3600
-_DATASET = "terminal-bench/terminal-bench-2-1"
+# Harbor selects datasets as `name@version`; a slug like
+# "terminal-bench/terminal-bench-2-1" is not a form `-d` accepts.
+_DATASET = "terminal-bench@2.1"
+_AGENT = "terminus-2"
+# Fugu's condition. Harbor's terminus-2 default turn budget is lower, which
+# truncates long traces well before the published limit.
+_MAX_TURNS = 500
+
+
+# Harbor's JobResult holds `trial_results`, and each TrialResult carries its
+# verdict under `verifier_result.rewards` — a task-defined dict, not a fixed
+# field. These are the keys Terminal-Bench-style verifiers use, in preference
+# order; a dict with exactly one entry is unambiguous whatever it is called.
+_REWARD_KEYS = ("reward", "resolved", "accuracy", "score", "passed")
+
+
+def trial_reward(rewards: dict) -> float | None:
+    """One reward value from a Harbor reward dict, or None when ambiguous."""
+    for key in _REWARD_KEYS:
+        if key in rewards:
+            value = rewards[key]
+            return float(bool(value)) if isinstance(value, bool) else float(value)
+    if len(rewards) == 1:
+        value = next(iter(rewards.values()))
+        return float(bool(value)) if isinstance(value, bool) else float(value)
+    return None
+
+
+def harbor_mean(items: list[ItemResult]) -> float | None:
+    """Harbor's own `Mean`: every trial counts, a missing reward as zero.
+
+    `aggregate_reward_dicts()` maps `None` to zero before averaging, so a trial
+    that raised is a zero in the denominator, not an exclusion from it. Averaging
+    only the completed trials would report a crashed run as a better score.
+    """
+    if not items:
+        return None
+    return sum(item.score or 0.0 for item in items) / len(items)
+
+
+def _trial_name(entry: dict, index: int) -> str:
+    """Prefer `trial_name`: with `-k > 1` it distinguishes attempts of one task."""
+    if entry.get("trial_name"):
+        return str(entry["trial_name"])
+    task_id = entry.get("task_id")
+    if isinstance(task_id, dict):
+        for key in ("name", "task_name", "path", "id"):
+            if task_id.get(key):
+                return str(task_id[key])
+    return str(task_id or entry.get("id") or index)
 
 
 def parse_harbor_results(data) -> list[ItemResult]:
-    """Harbor results -> per-task items ({"results": [...]}, or a bare list).
+    """Harbor `result.json` -> per-trial items.
 
-    Entries carry either a boolean `resolved` or a float `reward`.
+    Accepts the real `JobResult` shape (`trial_results` with
+    `verifier_result.rewards`) plus the flatter `{"results": [...]}` / bare-list
+    shapes older adapters wrote, so a schema move degrades to a visible
+    `failed` item rather than a silently empty cell.
     """
-    entries = data.get("results", data) if isinstance(data, dict) else data
+    if isinstance(data, dict):
+        entries = data.get("trial_results")
+        if entries is None:
+            entries = data.get("results", [])
+    else:
+        entries = data
     items: list[ItemResult] = []
     for index, entry in enumerate(entries):
-        task_id = str(entry.get("task_id", entry.get("id", index)))
-        if "resolved" in entry:
-            score = 1.0 if entry["resolved"] else 0.0
-        elif entry.get("reward") is not None:
-            score = float(entry["reward"])
-        else:
+        name = _trial_name(entry, index)
+        if entry.get("exception_info"):
+            exception = entry["exception_info"] or {}
             items.append(
-                ItemResult(item_id=task_id, status="failed", error="no verdict in entry")
+                ItemResult(
+                    item_id=name,
+                    status="failed",
+                    error=f"trial raised {exception.get('exception_type', 'error')}",
+                )
             )
             continue
-        items.append(ItemResult(item_id=task_id, status="completed", score=score))
+        verifier = entry.get("verifier_result") or {}
+        rewards = verifier.get("rewards") if isinstance(verifier, dict) else None
+        if isinstance(rewards, dict) and rewards:
+            score = trial_reward(rewards)
+            if score is None:
+                items.append(
+                    ItemResult(
+                        item_id=name,
+                        status="failed",
+                        error=f"ambiguous reward keys: {sorted(rewards)}",
+                    )
+                )
+                continue
+            items.append(ItemResult(item_id=name, status="completed", score=score))
+            continue
+        # legacy/flat shapes
+        if "resolved" in entry:
+            items.append(
+                ItemResult(
+                    item_id=name,
+                    status="completed",
+                    score=1.0 if entry["resolved"] else 0.0,
+                )
+            )
+        elif entry.get("reward") is not None:
+            items.append(
+                ItemResult(item_id=name, status="completed", score=float(entry["reward"]))
+            )
+        else:
+            items.append(
+                ItemResult(item_id=name, status="failed", error="no verdict in trial")
+            )
     return items
 
 
@@ -59,7 +148,16 @@ class TerminalBenchAdapter:
         metric="accuracy",
         needs_docker=True,
         agentic=True,
-        annotations=("agent scaffold: terminus-2 via the Harbor harness",),
+        annotations=(
+            f"agent scaffold: {_AGENT} via the Harbor harness, "
+            f"max_turns={_MAX_TURNS} (Fugu's condition)",
+            "one attempt per task by default (--attempts); the official "
+            "leaderboard requires at least five",
+            "the target's sampling policy (reasoning effort, top_p, seed) is NOT "
+            "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
+            "documents no sampling passthrough",
+            "score is Harbor's Mean over EVERY trial, errored trials as zero",
+        ),
     )
 
     def download(self, ctx: DownloadContext) -> DownloadReport:
@@ -84,11 +182,17 @@ class TerminalBenchAdapter:
             "-d",
             _DATASET,
             "-a",
-            "terminus-2",
+            _AGENT,
             "-m",
             f"openai/{target.model}",
-            "--output-dir",
+            # `harbor run` writes into --jobs-dir; --output-dir belongs to
+            # `harbor jobs download` and is rejected here.
+            "--jobs-dir",
             str(output_dir),
+            "--ak",
+            f"max_turns={_MAX_TURNS}",
+            "-k",
+            str(ctx.attempts),
         ]
         if ctx.limit is not None:
             command += ["--n-tasks", str(ctx.limit)]
@@ -147,24 +251,37 @@ class TerminalBenchAdapter:
                 "metric": self.info.metric,
                 "dataset": _DATASET,
                 "harness": "harbor",
-                "agent": "terminus-2",
+                "agent": _AGENT,
+                "max_turns": _MAX_TURNS,
+                "attempts": ctx.attempts,
+                "denominator": (
+                    "every trial, errored ones as zero (Harbor's own Mean maps a "
+                    "missing reward to zero before averaging)"
+                ),
                 "command": " ".join(command),
             },
             annotations=self.info.annotations,
             started_at=started_at,
+            score_fn=harbor_mean,
         )
 
     @staticmethod
     def _find_results(output_dir: Path):
-        for path in sorted(output_dir.rglob("*.json")):
+        """Harbor writes a job-level `result.json` holding `trial_results`."""
+        candidates = sorted(
+            output_dir.rglob("*.json"),
+            # prefer the job-level file over any per-trial artifact
+            key=lambda path: (path.name != "result.json", len(path.parts), str(path)),
+        )
+        for path in candidates:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
-            if isinstance(data, dict) and "results" in data:
+            if isinstance(data, dict) and ("trial_results" in data or "results" in data):
                 return data
             if isinstance(data, list) and data and isinstance(data[0], dict):
-                if "resolved" in data[0] or "reward" in data[0]:
+                if {"resolved", "reward", "verifier_result"} & set(data[0]):
                     return data
         return None
 
