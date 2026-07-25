@@ -1,4 +1,14 @@
-"""Gate 1: teacher-forced next-token agreement vs HF transformers (runbook §1).
+"""Teacher-forced next-token agreement vs HF transformers.
+
+NOT runbook §1 Gate 1 / G2 A1, and deliberately not named as one. Those are
+defined as Llama-3.1-8B, 64 fixed prompts, full greedy CONTINUATIONS, with the
+overlap pipeline ON and OFF. This runs each prefix as an independent
+`max_new_tokens=1` request through `EngineCore` only, so it exercises neither a
+continuation nor the overlap future-token path. Running the formal gate
+additionally needs the device-side future-token patch (m2 §2.2), which is
+unimplemented — `PagedModelRunner` raises IndexError under `OverlapEngineCore`.
+
+What it IS: the diagnostic that free-running comparison cannot provide.
 
 Free-running greedy comparison cannot answer "are our kernels right?". Once one
 token differs the trajectories separate and every later token is compared against
@@ -46,6 +56,86 @@ _TOP_K = 20  # HF ranks recorded per position; below this a pick is not a tie
 #: therefore MEASURED — see `_reference_noise_floor` — and this is only the
 #: fallback.
 _MIN_TIE_GAP = 0.125
+#: Absolute logprob agreement required at positions where BOTH sides picked the
+#: same token. This is the half of A2's "logprob tolerance" that a tie
+#: classification cannot express: an engine can agree on every argmax while its
+#: distribution is wildly different, and review [P1] on #131 demonstrated exactly
+#: that — a mock returning logprob -100.0 against HF's -1.0 scored
+#: `max_abs_delta: 99.0` and still reported PASS. Derived from the reference's
+#: own bf16 resolution: gaps quantize at ~0.125, so twice that is the smallest
+#: bound that is not measuring quantization.
+_MAX_LOGPROB_DELTA = 0.25
+
+
+_REFERENCE_SCHEMA = 2
+
+
+def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
+    """What a cached reference must match before it may be scored against.
+
+    Reuse was fail-open: the cache was keyed on nothing, so a file from another
+    model, tokenizer or prompt set was accepted, and a SHORT continuation was
+    scored as-is while `config.positions` still reported what was asked for
+    (review [P1] on #131).
+    """
+    import hashlib
+
+    import transformers
+
+    config_path = Path(model_path) / "config.json"
+    checkpoint = hashlib.sha256(config_path.read_bytes()).hexdigest()[:16]
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
+    tokenizer_id = hashlib.sha256(
+        json.dumps(tokenizer.get_vocab(), sort_keys=True).encode()
+    ).hexdigest()[:16]
+    prompt_hash = hashlib.sha256("\u0000".join(prompts).encode()).hexdigest()[:16]
+    return {
+        "schema": _REFERENCE_SCHEMA,
+        "checkpoint_config_sha256": checkpoint,
+        "tokenizer_vocab_sha256": tokenizer_id,
+        "prompt_set_sha256": prompt_hash,
+        "num_prompts": len(prompts),
+        "positions": positions,
+        # pinned so a checkpoint's own generation_config cannot quietly turn the
+        # reference into sampling and pass its noise off as bf16 tie-breaking
+        "generation": {
+            "do_sample": False,
+            "temperature": None,
+            "top_p": None,
+            "top_k": None,
+        },
+    }
+
+
+def _load_reference(path: Path, expected: dict) -> dict:
+    """Accept a cache only if it is the same measurement, and complete."""
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict) or "provenance" not in payload:
+        raise SystemExit(
+            f"{path} predates the provenance envelope (schema {_REFERENCE_SCHEMA}); "
+            "delete it and let the run rebuild the reference"
+        )
+    found = payload["provenance"]
+    for key, want in expected.items():
+        if found.get(key) != want:
+            raise SystemExit(
+                f"{path} does not match this run: {key} is {found.get(key)!r}, "
+                f"expected {want!r}. A cache from another model, tokenizer or "
+                "prompt set cannot be scored against."
+            )
+    entries = payload["reference"]
+    if len(entries) != expected["num_prompts"]:
+        raise SystemExit(
+            f"{path} holds {len(entries)} prompts, expected {expected['num_prompts']}"
+        )
+    for name, entry in entries.items():
+        if len(entry["continuation"]) != expected["positions"]:
+            raise SystemExit(
+                f"{path}: {name} has {len(entry['continuation'])} continuation "
+                f"tokens, expected {expected['positions']} — a short cache would be "
+                "scored while config.positions still reported the requested count"
+            )
+    return entries
 
 
 def _build_reference(model_path: str, prompts: list[str], positions: int) -> dict:
@@ -135,6 +225,8 @@ def _reference_noise_floor(reference: dict) -> dict:
         "positions": positions,
         "self_inconsistent": inconsistent,
         "self_agreement_rate": round(1 - inconsistent / positions, 4) if positions else 1.0,
+        # unrounded: the comparison must not be decided by a display artefact
+        "raw_self_agreement_rate": (1 - inconsistent / positions) if positions else 1.0,
         "max_gap_at_self_disagreement": round(max(gaps), 5) if gaps else 0.0,
         "method": (
             "HF greedy generate() vs HF teacher-forced argmax over the same "
@@ -237,16 +329,22 @@ def main() -> int:
             f"--num-prompts {args.num_prompts} exceeds the {len(_TEXT_PROMPTS)} fixed prompts"
         )
 
+    provenance = _provenance(args.model_path, prompts, args.positions)
     if args.reference and args.reference.exists():
-        reference = json.loads(args.reference.read_text())
-        reference = {k: v for k, v in reference.items() if int(k[1:]) < args.num_prompts}
-        for entry in reference.values():
-            entry["continuation"] = entry["continuation"][: args.positions]
+        # no truncation, no key filtering: a cache either IS this measurement or
+        # it is rejected. Silently trimming it is how a 1-prompt file got scored
+        # while config.positions still claimed 16.
+        reference = _load_reference(args.reference, provenance)
     else:
         reference = _build_reference(args.model_path, prompts, args.positions)
         if args.reference:
             args.reference.parent.mkdir(parents=True, exist_ok=True)
-            args.reference.write_text(json.dumps(reference, indent=2) + "\n")
+            args.reference.write_text(
+                json.dumps(
+                    {"provenance": provenance, "reference": reference}, indent=2
+                )
+                + "\n"
+            )
 
     noise_floor = _reference_noise_floor(reference)
     # the tolerance is the reference's own instability, never tighter
@@ -310,9 +408,14 @@ def main() -> int:
             "rate": round(hits / len(expected), 4) if expected else 0.0,
         }
 
-    rate = round(agreed / total, 4) if total else 0.0
+    # RAW ratio for every comparison; rounding is display only. 296/299 rounds to
+    # 0.99 and would pass a >= 0.99 test while the real value is 0.98997
+    # (review [P1] on #131).
+    raw_rate = agreed / total if total else 0.0
+    rate = round(raw_rate, 4)
     substantive = [d for d in disagreements if not d["tie_break"]]
-    max_delta = round(max(logprob_deltas), 5) if logprob_deltas else 0.0
+    raw_max_delta = max(logprob_deltas) if logprob_deltas else 0.0
+    max_delta = round(raw_max_delta, 5)
     mean_delta = (
         round(sum(logprob_deltas) / len(logprob_deltas), 5) if logprob_deltas else 0.0
     )
@@ -320,9 +423,14 @@ def main() -> int:
 
     profile = probe()
     payload = {
-        "gate": "runbook §1 Gate 1 — teacher-forced next-token agreement vs HF transformers",
+        "measurement": (
+            "teacher-forced next-token agreement vs HF transformers (DIAGNOSTIC — "
+            "not runbook §1 Gate 1 / G2 A1, which require full greedy "
+            "continuations with overlap ON and OFF)"
+        ),
         "config": {
             "model_path": args.model_path,
+            "reference_provenance": provenance,
             "tensor_parallel_size": args.tp,
             "num_prompts": len(reference),
             "positions": args.positions,
@@ -345,10 +453,12 @@ def main() -> int:
             "positions": total,
             "agreed": agreed,
             "rate": rate,
-            "threshold": noise_floor["self_agreement_rate"],
+            "threshold": noise_floor["raw_self_agreement_rate"],
             "threshold_source": "the reference's own self-agreement (G2 A2, amended 2026-07-25)",
             "historical_fixed_threshold": _REPORTED_REFERENCE_RATE,
-            "verdict": "PASS" if rate >= noise_floor["self_agreement_rate"] else "FAIL",
+            "verdict": (
+                "PASS" if raw_rate >= noise_floor["raw_self_agreement_rate"] else "FAIL"
+            ),
         },
         # A2 asks for a match rate AND a logprob tolerance. The rate alone cannot
         # separate "reduction order shifted a tie" from "the shard is wrong", and
@@ -368,7 +478,15 @@ def main() -> int:
             "disagreements": len(disagreements),
             "tie_breaks": len(disagreements) - len(substantive),
             "substantive": len(substantive),
-            "verdict": "PASS" if not substantive else "FAIL",
+            "max_abs_delta_bound": _MAX_LOGPROB_DELTA,
+            "within_delta_bound": raw_max_delta <= _MAX_LOGPROB_DELTA,
+            # BOTH halves: agreeing on every argmax while the distribution is far
+            # off is not a logprob tolerance pass
+            "verdict": (
+                "PASS"
+                if not substantive and raw_max_delta <= _MAX_LOGPROB_DELTA
+                else "FAIL"
+            ),
         },
         "per_prompt": per_prompt,
         # kept in full: which positions disagree is the diagnostic, and a summary
@@ -398,7 +516,13 @@ def main() -> int:
     )
     # both halves must hold: a high rate with one badly-wrong pick is not a pass,
     # and neither half is a fixed number — each is measured against the reference
-    return 0 if rate >= noise_floor["self_agreement_rate"] and not substantive else 1
+    return (
+        0
+        if raw_rate >= noise_floor["raw_self_agreement_rate"]
+        and not substantive
+        and raw_max_delta <= _MAX_LOGPROB_DELTA
+        else 1
+    )
 
 
 if __name__ == "__main__":

@@ -239,8 +239,14 @@ floor next to every result — so the comparison travels with the number. A fixe
 percentage may return once a reference is available at a precision that supports
 it (an fp32 forward, which needs more memory than one card holds for a 32B).
 
-**Free-running greedy sequence equality is not a correctness gate** and A1 no
-longer implies one. The same engine measured 0.786 free-running and 0.988
+**Free-running greedy sequence equality is not a correctness gate.** A1 keeps its
+full-continuation, overlap-ON-and-OFF definition; what changes is that its
+verdict is the teacher-forced agreement above rather than sequence equality.
+`bench/parity_hf.py` measures that agreement today but does NOT yet satisfy A1:
+it runs single-token requests through `EngineCore` only, because the overlap
+path needs the device-side future-token patch (m2 §2.2), which is unimplemented
+— `PagedModelRunner` raises IndexError under `OverlapEngineCore`. A1 is
+therefore still open, with the remaining work named. The same engine measured 0.786 free-running and 0.988
 teacher-forced: once one token differs, every later token is compared against a
 prefix the other side never produced, so a single moved near-tie is
 indistinguishable from a broken shard. `bench/parity_tp.py` still reports

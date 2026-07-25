@@ -1,0 +1,172 @@
+{
+  "gate": "runbook \u00a71 Gate 1 \u2014 teacher-forced next-token agreement vs HF transformers",
+  "config": {
+    "model_path": "/var/lib/docker/volumes/kairyu-qwen3-32b_qwen3-32b/_data/qwen3-32b",
+    "tensor_parallel_size": 8,
+    "num_prompts": 16,
+    "positions": 16,
+    "dtype": "bfloat16",
+    "hardware": {
+      "arch": "cuda",
+      "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "device_count": 8
+    },
+    "method": "both sides receive the identical prefix at every position; only the next token is compared, so trajectory divergence cannot compound"
+  },
+  "reference_noise_floor": {
+    "positions": 256,
+    "self_inconsistent": 5,
+    "self_agreement_rate": 0.9805,
+    "max_gap_at_self_disagreement": 0.125,
+    "method": "HF greedy generate() vs HF teacher-forced argmax over the same sequence: two paths through one set of weights"
+  },
+  "agreement": {
+    "positions": 256,
+    "agreed": 251,
+    "rate": 0.9805,
+    "threshold": 0.9805,
+    "threshold_source": "the reference's own self-agreement (G2 A2, amended 2026-07-25)",
+    "historical_fixed_threshold": 0.99,
+    "verdict": "PASS"
+  },
+  "logprob_tolerance": {
+    "tie_gap_nats": 0.125,
+    "tie_gap_source": "floor (bf16 logprob resolution); reference was self-consistent",
+    "top_k": 20,
+    "agreeing_positions_max_abs_delta": 0.16517,
+    "agreeing_positions_mean_abs_delta": 0.01792,
+    "disagreements": 5,
+    "tie_breaks": 5,
+    "substantive": 0,
+    "verdict": "PASS"
+  },
+  "per_prompt": {
+    "p0": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p1": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p2": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p3": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p4": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p5": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p6": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p7": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p8": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p9": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p10": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p11": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p12": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p13": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p14": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p15": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    }
+  },
+  "disagreements": [
+    {
+      "prompt": "p0",
+      "position": 3,
+      "engine": 3007,
+      "hf": 9625,
+      "hf_logprob_gap": -0.125,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    },
+    {
+      "prompt": "p5",
+      "position": 5,
+      "engine": 4041,
+      "hf": 374,
+      "hf_logprob_gap": 0.0,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    },
+    {
+      "prompt": "p8",
+      "position": 9,
+      "engine": 25,
+      "hf": 220,
+      "hf_logprob_gap": 0.125,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    },
+    {
+      "prompt": "p13",
+      "position": 2,
+      "engine": 13,
+      "hf": 1124,
+      "hf_logprob_gap": 0.0,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    },
+    {
+      "prompt": "p14",
+      "position": 7,
+      "engine": 911,
+      "hf": 1246,
+      "hf_logprob_gap": 0.125,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    }
+  ]
+}

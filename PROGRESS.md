@@ -12,9 +12,13 @@ there required four fixes, none of which any CPU test could have caught, because
 on a CPU box the behaviour they broke is the correct behaviour (PRs #124–#130).
 The measured interconnect is now recorded (`bench/results/env-2026-07-25.json`):
 PCIe throughout, P2P 30–37 GB/s against ~1450 GB/s device-local.
-Gate A1/A2 has a real-ranks harness for the first time and does NOT pass; the
-tp=1 baseline diverges from HF transformers by the same margin, so free-running
-greedy cannot attribute it — a teacher-forced Gate 1 harness is the follow-up.
+Gate A1/A2 has a real-ranks harness for the first time. Teacher-forced agreement
+against HF is measured and within the reference's own noise floor at TP=1 and
+TP=8 (`bench/parity_hf.py`), but that is a DIAGNOSTIC, not A1: the formal gate
+needs full greedy continuations with the overlap pipeline ON, and the
+device-side future-token patch (m2 §2.2) is unimplemented, so
+`PagedModelRunner` raises IndexError under `OverlapEngineCore`. A1 stays open
+with that work named.
 Performance and production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-25_
@@ -118,7 +122,9 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 ### 2026-07-25 — [amendment] A1/A2 and m2 §2.5 restated against measured quantities
 - What: G2 A2's "greedy output-match rate >=99%" and m2 §2.5's "greedy-decode token-level
   parity with HF transformers" are replaced by two measured criteria, both computed by the
-  new `bench/parity_hf.py`: (a) zero substantive disagreements — every disagreement inside
+  new `bench/parity_hf.py` (a DIAGNOSTIC — the formal gate additionally needs full
+  continuations with overlap ON, blocked on the unimplemented m2 §2.2 future-token
+  patch): (a) zero substantive disagreements — every disagreement inside
   the reference's top-k and within a tie gap measured from the reference's own
   self-disagreements; (b) agreement at or above the reference's self-agreement rate. The
   gate is teacher-forced (identical prefix at every position, next token only); free-running
