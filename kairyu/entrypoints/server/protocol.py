@@ -192,6 +192,60 @@ class Usage(BaseModel):
     prompt_tokens_details: PromptTokensDetails | None = None
 
 
+class KairyuTraceTiming(BaseModel):
+    queued_at: str | None = None
+    started_at: str | None = None
+    first_token_at: str | None = None
+    completed_at: str | None = None
+
+
+class KairyuTraceUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+
+
+class KairyuTraceBudget(BaseModel):
+    max_steps: int
+    steps_before: int
+    steps_consumed: int
+    steps_remaining: int
+    max_cost_usd: float | None = None
+    cost_before_usd: float
+    cost_consumed_usd: float
+    cost_remaining_usd: float | None = None
+
+
+class KairyuTraceError(BaseModel):
+    type: str
+    retryable: bool = False
+
+
+class KairyuTraceEvent(BaseModel):
+    seq: int
+    node: str
+    role: str | None = None
+    kind: str
+    status: str
+    attempt: int = 0
+    worker: str | None = None
+    engine: str | None = None
+    model: str | None = None
+    timing: KairyuTraceTiming | None = None
+    usage: KairyuTraceUsage | None = None
+    budget: KairyuTraceBudget | None = None
+    detail: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    error: KairyuTraceError | None = None
+
+
+class KairyuTraceV2(BaseModel):
+    trace_version: str
+    request_id: str
+    started_at: str
+    completed_at: str
+    events: list[KairyuTraceEvent]
+
+
 class ChatCompletionResponse(BaseModel):
     id: str
     object: str = "chat.completion"
@@ -200,7 +254,13 @@ class ChatCompletionResponse(BaseModel):
     choices: list[Choice]
     usage: Usage = Usage()
     # m11 D1: explicit opt-in trace (X-Kairyu-Trace: 1); excluded when None
-    kairyu_trace: list[str] | None = Field(default=None, exclude=False)
+    kairyu_trace: list[str] | None = None
+    # Additive structured trace for evaluation tooling. Like the legacy field,
+    # it is populated only when X-Kairyu-Trace: 1 is requested.
+    kairyu_trace_v2: KairyuTraceV2 | None = None
+    # Actual route uses the same schema as route preview. It is populated only
+    # for traced orchestrated responses.
+    kairyu_route: RouteDecisionPayload | None = None
 
 
 class ChunkToolCall(BaseModel):

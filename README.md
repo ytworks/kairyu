@@ -517,8 +517,9 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   token counts.
 - Streaming works with any OpenAI SDK: direct routes stream live token deltas; multi-stage
   routes emit SSE comment keep-alives between stages, then the final answer.
-- Send `X-Kairyu-Trace: 1` to get a `kairyu_trace` block (route decision, per-role events,
-  budget state) in the response.
+- Send `X-Kairyu-Trace: 1` to get the legacy `kairyu_trace` string list plus
+  `kairyu_trace_v2` (versioned route / role timing / usage / budget events) in unary
+  responses. Structured events exclude prompts and generated text.
 - The legacy single `orchestrator:` key still works and is served as `kairyu-auto`.
 
 ### 6.4 Multi-replica fleets (gateway + replicas)
@@ -666,9 +667,9 @@ vision content-parts wire format), `/v1/completions`, `/v1/embeddings`
 drain flips readyz to 503), `GET /admin/usage?tenant=` (when the ledger is enabled).
 
 Request extras: `X-Session-ID` (or the OpenAI `user` field) pins a session to the
-replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds a `kairyu_trace`
-block to `kairyu-auto` responses; `stream_options: {include_usage: true}` appends
-the final usage chunk.
+replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds the legacy
+`kairyu_trace` and versioned `kairyu_trace_v2` blocks to unary `kairyu-auto`
+responses; `stream_options: {include_usage: true}` appends the final usage chunk.
 
 `POST /v1/route` accepts `{model, messages}` and renders the same model-specific chat
 template as actual chat before calling the Router's non-mutating `preview()`. It never
@@ -676,7 +677,9 @@ dispatches an engine and returns `binding:false`; concurrent traffic can still m
 stateful-router decision differ. `GET /routing` returns whitelisted Router settings,
 effective target fallback, safe engine metadata, role dependencies, and budget. It is not an
 auth-exempt path. Unary auto-model responses include structured `kairyu_route` only with
-`X-Kairyu-Trace: 1`; the normal OpenAI-compatible response shape is unchanged.
+`X-Kairyu-Trace: 1`; the same opt-in adds the privacy-safe structured execution
+trace described in `docs/design/observability-trace-contract.md`. The normal
+OpenAI-compatible response shape is unchanged.
 
 ### Multi-tenancy
 

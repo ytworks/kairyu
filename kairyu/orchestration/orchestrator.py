@@ -17,6 +17,15 @@ from kairyu.engine.backend import (
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, CostModel, RoleSpec, zero_cost
 from kairyu.orchestration.router import RouteDecision, Router, RuleRouter
+from kairyu.orchestration.trace import (
+    StructuredTrace,
+    TraceBudget,
+    TraceEvent,
+    TraceTiming,
+    TraceUsage,
+    WorkerTraceIdentity,
+    utc_now_iso,
+)
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
@@ -66,6 +75,7 @@ class OrchestratorResult:
     trace: tuple[str, ...]
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    structured_trace: StructuredTrace | None = None
 
 
 @dataclass(frozen=True)
@@ -193,22 +203,65 @@ class Orchestrator:
     async def shutdown(self) -> None:
         await shutdown_all(self._engines.values(), "Orchestrator")
 
-    def _resolve_engine(self, tier: str, notes: list[str]) -> EngineBackend:
-        engine = self._engines.get(tier)
-        if engine is not None:
-            return engine
+    def _resolve_engine_name(self, tier: str, notes: list[str]) -> str:
+        if tier in self._engines:
+            return tier
         fallback_name = next(iter(self._engines))
         notes.append(f"fallback: engine {tier!r} not configured, using {fallback_name!r}")
-        return self._engines[fallback_name]
+        return fallback_name
+
+    def _resolve_engine(self, tier: str, notes: list[str]) -> EngineBackend:
+        return self._engines[self._resolve_engine_name(tier, notes)]
 
     def _conductor_workers(self, notes: list[str]) -> dict[str, EngineBackend]:
         needed = {role.worker for role in self._roles}
         return {name: self._resolve_engine(name, notes) for name in needed}
 
+    def _conductor_worker_trace(self) -> dict[str, WorkerTraceIdentity]:
+        fallback_name = next(iter(self._engines))
+        needed = {role.worker for role in self._roles}
+        identities = {}
+        for worker in needed:
+            engine = worker if worker in self._engines else fallback_name
+            descriptor = self._engine_descriptors[engine]
+            identities[worker] = WorkerTraceIdentity(
+                engine=engine,
+                model=descriptor.model,
+            )
+        return identities
+
+    def _route_trace_event(
+        self,
+        decision: RouteDecision,
+        *,
+        started_at: str,
+        completed_at: str,
+    ) -> TraceEvent:
+        return TraceEvent(
+            node="router",
+            kind="route",
+            detail=f"{decision.target} ({decision.reason})",
+            operation="routing",
+            status="success",
+            role="router",
+            timing=TraceTiming(
+                started_at=started_at,
+                completed_at=completed_at,
+            ),
+            metadata={
+                "target": decision.target,
+                "confidence": decision.confidence,
+                "reason": decision.reason,
+            },
+        )
+
     async def _run_direct(
         self, query: str, tier: str, notes: list[str]
-    ) -> tuple[str, tuple[int, int]]:
-        engine = self._resolve_engine(tier, notes)
+    ) -> tuple[str, tuple[int, int], TraceEvent]:
+        queued_at = utc_now_iso()
+        engine_name = self._resolve_engine_name(tier, notes)
+        engine = self._engines[engine_name]
+        descriptor = self._engine_descriptors[engine_name]
         request = GenerationRequest(
             request_id=f"direct-{uuid.uuid4().hex[:12]}",
             prompt=f"{self._shared_prefix}{query}",
@@ -218,39 +271,119 @@ class Orchestrator:
             # hint the pool routes by shared-prefix overlap and load instead.
             cache_hint=None,
         )
+        started_at = utc_now_iso()
         result = await engine.generate(request)
         usage = (
             (result.usage.prompt_tokens, result.usage.completion_tokens)
             if result.usage is not None
             else (0, 0)
         )
-        return result.text, usage
+        trace_usage = (
+            TraceUsage(
+                prompt_tokens=result.usage.prompt_tokens,
+                completion_tokens=result.usage.completion_tokens,
+                cached_tokens=result.usage.cached_tokens,
+            )
+            if result.usage is not None
+            else None
+        )
+        return (
+            result.text,
+            usage,
+            TraceEvent(
+                node=tier,
+                kind="generated",
+                operation="generation",
+                status="success",
+                role="direct",
+                worker=tier,
+                engine=engine_name,
+                model=descriptor.model,
+                timing=TraceTiming(
+                    queued_at=queued_at,
+                    started_at=started_at,
+                    completed_at=utc_now_iso(),
+                ),
+                usage=trace_usage,
+            ),
+        )
 
     async def run(self, query: str) -> OrchestratorResult:
+        request_id = f"orch-{uuid.uuid4().hex[:16]}"
+        trace_started_at = utc_now_iso()
+        route_started_at = utc_now_iso()
         decision = self._router.route(query)
+        route_completed_at = utc_now_iso()
         notes: list[str] = [f"route: {decision.target} ({decision.reason})"]
+        trace_events = [
+            self._route_trace_event(
+                decision,
+                started_at=route_started_at,
+                completed_at=route_completed_at,
+            )
+        ]
+
+        def result_with_trace(
+            *,
+            text: str,
+            prompt_tokens: int = 0,
+            completion_tokens: int = 0,
+        ) -> OrchestratorResult:
+            return OrchestratorResult(
+                text=text,
+                route=decision,
+                trace=tuple(notes),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                structured_trace=StructuredTrace(
+                    request_id=request_id,
+                    started_at=trace_started_at,
+                    completed_at=utc_now_iso(),
+                    events=tuple(trace_events),
+                ),
+            )
+
         if decision.target == "multi_agent":
             if self._moa_samples > 0:  # m11 A4: the deep tier's MoA route
                 from kairyu.orchestration.moa import run_moa
 
+                moa_queued_at = utc_now_iso()
+                budget_before = BudgetState(budget=self._budget)
                 moa_steps = self._moa_samples + 1
-                reservation = BudgetState(budget=self._budget).try_reserve(
+                reservation = budget_before.try_reserve(
                     steps=moa_steps,
                     unknown_cost=True,
                 )
                 if reservation is None:
                     notes.append("moa: skipped:budget")
-                    return OrchestratorResult(
-                        text="",
-                        route=decision,
-                        trace=tuple(notes),
+                    trace_events.append(
+                        TraceEvent(
+                            node="moa",
+                            kind="skipped:budget",
+                            operation="synthesis",
+                            status="skipped",
+                            role="moa",
+                            budget=TraceBudget.between(
+                                budget_before,
+                                budget_before,
+                            ),
+                            metadata={"reason": "budget"},
+                        )
                     )
+                    return result_with_trace(text="")
+                proposal_engine_name = self._resolve_engine_name("tier1", notes)
+                synthesizer_engine_name = self._resolve_engine_name("tier2", notes)
+                proposal_descriptor = self._engine_descriptors[proposal_engine_name]
+                synthesizer_descriptor = self._engine_descriptors[
+                    synthesizer_engine_name
+                ]
+                moa_started_at = utc_now_iso()
                 try:
                     moa = await run_moa(
-                        self._resolve_engine("tier1", notes),
+                        self._engines[proposal_engine_name],
                         query,
                         n_samples=self._moa_samples,
-                        synthesizer=self._resolve_engine("tier2", notes),
+                        synthesizer=self._engines[synthesizer_engine_name],
                         shared_prefix=self._shared_prefix,
                     )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
@@ -288,10 +421,59 @@ class Orchestrator:
                 )
                 if budget_state.is_exhausted:
                     notes.append("moa: budget exceeded")
-                return OrchestratorResult(
+                resolved_engines = tuple(
+                    dict.fromkeys(
+                        (proposal_engine_name, synthesizer_engine_name)
+                    )
+                )
+                resolved_models = tuple(
+                    dict.fromkeys(
+                        model
+                        for model in (
+                            proposal_descriptor.model,
+                            synthesizer_descriptor.model,
+                        )
+                        if model is not None
+                    )
+                )
+                trace_events.append(
+                    TraceEvent(
+                        node="moa",
+                        kind="synthesized",
+                        operation="synthesis",
+                        status="success",
+                        role="moa",
+                        worker="tier1,tier2",
+                        engine=",".join(resolved_engines),
+                        model=",".join(resolved_models) or None,
+                        timing=TraceTiming(
+                            queued_at=moa_queued_at,
+                            started_at=moa_started_at,
+                            completed_at=utc_now_iso(),
+                        ),
+                        usage=TraceUsage(
+                            prompt_tokens=moa.usage[0],
+                            completion_tokens=moa.usage[1],
+                        ),
+                        budget=TraceBudget.between(
+                            budget_before,
+                            budget_state,
+                            steps_consumed=moa_steps,
+                            cost_consumed_usd=moa_cost,
+                        ),
+                        metadata={
+                            "proposals": len(moa.proposals),
+                            "cost_usd": moa_cost,
+                            "budget_exhausted": budget_state.is_exhausted,
+                            "proposal_engine": proposal_engine_name,
+                            "proposal_model": proposal_descriptor.model,
+                            "synthesizer_engine": synthesizer_engine_name,
+                            "synthesizer_model": synthesizer_descriptor.model,
+                        },
+                    )
+                )
+                return result_with_trace(
                     text=moa.final_text,
-                    route=decision,
-                    trace=tuple(notes),
                     prompt_tokens=moa.usage[0],
                     completion_tokens=moa.usage[1],
                 )
@@ -301,21 +483,24 @@ class Orchestrator:
                 shared_prefix=self._shared_prefix,
                 sampling_params=self._sampling_params,
                 cost_model=self._cost_model,
+                worker_trace=self._conductor_worker_trace(),
             )
             result = await conductor.run(query, budget=self._budget)
             notes.extend(f"{event.node}: {event.kind} {event.detail}" for event in result.trace)
-            return OrchestratorResult(
+            trace_events.extend(result.trace)
+            return result_with_trace(
                 text=result.final_text,
-                route=decision,
-                trace=tuple(notes),
                 prompt_tokens=result.usage[0],
                 completion_tokens=result.usage[1],
             )
-        text, usage = await self._run_direct(query, decision.target, notes)
-        return OrchestratorResult(
+        text, usage, direct_event = await self._run_direct(
+            query,
+            decision.target,
+            notes,
+        )
+        trace_events.append(direct_event)
+        return result_with_trace(
             text=text,
-            route=decision,
-            trace=tuple(notes),
             prompt_tokens=usage[0],
             completion_tokens=usage[1],
         )
