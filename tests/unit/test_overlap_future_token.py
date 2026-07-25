@@ -28,7 +28,9 @@ def llama_dir(tmp_path_factory):
     return str(path)
 
 
-def _generate(model_dir: str, core_cls, prompt, max_new: int, **scheduler_kwargs):
+def _generate(
+    model_dir: str, core_cls, prompt, max_new: int, sampling=None, **scheduler_kwargs
+):
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
     from kairyu.engine.core.radix_kv import RadixKVCache
@@ -48,7 +50,7 @@ def _generate(model_dir: str, core_cls, prompt, max_new: int, **scheduler_kwargs
         core.add_request(
             EngineRequest(
                 f"r{index}", tuple(tokens), max_new_tokens=max_new,
-                sampling=EngineSampling(),
+                sampling=sampling or EngineSampling(),
             )
         )
     return core.run_to_completion(), runner
@@ -133,7 +135,8 @@ def test_the_in_flight_buffer_does_not_grow_with_the_request(llama_dir):
 
     _outputs, runner = _generate(llama_dir, EngineCore, [list(range(9))], 16)
     assert list(runner._future_tokens) == ["r0"]
-    assert len(runner._future_tokens["r0"]) == 1
+    # bounded by the pipeline's reach, not by the request length
+    assert len(runner._future_tokens["r0"]) <= runner._MAX_IN_FLIGHT
 
 
 def test_release_drops_the_buffer(llama_dir):
@@ -142,3 +145,149 @@ def test_release_drops_the_buffer(llama_dir):
     _outputs, runner = _generate(llama_dir, EngineCore, [list(range(9))], 4)
     runner.release("r0")
     assert runner._future_tokens == {}
+
+
+@pytest.mark.parametrize(
+    "penalty",
+    [
+        {"presence_penalty": 2.0},
+        {"frequency_penalty": 1.5},
+        {"repetition_penalty": 1.8},
+    ],
+    ids=["presence", "frequency", "repetition"],
+)
+def test_overlap_matches_eager_under_penalties(llama_dir, penalty):
+    """The half the first version missed.
+
+    `_decode_inputs` was corrected but `_sample` still handed the sampler the
+    stale `state.outputs`, so under overlap the penalties were computed over a
+    history missing the in-flight token — a different token set penalised, and a
+    different argmax. Pure-greedy tests cannot see it, because greedy ignores the
+    history entirely.
+    """
+    from kairyu.engine.core.engine_core import EngineCore
+    from kairyu.engine.core.overlap import OverlapEngineCore
+    from kairyu.engine.core.sampling_types import EngineSampling
+
+    sampling = EngineSampling(**penalty)
+    prompt = [list(range(11)), list(range(4, 17))]
+    eager, _ = _generate(llama_dir, EngineCore, prompt, 10, sampling=sampling)
+    overlapped, _ = _generate(llama_dir, OverlapEngineCore, prompt, 10, sampling=sampling)
+
+    assert overlapped == eager
+    assert all(len(tokens) == 10 for tokens in eager.values())
+
+
+def test_effective_outputs_fills_the_gap_the_snapshot_left(llama_dir):
+    """Directly: a snapshot two tokens behind must still see both."""
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampling_types import SampledToken
+    from kairyu.models.loader import load_model
+
+    model, config, _ = load_model(llama_dir)
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    runner = PagedModelRunner(model, PagedKVPool.for_cache(cache, config))
+
+    class _State:
+        class request:  # noqa: N801
+            request_id = "a"
+            prompt_token_ids = (1, 2, 3)
+
+        outputs = (11,)
+
+    runner._remember("a", 1, SampledToken(22))
+    runner._remember("a", 2, SampledToken(33))
+    # sampling position 3 must see the committed 11 plus both in-flight tokens
+    assert runner._effective_outputs(_State(), 3) == (11, 22, 33)
+    # and a committed-only history is returned untouched
+    assert runner._effective_outputs(_State(), 1) == (11,)
+
+
+def test_a_gap_in_the_history_is_an_error(llama_dir):
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.models.loader import load_model
+
+    model, config, _ = load_model(llama_dir)
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    runner = PagedModelRunner(model, PagedKVPool.for_cache(cache, config))
+
+    class _State:
+        class request:  # noqa: N801
+            request_id = "a"
+            prompt_token_ids = (1,)
+
+        outputs = ()
+
+    with pytest.raises(RuntimeError, match="no token for a at position 0"):
+        runner._effective_outputs(_State(), 2)
+
+
+def test_the_sampler_history_actually_changes_the_pick(llama_dir):
+    """The reviewer's repro, pinned directly.
+
+    The end-to-end penalty tests above pass even against the stale history —
+    with a real model the penalised token rarely happens to be the argmax, so
+    they cannot demonstrate the defect. This does: presence_penalty 2.0 over
+    logits [0.0, 1.0, 0.9] picks token 1 with an empty history and token 2 once
+    the in-flight token 1 is included.
+    """
+    import torch
+
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.sampling_types import EngineSampling
+
+    logits = torch.tensor([0.0, 1.0, 0.9])
+    sampling = EngineSampling(presence_penalty=2.0)
+
+    sampler = Sampler()
+    stale = sampler.sample("a", sampling, 1, logits, prompt=(5,), outputs=())
+    sampler.release("a")
+    with_in_flight = sampler.sample("a", sampling, 1, logits, prompt=(5,), outputs=(1,))
+
+    assert stale.token_id == 1
+    assert with_in_flight.token_id == 2, "the histories must diverge for this to test anything"
+
+
+def test_the_runner_hands_the_sampler_the_in_flight_history(llama_dir):
+    """And that the runner supplies the second of those two histories."""
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampling_types import SampledToken
+    from kairyu.models.loader import load_model
+
+    model, config, _ = load_model(llama_dir)
+    cache = RadixKVCache(num_pages=64, page_size=4)
+
+    seen = {}
+
+    class _Recording:
+        def sample(self, request_id, sampling, position, logits, **kwargs):
+            seen["outputs"] = kwargs["outputs"]
+            return SampledToken(0)
+
+        def release(self, request_id):
+            return None
+
+    runner = PagedModelRunner(
+        model, PagedKVPool.for_cache(cache, config), sampler=_Recording()
+    )
+
+    class _State:
+        class request:  # noqa: N801
+            request_id = "a"
+            prompt_token_ids = (5,)
+            sampling = None
+            eos_token_id = None
+
+        outputs = ()
+
+    runner._remember("a", 0, SampledToken(1))  # step N sampled 1, not yet committed
+    runner._sample(_State(), torch.tensor([0.0, 1.0, 0.9]), position=1)
+
+    # the stale snapshot would have handed over (); the pick differs on that
+    assert seen["outputs"] == (1,)

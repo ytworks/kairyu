@@ -47,11 +47,16 @@ class PagedModelRunner:
         # Input tensors (token ids, positions) must be built on the model's device
         # so the GPU forward never mixes CPU inputs with on-device weights/KV.
         self._device = next(model.parameters()).device
-        # m2 §2.2 future tokens: under OverlapEngineCore the snapshot for step
-        # N+1 is taken BEFORE step N's token is committed, so `state.outputs` is
-        # one short and reading `outputs[position - 1]` raised IndexError. The
-        # runner already produced that token; it just never kept it. Keyed by
-        # (request_id, position) and dropped when the request finishes.
+        # In-flight tokens: under OverlapEngineCore the snapshot for step N+1 is
+        # taken BEFORE step N's token is committed, so `state.outputs` is short
+        # and reading `outputs[position - 1]` raised IndexError. The runner
+        # already produced those tokens; it just never kept them.
+        #
+        # This is the HOST-SIDE half of m2 §2.2. That section specifies patching
+        # the placeholder slot device-to-device from the sampled tensor, with no
+        # host sync in the hot path; this keeps Python ints and rebuilds the
+        # input tensor each step. It makes overlap CORRECT on a real runner —
+        # which it was not — but the zero-host-sync property is still open.
         self._future_tokens: dict[str, dict[int, int]] = {}
 
     def release(self, request_id: str) -> None:
@@ -69,9 +74,37 @@ class PagedModelRunner:
             position,
             logits,
             prompt=state.request.prompt_token_ids,
-            outputs=tuple(state.outputs),
+            # the SAME completion the decode input came from: presence,
+            # frequency and repetition penalties are computed over this history,
+            # so an overlap snapshot missing the in-flight token would penalise a
+            # different set of tokens than the eager path and pick differently
+            outputs=self._effective_outputs(state, position),
             eos_token_id=state.request.eos_token_id,
         )
+
+    def _effective_outputs(self, state: object, position: int) -> tuple[int, ...]:
+        """Committed outputs, extended with any in-flight token before ``position``.
+
+        Under overlap the snapshot for step N+1 is taken before step N commits,
+        so `state.outputs` is short by exactly the tokens this runner has already
+        sampled. Sampling reads that history for the penalties, so it needs the
+        same view the decode input does.
+        """
+        outputs = tuple(state.outputs)
+        if position <= len(outputs):
+            return outputs
+        pending = self._future_tokens.get(state.request.request_id, {})
+        extended = list(outputs)
+        for index in range(len(outputs), position):
+            if index not in pending:
+                # a gap means the history is genuinely unknown; penalties over a
+                # silently-short history are worse than a loud failure
+                raise RuntimeError(
+                    f"no token for {state.request.request_id} at position {index} "
+                    f"while sampling position {position}"
+                )
+            extended.append(pending[index])
+        return tuple(extended)
 
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
@@ -108,16 +141,24 @@ class PagedModelRunner:
             self._remember(chunk.request_id, 0, token)
             sampled[chunk.request_id] = (token,)
 
-    def _remember(self, request_id: str, position: int, token: SampledToken) -> None:
-        """Keep this step's token so the NEXT step can read it before commit.
+    #: How far behind the committed outputs a snapshot may lag. OverlapEngineCore
+    #: runs a bounded pipeline (depth 2), so at most this many tokens are ever in
+    #: flight; keeping more would be an unbounded per-request history —
+    #: `EngineLoop` calls `release()` on finish, but a bare `EngineCore` does not.
+    _MAX_IN_FLIGHT = 8
 
-        Only the newest position is retained. A decode reads exactly
-        ``position - 1``, so keeping the whole history would be an unbounded
-        per-request dict — `EngineLoop` calls `release()` on finish but a bare
-        `EngineCore` does not, and the buffer grew for the length of every
-        request.
+    def _remember(self, request_id: str, position: int, token: SampledToken) -> None:
+        """Keep this step's token so later steps can read it before it commits.
+
+        A decode input needs `position - 1`; the sampler's penalties need every
+        uncommitted token before `position`. Both are served from here, trimmed
+        to the pipeline's reach.
         """
-        self._future_tokens[request_id] = {position: token.token_id}
+        pending = self._future_tokens.setdefault(request_id, {})
+        pending[position] = token.token_id
+        if len(pending) > self._MAX_IN_FLIGHT:
+            for stale in sorted(pending)[: -self._MAX_IN_FLIGHT]:
+                del pending[stale]
 
     def _previous_token(self, state, position: int) -> int:
         """The token at ``position - 1``, committed or still in flight.
