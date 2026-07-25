@@ -26,6 +26,7 @@ import hashlib
 import json
 import random
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from kairyu.engine.core.comm import FakeCommunicator
@@ -202,19 +203,30 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _safetensors_header(path: Path) -> str:
-    """Digest a shard's safetensors header.
+def _weight_digests(shards: list[Path]) -> list[dict]:
+    """Full SHA-256 of every weight file.
 
-    The header is the JSON map of every tensor's name, dtype, shape and byte
-    range, so two checkpoints that agree on it hold the same tensors laid out
-    the same way. Hashing it costs a few hundred KB per shard instead of the
-    tens of GB a full content hash would read, which is what makes recording
-    provenance on every run affordable.
+    An earlier version hashed only each shard's safetensors HEADER — the JSON
+    map of tensor names, dtypes, shapes and byte offsets — plus the file size.
+    That identifies the LAYOUT, not the weights: a base checkpoint and a
+    fine-tune of it share both, so they produced the same digest while every
+    weight value differed. Rewriting one payload byte without changing the file
+    size left the digest untouched.
+
+    Reading the bytes costs about a minute over a 32B checkpoint, against a run
+    that loads the same bytes onto the GPU anyway. hashlib releases the GIL, so
+    the shards hash in parallel.
+
+    A safetensors shard's SHA-256 is also the oid Hugging Face publishes for
+    that LFS blob, so these digests identify the checkpoint against an upstream
+    immutable revision rather than against a path on one machine.
     """
-    with path.open("rb") as handle:
-        length = int.from_bytes(handle.read(8), "little")
-        header = handle.read(length)
-    return hashlib.sha256(header).hexdigest()
+    with ThreadPoolExecutor(max_workers=min(8, len(shards))) as pool:
+        digests = list(pool.map(_sha256, shards))
+    return [
+        {"file": shard.name, "bytes": shard.stat().st_size, "sha256": digest}
+        for shard, digest in zip(shards, digests, strict=True)
+    ]
 
 
 def _checkpoint_provenance(model_path: str) -> dict:
@@ -234,14 +246,7 @@ def _checkpoint_provenance(model_path: str) -> dict:
     if not shards:
         raise SystemExit(f"no *.safetensors under {model_path}; cannot record provenance")
 
-    weights = [
-        {
-            "file": shard.name,
-            "bytes": shard.stat().st_size,
-            "header_sha256": _safetensors_header(shard),
-        }
-        for shard in shards
-    ]
+    weights = _weight_digests(shards)
     # one digest over every shard identity, so evidence can be compared at a glance
     rollup = hashlib.sha256(
         json.dumps(weights, sort_keys=True).encode()
