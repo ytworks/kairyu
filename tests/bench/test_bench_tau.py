@@ -81,17 +81,26 @@ async def test_skipped_when_judge_on_other_gateway(tmp_path, monkeypatch):
     assert "same base_url" in pair.reason
 
 
+def _write_harness_results(tmp_path, command) -> None:
+    """Mimic the harness: results land under <data dir>/simulations/<save_to>/.
+
+    Callers point TAU2_DATA_DIR at `tmp_path / "tau-data"` first.
+    """
+    save_to = command[command.index("--save-to") + 1]
+    results = tmp_path / "tau-data" / "simulations" / save_to / "results.json"
+    results.parent.mkdir(parents=True, exist_ok=True)
+    results.write_text(json.dumps(SAMPLE_RESULTS), encoding="utf-8")
+
+
 async def test_harness_invocation_and_translation(tmp_path, monkeypatch):
     monkeypatch.setattr(tau_bench, "detect_harness", lambda: "tau3")
+    monkeypatch.setenv("TAU2_DATA_DIR", str(tmp_path / "tau-data"))
     seen = {}
 
     def fake_run(command, capture_output, timeout, env, check):
         seen["command"] = command
         seen["env"] = env
-        output = command[command.index("--output") + 1]
-        import pathlib
-
-        pathlib.Path(output).write_text(json.dumps(SAMPLE_RESULTS), encoding="utf-8")
+        _write_harness_results(tmp_path, command)
 
         class Completed:
             returncode = 0
@@ -115,12 +124,10 @@ async def test_harness_invocation_and_translation(tmp_path, monkeypatch):
 
 async def test_tau2_fallback_adds_substitute_annotation(tmp_path, monkeypatch):
     monkeypatch.setattr(tau_bench, "detect_harness", lambda: "tau2")
+    monkeypatch.setenv("TAU2_DATA_DIR", str(tmp_path / "tau-data"))
 
     def fake_run(command, capture_output, timeout, env, check):
-        output = command[command.index("--output") + 1]
-        import pathlib
-
-        pathlib.Path(output).write_text(json.dumps(SAMPLE_RESULTS), encoding="utf-8")
+        _write_harness_results(tmp_path, command)
 
         class Completed:
             returncode = 0

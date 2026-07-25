@@ -120,10 +120,10 @@ async def test_terminal_bench_flow(tmp_path, monkeypatch):
     def fake_run(command, capture_output, timeout, env, check):
         seen["command"] = list(command)
         seen["env"] = env
-        output_dir = command[command.index("--output-dir") + 1]
+        jobs_dir = command[command.index("--jobs-dir") + 1]
         import pathlib
 
-        path = pathlib.Path(output_dir) / "results.json"
+        path = pathlib.Path(jobs_dir) / "results.json"
         path.write_text(json.dumps(HARBOR_RESULTS), encoding="utf-8")
 
         class Completed:
@@ -137,7 +137,7 @@ async def test_terminal_bench_flow(tmp_path, monkeypatch):
     pair = await TerminalBenchAdapter().run(make_target(model="m"), _ctx(tmp_path))
     assert pair.status == "partial"  # tb-004 has no verdict
     assert pair.metrics["n_total"] == 4
-    assert seen["command"][:4] == ["harbor", "run", "-d", "terminal-bench/terminal-bench-2-1"]
+    assert seen["command"][:4] == ["harbor", "run", "-d", "terminal-bench@2.1"]
     assert seen["env"]["OPENAI_BASE_URL"] == "http://gw/v1"
 
 

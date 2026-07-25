@@ -76,6 +76,8 @@ class RunContext:
     judge: JudgeClient | None = None
     limit: int | None = None
     seed: int = 0
+    attempts: int = 1  # agentic trials per task (Terminal-Bench -k, tau --num-trials)
+    run_id: str = ""  # provenance for artifacts the external harnesses name themselves
     concurrency: int = 8
     retries: int = 2
     request_timeout_s: float = 600.0

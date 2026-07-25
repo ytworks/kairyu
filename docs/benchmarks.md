@@ -82,15 +82,15 @@ vs `kairyu-auto-max` in one run.
 
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
-| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent scaffold + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
-| Terminal-Bench 2.1 | Harbor registry | `harbor run` (terminus-2), accuracy | docker, `[bench-agentic]` |
+| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
+| Terminal-Bench 2.1 | `terminal-bench@2.1` (Harbor) | `harbor run` (terminus-2, 500 turns), Harbor Mean | docker, `[bench-agentic]` |
 | LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
 | LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro` split `quater_2025_4_6` + `-Testcase` ZIPs | sandboxed pass@1 (lower bound: no testlib checker) | HF token |
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
 | SciCode | `SciCode1/SciCode` | sandboxed sub-step tests (+`test_data.h5` golden data) | numpy in venv |
-| τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
+| τ³-Bench Banking | tau3/tau2 `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
 | MRCRv2 | `openai/mrcr` | official prepend + SequenceMatcher ratio | long-context target |
 
@@ -293,6 +293,43 @@ SWE-Bench Pro and Terminal-Bench evaluate inside per-task docker containers.
 two rows report `skipped: docker unavailable` and everything else completes.
 The τ-bench harness needs the user simulator (judge) served by the **same
 gateway** as the target (single `OPENAI_BASE_URL`).
+
+Fugu's published turn and trial conditions are pinned in the invocations:
+
+| Slot | Condition | How it is passed |
+|---|---|---|
+| SWE-Bench Pro | 1,000 agent steps (harness default is 250) | `-c swebench.yaml -c agent.step_limit=1000` — the harness drops its default config as soon as `-c` is given, so the default file is restated |
+| Terminal-Bench 2.1 | terminus-2, 500 turns | `-a terminus-2 --ak max_turns=500`, dataset `-d terminal-bench@2.1`, results in `--jobs-dir` |
+| τ³ Banking | `banking_knowledge`, all retrieval tools, low-effort user simulator | `--domain banking_knowledge --retrieval-config alltools --user-llm-args '{"reasoning_effort":"low"}'` (from the judge's sampling policy), results addressed by `--save-to <name>` under the harness data dir |
+
+Harness output and sampling, verified against the pinned harnesses:
+
+- **Harbor** writes a job-level `result.json` holding `trial_results`, each trial
+  carrying its verdict under `verifier_result.rewards` — a *task-defined* dict.
+  The adapter prefers the conventional keys (`reward`, `resolved`, `accuracy`,
+  `score`, `passed`), accepts a single-key dict whatever it is called, and
+  records an ambiguous dict as a **failed** item listing the keys rather than
+  guessing. `trial_name` is the item id so `-k > 1` keeps attempts distinct. The
+  score is Harbor's own `Mean` — **every** trial counts, an errored one as zero,
+  because `aggregate_reward_dicts()` maps a missing reward to zero before
+  averaging; excluding errors would report a crashed run as a better score.
+- **τ** resolves its data directory itself (`TAU2_DATA_DIR`, else a path *beside*
+  `site-packages`), so the adapter imports the harness's own `DATA_DIR` instead
+  of reconstructing that layout. `--save-to` is unique per invocation and carries
+  the kairyu run id: the harness prompts before resuming an existing results
+  file, so a fixed name would make a second run interactive or resume
+  simulations from another configuration.
+- **Sampling**: τ takes `--agent-llm-args` / `--user-llm-args`, and mini-swe-agent
+  takes `model.model_kwargs.*`, so the named fields reach both. Vendor
+  `extra_body` has no equivalent in either, and Harbor exposes no documented
+  sampling passthrough for terminus-2 — both are annotated on the cell rather
+  than silently dropped.
+
+`--attempts N` sets trials per task (`-k` for Harbor, `--num-trials` for τ).
+It defaults to **1** because each attempt is another full container run; Fugu
+reports τ³ Banking as **pass@4** and the Terminal-Bench leaderboard requires at
+least five, and both facts are annotated on the cell so a single-attempt number
+is never mistaken for either.
 
 ## Scale and cost
 
