@@ -5,16 +5,19 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 
 ## Current Status
 
-**GPU bring-up in progress (2026-07-23): the CPU-safe full suite is green
-(1409 passed, 12 skipped, 92% cov), the single-GPU kernel suite is green
-(10 passed), and the explicit 2-GPU NCCL EP gate is green on the 8× RTX PRO
-6000 Blackwell host. The three gate-integrity problems found during the first
-hardware run (Issues #102–#104) are fixed and GPU-verified in PR #105. Real-model parity,
-performance, and production/fabric drills remain. The all-visible-GPU Qwen3-32B
-Compose and benchmark/report workflow are implemented but still need validation
-on the GPU host.**
+**Real-model multi-GPU bring-up (2026-07-25): `kairyu serve --tp N` ran on real
+hardware for the first time and served Qwen3-32B across 8× RTX PRO 6000
+Blackwell — 12,041 MiB per GPU, NCCL collectives, 32 tokens in 5.5 s. Getting
+there required four fixes, none of which any CPU test could have caught, because
+on a CPU box the behaviour they broke is the correct behaviour (PRs #124–#130).
+The measured interconnect is now recorded (`bench/results/env-2026-07-25.json`):
+PCIe throughout, P2P 30–37 GB/s against ~1450 GB/s device-local.
+Gate A1/A2 has a real-ranks harness for the first time and does NOT pass; the
+tp=1 baseline diverges from HF transformers by the same margin, so free-running
+greedy cannot attribute it — a teacher-forced Gate 1 harness is the follow-up.
+Performance and production/fabric drills remain untouched.**
 
-_Last updated: 2026-07-23_
+_Last updated: 2026-07-25_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
