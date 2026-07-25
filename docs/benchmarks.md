@@ -109,14 +109,17 @@ Fugu reports the **8-needle** subset at up to **128K**, which is the five bins a
 or below 131,072 — exactly **500 rows**. The adapter counts tokens with the
 official encoder (so `tiktoken` is required; without it the cell is skipped
 rather than approximated), assigns each row to its official bin, keeps the
-selected bins, prints the per-bin counts, and **fails closed** unless it lands on
-500. An approximation such as chars/4 over the prompt alone cannot reproduce
+selected bins, prints the per-bin counts, and **fails closed** unless there are
+exactly 100 rows in *each* of them — 500 in total weighted 99/101/100/100/100
+would be a different population reported as the official slice. An approximation such as chars/4 over the prompt alone cannot reproduce
 those boundaries, and averaging the whole 2,400-row split would score an easier,
 shorter population against Fugu's number.
 
-The target's own `max_context_tokens` gate is separate: it uses the prompt-only
-estimate, matching the official runner's `n_tokens(messages) > MAX_CONTEXT_WINDOW`
-check.
+The target's own `max_context_tokens` gate is separate: it uses the exact
+prompt-only token count, matching the official runner's
+`n_tokens(messages) > MAX_CONTEXT_WINDOW` check. (The chars/4 heuristic survives
+only as a fallback for rows normalized before that field existed; near a target's
+limit the two disagree and would skip a fitting row or send an oversized one.)
 
 ## Degradation model (why one command always completes)
 

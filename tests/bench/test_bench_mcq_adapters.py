@@ -232,8 +232,63 @@ def test_mrcr_normalize_selects_the_official_bins(tmp_path, monkeypatch, capsys)
 def test_mrcr_normalize_fails_closed_when_the_bins_do_not_match(tmp_path, monkeypatch):
     """A moved population must not be averaged as if it were Fugu's slice."""
     _patch_mrcr(monkeypatch, _official_slice()[:-1])
-    with pytest.raises(DatasetUnavailable, match="expected 500"):
+    with pytest.raises(DatasetUnavailable, match="100 rows in each"):
         MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+
+
+def test_mrcr_requires_100_rows_in_every_selected_bin(tmp_path, monkeypatch):
+    """500 rows weighted 99/101/100/100/100 is a different population."""
+    from kairyu.bench.adapters.mrcr import selected_bins
+
+    bins = selected_bins()
+    rows = []
+    for bound in bins:
+        count = {bins[0]: 99, bins[1]: 101}.get(bound, 100)
+        for _ in range(count):
+            rows.append(_mrcr_row(8, tokens=bound - 100, answer_tokens=100))
+    assert len(rows) == 500  # the total alone would have passed
+    _patch_mrcr(monkeypatch, rows)
+    with pytest.raises(DatasetUnavailable, match="100 rows in each") as error:
+        MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
+    assert "8192: 99" in str(error.value)
+
+
+def test_mrcr_context_gate_uses_the_exact_prompt_count(tmp_path):
+    """The official runner gates on exact o200k message tokens, not chars/4."""
+    adapter = MrcrAdapter()
+    ctx = _ctx(tmp_path)
+    # chars/4 would estimate ~1 token; the exact count recorded is 400
+    item = BenchItem(
+        id="x",
+        payload={
+            "messages": [{"role": "user", "content": "hi"}],
+            "answer": "PREFIXok",
+            "prepend": "PREFIX",
+            "prompt_tokens": 400,
+            "est_prompt_tokens": 1,
+        },
+    )
+    gated = adapter.build_request(item, make_target(max_context_tokens=100), ctx)
+    assert isinstance(gated, SkipItem)
+    assert "400" in gated.reason
+
+    fits = adapter.build_request(item, make_target(max_context_tokens=500), ctx)
+    assert isinstance(fits, ChatRequestSpec)
+    assert fits.est_prompt_tokens == 400
+
+
+def test_mrcr_context_gate_falls_back_for_legacy_rows(tmp_path):
+    adapter = MrcrAdapter()
+    item = BenchItem(
+        id="x",
+        payload={
+            "messages": [{"role": "user", "content": "words " * 4000}],
+            "answer": "PREFIXok",
+            "prepend": "PREFIX",
+        },
+    )
+    gated = adapter.build_request(item, make_target(max_context_tokens=100), _ctx(tmp_path))
+    assert isinstance(gated, SkipItem)
 
 
 def test_mrcr_normalize_requires_the_official_tokenizer(tmp_path, monkeypatch):
