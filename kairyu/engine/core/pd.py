@@ -31,11 +31,14 @@ capacity, never correctness.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
 from kairyu.engine.core.engine_core import ModelRunner, token_ids
 from kairyu.engine.core.radix_kv import KVAllocation, KVCacheFull, RadixKVCache
+from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -193,7 +196,7 @@ class _Handover:
     """
 
     commit: dict[str, int] = field(default_factory=dict)
-    adopt: list[tuple[EngineRequest, KVAllocation, int]] = field(default_factory=list)
+    adopt: list[tuple[EngineRequest, KVAllocation, SampledToken]] = field(default_factory=list)
     retries: list[tuple[str, EngineRequest, int]] = field(default_factory=list)
 
     def __bool__(self) -> bool:
@@ -224,6 +227,11 @@ class PDCoordinator:
         self._pending: dict[str, tuple[EngineRequest, int]] = {}
         self._outputs: dict[str, tuple[int, ...]] = {}
         self._failed: list[str] = []
+        # public request id -> the prefill clone id currently standing for it.
+        # A long-lived driver (the serving loop) needs this both ways: to find
+        # the request while it is still prefill-side, and to reclaim the clone's
+        # scheduler/runner state when the request is forgotten.
+        self._internal: dict[str, str] = {}
         # A deferring handoff (m18 D3) returns while the copy is still reading the
         # prefill-side pages, so this coordinator owns the lease on them until the
         # copy's completion event says otherwise. Refuse one that cannot be gated
@@ -240,6 +248,41 @@ class PDCoordinator:
         # the one prefill step's worth of transfers whose copies are still in
         # flight; None with a blocking handoff, which settles inside its own step
         self._handover: _Handover | None = None
+        # token 0s adopted since the driver last drained them: committed by
+        # resume_with_kv, so no runner ever reports them
+        self._carried: dict[str, SampledToken] = {}
+
+    @property
+    def decode_scheduler(self) -> Scheduler:
+        """The scheduler whose state the serving loop observes.
+
+        Requests enter at prefill and finish under decode, so decode's is the one
+        that answers "is this request done" for `EngineLoop`.
+        """
+        return self._decode
+
+    @property
+    def prefill_scheduler(self) -> Scheduler:
+        """The scheduler submissions actually enter."""
+        return self._prefill
+
+    @property
+    def decode_runner(self) -> ModelRunner:
+        """The runner that executes what ``decode_scheduler`` plans."""
+        return self._decode_runner
+
+    @property
+    def decode_cache(self) -> RadixKVCache:
+        """The cache the served request's KV ends up in."""
+        return self._decode.kv_cache
+
+    @property
+    def internal_ids(self) -> Mapping[str, str]:
+        """Live read view of public request id -> current prefill clone id."""
+        return MappingProxyType(self._internal)
+
+    def internal_id_for(self, request_id: str) -> str | None:
+        return self._internal.get(request_id)
 
     @property
     def failed_requests(self) -> tuple[str, ...]:
@@ -251,11 +294,84 @@ class PDCoordinator:
 
     def _enqueue(self, request: EngineRequest, attempt: int) -> None:
         internal_id = f"{request.request_id}{_PREFILL_ID_SEPARATOR}{attempt}"
-        clone = replace(request, request_id=internal_id, max_new_tokens=1)
+        # request_id is the prefill scheduler's bookkeeping name; sampling_id
+        # keeps the PUBLIC id as the sampling identity, so token 0 comes off the
+        # same RNG stream (and the same grammar state) as token 1 onward
+        clone = replace(
+            request,
+            request_id=internal_id,
+            max_new_tokens=1,
+            sampling_id=request.request_id,
+        )
         self._pending[internal_id] = (request, attempt)
+        self._internal[request.request_id] = internal_id
         self._prefill.add_request(clone)
 
-    def _handoff_or_retry(self, internal_id: str, token0: int, handover: _Handover) -> None:
+    def _release_sampling_state(self, public_id: str) -> None:
+        """Drop the prefill half's sampler state for a request (E2).
+
+        Separate from the clone id: the clone SAMPLES under the public id (so
+        token 0 shares token 1's seed and grammar state), so releasing the
+        scheduler-side clone id alone would leak the seed and the enforcer.
+        """
+        release = getattr(self._prefill_runner, "release", None)
+        if release is not None:
+            release(public_id)
+
+    def _discard_clone(self, internal_id: str, public_id: str | None = None) -> None:
+        """Reclaim a prefill clone's scheduler and runner state (E2)."""
+        self._pending.pop(internal_id, None)
+        self._prefill.forget(internal_id)
+        release = getattr(self._prefill_runner, "release", None)
+        if release is not None:
+            release(internal_id)
+        if public_id is not None:
+            self._release_sampling_state(public_id)
+
+    def _settle_if_held(self, request_id: str) -> None:
+        """Land an outstanding handover before touching a request it carries.
+
+        A deferred settlement spans a step boundary, which is exactly where the
+        serving loop drains abort/forget ops. Cancelling a request whose copy is
+        still in flight would otherwise leave the settlement to adopt it into
+        decode afterwards — resurrecting an aborted request, and leaking the
+        destination allocation the transfer already made. Settling first costs
+        this one request its overlap and keeps every path single-meaning.
+        """
+        if self._handover is None:
+            return
+        internal_id = self._internal.get(request_id)
+        held = any(original.request_id == request_id for original, _, _ in self._handover.adopt)
+        held = held or any(held_id == internal_id for held_id, _, _ in self._handover.retries)
+        if held:
+            self._settle_handover()
+
+    def abort(self, request_id: str) -> None:
+        """Cancel a request wherever it currently is (client disconnect).
+
+        The public id is only ever in ONE half: prefill under its clone id until
+        the handoff commits, decode after it.
+        """
+        self._settle_if_held(request_id)
+        internal_id = self._internal.get(request_id)
+        if internal_id is not None:
+            self._pending.pop(internal_id, None)
+            self._prefill.abort(internal_id)
+        self._decode.abort(request_id)
+
+    def forget(self, request_id: str) -> None:
+        """Drop every trace of a finished request across both halves (E2)."""
+        self._settle_if_held(request_id)
+        internal_id = self._internal.pop(request_id, None)
+        if internal_id is not None:
+            self._discard_clone(internal_id, request_id)
+        self._decode.forget(request_id)
+        self._outputs.pop(request_id, None)
+        self._carried.pop(request_id, None)
+
+    def _handoff_or_retry(
+        self, internal_id: str, token0: SampledToken, handover: _Handover
+    ) -> None:
         """Start one prompt's KV transfer; record what may happen once it lands.
 
         Nothing is acted on here. Success owes the decode core an adoption and
@@ -273,12 +389,14 @@ class PDCoordinator:
             source_pages = tuple(state.allocation.pages)
         try:
             allocation = self._handoff.transfer(
-                original.prompt_token_ids, token0, source_pages
+                # explicit SampledToken -> int unwrap (m8 D2): KVHandoff.transfer
+                # keeps its int-typed first_token contract
+                original.prompt_token_ids, token0.token_id, source_pages
             )
         except KVHandoffError:
             handover.retries.append((internal_id, original, attempt))
             return
-        handover.commit[internal_id] = token0
+        handover.commit[internal_id] = token0.token_id
         handover.adopt.append((original, allocation, token0))
 
     def _settle_handover(self) -> None:
@@ -310,18 +428,74 @@ class PDCoordinator:
             # un-marked and the request recomputes from scratch (design m6 D4)
             self._prefill.abort(internal_id)
             if attempt < self._max_retries:
+                # the superseded clone's state is dead weight once its successor
+                # is queued; the surviving one stays visible so a driver can see
+                # a request that exhausted its retries finish as "abort".
+                # The sampling state goes with it: the retry re-samples token 0
+                # at position 0 from a state built under the same public id, so
+                # a fresh one is identical to the one being dropped.
+                self._discard_clone(internal_id, original.request_id)
                 self._enqueue(original, attempt + 1)
             else:
+                # the clone itself stays visible so a driver can see the request
+                # finish as "abort"; only its sampling state is dead
+                self._release_sampling_state(original.request_id)
                 self._failed.append(original.request_id)
         if handover.commit:
             self._prefill.update(handover.commit)
         for original, allocation, token0 in handover.adopt:
-            if self._decode.resume_with_kv(original, allocation, token0):
+            self._carry_sampler_state(original.request_id)
+            # token 0's FULL metadata, not just its id: it is the first token of
+            # the completion, so its logprob/top_logprobs belong in the stream
+            # and its grammar_terminated flag can finish the request outright
+            self._carried[original.request_id] = token0
+            finished = self._decode.resume_with_kv(original, allocation, token0.token_id)
+            if not finished and token0.grammar_terminated:
+                # the grammar completed AT token 0 (m8 D1). The decode half never
+                # sampled that token, so nothing there would ever notice — and it
+                # has to be noticed BEFORE decode plans, or the request generates
+                # one token past a finished grammar.
+                self._decode.finish_early(original.request_id)
+                finished = True
+            if finished:
                 self._outputs[original.request_id] = self._decode.output_tokens(
                     original.request_id
                 )
 
-    def _step_prefill(self) -> None:
+    def _carry_sampler_state(self, request_id: str) -> None:
+        """Move the request's sampling state from the prefill half to decode.
+
+        Both halves key it under the PUBLIC id now, so the base seed already
+        agrees — but the grammar enforcer does not travel with a seed. Left
+        behind, the decode half builds a matcher that has never accepted token 0
+        and masks token 1 against the wrong grammar position (m8 D2 under m5 D5).
+        """
+        source = getattr(self._prefill_runner, "sampler", None)
+        destination = getattr(self._decode_runner, "sampler", None)
+        if source is None or destination is None or source is destination:
+            return
+        source.hand_over(request_id, destination)
+
+    def drain_carried_tokens(self) -> dict[str, SampledToken]:
+        """Token 0s committed by the ADOPTION rather than by a runner this step.
+
+        ``resume_with_kv`` appends token 0 to the decode request's outputs
+        directly, so it never appears in any ``execute()`` return — a driver
+        reading only runner output loses its logprobs entirely, and with
+        ``max_tokens=1`` there is no decode step at all to lose them in.
+        """
+        carried, self._carried = self._carried, {}
+        return carried
+
+    def step_prefill(self, *, reject_on_stall: bool = False) -> None:
+        """One prefill step: schedule, execute, hand the KV off, then commit.
+
+        ``reject_on_stall`` is the engine-loop backstop (``EngineLoop.step``
+        does the same for its own scheduler): an empty plan while requests are
+        unfinished means nothing is running to free pages, so the waiting head
+        is finished rather than the whole engine — and every concurrent request
+        with it — dying on a stall.
+        """
         plan = self._prefill.schedule()
         if not plan.scheduled and self._handover is not None:
             # nothing to queue alongside the outstanding copies — and their still
@@ -330,9 +504,11 @@ class PDCoordinator:
             self._settle_handover()
             plan = self._prefill.schedule()
         if not plan.scheduled:
-            if self._prefill.has_unfinished():
-                raise RuntimeError("P-D prefill stall: nothing schedulable")
-            return
+            if not self._prefill.has_unfinished():
+                return
+            if reject_on_stall and self._prefill.reject_waiting_head() is not None:
+                return
+            raise RuntimeError("P-D prefill stall: nothing schedulable")
         sampled = self._prefill_runner.execute(plan.scheduled, self._prefill.states)
         # The gate for the PREVIOUS step's copies lands here, with this step's
         # forward already queued in front of it — that forward, and the decode
@@ -340,9 +516,7 @@ class PDCoordinator:
         self._settle_handover()
         handover = _Handover()
         for internal_id, tokens in sampled.items():
-            # explicit SampledToken -> int unwrap (m8 D2): KVHandoff.transfer and
-            # resume_with_kv keep their int-typed first_token contracts
-            self._handoff_or_retry(internal_id, tokens[0].token_id, handover)
+            self._handoff_or_retry(internal_id, tokens[0], handover)
         self._handover = handover or None
         if self._gate_pending is None:
             # a blocking handoff already finished its copy inside transfer();
@@ -360,16 +534,16 @@ class PDCoordinator:
         for request_id in finished:
             self._outputs[request_id] = self._decode.output_tokens(request_id)
 
-    def _prefill_pending(self) -> bool:
+    def has_prefill_work(self) -> bool:
         """Prefill-side work, INCLUDING a handover whose copies are still in
         flight — its clones stay unfinished until the settlement commits them,
-        but saying so explicitly keeps the loop from ever dropping one."""
+        but saying so explicitly keeps a driver from ever dropping one."""
         return self._prefill.has_unfinished() or self._handover is not None
 
     def run_to_completion(self) -> dict[str, tuple[int, ...]]:
-        while self._prefill_pending() or self._decode.has_unfinished():
-            if self._prefill_pending():
-                self._step_prefill()
+        while self.has_prefill_work() or self._decode.has_unfinished():
+            if self.has_prefill_work():
+                self.step_prefill()
             if self._decode.has_unfinished():
                 self._step_decode()
         return dict(self._outputs)

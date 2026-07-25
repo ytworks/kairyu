@@ -19,7 +19,9 @@ That is only offered where the consumer honours it — `build_pd_coordinator`
 returns a `PDCoordinator`, which holds the whole settlement (release, commit and
 decode-side adoption) behind that event until its next prefill forward has been
 queued, keeping the source pages leased for the copy's whole lifetime.
-`build_kv_handoff` defaults to the blocking form for any other caller.
+`build_kv_handoff` defaults to the blocking form for any other caller. The
+serving path inherits that gate rather than opting out of it: `PDLoopAdapter`
+drives `PDCoordinator.step_prefill`, whose `_settle_handover` is where it lives.
 """
 
 from __future__ import annotations

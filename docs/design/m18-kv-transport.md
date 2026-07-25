@@ -131,7 +131,7 @@ a recording fake.
 > timeline stayed exactly as serial as the blocking form. Measured on device:
 > copy `[11.651, 12.342] ms`, next prefill forward `[12.898, 13.369] ms`.
 >
-> The settlement is therefore PIPELINED one producer step. `_step_prefill` plans,
+> The settlement is therefore PIPELINED one producer step. `step_prefill` plans,
 > runs its forward, and only THEN settles the previous step's transfers, so the
 > gate lands with that forward — and the decode step queued before it — already
 > in front of it. `_Handover` is what carries a step's `commit` / `adopt` /
@@ -144,15 +144,70 @@ a recording fake.
 > win, and the leased pages may be exactly what the next prompt needs.
 >
 > This applies to the deferring path ONLY. A blocking handoff has already finished
-> its copy inside `transfer()`, so `_step_prefill` settles it in its own step and
+> its copy inside `transfer()`, so `step_prefill` settles it in its own step and
 > the request starts decoding immediately, as before.
 >
 > Production wiring: `build_pd_coordinator(defer_handoff=True)` — the default,
 > and the only caller that turns it on, because it is the only one that settles
 > it. `build_kv_handoff(..., defer=...)` defaults off for everyone else.
 >
-> Still open: serving-layer exposure (a `pd_separation` deployment option) is G2
-> stage 5.3 work on top of `pd_factory.build_pd_coordinator()`.
+> **Serving exposure landed 2026-07-26.** `backend: kairyu` accepts
+> `pd_separation: true`, so a deployment YAML can serve through a prefill/decode
+> pair. m2 §2.4 reserved that config surface and never wired it. Combinations
+> the coordinator does not implement — TP > 1, speculative decoding — are
+> rejected rather than silently serving a different topology.
+>
+> Three things that wiring needs, stated because the first cut of it had none:
+>
+> - `engine/core/pd_loop.py::PDLoopAdapter`. `EngineLoop` owns ONE scheduler and
+>   ONE runner, and `_drain_ops` adds submissions straight to the scheduler it
+>   was given. Handing it the coordinator's decode scheduler admits requests
+>   into DECODE with no prompt KV and never calls `PDCoordinator.add_request`,
+>   and the coordinator has no `execute` for the loop to call. The adapter is
+>   both surfaces: submissions enter at prefill, `schedule()` runs one prefill
+>   step (prefill → transfer → commit) before planning decode, `execute()` runs
+>   the decode runner, and abort/forget/release reach both halves.
+> - A handoff that moves BYTES. The two halves own two POOLS, so the
+>   accounting-only `LocalKVHandoff` leaves the destination zero-initialised and
+>   decode attends over empty KV. `pd.LocalCopyKVHandoff` (amended in above) is
+>   the ONE copying handoff in this stack, and the serving path inherits it from
+>   `build_pd_coordinator` rather than introducing its own. Greedy equivalence
+>   against the single-engine path is the test that holds this down — now through
+>   the serving loop as well as through the coordinator directly.
+> - Copy ordering. The serving path inherits `build_pd_coordinator`'s
+>   `defer_handoff=True`, which is safe for exactly the reason recorded above:
+>   `PDCoordinator` holds the prefill-side lease and settles it only behind the
+>   copy's completion event. `PDLoopAdapter.schedule()` drives
+>   `PDCoordinator.step_prefill`, so the serving loop goes through that same
+>   `_settle_handover` gate rather than around it — and inherits its
+>   pipelining, so a deferred handoff starts decoding one step later than a
+>   blocking one.
+>
+> **Amended 2026-07-26 (review [P1]): token 0 keeps its sampling identity.**
+> The prefill clone ran under an INTERNAL id (`r#p0`) while decode ran under the
+> public one, on a different runner with a different `Sampler`. Three things
+> broke, none of them visible to a greedy parity test:
+>
+> - `Sampler._state_for` derives the base seed from the request id when
+>   `sampling.seed is None`, so with the default stochastic params token 0 and
+>   token 1 onward came off DIFFERENT RNG streams. `EngineRequest.sampling_id`
+>   is the fix: the clone keeps its own `request_id` for scheduler bookkeeping
+>   and carries the public id as its `sampling_identity`, which is what every
+>   runner now keys the sampler under.
+> - The grammar enforcer was rebuilt on the decode side from its INITIAL state,
+>   having never accepted token 0, so every later mask was computed against the
+>   wrong grammar position. `Sampler.hand_over()` moves the state object itself
+>   at adoption — seed and matcher together — because a matcher cannot be
+>   reconstructed from an id.
+> - Token 0's `SampledToken` was reduced to its `token_id`, so its `logprob`,
+>   `top_logprobs` and `grammar_terminated` never reached the driver.
+>   `resume_with_kv` commits it directly into the decode outputs, so no
+>   `execute()` ever reports it — and at `max_tokens=1` the request completes
+>   during the handoff with no decode step at all. `PDCoordinator` keeps the
+>   whole `SampledToken` and hands it over through `drain_carried_tokens()`,
+>   which `EngineLoop` drains and prepends to the request's metadata; grammar
+>   termination at token 0 finishes the request at adoption, before decode is
+>   planned, which is where the ordinary path's `finish_early` sits too.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 

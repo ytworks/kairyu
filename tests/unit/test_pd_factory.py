@@ -24,6 +24,19 @@ TINY = dict(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_optional_kernels(monkeypatch):
+    """Hold the module docstring's promise for the tests that cannot inject.
+
+    The `build_engine_loop` / `create_backend` cases below go through the real
+    probe, which selects FlashInfer on any CUDA host that has it — and then
+    rejects this fixture's 32-wide head outright (`Invalid configuration :
+    NUM_MMA_Q=1 ...`). These tests are about the P-D seam, not kernel selection;
+    the probed backend choice is pinned in tests/gpu/test_handoff_stream_gpu.py.
+    """
+    monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "torch")
+
+
 def _cpu_placement():
     """The injected placement: a CPU profile AND an explicit torch backend, so
     neither the hardware nor `KAIRYU_ATTENTION_BACKEND` can reach in."""
@@ -498,3 +511,389 @@ def test_the_deferred_wrapper_still_wraps_the_copying_handoff(model_dir):
         model_path=model_dir, num_pages=64, page_size=16, **_cuda_placement()
     )
     assert isinstance(coordinator._handoff._inner, LocalCopyKVHandoff)
+
+
+# --- the serving path: pd_separation through EngineLoop (G2 stage 5.3) -------
+
+def test_pd_separation_builds_a_coordinator_backed_loop(model_dir):
+    """m2 §2.4 reserved `pd_separation` as a config surface and never wired it;
+    a deployment could only reach `PDCoordinator` from Python."""
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.core.pd_loop import PDLoopAdapter
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    loop, cache, scheduler = build_engine_loop(
+        model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    coordinator = loop.pd_coordinator
+    assert coordinator is not None
+    # the loop drives the coordinator through the adapter, and reports the cache
+    # and scheduler it ACTUALLY drives -- not a third, unrelated pair
+    assert isinstance(scheduler, PDLoopAdapter)
+    assert loop._scheduler is scheduler and loop._runner is scheduler
+    assert scheduler.coordinator is coordinator
+    assert cache is coordinator.decode_cache
+    if torch.cuda.is_available():
+        assert isinstance(coordinator._handoff, StreamCopyKVHandoff)
+
+
+def _run(loop, request_id, prompt, max_tokens=None, params=None):
+    """Drive the loop like the backend pump does, returning the last update."""
+    from kairyu.sampling_params import SamplingParams
+
+    if params is None:
+        params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    loop.submit(request_id, prompt, params)
+    last = None
+    for _ in range(200):
+        if not loop.has_work():
+            break
+        for updated_id, update in loop.step():
+            if updated_id == request_id:
+                last = update
+    assert last is not None, "the loop produced no update at all"
+    return last
+
+
+def test_a_request_flows_prefill_handoff_then_decode(model_dir):
+    """The wiring test the construction assertions could not do: submit through
+    the P-D loop and require actual output.
+
+    Handing `EngineLoop` the bare coordinator cannot serve even one request --
+    `_drain_ops` adds submissions to the scheduler it was given, so they land in
+    the DECODE scheduler with no prompt KV and `PDCoordinator.add_request` is
+    never called.
+    """
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    loop, _cache, scheduler = build_engine_loop(
+        model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    coordinator = loop.pd_coordinator
+
+    update = _run(loop, "pd1", "<1> <2> <3> <4>", max_tokens=5)
+
+    assert update.finished and update.outputs
+    assert coordinator.failed_requests == ()
+    # the request really went through prefill: the coordinator's clone finished
+    # there, and decode adopted the transferred KV
+    assert coordinator.internal_id_for("pd1") is None  # reclaimed on finish
+    assert scheduler.states == {}  # both halves reclaimed (E2)
+    assert coordinator.prefill_scheduler.states == {}
+
+
+def test_pd_output_matches_the_single_engine_path(model_dir):
+    """Greedy equivalence is what proves the KV BYTES moved.
+
+    The two halves own two pools. An accounting-only handoff marks the
+    destination pages computed without copying anything into them, so decode
+    attends over a zero-initialised pool and diverges from the reference.
+    """
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    prompt = "<7> <11> <13> <17> <19>"
+    combined, _c, _s = build_engine_loop(
+        model_path=model_dir, num_pages=64, page_size=16
+    )
+    reference = _run(combined, "ref", prompt, max_tokens=6)
+
+    separated, _c2, _s2 = build_engine_loop(
+        model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    served = _run(separated, "pd", prompt, max_tokens=6)
+
+    assert len(reference.outputs) == 6
+    assert served.outputs == reference.outputs
+
+def test_pd_separation_needs_a_model():
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    with pytest.raises(ValueError, match="needs a model_path"):
+        build_engine_loop(pd_separation=True)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"tensor_parallel_size": 2}, "tensor_parallel_size"),
+        ({"speculative": "ngram"}, "speculative"),
+    ],
+    ids=["tp", "speculative"],
+)
+def test_pd_separation_rejects_combinations_it_does_not_implement(
+    model_dir, kwargs, match
+):
+    """Fail loudly rather than silently serving a different topology."""
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    with pytest.raises(ValueError, match=match):
+        build_engine_loop(model_path=model_dir, pd_separation=True, **kwargs)
+
+
+def test_the_backend_accepts_the_option(model_dir):
+    """`backend: kairyu` with `options: {pd_separation: true}` in a deployment
+    YAML has to reach the constructor."""
+    from kairyu.engine.registry import create_backend
+
+    backend = create_backend(
+        "kairyu", model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    assert backend._loop.pd_coordinator is not None
+
+
+async def test_the_backend_serves_a_generation_through_the_pair(model_dir):
+    """The whole deployment path, not just the constructor: an API request has
+    to come back with tokens."""
+    from kairyu.engine.backend import GenerationRequest
+    from kairyu.engine.registry import create_backend
+    from kairyu.sampling_params import SamplingParams
+
+    backend = create_backend(
+        "kairyu", model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    result = await backend.generate(
+        GenerationRequest(
+            request_id="served",
+            prompt="<3> <5> <8>",
+            sampling_params=SamplingParams(max_tokens=4, temperature=0.0),
+        )
+    )
+
+    assert result.finished
+    assert len(result.completions[0].token_ids) == 4
+    assert result.usage is not None and result.usage.prompt_tokens > 0
+    # E2: nothing left behind in either half
+    assert backend._scheduler.states == {}
+    assert backend._loop.pd_coordinator.prefill_scheduler.states == {}
+    await backend.shutdown()
+
+
+# --- token 0 keeps its sampling identity across the handoff (m5 D5) ----------
+
+
+def _single_engine_run(model_dir, request):
+    """One ordinary engine over the same checkpoint, for any request."""
+    from kairyu.engine.core.engine_core import EngineCore
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.scheduler import Scheduler
+    from kairyu.engine.tokenizer import resolve_tokenizer
+    from kairyu.models.loader import load_model
+
+    placement = _cpu_placement()
+    model, config, _generation = load_model(
+        model_dir, dtype=placement["dtype"],
+        attention_backend=placement["attention_backend"],
+    )
+    cache = RadixKVCache(num_pages=64, page_size=16)
+    scheduler = Scheduler(cache, max_num_batched_tokens=2048, page_size=16)
+    pool = PagedKVPool.for_cache(cache, config, dtype=placement["dtype"], device="cpu")
+    runner = PagedModelRunner(
+        model, pool, sampler=Sampler(vocab_provider=resolve_tokenizer(model_dir).vocab),
+        cache=cache,
+    )
+    core = EngineCore(scheduler, runner)
+    core.add_request(request)
+    return core.run_to_completion()
+
+
+def _pd_run(model_dir, request):
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+
+    coordinator = build_pd_coordinator(
+        model_path=model_dir, num_pages=64, page_size=16, **_cpu_placement()
+    )
+    coordinator.add_request(request)
+    outputs = coordinator.run_to_completion()
+    assert not coordinator.failed_requests
+    return outputs
+
+
+def _sampled_request(request_id="a", **sampling):
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import EngineRequest
+
+    return EngineRequest(
+        request_id,
+        tuple(range(9)),
+        max_new_tokens=sampling.pop("max_new_tokens", 4),
+        eos_token_id=sampling.pop("eos_token_id", None),
+        sampling=EngineSampling(**sampling),
+    )
+
+
+def test_stochastic_sampling_matches_the_single_engine_path(model_dir):
+    """[P1] token 0 was sampled under the prefill CLONE's id (`a#p0`).
+
+    `Sampler._state_for` derives the base seed from the request id when
+    `seed is None`, so the default stochastic case put token 0 on a different
+    RNG stream from token 1 onward -- invisible to a greedy-only parity test,
+    because argmax never consults the seed at all.
+    """
+    request = _sampled_request(temperature=1.0)  # seed=None: id-derived stream
+    assert _pd_run(model_dir, request)["a"] == _single_engine_run(model_dir, request)["a"]
+
+
+def test_the_clone_samples_under_the_public_request_id(model_dir):
+    """Named directly, because a token comparison can coincide."""
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+
+    coordinator = build_pd_coordinator(
+        model_path=model_dir, num_pages=64, page_size=16, **_cpu_placement()
+    )
+    coordinator.add_request(_sampled_request(temperature=1.0))
+    coordinator.step_prefill()
+
+    clone_id = coordinator.internal_id_for("a")
+    clone = coordinator.prefill_scheduler.states[clone_id].request
+    assert clone.request_id == clone_id != "a"
+    assert clone.sampling_identity == "a"
+
+
+# The `<0>`..`<255>` fixture vocab can spell no JSON at all, so every token is
+# grammar-illegal and sampling degenerates before the handoff is even reached.
+# This one can, which is what makes a structured-output parity test mean
+# something. `_SCHEMA` is deliberately small: the point is the accept state
+# crossing the handoff, not grammar coverage.
+_JSON_VOCAB = [
+    "{", "}", "[", "]", '"', ":", ",", " ", "a", "b",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    "true", "false", "null", "-",
+]
+_SCHEMA = {"type": "object", "properties": {"a": {"type": "integer"}}}
+
+
+@pytest.fixture(scope="module")
+def grammar_model_dir(tmp_path_factory):
+    """The same tiny checkpoint with a vocab that can spell JSON."""
+    pytest.importorskip("xgrammar")
+    torch.manual_seed(71)
+    path = tmp_path_factory.mktemp("pd-grammar")
+    transformers.LlamaForCausalLM(transformers.LlamaConfig(**TINY)).to(
+        torch.float32
+    ).eval().save_pretrained(path, safe_serialization=True)
+    vocab = {token: index for index, token in enumerate(_JSON_VOCAB)}
+    vocab.update({f"z{index}": index for index in range(len(_JSON_VOCAB), 256)})
+    (path / "tokenizer.json").write_text(
+        json.dumps(
+            {
+                "version": "1.0", "truncation": None, "padding": None,
+                "added_tokens": [], "normalizer": None,
+                "pre_tokenizer": {"type": "Whitespace"},
+                "post_processor": None, "decoder": None,
+                "model": {"type": "WordLevel", "vocab": vocab, "unk_token": "z255"},
+            }
+        )
+    )
+    (path / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "PreTrainedTokenizerFast", "unk_token": "z255"})
+    )
+    return str(path)
+
+
+def test_structured_output_matches_the_single_engine_path(grammar_model_dir):
+    """The grammar enforcer's accept state has to cross the handoff.
+
+    Rebuilt on the decode side it starts from the INITIAL grammar state, one
+    that has never accepted token 0, so every later mask is computed against the
+    wrong position and the completion diverges from a single engine's.
+    """
+    request = _sampled_request(json_schema=_SCHEMA, max_new_tokens=6, eos_token_id=255)
+    served = _pd_run(grammar_model_dir, request)["a"]
+    assert served == _single_engine_run(grammar_model_dir, request)["a"]
+
+
+def test_the_grammar_state_moves_to_the_decode_sampler(grammar_model_dir):
+    """The mechanism, so a coincidental token match cannot pass for it."""
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+
+    coordinator = build_pd_coordinator(
+        model_path=grammar_model_dir, num_pages=64, page_size=16, **_cpu_placement()
+    )
+    coordinator.add_request(
+        _sampled_request(json_schema=_SCHEMA, max_new_tokens=6, eos_token_id=255)
+    )
+    coordinator.step_prefill()
+
+    prefill_states = coordinator._prefill_runner.sampler._states
+    decode_states = coordinator._decode_runner.sampler._states
+    assert "a" not in prefill_states, "the prefill half kept the enforcer"
+    carried = decode_states["a"]
+    assert carried.enforcer is not None
+    assert carried.accepted_position == 0, "decode restarts from an unaccepted grammar"
+
+
+def _pd_engine_loop(model_dir):
+    """An EngineLoop over the P-D pair with the placement injected, so the
+    logprob assertions do not depend on what kernels the host happens to have."""
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+    from kairyu.engine.core.pd_loop import PDLoopAdapter
+    from kairyu.engine.engine_loop import EngineLoop
+    from kairyu.engine.tokenizer import resolve_tokenizer
+
+    coordinator = build_pd_coordinator(
+        model_path=model_dir, num_pages=64, page_size=16, **_cpu_placement()
+    )
+    adapter = PDLoopAdapter(coordinator)
+    return EngineLoop(resolve_tokenizer(model_dir), adapter, adapter)
+
+
+def _single_engine_loop(model_dir):
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.scheduler import Scheduler
+    from kairyu.engine.engine_loop import EngineLoop
+    from kairyu.engine.tokenizer import resolve_tokenizer
+    from kairyu.models.loader import load_model
+
+    placement = _cpu_placement()
+    model, config, _generation = load_model(
+        model_dir, dtype=placement["dtype"],
+        attention_backend=placement["attention_backend"],
+    )
+    cache = RadixKVCache(num_pages=64, page_size=16)
+    scheduler = Scheduler(cache, max_num_batched_tokens=2048, page_size=16)
+    pool = PagedKVPool.for_cache(cache, config, dtype=placement["dtype"], device="cpu")
+    resolved = resolve_tokenizer(model_dir)
+    runner = PagedModelRunner(
+        model, pool, sampler=Sampler(vocab_provider=resolved.vocab), cache=cache
+    )
+    return EngineLoop(resolved, scheduler, runner)
+
+
+def test_token0_logprobs_survive_a_single_token_completion(model_dir):
+    """[P1] `max_tokens=1` finishes DURING the handoff.
+
+    The only token of the completion is sampled on the prefill runner and
+    committed by `resume_with_kv`, so no decode `execute()` ever runs -- and a
+    loop that builds its logprob stream out of runner output alone reports
+    nothing at all for a completion that has one.
+    """
+    from kairyu.sampling_params import SamplingParams
+
+    params = SamplingParams(max_tokens=1, temperature=0.0, logprobs=3)
+    served = _run(_pd_engine_loop(model_dir), "one", "<3> <5> <8>", params=params)
+    reference = _run(_single_engine_loop(model_dir), "one", "<3> <5> <8>", params=params)
+
+    assert served.finished and len(served.outputs) == 1
+    assert reference.logprobs is not None, "the reference reported none either"
+    assert served.logprobs == reference.logprobs
+    assert served.cumulative_logprob == reference.cumulative_logprob
+    assert served.logprob_content == reference.logprob_content
+
+
+def test_token0_logprobs_lead_the_stream_of_a_longer_completion(model_dir):
+    """And in order: token 0's metadata must pair with token 0, not token 1."""
+    from kairyu.sampling_params import SamplingParams
+
+    params = SamplingParams(max_tokens=4, temperature=0.0, logprobs=2)
+    served = _run(_pd_engine_loop(model_dir), "many", "<3> <5> <8>", params=params)
+    reference = _run(_single_engine_loop(model_dir), "many", "<3> <5> <8>", params=params)
+
+    assert len(served.outputs) == 4
+    assert served.logprobs == reference.logprobs
+    assert served.logprob_content == reference.logprob_content

@@ -266,6 +266,12 @@ class EngineLoop:
                 sampled = {}
             else:
                 sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
+            # tokens this scheduler committed ITSELF, outside any execute() —
+            # the P-D adoption's token 0 (m5 D5). Applied after update() so the
+            # metadata order matches the outputs: token 0 precedes whatever the
+            # runner sampled for the same request in the same step. Terminal
+            # checks for it happened at adoption, before decode was planned.
+            carried = self._drain_carried()
             if sampled:
                 finished = self._scheduler.update(token_ids(sampled))
                 for request_id in grammar_finished(sampled, finished):
@@ -275,6 +281,10 @@ class EngineLoop:
                     track = self._tracked.get(request_id)
                     if track is not None:
                         track.pending.extend(tokens)
+            for request_id, token in carried.items():
+                track = self._tracked.get(request_id)
+                if track is not None:
+                    track.pending.insert(0, token)
         updates: list[tuple[str, StreamUpdate]] = []
         for request_id, track in list(self._tracked.items()):
             update = self._track_update(request_id, track)
@@ -285,6 +295,17 @@ class EngineLoop:
                 del self._tracked[request_id]
                 self._forget(request_id)
         return updates
+
+    def _drain_carried(self) -> dict[str, SampledToken]:
+        """Tokens a scheduler committed without a runner reporting them.
+
+        Only the P-D adapter has any: ``resume_with_kv`` writes token 0 straight
+        into the decode request's outputs, so the loop would otherwise pair the
+        completion's SECOND token's metadata with its first — or, at
+        ``max_tokens=1``, report no logprobs at all because no decode step ran.
+        """
+        drain = getattr(self._scheduler, "drain_carried_tokens", None)
+        return drain() if drain is not None else {}
 
     def _forget(self, request_id: str) -> None:
         """Reclaim finished per-request state in the scheduler and runner (E2)."""

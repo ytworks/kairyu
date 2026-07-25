@@ -112,6 +112,32 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] m18 D3: token 0 keeps its sampling identity across the P-D handoff
+- What: the P-D prefill clone sampled under its INTERNAL id (`r#p0`) on a different
+  runner and `Sampler` from decode's. Three corrections. (1) `EngineRequest.sampling_id`
+  / `sampling_identity`: the clone keeps its own `request_id` for scheduler bookkeeping
+  but samples under the PUBLIC id, and `PagedModelRunner` / `TorchModelRunner` key the
+  sampler by that identity. (2) `Sampler.hand_over()` moves a request's sampling state
+  from the prefill half to the decode half at adoption, carrying the grammar matcher.
+  (3) `PDCoordinator` keeps token 0's full `SampledToken` and exposes it through
+  `drain_carried_tokens()`, which `PDLoopAdapter` forwards and `EngineLoop` prepends to
+  the request's logprob metadata; a token 0 that terminates the grammar finishes the
+  request at adoption, before decode is planned.
+- Why: [P1] on PR #144. `Sampler._state_for` derives the base seed from the request id
+  when `seed is None`, so with default stochastic sampling token 0 and token 1 onward
+  came off different RNG streams — greedy parity tests cannot see it, because argmax
+  never consults the seed. The grammar enforcer was rebuilt decode-side from its initial
+  state, having never accepted token 0, so every later mask was computed against the
+  wrong grammar position. And `resume_with_kv` commits token 0 straight into the decode
+  outputs, so no `execute()` reports it: its logprob/top_logprobs were dropped, and at
+  `max_tokens=1` there is no decode step at all, so a one-token completion reported no
+  logprobs whatsoever.
+- Refs: m18 D3 (amended), m5 D5, m8 D2, `kairyu/engine/core/scheduler.py`,
+  `kairyu/engine/core/sampler.py`, `kairyu/engine/core/model_runner.py`,
+  `kairyu/engine/core/torch_runner.py`, `kairyu/engine/core/pd.py`,
+  `kairyu/engine/core/pd_loop.py`, `kairyu/engine/engine_loop.py`,
+  `tests/unit/test_pd_factory.py`, `tests/unit/test_pd.py`
+
 ### 2026-07-26 — [amendment] m18 D3: the deferred KV copy's gate is pipelined one producer step
 - What: `PDCoordinator` no longer settles a deferred transfer in the step that started it.
   `_release_source_pages` is replaced by `_settle_handover`, which completes a whole
@@ -137,6 +163,70 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   `test_a_blocking_handoff_settles_inside_its_own_step`),
   `tests/gpu/test_handoff_stream_gpu.py`
   (`test_the_copy_overlaps_the_next_prefill_forward_on_the_coordinator`)
+
+### 2026-07-26 — [amendment] one copying KV handoff in the P-D stack, not two
+- What: corrects two claims in the entry "the `pd_separation` serving path, corrected
+  after review" below. (1) It named `pd_factory.PagedCopyKVHandoff` as the handoff that
+  moves the KV bytes. The same [P1] had already been fixed one PR down the stack as
+  `pd.LocalCopyKVHandoff` (see "a production P-D constructor, and a handoff that actually
+  copies KV" below), on a branch this one had forked before. The duplicate is deleted and
+  `build_kv_handoff` / `build_pd_coordinator` wire `LocalCopyKVHandoff`, now the single
+  copying handoff in the stack. (2) It said the serving path takes the blocking handoff
+  because nothing settled a deferred copy. The entry "the deferred KV copy keeps its
+  source lease, and gets a caller" landed exactly that consumer, so the serving path now
+  inherits `build_pd_coordinator(defer_handoff=True)`: `PDLoopAdapter.schedule()` drives
+  `PDCoordinator.step_prefill`, whose `_release_source_pages` gates every prefill-side
+  release on the copy's completion event.
+- Why: two branches of one stack fixed the same P1 independently and only met at the
+  merge. Two implementations of the same Protocol are a place for the two to drift, and
+  the serving path would otherwise have used whichever one the merge happened to leave
+  wired. `LocalCopyKVHandoff` is the one kept because it validates more at the seam: pool
+  geometry AND cache/pool page-size agreement at construction, plus a source page count
+  that matches the prompt at transfer, where the duplicate only checked that some pages
+  were passed. Its tests subsume the duplicate's, so no coverage is dropped with it.
+  Correcting rather than editing the entries below, per the append-only rule.
+- Refs: m18 D3, `kairyu/engine/core/pd.py`, `kairyu/engine/core/pd_factory.py`,
+  `kairyu/engine/core/pd_loop.py`, `tests/unit/test_pd_factory.py`,
+  `tests/gpu/test_handoff_stream_gpu.py`, PRs #140 / #142 / #144
+
+### 2026-07-26 — [amendment] the `pd_separation` serving path, corrected after review
+- What: corrects the entry below it, which claimed the P-D serving chain was complete.
+  It was not: the loop it described could not execute even its first request, and would
+  have decoded from empty KV if it had. Three fixes. (1) `engine/core/pd_loop.py`
+  `PDLoopAdapter` — `EngineLoop._drain_ops` adds submissions to the scheduler it was
+  given, so wiring the loop to the coordinator's decode scheduler inserted requests into
+  DECODE with no prompt KV, never called `PDCoordinator.add_request`, and then called
+  `execute()` on a coordinator that has no such method. The adapter is the loop's
+  scheduler AND runner: submissions enter at prefill, each `schedule()` runs a prefill
+  step (prefill → KV transfer → commit) before planning decode, and abort/forget/release
+  reach both halves. (2) `pd_factory.PagedCopyKVHandoff` — the two halves own two POOLS,
+  and `LocalKVHandoff` only does the accounting (allocate + mark computed), so the
+  destination pool stayed zero-initialised; the paged handoff copies the non-cached
+  pages, all layers at once, with the same receiver-side prefix dedup as
+  `RemoteKVReceiver`. (3) `_build_pd_loop` returns the cache and scheduler the loop
+  actually drives (decode's cache, the adapter) instead of a third, unrelated pair.
+- Why: the previous entry also read as if production overlapped the copy via
+  `StreamCopyKVHandoff(defer=True)`. It does not, and should not yet: the serving path
+  takes the blocking default so the commit point cannot run ahead of the copy (m6 D4).
+  The deferred form stays opt-in with no production caller until a consumer-side
+  `wait_for_pending()` and source-page lifetime ordering land. Correcting rather than
+  editing, per the append-only rule.
+- Refs: m18 D3 (amended), `kairyu/engine/core/pd_loop.py`,
+  `kairyu/engine/core/pd_factory.py`, `kairyu/engine/core/pd.py`,
+  `kairyu/engine/kairyu_backend.py`, `tests/unit/test_pd_factory.py`, PR #144 review
+
+### 2026-07-26 — [progress] P-D disaggregation is reachable from a deployment (G2 stage 5.3)
+- What: `pd_factory.build_pd_coordinator()` assembles a prefill/decode pair from a
+  checkpoint and `build_kv_handoff()` picks the handoff from where the KV lives;
+  `backend: kairyu` accepts `pd_separation: true`, so a deployment YAML can serve through
+  the pair. `StreamCopyKVHandoff(defer=True)` records a completion event instead of
+  blocking, so the producer can queue its next step while the copy runs.
+- Why: `PDCoordinator` had no production constructor at all — it existed only in
+  `tests/unit/test_pd.py`, which is why `CudaStreamProvider` had no caller and why m2
+  §2.4's reserved `pd_separation` surface was never wired. TP > 1 and speculative decoding
+  are rejected with pd_separation rather than silently serving a different topology.
+- Refs: m18 D3 (amended), `kairyu/engine/core/pd_factory.py`,
+  `kairyu/engine/core/handoff_stream.py`, `kairyu/engine/kairyu_backend.py`
 
 ### 2026-07-26 — [amendment] m18 D3: the deferred KV copy keeps its source lease, and gets a caller
 - What: `StreamCopyKVHandoff(defer=True)` records the copy's completion event instead of
