@@ -96,6 +96,29 @@ a recording fake.
 > pair. m2 §2.4 reserved that config surface and never wired it. Combinations
 > the coordinator does not implement — TP > 1, speculative decoding — are
 > rejected rather than silently serving a different topology.
+>
+> Three things that wiring needs, stated because the first cut of it had none:
+>
+> - `engine/core/pd_loop.py::PDLoopAdapter`. `EngineLoop` owns ONE scheduler and
+>   ONE runner, and `_drain_ops` adds submissions straight to the scheduler it
+>   was given. Handing it the coordinator's decode scheduler admits requests
+>   into DECODE with no prompt KV and never calls `PDCoordinator.add_request`,
+>   and the coordinator has no `execute` for the loop to call. The adapter is
+>   both surfaces: submissions enter at prefill, `schedule()` runs one prefill
+>   step (prefill → transfer → commit) before planning decode, `execute()` runs
+>   the decode runner, and abort/forget/release reach both halves.
+> - `pd_factory.PagedCopyKVHandoff`. The two halves own two POOLS.
+>   `LocalKVHandoff` is the accounting half — allocate in the destination cache
+>   and mark computed — so with two pools the destination stays
+>   zero-initialised and decode attends over empty KV. The paged handoff copies
+>   each non-cached page, all layers at once, honouring the same receiver-side
+>   prefix dedup as `RemoteKVReceiver`. Greedy equivalence against the
+>   single-engine path is the test that holds this down.
+> - Blocking ordering. The serving path takes `defer=False` (`build_kv_handoff`
+>   leaves the default), so the commit point cannot run ahead of the copy. The
+>   deferred form remains opt-in with no production caller: it needs a
+>   consumer-side `wait_for_pending()` and source-page lifetime ordering, which
+>   is still open.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 

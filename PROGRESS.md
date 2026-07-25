@@ -112,6 +112,32 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] the `pd_separation` serving path, corrected after review
+- What: corrects the entry below it, which claimed the P-D serving chain was complete.
+  It was not: the loop it described could not execute even its first request, and would
+  have decoded from empty KV if it had. Three fixes. (1) `engine/core/pd_loop.py`
+  `PDLoopAdapter` — `EngineLoop._drain_ops` adds submissions to the scheduler it was
+  given, so wiring the loop to the coordinator's decode scheduler inserted requests into
+  DECODE with no prompt KV, never called `PDCoordinator.add_request`, and then called
+  `execute()` on a coordinator that has no such method. The adapter is the loop's
+  scheduler AND runner: submissions enter at prefill, each `schedule()` runs a prefill
+  step (prefill → KV transfer → commit) before planning decode, and abort/forget/release
+  reach both halves. (2) `pd_factory.PagedCopyKVHandoff` — the two halves own two POOLS,
+  and `LocalKVHandoff` only does the accounting (allocate + mark computed), so the
+  destination pool stayed zero-initialised; the paged handoff copies the non-cached
+  pages, all layers at once, with the same receiver-side prefix dedup as
+  `RemoteKVReceiver`. (3) `_build_pd_loop` returns the cache and scheduler the loop
+  actually drives (decode's cache, the adapter) instead of a third, unrelated pair.
+- Why: the previous entry also read as if production overlapped the copy via
+  `StreamCopyKVHandoff(defer=True)`. It does not, and should not yet: the serving path
+  takes the blocking default so the commit point cannot run ahead of the copy (m6 D4).
+  The deferred form stays opt-in with no production caller until a consumer-side
+  `wait_for_pending()` and source-page lifetime ordering land. Correcting rather than
+  editing, per the append-only rule.
+- Refs: m18 D3 (amended), `kairyu/engine/core/pd_loop.py`,
+  `kairyu/engine/core/pd_factory.py`, `kairyu/engine/core/pd.py`,
+  `kairyu/engine/kairyu_backend.py`, `tests/unit/test_pd_factory.py`, PR #144 review
+
 ### 2026-07-26 — [progress] P-D disaggregation is reachable from a deployment (G2 stage 5.3)
 - What: `pd_factory.build_pd_coordinator()` assembles a prefill/decode pair from a
   checkpoint and `build_kv_handoff()` picks the handoff from where the KV lives;

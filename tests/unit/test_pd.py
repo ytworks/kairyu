@@ -266,3 +266,130 @@ def test_transfer_failure_exhausts_retries_and_reports() -> None:
 
     assert outputs == {}
     assert coordinator.failed_requests == ("r",)
+
+
+# --- PDLoopAdapter: the EngineLoop-facing seam --------------------------------
+
+
+def _adapter(**kwargs):
+    from kairyu.engine.core.pd_loop import PDLoopAdapter
+
+    coordinator, prefill_kv, decode_kv = _make_coordinator(**kwargs)
+    return PDLoopAdapter(coordinator), coordinator, prefill_kv, decode_kv
+
+
+def test_submissions_enter_at_prefill_not_at_the_decode_scheduler() -> None:
+    # EngineLoop._drain_ops calls add_request on the scheduler it was given, so
+    # a bare coordinator wired as that scheduler admits requests into DECODE
+    # with no prompt KV — the request could never produce a token.
+    adapter, coordinator, _, _ = _adapter()
+
+    adapter.add_request(EngineRequest("r", prompt_token_ids=(1, 2, 3, 4), max_new_tokens=2))
+
+    assert coordinator.prefill_scheduler.waiting_ids == ("r#p0",)
+    assert coordinator.decode_scheduler.states == {}
+    assert adapter.has_unfinished()
+
+
+def test_one_adapter_step_prefills_transfers_and_starts_decoding() -> None:
+    adapter, coordinator, _, _ = _adapter()
+    request = EngineRequest("r", prompt_token_ids=(1, 2, 3, 4), max_new_tokens=3)
+    adapter.add_request(request)
+
+    plan = adapter.schedule()
+
+    # the handoff ran inside schedule(), so decode plans the same step
+    assert [chunk.request_id for chunk in plan.scheduled] == ["r"]
+    assert adapter.output_tokens("r") == (sum(request.prompt_token_ids) % _VOCAB,)
+    assert adapter.states["r"] is coordinator.decode_scheduler.states["r"]
+
+
+def test_a_request_still_at_prefill_is_visible_under_its_public_id() -> None:
+    """EngineLoop reads per-request state by the id it submitted; while the
+    request is prefill-side that state lives under the clone id."""
+    adapter, coordinator, _, _ = _adapter()
+    adapter.add_request(EngineRequest("r", prompt_token_ids=(1, 2, 3, 4), max_new_tokens=2))
+
+    assert "r" in adapter.states
+    assert adapter.states["r"] is coordinator.prefill_scheduler.states["r#p0"]
+    assert adapter.output_tokens("r") == ()
+    assert adapter.finish_reason("r") is None
+
+
+def test_a_prompt_prefill_can_never_admit_finishes_instead_of_hanging() -> None:
+    """C2, through the adapter: a prompt larger than the prefill cache is
+    rejected there, and the public request must still reach a terminal state —
+    it never enters the decode scheduler at all."""
+    adapter, coordinator, _, _ = _adapter(prefill_pages=2)
+    adapter.add_request(EngineRequest("r", prompt_token_ids=tuple(range(40)), max_new_tokens=2))
+
+    plan = adapter.schedule()
+    adapter.drain_rejected()
+
+    assert plan.scheduled == ()
+    assert not adapter.has_unfinished()
+    assert adapter.states["r"].status.value == "finished"
+    assert adapter.finish_reason("r") == "length"
+    assert adapter.output_tokens("r") == ()
+
+
+def test_a_request_that_exhausts_its_transfer_retries_finishes_as_abort() -> None:
+    decode_sched, decode_kv = _make_pair()
+    prefill_sched, _ = _make_pair()
+    from kairyu.engine.core.pd_loop import PDLoopAdapter
+
+    coordinator = PDCoordinator(
+        prefill_scheduler=prefill_sched,
+        prefill_runner=_ToyRunner(),
+        decode_scheduler=decode_sched,
+        decode_runner=_ToyRunner(),
+        handoff=_FlakyHandoff(LocalKVHandoff(decode_kv), failures=10),
+        max_transfer_retries=1,
+    )
+    adapter = PDLoopAdapter(coordinator)
+    adapter.add_request(EngineRequest("r", prompt_token_ids=(1, 2, 3, 4), max_new_tokens=2))
+
+    for _ in range(4):
+        adapter.schedule()
+
+    assert coordinator.failed_requests == ("r",)
+    assert adapter.states["r"].status.value == "finished"
+    assert adapter.finish_reason("r") == "abort"
+
+
+def test_abort_reaches_whichever_half_holds_the_request() -> None:
+    adapter, coordinator, _, _ = _adapter()
+    adapter.add_request(EngineRequest("p", prompt_token_ids=(1, 2, 3, 4), max_new_tokens=4))
+    adapter.add_request(EngineRequest("d", prompt_token_ids=(5, 6, 7, 8), max_new_tokens=4))
+    adapter.schedule()  # both hand off to decode
+
+    adapter.abort("d")
+    adapter.forget("d")
+
+    assert "d" not in coordinator.decode_scheduler.states
+    assert "d#p0" not in coordinator.prefill_scheduler.states
+    assert coordinator.internal_id_for("d") is None
+    assert adapter.has_unfinished()  # "p" is untouched
+
+
+def test_driving_the_adapter_like_engine_loop_generates_and_reclaims() -> None:
+    """schedule -> execute -> update, the loop's own cycle, plus the E2 sweep: a
+    long-running loop must not retain the prefill clone's state either."""
+    adapter, coordinator, _, _ = _adapter()
+    request = EngineRequest("r", prompt_token_ids=(1, 2, 3, 4), max_new_tokens=3)
+    adapter.add_request(request)
+
+    while adapter.has_unfinished():
+        plan = adapter.schedule()
+        if not plan.scheduled:
+            adapter.reject_waiting_head()
+            continue
+        sampled = adapter.execute(plan.scheduled, adapter.states)
+        adapter.update({rid: tokens[0].token_id for rid, tokens in sampled.items()})
+    outputs = adapter.output_tokens("r")
+    adapter.forget("r")
+
+    assert outputs == _single_core_reference([request])["r"]
+    assert coordinator.decode_scheduler.states == {}
+    assert coordinator.prefill_scheduler.states == {}
+    assert adapter.states == {}

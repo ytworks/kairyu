@@ -20,6 +20,7 @@ from pathlib import Path
 
 from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
 from kairyu.engine.core.comm import FakeCommunicator
+from kairyu.engine.core.pd_loop import PDLoopAdapter
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import SampledToken, mix_seed
 from kairyu.engine.core.scheduler import ScheduledChunk, Scheduler
@@ -62,7 +63,7 @@ def build_engine_loop(
     speculative_tokens: int = 4,
     model_path: str | None = None,
     pd_separation: bool = False,
-) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
+) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
     ``model_path`` loads a real checkpoint (m12 D5): DenseDecoder +
@@ -195,7 +196,7 @@ def _build_pd_loop(
     page_size: int,
     max_num_batched_tokens: int,
     tokenizer: str | Tokenizer | None,
-) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
+) -> tuple[EngineLoop, RadixKVCache, PDLoopAdapter]:
     """Serve through a prefill/decode pair (m18 D3, G2 stage 5.3).
 
     `PDCoordinator` had no serving entry point: `pd_factory` builds it, but a
@@ -203,8 +204,14 @@ def _build_pd_loop(
     option that turns it on, so `pd_separation: true` in a deployment YAML is a
     real topology rather than a config surface m2 §2.4 reserved and never wired.
 
-    The coordinator drives its own schedulers, so it stands in for both the
-    runner AND the scheduler the loop would otherwise own.
+    The coordinator owns two schedulers and two runners; `PDLoopAdapter` is what
+    makes that one scheduler and one runner from the loop's side — submissions
+    enter at prefill, each step transfers the KV before planning decode. Handing
+    the loop a bare coordinator would admit requests straight into the decode
+    scheduler, with no prompt KV and no `execute` to call.
+
+    The returned cache and scheduler are the ones the loop actually drives (the
+    `build_engine_loop` contract): decode's cache, and the adapter itself.
     """
     from kairyu.engine.core.pd_factory import build_pd_coordinator
     from kairyu.models.loader import load_generation_defaults
@@ -218,20 +225,17 @@ def _build_pd_loop(
         tokenizer=resolved,
     )
     generation = load_generation_defaults(model_path)
-    cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
-    scheduler = Scheduler(
-        cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
-    )
+    adapter = PDLoopAdapter(coordinator)
     loop = EngineLoop(
         resolved,
-        coordinator.decode_scheduler,
-        coordinator,
+        adapter,
+        adapter,
         default_eos_token_id=generation.eos_token_id,
         default_stop_token_ids=generation.stop_token_ids,
     )
     loop.tp_launcher = None
     loop.pd_coordinator = coordinator
-    return loop, cache, scheduler
+    return loop, adapter.kv_cache, adapter
 
 
 def _build_dist_tp_loop(

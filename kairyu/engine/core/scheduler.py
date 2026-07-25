@@ -165,6 +165,12 @@ class Scheduler:
         return self._states
 
     @property
+    def kv_cache(self) -> RadixKVCache:
+        """The cache this scheduler admits against — the one a caller assembling
+        several schedulers (P-D) must report rather than a freshly built one."""
+        return self._kv
+
+    @property
     def waiting_ids(self) -> tuple[str, ...]:
         return tuple(self._waiting)
 

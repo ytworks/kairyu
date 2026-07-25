@@ -145,27 +145,146 @@ def test_a_raising_deferred_transfer_still_closes_the_window():
     assert provider.events == ["begin", "record"]
 
 
-@pytest.fixture(scope="module")
-def _served(model_dir):
-    return model_dir
-
-
 def test_pd_separation_builds_a_coordinator_backed_loop(model_dir):
     """m2 §2.4 reserved `pd_separation` as a config surface and never wired it;
     a deployment could only reach `PDCoordinator` from Python."""
     from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.core.pd_loop import PDLoopAdapter
     from kairyu.engine.kairyu_backend import build_engine_loop
 
-    loop, _cache, _scheduler = build_engine_loop(
+    loop, cache, scheduler = build_engine_loop(
         model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
     )
     coordinator = loop.pd_coordinator
     assert coordinator is not None
-    # the serving loop observes the DECODE scheduler: requests enter at prefill
-    # and finish under decode
-    assert loop._scheduler is coordinator.decode_scheduler
+    # the loop drives the coordinator through the adapter, and reports the cache
+    # and scheduler it ACTUALLY drives -- not a third, unrelated pair
+    assert isinstance(scheduler, PDLoopAdapter)
+    assert loop._scheduler is scheduler and loop._runner is scheduler
+    assert scheduler.coordinator is coordinator
+    assert cache is coordinator.decode_cache
     if torch.cuda.is_available():
         assert isinstance(coordinator._handoff, StreamCopyKVHandoff)
+
+
+def _run(loop, request_id, prompt, max_tokens):
+    """Drive the loop like the backend pump does, returning the last update."""
+    from kairyu.sampling_params import SamplingParams
+
+    loop.submit(request_id, prompt, SamplingParams(max_tokens=max_tokens, temperature=0.0))
+    last = None
+    for _ in range(200):
+        if not loop.has_work():
+            break
+        for updated_id, update in loop.step():
+            if updated_id == request_id:
+                last = update
+    assert last is not None, "the loop produced no update at all"
+    return last
+
+
+def test_a_request_flows_prefill_handoff_then_decode(model_dir):
+    """The wiring test the construction assertions could not do: submit through
+    the P-D loop and require actual output.
+
+    Handing `EngineLoop` the bare coordinator cannot serve even one request --
+    `_drain_ops` adds submissions to the scheduler it was given, so they land in
+    the DECODE scheduler with no prompt KV and `PDCoordinator.add_request` is
+    never called.
+    """
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    loop, _cache, scheduler = build_engine_loop(
+        model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    coordinator = loop.pd_coordinator
+
+    update = _run(loop, "pd1", "<1> <2> <3> <4>", max_tokens=5)
+
+    assert update.finished and update.outputs
+    assert coordinator.failed_requests == ()
+    # the request really went through prefill: the coordinator's clone finished
+    # there, and decode adopted the transferred KV
+    assert coordinator.internal_id_for("pd1") is None  # reclaimed on finish
+    assert scheduler.states == {}  # both halves reclaimed (E2)
+    assert coordinator.prefill_scheduler.states == {}
+
+
+def test_pd_output_matches_the_single_engine_path(model_dir):
+    """Greedy equivalence is what proves the KV BYTES moved.
+
+    The two halves own two pools. An accounting-only handoff marks the
+    destination pages computed without copying anything into them, so decode
+    attends over a zero-initialised pool and diverges from the reference.
+    """
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    prompt = "<7> <11> <13> <17> <19>"
+    combined, _c, _s = build_engine_loop(
+        model_path=model_dir, num_pages=64, page_size=16
+    )
+    reference = _run(combined, "ref", prompt, max_tokens=6)
+
+    separated, _c2, _s2 = build_engine_loop(
+        model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    served = _run(separated, "pd", prompt, max_tokens=6)
+
+    assert len(reference.outputs) == 6
+    assert served.outputs == reference.outputs
+
+
+def test_the_paged_handoff_copies_the_pages_it_is_given():
+    """`LocalKVHandoff` is the accounting half; this one moves the bytes."""
+    from kairyu.engine.core.pd_factory import PagedCopyKVHandoff
+    from kairyu.engine.core.radix_kv import RadixKVCache
+
+    source, destination = _pool(), _pool()
+    torch.manual_seed(5)
+    source.k.copy_(torch.randn_like(source.k))
+    source.v.copy_(torch.randn_like(source.v))
+    cache = RadixKVCache(num_pages=4, page_size=4)
+    handoff = PagedCopyKVHandoff(cache, source, destination)
+
+    allocation = handoff.transfer(tuple(range(8)), first_token=3, pages=(2, 1))
+
+    assert allocation.tokens == tuple(range(8))
+    for target, origin in zip(allocation.pages, (2, 1), strict=True):
+        assert torch.equal(destination.k[:, target], source.k[:, origin])
+        assert torch.equal(destination.v[:, target], source.v[:, origin])
+
+
+def test_the_paged_handoff_skips_pages_the_destination_already_has():
+    """Receiver-side dedup (m6 D4): a destination radix hit is a prefix, so the
+    source pages it covers must not be re-copied over live shared pages."""
+    from kairyu.engine.core.pd_factory import PagedCopyKVHandoff
+    from kairyu.engine.core.radix_kv import RadixKVCache
+
+    source, destination = _pool(), _pool()
+    torch.manual_seed(6)
+    source.k.copy_(torch.randn_like(source.k))
+    cache = RadixKVCache(num_pages=4, page_size=4)
+    handoff = PagedCopyKVHandoff(cache, source, destination)
+    # first transfer publishes tokens 0..3 in the destination's radix tree
+    handoff.transfer(tuple(range(4)), first_token=0, pages=(0,))
+
+    allocation = handoff.transfer(tuple(range(8)), first_token=0, pages=(0, 3))
+
+    assert len(allocation.cached_pages) == 1
+    tail = allocation.pages[-1]
+    assert torch.equal(destination.k[:, tail], source.k[:, 3])
+
+
+def test_the_paged_handoff_rejects_incompatible_pools():
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.pd_factory import PagedCopyKVHandoff
+    from kairyu.engine.core.radix_kv import RadixKVCache
+
+    wider = PagedKVPool(
+        num_layers=1, num_pages=4, page_size=4, num_kv_heads=2, head_dim=4
+    )
+    with pytest.raises(ValueError, match="pool mismatch"):
+        PagedCopyKVHandoff(RadixKVCache(num_pages=4, page_size=4), _pool(), wider)
 
 
 def test_pd_separation_needs_a_model():
@@ -202,3 +321,30 @@ def test_the_backend_accepts_the_option(model_dir):
         "kairyu", model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
     )
     assert backend._loop.pd_coordinator is not None
+
+
+async def test_the_backend_serves_a_generation_through_the_pair(model_dir):
+    """The whole deployment path, not just the constructor: an API request has
+    to come back with tokens."""
+    from kairyu.engine.backend import GenerationRequest
+    from kairyu.engine.registry import create_backend
+    from kairyu.sampling_params import SamplingParams
+
+    backend = create_backend(
+        "kairyu", model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    result = await backend.generate(
+        GenerationRequest(
+            request_id="served",
+            prompt="<3> <5> <8>",
+            sampling_params=SamplingParams(max_tokens=4, temperature=0.0),
+        )
+    )
+
+    assert result.finished
+    assert len(result.completions[0].token_ids) == 4
+    assert result.usage is not None and result.usage.prompt_tokens > 0
+    # E2: nothing left behind in either half
+    assert backend._scheduler.states == {}
+    assert backend._loop.pd_coordinator.prefill_scheduler.states == {}
+    await backend.shutdown()

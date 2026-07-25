@@ -304,3 +304,34 @@ def test_wait_for_pending_is_safe_with_nothing_pending():
     handoff.transfer((1,), 0)
     assert handoff.pending_event is None
     handoff.wait_for_pending()  # must not raise
+
+
+def test_the_paged_handoff_copies_device_pages_inside_the_stream_window():
+    """The deploy-day shape of the P-D handoff: two device pools, the copy on
+    the side stream. An accounting-only handoff would leave the destination
+    zero-initialised and decode would attend over empty KV."""
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.pd_factory import PagedCopyKVHandoff, build_kv_handoff
+    from kairyu.engine.core.radix_kv import RadixKVCache
+
+    _require_cuda()
+
+    def pool():
+        return PagedKVPool(
+            num_layers=2, num_pages=4, page_size=4, num_kv_heads=1, head_dim=4,
+            device="cuda:0",
+        )
+
+    source, destination = pool(), pool()
+    source.k.copy_(torch.randn_like(source.k))
+    source.v.copy_(torch.randn_like(source.v))
+    cache = RadixKVCache(num_pages=4, page_size=4)
+    handoff = build_kv_handoff(
+        PagedCopyKVHandoff(cache, source, destination), source
+    )
+
+    allocation = handoff.transfer(tuple(range(8)), first_token=1, pages=(3, 0))
+
+    for target, origin in zip(allocation.pages, (3, 0), strict=True):
+        assert torch.equal(destination.k[:, target], source.k[:, origin])
+        assert torch.equal(destination.v[:, target], source.v[:, origin])
