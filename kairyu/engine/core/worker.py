@@ -339,6 +339,20 @@ class DistTPLauncher:
         startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
         self.runner = DistTPModelRunner(self._comm, runner)
 
+    def dead_ranks(self) -> tuple[int, ...]:
+        """Spawned ranks that are no longer running (rank 0 is this process).
+
+        A dead rank leaves the group unable to complete a single collective, but
+        rank 0 stays up and keeps answering health checks — on hardware this
+        presented as a served model that accepted requests and never returned a
+        token. Cheap enough for `/readyz`: `is_alive()` is a waitpid, no IPC.
+        """
+        return tuple(
+            index + 1
+            for index, process in enumerate(self._ctx.processes)
+            if not process.is_alive()
+        )
+
     def shutdown(self) -> None:
         import contextlib
         import os

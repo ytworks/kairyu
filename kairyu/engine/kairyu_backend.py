@@ -18,7 +18,12 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
+from kairyu.engine.backend import (
+    EngineReadiness,
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+)
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import SampledToken, mix_seed
@@ -266,6 +271,7 @@ class KairyuBackend:
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
+        self._engine_error: Exception | None = None  # last step failure, for readiness()
 
     def validate_request(self, request: GenerationRequest) -> None:
         self._loop.tokenize_prompt(request.prompt)
@@ -275,13 +281,24 @@ class KairyuBackend:
         try:
             while self._loop.has_work():
                 updates = await asyncio.to_thread(self._loop.step)
+                # a completed step is the only proof the engine still runs, so it
+                # is also what clears a previous failure (transient faults must
+                # not strand the node out of rotation forever)
+                self._engine_error = None
                 for request_id, update in updates:
                     queue = self._queues.get(request_id)
                     if queue is not None:
                         queue.put_nowait(update)
         except Exception as error:
+            # recorded FIRST: purge itself runs through the same broken transport
+            # that just failed, and when it raises too the original error escapes
+            # as an unretrieved task exception and nothing observes the fault
+            self._engine_error = error
             request_ids = tuple(self._queues)
-            await asyncio.to_thread(self._loop.purge, request_ids)
+            try:
+                await asyncio.to_thread(self._loop.purge, request_ids)
+            except Exception:  # noqa: BLE001 - already failing; report the first cause
+                pass
             failure = StreamUpdate((), "", True, None, error)
             for request_id in request_ids:
                 queue = self._queues.get(request_id)
@@ -292,6 +309,38 @@ class KairyuBackend:
             self._pump_task = None
             if restart_after_exit:
                 self._ensure_pump()
+
+    def readiness(self) -> EngineReadiness:
+        """Cheap liveness for `/readyz`: KNOWN-FATAL state only, no probe.
+
+        Dead TP ranks are the one condition this can assert. The group cannot
+        complete a single collective without them and nothing in-process can
+        bring them back, so the node needs replacing — `fatal` says so, and
+        `/health` turns that into a restart signal.
+
+        A step exception deliberately does NOT flip readiness. It is reported for
+        diagnosis but cannot be told apart from one bad request, and marking the
+        node unready for it is a trap: the load balancer stops sending work, so
+        the successful step that would clear the flag never arrives and the node
+        stays out of rotation until someone notices (review [P1] on #126).
+        """
+        launcher = getattr(self._loop, "tp_launcher", None)
+        if launcher is not None:
+            dead = launcher.dead_ranks()
+            if dead:
+                return EngineReadiness(
+                    False,
+                    f"tensor-parallel ranks not running: {sorted(dead)}",
+                    fatal=True,
+                )
+        return EngineReadiness(True, self._last_error_detail())
+
+    def _last_error_detail(self) -> str:
+        """Class name only — this reaches an unauthenticated endpoint, and an
+        exception's message can carry an upstream URL or a path (review [P2])."""
+        if self._engine_error is None:
+            return ""
+        return f"last step error: {type(self._engine_error).__name__}"
 
     def _ensure_pump(self) -> None:
         if not self._loop.has_work():
