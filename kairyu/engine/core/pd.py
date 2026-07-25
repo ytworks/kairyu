@@ -87,6 +87,15 @@ class PDCoordinator:
         self._failed: list[str] = []
 
     @property
+    def decode_scheduler(self) -> Scheduler:
+        """The scheduler whose state the serving loop observes.
+
+        Requests enter at prefill and finish under decode, so decode's is the one
+        that answers "is this request done" for `EngineLoop`.
+        """
+        return self._decode
+
+    @property
     def failed_requests(self) -> tuple[str, ...]:
         """Requests dropped after exhausting transfer retries."""
         return tuple(self._failed)

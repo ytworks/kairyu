@@ -112,6 +112,19 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [progress] P-D disaggregation is reachable from a deployment (G2 stage 5.3)
+- What: `pd_factory.build_pd_coordinator()` assembles a prefill/decode pair from a
+  checkpoint and `build_kv_handoff()` picks the handoff from where the KV lives;
+  `backend: kairyu` accepts `pd_separation: true`, so a deployment YAML can serve through
+  the pair. `StreamCopyKVHandoff(defer=True)` records a completion event instead of
+  blocking, so the producer can queue its next step while the copy runs.
+- Why: `PDCoordinator` had no production constructor at all — it existed only in
+  `tests/unit/test_pd.py`, which is why `CudaStreamProvider` had no caller and why m2
+  §2.4's reserved `pd_separation` surface was never wired. TP > 1 and speculative decoding
+  are rejected with pd_separation rather than silently serving a different topology.
+- Refs: m18 D3 (amended), `kairyu/engine/core/pd_factory.py`,
+  `kairyu/engine/core/handoff_stream.py`, `kairyu/engine/kairyu_backend.py`
+
 ### 2026-07-25 — [amendment] m18 D3: CudaStreamProvider landed; KV serde can read a device pool
 - What: `CudaStreamProvider` implemented (the deploy-day half of the m18 D3 stream seam),
   and `kv_serde._to_bytes` now copies to host before `.numpy()`.

@@ -61,6 +61,7 @@ def build_engine_loop(
     speculative: str | None = None,
     speculative_tokens: int = 4,
     model_path: str | None = None,
+    pd_separation: bool = False,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
@@ -77,6 +78,24 @@ def build_engine_loop(
         raise ValueError("speculative decoding with tensor_parallel_size > 1 is not supported")
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
+    if pd_separation:
+        if model_path is None:
+            raise ValueError("pd_separation needs a model_path")
+        if tensor_parallel_size > 1:
+            # the coordinator owns two engines; sharding each of them is m6
+            # stage 5.3 territory, not something to half-do here
+            raise ValueError(
+                "pd_separation with tensor_parallel_size > 1 is not supported"
+            )
+        if speculative is not None:
+            raise ValueError("pd_separation with speculative decoding is not supported")
+        return _build_pd_loop(
+            model_path=model_path,
+            num_pages=num_pages,
+            page_size=page_size,
+            max_num_batched_tokens=max_num_batched_tokens,
+            tokenizer=tokenizer,
+        )
 
     if model_path is not None and tensor_parallel_size > 1:
         return _build_dist_tp_loop(
@@ -169,6 +188,52 @@ def build_engine_loop(
     return loop, cache, scheduler
 
 
+def _build_pd_loop(
+    *,
+    model_path: str,
+    num_pages: int,
+    page_size: int,
+    max_num_batched_tokens: int,
+    tokenizer: str | Tokenizer | None,
+) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
+    """Serve through a prefill/decode pair (m18 D3, G2 stage 5.3).
+
+    `PDCoordinator` had no serving entry point: `pd_factory` builds it, but a
+    deployment could only reach it from Python. This is the `backend: kairyu`
+    option that turns it on, so `pd_separation: true` in a deployment YAML is a
+    real topology rather than a config surface m2 §2.4 reserved and never wired.
+
+    The coordinator drives its own schedulers, so it stands in for both the
+    runner AND the scheduler the loop would otherwise own.
+    """
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+    from kairyu.models.loader import load_generation_defaults
+
+    resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
+    coordinator = build_pd_coordinator(
+        model_path=model_path,
+        num_pages=num_pages,
+        page_size=page_size,
+        max_num_batched_tokens=max_num_batched_tokens,
+        tokenizer=resolved,
+    )
+    generation = load_generation_defaults(model_path)
+    cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
+    scheduler = Scheduler(
+        cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
+    )
+    loop = EngineLoop(
+        resolved,
+        coordinator.decode_scheduler,
+        coordinator,
+        default_eos_token_id=generation.eos_token_id,
+        default_stop_token_ids=generation.stop_token_ids,
+    )
+    loop.tp_launcher = None
+    loop.pd_coordinator = coordinator
+    return loop, cache, scheduler
+
+
 def _build_dist_tp_loop(
     *,
     model_path: str,
@@ -229,6 +294,7 @@ class KairyuBackend:
         speculative: str | None = None,
         speculative_tokens: int = 4,
         model_path: str | None = None,
+        pd_separation: bool = False,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
@@ -241,6 +307,7 @@ class KairyuBackend:
             speculative=speculative,
             speculative_tokens=speculative_tokens,
             model_path=model_path,
+            pd_separation=pd_separation,
         )
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime

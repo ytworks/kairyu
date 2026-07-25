@@ -91,8 +91,11 @@ a recording fake.
 > deferring moves the m6 D4 ordering responsibility to the caller and a caller
 > that forgets it reads half-written KV.
 >
-> Still open: serving-layer exposure (a `pd_separation` deployment option) is G2
-> stage 5.3 work on top of `pd_factory.build_pd_coordinator()`.
+> **Serving exposure landed 2026-07-26.** `backend: kairyu` accepts
+> `pd_separation: true`, so a deployment YAML can serve through a prefill/decode
+> pair. m2 §2.4 reserved that config surface and never wired it. Combinations
+> the coordinator does not implement — TP > 1, speculative decoding — are
+> rejected rather than silently serving a different topology.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 

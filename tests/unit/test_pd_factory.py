@@ -143,3 +143,62 @@ def test_a_raising_deferred_transfer_still_closes_the_window():
     with pytest.raises(RuntimeError, match="transfer failed"):
         StreamCopyKVHandoff(_Boom(), provider, defer=True).transfer((1,), 0)
     assert provider.events == ["begin", "record"]
+
+
+@pytest.fixture(scope="module")
+def _served(model_dir):
+    return model_dir
+
+
+def test_pd_separation_builds_a_coordinator_backed_loop(model_dir):
+    """m2 §2.4 reserved `pd_separation` as a config surface and never wired it;
+    a deployment could only reach `PDCoordinator` from Python."""
+    from kairyu.engine.core.handoff_stream import StreamCopyKVHandoff
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    loop, _cache, _scheduler = build_engine_loop(
+        model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    coordinator = loop.pd_coordinator
+    assert coordinator is not None
+    # the serving loop observes the DECODE scheduler: requests enter at prefill
+    # and finish under decode
+    assert loop._scheduler is coordinator.decode_scheduler
+    if torch.cuda.is_available():
+        assert isinstance(coordinator._handoff, StreamCopyKVHandoff)
+
+
+def test_pd_separation_needs_a_model():
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    with pytest.raises(ValueError, match="needs a model_path"):
+        build_engine_loop(pd_separation=True)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"tensor_parallel_size": 2}, "tensor_parallel_size"),
+        ({"speculative": "ngram"}, "speculative"),
+    ],
+    ids=["tp", "speculative"],
+)
+def test_pd_separation_rejects_combinations_it_does_not_implement(
+    model_dir, kwargs, match
+):
+    """Fail loudly rather than silently serving a different topology."""
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    with pytest.raises(ValueError, match=match):
+        build_engine_loop(model_path=model_dir, pd_separation=True, **kwargs)
+
+
+def test_the_backend_accepts_the_option(model_dir):
+    """`backend: kairyu` with `options: {pd_separation: true}` in a deployment
+    YAML has to reach the constructor."""
+    from kairyu.engine.registry import create_backend
+
+    backend = create_backend(
+        "kairyu", model_path=model_dir, pd_separation=True, num_pages=64, page_size=16
+    )
+    assert backend._loop.pd_coordinator is not None
