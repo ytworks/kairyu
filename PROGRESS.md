@@ -112,6 +112,26 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-26 — [amendment] FlashInfer decode is split into a host plan and a capture-safe run
+- What: `FlashInferBackend.attend_decode` no longer derives-and-plans inline. The adapter
+  now owns `plan_decode()` (the HOST phase: device-derived indptr/indices/last_page_len
+  handed to a `use_cuda_graph=True` wrapper whose paged buffers are persistent, one
+  wrapper per (batch, max_pages) shape and never replaced) and `attend_decode()` (a bare
+  `run()` over those buffers — no `.tolist()`, no `.cpu()`, no `plan()`). Inside a capture
+  the adapter refuses to plan and refuses to run unplanned; eagerly it still plans lazily,
+  now once per step instead of once per layer. Gated by a real `torch.cuda.CUDAGraph`
+  capture on the 8× RTX PRO 6000 host whose replay reflects an in-place page-table/seq-len
+  change after the step is re-planned, plus a CPU gate that forbids host synchronization
+  inside the capture region.
+- Why: the first cut of PR #141 claimed the m17 D1 tensor contract but converted the page
+  table and lengths with `.tolist()`/`.cpu()` on every layer, so capture died with
+  `cudaErrorStreamCaptureInvalidated` (reproduced on hardware) and the path was eager-only.
+  FlashInfer's `plan()` "cannot be used in Cuda Graph" by its own documentation — it builds
+  the split-KV schedule on the CPU — so the honest decomposition is plan-outside /
+  run-inside, which is what the wrapper's cudagraph buffers exist for.
+- Refs: PR #141 review [P1]; m17 D1, m13 D4; `kairyu/engine/core/attention/flashinfer_gpu.py`,
+  `tests/unit/test_attention_backend.py`, `tests/gpu/test_flashinfer_tensor_decode.py`.
+
 ### 2026-07-25 — [amendment] Review remediation across the Fugu bench alignment PRs
 - What: Addressed the review findings on the nine bench PRs. Highlights: pinned revisions
   are now passed to every fetch (they were recorded but unused, so the cache and run

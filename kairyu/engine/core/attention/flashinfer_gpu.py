@@ -9,12 +9,18 @@ tests enforce every one of them):
 - prefill ``plan()`` takes ``head_dim_qk`` (NOT ``head_dim`` — that spelling
   is decode-wrapper-only);
 - ``q_data_type``/``kv_data_type`` are passed explicitly (defaults are fp16);
-- indptr/indices/last_page_len are int32 tensors — indptr and last_page_len on
-  HOST, indices on the device;
+- indptr/indices/last_page_len are int32 tensors — for the list paths indptr
+  and last_page_len are built on the HOST and indices on the device; the tensor
+  decode path derives all three on the DEVICE (``plan()`` accepts that and does
+  its own host copy internally);
 - ``causal=True`` is bottom-right aligned: correct iff
   ``chunk_start + T == seq_len`` (asserted; every call site satisfies it);
 - the plan is cached per (page_table, seq_len, chunk_start, T) so layer 0
-  plans and layers 1..N-1 just run.
+  plans and layers 1..N-1 just run;
+- ``plan()`` CANNOT run inside a CUDA graph (FlashInfer's own docstring says
+  so, and it copies ``indptr`` to the host to build the split-KV schedule).
+  The capture-safe unit is therefore ``run()`` alone, over the persistent
+  device buffers a ``use_cuda_graph=True`` wrapper owns — see ``plan_decode``.
 
 This module is coverage-omitted (``*_gpu.py``); its LOGIC is still CPU-tested
 via the injected fake module.
@@ -27,6 +33,15 @@ import torch
 from kairyu.engine.core.kv_pool import PagedKVPool
 
 _WORKSPACE_BYTES = 128 * 1024 * 1024
+
+
+def _is_capturing() -> bool:
+    """True while the current stream is capturing a CUDA graph.
+
+    Returns False (without creating a CUDA context) on CPU boxes, so the
+    capture guards below are free in the eager and CPU-test paths.
+    """
+    return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
 
 
 class FlashInferBackend:
@@ -44,11 +59,20 @@ class FlashInferBackend:
         decode_workspace = torch.zeros(
             _WORKSPACE_BYTES, dtype=torch.uint8, device=device
         )
+        self._decode_workspace = decode_workspace
         self._decode = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             decode_workspace, kv_layout="NHD", use_tensor_cores=True
         )
         self._plan_key: tuple | None = None
         self._planned_decode = False
+        # tensor decode path: one cudagraph-mode wrapper per (batch, pages)
+        # shape. Never replaced once built — a captured graph holds pointers
+        # into ITS buffers, so swapping the wrapper would silently make every
+        # later replay read a dead plan.
+        self._graph_decode: dict[tuple[int, int], object] = {}
+        self._decode_tensor_wrapper: object | None = None
+        self._decode_tensor_key: tuple | None = None
+        self._decode_tensor_layers: set[int] = set()
 
     def _paged_arrays(
         self, page_table: list[int], seq_len: int, page_size: int
@@ -159,6 +183,120 @@ class FlashInferBackend:
         out = wrapper.run(query, paged_kv)  # [T, H, D]
         return out.reshape(query.shape[0], -1)
 
+    def _graph_decode_wrapper(self, batch_size: int, max_pages: int) -> object:
+        """The ``use_cuda_graph=True`` decode wrapper for this input SHAPE.
+
+        cudagraph mode is what gives the plan somewhere PERSISTENT to live:
+        without it ``plan()`` rebinds ``_paged_kv_*_buf`` to freshly allocated
+        tensors, so a captured ``run()`` would keep reading the buffers that
+        existed at capture time. Batch size is fixed per wrapper (FlashInfer
+        requires it), and the indices buffer is sized for the widest page table
+        the shape can produce, so re-planning never has to grow it.
+        """
+        shape = (batch_size, max_pages)
+        wrapper = self._graph_decode.get(shape)
+        if wrapper is not None:
+            return wrapper
+        indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=self._device)
+        indices = torch.zeros(
+            max(batch_size * max_pages, 1), dtype=torch.int32, device=self._device
+        )
+        last_page_len = torch.ones(batch_size, dtype=torch.int32, device=self._device)
+        wrapper = self._flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+            self._decode_workspace,
+            kv_layout="NHD",
+            use_cuda_graph=True,
+            use_tensor_cores=True,
+            paged_kv_indptr_buffer=indptr,
+            paged_kv_indices_buffer=indices,
+            paged_kv_last_page_len_buffer=last_page_len,
+        )
+        self._graph_decode[shape] = wrapper
+        return wrapper
+
+    @staticmethod
+    def _decode_shape_key(
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,
+        num_qo_heads: int,
+        q_dtype: torch.dtype,
+    ) -> tuple:
+        """Identity of a plan, from METADATA only — shapes and dtypes are host
+        attributes, so comparing them costs no synchronization."""
+        return (
+            int(page_tables.shape[0]),
+            int(page_tables.shape[1]),
+            num_qo_heads,
+            kv_pool.num_kv_heads,
+            kv_pool.head_dim,
+            kv_pool.page_size,
+            q_dtype,
+            kv_pool.k.dtype,
+        )
+
+    def plan_decode(
+        self,
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,  # [B, P] int
+        seq_lens: torch.Tensor,  # [B] int
+        *,
+        num_qo_heads: int,
+        q_dtype: torch.dtype,
+    ) -> None:
+        """HOST phase of the tensor decode path — run it ONCE PER STEP, and
+        never inside a CUDA graph.
+
+        FlashInfer's ``plan()`` builds the split-KV schedule on the CPU (it
+        copies ``indptr`` to the host itself) and its docs state outright that
+        it "cannot be used in Cuda Graph". That is a kernel-API limit, not a
+        choice: the capture-safe decomposition is plan-outside / run-inside,
+        which is exactly what the ``use_cuda_graph`` buffers exist for. Calling
+        this before each replay refreshes the schedule and the device-side
+        indptr/indices/last_page_len the captured ``run()`` already points at,
+        so the graph attends over the CURRENT step's pages.
+
+        The paged arrays themselves are derived on DEVICE from the page-table
+        and length tensors: no Python list and no D2H copy in this adapter.
+        """
+        if _is_capturing():
+            raise RuntimeError(
+                "FlashInfer plan() cannot run inside a CUDA graph; call "
+                "plan_decode() once per decode step BEFORE capture/replay"
+            )
+        page_size = kv_pool.page_size
+        pages_per_row = torch.div(
+            seq_lens + page_size - 1, page_size, rounding_mode="floor"
+        ).to(torch.int32)
+        indptr = torch.zeros(
+            pages_per_row.shape[0] + 1, dtype=torch.int32, device=pages_per_row.device
+        )
+        indptr[1:] = torch.cumsum(pages_per_row, dim=0)
+        # only the pages each row actually uses, concatenated in row order
+        span = torch.arange(page_tables.shape[1], device=page_tables.device)
+        used = span[None, :] < pages_per_row[:, None]
+        indices = page_tables[used].to(torch.int32)
+        last_page_len = ((seq_lens - 1) % page_size + 1).to(torch.int32)
+
+        wrapper = self._graph_decode_wrapper(
+            int(page_tables.shape[0]), int(page_tables.shape[1])
+        )
+        wrapper.plan(
+            indptr,
+            indices,
+            last_page_len,
+            num_qo_heads,
+            kv_pool.num_kv_heads,
+            kv_pool.head_dim,
+            page_size,
+            q_data_type=q_dtype,
+            kv_data_type=kv_pool.k.dtype,
+        )
+        self._decode_tensor_wrapper = wrapper
+        self._decode_tensor_key = self._decode_shape_key(
+            kv_pool, page_tables, num_qo_heads, q_dtype
+        )
+        self._decode_tensor_layers = set()
+
     def attend_decode(
         self,
         query: torch.Tensor,  # [B, heads, head_dim]
@@ -169,48 +307,42 @@ class FlashInferBackend:
     ) -> torch.Tensor:
         """Tensor-input decode, the same contract the torch backend implements.
 
-        The paged arrays FlashInfer plans over are derived on DEVICE from the
-        page-table and length tensors, so the caller never has to hand over
-        Python lists. ``plan()`` itself still runs on the host — capturing this
-        whole call in a CUDA graph needs FlashInfer's ``use_cuda_graph``
-        wrappers with pinned indptr/indices buffers, which is a separate step;
-        eagerly, this is a drop-in for ``TorchAttentionBackend.attend_decode``.
+        This call is the CAPTURE-SAFE half: it is one ``run()`` over buffers
+        that already hold the plan — no ``.tolist()``, no ``.cpu()``, no
+        ``plan()``, nothing that synchronizes with the host. Inside a capture
+        the step's ``plan_decode`` must therefore already have happened, and if
+        it has not this raises instead of silently baking capture-time pages
+        into the graph.
+
+        Eagerly nobody has to know that: the plan is refreshed lazily, once per
+        step (detected by a layer being revisited), so this stays a drop-in for
+        ``TorchAttentionBackend.attend_decode``.
         """
-        page_size = kv_pool.page_size
-        pages_per_row = torch.div(
-            seq_lens + page_size - 1, page_size, rounding_mode="floor"
-        ).to(torch.int32)
-        offsets = torch.zeros(
-            pages_per_row.shape[0] + 1, dtype=torch.int32, device=pages_per_row.device
+        key = self._decode_shape_key(
+            kv_pool, page_tables, int(query.shape[1]), query.dtype
         )
-        offsets[1:] = torch.cumsum(pages_per_row, dim=0)
-        # only the pages each row actually uses, concatenated in row order
-        span = torch.arange(page_tables.shape[1], device=page_tables.device)
-        used = span[None, :] < pages_per_row[:, None]
-        indices = page_tables[used].to(torch.int32)
-        last_page_len = ((seq_lens - 1) % page_size + 1).to(torch.int32)
-
-        key = (
-            "decode_tensors",
-            tuple(indices.tolist()),
-            tuple(seq_lens.tolist()),
-        )
-        if key != self._plan_key or not self._planned_decode:
-            self._decode.plan(
-                offsets.cpu(),
-                indices,
-                last_page_len.cpu(),
-                query.shape[1],
-                kv_pool.num_kv_heads,
-                kv_pool.head_dim,
-                page_size,
-                q_data_type=query.dtype,
-                kv_data_type=kv_pool.k.dtype,
+        if _is_capturing():
+            if self._decode_tensor_key != key:
+                raise RuntimeError(
+                    "FlashInfer decode has no live plan for this shape and "
+                    "plan() cannot run inside a CUDA graph: call plan_decode() "
+                    "for this step before capturing/replaying the graph"
+                )
+        elif self._decode_tensor_key != key or layer in self._decode_tensor_layers:
+            # a repeated layer means a NEW step over the same buffers, whose
+            # contents this adapter must not read to find out (that is the host
+            # sync); re-planning is both correct and once-per-step cheap
+            self.plan_decode(
+                kv_pool,
+                page_tables,
+                seq_lens,
+                num_qo_heads=int(query.shape[1]),
+                q_dtype=query.dtype,
             )
-            self._plan_key = key
-            self._planned_decode = True
-
-        out = self._decode.run(query, (kv_pool.k[layer], kv_pool.v[layer]))
+        self._decode_tensor_layers.add(layer)
+        out = self._decode_tensor_wrapper.run(  # type: ignore[union-attr]
+            query, (kv_pool.k[layer], kv_pool.v[layer])
+        )
         return out.reshape(query.shape[0], -1)
 
     def attend_batched(
