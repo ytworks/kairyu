@@ -232,3 +232,66 @@ def test_a_cache_from_another_tokenizer_serialization_is_rejected(tmp_path):
     )
     with pytest.raises(SystemExit, match="tokenizer_files_sha256"):
         parity_hf._load_reference(path, _provenance())
+
+
+@pytest.fixture(scope="module")
+def two_checkpoints(tmp_path_factory):
+    """Same architecture and config, different weights, size and mtime preserved.
+
+    Review [P2] on #131: hashing name/size/mtime accepts exactly this swap as the
+    same checkpoint, while claiming to pin the actual bytes.
+    """
+    import os
+    import shutil
+
+    import torch
+
+    transformers = pytest.importorskip("transformers")
+
+    config = transformers.LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+        num_attention_heads=2, num_key_value_heads=1, max_position_embeddings=64,
+    )
+    root = tmp_path_factory.mktemp("fingerprint")
+    first, second = root / "a", root / "b"
+
+    torch.manual_seed(1)
+    transformers.LlamaForCausalLM(config).to(torch.float32).eval().save_pretrained(
+        first, safe_serialization=True
+    )
+    tokenizer = transformers.AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.save_pretrained(first)
+    shutil.copytree(first, second)
+
+    original = (second / "model.safetensors").stat()
+    torch.manual_seed(2)
+    transformers.LlamaForCausalLM(config).to(torch.float32).eval().save_pretrained(
+        second, safe_serialization=True
+    )
+    os.utime(second / "model.safetensors", (original.st_atime, original.st_mtime))
+    return str(first), str(second)
+
+
+def test_different_weights_are_not_the_same_checkpoint(two_checkpoints):
+    from bench.parity_hf import _provenance
+
+    first, second = two_checkpoints
+    a, b = _provenance(first, ["hello"], 1), _provenance(second, ["hello"], 1)
+
+    # the architecture is identical, so config alone cannot tell them apart
+    assert a["checkpoint_config_sha256"] == b["checkpoint_config_sha256"]
+    # nor can size/mtime — they were deliberately preserved
+    import pathlib
+
+    stats = [pathlib.Path(p, "model.safetensors").stat() for p in (first, second)]
+    assert stats[0].st_size == stats[1].st_size
+    assert int(stats[0].st_mtime) == int(stats[1].st_mtime)
+    # the weight fingerprint must still separate them
+    assert a["checkpoint_weights_sha256"] != b["checkpoint_weights_sha256"]
+
+
+def test_the_same_checkpoint_fingerprints_stably(two_checkpoints):
+    from bench.parity_hf import _provenance
+
+    first, _second = two_checkpoints
+    assert _provenance(first, ["hello"], 1) == _provenance(first, ["hello"], 1)

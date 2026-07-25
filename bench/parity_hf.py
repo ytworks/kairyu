@@ -84,23 +84,38 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
 
     root = Path(model_path)
     # config.json alone does NOT identify a checkpoint: a fine-tune, or any other
-    # weights with the same architecture, hashes identically (review [P1] on
-    # #131). Weight file names, sizes and mtimes pin the actual bytes without
-    # reading 60 GB; the index file pins the shard map where one exists.
+    # weights with the same architecture, hashes identically. Neither do names,
+    # sizes and second-precision mtimes — a swap preserving those reads as the
+    # same checkpoint, which is what the first attempt did while claiming to pin
+    # "the actual bytes" (review [P2] on #131).
+    #
+    # safetensors puts a JSON header at the front of every shard listing each
+    # tensor's name, dtype, shape and byte range. Hashing the headers plus a
+    # sampled window of the DATA identifies the contents without reading 60 GB:
+    # different weights differ in the sampled bytes with overwhelming likelihood,
+    # and any shape/dtype/layout change shows up in the header alone.
     weight_files = sorted(
         list(root.glob("*.safetensors")) + list(root.glob("*.safetensors.index.json"))
     )
     if not weight_files:
         raise SystemExit(f"{model_path} has no safetensors weights to fingerprint")
-    weight_id = hashlib.sha256(
-        json.dumps(
-            [
-                [f.name, f.stat().st_size, int(f.stat().st_mtime)]
-                for f in weight_files
-            ],
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()[:16]
+    digest = hashlib.sha256()
+    for path in weight_files:
+        digest.update(path.name.encode())
+        with path.open("rb") as handle:
+            if path.suffix == ".json":
+                digest.update(handle.read())
+                continue
+            header_length = int.from_bytes(handle.read(8), "little")
+            digest.update(handle.read(header_length))  # full tensor manifest
+            size = path.stat().st_size
+            # four windows through the payload: a targeted edit anywhere in a
+            # shard has to miss all of them to go unnoticed
+            for fraction in (0.0, 0.33, 0.66, 0.99):
+                offset = 8 + header_length + int((size - 8 - header_length) * fraction)
+                handle.seek(min(offset, max(size - 4096, 0)))
+                digest.update(handle.read(4096))
+    weight_id = digest.hexdigest()[:16]
     config_path = root / "config.json"
     checkpoint = hashlib.sha256(config_path.read_bytes()).hexdigest()[:16]
     # the tokenizer's SERIALIZATION, not just its vocab: normalizer and
@@ -124,7 +139,7 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
     return {
         "schema": _REFERENCE_SCHEMA,
         "checkpoint_config_sha256": checkpoint,
-        "checkpoint_weights_sha256": weight_id,
+        "checkpoint_weights_sha256": weight_id,  # headers + sampled data windows
         "tokenizer_files_sha256": tokenizer_id,
         "tokenizer_vocab_sha256": vocab_id,
         "prompt_token_ids_sha256": prompt_hash,
