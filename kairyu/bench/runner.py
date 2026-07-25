@@ -32,7 +32,8 @@ from kairyu.bench.store import ResultStore
 from kairyu.bench.types import SMOKE_LIMIT, BenchConfig, PairResult
 
 _FINGERPRINT_EXCLUSIONS = frozenset(
-    {"run_id", "results_dir", "cache_dir", "rerun", "download"}
+    # location, resume and display controls: none of them change a score
+    {"run_id", "results_dir", "cache_dir", "rerun", "download", "progress"}
 )
 
 
@@ -112,10 +113,22 @@ def _run_fingerprint(identity: dict) -> str:
 
 
 class SuiteRunner:
-    def __init__(self, config: BenchConfig, *, http_factory=None, probe_docker=None) -> None:
+    def __init__(
+        self,
+        config: BenchConfig,
+        *,
+        http_factory=None,
+        probe_docker=None,
+        progress=None,
+    ) -> None:
         self.config = config
         self._http_factory = http_factory or (lambda: httpx.AsyncClient())
         self._probe_docker = probe_docker
+        if progress is None:
+            from kairyu.bench.progress import make_reporter
+
+            progress = make_reporter(enabled=config.progress)
+        self._progress = progress
 
     def _build_context(self, cache: BenchCache) -> RunContext:
         config = self.config
@@ -145,6 +158,7 @@ class SuiteRunner:
             offline_fixtures=config.offline_fixtures,
             smoke=config.smoke,
             docker=docker,
+            progress=self._progress,
             exec_semaphore=asyncio.Semaphore(max(1, (os.cpu_count() or 4) - 1)),
         )
 
@@ -204,6 +218,7 @@ class SuiteRunner:
 
         targets = [target.label() for target in config.targets]
         pairs: list[PairResult] = []
+        self._progress.suite_start(len(adapters) * len(config.targets))
         for adapter in adapters:
             for target in config.targets:
                 label = target.label()
@@ -224,9 +239,18 @@ class SuiteRunner:
                     )
                     if existing is not None and existing.status != "failed":
                         print(f"[cached] {adapter.info.name} × {label}: {existing.status}")
+                        self._progress.pair_start(adapter.info.name, label)
+                        self._progress.pair_done(
+                            existing.status, existing.score, cached=True
+                        )
                         pairs.append(existing)
                         continue
                 print(f"[run] {adapter.info.name} × {label} ...")
+                self._progress.pair_start(
+                    adapter.info.name,
+                    label,
+                    note="agentic harness" if adapter.info.agentic else "",
+                )
                 if dataset_identity_changed:
                     result = skipped_pair(
                         adapter.info.name,
@@ -252,8 +276,10 @@ class SuiteRunner:
                 store.save_pair(result)
                 score = f"{result.score * 100:.1f}" if result.score is not None else "n/a"
                 print(f"       -> {result.status} (score={score})")
+                self._progress.pair_done(result.status, result.score)
                 pairs.append(result)
 
+        self._progress.close()
         scoreboard = build_scoreboard(
             run_id=run_id,
             suite=config.suite,

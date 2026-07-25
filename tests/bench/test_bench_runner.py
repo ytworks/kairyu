@@ -24,6 +24,7 @@ _FINGERPRINT_EXCLUSIONS = {
     "cache_dir",
     "rerun",
     "download",
+    "progress",
 }
 
 

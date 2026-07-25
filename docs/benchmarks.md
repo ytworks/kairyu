@@ -99,6 +99,31 @@ the Long Context Reasoning slot is a **LongBench v2 substitute** (Fugu's own
 suite is unpublished; numbers are not directly comparable), and LiveCodeBench
 Pro is scored by the local sandbox, not the official judge.
 
+## Live progress
+
+A full run is thousands of judged items across eleven slots and can take hours,
+so the runner reports what it is doing:
+
+- **On a TTY** — a `tqdm` bar for the suite (pairs) plus one for the current
+  benchmark×target (items). `tqdm` comes with `kairyu[bench]`; without it the
+  run falls back to log lines rather than failing to import.
+- **In a log** (CI, `docker compose logs`, nohup) — one self-contained line per
+  event plus a throttled item counter, so a 2,500-item slot emits a handful of
+  lines instead of 2,500 and no line depends on the previous one being visible:
+
+  ```
+  [bench] 22 benchmark×target pairs to run
+  [bench 7/22] hle × qwen3-32b
+  [bench 7/22] hle × qwen3-32b: 2500 items
+  [bench 7/22] hle × qwen3-32b: 412/2500 items (15s)
+  [bench 7/22] hle × qwen3-32b: done — partial (score=8.4)
+  ```
+
+- `--no-progress` disables it. The reporter is a pure observer: `progress` is
+  excluded from the run fingerprint, and scoreboard/pair evidence is identical
+  either way. Agentic slots have no item count until their harness returns, so
+  they are labelled `agentic harness` and show an indeterminate bar.
+
 ## Degradation model (why one command always completes)
 
 Every unmet precondition becomes data, never a crash. Per (benchmark, target)
@@ -129,8 +154,8 @@ SHA-256 fingerprint in `run.json`. The identity contains:
   and vision capability; `judge` likewise includes its endpoint/model,
   API-key environment-variable name, concurrency, and retry limit.
 
-Exactly five execution or location controls are excluded: `run_id`,
-`results_dir`, `cache_dir`, `rerun`, and `download`. API-key *environment
+Exactly six execution, location or display controls are excluded: `run_id`,
+`results_dir`, `cache_dir`, `rerun`, `download`, and `progress`. API-key *environment
 variable names* remain part of the endpoint identity, but resolved secret
 values are never read into or hashed by the fingerprint. Environment metadata
 such as the timestamp, git commit, Python version, and kairyu version remains

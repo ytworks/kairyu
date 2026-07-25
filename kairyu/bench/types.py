@@ -71,6 +71,7 @@ class BenchConfig(BaseModel):
     run_id: str | None = None  # reuse an id to resume
     rerun: bool = False  # ignore existing pair results
     download: bool = True  # auto-download missing datasets before running
+    progress: bool = True  # live per-slot progress (bars on a TTY, lines in logs)
 
 
 SMOKE_LIMIT = 20

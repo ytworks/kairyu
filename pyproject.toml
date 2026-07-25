@@ -51,6 +51,7 @@ bench = [
     "huggingface_hub>=0.26",
     "pillow>=10",
     "h5py>=3.11",  # SciCode golden data (test_data.h5)
+    "tqdm>=4.66",  # interactive progress bars; absence degrades to log lines
 ]
 # Official agentic harnesses (SWE-Bench Pro, Terminal-Bench 2.1); need docker.
 # The tau3/tau2 harness is not on PyPI — see docs/benchmarks.md.
