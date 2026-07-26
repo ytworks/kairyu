@@ -135,6 +135,42 @@ async def test_livecodebench_mock_gateway_scores_zero_not_crash(tmp_path, http_f
         assert pair.score == 0.0  # mock text has no code block
 
 
+async def test_livecodebench_empty_completions_are_failed_not_scored_zero(tmp_path):
+    """No generated answer is missing evidence, not an incorrect solution."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    config = make_config(tmp_path, models=("m",), only=("livecodebench",))
+    runner = SuiteRunner(
+        config,
+        http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        probe_docker=lambda: (False, "t"),
+    )
+    assert await runner.run() == 1
+
+    pair = ResultStore(tmp_path / "results", "test-run").load_pair("livecodebench", "m")
+    assert pair.status == "failed"
+    assert pair.score is None
+    assert pair.metrics["n_scored"] == 0
+    assert pair.metrics["n_failed"] == pair.metrics["n_total"]
+    assert pair.items
+    assert all(item.status == "failed" for item in pair.items)
+    assert all("empty completion" in (item.error or "") for item in pair.items)
+    assert all(item.latency_s is not None for item in pair.items)
+
+
 def _scicode_ctx(tmp_path) -> RunContext:
     return RunContext(
         cache=BenchCache(tmp_path / "cache"),
