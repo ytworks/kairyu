@@ -51,6 +51,26 @@ scheduler hides CPU work under the GPU step; we adopt the same structure:
 - Invariant to test: engine step loop never blocks on `.item()`/`.cpu()` in the hot path
   (asserted by a torch profiler check in the perf test suite).
 
+Implementation status (amended 2026-07-26, PR #143 review; the prose above is the target,
+this is what exists). The scheduler half is done: the schedule-ahead pipeline runs, decode
+chunks carry an explicit `position`, and `PagedModelRunner` retains its uncommitted tokens,
+so planning N+1 never reads a committed output. The *slot* half is done as a slot: the
+decode inputs live in persistent device tensors allocated once and written in place
+(`PagedModelRunner._decode_input_slots`), used identically by the batched and the
+single-request decode path.
+
+What is NOT done, and cannot be while sampling is host-side: the **device-to-device** fill
+and the `.item()`/`.cpu()` invariant. The sampler decides on the CPU because m8 D2 pins
+reproducibility (including spec ≡ greedy) to the CPU RNG stream, so it pulls the logits row
+to host and the chosen id exists only as a Python int — there is nothing on the device to
+copy from, and manufacturing a scalar device tensor per row is the same round trip B times
+over. The ids therefore reach the slots as one batched H2D copy per step. Closing this
+requires moving the sampling decision (RNG, penalties, grammar mask, stop conditions) onto
+the device, which redefines what the m8 D2 pins mean; that is a separate decision and is not
+scheduled here. A second, independent violation of the same invariant lives in
+`models/attention.py::forward_decode_batch`, which reads `int(positions[i])` per row per
+layer.
+
 ### 2.3 KV management: Radix tree over paged blocks
 
 - Fixed-size pages (16 tokens default, FlashInfer paged-KV layout).
@@ -142,6 +162,9 @@ committed alongside results (`bench/results/<date>-<gpu>.json`).
   and this mechanism are the same technique — the GPU runner owns a future-token device
   buffer indexed by (request, position). Restated invariant: the *scheduling* thread never
   blocks on device sync; the worker thread syncs once per step to produce sampled ids.
+  (2026-07-26: that restatement is the honest one and is what holds — the worker's
+  once-per-step sync is the CPU sampling decision. §2.2's stronger "no host sync at all"
+  invariant does not hold; see the status note in §2.2.)
 - FP8 accuracy drift on Llama-3.1-8B: measured via logprob tolerance gate before any perf
   claim. FP8 **KV-cache** dtype is a separate decision from W8A8 weights (changes
   FlashInfer kernel selection) — decide at GPU-phase start; default bf16 KV.

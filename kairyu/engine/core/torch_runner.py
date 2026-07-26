@@ -119,7 +119,7 @@ class TorchPagedRunner:
         if self._sampler is None:
             return SampledToken(int(torch.argmax(logits).item()))
         return self._sampler.sample(
-            state.request.request_id,
+            state.request.sampling_identity,
             state.request.sampling,
             position,
             logits,

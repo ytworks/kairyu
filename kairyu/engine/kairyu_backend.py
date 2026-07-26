@@ -18,8 +18,14 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
+from kairyu.engine.backend import (
+    EngineReadiness,
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+)
 from kairyu.engine.core.comm import FakeCommunicator
+from kairyu.engine.core.pd_loop import PDLoopAdapter
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import SampledToken, mix_seed
 from kairyu.engine.core.scheduler import ScheduledChunk, Scheduler
@@ -61,7 +67,8 @@ def build_engine_loop(
     speculative: str | None = None,
     speculative_tokens: int = 4,
     model_path: str | None = None,
-) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
+    pd_separation: bool = False,
+) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
     ``model_path`` loads a real checkpoint (m12 D5): DenseDecoder +
@@ -73,10 +80,26 @@ def build_engine_loop(
     """
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
-    if speculative is not None and tensor_parallel_size > 1:
-        raise ValueError("speculative decoding with tensor_parallel_size > 1 is not supported")
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
+    if pd_separation:
+        if model_path is None:
+            raise ValueError("pd_separation needs a model_path")
+        if tensor_parallel_size > 1:
+            # the coordinator owns two engines; sharding each of them is m6
+            # stage 5.3 territory, not something to half-do here
+            raise ValueError(
+                "pd_separation with tensor_parallel_size > 1 is not supported"
+            )
+        if speculative is not None:
+            raise ValueError("pd_separation with speculative decoding is not supported")
+        return _build_pd_loop(
+            model_path=model_path,
+            num_pages=num_pages,
+            page_size=page_size,
+            max_num_batched_tokens=max_num_batched_tokens,
+            tokenizer=tokenizer,
+        )
 
     if model_path is not None and tensor_parallel_size > 1:
         return _build_dist_tp_loop(
@@ -86,6 +109,16 @@ def build_engine_loop(
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
             tokenizer=tokenizer,
+            speculative=speculative,
+            speculative_tokens=speculative_tokens,
+        )
+    if speculative is not None and tensor_parallel_size > 1:
+        # the toy/FakeCommunicator TP path shares ONE runner object across every
+        # rank, so a SpeculativeRunner over it would draft once and score
+        # against itself; the real multi-process path above has no such problem
+        raise ValueError(
+            "speculative decoding with tensor_parallel_size > 1 requires a real "
+            "model (model_path); the in-process TP path shares one runner"
         )
 
     default_eos: int | None = None
@@ -169,6 +202,55 @@ def build_engine_loop(
     return loop, cache, scheduler
 
 
+def _build_pd_loop(
+    *,
+    model_path: str,
+    num_pages: int,
+    page_size: int,
+    max_num_batched_tokens: int,
+    tokenizer: str | Tokenizer | None,
+) -> tuple[EngineLoop, RadixKVCache, PDLoopAdapter]:
+    """Serve through a prefill/decode pair (m18 D3, G2 stage 5.3).
+
+    `PDCoordinator` had no serving entry point: `pd_factory` builds it, but a
+    deployment could only reach it from Python. This is the `backend: kairyu`
+    option that turns it on, so `pd_separation: true` in a deployment YAML is a
+    real topology rather than a config surface m2 §2.4 reserved and never wired.
+
+    The coordinator owns two schedulers and two runners; `PDLoopAdapter` is what
+    makes that one scheduler and one runner from the loop's side — submissions
+    enter at prefill, each step transfers the KV before planning decode. Handing
+    the loop a bare coordinator would admit requests straight into the decode
+    scheduler, with no prompt KV and no `execute` to call.
+
+    The returned cache and scheduler are the ones the loop actually drives (the
+    `build_engine_loop` contract): decode's cache, and the adapter itself.
+    """
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+    from kairyu.models.loader import load_generation_defaults
+
+    resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
+    coordinator = build_pd_coordinator(
+        model_path=model_path,
+        num_pages=num_pages,
+        page_size=page_size,
+        max_num_batched_tokens=max_num_batched_tokens,
+        tokenizer=resolved,
+    )
+    generation = load_generation_defaults(model_path)
+    adapter = PDLoopAdapter(coordinator)
+    loop = EngineLoop(
+        resolved,
+        adapter,
+        adapter,
+        default_eos_token_id=generation.eos_token_id,
+        default_stop_token_ids=generation.stop_token_ids,
+    )
+    loop.tp_launcher = None
+    loop.pd_coordinator = coordinator
+    return loop, adapter.kv_cache, adapter
+
+
 def _build_dist_tp_loop(
     *,
     model_path: str,
@@ -177,6 +259,8 @@ def _build_dist_tp_loop(
     page_size: int,
     max_num_batched_tokens: int,
     tokenizer: str | Tokenizer | None,
+    speculative: str | None = None,
+    speculative_tokens: int = 4,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -204,12 +288,23 @@ def _build_dist_tp_loop(
     generation = load_generation_defaults(model_path)
     cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(
-        cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
+        cache,
+        max_num_batched_tokens=max_num_batched_tokens,
+        page_size=page_size,
+        speculative_tokens=speculative_tokens if speculative else 0,
     )
+    # SpeculativeRunner composes over any ModelRunner, and DistTPModelRunner is
+    # one: each scoring pass it issues is broadcast like any other step, so every
+    # rank replays the identical draft and the m5 D1 agreement invariant holds
+    # unchanged. A rejected draft shortens the overlay's outputs, which StateSync
+    # already handles — a shrinking output list re-sends the full snapshot.
+    active: object = launcher.runner
+    if speculative == "ngram":
+        active = SpeculativeRunner(active)
     loop = EngineLoop(
         resolved,
         scheduler,
-        launcher.runner,
+        active,
         default_eos_token_id=generation.eos_token_id,
         default_stop_token_ids=generation.stop_token_ids,
     )
@@ -229,6 +324,7 @@ class KairyuBackend:
         speculative: str | None = None,
         speculative_tokens: int = 4,
         model_path: str | None = None,
+        pd_separation: bool = False,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
@@ -241,10 +337,12 @@ class KairyuBackend:
             speculative=speculative,
             speculative_tokens=speculative_tokens,
             model_path=model_path,
+            pd_separation=pd_separation,
         )
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
+        self._engine_error: Exception | None = None  # last step failure, for readiness()
 
     def validate_request(self, request: GenerationRequest) -> None:
         self._loop.tokenize_prompt(request.prompt)
@@ -254,13 +352,24 @@ class KairyuBackend:
         try:
             while self._loop.has_work():
                 updates = await asyncio.to_thread(self._loop.step)
+                # a completed step is the only proof the engine still runs, so it
+                # is also what clears a previous failure (transient faults must
+                # not strand the node out of rotation forever)
+                self._engine_error = None
                 for request_id, update in updates:
                     queue = self._queues.get(request_id)
                     if queue is not None:
                         queue.put_nowait(update)
         except Exception as error:
+            # recorded FIRST: purge itself runs through the same broken transport
+            # that just failed, and when it raises too the original error escapes
+            # as an unretrieved task exception and nothing observes the fault
+            self._engine_error = error
             request_ids = tuple(self._queues)
-            await asyncio.to_thread(self._loop.purge, request_ids)
+            try:
+                await asyncio.to_thread(self._loop.purge, request_ids)
+            except Exception:  # noqa: BLE001 - already failing; report the first cause
+                pass
             failure = StreamUpdate((), "", True, None, error)
             for request_id in request_ids:
                 queue = self._queues.get(request_id)
@@ -271,6 +380,38 @@ class KairyuBackend:
             self._pump_task = None
             if restart_after_exit:
                 self._ensure_pump()
+
+    def readiness(self) -> EngineReadiness:
+        """Cheap liveness for `/readyz`: KNOWN-FATAL state only, no probe.
+
+        Dead TP ranks are the one condition this can assert. The group cannot
+        complete a single collective without them and nothing in-process can
+        bring them back, so the node needs replacing — `fatal` says so, and
+        `/health` turns that into a restart signal.
+
+        A step exception deliberately does NOT flip readiness. It is reported for
+        diagnosis but cannot be told apart from one bad request, and marking the
+        node unready for it is a trap: the load balancer stops sending work, so
+        the successful step that would clear the flag never arrives and the node
+        stays out of rotation until someone notices (review [P1] on #126).
+        """
+        launcher = getattr(self._loop, "tp_launcher", None)
+        if launcher is not None:
+            dead = launcher.dead_ranks()
+            if dead:
+                return EngineReadiness(
+                    False,
+                    f"tensor-parallel ranks not running: {sorted(dead)}",
+                    fatal=True,
+                )
+        return EngineReadiness(True, self._last_error_detail())
+
+    def _last_error_detail(self) -> str:
+        """Class name only — this reaches an unauthenticated endpoint, and an
+        exception's message can carry an upstream URL or a path (review [P2])."""
+        if self._engine_error is None:
+            return ""
+        return f"last step error: {type(self._engine_error).__name__}"
 
     def _ensure_pump(self) -> None:
         if not self._loop.has_work():

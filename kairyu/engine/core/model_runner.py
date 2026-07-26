@@ -10,6 +10,21 @@ written before it is read at every decode position; positions below
 ``num_cached_tokens`` are never rewritten (shared radix slots).
 Requests are processed sequentially within a step (CPU correctness first;
 cross-request batching arrives with M13/GPU).
+
+m2 §2.2 status (the "future token" technique), so the scope is stated where the
+code is rather than only in the design doc:
+
+- DONE — the decode input slots are persistent device tensors written in place
+  (`_decode_input_slots`), shared by the batched and the single-request path, so
+  no decode step allocates a device tensor and neither path is a fallback.
+- DONE (#136) — the runner keeps its uncommitted tokens, so overlap can resolve
+  a decode input one step before the scheduler commits it.
+- OPEN — filling those slots DEVICE-to-device, and §2.2's invariant that the
+  step loop never blocks on ``.item()``/``.cpu()``. Both require the sampling
+  DECISION to move onto the device; today it is host-side by design (m8 D2 pins
+  reproducibility to the CPU RNG stream), so the sampled id exists only as a
+  Python int and reaches the device by one batched H2D copy per step. The
+  batched-decode attention loop also reads ``int(positions[i])`` per row.
 """
 
 from __future__ import annotations
@@ -18,11 +33,53 @@ from collections.abc import Mapping
 
 import torch
 
+from kairyu.engine.core.attention import graph_capture_gap
 from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.models.llama import DenseDecoder
+
+
+def _tensor_decode_gap(model: DenseDecoder) -> str | None:
+    """Why this model cannot run the tensor decode contract, or None (m17 [P2]).
+
+    ``_graph_decode`` calls ``forward_decode_tensors``, which unconditionally
+    calls ``backend.attend_decode``. ``MlaAttention`` has no tensor decode form
+    at all, so an MLA model used to construct fine and then die with an
+    ``AttributeError`` on the first BATCHED decode, arbitrarily far into a run.
+
+    Presence of ``attend_decode`` is NOT the question, though (review [P1]).
+    A backend can own that method and still be uncapturable, because what
+    breaks a capture is host synchronization inside it — FlashInfer's
+    ``plan()`` copies ``indptr`` to the CPU and cannot run under capture at
+    all. Checking the method existed would have let such a backend construct
+    and then fail on the FIRST capture with a D2H ``RuntimeError``, which is
+    exactly the late failure this gate exists to prevent. So the question is
+    the declared ``GraphDecodeBackend`` capability, enforced in one place by
+    ``graph_capture_gap``.
+
+    Checked once, at construction, where the operator can still act on it.
+    """
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        return f"{type(model).__name__} exposes no model.layers to check"
+    if not callable(getattr(model, "plan_decode_tensors", None)):
+        return (
+            f"{type(model).__name__} has no plan_decode_tensors, so the step "
+            "boundary never reaches its attention backends"
+        )
+    for index, layer in enumerate(layers):
+        attention = getattr(layer, "self_attn", None)
+        if not hasattr(attention, "forward_decode_tensors"):
+            return (
+                f"layer {index}'s attention ({type(attention).__name__}) has no "
+                "forward_decode_tensors"
+            )
+        gap = graph_capture_gap(getattr(attention, "backend", None))
+        if gap is not None:
+            return f"layer {index}'s attention backend {gap}"
+    return None
 
 
 class PagedModelRunner:
@@ -32,6 +89,9 @@ class PagedModelRunner:
         pool: PagedKVPool,
         sampler: Sampler | None = None,
         cache: object | None = None,
+        graph_backend: object | None = None,
+        graph_max_batch: int = 0,
+        graph_max_pages: int = 0,
     ) -> None:
         if cache is not None:  # fail-fast sizing agreement (m12 D3)
             if pool.num_pages != cache.num_pages or pool.page_size != cache.page_size:
@@ -52,12 +112,89 @@ class PagedModelRunner:
         # and reading `outputs[position - 1]` raised IndexError. The runner
         # already produced those tokens; it just never kept them.
         #
-        # This is the HOST-SIDE half of m2 §2.2. That section specifies patching
-        # the placeholder slot device-to-device from the sampled tensor, with no
-        # host sync in the hot path; this keeps Python ints and rebuilds the
-        # input tensor each step. It makes overlap CORRECT on a real runner —
-        # which it was not — but the zero-host-sync property is still open.
+        # This is the HOST-SIDE half of m2 §2.2 (see the module docstring for what
+        # of that section is implemented and what cannot be while the sampling
+        # decision is host-side).
         self._future_tokens: dict[str, dict[int, int]] = {}
+        # The decode input slots themselves: allocated once on the device and
+        # written IN PLACE every step (`_decode_input_slots`).
+        self._decode_slots: torch.Tensor | None = None
+        self._decode_positions: torch.Tensor | None = None
+        self._slot_staging: torch.Tensor | None = None
+        self._slot_copy_done: torch.cuda.Event | None = None
+
+        # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
+        # the seam has existed since m17 with no caller, and enabling it by
+        # default would change what every deployment executes.
+        self._graph = None
+        self._graph_scratch_page: int | None = None
+        if graph_backend is not None:
+            from kairyu.engine.core.step_executor import GraphStepExecutor
+
+            if graph_max_batch < 1 or graph_max_pages < 1:
+                raise ValueError(
+                    "graph_max_batch and graph_max_pages must be >= 1 when a "
+                    f"graph backend is given (got {graph_max_batch}, {graph_max_pages})"
+                )
+            gap = _tensor_decode_gap(model)
+            if gap is not None:  # [P2]: fail here, not on the first batched decode
+                raise ValueError(
+                    f"graph decode needs the tensor decode contract but {gap}. "
+                    "A backend must declare supports_graph_capture and provide "
+                    "a plan_decode step hook (see GraphDecodeBackend) — build "
+                    "this runner without graph_backend."
+                )
+            # [P1]: the padding rows of every replay write KV somewhere. That
+            # page has to come OUT of the scheduler's allocator, so take it from
+            # the cache the scheduler allocates from — there is no way to pick a
+            # safe id without it.
+            if cache is None:
+                raise ValueError(
+                    "a graph backend needs the RadixKVCache the scheduler "
+                    "allocates from: the captured graph's padding rows write KV "
+                    "to a scratch page that must be reserved out of the "
+                    "allocator (m17 A5), and only the cache can reserve it"
+                )
+            self._graph_scratch_page = cache.reserve_scratch_page()
+            self._graph = GraphStepExecutor(
+                self._graph_decode,
+                graph_backend,
+                max_batch=graph_max_batch,
+                max_pages=graph_max_pages,
+                scratch_page=self._graph_scratch_page,
+                device=self._device,
+                plan_fn=self._plan_graph_decode,
+            )
+
+    def _plan_graph_decode(self, batch) -> None:
+        """Step-boundary host phase, run OUTSIDE the captured region ([P1]).
+
+        The executor calls this before it captures and again after every
+        copy-in, so the attention backends plan against the very buffers the
+        next ``replay()`` will read. Without it a planning backend such as
+        FlashInfer has no live plan at capture time, and every later replay
+        would attend over the pages that happened to be in the static buffers
+        when the graph was recorded.
+        """
+        self._model.plan_decode_tensors(self._pool, batch.page_tables, batch.seq_lens)
+
+    def _graph_decode(self, batch) -> torch.Tensor:
+        """The captured region: embed -> layers -> norm -> logits, tensors only."""
+        hidden = self._model.forward_decode_tensors(
+            batch.token_ids, batch.positions, self._pool,
+            batch.page_tables, batch.seq_lens,
+        )
+        return self._model.logits(hidden)
+
+    def invalidate_graphs(self) -> None:
+        """Weight swap or pool resize: every capture is stale (m17 D2)."""
+        if self._graph is not None:
+            self._graph.invalidate()
+
+    @property
+    def sampler(self) -> Sampler | None:
+        """The per-request sampling state a P-D handoff has to carry across."""
+        return self._sampler
 
     def release(self, request_id: str) -> None:
         """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
@@ -69,7 +206,7 @@ class PagedModelRunner:
         if self._sampler is None:
             return SampledToken(int(torch.argmax(logits).item()))
         return self._sampler.sample(
-            state.request.request_id,
+            state.request.sampling_identity,
             state.request.sampling,
             position,
             logits,
@@ -197,17 +334,134 @@ class PagedModelRunner:
         page_table = list(state.allocation.pages) + list(state.decode_pages)
         return input_token, absolute, page_table, cached
 
+    def _retire_decode_slots(self) -> None:
+        """Drain the in-flight staging DMA before its buffers can be dropped.
+
+        A growth replaces `_slot_staging` and the device slots wholesale, and the
+        event recorded by the last `_decode_input_slots` is the ONLY handle on the
+        transfer that may still be reading them. Overwriting `_slot_copy_done`
+        first destroys that handle: what remains is a freshly recorded event that
+        says nothing about the old DMA. Freeing pinned host memory is not
+        stream-ordered, so the source rows could go back to the allocator while
+        the copy engine is still reading them. Wait here, BEFORE anything is
+        released. Growth doubles, so this blocking wait is amortized away.
+        """
+        if self._slot_copy_done is not None:
+            self._slot_copy_done.synchronize()
+        self._slot_staging = None
+        self._slot_copy_done = None
+
+    def _allocate_decode_slots(self, size: int) -> None:
+        """(Re)allocate the persistent slots, doubling so growth is amortized."""
+        self._retire_decode_slots()
+        current = 0 if self._decode_slots is None else self._decode_slots.numel()
+        capacity = max(8, size, 2 * current)
+        self._decode_slots = torch.zeros(capacity, dtype=torch.long, device=self._device)
+        self._decode_positions = torch.zeros(capacity, dtype=torch.long, device=self._device)
+        if self._device.type == "cuda":
+            # pinned, so the H2D below is a real async DMA rather than a staged
+            # pageable copy that blocks the calling thread
+            self._slot_staging = torch.zeros(2, capacity, dtype=torch.long).pin_memory()
+            self._slot_copy_done = torch.cuda.Event()
+            self._slot_copy_done.record()
+        else:
+            self._slot_staging = None
+            self._slot_copy_done = None
+
+    def _decode_input_slots(
+        self, tokens: list[int], positions: list[int]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Write this step's decode inputs INTO the persistent device slots.
+
+        m2 §5 names this: "the GPU runner owns a future-token device buffer
+        indexed by (request, position)". The slots are allocated once and patched
+        in place, so no decode step allocates a device tensor and BOTH decode
+        paths — batched and single-request — read the same memory. Views are
+        returned, so a caller that kept last step's view sees this step's values;
+        that aliasing is the property, and `test_decode_input_slots.py` pins it.
+
+        What this does NOT do, and what m2 §2.2 asks for, is fill the slots
+        device-to-device. The sampler decides on the host by design (m8 D2 pins
+        reproducibility to the CPU RNG stream), so the chosen id exists only as a
+        Python int and one H2D copy per step is unavoidable — see the note in
+        `sampler.py`. Removing it means moving the sampling decision itself onto
+        the device. Per-row scalar copies would be the same round trip B times
+        over, so the ids are copied as one batched transfer.
+        """
+        size = len(tokens)
+        if self._decode_slots is None or self._decode_slots.numel() < size:
+            self._allocate_decode_slots(size)
+        assert self._decode_slots is not None and self._decode_positions is not None
+        host_tokens = torch.tensor(tokens, dtype=torch.long)
+        host_positions = torch.tensor(positions, dtype=torch.long)
+        if self._slot_staging is None:
+            self._decode_slots[:size].copy_(host_tokens)
+            self._decode_positions[:size].copy_(host_positions)
+        else:
+            assert self._slot_copy_done is not None
+            # the previous step's DMA must have drained before its source rows are
+            # overwritten; in practice it long since has (the sampler syncs once
+            # per step), so this is a completed-event check, not a stall — but it
+            # does not DEPEND on the sampler still syncing. The other way the
+            # source rows stop being valid is a capacity growth, and that path
+            # waits on THIS event in `_retire_decode_slots` before replacing it.
+            self._slot_copy_done.synchronize()
+            self._slot_staging[0, :size].copy_(host_tokens)
+            self._slot_staging[1, :size].copy_(host_positions)
+            self._decode_slots[:size].copy_(self._slot_staging[0, :size], non_blocking=True)
+            self._decode_positions[:size].copy_(
+                self._slot_staging[1, :size], non_blocking=True
+            )
+            self._slot_copy_done.record()
+        return self._decode_slots[:size], self._decode_positions[:size]
+
     def _execute_decode(self, chunk: ScheduledChunk, state, sampled: dict) -> None:
         input_token, absolute, page_table, cached = self._decode_inputs(chunk, state)
+        # the single-request path uses the SAME slots as the batched one: a
+        # workload that drops to one request must not fall back to rebuilding a
+        # fresh device tensor every step
+        token_slot, position_slot = self._decode_input_slots([input_token], [absolute])
         hidden = self._model.forward_tokens(
-            torch.tensor([input_token], dtype=torch.long, device=self._device),
-            torch.tensor([absolute], device=self._device),
+            token_slot, position_slot,
             self._pool, page_table, seq_len=absolute + 1, write_from=cached,
         )
         logits = self._model.logits(hidden[-1])
         token = self._sample(state, logits, position=chunk.position)
         self._remember(chunk.request_id, chunk.position, token)
         sampled[chunk.request_id] = (token,)
+
+    def _graph_logits(
+        self,
+        tokens: list[int],
+        positions: list[int],
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+    ) -> torch.Tensor:
+        """Route this decode through capture/replay (m17 D1).
+
+        `build_decode_batch` pads the ragged page lists into the [B, max_pages]
+        tensor the captured kernels index; `GraphStepExecutor` falls back to
+        eager for an oversize batch or a page table wider than the static buffer, so
+        this cannot fail on shape.
+
+        The width padding uses the SAME reserved scratch page as the row padding:
+        a short row's tail entries are only ever read (and then masked off by
+        seq_lens), but pointing them at an allocatable page leaves the class of
+        bug [P1] found one indexing mistake away.
+        """
+        from kairyu.engine.core.step_executor import build_decode_batch
+
+        assert self._graph_scratch_page is not None  # set with self._graph
+        batch = build_decode_batch(
+            token_ids=tokens,
+            positions=positions,
+            page_lists=page_tables,
+            seq_lens=seq_lens,
+            max_pages=max(len(table) for table in page_tables),
+            scratch_page=self._graph_scratch_page,
+            device=self._device,
+        )
+        return self._graph.execute_decode(batch)
 
     def _execute_decode_batch(
         self, chunks: list[ScheduledChunk], states: Mapping[str, object], sampled: dict
@@ -222,12 +476,15 @@ class PagedModelRunner:
             page_tables.append(page_table)
             seq_lens.append(absolute + 1)
             write_from.append(cached)
-        hidden = self._model.forward_decode_batch(
-            torch.tensor(tokens, dtype=torch.long, device=self._device),
-            torch.tensor(positions, device=self._device),
-            self._pool, page_tables, seq_lens, write_from,
-        )
-        logits = self._model.logits(hidden)  # [B, vocab]
+        if self._graph is not None:
+            logits = self._graph_logits(tokens, positions, page_tables, seq_lens)
+        else:
+            token_slots, position_slots = self._decode_input_slots(tokens, positions)
+            hidden = self._model.forward_decode_batch(
+                token_slots, position_slots,
+                self._pool, page_tables, seq_lens, write_from,
+            )
+            logits = self._model.logits(hidden)  # [B, vocab]
         for i, chunk in enumerate(chunks):
             state = states[chunk.request_id]
             token = self._sample(state, logits[i], position=chunk.position)

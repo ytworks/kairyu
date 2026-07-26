@@ -6,11 +6,20 @@ in-flight token accounting in Scheduler: decode chunks carry an explicit
 committed (``PagedModelRunner._future_tokens``), so a snapshot one step behind
 still resolves both the decode input and the sampler's penalty history.
 
-Still OPEN (m2 §2.2): patching the last-token slot DEVICE-side from the sampled
-tensor, with no host sync in the hot path. Today's version relays Python ints
-and rebuilds the input tensor each step — correct, but not the zero-overhead
-technique that section describes. Sampled tokens are committed via update() while the
-next step is already running, so the device never waits on host bookkeeping.
+The last-token SLOT is a persistent device tensor patched in place
+(``PagedModelRunner._decode_input_slots``, batched and single-request alike), so
+no decode step allocates a device tensor. What fills it is still a host value:
+the sampling DECISION runs on CPU because the reproducibility pins (m8 D2,
+spec == greedy) are defined by the CPU RNG stream, so the chosen id exists only
+as a Python int and crosses H2D once per step.
+
+Still OPEN (m2 §2.2), and NOT closed by anything here: the device-to-device fill,
+and the invariant that the step loop never blocks on ``.item()``/``.cpu()``. Both
+follow from moving the sampling decision onto the device, which changes what
+those pins mean — a separate decision.
+
+Sampled tokens are committed via update() while the next step is already
+running, so the device never waits on host bookkeeping.
 
 The pipeline structure (schedule-ahead, bounded depth, late finish commit) is
 what this module pins with CPU tests; the GPU runner slots into the same

@@ -85,16 +85,47 @@ class TestMlaEquivalence:
 
 
 class _FakeWrapper:
-    def __init__(self, workspace, kv_layout=None, use_tensor_cores=None):
+    def __init__(
+        self,
+        workspace,
+        kv_layout=None,
+        use_tensor_cores=None,
+        use_cuda_graph=False,
+        paged_kv_indptr_buffer=None,
+        paged_kv_indices_buffer=None,
+        paged_kv_last_page_len_buffer=None,
+    ):
         assert workspace.dtype == torch.uint8 and workspace.numel() >= 1
         self.workspace = workspace
         self.kv_layout = kv_layout
         self.use_tensor_cores = use_tensor_cores
+        self.use_cuda_graph = use_cuda_graph
         self.plans: list[dict] = []
         self.runs: list[tuple] = []
+        if use_cuda_graph:
+            # cudagraph mode: the wrapper OWNS these buffers for its lifetime —
+            # plan() copies into them in place and run() reads them, which is
+            # the only reason a captured run can see a later plan
+            # (flashinfer/decode.py BatchDecodeWithPagedKVCacheWrapper).
+            for buffer in (
+                paged_kv_indptr_buffer,
+                paged_kv_indices_buffer,
+                paged_kv_last_page_len_buffer,
+            ):
+                assert torch.is_tensor(buffer) and buffer.dtype == torch.int32
+            assert len(paged_kv_indptr_buffer) == len(paged_kv_last_page_len_buffer) + 1
+        self.indptr_buffer = paged_kv_indptr_buffer
+        self.indices_buffer = paged_kv_indices_buffer
+        self.last_page_len_buffer = paged_kv_last_page_len_buffer
 
     def plan(self, *args, **kwargs):
         self.plans.append({"args": args, "kwargs": kwargs})
+        if self.use_cuda_graph:
+            indptr, indices, last_page_len = args[:3]
+            assert len(indices) <= len(self.indices_buffer)
+            self.indptr_buffer.copy_(indptr)
+            self.indices_buffer[: len(indices)].copy_(indices)
+            self.last_page_len_buffer.copy_(last_page_len)
 
     def run(self, query, paged_kv):
         assert self.plans, "run() before plan() (contract violation)"
@@ -337,6 +368,218 @@ class TestFlashInferAdapterContract:
                 [6],
                 [4],
             )
+
+
+def _forbid_host_sync(monkeypatch) -> None:
+    """Make every host-synchronizing tensor read explode.
+
+    `.tolist()` / `.cpu()` / `.item()` are exactly what a CUDA graph capture
+    rejects ("Cannot copy between CPU and CUDA tensors during CUDA graph
+    capture"), so a decode that survives this is a decode a graph can capture.
+    """
+
+    def fail(name):
+        def method(self, *args, **kwargs):
+            raise AssertionError(f"host synchronization in the capture region: .{name}()")
+
+        return method
+
+    for name in ("tolist", "cpu", "item", "numpy"):
+        monkeypatch.setattr(torch.Tensor, name, fail(name))
+
+
+class TestFlashInferTensorDecode:
+    """The m17 D1 tensor contract on the kernel a GPU deployment selects.
+
+    FlashInfer splits into a HOST plan and a device run — `plan()` "cannot be
+    used in Cuda Graph" (its own docstring; it copies indptr to the CPU). So
+    `plan_decode` is the per-step host phase and `attend_decode` is the
+    capture-safe half, and these pin that the halves stay on their own side.
+    """
+
+    def _backend(self):
+        from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
+
+        return FlashInferBackend(device="cpu")
+
+    def _inputs(self, batch=2, heads=4):
+        query = torch.randn(batch, heads, 8)
+        page_tables = torch.tensor([[3, 1], [7, 6]][:batch], dtype=torch.int32)
+        seq_lens = torch.tensor([6, 5][:batch], dtype=torch.int32)
+        return query, page_tables, seq_lens
+
+    def _capturing(self, monkeypatch, value=True):
+        from kairyu.engine.core.attention import flashinfer_gpu
+
+        # raising=False so this test class states the property even against an
+        # implementation that has no capture guard at all
+        monkeypatch.setattr(
+            flashinfer_gpu, "_is_capturing", lambda: value, raising=False
+        )
+
+    def test_the_capture_region_never_touches_the_host(
+        self, fake_flashinfer, monkeypatch
+    ):
+        """THE regression gate, in the shape a capture really happens: warm up
+        eagerly (which plans), then decode with the host off-limits.
+
+        A `.tolist()` or `.cpu()` here is what a real capture rejects with
+        "Cannot copy between CPU and CUDA tensors during CUDA graph capture".
+        """
+        backend = self._backend()
+        pool = _pool(layers=2)
+        query, page_tables, seq_lens = self._inputs()
+        backend.attend_decode(query, pool, 0, page_tables, seq_lens)  # warmup
+        wrapper = backend._decode_tensor_wrapper
+        plans_before = len(wrapper.plans)
+
+        self._capturing(monkeypatch)
+        _forbid_host_sync(monkeypatch)
+        contexts = [
+            backend.attend_decode(query, pool, layer, page_tables, seq_lens)
+            for layer in range(2)
+        ]
+
+        assert len(wrapper.plans) == plans_before  # planning stayed outside
+        assert len(wrapper.runs) == 3  # warmup + both captured layers
+        assert [context.shape for context in contexts] == [(2, 32), (2, 32)]
+
+    def test_capture_without_a_plan_fails_loudly(self, fake_flashinfer, monkeypatch):
+        """Never silently bake capture-time pages into the graph."""
+        backend = self._backend()
+        query, page_tables, seq_lens = self._inputs()
+        self._capturing(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="plan_decode"):
+            backend.attend_decode(query, _pool(), 0, page_tables, seq_lens)
+
+    def test_a_plan_for_another_shape_does_not_count_as_this_step_s(
+        self, fake_flashinfer, monkeypatch
+    ):
+        backend = self._backend()
+        pool = _pool()
+        query, page_tables, seq_lens = self._inputs()
+        backend.plan_decode(
+            pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype
+        )
+        self._capturing(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="plan_decode"):
+            backend.attend_decode(
+                torch.randn(1, 4, 8),
+                pool,
+                0,
+                page_tables[:1],
+                seq_lens[:1],
+            )
+
+    def test_plan_decode_refuses_to_run_inside_a_capture(
+        self, fake_flashinfer, monkeypatch
+    ):
+        backend = self._backend()
+        query, page_tables, seq_lens = self._inputs()
+        self._capturing(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="cannot run inside a CUDA graph"):
+            backend.plan_decode(
+                _pool(), page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype
+            )
+
+    def test_the_plan_lands_in_persistent_cudagraph_buffers(self, fake_flashinfer):
+        """Plain (non-cudagraph) mode REBINDS its paged buffers on every plan, so
+        a captured run would keep reading the capture-time allocation."""
+        backend = self._backend()
+        pool = _pool()
+        query, page_tables, seq_lens = self._inputs()
+
+        backend.plan_decode(
+            pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype
+        )
+        wrapper = backend._decode_tensor_wrapper
+        buffers = (
+            wrapper.indptr_buffer,
+            wrapper.indices_buffer,
+            wrapper.last_page_len_buffer,
+        )
+        assert wrapper.use_cuda_graph is True
+        # ceil(6/4)=2 and ceil(5/4)=2 pages; last page holds 2 and 1 entries
+        assert wrapper.indptr_buffer.tolist() == [0, 2, 4]
+        assert wrapper.indices_buffer[:4].tolist() == [3, 1, 7, 6]
+        assert wrapper.last_page_len_buffer.tolist() == [2, 1]
+
+        page_tables.copy_(torch.tensor([[5, 4], [2, 0]], dtype=torch.int32))
+        seq_lens.copy_(torch.tensor([4, 8], dtype=torch.int32))
+        backend.plan_decode(
+            pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype
+        )
+
+        assert backend._decode_tensor_wrapper is wrapper  # same wrapper, same shape
+        assert (
+            wrapper.indptr_buffer,
+            wrapper.indices_buffer,
+            wrapper.last_page_len_buffer,
+        ) == buffers  # rewritten IN PLACE, not rebound
+        assert wrapper.indptr_buffer.tolist() == [0, 1, 3]
+        assert wrapper.indices_buffer[:3].tolist() == [5, 2, 0]
+        assert wrapper.last_page_len_buffer.tolist() == [4, 4]
+
+    def test_flashinfer_satisfies_the_graph_capture_contract(self, fake_flashinfer):
+        """The declaration the runner's fail-fast gate reads (#138 review [P1]).
+
+        Splitting the host plan out of the captured region is exactly what
+        earns this: before it, ``attend_decode`` existed but planned inline, so
+        a runner that only checked the METHOD would have built a graph path
+        whose first capture died on a D2H copy.
+        """
+        from kairyu.engine.core.attention import graph_capture_gap
+
+        backend = self._backend()
+        assert backend.supports_graph_capture is True
+        assert graph_capture_gap(backend) is None
+
+    def test_eager_replans_once_per_step_not_once_per_layer(self, fake_flashinfer):
+        backend = self._backend()
+        pool = _pool(layers=3)
+        query, page_tables, seq_lens = self._inputs()
+
+        for layer in range(3):
+            backend.attend_decode(query, pool, layer, page_tables, seq_lens)
+        wrapper = backend._decode_tensor_wrapper
+        assert len(wrapper.plans) == 1  # layer 0 plans, 1..2 reuse it
+
+        for layer in range(3):  # next step: same buffers, new contents
+            backend.attend_decode(query, pool, layer, page_tables, seq_lens)
+
+        assert len(wrapper.plans) == 2
+        assert len(wrapper.runs) == 6
+
+    def test_the_tensor_path_leaves_the_list_paths_plan_alone(self, fake_flashinfer):
+        backend = self._backend()
+        pool = _pool()
+        query, page_tables, seq_lens = self._inputs()
+
+        backend.attend_decode(query, pool, 0, page_tables, seq_lens)
+        backend.attend_batched([query[:1]], pool, 0, [[3, 1]], [6], [5])
+
+        assert len(backend._decode.plans) == 1  # the list path replanned once
+        assert len(backend._decode_tensor_wrapper.plans) == 1
+
+    def test_plan_run_dtypes_and_kwargs_are_the_pinned_ones(self, fake_flashinfer):
+        backend = self._backend()
+        pool = _pool(kv_heads=2, head_dim=8)
+        query, page_tables, seq_lens = self._inputs()
+
+        backend.attend_decode(query, pool, 0, page_tables, seq_lens)
+
+        plan = backend._decode_tensor_wrapper.plans[0]
+        indptr, indices, last_page_len = plan["args"][:3]
+        assert indptr.dtype == indices.dtype == last_page_len.dtype == torch.int32
+        assert plan["args"][3:7] == (4, 2, 8, PAGE)
+        assert plan["kwargs"]["q_data_type"] == query.dtype
+        assert plan["kwargs"]["kv_data_type"] == pool.k.dtype
+        run_query, paged_kv = backend._decode_tensor_wrapper.runs[0]
+        assert torch.equal(run_query, query)
+        assert torch.equal(paged_kv[0], pool.k[0])
 
 
 class TestSelector:

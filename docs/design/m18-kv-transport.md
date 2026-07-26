@@ -48,12 +48,166 @@ mark computed, ACK with allocation info. Failure paths: transport error →
 
 ### D3 — `handoff_stream.py`: `StreamCopyKVHandoff` + StreamProvider
 
-The GPU-phase copy pipeline shape: extraction happens on a side stream so
-decode compute overlaps the copy. `StreamProvider` protocol (`stream()`,
-`synchronize()`): `CpuNoopStream` (tests) and `CudaStreamProvider`
-(`*_gpu`-style deferred, tiny). `StreamCopyKVHandoff` wraps any KVHandoff:
-extract-on-stream → synchronize → inner.transfer — ordering pinned by a
-recording fake.
+The GPU-phase copy pipeline shape: extraction happens on a side stream.
+`StreamProvider` protocol (`begin()`, `synchronize()`): `CpuNoopStream` (tests)
+and `CudaStreamProvider`. `StreamCopyKVHandoff` wraps any KVHandoff:
+enter-stream → inner.transfer (extract+copy) → synchronize — ordering pinned by
+a recording fake.
+
+> **Amended 2026-07-25.** `CudaStreamProvider` is implemented; the original
+> "decode compute overlaps the copy" and the "deferred" marker on the class are
+> both replaced by this paragraph rather than left standing beside it.
+>
+> `kv_serde._to_bytes` now copies to host before `.numpy()`. Without that the
+> real handoff could not read a CUDA `PagedKVPool` at all (`TypeError: can't
+> convert cuda:0 device type tensor to numpy`), so this seam had never run
+> against a device pool.
+>
+> What landed: the extraction copy runs on its own stream, which waits on the
+> caller's stream FOR THE DEVICE THE PROVIDER WAS BUILT FOR. Work the caller
+> queues after that point is independent of the copy.
+>
+> What did NOT land, and remains open: decode compute does not overlap the copy.
+> `StreamCopyKVHandoff` blocks the host before returning and `PDCoordinator`
+> commits before stepping decode, so nothing is queued alongside it. That needs
+> the consumer to take a completion EVENT in place of the host-wide wait.
+>
+> **Production wiring landed 2026-07-26.** `PDCoordinator` previously had no
+> production constructor — it existed only in `tests/unit/test_pd.py`, so no
+> deployment could reach a `KVHandoff`, which is why the provider had no caller.
+> `engine/core/pd_factory.py` now supplies both halves:
+> `build_pd_coordinator()` assembles a prefill/decode pair from a checkpoint with
+> both engines placed by the same probe the single-process path uses (overridable
+> per component, so tests inject a placement instead of probing), and
+> `build_kv_handoff()` picks the handoff from where the KV lives — plain for a
+> host pool, `StreamCopyKVHandoff` over a `CudaStreamProvider` bound to the
+> pool's own device for a device pool.
+>
+> **Amended 2026-07-26 (review [P1]).** The first version of that constructor
+> wrapped `LocalKVHandoff`, which allocates in the destination cache and marks it
+> computed without touching either pool. The two halves own separate pools, so it
+> published the decode pool's untouched pages as computed and decode continued
+> from KV that was never written — silently, since nothing raises and the token
+> counts are unchanged. `pd.LocalCopyKVHandoff` is the corrected inner handoff:
+> destination allocate → skip the leading `len(cached_pages)` source pages
+> (receiver-side dedup skips the COPY, not the pages) → direct pool-to-pool page
+> copy → mark computed, releasing the allocation instead of publishing a
+> half-written prefix if the copy raises. It is a direct tensor copy rather than
+> `RemoteKVHandoff`'s serde round-trip because in-process there is no wire: a
+> device pair stays D2D instead of paying D2H + H2D. `LocalKVHandoff` is now
+> documented as a test double, not a deployment option.
+>
+> **Overlap landed 2026-07-26.** `StreamCopyKVHandoff(..., defer=True)` records a
+> completion event instead of blocking. The producer can queue its next step
+> while the copy runs — measured on device: the deferred form returns strictly
+> faster than the blocking one on the same work, the copied values are correct
+> once the event is settled, and on the coordinator the copy's device-time
+> interval overlaps the next prefill forward's
+> (`test_the_copy_overlaps_the_next_prefill_forward_on_the_coordinator`).
+>
+> Deferring is a CONSUMER CONTRACT with two halves, not one. Nothing may read the
+> destination pages before the event — and nothing may reuse the SOURCE pages
+> before it either. `PDCoordinator`'s m6 D4 rule releases the prefill-side
+> allocation the moment the transfer returns (`update()` → `commit_and_release`
+> pool-frees the tail page, `abort()` → `release_preempted` frees all of it), so
+> a deferred copy would be reading pages the next prefill step can allocate and
+> overwrite on the caller's stream. Waiting on the destination side does not stop
+> that; it is a source-side read/write race.
+>
+> The coordinator therefore owns the lease. `PDCoordinator._settle_handover` is
+> the single point where a transfer is completed — the prefill-side commit, the
+> abort on a failed copy, and the decode-side `resume_with_kv` all go through it
+> — and it calls `gate_pending()` first. The gate is stream-ordered, not a host
+> block (`event.wait(current_stream)`). A deferring handoff that exposes no
+> `gate_pending()` is refused at construction rather than releasing pages under a
+> copy the coordinator cannot order against. Events ACCUMULATE: a prefill step
+> transfers every prompt that completed in it, and a single-slot `pending_event`
+> would silently drop the ordering for all but the last copy.
+>
+> **Amended 2026-07-26 (review [P1]): where the gate sits is the whole point.**
+> The first version settled at the end of the very step that recorded the copy.
+> Correct, and no host block — but the next GPU work of any kind (the decode step,
+> then the next prefill forward) was queued *after* the gate, so the device
+> timeline stayed exactly as serial as the blocking form. Measured on device:
+> copy `[11.651, 12.342] ms`, next prefill forward `[12.898, 13.369] ms`.
+>
+> The settlement is therefore PIPELINED one producer step. `step_prefill` plans,
+> runs its forward, and only THEN settles the previous step's transfers, so the
+> gate lands with that forward — and the decode step queued before it — already
+> in front of it. `_Handover` is what carries a step's `commit` / `adopt` /
+> `retries` across that boundary. Adoption has to travel with the release: it is
+> what puts the destination pages in front of the decode runner, which is the
+> other half of the m6 D4 rule. The source pages stay leased for the extra step,
+> which costs prefill KV capacity — never correctness, because a page the prefill
+> scheduler still owns cannot be handed to anyone else. When a step has nothing
+> to schedule the settlement happens up front instead: there is no overlap left to
+> win, and the leased pages may be exactly what the next prompt needs.
+>
+> This applies to the deferring path ONLY. A blocking handoff has already finished
+> its copy inside `transfer()`, so `step_prefill` settles it in its own step and
+> the request starts decoding immediately, as before.
+>
+> Production wiring: `build_pd_coordinator(defer_handoff=True)` — the default,
+> and the only caller that turns it on, because it is the only one that settles
+> it. `build_kv_handoff(..., defer=...)` defaults off for everyone else.
+>
+> **Serving exposure landed 2026-07-26.** `backend: kairyu` accepts
+> `pd_separation: true`, so a deployment YAML can serve through a prefill/decode
+> pair. m2 §2.4 reserved that config surface and never wired it. Combinations
+> the coordinator does not implement — TP > 1, speculative decoding — are
+> rejected rather than silently serving a different topology.
+>
+> Three things that wiring needs, stated because the first cut of it had none:
+>
+> - `engine/core/pd_loop.py::PDLoopAdapter`. `EngineLoop` owns ONE scheduler and
+>   ONE runner, and `_drain_ops` adds submissions straight to the scheduler it
+>   was given. Handing it the coordinator's decode scheduler admits requests
+>   into DECODE with no prompt KV and never calls `PDCoordinator.add_request`,
+>   and the coordinator has no `execute` for the loop to call. The adapter is
+>   both surfaces: submissions enter at prefill, `schedule()` runs one prefill
+>   step (prefill → transfer → commit) before planning decode, `execute()` runs
+>   the decode runner, and abort/forget/release reach both halves.
+> - A handoff that moves BYTES. The two halves own two POOLS, so the
+>   accounting-only `LocalKVHandoff` leaves the destination zero-initialised and
+>   decode attends over empty KV. `pd.LocalCopyKVHandoff` (amended in above) is
+>   the ONE copying handoff in this stack, and the serving path inherits it from
+>   `build_pd_coordinator` rather than introducing its own. Greedy equivalence
+>   against the single-engine path is the test that holds this down — now through
+>   the serving loop as well as through the coordinator directly.
+> - Copy ordering. The serving path inherits `build_pd_coordinator`'s
+>   `defer_handoff=True`, which is safe for exactly the reason recorded above:
+>   `PDCoordinator` holds the prefill-side lease and settles it only behind the
+>   copy's completion event. `PDLoopAdapter.schedule()` drives
+>   `PDCoordinator.step_prefill`, so the serving loop goes through that same
+>   `_settle_handover` gate rather than around it — and inherits its
+>   pipelining, so a deferred handoff starts decoding one step later than a
+>   blocking one.
+>
+> **Amended 2026-07-26 (review [P1]): token 0 keeps its sampling identity.**
+> The prefill clone ran under an INTERNAL id (`r#p0`) while decode ran under the
+> public one, on a different runner with a different `Sampler`. Three things
+> broke, none of them visible to a greedy parity test:
+>
+> - `Sampler._state_for` derives the base seed from the request id when
+>   `sampling.seed is None`, so with the default stochastic params token 0 and
+>   token 1 onward came off DIFFERENT RNG streams. `EngineRequest.sampling_id`
+>   is the fix: the clone keeps its own `request_id` for scheduler bookkeeping
+>   and carries the public id as its `sampling_identity`, which is what every
+>   runner now keys the sampler under.
+> - The grammar enforcer was rebuilt on the decode side from its INITIAL state,
+>   having never accepted token 0, so every later mask was computed against the
+>   wrong grammar position. `Sampler.hand_over()` moves the state object itself
+>   at adoption — seed and matcher together — because a matcher cannot be
+>   reconstructed from an id.
+> - Token 0's `SampledToken` was reduced to its `token_id`, so its `logprob`,
+>   `top_logprobs` and `grammar_terminated` never reached the driver.
+>   `resume_with_kv` commits it directly into the decode outputs, so no
+>   `execute()` ever reports it — and at `max_tokens=1` the request completes
+>   during the handoff with no decode step at all. `PDCoordinator` keeps the
+>   whole `SampledToken` and hands it over through `drain_carried_tokens()`,
+>   which `EngineLoop` drains and prepends to the request's metadata; grammar
+>   termination at token 0 finishes the request at adoption, before decode is
+>   planned, which is where the ordinary path's `finish_early` sits too.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 

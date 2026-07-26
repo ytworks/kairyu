@@ -94,6 +94,7 @@ def test_committed_outputs_win_over_the_in_flight_buffer(llama_dir):
     class _State:
         class request:  # noqa: N801 - mirrors the runner's duck-typed access
             request_id = "a"
+            sampling_identity = "a"  # no P-D clone here: same id
             prompt_token_ids = (1, 2, 3)
 
         outputs = (41,)
@@ -118,6 +119,7 @@ def test_a_missing_token_is_an_error_not_a_silent_wrong_input(llama_dir):
     class _State:
         class request:  # noqa: N801
             request_id = "gone"
+            sampling_identity = "gone"  # no P-D clone here: same id
             prompt_token_ids = (1, 2)
 
         outputs = ()
@@ -194,6 +196,7 @@ def test_effective_outputs_fills_the_gap_the_snapshot_left(llama_dir):
     class _State:
         class request:  # noqa: N801
             request_id = "a"
+            sampling_identity = "a"  # no P-D clone here: same id
             prompt_token_ids = (1, 2, 3)
 
         outputs = (11,)
@@ -219,6 +222,7 @@ def test_a_gap_in_the_history_is_an_error(llama_dir):
     class _State:
         class request:  # noqa: N801
             request_id = "a"
+            sampling_identity = "a"  # no P-D clone here: same id
             prompt_token_ids = (1,)
 
         outputs = ()
@@ -281,6 +285,7 @@ def test_the_runner_hands_the_sampler_the_in_flight_history(llama_dir):
     class _State:
         class request:  # noqa: N801
             request_id = "a"
+            sampling_identity = "a"  # no P-D clone here: same id
             prompt_token_ids = (5,)
             sampling = None
             eos_token_id = None
