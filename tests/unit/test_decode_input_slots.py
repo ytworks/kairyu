@@ -162,7 +162,7 @@ def test_the_batched_decode_reads_the_same_slots(llama_dir):
     from kairyu.engine.core.scheduler import ScheduledChunk
 
     runner = _runner(llama_dir)
-    seen = _capture_decode_input(runner, "forward_decode_batch")
+    seen = _capture_decode_input(runner, "forward_decode_tensors")
 
     states = {
         "a": _decode_state("a", (1, 2, 3), (41,), pages=[0, 1]),

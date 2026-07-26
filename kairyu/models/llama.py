@@ -65,22 +65,56 @@ class DecoderLayer(nn.Module):
         )
 
     def forward_decode_tensors(
-        self, hidden, cos, sin, kv_pool, layer, page_tables, positions, seq_lens
+        self,
+        hidden,
+        cos,
+        sin,
+        kv_pool,
+        layer,
+        page_tables,
+        positions,
+        seq_lens,
+        write_from=None,
     ):
         """Tensor-only decode layer (m17 D1): no Python page lists."""
         hidden = hidden + self.self_attn.forward_decode_tensors(
             self.input_layernorm(hidden),
-            cos, sin, kv_pool, layer, page_tables, positions, seq_lens,
+            cos,
+            sin,
+            kv_pool,
+            layer,
+            page_tables,
+            positions,
+            seq_lens,
+            write_from,
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
     def forward_decode_batch(
-        self, hidden, cos, sin, kv_pool, layer, page_tables, positions, seq_lens, write_from
+        self,
+        hidden,
+        cos,
+        sin,
+        kv_pool,
+        layer,
+        page_tables,
+        positions,
+        seq_lens,
+        write_from,
+        position_values=None,
     ):
         """Batched decode (C4): row-batched residual around the batched attention."""
         hidden = hidden + self.self_attn.forward_decode_batch(
             self.input_layernorm(hidden),
-            cos, sin, kv_pool, layer, page_tables, positions, seq_lens, write_from,
+            cos,
+            sin,
+            kv_pool,
+            layer,
+            page_tables,
+            positions,
+            seq_lens,
+            write_from,
+            position_values,
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
@@ -144,6 +178,7 @@ class DenseDecoder(nn.Module):
         page_tables: list[list[int]],
         seq_lens: list[int],
         write_from: list[int],
+        position_values: list[int] | None = None,
     ) -> torch.Tensor:
         """Batched single-token decode over B sequences (C4): ONE forward pass
         instead of B. Row i of the output equals ``forward_tokens`` for sequence
@@ -153,7 +188,16 @@ class DenseDecoder(nn.Module):
         cos, sin = self.model.rotary_emb(positions)  # [B, head_dim]
         for index, layer in enumerate(self.model.layers):
             hidden = layer.forward_decode_batch(
-                hidden, cos, sin, kv_pool, index, page_tables, positions, seq_lens, write_from
+                hidden,
+                cos,
+                sin,
+                kv_pool,
+                index,
+                page_tables,
+                positions,
+                seq_lens,
+                write_from,
+                position_values,
             )
         return self.model.norm(hidden)  # [B, H]
 
@@ -165,6 +209,7 @@ class DenseDecoder(nn.Module):
         kv_pool: PagedKVPool,
         page_tables: torch.Tensor,  # [B, P]
         seq_lens: torch.Tensor,  # [B]
+        write_from: torch.Tensor | None = None,  # [B]
     ) -> torch.Tensor:
         """Batched decode with every input a tensor — the CUDA-graph-capturable
         form of ``forward_decode_batch`` (m17 D1). Numerically identical; pinned
@@ -173,7 +218,15 @@ class DenseDecoder(nn.Module):
         cos, sin = self.model.rotary_emb(positions)
         for index, layer in enumerate(self.model.layers):
             hidden = layer.forward_decode_tensors(
-                hidden, cos, sin, kv_pool, index, page_tables, positions, seq_lens
+                hidden,
+                cos,
+                sin,
+                kv_pool,
+                index,
+                page_tables,
+                positions,
+                seq_lens,
+                write_from,
             )
         return self.model.norm(hidden)
 

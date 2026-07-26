@@ -121,6 +121,36 @@ class TestGraphStepExecutor:
         assert int(static.page_tables[3, 0]) == 7  # padding row -> scratch page
         assert int(static.seq_lens[3]) == 1
 
+    def test_copy_in_refreshes_write_masks_between_replays(self):
+        backend = FakeGraphBackend()
+        executor = GraphStepExecutor(
+            _decode_fn, backend, max_batch=8, scratch_page=SCRATCH
+        )
+        first = build_decode_batch(
+            token_ids=[1, 2],
+            positions=[3, 4],
+            page_lists=[(0,), (1,)],
+            seq_lens=[4, 5],
+            max_pages=1,
+            scratch_page=SCRATCH,
+            write_from=[0, 5],
+        )
+        second = build_decode_batch(
+            token_ids=[1, 2],
+            positions=[4, 5],
+            page_lists=[(0,), (1,)],
+            seq_lens=[5, 6],
+            max_pages=1,
+            scratch_page=SCRATCH,
+            write_from=[5, 0],
+        )
+
+        executor.execute_decode(first)
+        executor.execute_decode(second)
+        _, static = executor._captured[2]
+
+        assert static.write_from.tolist() == [5, 0]
+
 
 def _decode_fn_pages(batch: DecodeBatch) -> torch.Tensor:
     """Output depends on each sequence's first page id — a proxy for 'attends

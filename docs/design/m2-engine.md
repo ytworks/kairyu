@@ -67,9 +67,19 @@ copy from, and manufacturing a scalar device tensor per row is the same round tr
 over. The ids therefore reach the slots as one batched H2D copy per step. Closing this
 requires moving the sampling decision (RNG, penalties, grammar mask, stop conditions) onto
 the device, which redefines what the m8 D2 pins mean; that is a separate decision and is not
-scheduled here. A second, independent violation of the same invariant lives in
-`models/attention.py::forward_decode_batch`, which reads `int(positions[i])` per row per
-layer.
+scheduled here.
+
+The second, independent violation was closed on 2026-07-26 (#207): supported eager and
+captured batched decode now share `forward_decode_tensors`. Positions, page tables,
+sequence lengths, and `write_from` are device tensors; cached/shared KV rows retain their
+existing value through a tensor mask. No Python branch or scalar extraction remains in
+the attention row path. A profiler gate records zero `aten::_local_scalar_dense` events at
+both B=1 and B=8 for the tensor path and the host-metadata compatibility fallback (the
+audited pre-fix path grew with B). FlashInfer keeps its single permitted step-boundary host
+plan outside capture. Qwen3-32B TP8 tensor eager
+measured 47.1% lower wall time and 56.5% lower TPOT than the list path on the same
+8-request workload
+(`bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json`).
 
 ### 2.3 KV management: Radix tree over paged blocks
 

@@ -129,3 +129,65 @@ def test_write_batched_lands_where_write_does(model_and_config):
 
     assert torch.equal(listed.k, tensored.k)
     assert torch.equal(listed.v, tensored.v)
+
+
+def test_tensor_decode_preserves_cached_rows(model_and_config):
+    """write_from is a device mask: shared cached KV is retained without a
+    Python predicate or reading positions row by row."""
+    model, config = model_and_config
+    listed, tensored = _pool(config), _pool(config)
+    before_k, before_v = tensored.k.clone(), tensored.v.clone()
+    tables = [[0, 1, 2], [4, 5, 6]]
+    tokens = torch.tensor([5, 9])
+    positions = torch.tensor([6, 10])
+    seq_lens = [7, 11]
+    write_from = [7, 0]  # row 0 is cached; row 1 owns its decode slot
+
+    reference = model.forward_decode_batch(
+        tokens,
+        positions,
+        listed,
+        tables,
+        seq_lens,
+        write_from,
+    )
+    actual = model.forward_decode_tensors(
+        tokens,
+        positions,
+        tensored,
+        torch.tensor(tables, dtype=torch.int32),
+        torch.tensor(seq_lens, dtype=torch.int32),
+        torch.tensor(write_from),
+    )
+
+    assert torch.allclose(reference, actual, atol=1e-5)
+    assert torch.allclose(listed.k, tensored.k, atol=1e-6)
+    assert torch.allclose(listed.v, tensored.v, atol=1e-6)
+    # Row 0 is position 6 -> page-table index 1, slot 2.
+    assert torch.equal(tensored.k[:, 1, 2], before_k[:, 1, 2])
+    assert torch.equal(tensored.v[:, 1, 2], before_v[:, 1, 2])
+
+
+def test_write_batched_mask_retains_cached_storage(model_and_config):
+    _model, config = model_and_config
+    pool = _pool(config)
+    before_k, before_v = pool.k.clone(), pool.v.clone()
+    keys = torch.randn(2, config.kv_cache_num_heads, config.kv_cache_head_dim)
+    values = torch.randn_like(keys)
+    positions = torch.tensor([2, 6])
+    tables = torch.tensor([[0, 1], [4, 5]], dtype=torch.int32)
+
+    pool.write_batched(
+        0,
+        tables,
+        positions,
+        keys,
+        values,
+        write_from=torch.tensor([3, 6]),
+    )
+
+    # Row 0's cached page is byte-identical; row 1's private slot changed.
+    assert torch.equal(pool.k[0, 0], before_k[0, 0])
+    assert torch.equal(pool.v[0, 0], before_v[0, 0])
+    assert not torch.equal(pool.k[0, 5], before_k[0, 5])
+    assert not torch.equal(pool.v[0, 5], before_v[0, 5])

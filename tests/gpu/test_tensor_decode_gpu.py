@@ -67,7 +67,8 @@ def test_tensor_decode_matches_list_decode_on_gpu(model_and_config):
     seq_lens = [7, 11]
 
     reference = model.forward_decode_batch(
-        tokens, positions, listed, tables, seq_lens, [0, 0]
+        tokens, positions, listed, tables, seq_lens, [0, 0],
+        position_values=[6, 10],
     )
     actual = model.forward_decode_tensors(
         tokens,
@@ -81,3 +82,90 @@ def test_tensor_decode_matches_list_decode_on_gpu(model_and_config):
     assert torch.allclose(reference.float(), actual.float(), atol=2e-2)
     assert torch.equal(listed.k, tensored.k), "the KV write landed elsewhere"
     assert torch.equal(listed.v, tensored.v)
+
+
+def test_tensor_decode_preserves_cached_kv_on_gpu(model_and_config):
+    model, config = model_and_config
+    _require_cuda()
+    listed, tensored = _pool(config), _pool(config)
+    tables = [[0, 1, 2], [4, 5, 6]]
+    tokens = torch.tensor([5, 9], device="cuda:0")
+    positions = torch.tensor([6, 10], device="cuda:0")
+    seq_lens = [7, 11]
+    write_from = [7, 0]
+
+    reference = model.forward_decode_batch(
+        tokens,
+        positions,
+        listed,
+        tables,
+        seq_lens,
+        write_from,
+        position_values=[6, 10],
+    )
+    actual = model.forward_decode_tensors(
+        tokens,
+        positions,
+        tensored,
+        torch.tensor(tables, dtype=torch.int32, device="cuda:0"),
+        torch.tensor(seq_lens, dtype=torch.int32, device="cuda:0"),
+        torch.tensor(write_from, device="cuda:0"),
+    )
+
+    assert torch.allclose(reference.float(), actual.float(), atol=2e-2)
+    assert torch.equal(listed.k, tensored.k)
+    assert torch.equal(listed.v, tensored.v)
+
+
+@pytest.mark.parametrize("batch", [1, 8])
+def test_tensor_decode_profiler_has_no_row_scalar_reads(
+    model_and_config, batch
+):
+    """`aten::_local_scalar_dense` is PyTorch's profiler-visible device scalar
+    extraction. Its count stays exactly zero instead of growing with B."""
+    from torch.profiler import ProfilerActivity, profile
+
+    model, config = model_and_config
+    _require_cuda()
+    pool = _pool(config, seed=17 + batch)
+    tokens = torch.arange(1, batch + 1, device="cuda:0")
+    positions = torch.full((batch,), 2, device="cuda:0")
+    tables = torch.arange(batch, dtype=torch.int32, device="cuda:0")[:, None]
+    seq_lens = torch.full((batch,), 3, dtype=torch.int32, device="cuda:0")
+    write_from = torch.zeros(batch, dtype=torch.int64, device="cuda:0")
+    legacy_pool = _pool(config, seed=17 + batch)
+
+    # Warm kernels/JIT before the observed steady-state step.
+    model.forward_decode_tensors(
+        tokens, positions, pool, tables, seq_lens, write_from
+    )
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as legacy:
+        model.forward_decode_batch(
+            tokens,
+            positions,
+            legacy_pool,
+            [[row] for row in range(batch)],
+            [3] * batch,
+            [0] * batch,
+            position_values=[2] * batch,
+        )
+        torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as trace:
+        model.forward_decode_tensors(
+            tokens, positions, pool, tables, seq_lens, write_from
+        )
+        torch.cuda.synchronize()
+
+    scalar_reads = sum(
+        event.count
+        for event in trace.key_averages()
+        if event.key == "aten::_local_scalar_dense"
+    )
+    legacy_scalar_reads = sum(
+        event.count
+        for event in legacy.key_averages()
+        if event.key == "aten::_local_scalar_dense"
+    )
+    assert scalar_reads == 0
+    assert legacy_scalar_reads == 0

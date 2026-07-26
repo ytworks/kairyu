@@ -126,6 +126,7 @@ class Attention(nn.Module):
         page_tables: torch.Tensor,  # [B, P]
         positions: torch.Tensor,  # [B]
         seq_lens: torch.Tensor,  # [B]
+        write_from: torch.Tensor | None = None,  # [B]
     ) -> torch.Tensor:
         """Decode attention with no host values anywhere (m17 D1).
 
@@ -142,7 +143,9 @@ class Attention(nn.Module):
             query = self.q_norm(query)
             keys = self.k_norm(keys)
         query, keys = apply_rope(query, keys, cos, sin)
-        kv_pool.write_batched(layer, page_tables, positions, keys, values)
+        kv_pool.write_batched(
+            layer, page_tables, positions, keys, values, write_from=write_from
+        )
         context = self.backend.attend_decode(
             query, kv_pool, layer, page_tables, seq_lens
         )
@@ -159,6 +162,7 @@ class Attention(nn.Module):
         positions: torch.Tensor,  # [B]
         seq_lens: list[int],
         write_from: list[int],
+        position_values: list[int] | None = None,
     ) -> torch.Tensor:
         """Batched decode attention (C4): projections/RoPE are row-batched, each
         sequence's single-token KV is written to its OWN pages, and attention is
@@ -172,8 +176,15 @@ class Attention(nn.Module):
             query = self.q_norm(query)
             keys = self.k_norm(keys)
         query, keys = apply_rope(query, keys, cos, sin)  # cos/sin [B, d] broadcast over heads
+        if position_values is None:
+            if positions.device.type != "cpu":
+                raise ValueError(
+                    "GPU list-metadata decode needs host position_values; "
+                    "reading positions row by row would synchronize the device"
+                )
+            position_values = positions.tolist()
         for i in range(batch):
-            if int(positions[i]) >= write_from[i]:  # decode pages are private, no conflict
+            if position_values[i] >= write_from[i]:
                 kv_pool.write(
                     layer, page_tables[i], positions[i : i + 1], keys[i : i + 1], values[i : i + 1]
                 )
@@ -183,6 +194,6 @@ class Attention(nn.Module):
             layer,
             page_tables,
             seq_lens,
-            [int(positions[i]) for i in range(batch)],
+            position_values,
         )
         return self.o_proj(torch.cat(contexts, dim=0))  # [B, heads*d] -> [B, H]

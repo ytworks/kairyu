@@ -28,7 +28,7 @@ def llama_dir(tmp_path_factory):
 
 def _generate(
     model_dir, graph_backend, *, max_batch=8, max_pages=8, max_new=6,
-    attention_backend=None,
+    attention_backend=None, forbid_list_decode=False,
 ):
     from kairyu.engine.core.engine_core import EngineCore
     from kairyu.engine.core.kv_pool import PagedKVPool
@@ -56,6 +56,11 @@ def _generate(
         else {}
     )
     runner = PagedModelRunner(model, pool, sampler=Sampler(), cache=cache, **extra)
+    if forbid_list_decode:
+        def _forbidden(*_args, **_kwargs):
+            raise AssertionError("eager batching fell back to per-row list metadata")
+
+        runner._model.forward_decode_batch = _forbidden
     core = EngineCore(scheduler, runner)
     for index, prompt in enumerate(PROMPTS):
         core.add_request(
@@ -83,6 +88,13 @@ def test_graph_decode_matches_eager(llama_dir):
 def test_the_seam_is_off_by_default(llama_dir):
     _outputs, runner = _generate(llama_dir, None)
     assert runner._graph is None
+
+
+def test_eager_runner_uses_the_tensor_metadata_path(llama_dir):
+    outputs, runner = _generate(llama_dir, None, forbid_list_decode=True)
+
+    assert outputs
+    assert runner._tensor_decode_supported is True
 
 
 def test_an_oversize_batch_falls_back_to_eager(llama_dir):

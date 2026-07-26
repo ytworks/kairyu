@@ -29,10 +29,17 @@ separate NCCL group. The exact 20-item Fugu concurrency-8 workload ran for
 cleanly. Its eight 600 s empty completions keep throughput #150 open; truthful
 empty-result accounting is handled separately by #149 / PR #235.
 Production serving can now opt into validated CUDA-graph decode through
-DeploymentSpec. Qwen3-32B TP8 measured 46.6% lower wall time and 56.0% lower
-TPOT than eager on the same 8-request workload; single-GPU and TP2 integration
-gates assert real capture/replay, token parity, scratch capacity, and clean NCCL
-teardown (`bench/results/cuda-graph-qwen3-32b-tp8-2026-07-26.json`).
+DeploymentSpec. After separating tensor metadata from capture, Qwen3-32B TP8
+Graph measured 18.6% lower wall time and 32.2% lower TPOT than tensor eager on
+the same 8-request workload; single-GPU and TP2 integration gates assert real
+capture/replay, token parity, scratch capacity, and clean NCCL teardown.
+Supported eager and captured batched decode now share tensor-only attention
+metadata and a device `write_from` mask. Profiler gates show zero per-row scalar
+reads at B=1 and B=8 while preserving ragged and cached/shared KV parity.
+Against the old list eager path, tensor eager cut Qwen3-32B TP8 wall time 47.1%
+and TPOT 56.5%. The remaining m2 §2.2 host sync is sampling/future-token fill
+(#206), not attention
+(`bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json`).
 Performance and production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-26_
@@ -135,6 +142,32 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [amendment] m2 §2.2: batched attention has no per-row host synchronization
+- What: supported eager and captured batched decode now share the tensor-only
+  model/attention path. `write_from` is a fifth static device input; KV rows
+  below it retain their existing cached/shared value through a tensor mask.
+  Ragged eager page-table tails repeat each row's owned last page and remain
+  length-masked, so eager needs no reserved graph page. FlashInfer performs its
+  allowed plan once at the step boundary. A GPU profiler gate reports zero
+  `aten::_local_scalar_dense` events at B=1 and B=8 for the tensor path and
+  host-metadata compatibility fallback; the audited pre-fix path grew with B.
+- Measurement: on Qwen3-32B TP8, 8 concurrent synthetic requests x 32 output
+  tokens, list eager -> tensor eager changed wall 16.722 -> 8.844 s, TPOT
+  441.831 -> 192.075 ms/token, and throughput 0.48 -> 0.90 req/s (47.1%,
+  56.5%, and 87.5% improvements). Re-running Graph on the tensor path measured
+  7.196 s, 130.297 ms/token, and 1.11 req/s, separating a further 18.6% wall,
+  32.2% TPOT, and 23.3% throughput graph gain from the row-sync removal.
+- Why: `forward_decode_batch` converted every CUDA `positions[i]` into Python
+  twice per row per layer, serializing decode in proportion to batch size and
+  undermining both overlap and graph launch savings. Simply routing eager
+  through the graph tensor path was not safe until cached-prefix KV writes were
+  masked without a data-dependent shape or Python predicate.
+- Refs: issue #207; m2 §2.2; m17 D1/A5;
+  `kairyu/engine/core/{kv_pool,model_runner,step_executor}.py`,
+  `kairyu/models/{attention,llama}.py`,
+  `tests/{unit/test_tensor_decode_path.py,gpu/test_tensor_decode_gpu.py}`,
+  `bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json`
 
 ### 2026-07-26 — [amendment] m17 D1/D2: CUDA graph decode is a production serving mode
 - What: `backend: kairyu` now accepts explicit `decode_mode: eager|cuda_graph`
