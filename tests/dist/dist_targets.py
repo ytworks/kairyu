@@ -580,6 +580,54 @@ def reduce_scatter_nccl_equivalence(
         dist.destroy_process_group()
 
 
+def tp_control_model_group_stress(
+    rank: int, world_size: int, init_file: str, out_dir: str, rounds: int
+) -> None:
+    """Alternate control objects and model tensors on their real backends."""
+    import torch.distributed as dist
+
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+    from kairyu.engine.core.worker import serving_groups
+
+    torch.cuda.set_device(rank)
+    init_distributed(rank, world_size, f"file://{init_file}", backend="nccl")
+    try:
+        groups = serving_groups("nccl")
+        control = TorchDistCommunicator(group=groups.control)
+        model = TorchDistCommunicator(group=groups.model, device=f"cuda:{rank}")
+        device = torch.device("cuda", rank)
+        expected = world_size * (world_size + 1) / 2
+        last_step = -1
+        for step in range(rounds):
+            payload = control.broadcast(
+                {"step": step, "request_id": f"request-{step % 8}"}
+                if rank == 0
+                else None,
+                src=0,
+            )
+            if payload["step"] != step:
+                raise AssertionError(f"control sequence diverged at {step}: {payload}")
+            reduced = model.tensor_all_reduce(
+                torch.tensor([float(rank + 1)], device=device)
+            )
+            if reduced.item() != expected:
+                raise AssertionError(
+                    f"model reduction diverged at {step}: {reduced.item()} != {expected}"
+                )
+            last_step = step
+        Path(out_dir, f"rank{rank}.json").write_text(
+            json.dumps(
+                {
+                    "control_backend": dist.get_backend(groups.control),
+                    "model_backend": dist.get_backend(groups.model),
+                    "last_step": last_step,
+                }
+            )
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 def sequence_parallel_parity(
     rank: int, world_size: int, init_file: str, out_dir: str, model_dir: str
 ) -> None:

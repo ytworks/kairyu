@@ -183,17 +183,21 @@ def test_serving_collectives_do_not_inherit_the_startup_timeout(tmp_path):
         ),
     )
     try:
-        group = worker_module.serving_group("gloo")
+        groups = worker_module.serving_groups("gloo")
         host = torch.device("cpu")
-        serving = group._get_backend(host).options._timeout.total_seconds()
+        control = (
+            groups.control._get_backend(host).options._timeout.total_seconds()
+        )
+        model = groups.model._get_backend(host).options._timeout.total_seconds()
         startup = (
             dist.distributed_c10d._get_default_group()
             ._get_backend(host)
             .options._timeout.total_seconds()
         )
         assert startup == worker_module._STARTUP_TIMEOUT_S == 1800.0
-        assert serving == worker_module._SERVE_OP_TIMEOUT_S == 120.0
-        assert serving < startup, "the step loop inherited the startup allowance"
+        assert control == model == worker_module._SERVE_OP_TIMEOUT_S == 120.0
+        assert groups.control is not groups.model
+        assert control < startup, "the step loop inherited the startup allowance"
     finally:
         dist.destroy_process_group()
 

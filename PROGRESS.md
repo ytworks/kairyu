@@ -22,6 +22,12 @@ measured to reproduce overlap OFF exactly at TP1/2/4/8
 (`bench/results/parity-tp-qwen3-32b-2026-07-26.json`). A1 stays open on the
 model and the continuations; the device-side half of m2 §2.2 stays open as a
 performance invariant, not as a gate.
+The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
+control protocol now uses a bounded gloo group while model tensors use a
+separate NCCL group. The exact 20-item Fugu concurrency-8 workload ran for
+654.53 s without a watchdog, kept readiness at 200, and shut down all eight GPUs
+cleanly. Its eight 600 s empty completions keep throughput #150 open; truthful
+empty-result accounting is handled separately by #149 / PR #235.
 Performance and production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-26_
@@ -121,6 +127,24 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [amendment] m16 D4: TP control traffic leaves the model NCCL group
+- What: TP serving now creates two 120 s operational groups in a fixed order after
+  the startup handshake. `StepDelta`, release, and shutdown object broadcasts use
+  gloo; `RowParallelLinear` and the other model tensor collectives use a separate
+  placement-backend group (NCCL on CUDA). A permanent two-GPU gate alternates 512
+  control broadcasts and model all-reduces and asserts the backend split.
+- Why: the exact Qwen3-32B TP=8 / Fugu LiveCodeBench concurrency-8 workload
+  reproduced issue #148: rank 1–7 timed out in BROADCAST sequence 4163 while rank 0
+  had advanced to ALLREDUCE sequence 4165. Python object broadcast is a multi-stage
+  metadata/payload/host-deserialization protocol and must not be interleaved with
+  model tensors on the same NCCL group. With the split, the same 20-item workload
+  completed its 654.53 s harness run without a watchdog, readiness remained 200,
+  and normal shutdown returned all eight GPUs to 0 MiB / 0% without reset. The
+  observed 600 s empty completions remain separate issues #149/#150.
+- Refs: m16 D4 (amended), issue #148, `kairyu/engine/core/worker.py`,
+  `tests/unit/test_tp_worker.py`, `tests/dist/test_distributed.py`,
+  `tests/dist/dist_targets.py`, `tests/gpu/test_tp_control_plane_nccl.py`
 
 ### 2026-07-26 — [amendment] m18 D3: token 0 keeps its sampling identity across the P-D handoff
 - What: the P-D prefill clone sampled under its INTERNAL id (`r#p0`) on a different

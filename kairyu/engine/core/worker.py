@@ -27,8 +27,8 @@ _STARTUP_TIMEOUT_S = 1800.0
 #: the timeout for EVERY operation on that group, not just the rendezvous, so
 #: giving the startup allowance to the default group would let one wedged rank
 #: hold an in-flight generation for half an hour. The step loop therefore runs on
-#: a SECOND group created with this bound, while the startup handshake — the one
-#: collective that legitimately has to absorb load skew — keeps the long one.
+#: operational groups created with this bound, while the startup handshake — the
+#: one collective that legitimately has to absorb load skew — keeps the long one.
 _SERVE_OP_TIMEOUT_S = 120.0
 
 
@@ -167,11 +167,11 @@ class _DeferredComm:
     """Forwards to whichever communicator is bound to it.
 
     The model's `RowParallelLinear` wrappers capture a communicator at build
-    time, but the serving group must not exist until every failure-prone startup
+    time, but the serving groups must not exist until every failure-prone startup
     step has succeeded — otherwise a rank-local failure leaves an UNaborted
     subgroup whose teardown waits on peers that will never arrive (review [P1] on
     #129). Building against this proxy and binding afterwards keeps both: the
-    load happens on the startup group, the step loop runs on the serving one.
+    load happens on the startup group, the model runs on the serving tensor one.
     """
 
     def __init__(self, target) -> None:
@@ -188,8 +188,24 @@ class _DeferredComm:
         return getattr(object.__getattribute__(self, "_target"), name)
 
 
+@dataclass(frozen=True)
+class ServingGroups:
+    """Operational groups with control and model collectives kept disjoint.
+
+    ``broadcast_object_list`` is not one NCCL operation: it broadcasts metadata
+    and payload tensors, then receivers copy the payload back to the host before
+    deserializing it.  A source rank can therefore enqueue the following model
+    all-reduce while peers are still completing the object broadcast.  Keeping
+    the Python control protocol on gloo makes that hand-off blocking and leaves
+    the NCCL group with tensor collectives only.
+    """
+
+    control: object
+    model: object
+
+
 def serving_group(backend: str):
-    """A second process group carrying the OPERATIONAL collective timeout.
+    """One process group carrying the OPERATIONAL collective timeout.
 
     Every rank must call this at the same point — it is itself a collective — so
     it is created right after the rendezvous, before the slow shard load, while
@@ -201,6 +217,14 @@ def serving_group(backend: str):
 
     return dist.new_group(
         timeout=timedelta(seconds=_SERVE_OP_TIMEOUT_S), backend=backend
+    )
+
+
+def serving_groups(model_backend: str) -> ServingGroups:
+    """Create bounded operational groups in the same order on every rank."""
+    return ServingGroups(
+        control=serving_group("gloo"),
+        model=serving_group(model_backend),
     )
 
 
@@ -296,17 +320,17 @@ def _tp_worker_entry(
     # — runs on the long-timeout startup group
     handshake = startup_comm.broadcast(None, src=0)
     validate_handshake(handshake, model_dir, num_pages, page_size)
+    groups = serving_groups(placement.backend)
     comm.bind(
-        TorchDistCommunicator(
-            group=serving_group(placement.backend), device=placement.device
-        )
+        TorchDistCommunicator(group=groups.model, device=placement.device)
     )
+    control_comm = TorchDistCommunicator(group=groups.control)
     try:
-        worker_step_loop(comm, runner)
+        worker_step_loop(control_comm, runner)
     finally:
         import torch.distributed as dist
 
-        dist.destroy_process_group()  # tears down the serving subgroup too
+        dist.destroy_process_group()  # tears down both serving subgroups too
 
 
 class DistTPLauncher:
@@ -369,14 +393,17 @@ class DistTPLauncher:
             )
             # the one collective that legitimately absorbs load skew
             startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
-            # every failure-prone step is done: now the step loop gets its own
-            # bounded-timeout group
+            # Every failure-prone step is done: now the step loop gets bounded
+            # operational groups.  Python state deltas stay on gloo; the model
+            # wrappers use only the tensor/NCCL group.
+            groups = serving_groups(placement.backend)
             self._comm.bind(
                 TorchDistCommunicator(
-                    group=serving_group(placement.backend), device=placement.device
+                    group=groups.model, device=placement.device
                 )
             )
-            self.runner = DistTPModelRunner(self._comm, runner)
+            self._control_comm = TorchDistCommunicator(group=groups.control)
+            self.runner = DistTPModelRunner(self._control_comm, runner)
         except BaseException:
             self._abandon_start()
             raise
@@ -463,9 +490,9 @@ class DistTPLauncher:
         # are already sitting in their own destroy. gloo never blocks here, which
         # is why the CPU parity gates could not see this.
         if dist.is_initialized():
-            # no argument: torch tears down the serving subgroup along with the
-            # default one, and destroying them individually is registration-order
-            # dependent across backends
+            # no argument: torch tears down both serving subgroups along with
+            # the default one, and destroying them individually is
+            # registration-order dependent across backends
             dist.destroy_process_group()
         self._ctx.join()
         with contextlib.suppress(FileNotFoundError):

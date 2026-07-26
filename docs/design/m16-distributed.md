@@ -3,7 +3,8 @@
 Status: **Implemented** (2026-07-03). Reviewed (1-reviewer panel with gloo
 spawn verification incl. uneven all_to_all splits, 2026-07-03; §6 binding).
 Amended 2026-07-25 (D1: `tensor_reduce_scatter`, measured) and 2026-07-26
-(**D6**: opt-in sequence parallelism, lifting the §3 call-site non-goal).
+(**D4**: separate TP control/model serving groups; **D6**: opt-in sequence
+parallelism, lifting the §3 call-site non-goal).
 Milestone: M16 (roadmap Track E3 local half; G2-as-amended multi-GPU gates'
 code, NCCL swapped in on deploy day)
 Date: 2026-07-03
@@ -108,6 +109,22 @@ carries outputs/sampling/num_cached_tokens — extended there.
 non-final stages run their layer slice and `tensor_send` hidden states +
 positions; the final stage recvs, finishes, samples.
 
+> **Amended 2026-07-26 (issue #148).** TP serving has two bounded-timeout
+> operational groups, created in the same order on every rank after the startup
+> handshake:
+>
+> - **control:** gloo only — `StepDelta`, release, and shutdown object broadcasts;
+> - **model:** the placement backend (NCCL on CUDA) — tensor collectives only.
+>
+> The long-timeout startup group remains separate. Python object broadcasts must
+> not share the model NCCL group: `broadcast_object_list` uses metadata and
+> payload collectives plus receiver-side host deserialization, so rank 0 can
+> enqueue the next model all-reduce while peers are still completing the control
+> transfer. On Qwen3-32B TP=8 this produced rank 1–7 at BROADCAST sequence 4163
+> while rank 0 had entered ALLREDUCE sequence 4165, followed by the 120 s NCCL
+> watchdog. A blocking gloo hand-off orders every rank before it enters the
+> independent model group.
+
 ### D5 — tests/dist harness
 
 `tests/dist/conftest.py`: `torch.multiprocessing.spawn` with **file://
@@ -193,6 +210,11 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   11 tokens across 2 ranks asserting an 11-row output — the gate that pins
   padding to the shard boundary (`tests/dist/test_distributed.py`); the same
   parity over real NCCL in bf16 (`tests/gpu/test_sequence_parallel_nccl.py`).
+- D4 control/model split: 512 alternating gloo-object/NCCL-tensor rounds on two
+  real GPUs (`tests/gpu/test_tp_control_plane_nccl.py`), plus the exact
+  Qwen3-32B TP=8 / Fugu LiveCodeBench 20-item / concurrency-8 workload. The
+  latter ran 654.53 s without a watchdog, kept `/readyz` at 200, and shut down
+  with all eight GPUs returning to 0 MiB / 0% without a reset.
 - Full suite green; dist tests excluded from cov accounting by design.
 
 ## 6. Review record (binding amendments)
