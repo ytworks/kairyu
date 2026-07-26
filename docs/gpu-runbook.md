@@ -115,8 +115,15 @@ GPU-only remainder (design m5 §4.2).
 - 6.2 Sharded FP8 70B load (per-rank safetensors); FlashInfer paged attention under
   head-sharded KV; pool sized min-over-ranks (m5 D1).
 - 6.3 Decode CUDA-graph capture per TP topology (A4 prerequisite, m5 §3).
-- Gate A1: `bench/parity_tp.py` 8B TP=2 vs TP=1, overlap ON/OFF.
-- Gate A2: 70B TP=4/8 vs TP=2 match-rate ≥99% + logprob tolerance.
+- Gate A1: Llama-3.1-8B, 64 fixed prompts, 16-token full continuations:
+  `bench/parity_tp.py --tp 1,2 --num-prompts 64 --max-new-tokens 16
+  --model-path <checkpoint>` records TP1/2 with overlap ON/OFF. Run
+  `bench/parity_hf.py` against one shared reference at `--tp 1` and `--tp 2`,
+  then pass all four files to `bench/gate_a1.py`. The assembler retains the raw
+  continuations/reference and fails unless both amended teacher-forced verdicts,
+  overlap transparency, checkpoint/prompt identity, and clean-code provenance pass.
+- Gate A2: 70B TP=4/8 vs TP=2 under the amended teacher-forced agreement and
+  logprob criteria in G2 §7.
 - Gates A3–A5: `bench/serving_bench.py --sweep-tp 2,4,8` (TP=2 base in same file;
   conc-64 report-only point).
 - Gate A6: vs pinned vLLM TP=4/8 (ShareGPT@128 + shared-prefix trace).

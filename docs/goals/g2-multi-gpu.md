@@ -61,7 +61,7 @@ results are ever reported (goal acceptance criteria, carried from G1).
 
 | Gate | Target | Regime |
 |---|---|---|
-| A1 (correctness anchor) | 8B TP=2: greedy token parity vs 8B TP=1 (HF-verified per gpu-runbook Gate 1) on the 64 fixed prompts, overlap ON and OFF | — |
+| A1 (correctness anchor) | Llama-3.1-8B TP=1/2 on the same 64 fixed prompts: retain full greedy continuations with overlap ON/OFF, require each overlap pair to be exact, and require TP1 and TP2 to pass the amended teacher-forced agreement and logprob criteria. `bench/gate_a1.py` assembles and enforces the self-contained gate | — |
 | A2 (correctness, 70B) | 70B TP=4 and TP=8 vs TP=2, teacher-forced next-token agreement on 64 prompts: (a) **zero substantive disagreements** — every disagreement inside the reference's own top-k and within the measured tie gap; (b) agreement rate **at or above the reference's self-agreement rate**, both measured by `bench/parity_hf.py`. See the 2026-07-25 amendment below | — |
 | A3 (TTFT scaling) | TTFT p50 at TP=8 ≤ ⅓ × TP=2 on 4k-token prompts (≥75% efficiency; prefill is compute-bound and parallelizes near-linearly over NVLink) | latency-bound |
 | A4 (TPOT scaling) | TPOT p50 at TP=8 ≤ ½ × TP=2 (≥50% efficiency; decode is bandwidth-bound and all-reduce latency does not shrink with N — linear TPOT scaling is not a defensible promise) | latency-bound |

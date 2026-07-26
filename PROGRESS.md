@@ -12,7 +12,10 @@ there required four fixes, none of which any CPU test could have caught, because
 on a CPU box the behaviour they broke is the correct behaviour (PRs #124–#130).
 The measured interconnect is now recorded (`bench/results/env-2026-07-25.json`):
 PCIe throughout, P2P 30–37 GB/s against ~1450 GB/s device-local.
-Gate A1/A2 has a real-ranks harness for the first time. Teacher-forced agreement
+Gate A1/A2 has a real-ranks harness for the first time. The formal A1 command now
+retains all TP1/2 overlap ON/OFF continuations and combines them with the amended
+teacher-forced verdicts while failing closed on incomplete or cross-checkpoint
+evidence; the Llama-3.1-8B hardware run is pending. Teacher-forced agreement
 against HF is measured and within the reference's own noise floor at TP=1 and
 TP=8 (`bench/parity_hf.py`), but that is a DIAGNOSTIC, not A1: the formal gate
 needs full greedy continuations on Llama-3.1-8B. The overlap pipeline is no
@@ -150,6 +153,20 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [progress] G2 A1 has a fail-closed evidence assembler
+- What: `parity_tp.py` now retains the fixed prompt text/token IDs and every
+  TP1/2 overlap ON/OFF continuation, plus checkpoint architecture and the
+  CUDA/NCCL runtime. `parity_hf.py` records code provenance. The new
+  `gate_a1.py` command verifies the Llama-3.1-8B contract, exact weight and
+  prompt identity, complete raw evidence, overlap transparency, both amended
+  teacher-forced verdicts, and one clean commit before producing a
+  self-contained result.
+- Why: the prior diagnostics could report the component measurements but could
+  neither retain the raw free-running outputs nor fail the formal gate when
+  evidence was partial, stale, or came from another checkpoint.
+- Refs: issue #151; G2 A1 and §7 amendment; GPU runbook §6;
+  `bench/{parity_tp,parity_hf,gate_a1}.py`
 
 ### 2026-07-26 — [amendment] m2/m13/m17: Qwen3-32B TP8 LiveCodeBench finishes below the request timeout
 - What: the Qwen3-32B example now has 8,192 KV pages, hardware-selected

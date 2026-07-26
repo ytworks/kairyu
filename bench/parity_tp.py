@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -267,13 +268,28 @@ def _checkpoint_provenance(model_path: str) -> dict:
         raise SystemExit(f"no tokenizer files under {model_path}; cannot record provenance")
 
     name = None
+    architecture = None
     config_file = root / "config.json"
     if config_file.is_file():
         parsed = json.loads(config_file.read_text())
         name = parsed.get("_name_or_path") or parsed.get("model_type")
+        architecture = {
+            key: parsed.get(key)
+            for key in (
+                "model_type",
+                "hidden_size",
+                "intermediate_size",
+                "num_hidden_layers",
+                "num_attention_heads",
+                "num_key_value_heads",
+                "vocab_size",
+                "torch_dtype",
+            )
+        }
 
     return {
         "name": name or root.name,
+        "architecture": architecture,
         "weights_sha256": rollup,
         "weights": weights,
         "metadata_sha256": metadata,
@@ -310,6 +326,62 @@ def _code_provenance() -> dict:
         # changing the code that produced the numbers, but a reader still gets to
         # see that something unversioned was present.
         "untracked_files": None if untracked is None else len(untracked.splitlines()),
+    }
+
+
+def _gpu_runtime_provenance() -> dict:
+    """Record the CUDA/NCCL runtime and knobs that can change a TP result."""
+    import torch
+
+    driver = None
+    try:
+        done = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,pci.bus_id,driver_version",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode == 0:
+            driver = [line.strip() for line in done.stdout.splitlines() if line.strip()]
+    except OSError:
+        pass
+
+    nccl_version = None
+    if torch.distributed.is_nccl_available():
+        raw_nccl_version = torch.cuda.nccl.version()
+        nccl_version = (
+            ".".join(str(part) for part in raw_nccl_version)
+            if isinstance(raw_nccl_version, tuple)
+            else str(raw_nccl_version)
+        )
+    environment = {
+        name: os.environ[name]
+        for name in (
+            "CUDA_VISIBLE_DEVICES",
+            "KAIRYU_DIST_BACKEND",
+            "NCCL_ALGO",
+            "NCCL_DEBUG",
+            "NCCL_IB_DISABLE",
+            "NCCL_P2P_DISABLE",
+            "NCCL_PROTO",
+        )
+        if name in os.environ
+    }
+    return {
+        "torch": torch.__version__,
+        "torch_cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version(),
+        "nccl": nccl_version,
+        "device_capabilities": [
+            list(torch.cuda.get_device_capability(index))
+            for index in range(torch.cuda.device_count())
+        ],
+        "nvidia_smi": driver,
+        "environment": environment,
     }
 
 
@@ -551,6 +623,7 @@ def main() -> int:
             "device_name": profile.device_name,
             "device_count": profile.device_count,
             "sm": profile.sm,
+            "runtime": _gpu_runtime_provenance(),
         }
     else:
         harness = "cpu-toy (pass --model-path for real ranks)"
@@ -567,8 +640,35 @@ def main() -> int:
         "overlap_modes": ["on" if mode else "off" for mode in overlap_modes],
         "overlap_on_gap": overlap_note,
         "seed": _SEED,
+        "sampling": {
+            "method": "greedy",
+            "temperature": None,
+            "top_p": None,
+            "top_k": None,
+        },
     }
-    payload = {"config": config, "parity": results, "overlap_equality": overlap_equality}
+    prompt_evidence = [
+        {
+            "request_id": prompt.request_id,
+            "text": _TEXT_PROMPTS[index] if args.model_path else None,
+            "token_ids": list(prompt.prompt_token_ids),
+        }
+        for index, prompt in enumerate(prompts)
+    ]
+    continuations = {
+        f"tp{degree}_overlap_{'on' if overlap else 'off'}": {
+            request_id: list(token_ids)
+            for request_id, token_ids in sorted(run.items())
+        }
+        for (degree, overlap), run in sorted(runs.items())
+    }
+    payload = {
+        "config": config,
+        "prompts": prompt_evidence,
+        "continuations": continuations,
+        "parity": results,
+        "overlap_equality": overlap_equality,
+    }
     print(json.dumps(payload, indent=2))
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -41,7 +41,7 @@ import argparse
 import json
 from pathlib import Path
 
-from bench.parity_tp import _TEXT_PROMPTS
+from bench.parity_tp import _TEXT_PROMPTS, _code_provenance
 
 #: G2 A2, amended 2026-07-25: the bar is the REFERENCE's own self-agreement, not
 #: a fixed percentage. HF's `generate()` and a teacher-forced forward over the
@@ -607,6 +607,7 @@ def main() -> int:
         "config": {
             "model_path": args.model_path,
             "reference_provenance": provenance,
+            "code": _code_provenance(),
             "tensor_parallel_size": args.tp,
             "num_prompts": len(reference),
             "positions": args.positions,
