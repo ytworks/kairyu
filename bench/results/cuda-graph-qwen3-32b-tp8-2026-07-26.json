@@ -37,6 +37,7 @@
   "notes": [
     "Both modes used the same image, model volume, prompts, topology, and serving benchmark harness.",
     "The graph run includes first-use capture and warmup in the observed request latency.",
+    "This pre-#207 comparison also changed eager list metadata into graph tensor metadata; use decode-row-sync-qwen3-32b-tp8-2026-07-26.json for the separated tensor-eager versus graph result.",
     "A production-builder GPU integration gate independently asserts capture and replay counters.",
     "The TP8 graph service shut down normally after the run and released all eight GPUs."
   ]

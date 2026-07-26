@@ -158,9 +158,10 @@ output (DeepSeek convention).
   synchronized, and destroyed in identical order on every rank before the
   default group.
 - **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
-  synthetic requests x 32 output tokens, torch attention: eager wall 16.722 s,
-  TPOT 441.831 ms/token, 0.48 req/s; CUDA graph wall 8.928 s, TPOT
-  194.200 ms/token, 0.90 req/s. That is 46.6% lower wall time, 56.0% lower
-  TPOT, and 87.5% higher throughput. The graph run includes first-use warmup
-  and capture. Evidence:
-  `bench/results/cuda-graph-qwen3-32b-tp8-2026-07-26.json`.
+  synthetic requests x 32 output tokens, torch attention: tensor eager wall
+  8.844 s, TPOT 192.075 ms/token, 0.90 req/s; CUDA graph wall 7.196 s,
+  TPOT 130.297 ms/token, 1.11 req/s. That is 18.6% lower wall time, 32.2%
+  lower TPOT, and 23.3% higher throughput after separating the #207 tensor
+  metadata improvement from graph capture. The graph run includes first-use
+  warmup and capture. Evidence:
+  `bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json`.

@@ -40,17 +40,20 @@ tensor when the real graph backend is enabled.
 sequentially; `AttentionBackend.attend(...)` was one-sequence-per-call. N
 concurrent decodes = N kernel-launch chains per layer per step.
 
-**Fix (landed).** `AttentionBackend.attend_batched(...)` (per-sequence contexts,
-one call per layer per step); `DenseDecoder.forward_decode_batch` (row-batched
-projections/RoPE/MLP, per-sequence KV write to private decode pages, batched
-attention); `PagedModelRunner.execute` now runs all single-token decodes in a
-step as ONE batched forward when ≥2 are present. The torch backend loops
-internally (CPU reference); the GPU FlashInfer backend replaces the loop with one
-batched kernel over indptr/indices behind the same signature. Byte-identical to
-sequential decode — `test_batched_decode.py` pins `forward_decode_batch[i] ==
-forward_tokens(seq_i)` and KV-write equality, and the full parity suite is
-unchanged. Remaining GPU-day work: batched PREFILL plan, and on-device batched
-sampling with a single async D2H (the CPU sampler already samples per row).
+**Fix (landed).** `PagedModelRunner.execute` runs all single-token decodes in a
+step as one batched forward when ≥2 are present. Supported eager and captured
+execution share `DenseDecoder.forward_decode_tensors`: token ids, positions,
+ragged padded page tables, sequence lengths, and the cached-KV `write_from` mask
+stay on device. Torch uses tensorized paged attention; FlashInfer performs one
+step-boundary plan and one batched kernel per layer. The old
+`forward_decode_batch` list path remains only as compatibility fallback for a
+model/attention backend that does not declare the tensor contract.
+Byte/token parity, cached/shared-page preservation, and KV-write equality are
+pinned on CPU and GPU. A torch-profiler gate measures zero
+`aten::_local_scalar_dense` events at B=1 and B=8 for both the tensor path and
+the host-metadata compatibility fallback; only the audited pre-fix path grew
+with B. Remaining GPU-day work: batched PREFILL planning and on-device
+sampling/future-token fill.
 
 ## E3 — one engine loop with pluggable pipeline depth (HIGH)
 

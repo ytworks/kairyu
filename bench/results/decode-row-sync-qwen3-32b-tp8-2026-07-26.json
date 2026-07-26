@@ -1,0 +1,57 @@
+{
+  "date": "2026-07-26",
+  "hardware": "8x NVIDIA RTX PRO 6000 Blackwell",
+  "model": "Qwen/Qwen3-32B",
+  "attention_backend": "torch",
+  "workload": {
+    "dataset": "synthetic",
+    "requests": 8,
+    "concurrency": 8,
+    "max_tokens": 32,
+    "tensor_parallel": 8
+  },
+  "legacy_list_eager": {
+    "source": "bench/results/cuda-graph-qwen3-32b-tp8-2026-07-26.json",
+    "wall_s": 16.722,
+    "tpot_mean_ms": 441.831,
+    "throughput_rps": 0.48
+  },
+  "tensor_eager": {
+    "wall_s": 8.844,
+    "ttft_p50_ms": 2396.5,
+    "ttft_p99_ms": 3857.67,
+    "tpot_mean_ms": 192.075,
+    "throughput_rps": 0.9
+  },
+  "tensor_cuda_graph": {
+    "wall_s": 7.196,
+    "ttft_p50_ms": 2111.02,
+    "ttft_p99_ms": 3939.34,
+    "tpot_mean_ms": 130.297,
+    "throughput_rps": 1.11
+  },
+  "legacy_list_to_tensor_eager_delta": {
+    "wall_reduction_percent": 47.1,
+    "tpot_reduction_percent": 56.5,
+    "throughput_increase_percent": 87.5
+  },
+  "tensor_eager_to_cuda_graph_delta": {
+    "wall_reduction_percent": 18.6,
+    "tpot_reduction_percent": 32.2,
+    "throughput_increase_percent": 23.3
+  },
+  "profiler_gate": {
+    "event": "aten::_local_scalar_dense",
+    "tensor_path_batch_1": 0,
+    "tensor_path_batch_8": 0,
+    "host_metadata_fallback_batch_1": 0,
+    "host_metadata_fallback_batch_8": 0,
+    "legacy_pre_fix_path": "count grew with batch size"
+  },
+  "notes": [
+    "All three runs used the same model, topology, prompts, and serving benchmark harness.",
+    "Each service was restarted before its observed run.",
+    "The earlier eager-vs-graph result included both graph capture and removal of the eager list path; this artifact separates those effects.",
+    "The final TP8 graph service shut down normally and released all eight GPUs."
+  ]
+}

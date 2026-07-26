@@ -23,8 +23,10 @@ code is rather than only in the design doc:
   step loop never blocks on ``.item()``/``.cpu()``. Both require the sampling
   DECISION to move onto the device; today it is host-side by design (m8 D2 pins
   reproducibility to the CPU RNG stream), so the sampled id exists only as a
-  Python int and reaches the device by one batched H2D copy per step. The
-  batched-decode attention loop also reads ``int(positions[i])`` per row.
+  Python int and reaches the device by one batched H2D copy per step.
+- DONE (#207) — supported eager and captured batched-decode attention share
+  the tensor metadata path; KV-write masking and ragged page tables never read
+  a per-row device scalar into Python.
 """
 
 from __future__ import annotations
@@ -123,6 +125,10 @@ class PagedModelRunner:
         self._decode_positions: torch.Tensor | None = None
         self._slot_staging: torch.Tensor | None = None
         self._slot_copy_done: torch.cuda.Event | None = None
+        # The same tensor-only decode contract serves both graph capture and
+        # eager batching. Unsupported model/attention combinations retain the
+        # list-based compatibility path.
+        self._tensor_decode_supported = _tensor_decode_gap(model) is None
 
         # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
         # the seam has existed since m17 with no caller, and enabling it by
@@ -200,7 +206,7 @@ class PagedModelRunner:
         """The captured region: embed -> layers -> norm -> logits, tensors only."""
         hidden = self._model.forward_decode_tensors(
             batch.token_ids, batch.positions, self._pool,
-            batch.page_tables, batch.seq_lens,
+            batch.page_tables, batch.seq_lens, batch.write_from,
         )
         return self._model.logits(hidden)
 
@@ -452,10 +458,11 @@ class PagedModelRunner:
 
     def _graph_logits(
         self,
-        tokens: list[int],
-        positions: list[int],
+        tokens: torch.Tensor,
+        positions: torch.Tensor,
         page_tables: list[list[int]],
         seq_lens: list[int],
+        write_from: list[int] | None = None,
     ) -> torch.Tensor:
         """Route this decode through capture/replay (m17 D1).
 
@@ -472,6 +479,8 @@ class PagedModelRunner:
         from kairyu.engine.core.step_executor import build_decode_batch
 
         assert self._graph_scratch_page is not None  # set with self._graph
+        if write_from is None:
+            write_from = [0] * len(tokens)
         batch = build_decode_batch(
             token_ids=tokens,
             positions=positions,
@@ -479,9 +488,49 @@ class PagedModelRunner:
             seq_lens=seq_lens,
             max_pages=max(len(table) for table in page_tables),
             scratch_page=self._graph_scratch_page,
+            write_from=write_from,
             device=self._device,
         )
         return self._graph.execute_decode(batch)
+
+    def _eager_tensor_logits(
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor,
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+        write_from: list[int],
+    ) -> torch.Tensor:
+        """One tensor-metadata eager forward, with no per-row device reads.
+
+        Ragged page-table tails repeat each request's last owned page. They are
+        masked by seq_lens and there are no synthetic rows, so eager execution
+        needs no graph scratch-page reservation.
+        """
+        from kairyu.engine.core.step_executor import build_decode_batch
+
+        batch = build_decode_batch(
+            token_ids=tokens,
+            positions=positions,
+            page_lists=page_tables,
+            seq_lens=seq_lens,
+            max_pages=max(len(table) for table in page_tables),
+            scratch_page=None,
+            write_from=write_from,
+            device=self._device,
+        )
+        self._model.plan_decode_tensors(
+            self._pool, batch.page_tables, batch.seq_lens
+        )
+        hidden = self._model.forward_decode_tensors(
+            batch.token_ids,
+            batch.positions,
+            self._pool,
+            batch.page_tables,
+            batch.seq_lens,
+            batch.write_from,
+        )
+        return self._model.logits(hidden)
 
     def _execute_decode_batch(
         self, chunks: list[ScheduledChunk], states: Mapping[str, object], sampled: dict
@@ -496,13 +545,23 @@ class PagedModelRunner:
             page_tables.append(page_table)
             seq_lens.append(absolute + 1)
             write_from.append(cached)
+        # Every branch consumes the same persistent token/position slots. The
+        # tensor path must not regress #143 by rebuilding those inputs while it
+        # tensorizes page-table metadata.
+        token_slots, position_slots = self._decode_input_slots(tokens, positions)
         if self._graph is not None:
-            logits = self._graph_logits(tokens, positions, page_tables, seq_lens)
+            logits = self._graph_logits(
+                token_slots, position_slots, page_tables, seq_lens, write_from
+            )
+        elif self._tensor_decode_supported:
+            logits = self._eager_tensor_logits(
+                token_slots, position_slots, page_tables, seq_lens, write_from
+            )
         else:
-            token_slots, position_slots = self._decode_input_slots(tokens, positions)
             hidden = self._model.forward_decode_batch(
                 token_slots, position_slots,
                 self._pool, page_tables, seq_lens, write_from,
+                position_values=positions,
             )
             logits = self._model.logits(hidden)  # [B, vocab]
         for i, chunk in enumerate(chunks):

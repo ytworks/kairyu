@@ -6,7 +6,8 @@ CUDA-touching lines are in ``cuda_graph_gpu.CudaGraphBackend``. The CUDA-graph
 contract: per-bucket STATIC device buffers, inputs copied in place before
 replay, outputs read from the static output buffer.
 
-All four decode inputs — token_ids, positions, page_tables, seq_lens — are
+All five decode inputs — token_ids, positions, page_tables, seq_lens,
+write_from — are
 static device tensors written IN PLACE by ``_copy_in`` (C5). A real CUDA graph
 replays fixed kernels over fixed memory, so nothing may be a Python attribute
 rebound after capture — it would be invisible to the graph and every replay
@@ -32,6 +33,7 @@ class DecodeBatch:
     positions: torch.Tensor  # [B] int64
     page_tables: torch.Tensor  # [B, max_pages] int32, padded with the scratch page
     seq_lens: torch.Tensor  # [B] int32
+    write_from: torch.Tensor  # [B] int64; positions below this retain cached KV
 
     @property
     def batch_size(self) -> int:
@@ -49,21 +51,35 @@ def build_decode_batch(
     seq_lens: Sequence[int],
     max_pages: int,
     *,
-    scratch_page: int,
+    scratch_page: int | None,
+    write_from: Sequence[int] | None = None,
     device: str | torch.device = "cpu",
 ) -> DecodeBatch:
     """Pad ragged per-sequence page lists into a [B, max_pages] int32 tensor.
 
-    ``scratch_page`` is REQUIRED and has no default: page 0 is the first page a
-    ``PagePool`` hands out, so a defaulted 0 silently aliases a live request's KV
-    (m17 A5). Callers over a real pool must pass a page id the allocator can
-    never return; callers with no pool behind the ids pass whatever is unused.
+    ``scratch_page`` is REQUIRED and has no default. Graph callers pass a page
+    the allocator can never return (m17 A5). Eager tensor decode passes ``None``
+    and repeats each row's final owned page into its masked tail; it has no
+    synthetic padding rows and therefore needs no capacity reservation.
     """
     batch = len(seq_lens)
-    page_tables = torch.full(
-        (batch, max_pages), scratch_page, dtype=torch.int32, device=device
-    )
+    if write_from is None:
+        write_from = [0] * batch
+    if len(write_from) != batch:
+        raise ValueError("write_from must have one entry per decode row")
+    if scratch_page is None:
+        if any(not pages for pages in page_lists):
+            raise ValueError("eager decode page lists must not be empty")
+        page_tables = torch.empty(
+            (batch, max_pages), dtype=torch.int32, device=device
+        )
+    else:
+        page_tables = torch.full(
+            (batch, max_pages), scratch_page, dtype=torch.int32, device=device
+        )
     for row, pages in enumerate(page_lists):
+        if scratch_page is None:
+            page_tables[row].fill_(pages[-1])
         if pages:
             page_tables[row, : len(pages)] = torch.tensor(
                 list(pages[:max_pages]), dtype=torch.int32, device=device
@@ -73,6 +89,7 @@ def build_decode_batch(
         positions=torch.as_tensor(positions, dtype=torch.int64, device=device),
         page_tables=page_tables,
         seq_lens=torch.as_tensor(seq_lens, dtype=torch.int32, device=device),
+        write_from=torch.as_tensor(write_from, dtype=torch.int64, device=device),
     )
 
 
@@ -235,6 +252,7 @@ class GraphStepExecutor:
                 device=self._device,
             ),
             seq_lens=torch.ones(bucket, dtype=torch.int32, device=self._device),
+            write_from=torch.zeros(bucket, dtype=torch.int64, device=self._device),
         )
         # Plan BEFORE the backend captures: the warmup passes and the capture
         # itself run decode_fn, which reaches attend_decode, which under capture
@@ -257,3 +275,5 @@ class GraphStepExecutor:
         static.page_tables[size:] = self._scratch_page
         static.seq_lens[:size] = batch.seq_lens
         static.seq_lens[size:] = 1
+        static.write_from[:size] = batch.write_from
+        static.write_from[size:] = 0

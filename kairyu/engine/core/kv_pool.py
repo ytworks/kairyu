@@ -103,6 +103,7 @@ class PagedKVPool:
         positions: torch.Tensor,  # [B] absolute position of each new token
         keys: torch.Tensor,  # [B, num_kv_heads, head_dim]
         values: torch.Tensor,
+        write_from: torch.Tensor | None = None,  # [B], retain KV below this
     ) -> None:
         """Batched single-token write, entirely on device.
 
@@ -115,9 +116,18 @@ class PagedKVPool:
         slot = positions - page_index * self.page_size
         pages = page_tables.gather(1, page_index.unsqueeze(1).long()).squeeze(1)
         flat = pages.long() * self.page_size + slot.long()
-        self.k[layer].reshape(-1, self.num_kv_heads, self.head_dim)[flat] = keys
+        k_flat = self.k[layer].reshape(-1, self.num_kv_heads, self.head_dim)
+        if write_from is not None:
+            writable = (positions >= write_from)[:, None, None]
+            keys = torch.where(writable, keys, k_flat[flat])
+        k_flat[flat] = keys
         if self.v_head_dim:
-            self.v[layer].reshape(-1, self.num_kv_heads, self.v_head_dim)[flat] = values
+            v_flat = self.v[layer].reshape(
+                -1, self.num_kv_heads, self.v_head_dim
+            )
+            if write_from is not None:
+                values = torch.where(writable, values, v_flat[flat])
+            v_flat[flat] = values
 
     def gather_batched(
         self, layer: int, page_tables: torch.Tensor
