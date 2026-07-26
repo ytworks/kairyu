@@ -68,6 +68,7 @@ class PDLoopAdapter:
     def __init__(self, coordinator: PDCoordinator) -> None:
         self._coordinator = coordinator
         self._states = _PDStates(self)
+        self._made_control_progress = False
 
     @property
     def coordinator(self) -> PDCoordinator:
@@ -123,9 +124,19 @@ class PDLoopAdapter:
         next — the copy has to finish either way, and this way it does so
         alongside work instead of in front of it.
         """
-        if self._coordinator.has_prefill_work():
+        self._made_control_progress = self._coordinator.has_prefill_work()
+        if self._made_control_progress:
             self._coordinator.step_prefill(reject_on_stall=True)
         return self._coordinator.decode_scheduler.schedule()
+
+    def made_control_progress(self) -> bool:
+        """Whether the latest schedule call advanced the prefill/handoff side.
+
+        Chunked prefill can legitimately leave the decode plan empty. Exposing
+        that control-only transition lets ``EngineLoop`` distinguish it from a
+        capacity stall without granting later empty steps a blanket exemption.
+        """
+        return self._made_control_progress
 
     def drain_carried_tokens(self) -> dict[str, SampledToken]:
         """Token 0s the adoption committed; no ``execute()`` ever reports them.

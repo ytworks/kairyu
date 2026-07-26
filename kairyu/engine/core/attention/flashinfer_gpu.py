@@ -3,9 +3,9 @@ on deploy day (`pytest -m gpu`).
 
 API pins (reviewed against docs.flashinfer.ai 0.6.x — the fake-module contract
 tests enforce every one of them):
-- both wrappers take a zero-initialized WORKSPACE buffer first (128 MB uint8),
-  constructed once — the adapter is stateful and must be ONE shared instance
-  across all layers;
+- both wrappers take one shared, zero-initialized WORKSPACE buffer first
+  (394 MiB uint8, matching vLLM's serving default), constructed once — the
+  adapter is stateful and must be ONE shared instance across all layers;
 - prefill ``plan()`` takes ``head_dim_qk`` (NOT ``head_dim`` — that spelling
   is decode-wrapper-only);
 - ``q_data_type``/``kv_data_type`` are passed explicitly (defaults are fp16);
@@ -32,7 +32,12 @@ import torch
 
 from kairyu.engine.core.kv_pool import PagedKVPool
 
-_WORKSPACE_BYTES = 128 * 1024 * 1024
+# FlashInfer calls 128 MiB "recommended", but that is not a capacity guarantee:
+# Qwen3-32B's 1,024-token chunked prefill required 190,840,832 bytes once its
+# context grew during the 20-item LiveCodeBench gate. vLLM uses 394 MiB for the
+# same shared prefill/decode workspace. Sharing keeps the per-rank reservation
+# at 394 MiB rather than allocating one buffer per wrapper.
+_WORKSPACE_BYTES = 394 * 1024 * 1024
 
 
 def _is_capturing() -> bool:
@@ -62,15 +67,12 @@ class FlashInferBackend:
         self._flashinfer = flashinfer
         self._device = device
         workspace = torch.zeros(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+        self._workspace = workspace
         self._prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             workspace, kv_layout="NHD"
         )
-        decode_workspace = torch.zeros(
-            _WORKSPACE_BYTES, dtype=torch.uint8, device=device
-        )
-        self._decode_workspace = decode_workspace
         self._decode = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            decode_workspace, kv_layout="NHD", use_tensor_cores=True
+            workspace, kv_layout="NHD", use_tensor_cores=True
         )
         self._plan_key: tuple | None = None
         self._planned_decode = False
@@ -212,7 +214,7 @@ class FlashInferBackend:
         )
         last_page_len = torch.ones(batch_size, dtype=torch.int32, device=self._device)
         wrapper = self._flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            self._decode_workspace,
+            self._workspace,
             kv_layout="NHD",
             use_cuda_graph=True,
             use_tensor_cores=True,

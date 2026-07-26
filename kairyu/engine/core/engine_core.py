@@ -74,6 +74,9 @@ class EngineCore:
                 if head is not None:
                     self._outputs[head] = self._scheduler.output_tokens(head)
                     return (*rejected, head)
+                raise RuntimeError(
+                    "scheduler made no progress with running requests"
+                )
             return rejected
         sampled = self._runner.execute(plan.scheduled, self._scheduler.states)
         finished = self._scheduler.update(token_ids(sampled)) if sampled else ()

@@ -23,13 +23,15 @@ _SHUTDOWN = None
 #: CI-tuned 120s default would fire on a cold multi-GB read long before anything
 #: is actually deadlocked. This covers ONLY startup.
 _STARTUP_TIMEOUT_S = 1800.0
-#: Every collective once the group is serving. `init_process_group(timeout=)` is
-#: the timeout for EVERY operation on that group, not just the rendezvous, so
-#: giving the startup allowance to the default group would let one wedged rank
-#: hold an in-flight generation for half an hour. The step loop therefore runs on
-#: operational groups created with this bound, while the startup handshake — the
-#: one collective that legitimately has to absorb load skew — keeps the long one.
+#: Model collectives once the group is serving. `init_process_group(timeout=)`
+#: bounds every operation on that group, so a wedged rank must not hold an
+#: in-flight generation for the startup allowance.
 _SERVE_OP_TIMEOUT_S = 120.0
+#: Non-zero ranks intentionally sit inside the next control broadcast while the
+#: server is idle. A short collective timeout therefore kills a healthy TP group
+#: after exactly that much idle time. Keep the control receive effectively
+#: process-lifetime while model work retains the fail-fast bound above.
+_CONTROL_IDLE_TIMEOUT_S = 365 * 24 * 60 * 60.0
 
 
 @dataclass(frozen=True)
@@ -70,28 +72,49 @@ class DistTPModelRunner:
     def __init__(self, comm, local_runner) -> None:
         self._comm = comm
         self._local = local_runner
+        self._fatal_error: Exception | None = None
         # delta-broadcast state (F4): only new/finished requests + committed
         # tokens cross the wire each step, not a full pickled snapshot of every
         # active request's (growing) prompt/outputs
         self._sync = StateSync()
 
     def execute(self, scheduled, states) -> dict:
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                "tensor-parallel runner is unavailable after a fatal step failure"
+            ) from self._fatal_error
         chunks = tuple(scheduled)
         delta = self._sync.diff(chunks, states)
-        self._comm.broadcast(delta, src=0)
-        view = self._sync.apply(delta)  # reconstructs snapshot_step()'s states exactly
-        return self._local.execute(chunks, view)
+        try:
+            self._comm.broadcast(delta, src=0)
+            view = self._sync.apply(delta)  # reconstructs snapshot_step() exactly
+            return self._local.execute(chunks, view)
+        except Exception as error:
+            # Once one TP rank misses a step, retrying on the same groups can only
+            # diverge their collective sequences further. Surface a fatal health
+            # state and require process replacement.
+            self._fatal_error = error
+            raise
+
+    @property
+    def fatal_error(self) -> Exception | None:
+        return self._fatal_error
 
     def release(self, request_id: str) -> None:
         try:
-            self._comm.broadcast(ReleaseRequest(request_id), src=0)
+            if self._fatal_error is None:
+                self._comm.broadcast(ReleaseRequest(request_id), src=0)
+        except Exception as error:
+            self._fatal_error = error
+            raise
         finally:
             release = getattr(self._local, "release", None)
             if release is not None:
                 release(request_id)
 
     def shutdown(self) -> None:
-        self._comm.broadcast(_SHUTDOWN, src=0)
+        if self._fatal_error is None:
+            self._comm.broadcast(_SHUTDOWN, src=0)
 
     def invalidate_graphs(self) -> None:
         invalidate = getattr(self._local, "invalidate_graphs", None)
@@ -209,7 +232,7 @@ class ServingGroups:
     model: object
 
 
-def serving_group(backend: str):
+def serving_group(backend: str, *, timeout_s: float = _SERVE_OP_TIMEOUT_S):
     """One process group carrying the OPERATIONAL collective timeout.
 
     Every rank must call this at the same point — it is itself a collective — so
@@ -221,15 +244,25 @@ def serving_group(backend: str):
     import torch.distributed as dist
 
     return dist.new_group(
-        timeout=timedelta(seconds=_SERVE_OP_TIMEOUT_S), backend=backend
+        timeout=timedelta(seconds=timeout_s), backend=backend
     )
 
 
-def serving_groups(model_backend: str) -> ServingGroups:
-    """Create bounded operational groups in the same order on every rank."""
+def serving_groups(
+    model_backend: str,
+    *,
+    control_timeout_s: float = _CONTROL_IDLE_TIMEOUT_S,
+    model_timeout_s: float = _SERVE_OP_TIMEOUT_S,
+) -> ServingGroups:
+    """Create control/model groups in the same order on every rank.
+
+    The control timeout must cover the server's idle lifetime because workers
+    wait *inside* its receive. The model group has no pending operation while
+    idle, so it keeps the short fail-fast bound.
+    """
     return ServingGroups(
-        control=serving_group("gloo"),
-        model=serving_group(model_backend),
+        control=serving_group("gloo", timeout_s=control_timeout_s),
+        model=serving_group(model_backend, timeout_s=model_timeout_s),
     )
 
 
@@ -556,6 +589,11 @@ class DistTPLauncher:
             if not process.is_alive()
         )
 
+    def failure_type(self) -> str | None:
+        """Fatal TP step failure, sanitized for the unauthenticated health API."""
+        error = self.runner.fatal_error
+        return type(error).__name__ if error is not None else None
+
     def shutdown(self) -> None:
         import contextlib
         import os
@@ -563,6 +601,11 @@ class DistTPLauncher:
         import torch
         import torch.distributed as dist
 
+        if self.runner.fatal_error is not None:
+            # The collective sequence is already untrustworthy. A graceful
+            # broadcast/barrier can only hang; abort and reap like failed startup.
+            self._abandon_start()
+            return
         self.runner.shutdown()  # broadcasts None -> workers leave worker_step_loop
         self.runner.invalidate_graphs()
         if self._placement_backend == "nccl":

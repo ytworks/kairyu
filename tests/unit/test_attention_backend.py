@@ -166,6 +166,7 @@ class TestFlashInferAdapterContract:
         for wrapper in (backend._prefill, backend._decode):
             assert wrapper.workspace.numel() == 64
             assert torch.count_nonzero(wrapper.workspace).item() == 0
+        assert backend._prefill.workspace is backend._decode.workspace
 
     def test_prefill_plan_pins_indptr_math_and_kwargs(self, fake_flashinfer):
         backend = self._backend()

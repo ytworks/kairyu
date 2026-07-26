@@ -258,11 +258,26 @@ class EngineLoop:
             # their tracks surface as finished via _track_update below
             self._scheduler.drain_rejected()
             if not plan.scheduled:
-                # No progress this step. An empty plan while unfinished implies
-                # nothing is running to free pages, so force the stuck waiting
-                # head to finish rather than crash the whole engine (and every
-                # concurrent request) with a fatal stall.
-                self._scheduler.reject_waiting_head()
+                # This is either one unadmittable waiting head or a violated
+                # scheduler capacity invariant, unless an adapter explicitly
+                # reports a control-only transition such as P-D prefill/KV
+                # handoff. The former can finish locally; the latter must fail
+                # loudly instead of hot-spinning while every GPU remains idle.
+                rejected = self._scheduler.reject_waiting_head()
+                progress_hook = getattr(
+                    self._scheduler, "made_control_progress", None
+                )
+                made_control_progress = (
+                    bool(progress_hook()) if callable(progress_hook) else False
+                )
+                if (
+                    rejected is None
+                    and self._scheduler.has_unfinished()
+                    and not made_control_progress
+                ):
+                    raise RuntimeError(
+                        "scheduler made no progress with running requests"
+                    )
                 sampled = {}
             else:
                 sampled = self._runner.execute(plan.scheduled, self._scheduler.states)

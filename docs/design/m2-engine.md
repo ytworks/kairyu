@@ -59,15 +59,15 @@ decode inputs live in persistent device tensors allocated once and written in pl
 (`PagedModelRunner._decode_input_slots`), used identically by the batched and the
 single-request decode path.
 
-What is NOT done, and cannot be while sampling is host-side: the **device-to-device** fill
-and the `.item()`/`.cpu()` invariant. The sampler decides on the CPU because m8 D2 pins
-reproducibility (including spec ≡ greedy) to the CPU RNG stream, so it pulls the logits row
-to host and the chosen id exists only as a Python int — there is nothing on the device to
-copy from, and manufacturing a scalar device tensor per row is the same round trip B times
-over. The ids therefore reach the slots as one batched H2D copy per step. Closing this
-requires moving the sampling decision (RNG, penalties, grammar mask, stop conditions) onto
-the device, which redefines what the m8 D2 pins mean; that is a separate decision and is not
-scheduled here.
+What is NOT done for general stochastic/penalized/grammar sampling is the
+**device-to-device** fill and the `.item()`/`.cpu()` invariant. The m8 D2 CPU
+RNG stream remains binding for those requests. Pure greedy requests are the
+safe exception: a whole batch now argmaxes on-device and copies one `[B]`
+token-id vector to the host instead of B full-vocabulary float32 rows. The ids
+still reach the persistent input slots as one batched H2D copy per step.
+Closing that final round trip for every sampling mode requires moving RNG,
+penalties, grammar masks, and stop decisions onto the device, which redefines
+what m8 D2 pins mean; that remains a separate decision.
 
 The second, independent violation was closed on 2026-07-26 (#207): supported eager and
 captured batched decode now share `forward_decode_tensors`. Positions, page tables,
@@ -107,6 +107,15 @@ measured 47.1% lower wall time and 56.5% lower TPOT than the list path on the sa
 
 - Default: chunked prefill (token-budget scheduler, decode-priority) — one policy knob
   `max_num_batched_tokens`.
+- KV capacity is a deployment invariant, not a scheduler retry condition. If
+  running requests consume every page, an empty plan cannot make progress
+  because none of those requests can finish and release pages. Both engine
+  loops therefore raise on an empty plan with running work instead of
+  hot-spinning forever; an unadmittable waiting head remains a request-local
+  rejection. A scheduler adapter may exempt only a step that it explicitly
+  reports as control progress (for example P-D prefill or KV handoff before a
+  decode plan exists). Deployments size `num_pages * page_size` for the
+  declared concurrency and sequence budget.
 - Optional single-node P-D separation (M3): two CUDA streams / two model replicas on one
   node with page-granular KV handoff. M2 only reserves the config surface
   (`pd_separation: bool`) and keeps the KV layout transfer-friendly (contiguous pages).

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from kairyu.outputs import CompletionOutput
 
 _VOCAB_SIZE = 50_000
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
+logger = logging.getLogger(__name__)
 
 
 class _ToyRunner:
@@ -426,6 +428,7 @@ class KairyuBackend:
                     if queue is not None:
                         queue.put_nowait(update)
         except Exception as error:
+            logger.exception("engine step failed")
             # recorded FIRST: purge itself runs through the same broken transport
             # that just failed, and when it raises too the original error escapes
             # as an unretrieved task exception and nothing observes the fault
@@ -440,7 +443,11 @@ class KairyuBackend:
                 queue = self._queues.get(request_id)
                 if queue is not None:
                     queue.put_nowait(failure)
-            restart_after_exit = self._loop.has_work()
+            # A generic runner exception can be request-local and recover on the
+            # next step. A TP step failure is different: one missed collective
+            # permanently invalidates the group, so a hot restart loop only floods
+            # logs and burns a CPU while every request receives the same 502.
+            restart_after_exit = self._loop.has_work() and self.readiness().ready
         finally:
             self._pump_task = None
             if restart_after_exit:
@@ -449,10 +456,10 @@ class KairyuBackend:
     def readiness(self) -> EngineReadiness:
         """Cheap liveness for `/readyz`: KNOWN-FATAL state only, no probe.
 
-        Dead TP ranks are the one condition this can assert. The group cannot
-        complete a single collective without them and nothing in-process can
-        bring them back, so the node needs replacing — `fatal` says so, and
-        `/health` turns that into a restart signal.
+        A dead TP rank or a failed TP step is fatal. The group cannot complete a
+        trustworthy next collective after either condition and nothing
+        in-process can repair its sequence, so the node needs replacing —
+        `fatal` says so, and `/health` turns that into a restart signal.
 
         A step exception deliberately does NOT flip readiness. It is reported for
         diagnosis but cannot be told apart from one bad request, and marking the
@@ -462,6 +469,13 @@ class KairyuBackend:
         """
         launcher = getattr(self._loop, "tp_launcher", None)
         if launcher is not None:
+            failure_type = getattr(launcher, "failure_type", lambda: None)()
+            if failure_type is not None:
+                return EngineReadiness(
+                    False,
+                    f"tensor-parallel transport failed: {failure_type}",
+                    fatal=True,
+                )
             dead = launcher.dead_ranks()
             if dead:
                 return EngineReadiness(

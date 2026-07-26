@@ -522,6 +522,20 @@ def test_one_adapter_step_prefills_transfers_and_starts_decoding() -> None:
     assert adapter.states["r"] is coordinator.decode_scheduler.states["r"]
 
 
+def test_chunked_prefill_reports_control_progress_with_an_empty_decode_plan() -> None:
+    adapter, _, _, _ = _adapter()
+    adapter.add_request(
+        EngineRequest("r", prompt_token_ids=tuple(range(40)), max_new_tokens=2)
+    )
+
+    plan = adapter.schedule()
+
+    assert plan.scheduled == ()
+    assert adapter.has_unfinished()
+    assert adapter.reject_waiting_head() is None
+    assert adapter.made_control_progress()
+
+
 def test_a_request_still_at_prefill_is_visible_under_its_public_id() -> None:
     """EngineLoop reads per-request state by the id it submitted; while the
     request is prefill-side that state lives under the clone id."""

@@ -9,9 +9,17 @@ engines:
     options:
       model_path: /models/qwen3-32b
       tensor_parallel_size: __TENSOR_PARALLEL_SIZE__
-      num_pages: 1024
+      # Eight concurrent LiveCodeBench requests may each generate up to 8,192
+      # tokens. 1,024 pages held only 16,384 tokens in total, so decode exhausted
+      # the KV pool and every running request waited forever for space none could
+      # release. 8,192 pages cover that declared benchmark concurrency plus
+      # prompts and retained prefixes on the 96 GiB/GPU reference host.
+      num_pages: 8192
       max_num_batched_tokens: 1024
       decode_mode: cuda_graph
       cuda_graph_max_batch: 8
-      cuda_graph_max_pages: 64
+      # Keep the declared 8,192-token quality workload inside graph replay.
+      # FlashInfer plans only the live indptr/indices, so unlike the torch
+      # reference backend it does not attend over this padded maximum width.
+      cuda_graph_max_pages: 512
       cuda_graph_warmup_iters: 3

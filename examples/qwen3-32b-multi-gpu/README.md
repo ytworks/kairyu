@@ -3,8 +3,11 @@
 Runs `Qwen/Qwen3-32B` with Kairyu using every NVIDIA GPU visible to the
 container. At startup, the container detects the GPU count and uses it as
 Kairyu's tensor-parallel size. The deployment opts into CUDA-graph decode for
-batches up to 8 and page tables up to 64 pages; larger decode shapes
-automatically use eager execution.
+batches up to 8 and page tables up to 512 pages (8,192 tokens); larger decode shapes
+automatically use eager execution. The attention backend follows the hardware
+profile, selecting the image's AOT FlashInfer kernels on supported GPUs; set
+`KAIRYU_ATTENTION_BACKEND=torch` only when deliberately measuring the reference
+backend.
 
 Requirements:
 

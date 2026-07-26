@@ -243,6 +243,41 @@ class PagedModelRunner:
             eos_token_id=state.request.eos_token_id,
         )
 
+    def _sample_rows(
+        self,
+        chunks: list[ScheduledChunk],
+        states: Mapping[str, object],
+        logits: torch.Tensor,
+    ) -> tuple[SampledToken, ...]:
+        """Select a decode batch without copying every vocab row to the host.
+
+        The common serving request is pure greedy with no logprob report. All
+        rows can then argmax on-device and cross to the host as one ``[B]``
+        vector, rather than B transfers of ``[vocab]`` float32 rows. Non-greedy,
+        penalized, grammar, and logprob requests retain the reviewed CPU sampler.
+        """
+        direct = self._sampler is None
+        if self._sampler is not None:
+            direct = all(
+                self._sampler.can_argmax_logits(
+                    states[chunk.request_id].request.sampling_identity,
+                    states[chunk.request_id].request.sampling,
+                    states[chunk.request_id].request.eos_token_id,
+                )
+                for chunk in chunks
+            )
+        if direct:
+            token_ids = torch.argmax(logits, dim=-1).to(device="cpu").tolist()
+            return tuple(SampledToken(int(token_id)) for token_id in token_ids)
+        return tuple(
+            self._sample(
+                states[chunk.request_id],
+                logits[index],
+                position=chunk.position,
+            )
+            for index, chunk in enumerate(chunks)
+        )
+
     def _effective_outputs(self, state: object, position: int) -> tuple[int, ...]:
         """Committed outputs, extended with any in-flight token before ``position``.
 
@@ -564,8 +599,7 @@ class PagedModelRunner:
                 position_values=positions,
             )
             logits = self._model.logits(hidden)  # [B, vocab]
-        for i, chunk in enumerate(chunks):
-            state = states[chunk.request_id]
-            token = self._sample(state, logits[i], position=chunk.position)
+        tokens = self._sample_rows(chunks, states, logits)
+        for chunk, token in zip(chunks, tokens, strict=True):
             self._remember(chunk.request_id, chunk.position, token)
             sampled[chunk.request_id] = (token,)
