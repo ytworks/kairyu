@@ -1,0 +1,214 @@
+{
+  "measurement": "teacher-forced next-token agreement vs HF transformers (DIAGNOSTIC \u2014 not runbook \u00a71 Gate 1 / G2 A1, which require full greedy continuations with overlap ON and OFF)",
+  "config": {
+    "model_path": "/var/lib/docker/volumes/kairyu-qwen3-32b_qwen3-32b/_data/qwen3-32b",
+    "reference_provenance": {
+      "schema": 3,
+      "checkpoint_config_sha256": "97e295b632839357",
+      "checkpoint_weights_sha256": "ffffe85431e0fc39",
+      "checkpoint_weight_files": {
+        "model-00001-of-00017.safetensors": "52562b2ff97b61764260273e71bf5b4cf8a66f569399398f26dec0300fcf1316",
+        "model-00002-of-00017.safetensors": "e26764b2c6878e3fb7198895fa833ec62838d84a19665e6abfbae43c6daf02b3",
+        "model-00003-of-00017.safetensors": "6c5ba7bed9c52bc121e75cbe8a7be46936d0006cc80f42a6d5886ed40b4c2a62",
+        "model-00004-of-00017.safetensors": "f736f6ac4d8c30866107fb1185a05b3c3cfce9717720082f466fa44e691bcec8",
+        "model-00005-of-00017.safetensors": "a52ed375c083209c54d42ac510afeb1fbb5af4f193be2dc7d103f665a0f212d3",
+        "model-00006-of-00017.safetensors": "37fae28990b0e4a70228549d040c0393e87bee3820d59e58e47844974d8dff5b",
+        "model-00007-of-00017.safetensors": "37776006aeaba29eca8bc73b2b963fe3477e1c2e3f6a27cb9527be75b905e1bf",
+        "model-00008-of-00017.safetensors": "73e74e9129674fe330948005075d70ab4fa0b92b68fb220c5a693f9cea553730",
+        "model-00009-of-00017.safetensors": "a044b3602a01bd8ea62ff51badf9cc038ab1d73d97399480e6a55b4c86fa7fa6",
+        "model-00010-of-00017.safetensors": "9966612ba7ecfc2cd2e592fb95224b86d743271ff88e172cc272a4b26382aa75",
+        "model-00011-of-00017.safetensors": "e2a058a0ac7d4b992b731c29221ecfb4b76b8a48d9004d0e8a62ba44f699845c",
+        "model-00012-of-00017.safetensors": "58a1aa89093fea07325f787072a468e3482a470ff4b7fe5ead5f749683907c40",
+        "model-00013-of-00017.safetensors": "35f3381bab31a23370c37d922290aeecdf603418336058fb86fe42d8f51ac40c",
+        "model-00014-of-00017.safetensors": "8713b062ddc178acf5917610b7f4b64eede833b2ea4aa37bd562dcf2f3a3339d",
+        "model-00015-of-00017.safetensors": "bec439d23931821a236d8f62fa79deecf5551bd25602278aa2ae0ce432b378cf",
+        "model-00016-of-00017.safetensors": "e569139fadd61fe7c8f9eb1c976d9a627cae48c57ddf228cfbd0593c59c64ff7",
+        "model-00017-of-00017.safetensors": "1f47c318fcd7797c0f85b4233cb754438b10e795b8bc874889090c416a94bd38",
+        "model.safetensors.index.json": "bed42c6c55274bc08a1f616bceb3bcb84b3f02cb6584c573bd18c6519291ecd0"
+      },
+      "tokenizer_files_sha256": "0d96ecc916745b3a",
+      "tokenizer_vocab_sha256": "3ec3c124e02b7ace",
+      "prompt_token_ids_sha256": "c835f3900683e3c6",
+      "num_prompts": 16,
+      "positions": 16,
+      "generation": {
+        "do_sample": false,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null
+      }
+    },
+    "tensor_parallel_size": 8,
+    "num_prompts": 16,
+    "positions": 16,
+    "dtype": "bfloat16",
+    "hardware": {
+      "arch": "cuda",
+      "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "device_count": 8
+    },
+    "method": "both sides receive the identical prefix at every position; only the next token is compared, so trajectory divergence cannot compound"
+  },
+  "reference_noise_floor": {
+    "positions": 256,
+    "self_inconsistent": 5,
+    "self_agreement_rate": 0.9805,
+    "raw_self_agreement_rate": 0.98046875,
+    "max_gap_at_self_disagreement": 0.125,
+    "method": "HF greedy generate() vs HF teacher-forced argmax over the same sequence: two paths through one set of weights"
+  },
+  "agreement": {
+    "positions": 256,
+    "agreed": 251,
+    "rate": 0.9805,
+    "threshold": 0.98046875,
+    "threshold_source": "the reference's own self-agreement (G2 A2, amended 2026-07-25)",
+    "historical_fixed_threshold": 0.99,
+    "verdict": "PASS"
+  },
+  "logprob_tolerance": {
+    "tie_gap_nats": 0.125,
+    "tie_gap_source": "floor (bf16 logprob resolution); reference was self-consistent",
+    "top_k": 20,
+    "agreeing_positions_max_abs_delta": 0.16517,
+    "agreeing_positions_mean_abs_delta": 0.01792,
+    "disagreements": 5,
+    "tie_breaks": 5,
+    "substantive": 0,
+    "max_abs_delta_bound": 0.25,
+    "within_delta_bound": true,
+    "expected_samples": 251,
+    "collected_samples": 251,
+    "missing_samples": [],
+    "verdict": "PASS"
+  },
+  "per_prompt": {
+    "p0": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p1": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p2": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p3": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p4": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p5": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p6": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p7": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p8": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p9": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p10": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p11": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p12": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    },
+    "p13": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p14": {
+      "positions": 16,
+      "agreed": 15,
+      "rate": 0.9375
+    },
+    "p15": {
+      "positions": 16,
+      "agreed": 16,
+      "rate": 1.0
+    }
+  },
+  "disagreements": [
+    {
+      "prompt": "p0",
+      "position": 3,
+      "engine": 3007,
+      "hf": 9625,
+      "hf_logprob_gap": -0.125,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    },
+    {
+      "prompt": "p5",
+      "position": 5,
+      "engine": 4041,
+      "hf": 374,
+      "hf_logprob_gap": 0.0,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    },
+    {
+      "prompt": "p8",
+      "position": 9,
+      "engine": 25,
+      "hf": 220,
+      "hf_logprob_gap": 0.125,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    },
+    {
+      "prompt": "p13",
+      "position": 2,
+      "engine": 13,
+      "hf": 1124,
+      "hf_logprob_gap": 0.0,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    },
+    {
+      "prompt": "p14",
+      "position": 7,
+      "engine": 911,
+      "hf": 1246,
+      "hf_logprob_gap": 0.125,
+      "outside_hf_top_k": false,
+      "tie_break": true
+    }
+  ]
+}

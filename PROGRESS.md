@@ -5,16 +5,26 @@ Maintained per the rules in `.claude/rules/progress-log.md`.
 
 ## Current Status
 
-**GPU bring-up in progress (2026-07-23): the CPU-safe full suite is green
-(1409 passed, 12 skipped, 92% cov), the single-GPU kernel suite is green
-(10 passed), and the explicit 2-GPU NCCL EP gate is green on the 8× RTX PRO
-6000 Blackwell host. The three gate-integrity problems found during the first
-hardware run (Issues #102–#104) are fixed and GPU-verified in PR #105. Real-model parity,
-performance, and production/fabric drills remain. The all-visible-GPU Qwen3-32B
-Compose and benchmark/report workflow are implemented but still need validation
-on the GPU host.**
+**Real-model multi-GPU bring-up (2026-07-25): `kairyu serve --tp N` ran on real
+hardware for the first time and served Qwen3-32B across 8× RTX PRO 6000
+Blackwell — 12,041 MiB per GPU, NCCL collectives, 32 tokens in 5.5 s. Getting
+there required four fixes, none of which any CPU test could have caught, because
+on a CPU box the behaviour they broke is the correct behaviour (PRs #124–#130).
+The measured interconnect is now recorded (`bench/results/env-2026-07-25.json`):
+PCIe throughout, P2P 30–37 GB/s against ~1450 GB/s device-local.
+Gate A1/A2 has a real-ranks harness for the first time. Teacher-forced agreement
+against HF is measured and within the reference's own noise floor at TP=1 and
+TP=8 (`bench/parity_hf.py`), but that is a DIAGNOSTIC, not A1: the formal gate
+needs full greedy continuations on Llama-3.1-8B. The overlap pipeline is no
+longer what blocks it: the in-flight token buffer removed the IndexError
+`PagedModelRunner` used to raise under `OverlapEngineCore`, and overlap ON is
+measured to reproduce overlap OFF exactly at TP1/2/4/8
+(`bench/results/parity-tp-qwen3-32b-2026-07-26.json`). A1 stays open on the
+model and the continuations; the device-side half of m2 §2.2 stays open as a
+performance invariant, not as a gate.
+Performance and production/fabric drills remain untouched.**
 
-_Last updated: 2026-07-23_
+_Last updated: 2026-07-26_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -484,6 +494,55 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   run-inside, which is what the wrapper's cudagraph buffers exist for.
 - Refs: PR #141 review [P1]; m17 D1, m13 D4; `kairyu/engine/core/attention/flashinfer_gpu.py`,
   `tests/unit/test_attention_backend.py`, `tests/gpu/test_flashinfer_tensor_decode.py`.
+
+### 2026-07-26 — [amendment] Checkpoint provenance is an exact content digest, not a sampled one
+- What: `bench/parity_hf.py` now fingerprints a checkpoint by the complete SHA-256 of every
+  weight file, recorded per file as `checkpoint_weight_files` with a rollup in
+  `checkpoint_weights_sha256` (reference schema 2 → 3). The reference and both TP results
+  were regenerated under it and the pre-schema-3 files removed; the corrected paths are
+  `bench/results/gate1-hf-parity-tp{1,8}-2026-07-26.json`, superseding the
+  `-2026-07-25` names in the Refs of the entry below. All 17 recorded shard digests are
+  byte-identical to the LFS oids Hugging Face publishes for `Qwen/Qwen3-32B@main`, so the
+  evidence identifies its checkpoint against an upstream immutable revision. Numbers are
+  unchanged: TP=1 253/256 = 0.9883, TP=8 251/256 = 0.9805, 0 substantive, all samples
+  collected — and the HF reference regenerated bit-identically outside the provenance block.
+- Why: the fingerprint it replaces hashed each shard's safetensors header plus four fixed
+  4 KB windows. A weight edit anywhere between those windows left it unchanged, so a
+  reference cache built from DIFFERENT weights was accepted while the field claimed to pin
+  the bytes (review [P2] on #131). A sampled fingerprint cannot be the basis for cache
+  safety: the bytes it skips are exactly the ones a swap changes. G2 §8 requires a number a
+  decision rests on to be reviewable next to the config that produced it, which a
+  machine-local path plus a partial hash does not deliver. Reading all 64 GB costs ~20 s
+  against a run that loads the same bytes onto a GPU anyway.
+- Refs: `bench/parity_hf.py`, `tests/unit/test_parity_hf_gates.py`,
+  `bench/results/hf-reference-qwen3-32b.json`,
+  `bench/results/gate1-hf-parity-tp{1,8}-2026-07-26.json`,
+  `docs/goals/g2-multi-gpu.md` §8 + A1/A2 amendment
+
+### 2026-07-25 — [amendment] A1/A2 and m2 §2.5 restated against measured quantities
+- What: G2 A2's "greedy output-match rate >=99%" and m2 §2.5's "greedy-decode token-level
+  parity with HF transformers" are replaced by two measured criteria, both computed by the
+  new `bench/parity_hf.py` (a DIAGNOSTIC — the formal gate additionally needs full
+  continuations with overlap ON, blocked on the unimplemented m2 §2.2 future-token
+  patch): (a) zero substantive disagreements — every disagreement inside
+  the reference's top-k and within a tie gap measured from the reference's own
+  self-disagreements; (b) agreement at or above the reference's self-agreement rate. The
+  gate is teacher-forced (identical prefix at every position, next token only); free-running
+  greedy sequence equality is explicitly no longer a correctness gate.
+- Why: the fixed 99% is not achievable by any implementation, including the reference's own.
+  On Qwen3-32B/bf16/8x RTX PRO 6000, HF transformers agrees with ITSELF — `generate()`
+  against a teacher-forced forward over the same sequence — on only 251/256 = 0.9805
+  positions, while kairyu agrees with HF on 253/256 = 0.9883 at TP=1 and 251/256 at TP=8.
+  A gate demanding an engine match a reference more closely than the reference matches
+  itself measures the reference's instability. The same applies to the logprob half: a 0.1
+  nat tolerance sits below bf16's ~0.125 quantization of these gaps, and one observed gap
+  was negative (HF's forward scoring kairyu's pick above HF's own choice). Separately,
+  free-running comparison scored the same engine at 0.786 against 0.988 teacher-forced —
+  once one token differs, every later token is compared against a prefix the other side
+  never produced, so a single moved near-tie is indistinguishable from a broken shard.
+- Refs: G2 §7 amendment (2026-07-25), `docs/design/m2-engine.md` §2.5, `bench/parity_hf.py`,
+  `bench/results/gate1-hf-parity-tp{1,8}-2026-07-25.json`,
+  `bench/results/hf-reference-qwen3-32b.json`
 
 ### 2026-07-25 — [progress] overlap ON works with a real runner (host-side in-flight tokens)
 - What: `PagedModelRunner` keeps the token it just sampled, so a decode can read

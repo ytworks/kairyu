@@ -231,3 +231,5 @@ bench/data/
 # config that produced it, so the environment records stay tracked.
 !bench/results/env-*.json
 !bench/results/parity-tp-*.json
+!bench/results/gate1-hf-parity-*.json
+!bench/results/hf-reference-*.json
