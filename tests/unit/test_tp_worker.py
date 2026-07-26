@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
+from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.step_input import StepDelta
 from kairyu.engine.core.worker import DistTPModelRunner, worker_step_loop
@@ -16,6 +17,21 @@ class _ReleaseRunner:
 
     def release(self, request_id: str) -> None:
         self.released.append(request_id)
+
+
+def test_serving_groups_keep_control_off_the_model_backend(monkeypatch):
+    created: list[str] = []
+
+    def fake_group(backend: str):
+        created.append(backend)
+        return f"group-{len(created)}-{backend}"
+
+    monkeypatch.setattr(worker_module, "serving_group", fake_group)
+    groups = worker_module.serving_groups("nccl")
+
+    assert created == ["gloo", "nccl"]
+    assert groups.control == "group-1-gloo"
+    assert groups.model == "group-2-nccl"
 
 
 def test_dist_release_reaches_driver_and_idle_worker():
