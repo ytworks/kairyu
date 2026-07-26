@@ -112,7 +112,10 @@ before the kind CPU deployment/HTTP drill; it does not schedule the GPU pod.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
 deployed gateway (single models and named orchestrations as scoreboard columns)
 with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
-footnoted scoreboard (G6 P-C1).
+footnoted scoreboard (G6 P-C1). A target call that returns no response content
+is recorded as a failed, unmeasured item with its latency rather than a completed
+zero, so an all-empty slot carries `score: null` and cannot be compared with a
+published accuracy number.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -121,6 +124,22 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [amendment] Empty benchmark completions are missing evidence, not zero accuracy
+- What: the shared generative benchmark path now classifies a successful HTTP
+  response with empty/whitespace-only completion content as a failed item,
+  preserves latency for both response and transport failures, and counts only
+  completed items with a numeric score in `n_scored`. If every target call is
+  empty, the pair is failed with `score: null`, `n_scored: 0`, and every item
+  carries the controlled empty-completion reason.
+- Why: Issue #149 captured a LiveCodeBench run where all 20 requests returned no
+  generated answer, yet the artifact said `completed`, `score: 0.0`,
+  `n_scored: 20`, and `n_failed: 0`. That made absent evidence
+  indistinguishable from 20 attempted solutions that all graded incorrect and
+  could publish a false zero in a full-suite comparison.
+- Refs: Issue #149; G6 P-C1 evidence rules;
+  `kairyu/bench/adapters/base.py`,
+  `tests/bench/test_bench_code_adapters.py`
 
 ### 2026-07-26 — [amendment] m18 D3: token 0 keeps its sampling identity across the P-D handoff
 - What: the P-D prefill clone sampled under its INTERNAL id (`r#p0`) on a different
