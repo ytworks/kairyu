@@ -286,14 +286,27 @@ async def attempt_item(
         unrepresentable = error.status_code == 400 and (
             "image" in lowered or "context" in lowered or "too long" in lowered
         )
+        latency_s = round(time.perf_counter() - start, 3)
         return ItemAttempt(
             failure=ItemResult(
                 item_id=item_id,
                 status="skipped" if unrepresentable else "failed",
                 error=str(error),
+                latency_s=latency_s,
             )
         )
-    return ItemAttempt(text=text, latency_s=time.perf_counter() - start)
+    latency_s = time.perf_counter() - start
+    if not text.strip():
+        return ItemAttempt(
+            failure=ItemResult(
+                item_id=item_id,
+                status="failed",
+                error="empty completion: target returned no response content",
+                response_excerpt=excerpt(text),
+                latency_s=round(latency_s, 3),
+            )
+        )
+    return ItemAttempt(text=text, latency_s=latency_s)
 
 
 def select_items(items: list[BenchItem], limit: int | None, seed: int) -> list[BenchItem]:
@@ -322,13 +335,16 @@ def summarize_items(
     by_status = {status: 0 for status in ("completed", "failed", "unjudged", "skipped")}
     for item in items:
         by_status[item.status] += 1
-    scored = [item.score for item in items if item.status == "completed"]
+    scored = [
+        item.score
+        for item in items
+        if item.status == "completed" and item.score is not None
+    ]
 
     if score_fn is not None:
         score = score_fn(items)
     else:
-        valid = [s for s in scored if s is not None]
-        score = sum(valid) / len(valid) if valid else None
+        score = sum(scored) / len(scored) if scored else None
 
     reasons = []
     if by_status["unjudged"]:
