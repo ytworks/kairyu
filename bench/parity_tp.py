@@ -317,6 +317,30 @@ def _code_provenance() -> dict:
     commit = _git("rev-parse", "HEAD")
     tracked = _git("status", "--porcelain", "--untracked-files=no")
     untracked = _git("ls-files", "--others", "--exclude-standard")
+    source = "git"
+    # Production benchmark images intentionally omit git. In that environment
+    # the caller supplies the already-resolved host values; requiring both the
+    # full commit and dirty flag prevents a partial fallback from looking clean.
+    if commit is None:
+        supplied_commit = os.environ.get("KAIRYU_BENCH_COMMIT")
+        supplied_dirty = os.environ.get("KAIRYU_BENCH_DIRTY")
+        if (
+            supplied_commit is not None
+            and len(supplied_commit) == 40
+            and all(character in "0123456789abcdef" for character in supplied_commit)
+            and supplied_dirty in {"0", "1"}
+        ):
+            commit = supplied_commit
+            tracked = "" if supplied_dirty == "0" else "<supplied dirty>"
+            supplied_untracked = os.environ.get("KAIRYU_BENCH_UNTRACKED_FILES")
+            untracked = (
+                "\n" * int(supplied_untracked)
+                if supplied_untracked is not None and supplied_untracked.isdigit()
+                else None
+            )
+            source = "environment"
+        else:
+            source = None
     return {
         "commit": commit,
         # a modified tracked file means the commit alone does not describe the run
@@ -326,6 +350,7 @@ def _code_provenance() -> dict:
         # changing the code that produced the numbers, but a reader still gets to
         # see that something unversioned was present.
         "untracked_files": None if untracked is None else len(untracked.splitlines()),
+        "source": source,
     }
 
 
