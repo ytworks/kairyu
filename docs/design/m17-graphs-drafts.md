@@ -1,8 +1,8 @@
 # M17 Design: StepExecutor (CUDA-Graph Seam) + EAGLE/MTP Draft Models
 
-Status: **Implemented** (2026-07-03). Reviewed — REVISE applied (1-reviewer
-panel, web-verified vs vLLM/SpecForge/SGLang + live SpecForge and DeepSeek-V3
-safetensors headers; §6 binding).
+Status: **Implemented and production-enabled** (2026-07-26). Reviewed — REVISE
+applied (1-reviewer panel, web-verified vs vLLM/SpecForge/SGLang + live
+SpecForge and DeepSeek-V3 safetensors headers; §6 binding).
 Milestone: M17 (roadmap E5/E6 local halves; G2 A-series latency levers)
 Date: 2026-07-03
 Depends on: M8 (SpeculativeRunner/propose_ngram/verify), M12/M15 (models,
@@ -142,3 +142,25 @@ output (DeepSeek convention).
 - **A9**: propose_ngram params are (max_draft, max_ngram, min_ngram);
   DraftSource may return fewer than k tokens (scheduler degrade paths
   already honor it).
+
+### 2026-07-26 production amendment
+
+- **A10 (explicit serving policy):** `KairyuBackend` and DeploymentSpec expose
+  `decode_mode: eager|cuda_graph`; eager remains the default. Graph mode
+  constructs `CudaGraphBackend` only for a real CUDA model whose attention path
+  declares the graph contract. Invalid dimensions, CPU placement, P-D
+  separation, and unsupported model/attention paths fail at startup. Batches
+  or page tables outside capture limits retain D2's eager fallback.
+- **A11 (distributed ownership):** the scheduler reserves the scratch page
+  before TP workers are spawned and passes its exact id to every rank. Captured
+  NCCL graphs are explicitly invalidated before shutdown. Replayables must not
+  retain `CUDAGraph` through a class closure; serving subgroups are drained,
+  synchronized, and destroyed in identical order on every rank before the
+  default group.
+- **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
+  synthetic requests x 32 output tokens, torch attention: eager wall 16.722 s,
+  TPOT 441.831 ms/token, 0.48 req/s; CUDA graph wall 8.928 s, TPOT
+  194.200 ms/token, 0.90 req/s. That is 46.6% lower wall time, 56.0% lower
+  TPOT, and 87.5% higher throughput. The graph run includes first-use warmup
+  and capture. Evidence:
+  `bench/results/cuda-graph-qwen3-32b-tp8-2026-07-26.json`.

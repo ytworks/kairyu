@@ -18,6 +18,19 @@ TINY = dict(
 PROMPTS = [list(range(9)), list(range(4, 15)), list(range(2, 11))]
 
 
+class _Tokenizer:
+    eos_token_id = None
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return tuple(PROMPTS[0])
+
+    def decode(self, token_ids) -> str:
+        return " ".join(f"t{token_id}" for token_id in token_ids)
+
+    def vocab(self) -> list[str]:
+        return [f"t{index}" for index in range(TINY["vocab_size"])]
+
+
 def _require_cuda() -> None:
     if not torch.cuda.is_available():  # pragma: no cover - CPU box
         pytest.skip("CUDA graph decode gate needs CUDA")
@@ -83,6 +96,44 @@ def test_captured_decode_matches_eager(llama_dir):
     assert runner._graph._captured, "nothing was captured; the graph path was skipped"
     assert graphed == eager
     assert all(len(tokens) == 6 for tokens in eager.values())
+
+
+def test_production_builder_reaches_capture_and_replay(llama_dir, monkeypatch):
+    from kairyu import SamplingParams
+    from kairyu.engine.kairyu_backend import build_engine_loop
+
+    _require_cuda()
+    monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "torch")
+    loop, _cache, _scheduler = build_engine_loop(
+        model_path=llama_dir,
+        tokenizer=_Tokenizer(),
+        num_pages=128,
+        page_size=16,
+        max_num_batched_tokens=64,
+        decode_mode="cuda_graph",
+        cuda_graph_max_batch=8,
+        cuda_graph_max_pages=8,
+        cuda_graph_warmup_iters=1,
+    )
+    loop.submit(
+        "production-graph",
+        "prompt",
+        SamplingParams(max_tokens=6, temperature=0.0, ignore_eos=True),
+    )
+    final = None
+    for _ in range(32):
+        for request_id, update in loop.step():
+            if request_id == "production-graph":
+                final = update
+        if final is not None and final.finished:
+            break
+
+    runner = loop._runner
+    graph_backend = runner._graph._backend
+    assert final is not None and final.finished
+    assert len(final.outputs) == 6
+    assert graph_backend.captures > 0
+    assert graph_backend.replays > graph_backend.captures
 
 
 def test_padding_rows_never_write_kv_into_an_allocatable_page(llama_dir):

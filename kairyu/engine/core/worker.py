@@ -93,6 +93,11 @@ class DistTPModelRunner:
     def shutdown(self) -> None:
         self._comm.broadcast(_SHUTDOWN, src=0)
 
+    def invalidate_graphs(self) -> None:
+        invalidate = getattr(self._local, "invalidate_graphs", None)
+        if invalidate is not None:
+            invalidate()
+
 
 def worker_step_loop(comm, local_runner) -> int:
     """Non-zero-rank main loop: execute broadcast steps until shutdown.
@@ -237,6 +242,10 @@ def build_tp_runner(
     page_size: int,
     vocab: list[str],
     placement: TPPlacement | None = None,
+    graph_scratch_page: int | None = None,
+    graph_max_batch: int = 0,
+    graph_max_pages: int = 0,
+    graph_warmup_iters: int = 3,
 ):
     """The per-rank sharded PagedModelRunner (pool sized from the tp_view config).
 
@@ -275,10 +284,21 @@ def build_tp_runner(
         device=placement.device,
     )
     vocab_table = list(vocab)
+    graph_options = {}
+    if graph_scratch_page is not None:
+        from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
+
+        graph_options = {
+            "graph_backend": CudaGraphBackend(warmup_iters=graph_warmup_iters),
+            "graph_max_batch": graph_max_batch,
+            "graph_max_pages": graph_max_pages,
+            "graph_scratch_page": graph_scratch_page,
+        }
     runner = PagedModelRunner(
         model,
         pool,
         sampler=Sampler(vocab_provider=lambda: vocab_table),
+        **graph_options,
     )
     return runner, full_config
 
@@ -287,6 +307,10 @@ def _tp_worker_entry(
     spawn_index: int, world_size: int, init_file: str,
     model_dir: str, num_pages: int, page_size: int, vocab: list[str],
     force_cpu: bool = False,
+    graph_scratch_page: int | None = None,
+    graph_max_batch: int = 0,
+    graph_max_pages: int = 0,
+    graph_warmup_iters: int = 3,
 ) -> None:
     """Spawned worker (rank = spawn_index + 1; rank 0 is the driver process).
 
@@ -314,7 +338,18 @@ def _tp_worker_entry(
     startup_comm = TorchDistCommunicator(device=placement.device)
     comm = _DeferredComm(startup_comm)
     runner, _ = build_tp_runner(
-        model_dir, world_size, rank, comm, num_pages, page_size, vocab, placement
+        model_dir,
+        world_size,
+        rank,
+        comm,
+        num_pages,
+        page_size,
+        vocab,
+        placement,
+        graph_scratch_page,
+        graph_max_batch,
+        graph_max_pages,
+        graph_warmup_iters,
     )
     # the handshake is the collective that absorbs load skew, so it — and only it
     # — runs on the long-timeout startup group
@@ -330,7 +365,20 @@ def _tp_worker_entry(
     finally:
         import torch.distributed as dist
 
-        dist.destroy_process_group()  # tears down both serving subgroups too
+        invalidate = getattr(runner, "invalidate_graphs", None)
+        if invalidate is not None:
+            invalidate()
+        if placement.backend == "nccl":
+            # Captured NCCL collectives retain graph-owned communicator work
+            # until the graph objects are released and their stream is drained.
+            # Drain it, then rendezvous on the model communicator so no rank
+            # destroys that communicator while a peer is still releasing its
+            # captured work.
+            torch.cuda.synchronize()
+            comm.barrier()
+        dist.destroy_process_group(comm.group)
+        dist.destroy_process_group(control_comm.group)
+        dist.destroy_process_group()
 
 
 class DistTPLauncher:
@@ -349,6 +397,10 @@ class DistTPLauncher:
         page_size: int,
         vocab: list[str],
         force_cpu: bool = False,
+        graph_scratch_page: int | None = None,
+        graph_max_batch: int = 0,
+        graph_max_pages: int = 0,
+        graph_warmup_iters: int = 3,
     ) -> None:
         import tempfile
 
@@ -360,12 +412,27 @@ class DistTPLauncher:
         # a fresh, not-yet-created path is the file:// rendezvous point
         self._init_file = tempfile.mktemp(prefix="kairyu-tp-")  # noqa: S306
         placement = tp_placement(tp, 0, force_cpu)
+        self._placement_backend = placement.backend
+        if graph_scratch_page is not None and placement.backend != "nccl":
+            raise ValueError("CUDA graph decode needs CUDA/NCCL TP placement")
         # force_cpu travels to the workers: rank 0 on host memory while the
         # spawned ranks probed their way onto GPUs would deadlock the first
         # all_reduce on mismatched backends
         self._ctx = mp.spawn(
             _tp_worker_entry,
-            args=(tp, self._init_file, model_dir, num_pages, page_size, vocab, force_cpu),
+            args=(
+                tp,
+                self._init_file,
+                model_dir,
+                num_pages,
+                page_size,
+                vocab,
+                force_cpu,
+                graph_scratch_page,
+                graph_max_batch,
+                graph_max_pages,
+                graph_warmup_iters,
+            ),
             nprocs=tp - 1,
             join=False,
         )
@@ -389,7 +456,18 @@ class DistTPLauncher:
             # may leave a serving subgroup behind for _abandon_start to miss
             self._comm = _DeferredComm(startup_comm)
             runner, self.full_config = build_tp_runner(
-                model_dir, tp, 0, self._comm, num_pages, page_size, vocab, placement
+                model_dir,
+                tp,
+                0,
+                self._comm,
+                num_pages,
+                page_size,
+                vocab,
+                placement,
+                graph_scratch_page,
+                graph_max_batch,
+                graph_max_pages,
+                graph_warmup_iters,
             )
             # the one collective that legitimately absorbs load skew
             startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
@@ -482,17 +560,27 @@ class DistTPLauncher:
         import contextlib
         import os
 
+        import torch
         import torch.distributed as dist
 
         self.runner.shutdown()  # broadcasts None -> workers leave worker_step_loop
+        self.runner.invalidate_graphs()
+        if self._placement_backend == "nccl":
+            torch.cuda.synchronize()
+            # Match the worker-side rendezvous after every rank has dropped its
+            # CUDA graphs.  Without this, TP graph serving can complete all
+            # inference steps and then hang forever in process-group teardown.
+            self._comm.barrier()
         # BEFORE the join, not after: NCCL's destroy_process_group waits for every
         # rank to reach it, so joining first deadlocks rank 0 against workers that
         # are already sitting in their own destroy. gloo never blocks here, which
         # is why the CPU parity gates could not see this.
         if dist.is_initialized():
-            # no argument: torch tears down both serving subgroups along with
-            # the default one, and destroying them individually is
-            # registration-order dependent across backends
+            # Multiple process groups must be destroyed explicitly in the same
+            # order on every rank.  Reverse creation order keeps the graph-owning
+            # NCCL subgroup ahead of the gloo control and startup groups.
+            dist.destroy_process_group(self._comm.group)
+            dist.destroy_process_group(self._control_comm.group)
             dist.destroy_process_group()
         self._ctx.join()
         with contextlib.suppress(FileNotFoundError):

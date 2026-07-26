@@ -28,6 +28,11 @@ separate NCCL group. The exact 20-item Fugu concurrency-8 workload ran for
 654.53 s without a watchdog, kept readiness at 200, and shut down all eight GPUs
 cleanly. Its eight 600 s empty completions keep throughput #150 open; truthful
 empty-result accounting is handled separately by #149 / PR #235.
+Production serving can now opt into validated CUDA-graph decode through
+DeploymentSpec. Qwen3-32B TP8 measured 46.6% lower wall time and 56.0% lower
+TPOT than eager on the same 8-request workload; single-GPU and TP2 integration
+gates assert real capture/replay, token parity, scratch capacity, and clean NCCL
+teardown (`bench/results/cuda-graph-qwen3-32b-tp8-2026-07-26.json`).
 Performance and production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-26_
@@ -54,7 +59,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
 | M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26). |
-| M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete** (2026-07-03, `docs/design/m17-graphs-drafts.md`): fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. 571 tests. |
+| M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete and production-enabled** (2026-07-26, `docs/design/m17-graphs-drafts.md`): explicit eager/graph serving mode, production builder wiring, real single-GPU/TP2 capture-replay parity, TP8 Qwen3-32B measurement and clean graph/NCCL teardown; fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
@@ -127,6 +132,27 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [amendment] m17 D1/D2: CUDA graph decode is a production serving mode
+- What: `backend: kairyu` now accepts explicit `decode_mode: eager|cuda_graph`
+  plus capture batch/page/warmup bounds. The production builder constructs
+  `CudaGraphBackend` only for a real model on CUDA, retains eager fallback
+  outside captured shapes, and preserves one scheduler-reserved scratch page
+  across every TP rank. Real single-GPU and TP2 gates prove capture/replay,
+  eager token parity, scratch capacity, and clean teardown. Qwen3-32B TP8 on
+  8x RTX PRO 6000 measured eager vs graph at 16.722 vs 8.928 s wall and
+  441.831 vs 194.200 ms/token TPOT; the graph service then shut down normally
+  and released all eight GPUs.
+- Why: m17's CUDA backend and capture contract existed but no deployment could
+  construct them, so production always ran eager and the intended launch-latency
+  reduction was neither selectable nor measurable. TP graph teardown also
+  exposed a hidden ownership bug: a nested-class closure retained each
+  `CUDAGraph`, leaving captured NCCL communicators alive through process-group
+  destruction.
+- Refs: m17 D1/D2/A5 + A10/A11; issue #221;
+  `kairyu/engine/{kairyu_backend.py,core/{cuda_graph_gpu,model_runner,step_executor,worker}.py}`,
+  `tests/gpu/test_{cuda_graph_decode_gpu,tp_cuda_graph_serve}.py`,
+  `bench/results/cuda-graph-qwen3-32b-tp8-2026-07-26.json`
 
 ### 2026-07-26 — [amendment] m16 D4: TP control traffic leaves the model NCCL group
 - What: TP serving now creates two 120 s operational groups in a fixed order after

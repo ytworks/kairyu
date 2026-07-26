@@ -206,6 +206,52 @@ def test_a_graph_backend_without_a_cache_is_rejected(llama_dir):
         )
 
 
+def test_an_explicitly_reserved_scratch_page_supports_worker_owned_pools(llama_dir):
+    """TP workers share the scheduler's reservation but do not own its cache."""
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.step_executor import SnapshotGraphBackend
+    from kairyu.models.loader import load_model
+
+    model, config, _ = load_model(llama_dir)
+    cache = RadixKVCache(num_pages=16, page_size=4)
+    scratch = cache.reserve_scratch_page()
+    runner = PagedModelRunner(
+        model,
+        PagedKVPool.for_cache(cache, config),
+        graph_backend=SnapshotGraphBackend(),
+        graph_max_batch=4,
+        graph_max_pages=2,
+        graph_scratch_page=scratch,
+    )
+
+    assert runner._graph_scratch_page == scratch
+    assert scratch not in [
+        cache.allocate_private_page() for _ in range(cache.num_free_pages)
+    ]
+
+
+def test_an_out_of_range_explicit_scratch_page_is_rejected(llama_dir):
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.step_executor import SnapshotGraphBackend
+    from kairyu.models.loader import load_model
+
+    model, config, _ = load_model(llama_dir)
+    cache = RadixKVCache(num_pages=16, page_size=4)
+    with pytest.raises(ValueError, match="outside"):
+        PagedModelRunner(
+            model,
+            PagedKVPool.for_cache(cache, config),
+            graph_backend=SnapshotGraphBackend(),
+            graph_max_batch=4,
+            graph_max_pages=2,
+            graph_scratch_page=16,
+        )
+
+
 # --- [P2]: backends that cannot run the tensor decode contract ----------------
 
 
