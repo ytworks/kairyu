@@ -79,6 +79,10 @@ class ZmqEngineBackend:
         speculative_tokens: int = 4,
         death_timeout_s: float = 10.0,
         model_path: str | None = None,
+        decode_mode: str = "eager",
+        cuda_graph_max_batch: int = 8,
+        cuda_graph_max_pages: int = 512,
+        cuda_graph_warmup_iters: int = 3,
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
@@ -90,6 +94,10 @@ class ZmqEngineBackend:
             "speculative": speculative,
             "speculative_tokens": speculative_tokens,
             "model_path": model_path,
+            "decode_mode": decode_mode,
+            "cuda_graph_max_batch": cuda_graph_max_batch,
+            "cuda_graph_max_pages": cuda_graph_max_pages,
+            "cuda_graph_warmup_iters": cuda_graph_warmup_iters,
         }
         self._death_timeout_s = death_timeout_s
         self._process = None

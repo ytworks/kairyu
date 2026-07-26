@@ -1,0 +1,43 @@
+{
+  "date": "2026-07-26",
+  "hardware": "8x NVIDIA RTX PRO 6000 Blackwell",
+  "model": "Qwen/Qwen3-32B",
+  "attention_backend": "torch",
+  "workload": {
+    "dataset": "synthetic",
+    "requests": 8,
+    "concurrency": 8,
+    "max_tokens": 32,
+    "tensor_parallel": 8
+  },
+  "eager": {
+    "wall_s": 16.722,
+    "ttft_p50_ms": 2461.31,
+    "ttft_p99_ms": 4156.11,
+    "tpot_mean_ms": 441.831,
+    "throughput_rps": 0.48
+  },
+  "cuda_graph": {
+    "config": {
+      "cuda_graph_max_batch": 8,
+      "cuda_graph_max_pages": 64,
+      "cuda_graph_warmup_iters": 3
+    },
+    "wall_s": 8.928,
+    "ttft_p50_ms": 2877.49,
+    "ttft_p99_ms": 2905.6,
+    "tpot_mean_ms": 194.2,
+    "throughput_rps": 0.9
+  },
+  "delta": {
+    "wall_reduction_percent": 46.6,
+    "tpot_reduction_percent": 56.0,
+    "throughput_increase_percent": 87.5
+  },
+  "notes": [
+    "Both modes used the same image, model volume, prompts, topology, and serving benchmark harness.",
+    "The graph run includes first-use capture and warmup in the observed request latency.",
+    "A production-builder GPU integration gate independently asserts capture and replay counters.",
+    "The TP8 graph service shut down normally after the run and released all eight GPUs."
+  ]
+}

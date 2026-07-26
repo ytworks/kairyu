@@ -122,6 +122,21 @@ async def test_rejects_non_string_tokenizer():
         ZmqEngineBackend(tokenizer=ToyTokenizer())  # type: ignore[arg-type]
 
 
+async def test_cuda_graph_serving_options_cross_the_process_boundary():
+    backend = ZmqEngineBackend(
+        model_path="/models/tiny",
+        decode_mode="cuda_graph",
+        cuda_graph_max_batch=4,
+        cuda_graph_max_pages=32,
+        cuda_graph_warmup_iters=1,
+    )
+
+    assert backend._config["decode_mode"] == "cuda_graph"
+    assert backend._config["cuda_graph_max_batch"] == 4
+    assert backend._config["cuda_graph_max_pages"] == 32
+    assert backend._config["cuda_graph_warmup_iters"] == 1
+
+
 async def test_inflight_request_sees_service_death():
     # A request awaiting when the child dies must be delivered an error event
     # (death detection), not hang forever.

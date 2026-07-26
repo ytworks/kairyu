@@ -37,6 +37,7 @@ from kairyu.engine.tokenizer import Tokenizer, resolve_tokenizer
 from kairyu.outputs import CompletionOutput
 
 _VOCAB_SIZE = 50_000
+_DECODE_MODES = frozenset({"eager", "cuda_graph"})
 
 
 class _ToyRunner:
@@ -68,6 +69,10 @@ def build_engine_loop(
     speculative_tokens: int = 4,
     model_path: str | None = None,
     pd_separation: bool = False,
+    decode_mode: str = "eager",
+    cuda_graph_max_batch: int = 8,
+    cuda_graph_max_pages: int = 512,
+    cuda_graph_warmup_iters: int = 3,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
@@ -80,6 +85,26 @@ def build_engine_loop(
     """
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
+    if decode_mode not in _DECODE_MODES:
+        known = ", ".join(sorted(_DECODE_MODES))
+        raise ValueError(f"unknown decode_mode {decode_mode!r}; choose one of: {known}")
+    graph_decode = decode_mode == "cuda_graph"
+    if graph_decode:
+        if model_path is None:
+            raise ValueError("decode_mode='cuda_graph' needs a real model_path")
+        if cuda_graph_max_batch < 1 or cuda_graph_max_pages < 1:
+            raise ValueError(
+                "cuda_graph_max_batch and cuda_graph_max_pages must be >= 1"
+            )
+        if cuda_graph_warmup_iters < 0:
+            raise ValueError("cuda_graph_warmup_iters must be >= 0")
+        if num_pages < 2:
+            raise ValueError("CUDA graph decode needs at least 2 KV pages")
+        if cuda_graph_max_pages >= num_pages:
+            raise ValueError(
+                f"cuda_graph_max_pages={cuda_graph_max_pages} must be smaller "
+                f"than num_pages={num_pages} so one page can remain scratch"
+            )
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
     if pd_separation:
@@ -93,6 +118,8 @@ def build_engine_loop(
             )
         if speculative is not None:
             raise ValueError("pd_separation with speculative decoding is not supported")
+        if graph_decode:
+            raise ValueError("pd_separation with CUDA graph decode is not supported")
         return _build_pd_loop(
             model_path=model_path,
             num_pages=num_pages,
@@ -111,6 +138,10 @@ def build_engine_loop(
             tokenizer=tokenizer,
             speculative=speculative,
             speculative_tokens=speculative_tokens,
+            graph_decode=graph_decode,
+            graph_max_batch=cuda_graph_max_batch,
+            graph_max_pages=cuda_graph_max_pages,
+            graph_warmup_iters=cuda_graph_warmup_iters,
         )
     if speculative is not None and tensor_parallel_size > 1:
         # the toy/FakeCommunicator TP path shares ONE runner object across every
@@ -140,6 +171,8 @@ def build_engine_loop(
         # every CPU test path is byte-for-byte unchanged.
         profile = probe()
         gpu = profile.arch == "cuda"
+        if graph_decode and not gpu:
+            raise RuntimeError("decode_mode='cuda_graph' requires CUDA hardware")
         compute_device = "cuda" if gpu else "cpu"
         compute_dtype = torch.bfloat16 if gpu else torch.float32
         model, model_config, generation = load_model(
@@ -174,8 +207,23 @@ def build_engine_loop(
         pool = PagedKVPool.for_cache(
             cache, model_config, dtype=compute_dtype, device=compute_device
         )
+        graph_options = {}
+        if graph_decode:
+            from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
+
+            graph_options = {
+                "graph_backend": CudaGraphBackend(
+                    warmup_iters=cuda_graph_warmup_iters
+                ),
+                "graph_max_batch": cuda_graph_max_batch,
+                "graph_max_pages": cuda_graph_max_pages,
+            }
         runner = PagedModelRunner(
-            model, pool, sampler=Sampler(vocab_provider=resolved.vocab), cache=cache
+            model,
+            pool,
+            sampler=Sampler(vocab_provider=resolved.vocab),
+            cache=cache,
+            **graph_options,
         )
     if tensor_parallel_size > 1:
         # CPU-testable TP path (design m5 D1/D3): deterministic rank runners
@@ -261,6 +309,10 @@ def _build_dist_tp_loop(
     tokenizer: str | Tokenizer | None,
     speculative: str | None = None,
     speculative_tokens: int = 4,
+    graph_decode: bool = False,
+    graph_max_batch: int = 8,
+    graph_max_pages: int = 512,
+    graph_warmup_iters: int = 3,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -278,14 +330,6 @@ def _build_dist_tp_loop(
             f"({model_vocab_size})"
         )
     vocab.extend("" for _ in range(model_vocab_size - len(vocab)))
-    launcher = DistTPLauncher(
-        model_path,
-        tensor_parallel_size,
-        num_pages,
-        page_size,
-        vocab=vocab,
-    )
-    generation = load_generation_defaults(model_path)
     cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(
         cache,
@@ -293,6 +337,19 @@ def _build_dist_tp_loop(
         page_size=page_size,
         speculative_tokens=speculative_tokens if speculative else 0,
     )
+    graph_scratch_page = cache.reserve_scratch_page() if graph_decode else None
+    launcher = DistTPLauncher(
+        model_path,
+        tensor_parallel_size,
+        num_pages,
+        page_size,
+        vocab=vocab,
+        graph_scratch_page=graph_scratch_page,
+        graph_max_batch=graph_max_batch,
+        graph_max_pages=graph_max_pages,
+        graph_warmup_iters=graph_warmup_iters,
+    )
+    generation = load_generation_defaults(model_path)
     # SpeculativeRunner composes over any ModelRunner, and DistTPModelRunner is
     # one: each scoring pass it issues is broadcast like any other step, so every
     # rank replays the identical draft and the m5 D1 agreement invariant holds
@@ -325,6 +382,10 @@ class KairyuBackend:
         speculative_tokens: int = 4,
         model_path: str | None = None,
         pd_separation: bool = False,
+        decode_mode: str = "eager",
+        cuda_graph_max_batch: int = 8,
+        cuda_graph_max_pages: int = 512,
+        cuda_graph_warmup_iters: int = 3,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
@@ -338,6 +399,10 @@ class KairyuBackend:
             speculative_tokens=speculative_tokens,
             model_path=model_path,
             pd_separation=pd_separation,
+            decode_mode=decode_mode,
+            cuda_graph_max_batch=cuda_graph_max_batch,
+            cuda_graph_max_pages=cuda_graph_max_pages,
+            cuda_graph_warmup_iters=cuda_graph_warmup_iters,
         )
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime

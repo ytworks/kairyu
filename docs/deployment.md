@@ -90,8 +90,19 @@ server: { host: 0.0.0.0, port: 8000 }
 engines:
   llama-70b:
     backend: kairyu            # or vllm; mock for CPU smoke
-    options: { model: "meta-llama/Llama-3.3-70B-Instruct", tensor_parallel_size: 4 }
+    options:
+      model_path: "meta-llama/Llama-3.3-70B-Instruct"
+      tensor_parallel_size: 4
+      decode_mode: cuda_graph   # explicit opt-in; eager is the safe default
+      cuda_graph_max_batch: 8
+      cuda_graph_max_pages: 64
 ```
+
+CUDA-graph decode reserves one KV page for padding rows and captures buckets up
+to the configured batch and page-table limits. Oversized decode steps fall back
+to eager execution. Invalid modes, CPU placement, unsupported attention/model
+paths, or a page limit that leaves no scratch page fail during startup rather
+than after traffic arrives.
 
 Gateway:
 

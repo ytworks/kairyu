@@ -92,6 +92,7 @@ class PagedModelRunner:
         graph_backend: object | None = None,
         graph_max_batch: int = 0,
         graph_max_pages: int = 0,
+        graph_scratch_page: int | None = None,
     ) -> None:
         if cache is not None:  # fail-fast sizing agreement (m12 D3)
             if pool.num_pages != cache.num_pages or pool.page_size != cache.page_size:
@@ -128,6 +129,8 @@ class PagedModelRunner:
         # default would change what every deployment executes.
         self._graph = None
         self._graph_scratch_page: int | None = None
+        if graph_backend is None and graph_scratch_page is not None:
+            raise ValueError("graph_scratch_page requires a graph_backend")
         if graph_backend is not None:
             from kairyu.engine.core.step_executor import GraphStepExecutor
 
@@ -148,14 +151,29 @@ class PagedModelRunner:
             # page has to come OUT of the scheduler's allocator, so take it from
             # the cache the scheduler allocates from — there is no way to pick a
             # safe id without it.
-            if cache is None:
+            if graph_scratch_page is None:
+                if cache is None:
+                    raise ValueError(
+                        "a graph backend needs either the scheduler's "
+                        "RadixKVCache or an already-reserved scratch page via "
+                        "graph_scratch_page: "
+                        "captured padding rows write KV to a page the allocator "
+                        "must never return (m17 A5)"
+                    )
+                graph_scratch_page = cache.reserve_scratch_page()
+            elif not 0 <= graph_scratch_page < pool.num_pages:
                 raise ValueError(
-                    "a graph backend needs the RadixKVCache the scheduler "
-                    "allocates from: the captured graph's padding rows write KV "
-                    "to a scratch page that must be reserved out of the "
-                    "allocator (m17 A5), and only the cache can reserve it"
+                    f"graph_scratch_page={graph_scratch_page} is outside the "
+                    f"KV pool's [0, {pool.num_pages}) range"
                 )
-            self._graph_scratch_page = cache.reserve_scratch_page()
+            elif cache is not None:
+                reserved = cache.reserve_scratch_page()
+                if reserved != graph_scratch_page:
+                    raise ValueError(
+                        f"graph_scratch_page={graph_scratch_page} disagrees with "
+                        f"the scheduler cache's reserved page {reserved}"
+                    )
+            self._graph_scratch_page = graph_scratch_page
             self._graph = GraphStepExecutor(
                 self._graph_decode,
                 graph_backend,
@@ -251,10 +269,12 @@ class PagedModelRunner:
         for chunk in scheduled:
             if chunk.is_prefill:
                 self._execute_prefill(chunk, states[chunk.request_id], sampled)
-        # C4: single-token decodes for all sequences run as ONE batched forward
-        # (byte-identical to per-sequence decode; see test_batched_decode). Below
-        # two, the per-sequence path is not worth the batch bookkeeping.
-        if len(decodes) >= 2:
+        # C4: single-token decodes for all sequences run as ONE tensor forward
+        # (byte-identical to per-sequence decode; see test_batched_decode).
+        # Eager execution keeps the cheaper per-sequence path for B=1, but graph
+        # mode must use its tensor/static-buffer path at every supported bucket:
+        # single-stream launch overhead is one of CUDA graph's primary targets.
+        if decodes and (self._graph is not None or len(decodes) >= 2):
             self._execute_decode_batch(decodes, states, sampled)
         else:
             for chunk in decodes:

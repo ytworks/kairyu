@@ -346,7 +346,8 @@ print(llm.generate(["What is paged attention?"], SamplingParams(max_tokens=64)))
 から自動検出されます。主なコンストラクタオプション(DeploymentSpec の `options:` と
 しても指定可能 — [バックエンドオプション表](#バックエンドオプション-enginesoptions)
 参照): `tokenizer`、`num_pages`、`page_size`、`max_num_batched_tokens`、
-`speculative="ngram"`、`tensor_parallel_size`。
+`speculative="ngram"`、`tensor_parallel_size`、CUDA 上の
+`decode_mode="cuda_graph"`。
 
 **ローカル重みの代わりにホステッド API を使う** — `openai` バックエンドは任意の
 OpenAI 互換エンドポイントを指せます。API キーは `api_key_env` で指定した環境変数から
@@ -388,6 +389,9 @@ engines:
     backend: kairyu              # または: kairyu-proc | vllm | openai | mock
     options:
       model_path: /models/qwen2.5-0.5b-instruct
+      decode_mode: cuda_graph   # 明示的 opt-in。既定値は eager
+      cuda_graph_max_batch: 8
+      cuda_graph_max_pages: 64  # より長い page table は安全に eager へ fallback
 ```
 
 ```bash
@@ -654,6 +658,10 @@ batch:                         # 任意の OpenAI 互換 /v1/files + /v1/batches
 | | `speculative` | null | `"ngram"` で投機的デコーディングを有効化 |
 | | `speculative_tokens` | 4 | ドラフト長 k |
 | | `tensor_parallel_size` | 1 | TP 度数。>1 で serve プロセスからマルチプロセス TP ワーカーグループをスポーン(CPU は gloo、GPU は NCCL) |
+| | `decode_mode` | `"eager"` | `"cuda_graph"` で実 CUDA モデルの bucket 化 CUDA Graph decode を有効化。非対応の hardware/model/attention 構成は起動時にエラー |
+| | `cuda_graph_max_batch` | 8 | capture する最大 decode batch。超過 batch は eager decode |
+| | `cuda_graph_max_pages` | 512 | capture bucket の固定 page-table 幅。より長い系列は eager decode。`num_pages` 未満が必須 |
+| | `cuda_graph_warmup_iters` | 3 | 初回 capture 前に side stream で実行する warmup 回数 |
 | `kairyu-proc` | `kairyu` と同じ | — | エンジンを別プロセスで実行(ZMQ/msgpack、クラッシュ分離) |
 | `openai` | `base_url`, `api_key`, `model` | — | 任意の OpenAI 互換エンドポイント |
 | `vllm` | vLLM エンジン kwargs | — | vllm がインストールされた Linux GPU ホストが必要 |

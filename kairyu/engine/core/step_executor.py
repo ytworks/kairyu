@@ -210,7 +210,14 @@ class GraphStepExecutor:
 
     def invalidate(self) -> None:
         """Weight swap / pool resize: every capture is stale."""
+        for replayable, _static in self._captured.values():
+            close = getattr(replayable, "close", None)
+            if close is not None:
+                close()
         self._captured.clear()
+        invalidate_backend = getattr(self._backend, "invalidate", None)
+        if invalidate_backend is not None:
+            invalidate_backend()
 
     def _plan(self, batch: DecodeBatch) -> None:
         """Backend host phase over ``batch``'s buffers — never under capture."""

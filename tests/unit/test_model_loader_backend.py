@@ -153,3 +153,49 @@ def test_oversized_tokenizer_vocab_fails_fast(checkpoint):
 
     with pytest.raises(ValueError, match="vocab"):
         build_engine_loop(model_path=str(path), tokenizer=_Huge())
+
+
+def test_cuda_graph_serving_mode_requires_a_real_model():
+    with pytest.raises(ValueError, match="real model_path"):
+        build_engine_loop(decode_mode="cuda_graph")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"decode_mode": "unknown"}, "unknown decode_mode"),
+        (
+            {"decode_mode": "cuda_graph", "model_path": "/unused", "num_pages": 1},
+            "at least 2 KV pages",
+        ),
+        (
+            {
+                "decode_mode": "cuda_graph",
+                "model_path": "/unused",
+                "num_pages": 8,
+                "cuda_graph_max_pages": 8,
+            },
+            "must be smaller than num_pages",
+        ),
+    ],
+)
+def test_cuda_graph_serving_config_fails_fast(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        build_engine_loop(**kwargs)
+
+
+def test_cuda_graph_serving_mode_rejects_cpu_placement(checkpoint, monkeypatch):
+    from kairyu.engine.core import hw_profile
+
+    path, _ = checkpoint
+    monkeypatch.setattr(
+        hw_profile, "probe", lambda: hw_profile.HardwareProfile(arch="cpu")
+    )
+    with pytest.raises(RuntimeError, match="requires CUDA"):
+        build_engine_loop(
+            model_path=str(path),
+            tokenizer=_SmallVocabTokenizer(),
+            decode_mode="cuda_graph",
+            num_pages=16,
+            cuda_graph_max_pages=4,
+        )
