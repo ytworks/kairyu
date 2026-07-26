@@ -6,6 +6,8 @@ sequence i's decode step on its own. This is the CPU-testable contract the GPU
 batched runner/FlashInfer path preserves.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -112,3 +114,71 @@ def test_batched_logits_match_sequential():
     # greedy tokens from the batched logits are well-defined per row
     assert batched_logits.shape == (2, config.vocab_size)
     assert batched_logits.argmax(dim=-1).shape == (2,)
+
+
+def _sampling_state(request_id, sampling):
+    request = SimpleNamespace(
+        request_id=request_id,
+        sampling_identity=request_id,
+        sampling=sampling,
+        eos_token_id=None,
+        prompt_token_ids=(1, 2, 3),
+    )
+    return SimpleNamespace(request=request, outputs=())
+
+
+def test_plain_greedy_batch_uses_one_vector_argmax():
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import ScheduledChunk
+
+    runner = object.__new__(PagedModelRunner)
+    runner._sampler = Sampler()
+    runner._sample = lambda *_args, **_kwargs: pytest.fail(
+        "plain greedy rows must bypass per-row CPU sampling"
+    )
+    chunks = [
+        ScheduledChunk("a", 1, False, 3),
+        ScheduledChunk("b", 1, False, 5),
+    ]
+    states = {
+        "a": _sampling_state("a", EngineSampling()),
+        "b": _sampling_state("b", EngineSampling()),
+    }
+    logits = torch.tensor([[0.0, 3.0, 1.0], [4.0, 2.0, 5.0]])
+
+    tokens = runner._sample_rows(chunks, states, logits)
+
+    assert [token.token_id for token in tokens] == [1, 2]
+    assert set(runner._sampler._states) == {"a", "b"}
+
+
+def test_non_plain_batch_keeps_the_reviewed_per_row_sampler():
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
+    from kairyu.engine.core.scheduler import ScheduledChunk
+
+    runner = object.__new__(PagedModelRunner)
+    runner._sampler = Sampler()
+    seen = []
+
+    def sample(state, _logits, position):
+        seen.append((state.request.request_id, position))
+        return SampledToken(position)
+
+    runner._sample = sample
+    chunks = [
+        ScheduledChunk("a", 1, False, 3),
+        ScheduledChunk("b", 1, False, 5),
+    ]
+    states = {
+        "a": _sampling_state("a", EngineSampling()),
+        "b": _sampling_state("b", EngineSampling(logprobs=0)),
+    }
+
+    tokens = runner._sample_rows(chunks, states, torch.zeros(2, 8))
+
+    assert [token.token_id for token in tokens] == [3, 5]
+    assert seen == [("a", 3), ("b", 5)]

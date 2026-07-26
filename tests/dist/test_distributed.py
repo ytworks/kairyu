@@ -163,7 +163,7 @@ def test_pp2_greedy_matches_single_process(spawn2, llama_dir):
     assert results[1]["outputs"] == reference
 
 
-def test_serving_collectives_do_not_inherit_the_startup_timeout(tmp_path):
+def test_serving_groups_separate_idle_control_and_fail_fast_model_timeouts(tmp_path):
     """Review [P1] on #124: `init_process_group(timeout=)` bounds EVERY operation
     on that group, so the cold-load allowance must not become the operational one.
 
@@ -195,11 +195,19 @@ def test_serving_collectives_do_not_inherit_the_startup_timeout(tmp_path):
             .options._timeout.total_seconds()
         )
         assert startup == worker_module._STARTUP_TIMEOUT_S == 1800.0
-        assert control == model == worker_module._SERVE_OP_TIMEOUT_S == 120.0
+        assert model == worker_module._SERVE_OP_TIMEOUT_S == 120.0
+        assert control == worker_module._CONTROL_IDLE_TIMEOUT_S
         assert groups.control is not groups.model
-        assert control < startup, "the step loop inherited the startup allowance"
+        assert model < startup < control
     finally:
         dist.destroy_process_group()
+
+
+def test_idle_control_receive_outlives_the_model_timeout(spawn2):
+    results = spawn2(dist_targets.control_idle_wait)
+    for result in results:
+        assert result["payload"] == {"after_idle": True}
+        assert result["idle_s"] > result["model_timeout_s"]
 
 
 

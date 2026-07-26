@@ -210,6 +210,23 @@ def test_port_reaches_the_compose_mapping(run_fugu_text):
     assert "export PORT" in (EXAMPLE / "run.sh").read_text(encoding="utf-8")
 
 
+def test_kv_capacity_covers_the_declared_eight_way_quality_run():
+    import yaml
+
+    config = yaml.safe_load((EXAMPLE / "kairyu.template.yaml").read_text())
+    options = config["engines"]["qwen3-32b"]["options"]
+
+    assert options["num_pages"] * 16 >= 8 * 8192
+    assert options["cuda_graph_max_pages"] * 16 >= 8192
+
+
+def test_compose_uses_the_hardware_selected_attention_backend_by_default():
+    compose = (EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
+
+    assert "KAIRYU_ATTENTION_BACKEND: ${KAIRYU_ATTENTION_BACKEND:-}" in compose
+    assert "KAIRYU_ATTENTION_BACKEND:-torch" not in compose
+
+
 def test_readme_documents_the_quality_suite():
     readme = (EXAMPLE / "README.md").read_text(encoding="utf-8")
     assert "run-fugu-benchmark.sh" in readme

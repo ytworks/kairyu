@@ -23,6 +23,24 @@ def test_temperature_zero_is_exact_argmax():
     assert token.token_id == int(torch.argmax(logits).item())
 
 
+def test_only_plain_greedy_without_logprobs_can_argmax_before_host_copy():
+    sampler = Sampler()
+
+    assert sampler.can_argmax_logits("plain", EngineSampling())
+    assert not sampler.can_argmax_logits(
+        "logprobs", EngineSampling(logprobs=0)
+    )
+    assert not sampler.can_argmax_logits(
+        "penalty", EngineSampling(repetition_penalty=1.1)
+    )
+    assert not sampler.can_argmax_logits(
+        "stochastic", EngineSampling(temperature=0.5)
+    )
+    assert not sampler.can_argmax_logits(
+        "grammar", EngineSampling(json_mode=True), eos_token_id=1
+    )
+
+
 def test_same_seed_same_tokens():
     logits = _logits()
     sampling = EngineSampling(temperature=1.0, seed=7)

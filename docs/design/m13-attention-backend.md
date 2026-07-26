@@ -128,9 +128,11 @@ FlashInfer adapter (all verified against docs.flashinfer.ai 0.6.x + TGI/sglang
 issue reports):
 - prefill `plan()` takes **`head_dim_qk`** (+`head_dim_vo`), NOT `head_dim`
   (that kwarg is decode-wrapper-only) — the fake pins both spellings.
-- Both wrappers take a **workspace buffer** first ctor arg (128 MB uint8,
-  named constant); the adapter is stateful — ONE shared instance across all
-  layers (DenseDecoder threading provides this; load-bearing).
+- Both wrappers take the same **workspace buffer** first ctor arg (394 MiB
+  uint8, matching vLLM's serving default; FlashInfer's documented 128 MiB
+  recommendation overflowed at 190,840,832 bytes on the Qwen3-32B 1,024-token
+  chunked-prefill gate). The adapter is stateful — ONE shared instance across
+  all layers (DenseDecoder threading provides this; load-bearing).
 - `plan()` must pass `q_data_type`/`kv_data_type` explicitly (defaults are
   fp16 — silent mismatch with bf16 pools); fp32 pools are NOT a FlashInfer
   kernel path — the tests/gpu mirror constructs fp16/bf16 pools.

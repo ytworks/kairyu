@@ -23,11 +23,19 @@ measured to reproduce overlap OFF exactly at TP1/2/4/8
 model and the continuations; the device-side half of m2 §2.2 stays open as a
 performance invariant, not as a gate.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
-control protocol now uses a bounded gloo group while model tensors use a
-separate NCCL group. The exact 20-item Fugu concurrency-8 workload ran for
-654.53 s without a watchdog, kept readiness at 200, and shut down all eight GPUs
-cleanly. Its eight 600 s empty completions keep throughput #150 open; truthful
-empty-result accounting is handled separately by #149 / PR #235.
+control protocol uses an effectively process-lifetime gloo group while model
+tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
+timeouts must differ: workers wait inside the control receive while idle, so the
+old shared 120 s timeout killed a healthy group before the next request.
+TP transport failure is now fatal readiness state rather than a hot retry/log
+loop. The corrected #150 LiveCodeBench gate now passes: Qwen3-32B TP8 completed
+20/20 items at concurrency 8 with zero inference failures and a maximum request
+latency of 460.681 s under the 600 s timeout (score 40.0; total pair time
+1,049 s). The fixes size KV capacity for the declared workload, fail loudly on
+an impossible empty schedule, select FlashInfer by hardware, keep 8,192-token
+requests inside graph replay, share a vLLM-sized 394 MiB FlashInfer workspace,
+and batch pure-greedy argmax on-device. Truthful empty-result accounting is
+handled separately by #149 / PR #235.
 Production serving can now opt into validated CUDA-graph decode through
 DeploymentSpec. After separating tensor metadata from capture, Qwen3-32B TP8
 Graph measured 18.6% lower wall time and 32.2% lower TPOT than tensor eager on
@@ -142,6 +150,54 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [amendment] m2/m13/m17: Qwen3-32B TP8 LiveCodeBench finishes below the request timeout
+- What: the Qwen3-32B example now has 8,192 KV pages, hardware-selected
+  attention, and a 512-page CUDA-graph width. Empty scheduler plans with running
+  requests raise instead of hot-spinning; an adapter can preserve a real
+  control-only transition such as P-D prefill/KV handoff. Pure-greedy batches
+  argmax on-device and transfer one token-id vector rather than one
+  full-vocabulary row per request. FlashInfer prefill and decode share a 394
+  MiB workspace, matching vLLM's serving default. Static regressions bind
+  KV/graph capacity and the attention default.
+- Measurement: on 8x RTX PRO 6000 Blackwell, Qwen3-32B TP8, the pinned
+  LiveCodeBench 20-item subset at concurrency 8 and 8,192 max output tokens
+  completed 20/20 with zero failed or timed-out inference requests. Maximum
+  request latency was 460.681 s under the 600 s timeout; pair elapsed time was
+  1,049 s because twenty requests ran in waves of eight. The model scored 40.0
+  (twelve successful generations had no code block and scored zero).
+- Why: the original 1,024-page pool held only 16,384 tokens, so all running
+  requests could consume it and wait forever for pages none could release.
+  After capacity was fixed, the forced torch reference backend and 64-page
+  graph width left long decode unnecessarily eager. The first full FlashInfer
+  run then exposed a second hard limit: chunked prefill required 190,840,832
+  workspace bytes but only 134,217,728 were reserved. The 394 MiB shared
+  workspace removes that failure without separate prefill/decode reservations.
+- Refs: issue #150; m2 §2.2/§2.4; m13 D4; m17 A12;
+  `bench/results/issue-150-qwen3-32b-tp8-livecodebench-2026-07-26.json`;
+  `kairyu/engine/core/{engine_core,model_runner,sampler}.py`,
+  `kairyu/engine/engine_loop.py`,
+  `kairyu/engine/core/attention/flashinfer_gpu.py`,
+  `examples/qwen3-32b-multi-gpu/`
+
+### 2026-07-26 — [amendment] m16 D4: idle control receives do not inherit the model timeout
+- What: TP serving now gives the gloo control group an effectively
+  process-lifetime idle timeout while keeping the model group at 120 s.
+  `DistTPModelRunner` marks any failed distributed step fatal; readiness requests
+  process replacement, request purge stops issuing collectives, the pump does
+  not hot-retry a broken group, and shutdown aborts/reaps instead of entering a
+  mismatched barrier. A two-rank regression waits three model-timeout intervals
+  inside the worker control receive before rank 0 delivers the next step.
+- Why: the #150 Qwen3-32B TP8 rerun began after more than 120 idle seconds.
+  Every worker was correctly blocked waiting for the next `StepDelta`, but the
+  shared operational timeout treated that normal idle receive as a deadlock.
+  The subsequent graph-teardown barrier timeout obscured the original gloo
+  failure, and the backend then retried the permanently broken group in a tight
+  loop. Model collectives have no pending operation while idle and retain the
+  fail-fast bound.
+- Refs: issue #148 follow-up / #150; m16 D4/A6;
+  `kairyu/engine/core/worker.py`, `kairyu/engine/kairyu_backend.py`,
+  `tests/{unit/test_tp_worker.py,dist/test_distributed.py}`
 
 ### 2026-07-26 — [amendment] m2 §2.2: batched attention has no per-row host synchronization
 - What: supported eager and captured batched decode now share the tensor-only

@@ -628,6 +628,43 @@ def tp_control_model_group_stress(
         dist.destroy_process_group()
 
 
+def control_idle_wait(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """A worker control receive may wait longer than the model timeout."""
+    import time
+
+    import torch.distributed as dist
+
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+    from kairyu.engine.core.worker import serving_groups
+
+    model_timeout_s = 0.1
+    control_timeout_s = 2.0
+    idle_s = 0.3
+    init_distributed(rank, world_size, f"file://{init_file}", backend="gloo")
+    groups = serving_groups(
+        "gloo",
+        control_timeout_s=control_timeout_s,
+        model_timeout_s=model_timeout_s,
+    )
+    control = TorchDistCommunicator(group=groups.control)
+    if rank == 0:
+        time.sleep(idle_s)
+    payload = control.broadcast({"after_idle": True} if rank == 0 else None, src=0)
+    dist.destroy_process_group(groups.model)
+    dist.destroy_process_group(groups.control)
+    _finish(
+        out_dir,
+        rank,
+        {
+            "payload": payload,
+            "idle_s": idle_s,
+            "model_timeout_s": model_timeout_s,
+        },
+    )
+
+
 def sequence_parallel_parity(
     rank: int, world_size: int, init_file: str, out_dir: str, model_dir: str
 ) -> None:

@@ -536,11 +536,15 @@ class _AlwaysFailRunner:
 
 
 class _DeadRankLauncher:
-    def __init__(self, dead: tuple[int, ...]) -> None:
+    def __init__(self, dead: tuple[int, ...], failure: str | None = None) -> None:
         self._dead = dead
+        self._failure = failure
 
     def dead_ranks(self) -> tuple[int, ...]:
         return self._dead
+
+    def failure_type(self) -> str | None:
+        return self._failure
 
 
 async def test_readiness_is_ready_before_any_work():
@@ -592,3 +596,12 @@ async def test_live_tensor_parallel_ranks_stay_ready():
     backend = KairyuBackend(runner=_SlowRunner())
     backend._loop.tp_launcher = _DeadRankLauncher(())
     assert backend.readiness().ready is True
+
+
+async def test_failed_tensor_parallel_transport_is_fatal_even_with_live_ranks():
+    backend = KairyuBackend(runner=_SlowRunner())
+    backend._loop.tp_launcher = _DeadRankLauncher((), failure="DistBackendError")
+    status = backend.readiness()
+    assert status.ready is False
+    assert status.fatal is True
+    assert status.detail == "tensor-parallel transport failed: DistBackendError"

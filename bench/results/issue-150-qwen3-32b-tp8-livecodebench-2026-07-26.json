@@ -1,0 +1,90 @@
+{
+  "date": "2026-07-26",
+  "issue": 150,
+  "hardware": "8x NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "model": "Qwen/Qwen3-32B",
+  "tensor_parallel": 8,
+  "resolved_attention_backend": "flashinfer",
+  "flashinfer_version": "0.6.14",
+  "workload": {
+    "benchmark": "livecodebench",
+    "dataset": "livecodebench/code_generation_lite",
+    "dataset_revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+    "limit": 20,
+    "concurrency": 8,
+    "attempts": 1,
+    "temperature": 0.0,
+    "max_output_tokens": 8192,
+    "request_timeout_s": 600.0,
+    "run_id": "issue-150-graph512-20260726"
+  },
+  "serving_config": {
+    "num_pages": 8192,
+    "page_size": 16,
+    "max_num_batched_tokens": 1024,
+    "decode_mode": "cuda_graph",
+    "cuda_graph_max_batch": 8,
+    "cuda_graph_max_pages": 512,
+    "flashinfer_workspace_bytes": 413138944
+  },
+  "result": {
+    "status": "completed",
+    "pair_elapsed_s": 1049.0,
+    "terminal_progress_s": 1041,
+    "completed_items": 20,
+    "failed_items": 0,
+    "timed_out_items": 0,
+    "http_502_items": 0,
+    "score_fraction": 0.4,
+    "score_percent": 40.0,
+    "latency_s": {
+      "min": 76.981,
+      "p50": 378.894,
+      "p95": 456.409,
+      "max": 460.681,
+      "mean": 349.87145
+    },
+    "per_item_latency_s": [
+      378.34,
+      378.415,
+      196.215,
+      289.613,
+      378.67,
+      76.981,
+      151.504,
+      379.118,
+      432.348,
+      396.398,
+      158.142,
+      272.948,
+      455.469,
+      456.406,
+      456.409,
+      456.276,
+      456.052,
+      448.342,
+      460.681,
+      319.102
+    ]
+  },
+  "diagnosis": {
+    "original_stall": "1024 KV pages held only 16384 tokens; eight requests could exhaust the pool while all remained running, so the scheduler returned empty plans forever",
+    "first_fixed_capacity_run": "FlashInfer prefill later required 190840832 workspace bytes but the adapter reserved only 134217728, producing RuntimeError and 14 HTTP 502 results",
+    "workspace_fix": "prefill and decode now share vLLM's 394 MiB serving default instead of owning separate undersized buffers",
+    "performance_fixes": [
+      "hardware-selected FlashInfer instead of the example's forced torch backend",
+      "512-page graph capture width keeps an 8192-token request in graph replay",
+      "pure-greedy batches argmax on device and copy one token-id vector instead of one full-vocabulary row per request"
+    ],
+    "safety_fixes": [
+      "an empty schedule with running requests raises instead of hot-spinning",
+      "idle gloo control receives use a process-lifetime timeout while NCCL model collectives retain the 120-second fail-fast timeout",
+      "a TP transport failure becomes fatal readiness state and is not hot-retried"
+    ]
+  },
+  "notes": [
+    "The total pair time exceeds 600 seconds because twenty requests are served with concurrency eight; the issue gate is the per-request 600-second timeout. Every request completed below it, with a measured maximum of 460.681 seconds.",
+    "Twelve completed generations contained no code block and therefore scored zero. Those are model-quality outcomes, not inference failures or empty timeout completions.",
+    "The benchmark command exited zero and reported completed with score 40.0."
+  ]
+}

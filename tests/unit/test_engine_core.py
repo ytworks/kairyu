@@ -76,6 +76,50 @@ def test_empty_prompt_never_reaches_model_runner():
     assert runner.steps_executed == 0
 
 
+def test_running_request_empty_plan_fails_instead_of_spinning():
+    class StalledScheduler:
+        states = {}
+
+        @staticmethod
+        def schedule():
+            from kairyu.engine.core.scheduler import SchedulerOutput
+
+            return SchedulerOutput(())
+
+        @staticmethod
+        def drain_rejected():
+            return ()
+
+        @staticmethod
+        def has_unfinished():
+            return True
+
+        @staticmethod
+        def reject_waiting_head():
+            return None
+
+    engine = EngineCore(scheduler=StalledScheduler(), runner=EchoRunner())
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no progress with running requests"):
+        engine.step()
+
+
+def test_decode_capacity_exhaustion_fails_instead_of_spinning():
+    cache = RadixKVCache(num_pages=2, page_size=PAGE)
+    scheduler = Scheduler(cache, max_num_batched_tokens=64)
+    engine = EngineCore(scheduler=scheduler, runner=EchoRunner())
+    engine.add_request(
+        EngineRequest("too-long", (1, 2, 3, 4), max_new_tokens=32)
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no progress with running requests"):
+        engine.run_to_completion()
+
+
 def test_oversized_prompt_does_not_block_concurrent_requests():
     # C2: an unadmittable request must not wedge a normal request behind it.
     cache = RadixKVCache(num_pages=2, page_size=PAGE)  # capacity = 8 tokens

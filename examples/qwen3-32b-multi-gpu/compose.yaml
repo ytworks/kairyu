@@ -20,7 +20,9 @@ services:
       context: ../..
       dockerfile: Dockerfile.cuda
     environment:
-      KAIRYU_ATTENTION_BACKEND: ${KAIRYU_ATTENTION_BACKEND:-torch}
+      # Empty means hardware-profile selection: FlashInfer on the supported
+      # SM120 image, while an explicit caller override remains available.
+      KAIRYU_ATTENTION_BACKEND: ${KAIRYU_ATTENTION_BACKEND:-}
     shm_size: 1gb
     ulimits:
       memlock: -1

@@ -108,6 +108,25 @@ class Sampler:
         destination._states[request_id] = state
         return True
 
+    def can_argmax_logits(
+        self,
+        request_id: str,
+        sampling: EngineSampling,
+        eos_token_id: int | None = None,
+    ) -> bool:
+        """Whether selection can happen on the logits device before host copy.
+
+        Pure greedy sampling needs only the winning index. Copying the entire
+        vocabulary row to CPU first is both unnecessary and expensive; callers
+        with a batch can argmax every row together and transfer only the small
+        index vector. State is still materialized here so lifecycle and grammar
+        handoff semantics remain unchanged.
+        """
+        if not sampling.is_greedy_pure or sampling.logprobs is not None:
+            return False
+        state = self._state_for(request_id, sampling, eos_token_id)
+        return state.enforcer is None
+
     def sample(
         self,
         request_id: str,
@@ -120,6 +139,8 @@ class Sampler:
         eos_token_id: int | None = None,
     ) -> SampledToken:
         state = self._state_for(request_id, sampling, eos_token_id)
+        if self.can_argmax_logits(request_id, sampling, eos_token_id):
+            return SampledToken(int(torch.argmax(logits).item()))
         # Sampling runs on CPU: the seeded torch.Generator + multinomial and the
         # penalty/enforcer index tensors are all CPU, and the reproducibility pins
         # (m8 D2, spec ≡ greedy) are defined by the CPU RNG stream — a CUDA

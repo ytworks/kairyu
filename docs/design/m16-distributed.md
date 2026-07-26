@@ -109,12 +109,14 @@ carries outputs/sampling/num_cached_tokens — extended there.
 non-final stages run their layer slice and `tensor_send` hidden states +
 positions; the final stage recvs, finishes, samples.
 
-> **Amended 2026-07-26 (issue #148).** TP serving has two bounded-timeout
-> operational groups, created in the same order on every rank after the startup
-> handshake:
+> **Amended 2026-07-26 (issue #148, corrected after the #150 hardware
+> rerun).** TP serving has two operational groups, created in the same order on
+> every rank after the startup handshake:
 >
-> - **control:** gloo only — `StepDelta`, release, and shutdown object broadcasts;
-> - **model:** the placement backend (NCCL on CUDA) — tensor collectives only.
+> - **control:** gloo only, with an effectively process-lifetime idle timeout —
+>   `StepDelta`, release, and shutdown object broadcasts;
+> - **model:** the placement backend (NCCL on CUDA), with the 120 s fail-fast
+>   timeout — tensor collectives only.
 >
 > The long-timeout startup group remains separate. Python object broadcasts must
 > not share the model NCCL group: `broadcast_object_list` uses metadata and
@@ -124,6 +126,15 @@ positions; the final stage recvs, finishes, samples.
 > while rank 0 had entered ALLREDUCE sequence 4165, followed by the 120 s NCCL
 > watchdog. A blocking gloo hand-off orders every rank before it enters the
 > independent model group.
+>
+> The timeout asymmetry is load-bearing. Non-zero ranks wait *inside* the next
+> control broadcast while the server is idle. Giving that receive the model
+> group's 120 s timeout killed a healthy deployment after 120 idle seconds; its
+> workers then entered graph teardown and produced a misleading NCCL barrier
+> watchdog. The model group has no collective pending while idle, so only it can
+> safely retain the short operational bound. Any TP step exception marks the
+> group fatal: the backend stops retrying the permanently divergent sequence,
+> readiness requests process replacement, and teardown takes the abort/reap path.
 
 ### D5 — tests/dist harness
 
@@ -211,7 +222,9 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   padding to the shard boundary (`tests/dist/test_distributed.py`); the same
   parity over real NCCL in bf16 (`tests/gpu/test_sequence_parallel_nccl.py`).
 - D4 control/model split: 512 alternating gloo-object/NCCL-tensor rounds on two
-  real GPUs (`tests/gpu/test_tp_control_plane_nccl.py`), plus the exact
+  real GPUs (`tests/gpu/test_tp_control_plane_nccl.py`); a two-rank gloo gate
+  holds a worker receive beyond the model timeout before delivering the next
+  step. Hardware validation also uses the exact
   Qwen3-32B TP=8 / Fugu LiveCodeBench 20-item / concurrency-8 workload. The
   latter ran 654.53 s without a watchdog, kept `/readyz` at 200, and shut down
   with all eight GPUs returning to 0 MiB / 0% without a reset.
@@ -243,8 +256,10 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
 - **A5**: repo coverage config MEASURES spawned children — dist tests run in
   the default suite; worker mains stay in measured code; pure-function
   discipline retained on its own merits.
-- **A6 harness pins**: init_process_group(timeout=120s) — gloo's 30-min
-  default turns deadlocks into CI killers; start_processes(join=False) +
+- **A6 harness pins**: test init_process_group(timeout=120s) — gloo's 30-min
+  default turns test deadlocks into CI killers. Production TP control receives
+  are intentionally exempt because idle workers wait inside that collective;
+  production model collectives retain 120 s. start_processes(join=False) +
   polled join; torch.set_num_threads(1) in children; module-level spawn
   targets; one rendezvous file per group; GLOO_SOCKET_IFNAME=lo0 fallback
   recorded.

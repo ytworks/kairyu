@@ -157,6 +157,14 @@ output (DeepSeek convention).
   retain `CUDAGraph` through a class closure; serving subgroups are drained,
   synchronized, and destroyed in identical order on every rank before the
   default group.
+- **A12 (capture width is workload capacity):** a deployment's
+  `cuda_graph_max_pages * page_size` must cover the sequence length it intends
+  to accelerate. The Qwen3-32B quality example uses 512 pages (8,192 tokens)
+  instead of 64; wider requests still retain D2's explicit eager fallback.
+  FlashInfer plans only live page indices, so this fixed graph-input width does
+  not make attention traverse padding. The same example leaves the attention
+  override empty so hardware policy selects FlashInfer rather than forcing the
+  torch reference path.
 - **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
   synthetic requests x 32 output tokens, torch attention: tensor eager wall
   8.844 s, TPOT 192.075 ms/token, 0.90 req/s; CUDA graph wall 7.196 s,
@@ -165,3 +173,9 @@ output (DeepSeek convention).
   metadata improvement from graph capture. The graph run includes first-use
   warmup and capture. Evidence:
   `bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json`.
+- **Issue #150 gate:** the Qwen3-32B TP8 LiveCodeBench 20-item subset at
+  concurrency 8, 8,192 max output tokens, and a 600 s request timeout completed
+  20/20 with zero inference failures. Maximum request latency was 460.681 s;
+  total pair time was 1,049 s because twenty requests were served in waves of
+  eight. Evidence:
+  `bench/results/issue-150-qwen3-32b-tp8-livecodebench-2026-07-26.json`.
