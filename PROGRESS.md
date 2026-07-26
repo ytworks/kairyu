@@ -12,19 +12,19 @@ there required four fixes, none of which any CPU test could have caught, because
 on a CPU box the behaviour they broke is the correct behaviour (PRs #124–#130).
 The measured interconnect is now recorded (`bench/results/env-2026-07-25.json`):
 PCIe throughout, P2P 30–37 GB/s against ~1450 GB/s device-local.
-Gate A1/A2 has a real-ranks harness for the first time. The formal A1 command now
-retains all TP1/2 overlap ON/OFF continuations and combines them with the amended
-teacher-forced verdicts while failing closed on incomplete or cross-checkpoint
-evidence; the Llama-3.1-8B hardware run is pending. Teacher-forced agreement
-against HF is measured and within the reference's own noise floor at TP=1 and
-TP=8 (`bench/parity_hf.py`), but that is a DIAGNOSTIC, not A1: the formal gate
-needs full greedy continuations on Llama-3.1-8B. The overlap pipeline is no
-longer what blocks it: the in-flight token buffer removed the IndexError
-`PagedModelRunner` used to raise under `OverlapEngineCore`, and overlap ON is
-measured to reproduce overlap OFF exactly at TP1/2/4/8
-(`bench/results/parity-tp-qwen3-32b-2026-07-26.json`). A1 stays open on the
-model and the continuations; the device-side half of m2 §2.2 stays open as a
-performance invariant, not as a gate.
+G2 A1 is complete on Llama-3.1-8B. The self-contained formal result retains the
+same 64 prompt texts/token IDs and all TP1/2 overlap ON/OFF continuations;
+overlap reproduced OFF exactly at both degrees (64/64 each). HF's own
+teacher-forced path agreed with its greedy reference on 1010/1024 positions
+(0.9863); Kairyu TP1 and TP2 each agreed on 1014/1024 (0.9902), with zero
+substantive disagreements, zero missing logprobs, and max agreeing-position
+logprob deltas 0.10440/0.10331 below the 0.25 bound. The assembler validated
+the Llama shape, four weight SHA-256s, identical BOS-free prompt tokens,
+CUDA 13.0/NCCL 2.29.7, and one clean commit
+(`bench/results/g2-a1-llama31-8b-rtxpro6000-2026-07-26.json`). A2's existing
+Qwen3-32B TP1/8 teacher-forced measurement remains diagnostic evidence for the
+70B gate, not its completion. The device-side half of m2 §2.2 remains a
+performance invariant, not an A1 blocker.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -153,6 +153,23 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-26 — [progress] G2 A1 closes on Llama-3.1-8B TP1/2
+- What: the formal A1 result contains all 64 fixed prompts and token IDs, all
+  four 16-token continuations (TP1/2, overlap OFF/ON), the full HF reference,
+  TP1/TP2 teacher-forced results, exact checkpoint digests, CUDA/NCCL config,
+  and clean-code provenance. Overlap is exact at both degrees. HF self-agreement
+  is 1010/1024 (0.9863); TP1 and TP2 each achieve 1014/1024 (0.9902), zero
+  substantive disagreements or missing samples, and 0.10440/0.10331 maximum
+  agreeing-position logprob deltas against the 0.25 bound. All 14 assembler
+  checks pass.
+- Why: A1 is the foundational TP correctness anchor for later G2 performance
+  gates. The first assembly attempt correctly rejected a hidden BOS mismatch;
+  reference schema 4 now uses the production Kairyu no-special-token prompt
+  contract, so the free-running and teacher-forced evidence uses identical
+  prefixes rather than merely identical text.
+- Refs: issue #151; G2 A1 and §7 amendment; GPU runbook §6;
+  `bench/results/g2-a1-llama31-8b-rtxpro6000-2026-07-26.json`
 
 ### 2026-07-26 — [progress] G2 A1 has a fail-closed evidence assembler
 - What: `parity_tp.py` now retains the fixed prompt text/token IDs and every
