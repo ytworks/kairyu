@@ -380,6 +380,7 @@ def test_in_process_tp_still_rejects_speculative():
     with pytest.raises(ValueError, match="requires a real model"):
         build_engine_loop(tensor_parallel_size=2, speculative="ngram")
 
+
 def test_failed_launcher_start_leaves_no_group_or_workers(llama_dir):
     # A constructor that raises after mp.spawn used to leave the workers running
     # and the process group initialized: the caller got the real error, then a
