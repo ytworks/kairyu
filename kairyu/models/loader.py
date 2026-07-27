@@ -15,7 +15,7 @@ from pathlib import Path
 
 import torch
 
-from kairyu.engine.core.quant_config import detect_quantization
+from kairyu.engine.core.quant_config import QuantMethod, detect_quantization
 from kairyu.engine.core.weights import CheckpointReader
 from kairyu.models.config import ModelConfig, parse_model_config
 from kairyu.models.llama import DenseDecoder
@@ -84,6 +84,12 @@ def load_model(
     raw_config = json.loads(config_file.read_text())
     quant = detect_quantization(raw_config)
     config = parse_model_config(raw_config)
+    if config.is_mla and quant.method is not QuantMethod.NONE:
+        raise ValueError(
+            f"{config.architecture} MLA does not support {quant.method.value} "
+            "checkpoints: its absorbed KV projection requires an unquantized "
+            "kv_b_proj weight"
+        )
     model = build_model(
         config,
         attention_backend=attention_backend,
@@ -94,13 +100,23 @@ def load_model(
     # state_dict() — NOT named_parameters+named_buffers: non-persistent buffers
     # (rotary inv_freq) are absent from checkpoints by contract (m14 A1)
     expected = model.state_dict()
+    quantized_buffers = {
+        f"{module_name}.{buffer_name}" if module_name else buffer_name
+        for module_name, module in model.named_modules()
+        if getattr(module, "is_quantized", False)
+        for buffer_name, _ in module.named_buffers(recurse=False)
+    }
     for name, current in expected.items():
         if name == "lm_head.weight" and config.tie_word_embeddings:
             continue  # tied: the file omits it; re-tied after load
         if name not in reader:
             raise KeyError(f"checkpoint at {path} is missing tensor {name!r}")
         tensor = reader.tensor(name)
-        if current.dtype == torch.float32 and tensor.is_floating_point():
+        if (
+            name not in quantized_buffers
+            and current.dtype == torch.float32
+            and tensor.is_floating_point()
+        ):
             # regular fp params follow the requested compute dtype; quantized
             # payloads (int/fp8/uint8 packs, fp16 scales) load VERBATIM (m14 A2)
             tensor = tensor.to(dtype)

@@ -82,9 +82,12 @@ class TestHardwareProfile:
             assert profile.kernel_tier == "torch"
 
     def test_best_format_matrix(self):
-        sm120 = HardwareProfile(arch="cuda", sm=120, formats=("bf16", "fp8", "nvfp4"))
+        sm120 = HardwareProfile(
+            arch="cuda", sm=120, formats=("bf16", "fp8", "int8", "nvfp4")
+        )
         assert sm120.best_format(QuantConfig(QuantMethod.NVFP4)) == "nvfp4"
         assert sm120.best_format(QuantConfig(QuantMethod.FP8)) == "fp8"
+        assert sm120.best_format(QuantConfig(QuantMethod.INT8)) == "int8"
         assert sm120.kernel_tier == "fa2"
 
         sm90 = HardwareProfile(arch="cuda", sm=90, formats=("bf16", "fp8"))

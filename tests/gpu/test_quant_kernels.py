@@ -1,4 +1,8 @@
-"""Deploy-day mirror: GPU quant kernels vs the CPU dequant oracles (m14 D4)."""
+"""GPU oracles for every advertised production quantized-linear scheme."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -13,37 +17,156 @@ def cuda():
     return "cuda"
 
 
-def test_fp8_kernel_matches_cpu_reference(cuda):
-    from kairyu.kernels.fp8_gemm_gpu import linear_forward
+def _fp8_module(in_features=64, out_features=32):
     from kairyu.quant.fp8 import quantize_fp8
     from kairyu.quant.linear import Fp8Linear
 
-    torch.manual_seed(0)
-    module = Fp8Linear(64, 32, bias=False)
-    weight = torch.randn(32, 64)
-    q, scale = quantize_fp8(weight)
-    module.weight.copy_(q)
+    module = Fp8Linear(in_features, out_features, bias=True)
+    qweight, scale = quantize_fp8(torch.randn(out_features, in_features))
+    module.weight.copy_(qweight)
     module.weight_scale.copy_(scale)
-    x = torch.randn(4, 64)
-    cpu_out = module.forward(x)
-    module = module.to(cuda)
-    gpu_out = linear_forward(x.to(cuda), module).cpu()
-    assert (gpu_out - cpu_out).abs().max().item() < 2e-2
+    return module
 
 
-def test_awq_kernel_matches_cpu_reference(cuda):
-    from kairyu.kernels.awq_gemm_gpu import linear_forward
+def _int8_module(in_features=64, out_features=32):
+    from kairyu.quant.int8 import quantize_int8_weight
+    from kairyu.quant.linear import Int8Linear
+
+    module = Int8Linear(in_features, out_features, bias=True)
+    qweight, scale = quantize_int8_weight(torch.randn(out_features, in_features))
+    module.weight.copy_(qweight)
+    module.weight_scale.copy_(scale)
+    return module
+
+
+def _awq_module(in_features=64, out_features=32):
     from kairyu.quant.awq import quantize_awq
     from kairyu.quant.linear import AwqLinear
 
-    torch.manual_seed(1)
-    module = AwqLinear(64, 32, bias=False, group_size=16)
-    qweight, qzeros, scales = quantize_awq(torch.randn(32, 64), group_size=16)
+    module = AwqLinear(in_features, out_features, bias=True, group_size=16)
+    qweight, qzeros, scales = quantize_awq(
+        torch.randn(out_features, in_features), group_size=16
+    )
     module.qweight.copy_(qweight)
     module.qzeros.copy_(qzeros)
     module.scales.copy_(scales)
-    x = torch.randn(4, 64)
-    cpu_out = module.forward(x)
+    return module
+
+
+def _gptq_module(in_features=64, out_features=32):
+    from kairyu.quant.gptq import quantize_gptq
+    from kairyu.quant.linear import GptqLinear
+
+    module = GptqLinear(in_features, out_features, bias=True, group_size=16)
+    qweight, qzeros, scales, g_idx = quantize_gptq(
+        torch.randn(out_features, in_features), group_size=16
+    )
+    module.qweight.copy_(qweight)
+    module.qzeros.copy_(qzeros)
+    module.scales.copy_(scales)
+    module.g_idx.copy_(g_idx)
+    return module
+
+
+def _nvfp4_module(in_features=64, out_features=32):
+    from kairyu.quant.linear import NvFp4Linear
+    from kairyu.quant.nvfp4 import quantize_nvfp4
+
+    module = NvFp4Linear(in_features, out_features, bias=True)
+    weight, weight_scale, weight_scale_2 = quantize_nvfp4(
+        torch.randn(out_features, in_features)
+    )
+    module.weight.copy_(weight)
+    module.weight_scale.copy_(weight_scale)
+    module.weight_scale_2.copy_(weight_scale_2)
+    module.input_scale.copy_(torch.tensor(4.0 / (6.0 * 448.0)))
+    return module
+
+
+@pytest.mark.parametrize(
+    ("scheme", "factory", "atol"),
+    [
+        ("fp8", _fp8_module, 0.40),
+        ("int8", _int8_module, 0.08),
+        ("awq", _awq_module, 0.08),
+        ("gptq", _gptq_module, 0.08),
+        ("nvfp4", _nvfp4_module, 0.08),
+    ],
+)
+@pytest.mark.parametrize(
+    ("m_size", "k_size", "n_size"),
+    [(1, 64, 32), (17, 96, 40), (32, 64, 32)],
+)
+def test_fused_kernel_matches_cpu_oracle_without_dequantizing_weight(
+    cuda,
+    monkeypatch,
+    scheme: str,
+    factory: Callable,
+    atol: float,
+    m_size: int,
+    k_size: int,
+    n_size: int,
+):
+    """Production forward must dispatch to the fused kernel, never dequantize."""
+    torch.manual_seed(0)
+    module = factory(k_size, n_size)
+    module.bias.data.normal_()
+    x = torch.randn(m_size, k_size)
+    # Both paths see the identical values that the production BF16 model emits.
+    cpu_out = module.forward_reference(x.to(torch.bfloat16).float())
+
+    def forbidden_dequantize(*_args, **_kwargs):
+        raise AssertionError(f"{scheme} CUDA forward materialized its full weight")
+
+    monkeypatch.setattr(type(module), "dequantize", forbidden_dequantize)
     module = module.to(cuda)
-    gpu_out = linear_forward(x.to(cuda), module).cpu()
-    assert (gpu_out - cpu_out).abs().max().item() < 2e-2
+    gpu_out = module(x.to(device=cuda, dtype=torch.bfloat16)).float().cpu()
+
+    if scheme == "fp8":
+        error = gpu_out - cpu_out
+        relative_rmse = error.square().mean().sqrt() / cpu_out.square().mean().sqrt()
+        assert relative_rmse.item() < 0.035
+        assert error.abs().max().item() < 0.12 * k_size**0.5
+    else:
+        torch.testing.assert_close(gpu_out, cpu_out, rtol=0.03, atol=atol)
+
+
+def test_fused_kernel_rejects_unsupported_activation_dtype(cuda):
+    module = _awq_module().to(cuda)
+    with pytest.raises(RuntimeError, match="float16/bfloat16"):
+        module(torch.randn(2, 64, device=cuda, dtype=torch.float32))
+
+
+@pytest.mark.parametrize(
+    ("scheme", "factory"),
+    [
+        ("fp8", _fp8_module),
+        ("int8", _int8_module),
+        ("awq", _awq_module),
+        ("gptq", _gptq_module),
+        ("nvfp4", _nvfp4_module),
+    ],
+)
+def test_fused_kernel_rejects_unsupported_compute_capability(
+    cuda, monkeypatch, scheme: str, factory: Callable
+):
+    module = factory().to(cuda)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (7, 5))
+    with pytest.raises(RuntimeError, match=rf"{scheme} fused kernel requires SM"):
+        module(torch.randn(2, 64, device=cuda, dtype=torch.bfloat16))
+
+
+def test_static_fp8_uses_checkpoint_input_scale(cuda):
+    from kairyu.quant.fp8 import quantize_fp8
+    from kairyu.quant.linear import Fp8Linear
+
+    torch.manual_seed(2)
+    module = Fp8Linear(64, 32, bias=False, activation_dynamic=False)
+    qweight, weight_scale = quantize_fp8(torch.randn(32, 64), per_channel=False)
+    module.weight.copy_(qweight)
+    module.weight_scale = weight_scale
+    module.input_scale.copy_(torch.tensor(0.01))
+    x = torch.randn(7, 64).to(torch.bfloat16).float()
+    expected = module.forward_reference(x)
+    actual = module.to(cuda)(x.to(device=cuda, dtype=torch.bfloat16)).float().cpu()
+    torch.testing.assert_close(actual, expected, rtol=0.03, atol=0.40)

@@ -30,5 +30,31 @@ def quantize_fp8(
     return scaled.to(torch.float8_e4m3fn), scale
 
 
+def quantize_fp8_activation(
+    x: torch.Tensor, scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """x [..., in] -> (fp8 x, scale), dynamically or with a static scalar."""
+    if scale is None:
+        amax = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+        scale = (amax / FP8_MAX).to(torch.float32)
+    elif scale.numel() != 1:
+        raise ValueError(f"static FP8 input_scale must be scalar, got {scale.shape}")
+    else:
+        scale = scale.to(device=x.device, dtype=torch.float32)
+    scaled = (x.to(torch.float32) / scale).clamp(-FP8_MAX, FP8_MAX)
+    return scaled.to(torch.float8_e4m3fn), scale
+
+
+def fp8_w8a8_matmul(
+    x_q: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_q: torch.Tensor,
+    w_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Upcasted CPU oracle for dynamic-token FP8 accumulation."""
+    accumulated = torch.matmul(x_q.to(torch.float32), w_q.to(torch.float32).t())
+    return accumulated * x_scale * w_scale.reshape(-1)
+
+
 def dequantize_fp8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return weight.to(torch.float32) * scale.to(torch.float32)

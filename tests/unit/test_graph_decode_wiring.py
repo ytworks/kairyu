@@ -515,7 +515,10 @@ def test_the_planned_dtype_is_the_activation_dtype_not_the_projections(llama_dir
 
     _model, config, _ = load_model(llama_dir)
     model = DenseDecoder(
-        config, linear_factory=linear_factory(QuantConfig(method=QuantMethod.AWQ))
+        config,
+        linear_factory=linear_factory(
+            QuantConfig(method=QuantMethod.AWQ, group_size=16)
+        ),
     )
     attention = _PlanRequiredBackend()
     for layer in model.model.layers:

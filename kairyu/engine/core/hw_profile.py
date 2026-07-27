@@ -17,9 +17,9 @@ from kairyu.engine.core.quant_config import QuantConfig, QuantMethod
 
 # SM -> supported compute formats (roadmap §2 quantization matrix)
 _FORMATS_BY_SM: tuple[tuple[int, tuple[str, ...]], ...] = (
-    (120, ("bf16", "fp8", "nvfp4")),  # RTX PRO 6000 Blackwell (SM120)
-    (100, ("bf16", "fp8", "nvfp4")),  # B200 (SM100)
-    (89, ("bf16", "fp8")),  # Ada / Hopper FP8 floor
+    (120, ("bf16", "fp8", "int8", "nvfp4")),  # RTX PRO 6000 Blackwell
+    (100, ("bf16", "fp8", "int8", "nvfp4")),  # B200 (SM100)
+    (89, ("bf16", "fp8", "int8")),  # Ada / Hopper FP8 floor
     (80, ("bf16", "int8")),  # A100 (SM80): no FP8/FP4 tensor cores
 )
 

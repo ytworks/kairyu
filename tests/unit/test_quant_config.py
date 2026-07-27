@@ -24,11 +24,50 @@ def test_fp8_via_compressed_tensors():
     assert config.method is QuantMethod.FP8
     assert config.weight_bits == 8
     assert config.activation_bits == 8
+    assert config.activation_dynamic is False
 
 
 def test_fp8_direct_method():
     config = detect_quantization({"quantization_config": {"quant_method": "fp8"}})
     assert config.method is QuantMethod.FP8
+    assert config.activation_dynamic is True
+
+
+def test_fp8_static_activation_scheme_is_preserved():
+    config = detect_quantization(
+        {
+            "quantization_config": {
+                "quant_method": "fp8",
+                "activation_scheme": "static",
+            }
+        }
+    )
+    assert config.activation_dynamic is False
+
+
+def test_fp8_unknown_activation_scheme_fails_loudly():
+    with pytest.raises(ValueError, match="activation_scheme"):
+        detect_quantization(
+            {
+                "quantization_config": {
+                    "quant_method": "fp8",
+                    "activation_scheme": "block",
+                }
+            }
+        )
+
+
+def test_modelopt_fp8_unknown_activation_scheme_fails_loudly():
+    with pytest.raises(ValueError, match="modelopt FP8 activation_scheme"):
+        detect_quantization(
+            {
+                "quantization_config": {
+                    "quant_method": "modelopt",
+                    "quant_algo": "FP8",
+                    "activation_scheme": "block",
+                }
+            }
+        )
 
 
 def test_awq_with_group_size():

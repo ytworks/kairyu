@@ -1,8 +1,7 @@
-"""Triton NVFP4 GEMM (m14 D4) — deploy-day verified vs the CPU reference.
+"""Native FlashInfer NVFP4 W4A4 GEMM.
 
-SM120 has native FP4 tensor cores; several NVFP4 grouped-GEMM paths were
-immature at design time (roadmap §2) — this Triton dequant path is the
-correctness-first fallback the fused kernel replaces.
+SM100+ has native FP4 tensor cores. Activations and checkpoint weights remain
+FP4 through the selected FlashInfer kernel; no W4A16 fallback is enabled.
 """
 
 from __future__ import annotations
@@ -11,11 +10,6 @@ import torch
 
 
 def linear_forward(x: torch.Tensor, module) -> torch.Tensor:
-    import triton  # noqa: F401  (deferred: [gpu] extra)
+    from kairyu.kernels.quant_gemm_gpu import nvfp4_linear_forward
 
-    from kairyu.quant.nvfp4 import dequantize_nvfp4
-
-    weight = dequantize_nvfp4(
-        module.weight, module.weight_scale, module.weight_scale_2
-    ).to(x.dtype)
-    return torch.nn.functional.linear(x, weight, module.bias)
+    return nvfp4_linear_forward(x, module)

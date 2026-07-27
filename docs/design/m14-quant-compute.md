@@ -1,6 +1,7 @@
-# M14 Design: Quantization Compute Paths — CPU References + Triton Stubs
+# M14 Design: Quantization Compute Paths — CPU References + Production GPU Kernels
 
-Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS (1-reviewer panel; formats
+Status: **GPU-validated** (2026-07-27). Implemented 2026-07-03; reviewed —
+APPROVE-WITH-AMENDMENTS (1-reviewer panel; formats
 verified against AutoAWQ/AutoGPTQ/vLLM/compressed-tensors source and LIVE
 safetensors headers of four real Hub checkpoints, 2026-07-03; §6 binding).
 Milestone: M14 (roadmap Track E1/E2 quant half, goal G2-as-amended quant matrix)
@@ -157,3 +158,73 @@ lossy by construction).
 - **A10**: fixture quantization_config JSONs pinned per scheme (awq incl.
   version/zero_point; gptq incl. desc_act/sym; CT incl. config_groups with
   input_activations + ignore:[lm_head]; modelopt quant_algo NVFP4).
+
+## 7. GPU binding amendment (2026-07-27, issue #205)
+
+The original D2/D4 deploy-day deferral is closed. The following rules supersede
+the stub/fallback wording above:
+
+- CUDA `QuantizedLinear.forward` is the production dispatch point. CPU continues
+  to use the explicit correctness oracle; CUDA never calls `dequantize()` and
+  has no `F.linear` fallback.
+- FP8 performs fused dynamic-per-token or checkpoint-static activation
+  quantization and selected native scaled GEMM, with a fused Triton ragged-shape
+  path. INT8 performs fused dynamic-per-token activation quantization and an
+  int32-accumulating tiled Triton GEMM.
+- AWQ and GPTQ unpack only the current packed weight tile in registers inside a
+  fused W4A16 Triton GEMM. They never materialize an `[out, in]` floating weight.
+- ModelOpt NVFP4 is native W4A4: FlashInfer quantizes activations to FP4 and runs
+  its FP4 GEMM with the checkpoint `input_scale * weight_scale_2` alpha. Weight
+  scale swizzling/padding is cached once as non-persistent device buffers.
+- Unsupported dtype, packed layout, compute capability, or missing kernel
+  dependency fails loudly. Capability floors are SM89 for FP8, SM80 for
+  INT8/AWQ/GPTQ, and SM100 for NVFP4. Quantized MLA is rejected at load time
+  because its current latent-attention implementation reads an unquantized
+  projection weight directly. Quantized TP remains the separately tracked
+  #152 boundary.
+
+GPU oracle tests cover production `module(x)` for all five formats, including
+ragged shapes and a monkeypatched `dequantize()` that raises. Separate
+full-checkpoint tests load and greedily generate through the whole CUDA engine
+for all five formats.
+
+### 7.1 RTX PRO 6000 Blackwell evidence
+
+CUDA-event medians below include activation quantization, shape M×K by K×N with
+K=N=4096, 50 warmups and 200 samples. “old” is the removed full-weight
+dequantize-plus-BF16 path; “BF16” is unquantized `F.linear`. External results use
+the official vLLM 0.26.0 CUDA 12.9 image at the pinned image digest on the same
+GPU. vLLM's stable INT8 scaled-MM operation explicitly rejects SM120; its AWQ
+and GPTQ selector was not used because this kernel-level comparison does not
+construct vLLM model-layer metadata.
+
+| format | M | Kairyu fused ms | old ms (speedup) | BF16 ms | vLLM ms (Kairyu/vLLM) | fused temporary |
+|---|---:|---:|---:|---:|---:|---:|
+| FP8 | 1 | 0.11891 | 0.15667 (1.32×) | 0.02408 | 0.05229 (2.27×) | 0.021 MiB |
+| FP8 | 128 | 0.11754 | 0.16565 (1.41×) | 0.03168 | 0.05325 (2.21×) | 2.501 MiB |
+| INT8 | 1 | 0.10899 | 0.15322 (1.41×) | 0.02389 | unsupported on SM120 | 0.012 MiB |
+| INT8 | 128 | 0.11770 | 0.16426 (1.40×) | 0.03154 | unsupported on SM120 | 1.500 MiB |
+| AWQ | 1 | 0.08890 | 2.59094 (29.15×) | 0.02362 | — | 0.008 MiB |
+| AWQ | 128 | 0.29862 | 2.62294 (8.78×) | 0.03349 | — | 1.000 MiB |
+| GPTQ | 1 | 0.10749 | 0.92614 (8.62×) | 0.02618 | — | 0.008 MiB |
+| GPTQ | 128 | 0.26109 | 0.93640 (3.59×) | 0.03418 | — | 1.000 MiB |
+| NVFP4 | 1 | 0.35595 | 0.57914 (1.63×) | 0.02365 | 0.12963 (2.75×) | 0.050 MiB |
+| NVFP4 | 128 | 0.35286 | 0.59862 (1.70×) | 0.03136 | 0.13307 (2.65×) | 2.282 MiB |
+
+Correctness is measured on the same matrices. Fused-vs-oracle isolates kernel
+error; quantized-vs-BF16 includes the expected format loss:
+
+| format | M | fused vs quantized oracle rel-RMSE | quantized vs BF16 rel-RMSE |
+|---|---:|---:|---:|
+| FP8 | 1 / 128 | 0.00164 / 0.00166 | 0.03839 / 0.03752 |
+| INT8 | 1 / 128 | 0.00166 / 0.00170 | 0.01327 / 0.01261 |
+| AWQ | 1 / 128 | 0.00236 / 0.00236 | 0.09812 / 0.10055 |
+| GPTQ | 1 / 128 | 0.00236 / 0.00236 | 0.09812 / 0.10055 |
+| NVFP4 | 1 / 128 | 0.00276 / 0.00597 | 0.13216 / 0.13436 |
+
+The external vLLM run reports BF16-relative RMSE 0.03743/0.03748 for FP8 and
+0.13489/0.13475 for NVFP4 at M=1/128, consistent with Kairyu's format loss.
+
+Raw provenance and p95/minimum data:
+`bench/results/quant-gemm-rtxpro6000-2026-07-27.json` and
+`bench/results/quant-vllm-rtxpro6000-2026-07-27.json`.

@@ -32,13 +32,15 @@ def _cast_to_fp4_indices(values: torch.Tensor) -> torch.Tensor:
     index 4 (=2.0). (The prior table applied LUT *values* as indices and dropped
     two boundaries, corrupting the packing oracle by up to 60%.)
     """
-    boundaries = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
+    boundaries = values.new_tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
     indices = torch.bucketize(values, boundaries, right=False)
     # override every exact-boundary value to its even LUT index (idempotent where
     # bucketize already lands even; corrective where it lands odd)
     ties = ((0.25, 0), (0.75, 2), (1.25, 2), (1.75, 4), (2.5, 4), (3.5, 6), (5.0, 6))
     for boundary, even_index in ties:
-        indices = torch.where(values == boundary, torch.tensor(even_index), indices)
+        indices = torch.where(
+            values == boundary, indices.new_tensor(even_index), indices
+        )
     return indices
 
 
@@ -47,9 +49,23 @@ def quantize_nvfp4(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """weight [out, in] (in % 16 == 0) -> (packed uint8 [out, in//2],
     block scales fp8 [out, in//16], global scale fp32 scalar)."""
-    out_features, in_features = weight.shape
     w = weight.to(torch.float32)
     global_scale = (w.abs().amax() / (FP4_MAX * FP8_MAX)).clamp(min=1e-12)
+    packed, fp8_scale = quantize_nvfp4_with_scale(w, global_scale)
+    return packed, fp8_scale, global_scale.reshape(())
+
+
+def quantize_nvfp4_with_scale(
+    values: torch.Tensor, global_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 2D tensor using a checkpoint-provided global multiplier."""
+    out_features, in_features = values.shape
+    if in_features % _BLOCK:
+        raise ValueError("NVFP4 last dimension must be divisible by 16")
+    w = values.to(torch.float32)
+    global_scale = global_scale.to(device=w.device, dtype=torch.float32)
+    if global_scale.numel() != 1 or global_scale.item() <= 0:
+        raise ValueError("NVFP4 global scale must be one positive scalar")
     blocks = w.reshape(out_features, in_features // _BLOCK, _BLOCK)
     block_amax = blocks.abs().amax(dim=-1)
     fp8_scale = (
@@ -61,7 +77,7 @@ def quantize_nvfp4(
     indices = _cast_to_fp4_indices(scaled.abs()).to(torch.uint8)
     nibbles = (signs | indices).reshape(out_features, in_features)
     packed = nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)  # low nibble = even elem
-    return packed, fp8_scale, global_scale.reshape(())
+    return packed, fp8_scale
 
 
 def unpack_nvfp4(packed: torch.Tensor) -> torch.Tensor:
@@ -69,7 +85,7 @@ def unpack_nvfp4(packed: torch.Tensor) -> torch.Tensor:
     low = packed & 0xF
     high = (packed >> 4) & 0xF
     nibbles = torch.stack((low, high), dim=-1).reshape(packed.shape[0], -1)
-    magnitudes = E2M1_LUT[(nibbles & 0x7).to(torch.long)]
+    magnitudes = E2M1_LUT.to(packed.device)[(nibbles & 0x7).to(torch.long)]
     signs = torch.where(nibbles & 0x8 > 0, -1.0, 1.0)
     return magnitudes * signs
 
