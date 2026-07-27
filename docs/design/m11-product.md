@@ -1,7 +1,8 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Implemented** (2026-07-03). Reviewed (1-reviewer panel with
-file/line evidence + OpenAI SDK verification, 2026-07-03; §5 binding).
+Status: **Implemented** (2026-07-03; D6 amended 2026-07-27). Reviewed
+(1-reviewer panel with file/line evidence + OpenAI SDK verification,
+2026-07-03; §5 binding).
 Milestone: M11 (roadmap P-B/P-C + F5 CPU halves; goal G6)
 Date: 2026-07-03
 Depends on: m7 Orchestrator/Conductor/MoA/Budget, m9 server surface, M10a
@@ -81,6 +82,17 @@ are shed (429 `slo_shed`) or deferred to batch (`defer` decision recorded).
 (c) `autoscale.py`: pure decision function `(metrics window) →
 scale_up/down/hold + reason` with hysteresis; logged, not executed (the
 executor is a deploy-day k8s HPA/keda adapter).
+
+**Indexed waiting queue amendment (2026-07-27, issue #219).** FIFO admission
+uses an `OrderedDict` so append, head pop, and cancellation by request ID are
+O(1). Priority admission uses a stable sequence-numbered heap plus an ID index;
+removal leaves lazily reclaimed tombstones with amortized compaction. The aging
+rank is factored as `priority - arrival/age` because the omitted `now/age` term
+is common to every waiting request. This preserves stable ties and starvation
+prevention without re-sorting the full queue on every schedule. Recompute
+preemption retains front-of-tie placement, and KV allocation still blocks at
+the selected head without skip-ahead. Reproduce the 100k A/B measurements with
+`uv run python bench/scheduler_queue_bench.py --requests 100000 --repeats 5`.
 
 ### D7 — Open WebUI + frontier bench
 

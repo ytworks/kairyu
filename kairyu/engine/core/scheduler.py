@@ -12,6 +12,8 @@ the token being generated).
 
 from __future__ import annotations
 
+import heapq
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from enum import Enum
@@ -114,6 +116,151 @@ class SchedulerOutput:
     scheduled: tuple[ScheduledChunk, ...]
 
 
+class _IndexedWaitingQueue:
+    """ID-indexed FIFO or stable priority queue for waiting requests.
+
+    With aging enabled, every effective priority contains the same ``now/age``
+    term. Ordering can therefore use the immutable ``priority - arrival/age``
+    component without repeatedly sorting the whole waiting set. Heap removals
+    are lazy and periodically compacted, making ID cancellation amortized O(1).
+    """
+
+    def __init__(self, priority_age_s: float | None) -> None:
+        self._priority_age_s = priority_age_s
+        self._fifo: OrderedDict[str, None] = OrderedDict()
+        self._heap: list[tuple[float, int, str]] = []
+        self._priority_entries: dict[str, tuple[float, int]] = {}
+        self._next_back_sequence = 0
+        self._next_front_sequence = -1
+
+    @property
+    def priority_enabled(self) -> bool:
+        return self._priority_age_s is not None
+
+    def __bool__(self) -> bool:
+        if self.priority_enabled:
+            return bool(self._priority_entries)
+        return bool(self._fifo)
+
+    def __len__(self) -> int:
+        if self.priority_enabled:
+            return len(self._priority_entries)
+        return len(self._fifo)
+
+    def __iter__(self):
+        if not self.priority_enabled:
+            yield from self._fifo
+            return
+        ordered = sorted(
+            (key, sequence, request_id)
+            for request_id, (key, sequence) in self._priority_entries.items()
+        )
+        yield from (request_id for _key, _sequence, request_id in ordered)
+
+    def _priority_key(self, priority: int, arrival: float) -> float:
+        score = float(priority)
+        if self._priority_age_s:
+            score -= arrival / self._priority_age_s
+        return -score
+
+    def append(
+        self,
+        request_id: str,
+        *,
+        priority: int,
+        arrival: float,
+        front: bool = False,
+    ) -> None:
+        if not self.priority_enabled:
+            if request_id in self._fifo:
+                raise ValueError(f"duplicate waiting request_id {request_id!r}")
+            self._fifo[request_id] = None
+            if front:
+                self._fifo.move_to_end(request_id, last=False)
+            return
+
+        if request_id in self._priority_entries:
+            raise ValueError(f"duplicate waiting request_id {request_id!r}")
+        if front:
+            sequence = self._next_front_sequence
+            self._next_front_sequence -= 1
+        else:
+            sequence = self._next_back_sequence
+            self._next_back_sequence += 1
+        key = self._priority_key(priority, arrival)
+        self._priority_entries[request_id] = (key, sequence)
+        heapq.heappush(self._heap, (key, sequence, request_id))
+
+    def extend(
+        self, requests: Sequence[tuple[str, int, float]]
+    ) -> None:
+        for request_id, priority, arrival in requests:
+            self.append(
+                request_id,
+                priority=priority,
+                arrival=arrival,
+            )
+
+    def _drop_stale_head(self) -> None:
+        while self._heap:
+            key, sequence, request_id = self._heap[0]
+            if self._priority_entries.get(request_id) == (key, sequence):
+                return
+            heapq.heappop(self._heap)
+
+    def _maybe_compact(self) -> None:
+        if len(self._heap) <= 64 or len(self._heap) <= 2 * len(
+            self._priority_entries
+        ):
+            return
+        self._heap = [
+            (key, sequence, request_id)
+            for request_id, (key, sequence) in self._priority_entries.items()
+        ]
+        heapq.heapify(self._heap)
+
+    def peek(self) -> str:
+        if not self.priority_enabled:
+            if not self._fifo:
+                raise IndexError("peek from empty waiting queue")
+            return next(iter(self._fifo))
+        self._drop_stale_head()
+        if not self._heap:
+            raise IndexError("peek from empty waiting queue")
+        return self._heap[0][2]
+
+    def popleft(self) -> str:
+        if not self.priority_enabled:
+            if not self._fifo:
+                raise IndexError("pop from empty waiting queue")
+            return self._fifo.popitem(last=False)[0]
+        self._drop_stale_head()
+        if not self._heap:
+            raise IndexError("pop from empty waiting queue")
+        key, sequence, request_id = heapq.heappop(self._heap)
+        if self._priority_entries.get(request_id) != (key, sequence):
+            raise AssertionError("waiting priority index diverged from heap")
+        del self._priority_entries[request_id]
+        return request_id
+
+    def remove(self, request_id: str) -> None:
+        if not self.priority_enabled:
+            try:
+                del self._fifo[request_id]
+            except KeyError:
+                raise ValueError(
+                    f"{request_id!r} is not in waiting queue"
+                ) from None
+            return
+        try:
+            del self._priority_entries[request_id]
+        except KeyError:
+            raise ValueError(
+                f"{request_id!r} is not in waiting queue"
+            ) from None
+        self._maybe_compact()
+
+
 class Scheduler:
     def __init__(
         self,
@@ -146,14 +293,13 @@ class Scheduler:
         # page_size param kept for back-compat; the cache is the source of truth
         self._page_size = getattr(kv_cache, "page_size", page_size)
         self._states: dict[str, _RequestState] = {}
-        self._waiting: list[str] = []
+        self._waiting = _IndexedWaitingQueue(priority_age_s)
         # m11 D6: priority admission — effective priority ages up so low
         # priorities cannot starve; EngineRequest is frozen, so aging is
-        # computed at sort time from the arrival timestamp
+        # factored into an immutable heap key from the arrival timestamp
         import time as _time
 
         self._clock = clock or _time.monotonic
-        self._priority_age_s = priority_age_s
         self._arrivals: dict[str, float] = {}
         self._running: list[str] = []
         # requests rejected at admission (C2), drained by the engine core/loop
@@ -164,8 +310,13 @@ class Scheduler:
         if request.request_id in self._states:
             raise ValueError(f"duplicate request_id {request.request_id!r}")
         self._states[request.request_id] = _RequestState(request)
-        self._waiting.append(request.request_id)
-        self._arrivals[request.request_id] = self._clock()
+        arrival = self._clock()
+        self._arrivals[request.request_id] = arrival
+        self._waiting.append(
+            request.request_id,
+            priority=request.priority,
+            arrival=arrival,
+        )
 
     def add_requests_atomic(self, requests: Sequence[EngineRequest]) -> None:
         """Admit one producer batch, or mutate nothing if any ID is invalid.
@@ -186,8 +337,17 @@ class Scheduler:
             arrivals[request_id] = self._clock()
 
         self._states.update(states)
-        self._waiting.extend(request_ids)
         self._arrivals.update(arrivals)
+        self._waiting.extend(
+            [
+                (
+                    request_id,
+                    states[request_id].request.priority,
+                    arrivals[request_id],
+                )
+                for request_id in request_ids
+            ]
+        )
 
     def has_unfinished(self) -> bool:
         return bool(self._waiting or self._running)
@@ -300,7 +460,7 @@ class Scheduler:
         """
         if not self._waiting:
             return None
-        request_id = self._waiting[0]
+        request_id = self._waiting.peek()
         self._reject_unadmittable(request_id, self._states[request_id])
         return request_id
 
@@ -329,7 +489,12 @@ class Scheduler:
             self._release_without_commit(state)
             state.computed_prompt = 0
             state.status = _Status.WAITING
-            self._waiting.insert(0, victim_id)
+            self._waiting.append(
+                victim_id,
+                priority=state.request.priority,
+                arrival=self._arrivals[victim_id],
+                front=True,
+            )
             return True
         return False
 
@@ -436,21 +601,12 @@ class Scheduler:
             budget -= chunk
         return budget
 
-    def _effective_priority(self, request_id: str) -> float:
-        state = self._states[request_id]
-        priority = float(getattr(state.request, "priority", 0))
-        if self._priority_age_s:
-            waited = self._clock() - self._arrivals.get(request_id, self._clock())
-            priority += waited / self._priority_age_s  # starvation guard
-        return priority
-
     def _admit_waiting(self, budget: int, plan: list[ScheduledChunk]) -> int:
-        if self._priority_age_s is not None:
-            # highest effective priority first; FIFO within ties (stable sort);
-            # the head still BLOCKS on KVCacheFull — no skip-ahead (m11 A11)
-            self._waiting.sort(key=lambda rid: -self._effective_priority(rid))
         while self._waiting and budget > 0 and len(self._running) < self._max_seqs:
-            request_id = self._waiting[0]
+            # The indexed queue already exposes the highest effective priority,
+            # with stable FIFO ties. The head still BLOCKS on KVCacheFull — no
+            # skip-ahead (m11 A11).
+            request_id = self._waiting.peek()
             state = self._states[request_id]
             if state.prompt_len == 0:
                 self._reject_unadmittable(request_id, state)
@@ -481,7 +637,9 @@ class Scheduler:
                     self._reject_unadmittable(request_id, state)
                     continue
                 break  # head-of-line waits for running requests to free pages
-            self._waiting.pop(0)
+            popped_id = self._waiting.popleft()
+            if popped_id != request_id:
+                raise AssertionError("waiting queue head changed during admission")
             state.status = _Status.RUNNING
             self._running.append(request_id)
             # cached prefix skips prefill compute; the last prompt token is
