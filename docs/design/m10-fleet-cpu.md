@@ -1,7 +1,8 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
-Status: **M10a + M10b Implemented** (2026-07-03). Reviewed (1-reviewer
-panel with repo-line evidence; §6 binding; covers M10a+M10b).
+Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
+2026-07-27). Reviewed (1-reviewer panel with repo-line evidence; §6 binding;
+covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
 Depends on: m7 ReplicaPool/JsonlRouterLog, m7 deploy (spec/builder/prober),
@@ -128,6 +129,18 @@ default. Decision reason `prefix_match` in the router log.
 gateway subscriber updating the trie; staleness > 500 ms → graceful
 fallback to the approximate trie (chaos test kills the publisher).
 
+**Incremental hash-chain amendment (2026-07-27, issue #220).** Event-enabled
+radix nodes retain the SHA-256 continuation state for the canonical
+`repr(tuple(prefix))` token stream, the prefix token count, and their local
+block-boundary digests. A child copies its parent's continuation once and
+feeds only its own token suffix. Tuple closing punctuation is appended only to
+a digest snapshot, including the singleton trailing comma, so emitted hashes
+remain byte-identical to the original full-prefix protocol. Splits reuse the
+existing digest suffix and derive only the new upper node; stored and removed
+events read node-local hashes directly. Caches without an event sink allocate
+no hashers and perform no SHA work. Reproduce the long-prefix comparison with
+`uv run python bench/kv_event_hash_bench.py --tokens 32768 --repeats 5`.
+
 ### D8 — Learning placement
 
 Placement decisions + TTFT into `learning/dataset.py`; offline bandit grid
@@ -197,6 +210,8 @@ over (α, β) (pure function over the dataset; no online learning).
   _ensure_free eviction; _split emits nothing; release_preempted emits
   nothing (never stored); vLLM schema fields block_hashes/parent_block_hash/
   token_ids/block_size + ts; replay endpoint out of scope (recorded).
+  Block hashes use the node-cached incremental SHA continuation while remaining
+  exactly compatible with the original `sha256(repr(prefix))[:16]` values.
 - **A14**: drain cancellation is ownership-scoped. `_ReplicaEntry` separately
   stores the manual owner and opaque `DrainLease` owners; effective draining is
   their OR. `PoolReconciler` records the exact lease it acquired, and a desired

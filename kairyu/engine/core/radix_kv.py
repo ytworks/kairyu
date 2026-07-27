@@ -12,6 +12,7 @@ Structure follows SGLang's RadixAttention adapted to page alignment:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 from kairyu.engine.core.pages import PagePool
@@ -19,6 +20,35 @@ from kairyu.engine.core.pages import PagePool
 
 class KVCacheFull(MemoryError):
     """Not enough free or evictable pages to admit the request."""
+
+
+def _snapshot_prefix_hash(prefix_hasher, token_count: int) -> str:
+    snapshot = prefix_hasher.copy()
+    # repr((token,)) carries a trailing comma; every longer tuple does not.
+    if token_count == 1:
+        snapshot.update(b",")
+    snapshot.update(b")")
+    return snapshot.hexdigest()[:16]
+
+
+def _extend_prefix_hash_chain(
+    prefix_hasher,
+    prefix_token_count: int,
+    token_ids: tuple[int, ...],
+    page_size: int,
+):
+    """Extend compatible repr(tuple(prefix)) block hashes in one pass."""
+    extended = prefix_hasher.copy()
+    token_count = prefix_token_count
+    hashes: list[str] = []
+    for offset, token_id in enumerate(token_ids, start=1):
+        if token_count:
+            extended.update(b", ")
+        extended.update(repr(token_id).encode())
+        token_count += 1
+        if offset % page_size == 0:
+            hashes.append(_snapshot_prefix_hash(extended, token_count))
+    return extended, token_count, tuple(hashes)
 
 
 class _Node:
@@ -31,6 +61,9 @@ class _Node:
         "last_access",
         "computed",
         "publishing",
+        "prefix_hasher",
+        "prefix_token_count",
+        "block_hashes",
     )
 
     def __init__(
@@ -52,6 +85,12 @@ class _Node:
         # Suppress same-node reentry while BlockStored is being delivered.
         # This is reset even when the sink fails so callers can retry.
         self.publishing = False
+        # Event-enabled caches maintain the canonical repr(tuple(prefix))
+        # SHA-256 stream without its closing punctuation. A copy can append the
+        # tuple terminator at each block boundary without rebuilding prefixes.
+        self.prefix_hasher = None
+        self.prefix_token_count = 0
+        self.block_hashes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,10 +133,13 @@ class RadixKVCache:
     ) -> None:
         if page_size < 1:
             raise ValueError(f"page_size must be >= 1, got {page_size}")
+        # m10b D7: optional KV-event sink (BlockStored/BlockRemoved)
+        self._event_sink = event_sink
         self._pool = PagePool(num_pages)
         self._num_pages = num_pages
         self._page_size = page_size
         self._root = _Node(key=(), pages=(), parent=None)
+        self._initialize_hash_chain(self._root)
         self._root.ref_count = 1  # never evictable
         self._root.computed = True
         self._clock = 0
@@ -105,9 +147,6 @@ class RadixKVCache:
         self._pins: dict[str, tuple[_Node, int | None]] = {}  # node, expiry tick
         self._hit_tokens = 0
         self._total_tokens = 0
-        # m10b D7: optional KV-event sink (BlockStored/BlockRemoved)
-        self._event_sink = event_sink
-
     @property
     def num_free_pages(self) -> int:
         return self._pool.num_free
@@ -121,6 +160,29 @@ class RadixKVCache:
     def _touch(self, node: _Node) -> None:
         self._clock += 1
         node.last_access = self._clock
+
+    def _initialize_hash_chain(self, node: _Node) -> None:
+        """Derive one node's compatible block hashes from its parent once."""
+        if self._event_sink is None:
+            return
+        if node.parent is None:
+            node.prefix_hasher = hashlib.sha256(b"(")
+            node.prefix_token_count = 0
+            node.block_hashes = ()
+            return
+
+        parent = node.parent
+        assert parent.prefix_hasher is not None
+        (
+            node.prefix_hasher,
+            node.prefix_token_count,
+            node.block_hashes,
+        ) = _extend_prefix_hash_chain(
+            parent.prefix_hasher,
+            parent.prefix_token_count,
+            node.key,
+            self._page_size,
+        )
 
     def _split(self, node: _Node, keep_pages: int) -> _Node:
         """Split ``node`` so its first ``keep_pages`` pages become a new parent.
@@ -138,11 +200,19 @@ class RadixKVCache:
         upper.ref_count = node.ref_count
         upper.last_access = node.last_access
         upper.computed = node.computed
+        self._initialize_hash_chain(upper)
+        retained_hashes = node.block_hashes[:keep_pages]
+        if (
+            self._event_sink is not None
+            and upper.block_hashes != retained_hashes
+        ):
+            raise AssertionError("split prefix hash diverged from stored chain")
         parent = node.parent
         assert parent is not None  # root is never split (its key is empty)
         parent.children[upper.key[: self._page_size]] = upper
         node.key = node.key[split_tokens:]
         node.pages = node.pages[keep_pages:]
+        node.block_hashes = node.block_hashes[keep_pages:]
         node.parent = upper
         upper.children[node.key[: self._page_size]] = node
         return upper
@@ -242,6 +312,7 @@ class RadixKVCache:
                 tree_inserted = False
             else:
                 child = _Node(key=key, pages=new_full_pages, parent=node)
+                self._initialize_hash_chain(child)
                 child.ref_count = 1
                 self._touch(child)
                 node.children[key[: self._page_size]] = child
@@ -258,40 +329,17 @@ class RadixKVCache:
             _page_size=self._page_size,
         )
 
-    def _full_prefix(self, node) -> tuple[int, ...]:
-        parts = []
-        current = node
-        while current is not None and current.key:
-            parts.append(tuple(current.key))
-            current = current.parent
-        tokens: tuple[int, ...] = ()
-        for part in reversed(parts):
-            tokens += part
-        return tokens
-
     def _emit_stored(self, node) -> None:
         """BlockStored on the computed False->True transition (m10b A13)."""
         if self._event_sink is None:
             return
-        import hashlib as _hashlib
-
-        prefix = self._full_prefix(node)
-        start = len(prefix) - len(node.key)
-        hashes = []
-        for offset in range(0, len(node.key), self._page_size):
-            end = start + offset + self._page_size
-            hashes.append(
-                _hashlib.sha256(repr(prefix[:end]).encode()).hexdigest()[:16]
-            )
-        parent_hash = (
-            _hashlib.sha256(repr(prefix[:start]).encode()).hexdigest()[:16]
-            if start
-            else None
-        )
+        parent = node.parent
+        assert parent is not None
+        parent_hash = parent.block_hashes[-1] if parent.block_hashes else None
         self._event_sink(
             {
                 "type": "BlockStored",
-                "block_hashes": hashes,
+                "block_hashes": list(node.block_hashes),
                 "parent_block_hash": parent_hash,
                 "token_ids": list(node.key),
                 "block_size": self._page_size,
@@ -301,16 +349,9 @@ class RadixKVCache:
     def _emit_removed(self, node) -> None:
         if self._event_sink is None:
             return
-        import hashlib as _hashlib
-
-        prefix = self._full_prefix(node)
-        start = len(prefix) - len(node.key)
-        hashes = [
-            _hashlib.sha256(repr(prefix[: start + offset + self._page_size]).encode())
-            .hexdigest()[:16]
-            for offset in range(0, len(node.key), self._page_size)
-        ]
-        self._event_sink({"type": "BlockRemoved", "block_hashes": hashes})
+        self._event_sink(
+            {"type": "BlockRemoved", "block_hashes": list(node.block_hashes)}
+        )
 
     def mark_computed(self, allocation: KVAllocation) -> None:
         """Record that the allocation's prefill KV has been written (prefill done)."""
@@ -402,6 +443,7 @@ class RadixKVCache:
                 existing = node.children.get(first_page)
                 if existing is None:
                     child = _Node(key=key, pages=candidate_pages, parent=node)
+                    self._initialize_hash_chain(child)
                     # Keep an uncomputed, in-delivery child invisible to matching
                     # and protected from reentrant eviction until the sink accepts it.
                     child.ref_count = 1
