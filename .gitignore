@@ -234,3 +234,5 @@ bench/data/
 !bench/results/gate1-hf-parity-*.json
 !bench/results/hf-reference-*.json
 !bench/results/g2-a1-*.json
+!bench/results/quant-gemm-*.json
+!bench/results/quant-vllm-*.json

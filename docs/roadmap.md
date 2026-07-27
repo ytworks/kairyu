@@ -39,8 +39,8 @@ of the profile, never assumptions.
 
 | Profile | Arch (SM) | Memory | Interconnect | Formats | Kernel tier | Default parallelism |
 |---|---|---|---|---|---|---|
-| **NVLink-HBM** (peak-perf) | H100/H200 (SM90), B200 (SM100) | 80–192 GB HBM, 3.3–8 TB/s | NVLink ≥900 GB/s | BF16, FP8 (+NVFP4 on SM100) | Full: FA2/FA3, FlashMLA, DeepGEMM, CUTLASS | **TP-first** in-node — G2's original §2 arithmetic and gates A1–A10 apply as written |
-| **PCIe-GDDR** (fleet-scale) | RTX PRO 6000 Blackwell (SM120) | 96 GB GDDR7, ~1.6 TB/s | PCIe Gen5 (~24 GB/s P2P via root complex; switch topologies better); GPUDirect P2P/RDMA; MIG 4×24 GB (vBIOS ≥98.02.55 — audit) | BF16, FP8, native NVFP4 | FA2-path only (FlashMLA/FA3/DeepGEMM are SM90/100-only); ~99 KB smem/SM; Triton-first FP8; several NVFP4 grouped-GEMM/MoE paths immature; FP8-KV silent-corruption reports → **BF16 KV default** until a correctness bake passes | **DP-first, PP for capacity, EP over RDMA NICs**; TP only within a PCIe-switch pair, mainly prefill |
+| **NVLink-HBM** (peak-perf) | H100/H200 (SM90), B200 (SM100) | 80–192 GB HBM, 3.3–8 TB/s | NVLink ≥900 GB/s | BF16, INT8, FP8 (+NVFP4 on SM100) | Full: FA2/FA3, FlashMLA, DeepGEMM, CUTLASS | **TP-first** in-node — G2's original §2 arithmetic and gates A1–A10 apply as written |
+| **PCIe-GDDR** (fleet-scale) | RTX PRO 6000 Blackwell (SM120) | 96 GB GDDR7, ~1.6 TB/s | PCIe Gen5 (~24 GB/s P2P via root complex; switch topologies better); GPUDirect P2P/RDMA; MIG 4×24 GB (vBIOS ≥98.02.55 — audit) | BF16, INT8, FP8, native NVFP4 | FA2-path only (FlashMLA/FA3/DeepGEMM are SM90/100-only); ~99 KB smem/SM; fused Triton INT8 and ragged FP8, native scaled-MM FP8, native NVFP4; FP8-KV silent-corruption reports → **BF16 KV default** until a correctness bake passes | **DP-first, PP for capacity, EP over RDMA NICs**; TP only within a PCIe-switch pair, mainly prefill |
 | **Ampere-compat** | A100 (SM80) | 40/80 GB HBM2e, ~2 TB/s | NVLink 600 GB/s | BF16, INT8 (**no FP8/FP4 tensor cores**) | FA2; Marlin-class W4A16 (AWQ/GPTQ), INT8 W8A8 | TP-first (NVLink rules); quant paths differ |
 
 Consequences that drive the designs below:

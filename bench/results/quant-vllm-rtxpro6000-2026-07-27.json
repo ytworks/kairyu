@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-27T02:00:45.479889+00:00",
+  "runtime": "vLLM",
+  "vllm": "0.26.0",
+  "image": "vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404",
+  "image_digest": "sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8",
+  "torch": "2.11.0+cu129",
+  "torch_cuda": "12.9",
+  "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "compute_capability": [
+    12,
+    0
+  ],
+  "method": "vLLM scaled activation quantization + CUTLASS scaled MM; CUDA events",
+  "records": [
+    {
+      "scheme": "fp8",
+      "shape": {
+        "m": 1,
+        "n": 4096,
+        "k": 4096
+      },
+      "status": "ok",
+      "median_ms": 0.0522879995405674,
+      "p95_ms": 0.05878400057554245,
+      "min_ms": 0.049056001007556915,
+      "samples": 200,
+      "warmup": 50,
+      "correctness_vs_unquantized_bf16": {
+        "relative_rmse": 0.037433523684740067,
+        "mean_abs_error": 1.8579792976379395,
+        "max_abs_error": 8.75
+      }
+    },
+    {
+      "scheme": "fp8",
+      "shape": {
+        "m": 128,
+        "n": 4096,
+        "k": 4096
+      },
+      "status": "ok",
+      "median_ms": 0.053247999399900436,
+      "p95_ms": 0.05603199824690819,
+      "min_ms": 0.05135999992489815,
+      "samples": 200,
+      "warmup": 50,
+      "correctness_vs_unquantized_bf16": {
+        "relative_rmse": 0.037484437227249146,
+        "mean_abs_error": 1.913001537322998,
+        "max_abs_error": 11.546875
+      }
+    },
+    {
+      "scheme": "int8",
+      "shape": {
+        "m": 1,
+        "n": 4096,
+        "k": 4096
+      },
+      "status": "unsupported",
+      "error": "dispatch_scaled_mm, /workspace/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_helper.hpp:34, Int8 not supported on SM120. Use FP8 quantization instead, or run on older arch (SM < 100)."
+    },
+    {
+      "scheme": "int8",
+      "shape": {
+        "m": 128,
+        "n": 4096,
+        "k": 4096
+      },
+      "status": "unsupported",
+      "error": "dispatch_scaled_mm, /workspace/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_helper.hpp:34, Int8 not supported on SM120. Use FP8 quantization instead, or run on older arch (SM < 100)."
+    },
+    {
+      "scheme": "nvfp4",
+      "shape": {
+        "m": 1,
+        "n": 4096,
+        "k": 4096
+      },
+      "status": "ok",
+      "median_ms": 0.12963199615478516,
+      "p95_ms": 0.1343040019273758,
+      "min_ms": 0.12598399817943573,
+      "samples": 200,
+      "warmup": 50,
+      "correctness_vs_unquantized_bf16": {
+        "relative_rmse": 0.1348923295736313,
+        "mean_abs_error": 6.782912254333496,
+        "max_abs_error": 33.0
+      }
+    },
+    {
+      "scheme": "nvfp4",
+      "shape": {
+        "m": 128,
+        "n": 4096,
+        "k": 4096
+      },
+      "status": "ok",
+      "median_ms": 0.13307199627161026,
+      "p95_ms": 0.13817599415779114,
+      "min_ms": 0.13091200590133667,
+      "samples": 200,
+      "warmup": 50,
+      "correctness_vs_unquantized_bf16": {
+        "relative_rmse": 0.1347525417804718,
+        "mean_abs_error": 6.8882646560668945,
+        "max_abs_error": 41.5
+      }
+    }
+  ]
+}

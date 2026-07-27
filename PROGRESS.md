@@ -51,9 +51,15 @@ Against the old list eager path, tensor eager cut Qwen3-32B TP8 wall time 47.1%
 and TPOT 56.5%. The remaining m2 §2.2 host sync is sampling/future-token fill
 (#206), not attention
 (`bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json`).
-Performance and production/fabric drills remain untouched.**
+M14 quantized CUDA execution is now production-wired for FP8, INT8, AWQ, GPTQ,
+and native W4A4 NVFP4. All five formats pass GPU oracles without full-weight
+dequantization and full-engine checkpoint generation; unsupported combinations
+fail loudly. RTX PRO 6000 evidence records correctness, latency, temporary
+memory, BF16 baselines, and pinned vLLM 0.26.0 comparisons
+(`bench/results/quant-{gemm,vllm}-rtxpro6000-2026-07-27.json`).
+Production/fabric drills remain untouched.**
 
-_Last updated: 2026-07-26_
+_Last updated: 2026-07-27_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -74,7 +80,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
-| M14 — Quant compute (fp8/int8/awq/gptq/nvfp4 CPU references + Triton stubs) | **Complete** (2026-07-03, `docs/design/m14-quant-compute.md`): all 5 schemes load + run through the full engine on CPU; formats pinned vs live Hub checkpoints. 530 tests. |
+| M14 — Quant compute (FP8/INT8/AWQ/GPTQ/NVFP4 CPU oracles + fused/native GPU kernels) | **GPU-validated** (2026-07-27, `docs/design/m14-quant-compute.md`): all five schemes production-dispatch on CUDA without a full dequantized weight, pass per-kernel and full-engine GPU gates, and fail loudly outside their supported capability/layout. CPU format proofs remain pinned vs live Hub checkpoints. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
 | M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26). |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete and production-enabled** (2026-07-26, `docs/design/m17-graphs-drafts.md`): explicit eager/graph serving mode, production builder wiring, real single-GPU/TP2 capture-replay parity, TP8 Qwen3-32B measurement and clean graph/NCCL teardown; fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. |
@@ -153,6 +159,24 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] m14 D2/D4: quantized CUDA forward is fused and production-wired
+- What: CUDA `QuantizedLinear.forward` now dispatches every advertised scheme
+  to a validated kernel: selected scaled-MM/Triton FP8, int32-accumulating
+  Triton INT8, register-tiled AWQ/GPTQ W4A16, and FlashInfer native NVFP4 W4A4.
+  No CUDA path calls `dequantize()` or constructs a floating `[out, in]`
+  weight. Static/dynamic FP8 checkpoint semantics are preserved, ModelOpt
+  scales remain fp32/fp8 at load, invalid capability/layout/dtype combinations
+  fail closed, and quantized MLA is rejected until its direct projection-weight
+  access has a quantized contract.
+- Why: the previous helpers were direct-test-only fallbacks; production model
+  calls still materialized full weights and silently forfeited quantization's
+  latency and memory benefit. Kernel selection must be reachable from the model
+  and unsupported combinations must never disguise themselves as a slow
+  success.
+- Refs: issue #205; m14 §7; roadmap §2; `kairyu/kernels/quant_gemm_gpu.py`;
+  `tests/gpu/test_quant_{kernels,full_model_gpu}.py`;
+  `bench/results/quant-{gemm,vllm}-rtxpro6000-2026-07-27.json`
 
 ### 2026-07-26 — [progress] G2 A1 closes on Llama-3.1-8B TP1/2
 - What: the formal A1 result contains all 64 fixed prompts and token IDs, all

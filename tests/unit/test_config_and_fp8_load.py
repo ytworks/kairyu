@@ -1,5 +1,7 @@
 """Phase 4 parity fixes: rope-scaling validation (M3) + FP8 scale-shape load (M4)."""
 
+import json
+
 import pytest
 import torch
 
@@ -71,6 +73,20 @@ def test_fp8_linear_still_loads_per_channel_scale():
     assert layer.weight_scale.shape == (4, 1)
 
 
+def test_static_fp8_linear_requires_and_uses_input_scale():
+    layer = Fp8Linear(
+        in_features=8, out_features=4, bias=False, activation_dynamic=False
+    )
+    state = {
+        "weight": torch.zeros(4, 8, dtype=torch.float8_e4m3fn),
+        "weight_scale": torch.tensor([0.5]),
+        "input_scale": torch.tensor(0.25),
+    }
+    missing, unexpected = layer.load_state_dict(state, strict=True, assign=True)
+    assert not missing and not unexpected
+    assert layer.input_scale.item() == 0.25
+
+
 def test_deepseek_moe_defaults_match_hf_when_keys_omitted():
     # M2: a trimmed DeepSeek config must fall back to HF defaults, not the
     # Qwen-flavored ones (norm_topk_prob True, routed_scaling 2.5, etc.).
@@ -123,3 +139,42 @@ def test_block_fp8_is_rejected_loudly():
         detect_quantization(
             {"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}
         )
+
+
+@pytest.mark.parametrize("scheme", ["fp8", "int8", "awq", "gptq", "nvfp4"])
+def test_quantized_mla_is_rejected_before_checkpoint_read(tmp_path, scheme):
+    from kairyu.models.loader import load_model
+    from tests.quant_checkpoint_fixtures import QUANT_CONFIGS
+
+    config = {
+        "architectures": ["DeepseekV3ForCausalLM"],
+        "hidden_size": 64,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "intermediate_size": 128,
+        "vocab_size": 256,
+        "num_experts_per_tok": 2,
+        "moe_intermediate_size": 32,
+        "n_routed_experts": 8,
+        "kv_lora_rank": 16,
+        "qk_nope_head_dim": 8,
+        "qk_rope_head_dim": 8,
+        "v_head_dim": 8,
+        "quantization_config": QUANT_CONFIGS[scheme],
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=f"MLA does not support {scheme}"):
+        load_model(tmp_path)
+
+
+def test_invalid_packed_linear_dimensions_fail_at_construction():
+    from kairyu.quant.linear import AwqLinear, GptqLinear, NvFp4Linear
+
+    with pytest.raises(ValueError, match="AWQ out_features"):
+        AwqLinear(64, 31, bias=False, group_size=16)
+    with pytest.raises(ValueError, match="group_size"):
+        AwqLinear(72, 32, bias=False, group_size=16)
+    with pytest.raises(ValueError, match="GPTQ"):
+        GptqLinear(63, 32, bias=False, group_size=16)
+    with pytest.raises(ValueError, match="NVFP4"):
+        NvFp4Linear(63, 32, bias=False)

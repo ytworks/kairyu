@@ -35,6 +35,7 @@ class QuantConfig:
     weight_bits: int | None = None
     activation_bits: int | None = None
     group_size: int | None = None
+    activation_dynamic: bool | None = None
 
 
 def _detect_compressed_tensors(quant: dict) -> QuantConfig:
@@ -47,6 +48,7 @@ def _detect_compressed_tensors(quant: dict) -> QuantConfig:
             method=QuantMethod.FP8,
             weight_bits=8,
             activation_bits=activations.get("num_bits"),
+            activation_dynamic=bool(activations.get("dynamic", False)),
         )
     if weights.get("type") == "int" and weights.get("num_bits") == 8:
         return QuantConfig(
@@ -77,7 +79,18 @@ def _detect_modelopt(quant: dict) -> QuantConfig:
             group_size=quant.get("group_size", 16),
         )
     if algo == "FP8":
-        return QuantConfig(method=QuantMethod.FP8, weight_bits=8, activation_bits=8)
+        scheme = str(quant.get("activation_scheme", "dynamic")).lower()
+        if scheme not in ("dynamic", "static"):
+            raise ValueError(
+                f"unsupported modelopt FP8 activation_scheme {scheme!r}: "
+                "supported: dynamic, static"
+            )
+        return QuantConfig(
+            method=QuantMethod.FP8,
+            weight_bits=8,
+            activation_bits=8,
+            activation_dynamic=scheme == "dynamic",
+        )
     raise ValueError(f"unsupported modelopt quant_algo {algo!r}; supported: NVFP4, FP8")
 
 
@@ -99,7 +112,18 @@ def detect_quantization(hf_config: dict) -> QuantConfig:
                 "block-wise FP8 (weight_block_size) is not yet supported; only "
                 "per-tensor/per-channel FP8 checkpoints load"
             )
-        return QuantConfig(method=QuantMethod.FP8, weight_bits=8, activation_bits=8)
+        scheme = str(quant.get("activation_scheme", "dynamic")).lower()
+        if scheme not in ("dynamic", "static"):
+            raise ValueError(
+                f"unsupported FP8 activation_scheme {scheme!r}: "
+                "supported: dynamic, static"
+            )
+        return QuantConfig(
+            method=QuantMethod.FP8,
+            weight_bits=8,
+            activation_bits=8,
+            activation_dynamic=scheme == "dynamic",
+        )
     if method == "awq":
         version = str(quant.get("version", "gemm")).lower()
         if version != "gemm":
