@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Implemented** (2026-07-03; D6 amended 2026-07-27). Reviewed
+Status: **Implemented** (2026-07-03; D3/D6 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
 Milestone: M11 (roadmap P-B/P-C + F5 CPU halves; goal G6)
@@ -45,8 +45,15 @@ configured Orchestrator instances listed in /v1/models.
 budgets), `TenantLimitMiddleware` (pure-ASGI, token-bucket per tenant on
 /v1/*; 429 with retry-after), usage ledger — persistent O_APPEND JSONL,
 one record per execution (tenant, model, prompt/completion tokens, ts),
-app-lifespan-owned flush/close, and row-isolated aggregation that preserves
-valid totals around malformed records — plus `GET /admin/usage?tenant=`.
+and row-isolated aggregation that preserves valid totals around malformed
+records — plus `GET /admin/usage?tenant=`. A bounded lifecycle-owned writer
+moves append/flush calls to one background thread, batches up to 128 records,
+and drains every accepted record at app shutdown. Aggregation enters an ordered
+flush barrier and performs the subsequent file scan through
+`asyncio.to_thread`, preserving read-after-write without blocking the event
+loop. A barrier flushes language/runtime buffers to the OS for reader
+visibility; it deliberately does not call `fsync`, so no power-loss durability
+is claimed.
 Isolation gate: tenant A at its limit 429s while tenant B proceeds; ledger
 totals reconcile with returned usage to <0.1%.
 
@@ -149,14 +156,24 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   TenantLimitMiddleware runs INSIDE auth (added before it) so 401 wins over
   429 and unauthenticated requests never drain buckets; keyless mode →
   tenant "default".
-- **A7 (D3, amended by Issue #90)**: ledger = O_APPEND single-writer JSONL
+- **A7 (D3, amended by Issues #90 and #213)**: ledger = O_APPEND single-writer JSONL
   (atomic-rename doesn't fit appends); writes happen in handlers, stream
   generators, and successful batch consumers (middleware can't see usage).
-  `create_app` owns the persistent append handle and closes it in an outer
-  lifespan after caller/builder cleanup finishes or raises. Aggregation
-  validates each non-whitespace record independently: a malformed final line
-  without a newline is a truncated tail (skip + warning), complete malformed
-  lines are corruption (skip + per-line error), and all valid rows still count.
+  `record` performs only bounded `put_nowait` admission (4,096 records by
+  default); one writer thread owns the append handle and flushes each batch of
+  at most 128 records. Queue saturation raises `AuditQueueFull` immediately
+  rather than blocking a request thread or silently dropping billing data.
+  Append/flush/close failures become sticky `AuditWriteError`s and surface on
+  the next admission or ordered barrier; no failed write is reported durable.
+  `create_app` closes the writer in an outer lifespan after caller/builder
+  cleanup finishes or raises, and normal close drains all accepted records
+  before closing the handle. `/admin/usage` waits for the ordered flush barrier
+  on a worker thread before scanning, so it observes every prior accepted row
+  while other requests continue. Flush means runtime buffers reach the OS and
+  readers; it is not an `fsync` or a power-loss guarantee. Aggregation validates
+  each non-whitespace record independently: a malformed final line without a
+  newline is a truncated tail (skip + warning), complete malformed lines are
+  corruption (skip + per-line error), and all valid rows still count.
 - **A8 (D4)**: Responses usage names are input_tokens/output_tokens/
   total_tokens; output item = {type: message, role: assistant, status,
   content: [{type: output_text, text, annotations: []}]}; instructions

@@ -619,6 +619,7 @@ class TestTenancy:
         ledger_path = tmp_path / "ledger.jsonl"
         ledger = UsageLedger(ledger_path)
         ledger.record("tenant-a", "m", prompt_tokens=7, completion_tokens=3)
+        ledger.flush()
         with ledger_path.open("a", encoding="utf-8") as handle:
             handle.write('{"tenant":"tenant-a","prompt_tokens":11')
 
@@ -750,12 +751,14 @@ class TestTenancy:
 
         with TestClient(app):
             ledger.record("tenant-a", "m", prompt_tokens=1, completion_tokens=2)
+            ledger.flush()
             first_handle = ledger._handle
             assert first_handle is not None
             assert not first_handle.closed
 
         assert first_handle.closed
         ledger.record("tenant-a", "m", prompt_tokens=3, completion_tokens=4)
+        ledger.flush()
         assert ledger._handle is not first_handle
         assert not ledger._handle.closed
         ledger.close()
@@ -778,6 +781,7 @@ class TestTenancy:
         with pytest.raises(RuntimeError, match="caller shutdown failed"):
             with TestClient(app):
                 ledger.record("tenant-a", "m", prompt_tokens=1, completion_tokens=2)
+                ledger.flush()
                 handle = ledger._handle
 
         assert handle is not None

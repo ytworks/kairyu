@@ -720,6 +720,7 @@ orchestrator: {{ spec: auto.yaml }}
             app.state.usage_ledger.record(
                 "tenant-a", "bad", prompt_tokens=1, completion_tokens=2
             )
+            app.state.usage_ledger.flush()
             ledger_handle = app.state.usage_ledger._handle
 
     assert failing_engine.shutdown_count == 1

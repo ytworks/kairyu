@@ -317,9 +317,11 @@ async def test_probe_rejects_invalid_index():
 
 async def test_placement_logged_with_hashed_session(tmp_path):
     log_path = tmp_path / "router.jsonl"
-    pool = ReplicaPool([MockBackend(), MockBackend()], log=JsonlRouterLog(log_path))
+    log = JsonlRouterLog(log_path)
+    pool = ReplicaPool([MockBackend(), MockBackend()], log=log)
     await pool.generate(make_request("hello", session_id="secret-session"))
     await pool.generate(make_request("anon"))
+    log.flush()
     lines = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert [line["kind"] for line in lines] == ["replica", "replica"]
     assert lines[0]["session_sha256"] == hashlib.sha256(b"secret-session").hexdigest()
@@ -328,15 +330,31 @@ async def test_placement_logged_with_hashed_session(tmp_path):
     assert lines[1]["reason"] == "least_outstanding"
     assert all(isinstance(line["replica"], int) for line in lines)
     assert "secret-session" not in log_path.read_text()  # raw session id never stored
+    log.close()
 
 
 async def test_placement_logged_before_dispatch_even_on_failure(tmp_path):
     log_path = tmp_path / "router.jsonl"
     backends = [FlakyBackend()]
     backends[0].failing = True
-    pool = ReplicaPool(backends, log=JsonlRouterLog(log_path))
+    log = JsonlRouterLog(log_path)
+    pool = ReplicaPool(backends, log=log)
     with pytest.raises(RuntimeError, match="injected failure"):
         await pool.generate(make_request("boom", session_id="s"))
+    log.flush()
+    entry = json.loads(log_path.read_text().splitlines()[0])
+    assert entry["kind"] == "replica"
+    log.close()
+
+
+async def test_pool_shutdown_drains_owned_router_log(tmp_path):
+    log_path = tmp_path / "router.jsonl"
+    log = JsonlRouterLog(log_path)
+    pool = ReplicaPool([MockBackend()], log=log)
+    await pool.generate(make_request("hello"))
+
+    await pool.shutdown()
+
     entry = json.loads(log_path.read_text().splitlines()[0])
     assert entry["kind"] == "replica"
 
@@ -372,7 +390,8 @@ async def test_outstanding_decremented_on_error():
 async def test_stream_delegates_with_affinity_and_accounting(tmp_path):
     log_path = tmp_path / "router.jsonl"
     backends = [FlakyBackend() for _ in range(2)]
-    pool = ReplicaPool(backends, log=JsonlRouterLog(log_path))
+    log = JsonlRouterLog(log_path)
+    pool = ReplicaPool(backends, log=log)
     session = "stream-session"
     affine = await place_session(pool, backends, session)
 
@@ -384,8 +403,10 @@ async def test_stream_delegates_with_affinity_and_accounting(tmp_path):
     assert len(chunks) > 1  # partials + final, per MockBackend chunking
     assert pool.outstanding == (0, 0)
     assert any("stream me a story" in p for p in backends[affine].prompts_seen)
+    log.flush()
     last_entry = json.loads(log_path.read_text().splitlines()[-1])
     assert last_entry["kind"] == "replica"
+    log.close()
 
 
 async def test_stream_failure_counts_toward_health_and_decrements():

@@ -8,12 +8,15 @@ as the M4 training corpus.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import IO, Literal, Protocol
 
+from kairyu.audit_io import BoundedJsonlWriter
 from kairyu.orchestration.features import QueryFeatures, extract_features
 
 RouteTarget = Literal["tier1", "tier2", "multi_agent"]
@@ -106,14 +109,45 @@ class RuleRouter:
 
 
 class JsonlRouterLog:
-    """Appends routing decisions as JSONL; raw query text is never stored."""
+    """Bounded asynchronous JSONL; raw query text is never stored.
 
-    def __init__(self, path: str | Path) -> None:
+    The constructing router/pool owns ``close``. ``flush`` provides an ordered
+    read-after-write barrier for training/inspection consumers."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        max_pending_records: int = 4_096,
+        batch_size: int = 128,
+        _open_file: Callable[..., IO[str]] = open,
+    ) -> None:
         self._path = Path(path)
+        self._writer = BoundedJsonlWriter(
+            self._path,
+            max_pending=max_pending_records,
+            batch_size=batch_size,
+            open_file=_open_file,
+        )
 
     def _append(self, entry: dict) -> None:
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
+        self._writer.append(json.dumps(entry))
+
+    def flush(self) -> None:
+        self._writer.flush()
+
+    def close(self) -> None:
+        self._writer.close()
+
+    async def shutdown(self) -> None:
+        """Drain without blocking an async lifecycle's event loop."""
+        await asyncio.to_thread(self.close)
+
+    def __enter__(self) -> JsonlRouterLog:
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        self.close()
 
     def record(self, query: str, decision: RouteDecision) -> None:
         self._append(

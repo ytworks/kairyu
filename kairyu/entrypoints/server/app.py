@@ -616,7 +616,12 @@ def create_app(
             deployments (no tenant_config) see everything behind auth."""
             state = http_request.scope.get("state", {})
             if state.get("is_admin"):
-                return {"usage": ledger.totals(tenant)}
+                return {
+                    "usage": await asyncio.to_thread(
+                        ledger.totals,
+                        tenant,
+                    )
+                }
             if tenant_config is not None:
                 caller = getattr(http_request.state, "tenant", None)
                 if caller is None:
@@ -630,8 +635,18 @@ def create_app(
                             "code": "tenant_forbidden",
                         }},
                     )
-                return {"usage": ledger.totals(caller)}
-            return {"usage": ledger.totals(tenant)}
+                return {
+                    "usage": await asyncio.to_thread(
+                        ledger.totals,
+                        caller,
+                    )
+                }
+            return {
+                "usage": await asyncio.to_thread(
+                    ledger.totals,
+                    tenant,
+                )
+            }
 
     if settings.tracing:
         from kairyu.entrypoints.server.middleware import TracingMiddleware

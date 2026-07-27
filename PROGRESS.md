@@ -201,9 +201,15 @@ Tenant usage accounting now covers synchronous and streaming generation, Respons
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
 early or a completed batch line is later rolled back by cancellation or spool failure.
-The app lifespan owns each persistent usage-ledger append handle and closes it only after
-inner worker/backend cleanup, including exceptional shutdowns. Aggregation skips and logs
-truncated tails or complete malformed records while preserving every valid usage total.
+Usage-ledger and router JSONL records now enter a bounded non-blocking queue; a
+lifecycle-owned thread batches append+flush work outside request/stream execution.
+Normal shutdown drains every accepted row, queue saturation fails immediately without
+silent loss, and disk errors remain sticky through the next admission/barrier. Usage
+aggregation inserts an ordered flush barrier and scans on a worker thread, preserving
+read-after-write while the event loop remains responsive. The app closes its ledger only
+after inner worker/backend cleanup, including exceptional shutdowns. Aggregation still
+skips and logs truncated tails or complete malformed records while preserving every valid
+usage total.
 
 The Open WebUI Compose topology is clean-checkout runnable with a standalone
 `default` mock DeploymentSpec; CI validates its binds/rendered internal endpoint and
@@ -232,6 +238,32 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] audit JSONL filesystem work leaves request loops
+- What: usage-ledger and router-log producers now admit complete JSON rows to a
+  bounded queue without waiting for filesystem calls. One lifecycle-owned
+  thread batches up to 128 rows per append+flush. Ordered `flush()` barriers
+  preserve read-after-write, `/admin/usage` runs its barrier and scan through a
+  worker thread, and `close()` drains all accepted rows. Queue saturation fails
+  immediately; filesystem failures are sticky and surface through admission,
+  flush, or close rather than claiming durability. Flush reaches the OS for
+  reader visibility but deliberately does not claim `fsync` power-loss safety.
+- Why: persistent handles removed open/close overhead but still performed
+  write+flush synchronously in request handlers and stream finalizers. Slow or
+  failing storage could therefore stall every coroutine sharing the event loop.
+  Bounded admission keeps latency independent of disk while preserving explicit
+  backpressure and accounting integrity.
+- Verification: 305 focused server/router tests pass. Six fault-oriented gates
+  cover an intentionally blocked filesystem behind a real SSE response,
+  immediate queue-full failure, sticky disk errors, concurrent JSONL integrity,
+  ordered visibility, batching, restart, and shutdown drain. With 10,000
+  records and an injected 0.1 ms delay per write/flush, request-path admission
+  measured 3.1821 s → 0.02077 s (153.21×), full flush/drain 3.1821 s →
+  0.05842 s (54.47×), and writes 10,000 → 79. The final complete CPU suite
+  passed 2,027 tests (12 skipped, 118 deselected).
+- Refs: issue #213; m11 D3/A7; m4 §2.1;
+  `kairyu/audit_io.py`; `kairyu/entrypoints/server/tenancy.py`;
+  `kairyu/orchestration/router.py`; `bench/audit_io_bench.py`.
 
 ### 2026-07-27 — [amendment] sampler penalties use measured incremental effective counts
 - What: penalty-active sampler states lazily allocate prompt membership,

@@ -21,6 +21,14 @@ decision. M4 adds outcome records `{query_sha256, target, quality, cost_usd, lat
 (quality ∈ [0,1] from an LLM-as-judge or user feedback). Decisions and outcomes join on
 `query_sha256` — raw text is never stored (privacy invariant from M1).
 
+**Async-I/O amendment (2026-07-27, issue #213).** Routing decisions, replica placements,
+and outcomes use the same bounded lifecycle-owned JSONL writer as the usage ledger.
+Hot-path admission is non-blocking; batches of at most 128 rows are append-flushed by one
+writer thread. The constructing router/pool owner calls `close()` to drain accepted rows,
+and offline training or inspection calls `flush()` before reading. Queue saturation and
+disk failures raise explicitly rather than blocking routing or silently dropping records.
+Flush guarantees reader visibility through the OS, not `fsync` power-loss durability.
+
 ### 2.2 Dataset building (distillation labels)
 
 `build_dataset(records, cost_weight)` groups outcomes by query hash and labels each query

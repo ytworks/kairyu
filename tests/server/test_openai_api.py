@@ -11,7 +11,6 @@ from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
-from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
 
@@ -36,6 +35,11 @@ def _client(app, *, raise_app_exceptions: bool = True) -> httpx.AsyncClient:
         app=app, raise_app_exceptions=raise_app_exceptions
     )
     return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+async def _usage_totals(app) -> dict[str, dict[str, int]]:
+    """Read through the owning ledger's ordered durability barrier."""
+    return await asyncio.to_thread(app.state.usage_ledger.totals)
 
 
 @pytest.fixture()
@@ -1005,7 +1009,7 @@ async def test_malformed_auto_tool_output_records_actual_backend_usage(tmp_path)
 
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["tool_calls"] is None
-    assert UsageLedger(ledger_path).totals()["default"] == {
+    assert (await _usage_totals(app))["default"] == {
         "requests": 1,
         "prompt_tokens": 7,
         "completion_tokens": 3,
@@ -1031,7 +1035,7 @@ async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
 
     assert response.status_code == 200
     wire_usage = response.json()["usage"]
-    assert UsageLedger(ledger_path).totals()["default"] == {
+    assert (await _usage_totals(app))["default"] == {
         "requests": 1,
         "prompt_tokens": wire_usage["prompt_tokens"],
         "completion_tokens": wire_usage["completion_tokens"],
@@ -1071,7 +1075,7 @@ async def test_sync_orchestrator_zero_usage_derives_wire_and_ledger(tmp_path):
     wire_usage = response.json()["usage"]
     assert wire_usage["prompt_tokens"] == expected[0]
     assert wire_usage["completion_tokens"] == expected[1]
-    assert UsageLedger(ledger_path).totals()["default"] == {
+    assert (await _usage_totals(app))["default"] == {
         "requests": 1,
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
@@ -1121,7 +1125,7 @@ async def test_sync_completions_derives_each_missing_usage(
     assert wire_usage["prompt_tokens"] == expected[0]
     assert wire_usage["completion_tokens"] == expected[1]
     assert wire_usage["total_tokens"] == sum(expected)
-    assert UsageLedger(ledger_path).totals()["default"] == {
+    assert (await _usage_totals(app))["default"] == {
         "requests": 1,
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
@@ -1168,7 +1172,7 @@ async def test_every_dispatched_stream_is_metered_exactly_once(
             ),
         )
     )
-    assert UsageLedger(ledger_path).totals()["default"] == {
+    assert (await _usage_totals(app))["default"] == {
         "requests": 1,
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
@@ -1216,7 +1220,7 @@ async def test_stream_retains_reported_usage_when_final_partial_has_none(
     ]
     assert usage_chunks[-1]["prompt_tokens"] == 17
     assert usage_chunks[-1]["completion_tokens"] == 9
-    assert UsageLedger(ledger_path).totals()["default"] == {
+    assert (await _usage_totals(app))["default"] == {
         "requests": 1,
         "prompt_tokens": 17,
         "completion_tokens": 9,
@@ -1315,7 +1319,7 @@ async def test_generate_fully_tool_stream_keeps_single_sync_metering_owner(tmp_p
 
     assert response.status_code == 200
     assert "data: [DONE]" in response.text
-    assert UsageLedger(ledger_path).totals()["default"] == {
+    assert (await _usage_totals(app))["default"] == {
         "requests": 1,
         "prompt_tokens": 13,
         "completion_tokens": 8,
@@ -1360,7 +1364,7 @@ async def test_unsatisfied_tool_choice_is_metered_once(
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
     assert engine.calls == 1
-    assert UsageLedger(ledger_path).totals()["default"] == {
+    assert (await _usage_totals(app))["default"] == {
         "requests": 1,
         "prompt_tokens": 11,
         "completion_tokens": 5,
