@@ -108,6 +108,26 @@ p99 AUTO/direct TTFT ratios are at most 1.5, and writes the raw paired samples
 plus the pull-through-versus-queue responsibility-boundary A/B under
 `bench/results/`.
 
+## AUTO tier latency/quality gate
+
+The same production gateway also serves `kairyu-auto-max`. The standard tier
+uses the Conductor role DAG; the max tier uses three parallel Qwen3-32B
+proposals followed by Qwen3-32B synthesis. Run the P-B4 gate after the gateway
+above is ready:
+
+```console
+.venv/bin/python bench/tiered_auto_bench.py \
+  --base-url http://127.0.0.1:8002 \
+  --result bench/results/tiered-auto-qwen3-32b-tp8.json
+```
+
+The quality set is a fixed seed-198 sample of eight LiveCodeBench release-v6
+items whose canonical prompts route to `multi_agent`. Every answer is executed
+against its public and private tests. The artifact includes `/v1/models`
+discovery, paired direct/AUTO TTFT, per-tier scores, actual internal call and
+token totals from the structured trace, and allocated GPU-seconds. This is a
+fixed subset gate, not a claim about full-suite LiveCodeBench accuracy.
+
 ## Answer quality: the Fugu suite
 
 The commands above measure throughput. To measure *answers* — all eleven

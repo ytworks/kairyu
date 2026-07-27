@@ -102,7 +102,7 @@ async def test_qwen_auto_gate_resolves_relative_orchestrator_spec():
         models = await client.get("/v1/models")
         ids = {model["id"] for model in models.json()["data"]}
 
-    assert ids == {"qwen3-32b", "kairyu-auto"}
+    assert ids == {"qwen3-32b", "kairyu-auto", "kairyu-auto-max"}
 
 
 async def test_builder_wires_named_embedding_models():

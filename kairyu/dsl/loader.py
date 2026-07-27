@@ -85,5 +85,6 @@ def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
         budget=budget,
         shared_prefix=spec.shared_prefix,
         cost_model=cost_model,
+        moa_samples=spec.moa_samples,
         engine_descriptors=engine_descriptors,
     )

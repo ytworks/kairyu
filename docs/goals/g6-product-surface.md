@@ -52,6 +52,14 @@ MoA unary/streaming paths expose cumulative internal usage; retry, fallback,
 partial-failure, cancellation, structured-trace, and privacy cases are fixed
 server tests.
 
+P-B4 is GPU-green as of 2026-07-27 (issue #198): one Qwen3-32B TP8
+DeploymentSpec lists direct, standard AUTO, and max AUTO. Twelve alternating
+direct/standard pairs measured 1.0207x p50 and 0.9674x p99 TTFT ratios. On a
+fixed, sandbox-scored eight-item LiveCodeBench multi-agent slice, max scored
+25.0% versus standard's 0.0% while using fewer calls, tokens, and allocated
+GPU-seconds. The subset and effective internal sampling caveat are explicit in
+the committed raw artifact.
+
 P-B5 is CPU-green as of 2026-07-27 (issue #199): the supported
 `DeploymentSpec` path proves isolated two-key 429s and exact (0% error)
 ledger-versus-Prometheus reconciliation. The same usage counters cover all

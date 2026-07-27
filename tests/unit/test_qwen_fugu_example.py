@@ -234,6 +234,19 @@ def test_readme_documents_the_quality_suite():
     assert "comparison.md" in readme
 
 
+def test_auto_gateway_serves_distinct_conductor_and_moa_tiers():
+    import yaml
+
+    gateway = yaml.safe_load((EXAMPLE / "auto-gateway.yaml").read_text())
+    standard = yaml.safe_load((EXAMPLE / "auto-orchestrator.yaml").read_text())
+    maximum = yaml.safe_load((EXAMPLE / "auto-max-orchestrator.yaml").read_text())
+
+    assert set(gateway["orchestrators"]) == {"kairyu-auto", "kairyu-auto-max"}
+    assert standard.get("moa_samples", 0) == 0
+    assert maximum["moa_samples"] == 3
+    assert standard["shared_prefix"] == maximum["shared_prefix"]
+
+
 # -- runtime boundaries (executed, not only grepped) ---------------------------
 
 

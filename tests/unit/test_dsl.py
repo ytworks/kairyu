@@ -6,6 +6,7 @@ from kairyu.dsl.loader import build_orchestrator, load_spec
 
 YAML_SPEC = """
 shared_prefix: "SYS\\n"
+moa_samples: 3
 workers:
   - name: tier1
     backend: mock
@@ -35,6 +36,7 @@ def test_yaml_spec_round_trip():
     assert spec.roles[1].depends_on == ("planner",)
     assert spec.budget.max_steps == 8
     assert spec.shared_prefix == "SYS\n"
+    assert spec.moa_samples == 3
 
 
 def test_yaml_spec_from_file(tmp_path):
@@ -50,7 +52,7 @@ def test_role_referencing_unknown_worker_rejected():
 
 
 def test_decorator_pool_builds_equivalent_spec():
-    pool = AgentPool(shared_prefix="SYS\n")
+    pool = AgentPool(shared_prefix="SYS\n", moa_samples=3)
     pool.worker("tier1", backend="mock")
     pool.worker("tier2", backend="mock", options={"responses": {"[verifier]": "PASS"}})
     pool.budget(max_steps=8, max_refine_depth=1)
@@ -73,11 +75,19 @@ async def test_build_orchestrator_runs_end_to_end():
         "tier1": {"backend_type": "mock", "model": None},
         "tier2": {"backend_type": "mock", "model": None},
     }
+    assert descriptor["moa_samples"] == 3
+    assert descriptor["target_resolution"]["multi_agent"]["mode"] == "moa"
     result = await orchestrator.run(
         "First, plan the work. Then execute it. Finally, summarize the outcome."
     )
     assert result.route.target == "multi_agent"
     assert result.text
+
+
+@pytest.mark.parametrize("value", [-1, 17])
+def test_moa_samples_rejects_unsafe_values(value):
+    with pytest.raises(ValidationError, match="moa_samples"):
+        load_spec(YAML_SPEC.replace("moa_samples: 3", f"moa_samples: {value}"))
 
 
 def test_build_openai_worker_preserves_keyless_auth(monkeypatch):

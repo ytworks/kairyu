@@ -43,6 +43,9 @@ class OrchestratorSpec(BaseModel):
     roles: tuple[RoleNodeSpec, ...] = ()
     budget: BudgetSpec = BudgetSpec()
     shared_prefix: str = ""
+    # Zero keeps the standard Conductor route. A positive value turns the
+    # multi-agent route into that many parallel MoA proposals plus synthesis.
+    moa_samples: int = Field(default=0, ge=0, le=16)
 
     @model_validator(mode="after")
     def _roles_reference_known_workers(self) -> OrchestratorSpec:
