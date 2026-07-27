@@ -6,6 +6,8 @@ from kairyu.engine.tokenizer import (
     HFTokenizer,
     IncrementalDetokenizer,
     ToyTokenizer,
+    _grammar_metadata,
+    grammar_vocabulary,
     resolve_tokenizer,
 )
 
@@ -83,6 +85,32 @@ class TestHFTokenizer:
         vocab = tok.vocab()
         ids = tok.encode("hello")
         assert all(isinstance(vocab[i], str) for i in ids)
+
+    def test_grammar_vocabulary_preserves_byte_level_metadata(self, hf_tokenizer_dir):
+        tok = HFTokenizer(hf_tokenizer_dir)
+        model_vocab_size = len(tok.vocab()) + 7
+
+        vocabulary = grammar_vocabulary(tok, model_vocab_size=model_vocab_size)
+
+        assert vocabulary.encoded_vocab is tok.vocab()
+        assert vocabulary.vocab_type == "byte_level"
+        assert vocabulary.vocab_size == model_vocab_size
+        assert vocabulary.add_prefix_space is False
+
+    def test_grammar_metadata_detects_nested_byte_fallback_and_metaspace(self):
+        backend = {
+            "decoder": {
+                "type": "Sequence",
+                "decoders": [{"type": "ByteFallback"}, {"type": "Fuse"}],
+            },
+            "pre_tokenizer": {
+                "type": "Metaspace",
+                "replacement": "▁",
+                "prepend_scheme": "first",
+            },
+        }
+
+        assert _grammar_metadata(backend) == ("byte_fallback", True)
 
 
 class TestResolveTokenizer:
@@ -199,9 +227,7 @@ class TestIncrementalDetokenizer:
                 unk_token="<unk>",
             )
         )
-        raw.decoder = decoders.Metaspace(
-            replacement="▁", prepend_scheme="always", split=True
-        )
+        raw.decoder = decoders.Metaspace(replacement="▁", prepend_scheme="always", split=True)
         raw.save(str(tmp_path / "tokenizer.json"))
         tok = HFTokenizer(tmp_path)
         ids = (1, 3, 2)
@@ -233,9 +259,7 @@ class TestIncrementalDetokenizer:
 
             def decode(self, token_ids):
                 self.full_decode_work += len(token_ids)
-                return "".join(
-                    chr(ord("a") + token_id % 26) for token_id in token_ids
-                )
+                return "".join(chr(ord("a") + token_id % 26) for token_id in token_ids)
 
             def vocab(self):
                 return []
@@ -286,9 +310,7 @@ class TestIncrementalDetokenizer:
         assert not detok.uses_native_stream
         assert detok.push((1, 2, 3)) == tok.decode((1, 2, 3))
 
-    def test_hf_without_decode_stream_uses_safe_fallback(
-        self, hf_tokenizer_dir, monkeypatch
-    ):
+    def test_hf_without_decode_stream_uses_safe_fallback(self, hf_tokenizer_dir, monkeypatch):
         from tokenizers import decoders
 
         monkeypatch.delattr(decoders, "DecodeStream")

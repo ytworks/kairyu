@@ -524,6 +524,21 @@ def test_named_orchestrators_parse():
     assert spec.orchestrators["kairyu-auto-max"].spec == "auto_max.yaml"
 
 
+def test_chat_template_may_target_named_orchestrator():
+    spec = load_deployment_spec(
+        """
+engines:
+  m: { backend: mock }
+orchestrators:
+  kairyu-auto: { spec: auto.yaml }
+chat_templates:
+  kairyu-auto: "{{ messages }}"
+"""
+    )
+
+    assert spec.chat_templates["kairyu-auto"] == "{{ messages }}"
+
+
 def test_orchestrator_name_colliding_with_engine_rejected():
     yaml_text = """
 engines:

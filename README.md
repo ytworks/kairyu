@@ -693,6 +693,11 @@ Request extras: `X-Session-ID` (or the OpenAI `user` field) pins a session to th
 replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds the legacy
 `kairyu_trace` and versioned `kairyu_trace_v2` blocks to unary `kairyu-auto`
 responses; `stream_options: {include_usage: true}` appends the final usage chunk.
+Named AUTO models accept the same sampling, `n`, logprob, tool-choice, and
+structured-output fields as direct chat models. Scalar sampling reaches private
+orchestration stages under the advertised private max-token policy, while the
+exact public max-token limit, `n`, logprobs, tools, and response grammar apply
+to the selected final worker or synthesis boundary.
 
 `POST /v1/route` accepts `{model, messages}` and renders the same model-specific chat
 template as actual chat before calling the Router's non-mutating `preview()`. It never

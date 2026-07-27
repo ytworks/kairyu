@@ -22,6 +22,10 @@ from kairyu.orchestration.conductor import (
     RoleSpec,
     zero_cost,
 )
+from kairyu.orchestration.request import (
+    OrchestrationRequest,
+    default_orchestration_request,
+)
 from kairyu.orchestration.router import RouteDecision, Router, RuleRouter
 from kairyu.orchestration.trace import (
     StructuredTrace,
@@ -81,6 +85,7 @@ class OrchestratorResult:
     text: str
     route: RouteDecision
     trace: tuple[str, ...]
+    completions: tuple[CompletionOutput, ...] = ()
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
@@ -93,6 +98,7 @@ class OrchestratorEvent:
 
     kind: str  # "status" | "delta" | "error" | "result"
     text: str = ""
+    completions: tuple[CompletionOutput, ...] = ()
     result: OrchestratorResult | None = None
     error_type: str | None = None
 
@@ -186,27 +192,20 @@ class Orchestrator:
     def describe_routing(self) -> dict[str, object]:
         describe = getattr(self._router, "describe", None)
         router = (
-            describe()
-            if describe is not None
-            else {"router_type": type(self._router).__name__}
+            describe() if describe is not None else {"router_type": type(self._router).__name__}
         )
         role_workers = tuple(dict.fromkeys(role.worker for role in self._roles))
         if self._moa_samples > 0:
-            multi_engines = [
-                self._resolved_engine_descriptor(key) for key in ("tier1", "tier2")
-            ]
+            multi_engines = [self._resolved_engine_descriptor(key) for key in ("tier1", "tier2")]
             multi_mode = "moa"
         else:
-            multi_engines = [
-                self._resolved_engine_descriptor(key) for key in role_workers
-            ]
+            multi_engines = [self._resolved_engine_descriptor(key) for key in role_workers]
             multi_mode = "roles"
         return {
             "router": router,
             "targets": ["tier1", "tier2", "multi_agent"],
             "configured_engines": {
-                name: descriptor.as_dict()
-                for name, descriptor in self._engine_descriptors.items()
+                name: descriptor.as_dict() for name, descriptor in self._engine_descriptors.items()
             },
             "target_resolution": {
                 "tier1": self._resolved_engine_descriptor("tier1"),
@@ -228,6 +227,7 @@ class Orchestrator:
             ],
             "budget": asdict(self._budget),
             "moa_samples": self._moa_samples,
+            "internal_max_tokens": self._sampling_params.max_tokens,
         }
 
     async def shutdown(self) -> None:
@@ -242,6 +242,82 @@ class Orchestrator:
 
     def _resolve_engine(self, tier: str, notes: list[str]) -> EngineBackend:
         return self._engines[self._resolve_engine_name(tier, notes)]
+
+    def _request(self, request: str | OrchestrationRequest) -> OrchestrationRequest:
+        if isinstance(request, OrchestrationRequest):
+            return request
+        return default_orchestration_request(request, self._sampling_params)
+
+    def _internal_sampling_params(
+        self,
+        call: OrchestrationRequest,
+    ) -> SamplingParams:
+        return call.internal_sampling_params(
+            max_tokens_cap=self._sampling_params.max_tokens,
+        )
+
+    def _conductor_final_role(self) -> RoleSpec:
+        units = [role for role in self._roles if role.role_type != "verifier"]
+        dependents = {dependency for role in units for dependency in role.depends_on}
+        terminal = [role for role in units if role.name not in dependents]
+        synthesizers = [role for role in terminal if role.role_type == "synthesizer"]
+        if not terminal:
+            raise ValueError("orchestration requires at least one terminal role")
+        return (synthesizers + terminal)[0]
+
+    def _final_engine_keys(self, decision: RouteDecision | None) -> tuple[str, ...]:
+        if decision is None:
+            keys = {"tier1", "tier2", self._conductor_final_role().worker}
+        elif decision.target == "multi_agent":
+            keys = {"tier2" if self._moa_samples > 0 else self._conductor_final_role().worker}
+        else:
+            keys = {decision.target}
+        fallback = next(iter(self._engines))
+        return tuple(key if key in self._engines else fallback for key in sorted(keys))
+
+    def _validate_call(
+        self,
+        call: OrchestrationRequest,
+        decision: RouteDecision | None,
+    ) -> None:
+        if call.sampling_params.n <= 1:
+            return
+        final_role = self._conductor_final_role()
+        if (
+            (decision is None or decision.target == "multi_agent")
+            and self._moa_samples == 0
+            and any(
+                role.role_type == "verifier" and role.verifies == final_role.name
+                for role in self._roles
+            )
+        ):
+            raise ValueError(
+                "n > 1 is not supported when the final orchestration role has "
+                "a post-generation verifier"
+            )
+        unsupported = [
+            key
+            for key in self._final_engine_keys(decision)
+            if getattr(self._engines[key], "supports_n", True) is False
+        ]
+        if unsupported:
+            raise ValueError(
+                "n > 1 is not supported by final orchestration engine(s): " + ", ".join(unsupported)
+            )
+
+    def validate_request(self, request: str | OrchestrationRequest) -> None:
+        """Preflight capability checks without dispatching generation."""
+
+        call = self._request(request)
+        preview = getattr(self._router, "preview", None)
+        if preview is None:
+            decision = None
+        else:
+            try:
+                decision = preview(call.prompt)
+            except NotImplementedError:
+                decision = None
+        self._validate_call(call, decision)
 
     def _conductor_workers(self, notes: list[str]) -> dict[str, EngineBackend]:
         needed = {role.worker for role in self._roles}
@@ -286,20 +362,23 @@ class Orchestrator:
         )
 
     async def _run_direct(
-        self, query: str, tier: str, notes: list[str]
-    ) -> tuple[str, tuple[int, int, int], TraceEvent]:
+        self, call: OrchestrationRequest, tier: str, notes: list[str]
+    ) -> tuple[GenerationResult, tuple[int, int, int], TraceEvent]:
         queued_at = utc_now_iso()
         engine_name = self._resolve_engine_name(tier, notes)
         engine = self._engines[engine_name]
         descriptor = self._engine_descriptors[engine_name]
         request = GenerationRequest(
             request_id=f"direct-{uuid.uuid4().hex[:12]}",
-            prompt=f"{self._shared_prefix}{query}",
-            sampling_params=self._sampling_params,
+            prompt=f"{self._shared_prefix}{call.prompt}",
+            sampling_params=call.sampling_params,
             # no random per-request session (M2): a fresh uuid forces uniform HRW
             # placement and defeats prefix + least-outstanding routing. With no
             # hint the pool routes by shared-prefix overlap and load instead.
             cache_hint=None,
+            tools=call.tools,
+            tool_choice=call.tool_choice,
+            tools_in_prompt=call.tools_in_prompt,
         )
         started_at = utc_now_iso()
         try:
@@ -343,7 +422,7 @@ class Orchestrator:
             else None
         )
         return (
-            result.text,
+            result,
             usage,
             TraceEvent(
                 node=tier,
@@ -363,11 +442,17 @@ class Orchestrator:
             ),
         )
 
-    async def run(self, query: str) -> OrchestratorResult:
+    async def run(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> OrchestratorResult:
+        call = self._request(request)
+        query = call.prompt
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
         trace_started_at = utc_now_iso()
         route_started_at = utc_now_iso()
         decision = self._router.route(query)
+        self._validate_call(call, decision)
         route_completed_at = utc_now_iso()
         notes: list[str] = [f"route: {decision.target} ({decision.reason})"]
         trace_events = [
@@ -381,6 +466,7 @@ class Orchestrator:
         def result_with_trace(
             *,
             text: str,
+            completions: tuple[CompletionOutput, ...] = (),
             prompt_tokens: int = 0,
             completion_tokens: int = 0,
             cached_tokens: int = 0,
@@ -389,6 +475,7 @@ class Orchestrator:
                 text=text,
                 route=decision,
                 trace=tuple(notes),
+                completions=completions,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
@@ -440,6 +527,11 @@ class Orchestrator:
                         query,
                         n_samples=self._moa_samples,
                         synthesizer=self._engines[synthesizer_engine_name],
+                        sampling_params=self._internal_sampling_params(call),
+                        final_sampling_params=call.sampling_params,
+                        final_tools=call.tools,
+                        final_tool_choice=call.tool_choice,
+                        final_tools_in_prompt=call.tools_in_prompt,
                         shared_prefix=self._shared_prefix,
                     )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
@@ -449,13 +541,21 @@ class Orchestrator:
                         GenerationRequest(
                             request_id="moa",
                             prompt=query,
-                            sampling_params=self._sampling_params,
+                            sampling_params=call.sampling_params,
+                            tools=call.tools,
+                            tool_choice=call.tool_choice,
+                            tools_in_prompt=call.tools_in_prompt,
                         ),
                         GenerationResult(
                             request_id="moa",
                             prompt=query,
-                            completions=(
-                                CompletionOutput(index=0, text=moa.final_text, token_ids=()),
+                            completions=moa.completions
+                            or (
+                                CompletionOutput(
+                                    index=0,
+                                    text=moa.final_text,
+                                    token_ids=(),
+                                ),
                             ),
                             usage=GenerationUsage(
                                 prompt_tokens=moa.usage[0],
@@ -539,8 +639,7 @@ class Orchestrator:
                     reservation.release(steps=moa_steps, unknown_cost=True)
                     raise
                 notes.append(
-                    f"moa: {len(moa.proposals)} proposals synthesized "
-                    f"(cost={moa_cost:.4f})"
+                    f"moa: {len(moa.proposals)} proposals synthesized (cost={moa_cost:.4f})"
                 )
                 if budget_state.is_exhausted:
                     notes.append("moa: budget exceeded")
@@ -596,6 +695,15 @@ class Orchestrator:
                 )
                 return result_with_trace(
                     text=moa.final_text,
+                    completions=moa.completions
+                    or (
+                        CompletionOutput(
+                            index=0,
+                            text=moa.final_text,
+                            token_ids=(),
+                            finish_reason="stop",
+                        ),
+                    ),
                     prompt_tokens=moa.usage[0],
                     completion_tokens=moa.usage[1],
                     cached_tokens=moa.cached_tokens,
@@ -604,7 +712,11 @@ class Orchestrator:
                 roles=self._roles,
                 workers=self._conductor_workers(notes),
                 shared_prefix=self._shared_prefix,
-                sampling_params=self._sampling_params,
+                sampling_params=self._internal_sampling_params(call),
+                final_sampling_params=call.sampling_params,
+                final_tools=call.tools,
+                final_tool_choice=call.tool_choice,
+                final_tools_in_prompt=call.tools_in_prompt,
                 cost_model=self._cost_model,
                 worker_trace=self._conductor_worker_trace(),
             )
@@ -613,13 +725,14 @@ class Orchestrator:
             trace_events.extend(result.trace)
             return result_with_trace(
                 text=result.final_text,
+                completions=result.completions,
                 prompt_tokens=result.usage[0],
                 completion_tokens=result.usage[1],
                 cached_tokens=result.cached_tokens,
             )
         try:
-            text, usage, direct_event = await self._run_direct(
-                query,
+            direct_result, usage, direct_event = await self._run_direct(
+                call,
                 decision.target,
                 notes,
             )
@@ -631,7 +744,8 @@ class Orchestrator:
             ) from error.cause
         trace_events.append(direct_event)
         return result_with_trace(
-            text=text,
+            text=direct_result.text,
+            completions=direct_result.completions,
             prompt_tokens=usage[0],
             completion_tokens=usage[1],
             cached_tokens=usage[2],
@@ -639,7 +753,7 @@ class Orchestrator:
 
     async def run_chat(
         self,
-        prompt: str,
+        request: str | OrchestrationRequest,
         stream: bool = False,
         usage_observer: Callable[[GenerationUsage], None] | None = None,
     ):
@@ -651,8 +765,11 @@ class Orchestrator:
         worker/synthesizer, then one result event.
         """
         if not stream:
-            return await self.run(prompt)
-        return self._run_chat_stream(prompt, usage_observer=usage_observer)
+            return await self.run(request)
+        return self._run_chat_stream(
+            self._request(request),
+            usage_observer=usage_observer,
+        )
 
     async def _with_initial_keepalives(self, stream) -> AsyncIterator[object | None]:
         """Emit timer sentinels until the first final-stage event is available.
@@ -689,14 +806,16 @@ class Orchestrator:
 
     async def _run_chat_stream(
         self,
-        prompt: str,
+        call: OrchestrationRequest,
         *,
         usage_observer: Callable[[GenerationUsage], None] | None,
     ):
+        prompt = call.prompt
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
         trace_started_at = utc_now_iso()
         route_started_at = utc_now_iso()
         decision = self._router.route(prompt)
+        self._validate_call(call, decision)
         route_completed_at = utc_now_iso()
         notes = [f"route: {decision.target} ({decision.reason})"]
         trace_events = [
@@ -710,6 +829,7 @@ class Orchestrator:
         def result_with_trace(
             *,
             text: str,
+            completions: tuple[CompletionOutput, ...] = (),
             prompt_tokens: int = 0,
             completion_tokens: int = 0,
             cached_tokens: int = 0,
@@ -718,6 +838,7 @@ class Orchestrator:
                 text=text,
                 route=decision,
                 trace=tuple(notes),
+                completions=completions,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
@@ -737,8 +858,11 @@ class Orchestrator:
             request = GenerationRequest(
                 request_id=f"direct-{uuid.uuid4().hex[:12]}",
                 prompt=f"{self._shared_prefix}{prompt}",
-                sampling_params=self._sampling_params,
+                sampling_params=call.sampling_params,
                 cache_hint=None,  # M2: no random session — route by prefix + load
+                tools=call.tools,
+                tool_choice=call.tool_choice,
+                tools_in_prompt=call.tools_in_prompt,
             )
             emitted = 0
             last = None
@@ -757,14 +881,14 @@ class Orchestrator:
                     if not text.startswith(previous_text):
                         raise RuntimeError("direct stream must emit cumulative, prefix-stable text")
                     previous_text = text
-                    if len(text) > emitted:
-                        if first_token_at is None:
-                            first_token_at = utc_now_iso()
-                        yield OrchestratorEvent(
-                            kind="delta",
-                            text=text[emitted:],
-                        )
-                        emitted = len(text)
+                    if first_token_at is None and partial.completions:
+                        first_token_at = utc_now_iso()
+                    yield OrchestratorEvent(
+                        kind="delta",
+                        text=text[emitted:],
+                        completions=partial.completions,
+                    )
+                    emitted = len(text)
                 if last is None:
                     raise RuntimeError("direct stream produced no result")
             except Exception as error:
@@ -853,6 +977,7 @@ class Orchestrator:
                 kind="result",
                 result=result_with_trace(
                     text=last.text if last is not None else "",
+                    completions=last.completions if last is not None else (),
                     prompt_tokens=usage[0],
                     completion_tokens=usage[1],
                     cached_tokens=usage[2],
@@ -917,6 +1042,11 @@ class Orchestrator:
                     prompt,
                     n_samples=self._moa_samples,
                     synthesizer=self._engines[synthesizer_engine_name],
+                    sampling_params=self._internal_sampling_params(call),
+                    final_sampling_params=call.sampling_params,
+                    final_tools=call.tools,
+                    final_tool_choice=call.tool_choice,
+                    final_tools_in_prompt=call.tools_in_prompt,
                     shared_prefix=self._shared_prefix,
                     usage_observer=observe_moa_usage,
                 )
@@ -929,6 +1059,7 @@ class Orchestrator:
                         yield OrchestratorEvent(
                             kind="delta",
                             text=event.text,
+                            completions=event.completions,
                         )
                     else:
                         moa_result = event.result
@@ -938,12 +1069,16 @@ class Orchestrator:
                     GenerationRequest(
                         request_id="moa",
                         prompt=prompt,
-                        sampling_params=self._sampling_params,
+                        sampling_params=call.sampling_params,
+                        tools=call.tools,
+                        tool_choice=call.tool_choice,
+                        tools_in_prompt=call.tools_in_prompt,
                     ),
                     GenerationResult(
                         request_id="moa",
                         prompt=prompt,
-                        completions=(
+                        completions=moa_result.completions
+                        or (
                             CompletionOutput(
                                 index=0,
                                 text=moa_result.final_text,
@@ -1052,14 +1187,11 @@ class Orchestrator:
                 raise
 
             notes.append(
-                f"moa: {len(moa_result.proposals)} proposals synthesized "
-                f"(cost={moa_cost:.4f})"
+                f"moa: {len(moa_result.proposals)} proposals synthesized (cost={moa_cost:.4f})"
             )
             if budget_state.is_exhausted:
                 notes.append("moa: budget exceeded")
-            resolved_engines = tuple(
-                dict.fromkeys((proposal_engine_name, synthesizer_engine_name))
-            )
+            resolved_engines = tuple(dict.fromkeys((proposal_engine_name, synthesizer_engine_name)))
             resolved_models = tuple(
                 dict.fromkeys(
                     model
@@ -1113,6 +1245,15 @@ class Orchestrator:
                 kind="result",
                 result=result_with_trace(
                     text=moa_result.final_text,
+                    completions=moa_result.completions
+                    or (
+                        CompletionOutput(
+                            index=0,
+                            text=moa_result.final_text,
+                            token_ids=(),
+                            finish_reason="stop",
+                        ),
+                    ),
                     prompt_tokens=moa_result.usage[0],
                     completion_tokens=moa_result.usage[1],
                     cached_tokens=moa_result.cached_tokens,
@@ -1124,7 +1265,11 @@ class Orchestrator:
             roles=self._roles,
             workers=self._conductor_workers(notes),
             shared_prefix=self._shared_prefix,
-            sampling_params=self._sampling_params,
+            sampling_params=self._internal_sampling_params(call),
+            final_sampling_params=call.sampling_params,
+            final_tools=call.tools,
+            final_tool_choice=call.tool_choice,
+            final_tools_in_prompt=call.tools_in_prompt,
             cost_model=self._cost_model,
             worker_trace=self._conductor_worker_trace(),
             usage_observer=usage_observer,
@@ -1140,6 +1285,7 @@ class Orchestrator:
                     yield OrchestratorEvent(
                         kind="delta",
                         text=event.text,
+                        completions=event.completions,
                     )
                 else:
                     conductor_result = event.result
@@ -1153,6 +1299,7 @@ class Orchestrator:
                 kind="error",
                 result=result_with_trace(
                     text=conductor_result.final_text,
+                    completions=conductor_result.completions,
                     prompt_tokens=conductor_result.usage[0],
                     completion_tokens=conductor_result.usage[1],
                     cached_tokens=conductor_result.cached_tokens,
@@ -1163,14 +1310,14 @@ class Orchestrator:
         if conductor_result is None:
             raise RuntimeError("Conductor stream did not produce a final result")
         notes.extend(
-            f"{event.node}: {event.kind} {event.detail}"
-            for event in conductor_result.trace
+            f"{event.node}: {event.kind} {event.detail}" for event in conductor_result.trace
         )
         trace_events.extend(conductor_result.trace)
         yield OrchestratorEvent(
             kind="result",
             result=result_with_trace(
                 text=conductor_result.final_text,
+                completions=conductor_result.completions,
                 prompt_tokens=conductor_result.usage[0],
                 completion_tokens=conductor_result.usage[1],
                 cached_tokens=conductor_result.cached_tokens,

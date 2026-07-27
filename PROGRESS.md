@@ -149,18 +149,31 @@ versioned route/DAG/verifier envelope as unary. A synchronous accounting
 observer preserves completed pre-final and partial-final usage across
 disconnects and failures without a task/queue bridge; returned failure data
 contains only sanitized exception types.
-G6 P-B4 tiered AUTO proof is now closed. Declarative specs can configure
-bounded MoA proposal counts, and the Qwen3-32B TP8 production gateway exposes
-direct, standard AUTO (Conductor), and max AUTO (three proposals plus
-synthesis). Twelve alternating latency pairs measured standard/direct TTFT at
-1.0207x p50 and 0.9674x p99. A fixed eight-item LiveCodeBench multi-agent slice
-scored max 25.0% versus standard 0.0%; max also used 32 versus 44 internal
-calls, 45,759 versus 60,369 internal tokens, and 1,549.6 versus 2,602.8
-allocated GPU-seconds. The artifact explicitly limits the claim to this subset
-and records issue #208's effective-sampling caveat.
+G6 AUTO request-intent parity is now closed. An immutable request carries
+sampling, deterministic `n`, choice-scoped logprobs, tools/tool choice, and
+response format across direct, Conductor, and MoA without mutating the shared
+orchestrator. Private stages use scalar sampling and the advertised 1024-token
+policy but no sibling/logprob/tool/grammar expansion; the exact public output
+intent applies at the final boundary. Qwen3-32B TP8 produced schema-valid
+`n=2` choices with logprobs and a required named tool, then remained healthy
+for a plain request. The same run fixed the native xgrammar path by preserving
+BYTE_LEVEL/BYTE_FALLBACK metadata and the model lm-head vocabulary width
+through every TP rank.
+G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
+specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
+production gateway exposes direct, standard AUTO (Conductor), and max AUTO
+(three proposals plus synthesis). Twelve alternating latency pairs measured
+standard/direct TTFT at
+1.0123x p50 and 0.7666x p99. The fixed eight-item LiveCodeBench multi-agent
+slice scored max 37.5% versus standard 12.5%; max also used 32 versus 38
+internal calls, 47,266 versus 50,504 internal tokens, and 1,499.274 versus
+2,567.389 allocated GPU-seconds. An uncapped private-stage interpretation
+failed the same gate with a 60 s upstream timeout; the selected 1024-token
+policy completed it while preserving the public final 8192-token allowance.
+The artifacts explicitly limit the quality claim to this subset.
 Production/fabric drills remain untouched.**
 
-_Last updated: 2026-07-27_
+_Last updated: 2026-07-28_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -177,7 +190,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + `PipelinedModelRunner` consumed by the unified production `EngineLoop`; the old pipelined core is compatibility-only). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
-| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-27, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
+| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-28, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + tokenizer-native xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
@@ -190,7 +203,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
-| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D6 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission are production-wired. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2 amended 2026-07-28, D3/D6 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, and P-B5 are green; P-B3 and P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
@@ -284,6 +297,54 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] AUTO preserves OpenAI intent at a bounded final-output boundary
+- What: Issue #208 replaces prompt-only AUTO dispatch with an immutable
+  per-request intent for sampling, deterministic `n`, choice-scoped logprobs,
+  tools/tool choice, and response format. Direct, Conductor, and MoA retain
+  complete final `CompletionOutput` choices in unary and pull-through streams;
+  private stages use `n=1`, no logprob/tool/grammar expansion, and the explicit
+  1024-token orchestration policy while the final stage receives the exact
+  public output limit and intent. Native OpenAI tool calls are normalized at
+  the existing L3 parser boundary, prompt-only engines receive one tool
+  instruction, and AUTO chat templates are valid deployment targets.
+  Qwen3-32B TP8 passed schema-valid `n=2` with logprobs, a required named tool,
+  and a post-gate plain request. The tiered rerun measured 1.0123x / 0.7666x
+  p50/p99 standard/direct TTFT and max 3/8 versus standard 1/8, with max using
+  32 versus 38 calls and 1,499.274 versus 2,567.389 allocated GPU-seconds.
+- Why: The old L3/L2 seam validated these OpenAI fields and then either rejected
+  or discarded them, while fixed MoA sampling made the advertised model
+  contract route-dependent. Applying a public 8192-token answer allowance to
+  every private stage was also objectively worse: one stage took 76.44 s and a
+  MoA proposal exceeded the upstream 60 s timeout, returning 502. The selected
+  Kairyu-native boundary exposes the private cap through `/routing`, preserves
+  scalar intent without shared-orchestrator mutation, and leaves the final
+  public limit exact.
+- Refs: m11 D1/D2, m8 D1/D2, G6 P-B4, issue #208;
+  `kairyu/orchestration/request.py`,
+  `kairyu/{orchestration,entrypoints/server,engine}/`,
+  `bench/auto_params_bench.py`,
+  `bench/results/auto-params-qwen3-32b-tp8-2026-07-28.json`,
+  `bench/results/tiered-auto-qwen3-32b-tp8-2026-07-28.json`
+
+### 2026-07-28 — [amendment] xgrammar receives tokenizer-native vocabulary metadata on every TP rank
+- What: Structured sampling now carries a serializable `GrammarVocabulary`
+  containing RAW/BYTE_FALLBACK/BYTE_LEVEL type, prefix-space behavior, encoded
+  token strings, and the model lm-head vocabulary width. Local, P-D, and every
+  spawned TP sampler receive the same metadata. The Qwen3-32B TP8 native engine
+  completed `n=1` and `n=2` JSON-schema requests with logprobs and remained
+  ready afterward.
+- Why: Qwen stores a space token as byte-level `Ġ`, but Kairyu constructed
+  xgrammar's `TokenizerInfo` as RAW and padded the tokenizer vocabulary with
+  fabricated empty strings. After the valid prefix `{"answer":`, the RAW FSM
+  could expose zero legal tokens; all masked logits became `-inf`, argmax chose
+  token 0, and the TP runner became fatal when the matcher rejected it. vLLM's
+  independently reviewed xgrammar path likewise passes tokenizer type and
+  model vocabulary width; Kairyu now preserves that correctness contract
+  through its own lighter tokenizer/sampler boundary.
+- Refs: m8 D1/D2, issue #208;
+  `kairyu/engine/{tokenizer.py,core/structured.py,core/worker.py}`,
+  `tests/unit/{test_tokenizer.py,test_structured_output.py}`
 
 ### 2026-07-27 — [evidence] P-B4 proves distinct AUTO tiers on Qwen3-32B TP8
 - What: The declarative orchestrator spec now wires a bounded `moa_samples`

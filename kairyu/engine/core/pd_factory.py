@@ -62,14 +62,11 @@ def build_kv_handoff(
         return inner
     if not on_device and force_side_stream:
         raise ValueError(
-            "force_side_stream=True needs a CUDA KV pool; this one is on "
-            f"{pool.k.device}"
+            f"force_side_stream=True needs a CUDA KV pool; this one is on {pool.k.device}"
         )
     from kairyu.engine.core.handoff_stream import CudaStreamProvider
 
-    return StreamCopyKVHandoff(
-        inner, CudaStreamProvider(device=pool.k.device), defer=defer
-    )
+    return StreamCopyKVHandoff(inner, CudaStreamProvider(device=pool.k.device), defer=defer)
 
 
 def build_cpu_kv_handoff(inner, *, defer: bool = False):
@@ -125,7 +122,7 @@ def build_pd_coordinator(
     from kairyu.engine.core.radix_kv import RadixKVCache
     from kairyu.engine.core.sampler import Sampler
     from kairyu.engine.core.scheduler import Scheduler
-    from kairyu.engine.tokenizer import resolve_tokenizer
+    from kairyu.engine.tokenizer import grammar_vocabulary, resolve_tokenizer
     from kairyu.models.loader import load_model
 
     profile = probe() if profile is None else profile
@@ -147,8 +144,11 @@ def build_pd_coordinator(
             cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
         )
         pool = PagedKVPool.for_cache(cache, config, dtype=dtype, device=device)
+        grammar_vocab = grammar_vocabulary(resolved, model_vocab_size=config.vocab_size)
         runner = PagedModelRunner(
-            model.to(device), pool, sampler=Sampler(vocab_provider=resolved.vocab),
+            model.to(device),
+            pool,
+            sampler=Sampler(vocab_provider=lambda: grammar_vocab),
             cache=cache,
         )
         return cache, scheduler, runner, pool

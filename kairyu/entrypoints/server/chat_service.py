@@ -75,6 +75,7 @@ class ValidatedChatInput:
     request: ChatCompletionRequest
     prompt: str
     normalized_tool_choice: NormalizedToolChoice
+    tools_in_prompt: bool
     include_usage: bool
 
 
@@ -92,16 +93,12 @@ class ExecutedChat:
 
 
 def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
-    extra_args = (
-        {"response_format": request.response_format} if request.response_format else {}
-    )
+    extra_args = {"response_format": request.response_format} if request.response_format else {}
     logprobs = None
     if request.logprobs:
         logprobs = request.top_logprobs or 0
     max_tokens = (
-        request.max_tokens
-        if request.max_tokens is not None
-        else request.max_completion_tokens
+        request.max_tokens if request.max_tokens is not None else request.max_completion_tokens
     )
     return SamplingParams(
         temperature=request.temperature,
@@ -127,13 +124,9 @@ def _normalize_tool_choice(request: ChatCompletionRequest) -> NormalizedToolChoi
             raise ChatRequestError(f"tools[{index}].function must be an object")
         name = function.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise ChatRequestError(
-                f"tools[{index}].function.name must be a non-empty string"
-            )
+            raise ChatRequestError(f"tools[{index}].function.name must be a non-empty string")
         if name in allowed_names:
-            raise ChatRequestError(
-                f"tools[{index}].function.name {name!r} is duplicated"
-            )
+            raise ChatRequestError(f"tools[{index}].function.name {name!r} is duplicated")
         allowed_names.add(name)
 
     choice = request.tool_choice
@@ -141,9 +134,7 @@ def _normalize_tool_choice(request: ChatCompletionRequest) -> NormalizedToolChoi
         return NormalizedToolChoice("auto", frozenset(allowed_names))
     if isinstance(choice, str):
         if choice not in {"auto", "none", "required"}:
-            raise ChatRequestError(
-                "tool_choice must be 'auto', 'none', 'required', or a function"
-            )
+            raise ChatRequestError("tool_choice must be 'auto', 'none', 'required', or a function")
         if choice == "required" and not allowed_names:
             raise ChatRequestError("tool_choice 'required' requires at least one tool")
         return NormalizedToolChoice(choice, frozenset(allowed_names))
@@ -154,13 +145,9 @@ def _normalize_tool_choice(request: ChatCompletionRequest) -> NormalizedToolChoi
         raise ChatRequestError("named tool_choice.function must be an object")
     name = function.get("name")
     if not isinstance(name, str) or not name.strip():
-        raise ChatRequestError(
-            "named tool_choice.function.name must be a non-empty string"
-        )
+        raise ChatRequestError("named tool_choice.function.name must be a non-empty string")
     if name not in allowed_names:
-        raise ChatRequestError(
-            f"named tool_choice function {name!r} is not declared in tools"
-        )
+        raise ChatRequestError(f"named tool_choice function {name!r} is not declared in tools")
     return NormalizedToolChoice("named", frozenset(allowed_names), named=name)
 
 
@@ -170,8 +157,7 @@ def _validate_response_format(response_format: dict | None) -> None:
     kind = response_format.get("type")
     if kind not in ("text", "json_object", "json_schema"):
         raise ChatRequestError(
-            "response_format.type must be text, json_object or json_schema, "
-            f"got {kind!r}"
+            f"response_format.type must be text, json_object or json_schema, got {kind!r}"
         )
     if kind == "json_schema":
         schema = (response_format.get("json_schema") or {}).get("schema")
@@ -188,9 +174,10 @@ def render_prompt(
     """Render one prompt identically for HTTP and batch transports."""
     template = (chat_templates or {}).get(request.model)
     messages = [message.model_dump() for message in request.messages]
+    tools = None if request.tool_choice == "none" else request.tools
     if template is None:
         return render_chat(messages)
-    return template.render(messages, tools=request.tools)
+    return template.render(messages, tools=tools)
 
 
 def validate_chat_input(
@@ -208,16 +195,17 @@ def validate_chat_input(
     for message in request.messages:
         _, has_images = flatten_content(message.content)
         if has_images:
-            raise ChatRequestError(
-                f"model {request.model!r} does not support image inputs"
-            )
+            raise ChatRequestError(f"model {request.model!r} does not support image inputs")
     return ValidatedChatInput(
         request=request,
         prompt=render_prompt(request, chat_templates),
         normalized_tool_choice=normalized_tool_choice,
-        include_usage=bool(
-            request.stream_options and request.stream_options.include_usage
+        tools_in_prompt=bool(
+            (chat_templates or {}).get(request.model)
+            and request.tools
+            and request.tool_choice != "none"
         ),
+        include_usage=bool(request.stream_options and request.stream_options.include_usage),
     )
 
 
@@ -248,6 +236,9 @@ def validate_chat_request(
         prompt=validated_input.prompt,
         sampling_params=sampling,
         cache_hint=cache_hint,
+        tools=tuple(request.tools or ()),
+        tool_choice=request.tool_choice,
+        tools_in_prompt=validated_input.tools_in_prompt,
     )
     validate = getattr(engine, "validate_request", None)
     if validate is not None:
@@ -272,9 +263,7 @@ async def execute_chat(validated: ValidatedChatRequest) -> ExecutedChat:
         normalized_tool_choice=validated.input.normalized_tool_choice,
     )
     execution = ExecutedChat(response=response, result=result)
-    if not _tool_choice_is_satisfied(
-        response.choices, validated.input.normalized_tool_choice
-    ):
+    if not tool_choice_is_satisfied(response.choices, validated.input.normalized_tool_choice):
         raise ChatRequestError(
             "upstream model did not satisfy tool_choice",
             status_code=502,
@@ -381,9 +370,7 @@ def _wire_usage(
     )
     if isinstance(usage, GenerationUsage):
         details = (
-            PromptTokensDetails(cached_tokens=usage.cached_tokens)
-            if usage.cached_tokens
-            else None
+            PromptTokensDetails(cached_tokens=usage.cached_tokens) if usage.cached_tokens else None
         )
     elif isinstance(usage, Usage):
         details = usage.prompt_tokens_details
@@ -425,9 +412,7 @@ def completion_response(
     )
 
 
-def _tool_choice_is_satisfied(
-    choices: Sequence[Choice], tool_choice: NormalizedToolChoice
-) -> bool:
+def tool_choice_is_satisfied(choices: Sequence[Choice], tool_choice: NormalizedToolChoice) -> bool:
     if tool_choice.mode not in {"required", "named"}:
         return True
     return bool(choices) and all(choice.message.tool_calls for choice in choices)

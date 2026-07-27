@@ -13,13 +13,36 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 _TOY_VOCAB = 50_000
 _REPLACEMENT_CHAR = "�"
 # eos candidates probed when tokenizer_config.json is absent, most-specific first
 _COMMON_EOS_TOKENS = ("<|eot_id|>", "<|im_end|>", "<|endoftext|>", "</s>")
+GrammarVocabType = Literal["raw", "byte_fallback", "byte_level"]
+
+
+@dataclass(frozen=True)
+class GrammarVocabulary:
+    """Encoded tokenizer vocabulary plus the metadata xgrammar must decode with.
+
+    Hugging Face tokenizer vocabularies are not uniformly literal text:
+    byte-level BPE represents a space as ``Ġ`` and byte-fallback tokenizers use
+    strings such as ``<0x1B>``. Treating either as raw text can leave a valid
+    grammar with no legal tokens. ``vocab_size`` is the model lm-head width,
+    which may include padding ids absent from the tokenizer vocabulary.
+    """
+
+    encoded_vocab: list[str]
+    vocab_type: GrammarVocabType = "raw"
+    vocab_size: int | None = None
+    add_prefix_space: bool = False
+
+    def __post_init__(self) -> None:
+        if self.vocab_size is not None and self.vocab_size < 1:
+            raise ValueError("grammar vocabulary size must be positive")
 
 
 @runtime_checkable
@@ -96,10 +119,44 @@ def _import_tokenizers():
         import tokenizers
     except ImportError as error:  # pragma: no cover - exercised only without the dep
         raise RuntimeError(
-            "HF tokenizer support requires the 'tokenizers' package "
-            "(uv sync --extra hf)"
+            "HF tokenizer support requires the 'tokenizers' package (uv sync --extra hf)"
         ) from error
     return tokenizers
+
+
+def _nodes_with_type(value: object, wanted: str):
+    """Yield tokenizer.json nodes of ``wanted`` type, including sequences."""
+    if isinstance(value, dict):
+        if value.get("type") == wanted:
+            yield value
+        for child in value.values():
+            yield from _nodes_with_type(child, wanted)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _nodes_with_type(child, wanted)
+
+
+def _grammar_metadata(backend: dict) -> tuple[GrammarVocabType, bool]:
+    """Detect the public xgrammar vocabulary metadata from tokenizer.json."""
+    decoder = backend.get("decoder")
+    vocab_type: GrammarVocabType
+    if next(_nodes_with_type(decoder, "ByteLevel"), None) is not None:
+        vocab_type = "byte_level"
+    elif next(_nodes_with_type(decoder, "ByteFallback"), None) is not None:
+        vocab_type = "byte_fallback"
+    else:
+        vocab_type = "raw"
+
+    pre_tokenizer = backend.get("pre_tokenizer")
+    byte_level = next(_nodes_with_type(pre_tokenizer, "ByteLevel"), None)
+    if byte_level is not None:
+        add_prefix_space = bool(byte_level.get("add_prefix_space", False))
+    else:
+        metaspace = next(_nodes_with_type(pre_tokenizer, "Metaspace"), None)
+        add_prefix_space = (
+            metaspace is not None and metaspace.get("prepend_scheme", "always") != "never"
+        )
+    return vocab_type, add_prefix_space
 
 
 class HFTokenizer:
@@ -113,6 +170,9 @@ class HFTokenizer:
         tokenizers = _import_tokenizers()
         file, config = _locate_tokenizer_files(Path(path))
         self._tok = tokenizers.Tokenizer.from_file(str(file))
+        self._grammar_vocab_type, self._grammar_add_prefix_space = _grammar_metadata(
+            json.loads(self._tok.to_str())
+        )
         if eos_token is None and config is not None:
             eos_token = json.loads(config.read_text()).get("eos_token")
         self.eos_token_id = self._resolve_eos(eos_token)
@@ -141,6 +201,14 @@ class HFTokenizer:
                     table[token_id] = token
             self._vocab = table
         return self._vocab
+
+    def grammar_vocabulary(self) -> GrammarVocabulary:
+        """Return cached token strings with their tokenizer-native encoding."""
+        return GrammarVocabulary(
+            self.vocab(),
+            vocab_type=self._grammar_vocab_type,
+            add_prefix_space=self._grammar_add_prefix_space,
+        )
 
     def new_decode_stream(self) -> TokenDecodeStream | None:
         """Use the Rust tokenizer's stateful decoder when the version supports it.
@@ -197,6 +265,29 @@ def resolve_tokenizer(tokenizer: str | Tokenizer) -> Tokenizer:
         raise
     except Exception as error:
         raise ValueError(f"could not load tokenizer from {tokenizer!r}: {error}") from error
+
+
+def grammar_vocabulary(
+    tokenizer: Tokenizer,
+    *,
+    model_vocab_size: int | None = None,
+) -> GrammarVocabulary:
+    """Build xgrammar input while preserving legacy/custom tokenizer support."""
+    factory = getattr(tokenizer, "grammar_vocabulary", None)
+    if callable(factory):
+        vocabulary = factory()
+        if not isinstance(vocabulary, GrammarVocabulary):
+            raise TypeError("grammar_vocabulary() must return GrammarVocabulary")
+    else:
+        vocabulary = GrammarVocabulary(tokenizer.vocab())
+    if model_vocab_size is not None:
+        if len(vocabulary.encoded_vocab) > model_vocab_size:
+            raise ValueError(
+                f"tokenizer vocab ({len(vocabulary.encoded_vocab)}) exceeds the "
+                f"model's vocab_size ({model_vocab_size})"
+            )
+        vocabulary = replace(vocabulary, vocab_size=model_vocab_size)
+    return vocabulary
 
 
 class IncrementalDetokenizer:

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kairyu.engine.core.step_input import StateSync, StepDelta
+from kairyu.engine.tokenizer import GrammarVocabulary
 
 _SHUTDOWN = None
 
@@ -184,8 +185,7 @@ def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
         # one rank per device: overcommitting would put two shards on one GPU
         # and silently halve the memory each expects
         raise RuntimeError(
-            f"tensor_parallel_size={tp} needs {tp} CUDA devices; "
-            f"found {profile.device_count}"
+            f"tensor_parallel_size={tp} needs {tp} CUDA devices; found {profile.device_count}"
         )
     # gloo would move every RowParallelLinear all_reduce through host memory
     return TPPlacement(f"cuda:{rank}", torch.bfloat16, "nccl")
@@ -243,9 +243,7 @@ def serving_group(backend: str, *, timeout_s: float = _SERVE_OP_TIMEOUT_S):
 
     import torch.distributed as dist
 
-    return dist.new_group(
-        timeout=timedelta(seconds=timeout_s), backend=backend
-    )
+    return dist.new_group(timeout=timedelta(seconds=timeout_s), backend=backend)
 
 
 def serving_groups(
@@ -273,7 +271,7 @@ def build_tp_runner(
     comm,
     num_pages: int,
     page_size: int,
-    vocab: list[str],
+    vocab: list[str] | GrammarVocabulary,
     placement: TPPlacement | None = None,
     graph_scratch_page: int | None = None,
     graph_max_batch: int = 0,
@@ -316,7 +314,9 @@ def build_tp_runner(
         dtype=placement.dtype,
         device=placement.device,
     )
-    vocab_table = list(vocab)
+    grammar_vocab = (
+        vocab if isinstance(vocab, GrammarVocabulary) else GrammarVocabulary(list(vocab))
+    )
     graph_options = {}
     if graph_scratch_page is not None:
         from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
@@ -330,15 +330,20 @@ def build_tp_runner(
     runner = PagedModelRunner(
         model,
         pool,
-        sampler=Sampler(vocab_provider=lambda: vocab_table),
+        sampler=Sampler(vocab_provider=lambda: grammar_vocab),
         **graph_options,
     )
     return runner, full_config
 
 
 def _tp_worker_entry(
-    spawn_index: int, world_size: int, init_file: str,
-    model_dir: str, num_pages: int, page_size: int, vocab: list[str],
+    spawn_index: int,
+    world_size: int,
+    init_file: str,
+    model_dir: str,
+    num_pages: int,
+    page_size: int,
+    vocab: list[str] | GrammarVocabulary,
     force_cpu: bool = False,
     graph_scratch_page: int | None = None,
     graph_max_batch: int = 0,
@@ -389,9 +394,7 @@ def _tp_worker_entry(
     handshake = startup_comm.broadcast(None, src=0)
     validate_handshake(handshake, model_dir, num_pages, page_size)
     groups = serving_groups(placement.backend)
-    comm.bind(
-        TorchDistCommunicator(group=groups.model, device=placement.device)
-    )
+    comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
     control_comm = TorchDistCommunicator(group=groups.control)
     try:
         worker_step_loop(control_comm, runner)
@@ -428,7 +431,7 @@ class DistTPLauncher:
         tp: int,
         num_pages: int,
         page_size: int,
-        vocab: list[str],
+        vocab: list[str] | GrammarVocabulary,
         force_cpu: bool = False,
         graph_scratch_page: int | None = None,
         graph_max_batch: int = 0,
@@ -508,11 +511,7 @@ class DistTPLauncher:
             # operational groups.  Python state deltas stay on gloo; the model
             # wrappers use only the tensor/NCCL group.
             groups = serving_groups(placement.backend)
-            self._comm.bind(
-                TorchDistCommunicator(
-                    group=groups.model, device=placement.device
-                )
-            )
+            self._comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
             self._control_comm = TorchDistCommunicator(group=groups.control)
             self.runner = DistTPModelRunner(self._control_comm, runner)
         except BaseException:
@@ -584,9 +583,7 @@ class DistTPLauncher:
         token. Cheap enough for `/readyz`: `is_alive()` is a waitpid, no IPC.
         """
         return tuple(
-            index + 1
-            for index, process in enumerate(self._ctx.processes)
-            if not process.is_alive()
+            index + 1 for index, process in enumerate(self._ctx.processes) if not process.is_alive()
         )
 
     def failure_type(self) -> str | None:

@@ -38,6 +38,7 @@ def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
         raise UpstreamClientError(message, status_code)
     raise RuntimeError(message)
 
+
 _DEFAULT_TIMEOUT_S = 60.0
 _SSE_DATA_PREFIX = "data:"
 _SSE_DONE = "[DONE]"
@@ -68,6 +69,38 @@ def _token_logprob(raw: dict) -> TokenLogprob:
     )
 
 
+def _message_text(message: Mapping[str, object]) -> str:
+    """Preserve native OpenAI tool calls in Kairyu's backend-neutral text form."""
+
+    text = message.get("content")
+    parts = [text] if isinstance(text, str) and text else []
+    for call in message.get("tool_calls") or ():
+        if not isinstance(call, Mapping):
+            continue
+        function = call.get("function")
+        if not isinstance(function, Mapping):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = function.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                pass
+        parts.append(
+            "<tool_call>"
+            + json.dumps(
+                {"name": name, "arguments": arguments},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "</tool_call>"
+        )
+    return "".join(parts)
+
+
 def _validated_extra_args(params: SamplingParams) -> Mapping[str, object]:
     unsupported: list[str] = []
     if params.best_of is not None:
@@ -92,9 +125,7 @@ def _validated_extra_args(params: SamplingParams) -> Mapping[str, object]:
         unsupported.append("extra_args")
         extra_args = {}
     else:
-        unsupported.extend(
-            f"extra_args.{key}" for key in extra_args if key != "response_format"
-        )
+        unsupported.extend(f"extra_args.{key}" for key in extra_args if key != "response_format")
     if unsupported:
         fields = ", ".join(unsupported)
         raise UpstreamClientError(
@@ -169,9 +200,7 @@ class OpenAICompatBackend:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                timeout=self._timeout_s, transport=self._transport
-            )
+            self._client = httpx.AsyncClient(timeout=self._timeout_s, transport=self._transport)
         return self._client
 
     def _payload(self, request: GenerationRequest) -> dict:
@@ -201,6 +230,10 @@ class OpenAICompatBackend:
             payload["top_logprobs"] = params.logprobs
         if "response_format" in extra_args:
             payload["response_format"] = extra_args["response_format"]
+        if request.tools:
+            payload["tools"] = list(request.tools)
+            if request.tool_choice is not None:
+                payload["tool_choice"] = request.tool_choice
         return payload
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
@@ -224,14 +257,12 @@ class OpenAICompatBackend:
         for i, choice in enumerate(choices):
             raw_content = (choice.get("logprobs") or {}).get("content")
             logprob_content = (
-                None
-                if raw_content is None
-                else tuple(_token_logprob(item) for item in raw_content)
+                None if raw_content is None else tuple(_token_logprob(item) for item in raw_content)
             )
             completions_list.append(
                 CompletionOutput(
                     index=choice.get("index", i),
-                    text=choice["message"]["content"] or "",
+                    text=_message_text(choice["message"]),
                     token_ids=token_ids,
                     cumulative_logprob=(
                         None
@@ -258,6 +289,7 @@ class OpenAICompatBackend:
         texts: dict[int, str],
         finish: dict[int, str],
         deltas_seen: dict[int, int],
+        logprobs: dict[int, list[TokenLogprob]],
         finished: bool,
         usage: GenerationUsage | None = None,
     ) -> GenerationResult:
@@ -265,12 +297,14 @@ class OpenAICompatBackend:
             CompletionOutput(
                 index=index,
                 text=texts.get(index, ""),
-                token_ids=(
-                    tuple(range(deltas_seen.get(index, 0))) if finished else ()
-                ),
+                token_ids=(tuple(range(deltas_seen.get(index, 0))) if finished else ()),
                 finish_reason=finish.get(index, "stop") if finished else None,
+                cumulative_logprob=(
+                    sum(item.logprob for item in logprobs[index]) if index in logprobs else None
+                ),
+                logprob_content=(tuple(logprobs[index]) if index in logprobs else None),
             )
-            for index in sorted(texts.keys() | finish.keys())
+            for index in sorted(texts.keys() | finish.keys() | logprobs.keys())
         )
         return GenerationResult(
             request_id=request.request_id,
@@ -297,6 +331,7 @@ class OpenAICompatBackend:
             texts: dict[int, str] = {}
             finish: dict[int, str] = {}
             deltas_seen: dict[int, int] = {}
+            logprobs: dict[int, list[TokenLogprob]] = {}
             usage: GenerationUsage | None = None
             async for line in response.aiter_lines():
                 if not line.startswith(_SSE_DATA_PREFIX):
@@ -318,11 +353,32 @@ class OpenAICompatBackend:
                         changed = True
                     if choice.get("finish_reason"):
                         finish[index] = choice["finish_reason"]
+                    raw_logprobs = (choice.get("logprobs") or {}).get("content")
+                    if raw_logprobs:
+                        logprobs.setdefault(index, []).extend(
+                            _token_logprob(item) for item in raw_logprobs
+                        )
+                        changed = True
                 if changed:
-                    yield self._partial(request, texts, finish, deltas_seen, finished=False)
+                    yield self._partial(
+                        request,
+                        texts,
+                        finish,
+                        deltas_seen,
+                        logprobs,
+                        finished=False,
+                    )
         if not texts and not finish:
             raise RuntimeError(f"backend {self._base_url} streamed no choices")
-        yield self._partial(request, texts, finish, deltas_seen, finished=True, usage=usage)
+        yield self._partial(
+            request,
+            texts,
+            finish,
+            deltas_seen,
+            logprobs,
+            finished=True,
+            usage=usage,
+        )
 
     async def shutdown(self) -> None:
         if self._client is not None and not self._client.is_closed:

@@ -1,6 +1,7 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Implemented** (2026-07-03; D1/D2/D3/D6 amended 2026-07-27). Reviewed
+Status: **Implemented** (2026-07-03; D1/D2 amended 2026-07-28;
+D3/D6 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
 Milestone: M11 (roadmap P-B/P-C + F5 CPU halves; goal G6)
@@ -60,6 +61,40 @@ responses while retaining the legacy field/comment. Partial failures return
 known usage and typed failure events, never raw exception messages, prompts,
 or generated intermediate text.
 
+**OpenAI request-intent amendment (2026-07-28, issue #208).** L3 validates and
+normalizes the wire request once into an immutable `OrchestrationRequest`
+(rendered prompt, `SamplingParams`, tools/tool choice, whether the template
+already rendered tools, and response format). L2 derives stage-local execution
+values without mutating the shared `Orchestrator`: scalar sampling, stop,
+and seed intent reach every stage; private planner/verifier/proposal stages
+force `n=1`, cap work at `min(public max_tokens, internal policy)`, and omit
+logprob reporting, native tools, and response grammar. Only the direct call,
+selected final worker, or MoA synthesis receives the complete public
+max-tokens/`n`/logprobs/tools/response-format intent. MoA proposal seeds are
+deterministically derived from the request seed and proposal index. This
+final-boundary policy avoids multiplying every private stage by `n` or forcing
+planner text through the user's output schema.
+
+The private max-token cap is an explicit orchestration policy (1024 by default
+and visible through `/routing`), not silent loss of the public answer limit. A
+Qwen3-32B TP8 A/B rejected uncapped propagation after one Conductor stage ran
+76.44 s and a MoA proposal exceeded the upstream 60 s timeout, failing the
+fixed quality gate with 502. The bounded policy leaves the final 8192-token
+allowance unchanged and completes the same gate.
+
+Typed final events retain cumulative `CompletionOutput` choices, so unary and
+SSE preserve every choice index, finish/stop reason, cumulative logprob, and
+token logprob exactly once. Tool-enabled streams buffer until every final
+choice passes required/named choice enforcement because an invalid provisional
+tool delta cannot be retracted. Prompt-only engines get one generic tool-schema
+instruction when the HF template did not render tools; OpenAI-compatible
+engines receive native schemas and choice, and their native `message.tool_calls`
+are normalized into Kairyu's existing final parser boundary. A configured
+final-role post-verifier still rejects `n>1` before dispatch because it cannot
+truthfully verify every sibling; an engine that declares `supports_n=False`
+does likewise. These are capability-specific 400s, replacing the former
+blanket AUTO rejection.
+
 ### D2 — Tiered auto models
 
 `create_app(orchestrators: dict[str, Orchestrator])` (back-compat shim for
@@ -78,8 +113,21 @@ to `multi_agent`, max scored 2/8 versus standard 0/8. Max also consumed 32
 internal calls, 33,573 input + 12,186 output tokens, and 1,549.6 allocated
 GPU-seconds versus standard's 44 calls, 47,152 + 13,217 tokens, and 2,602.8
 GPU-seconds. This small fixed subset closes the product gate but is not a
-full-suite accuracy claim; the raw per-item evidence records that issue #208
-still prevents request sampling parameters from reaching AUTO internals.
+full-suite accuracy claim; that dated raw artifact records the then-open issue
+#208 sampling caveat.
+
+**Request-intent revalidation (2026-07-28, issue #208).** The identical TP8
+deployment and fixed slice were rerun after request propagation. Twelve
+alternating pairs measured standard/direct TTFT at 1.0123x p50 and 0.7666x
+p99. With public `temperature=0` and final `max_tokens=8192`, max scored 3/8
+versus standard 1/8. Max used 32 calls, 34,038 input + 13,228 output tokens,
+and 1,499.274 allocated GPU-seconds; standard used 38 calls, 37,803 + 12,701
+tokens, and 2,567.389 GPU-seconds. The selected 1024-token private cap also
+outperformed the uncapped interpretation operationally: the latter exceeded
+an internal 60 s backend timeout and returned 502 on item `abc382_g`, while the
+bounded run completed that same Max item in 47.68 s and passed the full gate.
+The 0.25 quality delta is preserved with no effective-sampling caveat in
+`bench/results/tiered-auto-qwen3-32b-tp8-2026-07-28.json`.
 
 ### D3 — Tenancy v1
 
@@ -197,6 +245,11 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 - AUTO accounting matrix: direct/Conductor/MoA × unary/stream reconciles
   `orchestration_input/output_tokens` to recorded internal calls; retry,
   fallback, partial-failure, cancellation, and privacy cases are fixed tests.
+- AUTO request parity: direct, Conductor, and MoA unary/stream preserve scalar
+  sampling, deterministic `n`, choice-scoped logprobs, tools/tool choice, and
+  final-boundary JSON schema intent; concurrent requests do not share mutable
+  intent. Qwen3-32B TP8 evidence covers schema-valid `n=2` with logprobs,
+  required named tools, and a healthy post-request plain generation.
 - Tiered AUTO production gate: both named tiers appear beside Qwen3-32B in
   `/v1/models`; paired direct-route TTFT stays <=1.5x and the fixed,
   sandbox-scored multi-agent quality slice is a strict auto-max win with call,

@@ -36,6 +36,7 @@ from kairyu.engine.core.sampling_types import (
     stable_request_seed,
 )
 from kairyu.engine.core.structured import XGrammarEnforcer
+from kairyu.engine.tokenizer import GrammarVocabulary
 
 
 @dataclass(frozen=True)
@@ -99,59 +100,33 @@ class _IncrementalPenaltyState:
         self.committed: list[int] = []
         self.pending: tuple[int | torch.Tensor, ...] = ()
         self.history_epoch: int | None = None
-        self._cpu_prompt_ids: set[int] | None = (
-            set() if device.type == "cpu" else None
-        )
-        self._cpu_output_ref_counts: dict[int, int] | None = (
-            {} if device.type == "cpu" else None
-        )
-        self._cpu_output_positions: dict[int, int] | None = (
-            {} if device.type == "cpu" else None
-        )
-        self._cpu_repetition_positions: dict[int, int] | None = (
-            {} if device.type == "cpu" else None
-        )
+        self._cpu_prompt_ids: set[int] | None = set() if device.type == "cpu" else None
+        self._cpu_output_ref_counts: dict[int, int] | None = {} if device.type == "cpu" else None
+        self._cpu_output_positions: dict[int, int] | None = {} if device.type == "cpu" else None
+        self._cpu_repetition_positions: dict[int, int] | None = {} if device.type == "cpu" else None
         self._cpu_repetition_indices: torch.Tensor | None = (
-            torch.empty(8, dtype=torch.long)
-            if device.type == "cpu"
-            else None
+            torch.empty(8, dtype=torch.long) if device.type == "cpu" else None
         )
         self._cpu_output_indices: torch.Tensor | None = (
-            torch.empty(8, dtype=torch.long)
-            if device.type == "cpu"
-            else None
+            torch.empty(8, dtype=torch.long) if device.type == "cpu" else None
         )
         self._cpu_repetition_len = 0
         self._cpu_output_len = 0
         self._cpu_indices_initialized = False
-        self.prompt_seen = torch.zeros(
-            vocab_size, dtype=torch.bool, device=device
-        )
-        self.repetition_seen = torch.zeros(
-            vocab_size, dtype=torch.bool, device=device
-        )
-        self.output_counts = torch.zeros(
-            vocab_size, dtype=torch.float32, device=device
-        )
-        self.output_seen = torch.zeros(
-            vocab_size, dtype=torch.bool, device=device
-        )
+        self.prompt_seen = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        self.repetition_seen = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        self.output_counts = torch.zeros(vocab_size, dtype=torch.float32, device=device)
+        self.output_seen = torch.zeros(vocab_size, dtype=torch.bool, device=device)
 
-    def _indices(
-        self, tokens: Sequence[int | torch.Tensor]
-    ) -> tuple[torch.Tensor, ...]:
+    def _indices(self, tokens: Sequence[int | torch.Tensor]) -> tuple[torch.Tensor, ...]:
         host = [token for token in tokens if not isinstance(token, torch.Tensor)]
         device = [token for token in tokens if isinstance(token, torch.Tensor)]
         batches: list[torch.Tensor] = []
         if host:
-            batches.append(
-                torch.as_tensor(host, dtype=torch.long, device=self.device)
-            )
+            batches.append(torch.as_tensor(host, dtype=torch.long, device=self.device))
         if device:
             if len(device) == 1:
-                batches.append(
-                    device[0].to(device=self.device, dtype=torch.long).reshape(1)
-                )
+                batches.append(device[0].to(device=self.device, dtype=torch.long).reshape(1))
             else:
                 batches.append(
                     torch.stack(
@@ -236,19 +211,13 @@ class _IncrementalPenaltyState:
             assert self._cpu_output_ref_counts is not None
             cpu_token_ids = []
             for token in tokens:
-                token_id = (
-                    int(token.item())
-                    if isinstance(token, torch.Tensor)
-                    else int(token)
-                )
+                token_id = int(token.item()) if isinstance(token, torch.Tensor) else int(token)
                 cpu_token_ids.append(token_id)
                 if output:
                     old_count = self._cpu_output_ref_counts.get(token_id, 0)
                     count = old_count + delta
                     if count < 0:
-                        raise AssertionError(
-                            "sampler output count became negative"
-                        )
+                        raise AssertionError("sampler output count became negative")
                     if count:
                         self._cpu_output_ref_counts[token_id] = count
                     else:
@@ -270,9 +239,7 @@ class _IncrementalPenaltyState:
                     if output:
                         self.output_counts[token_id] = float(count)
                         self.output_seen[token_id] = count > 0
-                    self.repetition_seen[token_id] = (
-                        token_id in self._cpu_prompt_ids or count > 0
-                    )
+                    self.repetition_seen[token_id] = token_id in self._cpu_prompt_ids or count > 0
                     if not output:
                         self.prompt_seen[token_id] = True
                 return
@@ -336,24 +303,16 @@ class _IncrementalPenaltyState:
         assert self._cpu_repetition_positions is not None
         if not self._cpu_indices_initialized:
             output = self._cpu_output_indices[: self._cpu_output_len]
-            repetition = self._cpu_repetition_indices[
-                : self._cpu_repetition_len
-            ]
+            repetition = self._cpu_repetition_indices[: self._cpu_repetition_len]
             output.copy_(torch.sort(output).values)
             repetition.copy_(torch.sort(repetition).values)
             self._cpu_output_positions.clear()
             self._cpu_output_positions.update(
-                {
-                    int(token): index
-                    for index, token in enumerate(output.tolist())
-                }
+                {int(token): index for index, token in enumerate(output.tolist())}
             )
             self._cpu_repetition_positions.clear()
             self._cpu_repetition_positions.update(
-                {
-                    int(token): index
-                    for index, token in enumerate(repetition.tolist())
-                }
+                {int(token): index for index, token in enumerate(repetition.tolist())}
             )
             self._cpu_indices_initialized = True
         return (
@@ -403,10 +362,7 @@ class _IncrementalPenaltyState:
                 # for an actual rollback.
                 common = 0
                 limit = min(old_length, new_length)
-                while (
-                    common < limit
-                    and self.committed[common] == outputs[common]
-                ):
+                while common < limit and self.committed[common] == outputs[common]:
                     common += 1
 
             if common < old_length:
@@ -453,12 +409,9 @@ class _IncrementalPenaltyState:
         pending = tuple(pending_outputs)
         common_pending = 0
         limit = min(len(self.pending), len(pending))
-        while (
-            common_pending < limit
-            and self._same_pending(
-                self.pending[common_pending],
-                pending[common_pending],
-            )
+        while common_pending < limit and self._same_pending(
+            self.pending[common_pending],
+            pending[common_pending],
         ):
             common_pending += 1
         self._change(self.pending[common_pending:], -1, output=True)
@@ -471,13 +424,8 @@ class _IncrementalPenaltyState:
         sampling: EngineSampling,
     ) -> None:
         if logits.device.type == "cpu":
-            repetition_indices, output_indices = (
-                self._cpu_active_indices()
-            )
-            if (
-                sampling.repetition_penalty != 1.0
-                and repetition_indices.numel()
-            ):
+            repetition_indices, output_indices = self._cpu_active_indices()
+            if sampling.repetition_penalty != 1.0 and repetition_indices.numel():
                 values = logits[repetition_indices]
                 logits[repetition_indices] = torch.where(
                     values > 0,
@@ -487,10 +435,7 @@ class _IncrementalPenaltyState:
             if output_indices.numel():
                 values = logits[output_indices]
                 if sampling.frequency_penalty != 0.0:
-                    values.sub_(
-                        sampling.frequency_penalty
-                        * self.output_counts[output_indices]
-                    )
+                    values.sub_(sampling.frequency_penalty * self.output_counts[output_indices])
                 if sampling.presence_penalty != 0.0:
                     values.sub_(sampling.presence_penalty)
                 logits[output_indices] = values
@@ -510,14 +455,9 @@ class _IncrementalPenaltyState:
             )
         if self.committed or self.pending:
             if sampling.frequency_penalty != 0.0:
-                logits.sub_(
-                    sampling.frequency_penalty * self.output_counts
-                )
+                logits.sub_(sampling.frequency_penalty * self.output_counts)
             if sampling.presence_penalty != 0.0:
-                logits.sub_(
-                    sampling.presence_penalty
-                    * self.output_seen.to(logits.dtype)
-                )
+                logits.sub_(sampling.presence_penalty * self.output_seen.to(logits.dtype))
 
 
 class _RequestSamplerState:
@@ -532,9 +472,7 @@ class _RequestSamplerState:
         self.base_seed = base_seed
         self.enforcer = enforcer
         self.accepted_position = -1
-        self.penalty_states: dict[
-            tuple[str, int | None, int], _IncrementalPenaltyState
-        ] = {}
+        self.penalty_states: dict[tuple[str, int | None, int], _IncrementalPenaltyState] = {}
 
 
 class Sampler:
@@ -546,7 +484,10 @@ class Sampler:
     scalars; penalty-active state lazily owns one vocabulary-sized row.
     """
 
-    def __init__(self, vocab_provider: Callable[[], list[str]] | None = None) -> None:
+    def __init__(
+        self,
+        vocab_provider: Callable[[], list[str] | GrammarVocabulary] | None = None,
+    ) -> None:
         self._vocab_provider = vocab_provider
         self._states: dict[str, _RequestSamplerState] = {}
 
@@ -561,9 +502,7 @@ class Sampler:
             enforcer = None
             if sampling.needs_grammar:
                 if self._vocab_provider is None:
-                    raise RuntimeError(
-                        "structured output requires a Sampler with a vocab_provider"
-                    )
+                    raise RuntimeError("structured output requires a Sampler with a vocab_provider")
                 if eos_token_id is None:
                     raise RuntimeError(
                         "structured output requires an eos token id — a completed "
@@ -767,9 +706,7 @@ class Sampler:
         if sampling.temperature == 0.0:
             token_id = torch.argmax(work).to(dtype=torch.int64)
         else:
-            token_id = self._sample_scaled_device(
-                work, sampling, state.base_seed, position
-            )
+            token_id = self._sample_scaled_device(work, sampling, state.base_seed, position)
 
         logprob = None
         top_indices = None
@@ -806,10 +743,7 @@ class Sampler:
         if sampling.top_p < 1.0:
             sorted_probs, sorted_idx = torch.sort(probs, descending=True)
             cumulative = torch.cumsum(sorted_probs, dim=-1)
-            cut = (
-                cumulative - sorted_probs
-                >= sampling.top_p * cumulative[-1].clamp(min=1e-12)
-            )
+            cut = cumulative - sorted_probs >= sampling.top_p * cumulative[-1].clamp(min=1e-12)
             sorted_probs = sorted_probs.masked_fill(cut, 0.0)
             probs = torch.zeros_like(probs).scatter(-1, sorted_idx, sorted_probs)
 

@@ -24,6 +24,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    prompt_with_tool_intent,
 )
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.pd_loop import PDLoopAdapter
@@ -34,7 +35,11 @@ from kairyu.engine.core.spec_runner import SpeculativeRunner
 from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
 from kairyu.engine.engine_loop import EngineLoop, StreamUpdate
 from kairyu.engine.registry import register_backend
-from kairyu.engine.tokenizer import Tokenizer, resolve_tokenizer
+from kairyu.engine.tokenizer import (
+    Tokenizer,
+    grammar_vocabulary,
+    resolve_tokenizer,
+)
 from kairyu.outputs import CompletionOutput
 
 _VOCAB_SIZE = 50_000
@@ -98,9 +103,7 @@ def build_engine_loop(
         if model_path is None:
             raise ValueError("decode_mode='cuda_graph' needs a real model_path")
         if cuda_graph_max_batch < 1 or cuda_graph_max_pages < 1:
-            raise ValueError(
-                "cuda_graph_max_batch and cuda_graph_max_pages must be >= 1"
-            )
+            raise ValueError("cuda_graph_max_batch and cuda_graph_max_pages must be >= 1")
         if cuda_graph_warmup_iters < 0:
             raise ValueError("cuda_graph_warmup_iters must be >= 0")
         if num_pages < 2:
@@ -118,9 +121,7 @@ def build_engine_loop(
         if tensor_parallel_size > 1:
             # the coordinator owns two engines; sharding each of them is m6
             # stage 5.3 territory, not something to half-do here
-            raise ValueError(
-                "pd_separation with tensor_parallel_size > 1 is not supported"
-            )
+            raise ValueError("pd_separation with tensor_parallel_size > 1 is not supported")
         if speculative is not None:
             raise ValueError("pd_separation with speculative decoding is not supported")
         if graph_decode:
@@ -196,6 +197,7 @@ def build_engine_loop(
                 f"tokenizer vocab ({vocab_size}) exceeds the model's vocab_size "
                 f"({model_config.vocab_size})"
             )
+        grammar_vocab = grammar_vocabulary(resolved, model_vocab_size=model_config.vocab_size)
     else:
         resolved = resolve_tokenizer(tokenizer if tokenizer is not None else "toy")
 
@@ -219,16 +221,14 @@ def build_engine_loop(
             from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
 
             graph_options = {
-                "graph_backend": CudaGraphBackend(
-                    warmup_iters=cuda_graph_warmup_iters
-                ),
+                "graph_backend": CudaGraphBackend(warmup_iters=cuda_graph_warmup_iters),
                 "graph_max_batch": cuda_graph_max_batch,
                 "graph_max_pages": cuda_graph_max_pages,
             }
         runner = PagedModelRunner(
             model,
             pool,
-            sampler=Sampler(vocab_provider=resolved.vocab),
+            sampler=Sampler(vocab_provider=lambda: grammar_vocab),
             cache=cache,
             **graph_options,
         )
@@ -332,15 +332,9 @@ def _build_dist_tp_loop(
     from kairyu.models.loader import load_generation_defaults
 
     resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
-    vocab = list(resolved.vocab())
     raw_config = json.loads((Path(model_path) / "config.json").read_text())
     model_vocab_size = int(raw_config["vocab_size"])
-    if len(vocab) > model_vocab_size:
-        raise ValueError(
-            f"tokenizer vocab ({len(vocab)}) exceeds the model's vocab_size "
-            f"({model_vocab_size})"
-        )
-    vocab.extend("" for _ in range(model_vocab_size - len(vocab)))
+    grammar_vocab = grammar_vocabulary(resolved, model_vocab_size=model_vocab_size)
     cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(
         cache,
@@ -354,7 +348,7 @@ def _build_dist_tp_loop(
         tensor_parallel_size,
         num_pages,
         page_size,
-        vocab=vocab,
+        vocab=grammar_vocab,
         graph_scratch_page=graph_scratch_page,
         graph_max_batch=graph_max_batch,
         graph_max_pages=graph_max_pages,
@@ -542,16 +536,18 @@ class KairyuBackend:
         if self._queues.get(request_id) is queue:
             del self._queues[request_id]
 
-    def _submit(
-        self, request: GenerationRequest, *, pre_reserved: bool = False
-    ) -> asyncio.Queue:
+    def _submit(self, request: GenerationRequest, *, pre_reserved: bool = False) -> asyncio.Queue:
         request_id = request.request_id
         if not pre_reserved:
             self._reserve_request_ids((request_id,))
         submitted = False
         queue: asyncio.Queue | None = None
         try:
-            self._loop.submit(request_id, request.prompt, request.sampling_params)
+            self._loop.submit(
+                request_id,
+                prompt_with_tool_intent(request),
+                request.sampling_params,
+            )
             submitted = True
             queue = asyncio.Queue()
             self._queues[request_id] = queue
@@ -608,6 +604,9 @@ class KairyuBackend:
                     prompt=request.prompt,
                     sampling_params=params.clone(n=1, seed=seed),
                     cache_hint=request.cache_hint,
+                    tools=request.tools,
+                    tool_choice=request.tool_choice,
+                    tools_in_prompt=request.tools_in_prompt,
                 )
             )
         return subs
@@ -678,8 +677,7 @@ class KairyuBackend:
         tasks: list[asyncio.Task] = []
         try:
             tasks = [
-                asyncio.create_task(self._generate_one(sub, pre_reserved=True))
-                for sub in subs
+                asyncio.create_task(self._generate_one(sub, pre_reserved=True)) for sub in subs
             ]
             results = await asyncio.gather(*tasks)
         except BaseException:
@@ -706,9 +704,7 @@ class KairyuBackend:
         }
         return self._merged(request, latest, finished=True)
 
-    async def _stream_one(
-        self, request: GenerationRequest
-    ) -> AsyncIterator[GenerationResult]:
+    async def _stream_one(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         queue = self._submit(request)
         emitted = -1
         finished_cleanly = False
@@ -751,14 +747,9 @@ class KairyuBackend:
         try:
             for index, sub in enumerate(subs):
                 queues[index] = self._submit(sub, pre_reserved=True)
-            pending = {
-                index: asyncio.ensure_future(queue.get())
-                for index, queue in queues.items()
-            }
+            pending = {index: asyncio.ensure_future(queue.get()) for index, queue in queues.items()}
             while len(finished) < len(subs):
-                done, _ = await asyncio.wait(
-                    pending.values(), return_when=asyncio.FIRST_COMPLETED
-                )
+                done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED)
                 for index in list(pending):
                     task = pending[index]
                     if task not in done:

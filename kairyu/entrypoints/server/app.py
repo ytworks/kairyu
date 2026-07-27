@@ -32,6 +32,7 @@ from kairyu.entrypoints.server.chat_service import (
     completion_response,
     execute_chat,
     sampling_params_from,
+    tool_choice_is_satisfied,
     validate_chat_input,
     validate_chat_request,
 )
@@ -89,6 +90,7 @@ from kairyu.orchestration.orchestrator import (
     PreviewNotSupportedError,
 )
 from kairyu.orchestration.replica import ReplicaPool
+from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.outputs import CompletionOutput
 from kairyu.pricing import InvoiceExportError, PriceSheet, export_invoice_csv
 from kairyu.sampling_params import SamplingParams
@@ -181,9 +183,7 @@ def _validate_generation_request(
     return None
 
 
-def _stream_usage_owner(
-    http_request: Request, model: str, prompt: str
-) -> StreamUsageOwner:
+def _stream_usage_owner(http_request: Request, model: str, prompt: str) -> StreamUsageOwner:
     tenant = getattr(http_request.state, "tenant", None) or "default"
     return stream_usage_owner_from_state(
         http_request.app.state,
@@ -194,18 +194,22 @@ def _stream_usage_owner(
 
 
 def _sse_chunk(
-    response_id: str, created: int, model: str, index: int, delta: ChunkDelta,
-    finish_reason: str | None = None, include_usage: bool = False,
-    usage: Usage | None = None, logprobs: ChoiceLogprobs | None = None,
+    response_id: str,
+    created: int,
+    model: str,
+    index: int,
+    delta: ChunkDelta,
+    finish_reason: str | None = None,
+    include_usage: bool = False,
+    usage: Usage | None = None,
+    logprobs: ChoiceLogprobs | None = None,
 ) -> str:
     payload = ChatCompletionChunk(
         id=response_id,
         created=created,
         model=model,
         choices=[
-            ChunkChoice(
-                index=index, delta=delta, finish_reason=finish_reason, logprobs=logprobs
-            )
+            ChunkChoice(index=index, delta=delta, finish_reason=finish_reason, logprobs=logprobs)
         ],
         usage=usage,
     )
@@ -284,7 +288,7 @@ async def _stream_engine(
                 last = partial
                 owner.observe(partial.usage, partial.completions)
                 for completion in partial.completions:
-                    delta_text = completion.text[sent.get(completion.index, 0):]
+                    delta_text = completion.text[sent.get(completion.index, 0) :]
                     if not delta_text and not partial.finished:
                         continue
                     is_first = completion.index not in sent
@@ -297,7 +301,10 @@ async def _stream_engine(
                         if fresh:
                             chunk_logprobs = ChoiceLogprobs(content=_logprob_entries(fresh))
                     yield _sse_chunk(
-                        response_id, created, model, completion.index,
+                        response_id,
+                        created,
+                        model,
+                        completion.index,
                         ChunkDelta(
                             role="assistant" if is_first else None,
                             content=delta_text,
@@ -318,13 +325,19 @@ async def _stream_engine(
             return
         for completion in last.completions if last else ():
             yield _sse_chunk(
-                response_id, created, model, completion.index, ChunkDelta(),
+                response_id,
+                created,
+                model,
+                completion.index,
+                ChunkDelta(),
                 finish_reason=completion.finish_reason or "stop",
                 include_usage=include_usage,
             )
         if include_usage and last is not None:
             yield _usage_chunk(
-                response_id, created, model,
+                response_id,
+                created,
+                model,
                 _wire_usage(
                     generation_request.prompt,
                     last.completions,
@@ -337,30 +350,76 @@ async def _stream_engine(
 
 
 async def _stream_orchestrator(
-    orchestrator, prompt: str, request: ChatCompletionRequest,
-    include_usage: bool, want_trace: bool, http_request: Request,
+    orchestrator,
+    call: OrchestrationRequest | str,
+    request: ChatCompletionRequest,
+    include_usage: bool,
+    want_trace: bool,
+    http_request: Request,
 ) -> AsyncIterator[str]:
     """AUTO-model SSE (m11 D1/A2): status keep-alives ride SSE COMMENT lines
     (the OpenAI SDK parses every data: payload as a chunk), deltas and the
     final chunk are standard chat chunks."""
+    if isinstance(call, str):
+        call = OrchestrationRequest(
+            prompt=call,
+            sampling_params=sampling_params_from(request),
+            tools=tuple(request.tools or ()),
+            tool_choice=request.tool_choice,
+            response_format=request.response_format,
+        )
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
     first = True
+    sent: dict[int, int] = {}
+    logprobs_sent: dict[int, int] = {}
     final_result = None
     completion_text = ""
     completions: tuple[CompletionOutput, ...] = ()
     reported_usage: GenerationUsage | None = None
     terminal_error_type: str | None = None
+    prompt = call.prompt
     owner = _stream_usage_owner(http_request, request.model, prompt)
 
     def observe_internal_usage(usage: GenerationUsage) -> None:
         owner.observe(usage, completions)
 
+    def fresh_chunks(
+        snapshot: Sequence[CompletionOutput],
+    ):
+        for completion in sorted(snapshot, key=lambda item: item.index):
+            seen_text = sent.get(completion.index, 0)
+            delta_text = completion.text[seen_text:]
+            seen_logprobs = logprobs_sent.get(completion.index, 0)
+            fresh_logprobs = (
+                completion.logprob_content[seen_logprobs:]
+                if completion.logprob_content is not None
+                else ()
+            )
+            if not delta_text and not fresh_logprobs and completion.index in sent:
+                continue
+            is_first = completion.index not in sent
+            sent[completion.index] = len(completion.text)
+            if completion.logprob_content is not None:
+                logprobs_sent[completion.index] = len(completion.logprob_content)
+            yield (
+                completion.index,
+                ChunkDelta(
+                    role="assistant" if is_first else None,
+                    content=delta_text,
+                ),
+                (
+                    ChoiceLogprobs(content=_logprob_entries(fresh_logprobs))
+                    if fresh_logprobs
+                    else None
+                ),
+            )
+
     try:
         try:
             owner.mark_dispatched()
             stream = await orchestrator.run_chat(
-                prompt,
+                call,
                 stream=True,
                 usage_observer=observe_internal_usage,
             )
@@ -368,31 +427,49 @@ async def _stream_orchestrator(
                 if event.kind == "status":
                     yield f": status {event.text}\n\n"  # SSE comment (A2)
                 elif event.kind == "delta":
-                    completion_text += event.text
-                    completions = (
-                        CompletionOutput(
-                            index=0,
-                            text=completion_text,
-                            token_ids=(),
-                            finish_reason=None,
-                        ),
-                    )
-                    owner.observe(None, completions)
-                    delta = (
-                        ChunkDelta(role="assistant", content=event.text)
-                        if first
-                        else ChunkDelta(content=event.text)
-                    )
-                    first = False
-                    yield _sse_chunk(
-                        response_id, created, request.model, 0, delta,
-                        include_usage=include_usage,
-                    )
+                    if event.completions:
+                        completions = event.completions
+                        owner.observe(None, completions)
+                        for index, delta, chunk_logprobs in fresh_chunks(completions):
+                            yield _sse_chunk(
+                                response_id,
+                                created,
+                                request.model,
+                                index,
+                                delta,
+                                include_usage=include_usage,
+                                logprobs=chunk_logprobs,
+                            )
+                    else:
+                        completion_text += event.text
+                        completions = (
+                            CompletionOutput(
+                                index=0,
+                                text=completion_text,
+                                token_ids=(),
+                                finish_reason=None,
+                            ),
+                        )
+                        owner.observe(None, completions)
+                        delta = (
+                            ChunkDelta(role="assistant", content=event.text)
+                            if first
+                            else ChunkDelta(content=event.text)
+                        )
+                        first = False
+                        yield _sse_chunk(
+                            response_id,
+                            created,
+                            request.model,
+                            0,
+                            delta,
+                            include_usage=include_usage,
+                        )
                 elif event.kind in {"result", "error"}:
                     final_result = event.result
                     if final_result is not None:
                         completion_text = final_result.text or completion_text
-                        completions = (
+                        completions = final_result.completions or (
                             CompletionOutput(
                                 index=0,
                                 text=completion_text,
@@ -400,10 +477,17 @@ async def _stream_orchestrator(
                                 finish_reason="stop",
                             ),
                         )
-                        if (
-                            final_result.prompt_tokens
-                            or final_result.completion_tokens
-                        ):
+                        for index, delta, chunk_logprobs in fresh_chunks(completions):
+                            yield _sse_chunk(
+                                response_id,
+                                created,
+                                request.model,
+                                index,
+                                delta,
+                                include_usage=include_usage,
+                                logprobs=chunk_logprobs,
+                            )
+                        if final_result.prompt_tokens or final_result.completion_tokens:
                             reported_usage = GenerationUsage(
                                 prompt_tokens=final_result.prompt_tokens,
                                 completion_tokens=final_result.completion_tokens,
@@ -452,10 +536,19 @@ async def _stream_orchestrator(
             yield f"data: {json.dumps(payload)}\n\n"
             yield "data: [DONE]\n\n"
             return
-        yield _sse_chunk(
-            response_id, created, request.model, 0, ChunkDelta(),
-            finish_reason="stop", include_usage=include_usage,
+        final_completions = completions or (
+            CompletionOutput(index=0, text="", token_ids=(), finish_reason="stop"),
         )
+        for completion in sorted(final_completions, key=lambda item: item.index):
+            yield _sse_chunk(
+                response_id,
+                created,
+                request.model,
+                completion.index,
+                ChunkDelta(),
+                finish_reason=completion.finish_reason or "stop",
+                include_usage=include_usage,
+            )
         if final_result is not None:
             usage = _orchestration_wire_usage(
                 prompt,
@@ -484,7 +577,12 @@ async def _stream_orchestrator(
 
 
 async def _stream_choices(
-    choices: list[Choice], model: str, usage: Usage | None = None
+    choices: list[Choice],
+    model: str,
+    usage: Usage | None = None,
+    *,
+    orchestration_result=None,
+    want_trace: bool = False,
 ) -> AsyncIterator[str]:
     """Stream already-final choices (orchestrated or tool-call responses)."""
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
@@ -500,21 +598,42 @@ async def _stream_choices(
                 for i, tc in enumerate(choice.message.tool_calls)
             ]
         yield _sse_chunk(
-            response_id, created, model, choice.index,
+            response_id,
+            created,
+            model,
+            choice.index,
             ChunkDelta(
                 role="assistant",
                 content=choice.message.content,
                 tool_calls=tool_calls,
             ),
             include_usage=include_usage,
+            logprobs=choice.logprobs,
         )
         yield _sse_chunk(
-            response_id, created, model, choice.index, ChunkDelta(),
+            response_id,
+            created,
+            model,
+            choice.index,
+            ChunkDelta(),
             finish_reason=choice.finish_reason,
             include_usage=include_usage,
         )
     if usage is not None:
         yield _usage_chunk(response_id, created, model, usage)
+    if orchestration_result is not None and want_trace:
+        metadata = _orchestrator_metadata_chunk(
+            response_id,
+            created,
+            model,
+            usage=None,
+            result=orchestration_result,
+            include_usage=False,
+            want_trace=True,
+        )
+        if metadata is not None:
+            yield metadata
+        yield f": trace {' | '.join(orchestration_result.trace)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -568,8 +687,11 @@ async def _stream_completions(
 
     def _chunk(choices: list[CompletionChoice], usage: Usage | None = None) -> str:
         payload = CompletionChunk(
-            id=response_id, created=created, model=request.model,
-            choices=choices, usage=usage,
+            id=response_id,
+            created=created,
+            model=request.model,
+            choices=choices,
+            usage=usage,
         )
         exclude = None if include_usage else {"usage"}
         return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
@@ -581,15 +703,11 @@ async def _stream_completions(
                 last = partial
                 owner.observe(partial.usage, partial.completions)
                 for completion in partial.completions:
-                    delta = completion.text[sent.get(completion.index, 0):]
+                    delta = completion.text[sent.get(completion.index, 0) :]
                     if not delta and not partial.finished:
                         continue
                     sent[completion.index] = len(completion.text)
-                    finish = (
-                        (completion.finish_reason or "stop")
-                        if partial.finished
-                        else None
-                    )
+                    finish = (completion.finish_reason or "stop") if partial.finished else None
                     yield _chunk(
                         [
                             CompletionChoice(
@@ -678,8 +796,7 @@ def create_app(
         unknown_discounts = price_sheet.tenant_discounts.keys() - known_tenants
         if unknown_discounts:
             raise ValueError(
-                "price_sheet discounts reference unknown tenants "
-                f"{sorted(unknown_discounts)}"
+                f"price_sheet discounts reference unknown tenants {sorted(unknown_discounts)}"
             )
     app = FastAPI(
         title="kairyu",
@@ -709,15 +826,9 @@ def create_app(
         for name, engine in served_engines.items():
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
-    api_keys = (
-        settings.resolve_api_keys()
-        if resolved_api_keys is None
-        else resolved_api_keys
-    )
+    api_keys = settings.resolve_api_keys() if resolved_api_keys is None else resolved_api_keys
     admin_keys = (
-        settings.resolve_admin_keys()
-        if resolved_admin_keys is None
-        else resolved_admin_keys
+        settings.resolve_admin_keys() if resolved_admin_keys is None else resolved_admin_keys
     )
     add_health_routes(app, served_engines, metrics, admin_keys=admin_keys)
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
@@ -786,11 +897,13 @@ def create_app(
                 if tenant is not None and tenant != caller:
                     return JSONResponse(
                         status_code=403,
-                        content={"error": {
-                            "message": "cannot query another tenant's usage",
-                            "type": "invalid_request_error",
-                            "code": "tenant_forbidden",
-                        }},
+                        content={
+                            "error": {
+                                "message": "cannot query another tenant's usage",
+                                "type": "invalid_request_error",
+                                "code": "tenant_forbidden",
+                            }
+                        },
                     )
                 return {
                     "usage": await asyncio.to_thread(
@@ -825,13 +938,13 @@ def create_app(
                     if tenant is not None and tenant != caller:
                         return JSONResponse(
                             status_code=403,
-                            content={"error": {
-                                "message": (
-                                    "cannot export another tenant's invoice"
-                                ),
-                                "type": "invalid_request_error",
-                                "code": "tenant_forbidden",
-                            }},
+                            content={
+                                "error": {
+                                    "message": ("cannot export another tenant's invoice"),
+                                    "type": "invalid_request_error",
+                                    "code": "tenant_forbidden",
+                                }
+                            },
                         )
                     scoped_tenant = caller
                 try:
@@ -847,19 +960,19 @@ def create_app(
                 except InvoiceExportError as error:
                     return JSONResponse(
                         status_code=409,
-                        content={"error": {
-                            "message": str(error),
-                            "type": "invoice_export_error",
-                            "code": "invoice_ledger_invalid",
-                        }},
+                        content={
+                            "error": {
+                                "message": str(error),
+                                "type": "invoice_export_error",
+                                "code": "invoice_ledger_invalid",
+                            }
+                        },
                     )
                 return Response(
                     content=payload,
                     media_type="text/csv",
                     headers={
-                        "content-disposition": (
-                            'attachment; filename="kairyu-usage-invoice.csv"'
-                        )
+                        "content-disposition": ('attachment; filename="kairyu-usage-invoice.csv"')
                     },
                 )
 
@@ -874,11 +987,7 @@ def create_app(
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
-        names = (
-            list(served_engines)
-            + list(auto_models)
-            + list(served_embedding_backends)
-        )
+        names = list(served_engines) + list(auto_models) + list(served_embedding_backends)
         return ModelList(data=[ModelCard(id=name) for name in names])
 
     @app.post("/v1/route", response_model=RoutePreviewResponse)
@@ -924,10 +1033,7 @@ def create_app(
     @app.get("/routing", response_model=RoutingResponse)
     async def routing_config() -> RoutingResponse:
         return RoutingResponse(
-            models={
-                name: selected.describe_routing()
-                for name, selected in auto_models.items()
-            }
+            models={name: selected.describe_routing() for name, selected in auto_models.items()}
         )
 
     @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
@@ -943,37 +1049,33 @@ def create_app(
             prompt = validated_input.prompt
             normalized_tool_choice = validated_input.normalized_tool_choice
             include_usage = validated_input.include_usage
-            # Orchestrated models do not consume SamplingParams directly, but
-            # the public chat boundary must still enforce the same selected
-            # output-limit semantics before either dispatch seam is entered.
             try:
-                sampling_params_from(request)
+                sampling = sampling_params_from(request)
             except ValueError as error:
                 return invalid_request(str(error))
-            # the orchestrator path takes only the prompt; params it cannot honor
-            # must be a 400, not silently dropped (M4 — OpenAI-compat by refusal)
-            unsupported = [
-                name
-                for name, active in (
-                    ("n>1", request.n > 1),
-                    ("logprobs", bool(request.logprobs)),
-                    ("tools", bool(request.tools)),
-                    ("response_format", request.response_format is not None),
-                )
-                if active
-            ]
-            if unsupported:
-                return invalid_request(
-                    f"model {request.model!r} (orchestrated) does not support: "
-                    + ", ".join(unsupported)
-                )
+            orchestration_request = OrchestrationRequest(
+                prompt=prompt,
+                sampling_params=sampling,
+                tools=tuple(request.tools or ()),
+                tool_choice=request.tool_choice,
+                tools_in_prompt=validated_input.tools_in_prompt,
+                response_format=request.response_format,
+            )
             selected = auto_models[request.model]
+            try:
+                selected.validate_request(orchestration_request)
+            except ValueError as error:
+                return invalid_request(str(error))
             want_trace = http_request.headers.get("x-kairyu-trace") == "1"
-            if request.stream:
+            # Tool choices must be validated across every final choice before
+            # any bytes become irrevocable SSE output. Indexed alternatives
+            # and logprobs otherwise stay on the low-latency pull-through path.
+            buffered_stream = bool(request.tools)
+            if request.stream and not buffered_stream:
                 return StreamingResponse(
                     _stream_orchestrator(
                         selected,
-                        prompt,
+                        orchestration_request,
                         request,
                         include_usage,
                         want_trace,
@@ -982,11 +1084,11 @@ def create_app(
                     media_type="text/event-stream",
                 )
             try:
-                result = await selected.run(prompt)
+                result = await selected.run(orchestration_request)
             except OrchestratorExecutionError as error:
                 logger.exception("orchestrator backend error")
                 result = error.result
-                completions = (
+                completions = result.completions or (
                     CompletionOutput(
                         index=0,
                         text=result.text,
@@ -1020,7 +1122,7 @@ def create_app(
                 return JSONResponse(status_code=502, content=payload)
             except Exception as error:
                 return upstream_error(error)
-            completions = (
+            completions = result.completions or (
                 CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
             )
             # OrchestratorResult uses 0/0 when its backend did not report usage.
@@ -1043,6 +1145,27 @@ def create_app(
             )
             response.usage.orchestration_input_tokens = result.prompt_tokens
             response.usage.orchestration_output_tokens = result.completion_tokens
+            if not tool_choice_is_satisfied(
+                response.choices,
+                normalized_tool_choice,
+            ):
+                _record_usage(
+                    http_request,
+                    request.model,
+                    response.usage,
+                    prompt=prompt,
+                    completions=completions,
+                )
+                error = ChatRequestError(
+                    "upstream model did not satisfy tool_choice",
+                    status_code=502,
+                    code="tool_choice_not_satisfied",
+                    error_type="upstream_error",
+                )
+                return JSONResponse(
+                    status_code=error.status_code,
+                    content={"error": error.payload()},
+                )
             _record_usage(
                 http_request,
                 request.model,
@@ -1050,6 +1173,17 @@ def create_app(
                 prompt=prompt,
                 completions=completions,
             )
+            if request.stream:
+                return StreamingResponse(
+                    _stream_choices(
+                        response.choices,
+                        request.model,
+                        usage=response.usage if include_usage else None,
+                        orchestration_result=result,
+                        want_trace=want_trace,
+                    ),
+                    media_type="text/event-stream",
+                )
             if want_trace:
                 payload = _chat_response_payload(response)
                 payload["kairyu_trace"] = list(result.trace)
@@ -1057,9 +1191,7 @@ def create_app(
                     payload["kairyu_trace_v2"] = result.structured_trace.as_dict(
                         request_id=response.id
                     )
-                payload["kairyu_route"] = _route_payload(result.route).model_dump(
-                    mode="json"
-                )
+                payload["kairyu_route"] = _route_payload(result.route).model_dump(mode="json")
                 return JSONResponse(content=payload)
             return JSONResponse(content=_chat_response_payload(response))
 
@@ -1075,9 +1207,7 @@ def create_app(
                 cache_hint=CacheHint(session_id=session_id) if session_id else None,
             )
         except ChatRequestError as error:
-            return JSONResponse(
-                status_code=error.status_code, content={"error": error.payload()}
-            )
+            return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
         if request.stream and not request.tools:
             return StreamingResponse(
                 _stream_engine(
@@ -1100,9 +1230,7 @@ def create_app(
                     prompt=error.execution.result.prompt,
                     completions=error.execution.result.completions,
                 )
-            return JSONResponse(
-                status_code=error.status_code, content={"error": error.payload()}
-            )
+            return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
         except Exception as error:
             return upstream_error(error)
         response = executed.response
@@ -1120,9 +1248,7 @@ def create_app(
                 _stream_choices(
                     response.choices,
                     request.model,
-                    usage=(
-                        response.usage if validated.input.include_usage else None
-                    ),
+                    usage=(response.usage if validated.input.include_usage else None),
                 ),
                 media_type="text/event-stream",
             )
@@ -1189,19 +1315,13 @@ def create_app(
         try:
             # run the prompt array concurrently (latency = max, not sum); order is
             # restored by prompt_index below so the response is unchanged (P-perf)
-            results = await asyncio.gather(
-                *(engine.generate(item) for item in generation_requests)
-            )
+            results = await asyncio.gather(*(engine.generate(item) for item in generation_requests))
         except Exception as error:
             return upstream_error(error)
-        for prompt_index, (prompt, result) in enumerate(
-            zip(prompts, results, strict=True)
-        ):
+        for prompt_index, (prompt, result) in enumerate(zip(prompts, results, strict=True)):
             for completion in result.completions:
                 choices.append(
-                    _completion_choice(
-                        prompt_index * request.n + completion.index, completion
-                    )
+                    _completion_choice(prompt_index * request.n + completion.index, completion)
                 )
             prompt_tokens, completion_tokens = resolve_usage_counts(
                 result.usage,
@@ -1212,13 +1332,13 @@ def create_app(
             usage_totals[1] += completion_tokens
             if result.usage is not None:
                 usage_totals[2] += result.usage.cached_tokens
-        details = (
-            PromptTokensDetails(cached_tokens=usage_totals[2]) if usage_totals[2] else None
-        )
+        details = PromptTokensDetails(cached_tokens=usage_totals[2]) if usage_totals[2] else None
         _record_usage(  # S3: /v1/completions was never metered
-            http_request, request.model,
+            http_request,
+            request.model,
             GenerationUsage(
-                prompt_tokens=usage_totals[0], completion_tokens=usage_totals[1],
+                prompt_tokens=usage_totals[0],
+                completion_tokens=usage_totals[1],
                 cached_tokens=usage_totals[2],
             ),
             prompt="",

@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import json
 
+from kairyu.engine.tokenizer import GrammarVocabulary
+
 
 def _import_xgrammar():
     try:
         import xgrammar
     except ImportError as error:  # pragma: no cover - exercised only without xgrammar
-        raise RuntimeError(
-            "structured output requires xgrammar (pip install xgrammar)"
-        ) from error
+        raise RuntimeError("structured output requires xgrammar (pip install xgrammar)") from error
     return xgrammar
 
 
@@ -32,20 +32,34 @@ class XGrammarEnforcer:
 
     def __init__(
         self,
-        vocab: list[str],
+        vocab: list[str] | GrammarVocabulary,
         json_schema: dict | None = None,
         stop_token_id: int | None = None,
     ) -> None:
         xgr = self._xgr = _import_xgrammar()
         stop_ids = [stop_token_id] if stop_token_id is not None else None
-        tokenizer_info = xgr.TokenizerInfo(vocab, stop_token_ids=stop_ids)
+        if isinstance(vocab, GrammarVocabulary):
+            vocab_type = {
+                "raw": xgr.VocabType.RAW,
+                "byte_fallback": xgr.VocabType.BYTE_FALLBACK,
+                "byte_level": xgr.VocabType.BYTE_LEVEL,
+            }[vocab.vocab_type]
+            tokenizer_info = xgr.TokenizerInfo(
+                vocab.encoded_vocab,
+                vocab_type,
+                vocab_size=vocab.vocab_size,
+                stop_token_ids=stop_ids,
+                add_prefix_space=vocab.add_prefix_space,
+            )
+        else:
+            # Public tests and third-party runners that provide literal token
+            # strings retain the pre-metadata RAW behavior.
+            tokenizer_info = xgr.TokenizerInfo(vocab, stop_token_ids=stop_ids)
         compiler = xgr.GrammarCompiler(tokenizer_info)
         if json_schema is not None:
             # strict format (no free whitespace): removes degenerate unbounded
             # whitespace runs — matches vLLM's disable_any_whitespace guidance
-            compiled = compiler.compile_json_schema(
-                json.dumps(json_schema), any_whitespace=False
-            )
+            compiled = compiler.compile_json_schema(json.dumps(json_schema), any_whitespace=False)
         else:
             compiled = compiler.compile_builtin_json_grammar()
         self._matcher = xgr.GrammarMatcher(compiled)

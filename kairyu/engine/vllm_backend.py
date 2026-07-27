@@ -11,7 +11,11 @@ from __future__ import annotations
 import importlib
 from collections.abc import AsyncIterator
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult
+from kairyu.engine.backend import (
+    GenerationRequest,
+    GenerationResult,
+    prompt_with_tool_intent,
+)
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
@@ -94,7 +98,7 @@ class VLLMBackend:
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         vllm_params = self._vllm.SamplingParams(**to_vllm_sampling_kwargs(request.sampling_params))
         async for output in self._engine.generate(
-            request.prompt, vllm_params, request.request_id
+            prompt_with_tool_intent(request), vllm_params, request.request_id
         ):
             yield self._to_result(request, output)
 

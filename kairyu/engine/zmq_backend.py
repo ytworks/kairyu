@@ -19,7 +19,12 @@ import atexit
 import logging
 from collections.abc import AsyncIterator
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
+from kairyu.engine.backend import (
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+    prompt_with_tool_intent,
+)
 from kairyu.engine.core.engine_service import run_engine_service, sampling_params_to_wire
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput, TokenLogprob
@@ -260,7 +265,7 @@ class ZmqEngineBackend:
                     {
                         "op": "add",
                         "request_id": request.request_id,
-                        "prompt": request.prompt,
+                        "prompt": prompt_with_tool_intent(request),
                         "sampling": sampling_params_to_wire(request.sampling_params),
                     }
                 )
