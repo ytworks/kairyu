@@ -182,6 +182,11 @@ class Scheduler:
         return self._kv
 
     @property
+    def speculative_tokens(self) -> int:
+        """Configured draft length; used by the loop to place commit barriers."""
+        return self._spec_k
+
+    @property
     def waiting_ids(self) -> tuple[str, ...]:
         return tuple(self._waiting)
 

@@ -38,6 +38,16 @@ token on-device, patch the next decode slot D2D, and defer one batched public
 D2H copy to the late EOS/streaming boundary. The isolated steady-decode
 profiler records zero host-sync events. Structured xgrammar remains an explicit
 stateful CPU compatibility path.
+Production execution now converges on that same `EngineLoop` for synchronous,
+schedule/device-overlapped, and native async/PP runners. `pipeline_depth=1`
+preserves synchronous behavior; depth 2+ submits immutable `StepInput`
+snapshots, commits oldest-first, and defers finished-request reclamation until
+scheduled-ahead surplus results are trimmed. Streaming/stop holdback, grammar,
+speculation, preemption, chunked prefill, abort/failure recovery, P-D carried
+tokens, and PP all pass through this one path. On Qwen3-32B TP8, depth 2 retained
+the depth-1 output digest and measured 66.951 → 67.814 token/s (+1.29%, wall
+−1.27%) over 8×32-token requests
+(`bench/results/unified-loop-qwen3-32b-tp8-2026-07-27.json`).
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -84,11 +94,11 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | Milestone | Status |
 |-----------|--------|
 | M1 — Orchestration (L2) + Interface (L3) | Complete and merged. Router / Conductor / MoA, vLLM-compatible `LLM` + `AsyncLLMEngine`, OpenAI-compatible server, YAML/decorator DSL. Atomic pre-dispatch reservations enforce strict step admission and serialize result-priced work under configured cost caps without hiding a single admitted generation's actual-cost overrun. |
-| M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done and the device future-token phase GPU-validated on 8× RTX PRO 6000: scheduler/KV lifecycle, overlap, tensor attention metadata, device sampling, D2D decode-slot feedback, late EOS/streaming commit. Formal NVLink-HBM performance gates still require H100/A100-class hardware. |
+| M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done and the unified production loop/device future-token phase GPU-validated on 8× RTX PRO 6000: immutable schedule-ahead snapshots, scheduler/KV lifecycle, streaming/stop/grammar/spec/preemption parity, tensor attention metadata, device sampling, D2D decode-slot feedback, late commit. Formal NVLink-HBM performance gates still require H100/A100-class hardware. |
 | M3 — Spec decode / CUDA graphs / P-D separation | n-gram draft spec-decode policy and xgrammar structured output implemented CPU-side. CUDA graphs and the rest gated on M2 GPU phase. |
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
-| M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + PipelinedEngineCore). GPU phase: runbook §7, prereq all M5 gates. |
+| M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + `PipelinedModelRunner` consumed by the unified production `EngineLoop`; the old pipelined core is compatibility-only). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
 | M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, `docs/design/m8-engine-cpu.md`): HF tokenizer seam + SSE-safe stop strings, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. 437 tests, 95% cov. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
@@ -173,6 +183,30 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] production generation converges on one pipeline-depth loop
+- What: `EngineLoop` now owns immutable snapshot submission, bounded
+  schedule-ahead, synchronous/native-async runner handles, oldest-first commit,
+  streaming, and late-result reclamation. `pipeline_depth=1` is the compatible
+  default and depth 2+ activates overlap through the same Kairyu and ZMQ
+  production builders. Speculative variable-length steps use commit barriers;
+  stop/grammar/abort terminals emit immediately while scheduler/runner state is
+  retained until surplus work drains. The old overlap and pipelined cores are
+  explicitly compatibility-only, and the Qwen benchmark now enters through
+  production `EngineLoop`.
+- Why: independent run-to-completion cores could demonstrate overlap or PP but
+  could not safely compose production streaming, stop holdback, grammar,
+  speculation, preemption, chunked prefill, P-D adoption, and failure cleanup.
+  Mandatory frozen `StepInput` boundaries remove live-state races, while one
+  commit path prevents those semantics from diverging again.
+- Verification: 1,881 CPU tests pass; the production CUDA image passes all 95
+  runnable 1-GPU tests (16 topology/environment skips); TP2/NCCL passes 3/3
+  runnable gates (2 conditional skips). Qwen3-32B TP8 on 8× RTX PRO 6000
+  retained an identical depth-1/depth-2 output digest and measured 66.951 →
+  67.814 token/s (+1.29%, wall −1.27%) over 8×32-token requests.
+- Refs: issue #222; m2 §2.2/E3; m6 D5; `kairyu/engine/engine_loop.py`;
+  `kairyu/engine/core/step_input.py`; `tests/unit/test_unified_engine_loop.py`;
+  `bench/results/unified-loop-qwen3-32b-tp8-2026-07-27.json`
 
 ### 2026-07-27 — [amendment] m2 §2.2 future-token feedback is device-side
 - What: grammar-free CUDA sampling now covers greedy, seeded stateless

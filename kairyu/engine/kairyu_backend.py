@@ -71,6 +71,7 @@ def build_engine_loop(
     speculative_tokens: int = 4,
     model_path: str | None = None,
     pd_separation: bool = False,
+    pipeline_depth: int = 1,
     decode_mode: str = "eager",
     cuda_graph_max_batch: int = 8,
     cuda_graph_max_pages: int = 512,
@@ -85,6 +86,8 @@ def build_engine_loop(
     drives it via ``DistTPModelRunner``; the loop's ``.tp_launcher`` handle must
     be ``shutdown()`` on serve teardown.
     """
+    if pipeline_depth < 1:
+        raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
     if decode_mode not in _DECODE_MODES:
@@ -128,6 +131,7 @@ def build_engine_loop(
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
             tokenizer=tokenizer,
+            pipeline_depth=pipeline_depth,
         )
 
     if model_path is not None and tensor_parallel_size > 1:
@@ -140,6 +144,7 @@ def build_engine_loop(
             tokenizer=tokenizer,
             speculative=speculative,
             speculative_tokens=speculative_tokens,
+            pipeline_depth=pipeline_depth,
             graph_decode=graph_decode,
             graph_max_batch=cuda_graph_max_batch,
             graph_max_pages=cuda_graph_max_pages,
@@ -247,6 +252,7 @@ def build_engine_loop(
         active,
         default_eos_token_id=default_eos,
         default_stop_token_ids=default_stop_ids,
+        pipeline_depth=pipeline_depth,
     )
     loop.tp_launcher = None  # single-process: nothing to tear down
     return loop, cache, scheduler
@@ -259,6 +265,7 @@ def _build_pd_loop(
     page_size: int,
     max_num_batched_tokens: int,
     tokenizer: str | Tokenizer | None,
+    pipeline_depth: int,
 ) -> tuple[EngineLoop, RadixKVCache, PDLoopAdapter]:
     """Serve through a prefill/decode pair (m18 D3, G2 stage 5.3).
 
@@ -295,6 +302,7 @@ def _build_pd_loop(
         adapter,
         default_eos_token_id=generation.eos_token_id,
         default_stop_token_ids=generation.stop_token_ids,
+        pipeline_depth=pipeline_depth,
     )
     loop.tp_launcher = None
     loop.pd_coordinator = coordinator
@@ -311,6 +319,7 @@ def _build_dist_tp_loop(
     tokenizer: str | Tokenizer | None,
     speculative: str | None = None,
     speculative_tokens: int = 4,
+    pipeline_depth: int = 1,
     graph_decode: bool = False,
     graph_max_batch: int = 8,
     graph_max_pages: int = 512,
@@ -366,6 +375,7 @@ def _build_dist_tp_loop(
         active,
         default_eos_token_id=generation.eos_token_id,
         default_stop_token_ids=generation.stop_token_ids,
+        pipeline_depth=pipeline_depth,
     )
     loop.tp_launcher = launcher  # serve teardown must call launcher.shutdown()
     return loop, cache, scheduler
@@ -384,6 +394,7 @@ class KairyuBackend:
         speculative_tokens: int = 4,
         model_path: str | None = None,
         pd_separation: bool = False,
+        pipeline_depth: int = 1,
         decode_mode: str = "eager",
         cuda_graph_max_batch: int = 8,
         cuda_graph_max_pages: int = 512,
@@ -401,6 +412,7 @@ class KairyuBackend:
             speculative_tokens=speculative_tokens,
             model_path=model_path,
             pd_separation=pd_separation,
+            pipeline_depth=pipeline_depth,
             decode_mode=decode_mode,
             cuda_graph_max_batch=cuda_graph_max_batch,
             cuda_graph_max_pages=cuda_graph_max_pages,
@@ -776,6 +788,7 @@ class KairyuBackend:
     async def shutdown(self) -> None:
         if self._pump_task is not None:
             self._pump_task.cancel()
+        await asyncio.to_thread(self._loop.close)
         # stop the spawned TP worker ranks (no-op unless --tp N launched them)
         launcher = getattr(self._loop, "tp_launcher", None)
         if launcher is not None:

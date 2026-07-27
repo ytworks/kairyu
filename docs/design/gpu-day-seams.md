@@ -55,19 +55,18 @@ the host-metadata compatibility fallback; only the audited pre-fix path grew
 with B. Remaining GPU-day work: batched PREFILL planning and on-device
 sampling/future-token fill.
 
-## E3 — one engine loop with pluggable pipeline depth (HIGH)
+## E3 — one engine loop with pluggable pipeline depth (HIGH, **IMPLEMENTED**)
 
-**Gap.** The production path is the synchronous `EngineLoop.step()`;
-`OverlapEngineCore`/`PipelinedEngineCore` are imported only by tests. Overlap +
-streaming + stop-string holdback + spec decode + grammar termination have never
-coexisted in one loop, and the overlap cores pass live mutable `_RequestState`
-across the execution seam (chunked-prefill range drift, decode-ahead IndexError,
-preemption races).
-
-**Design.** Converge on one `EngineLoop` with a pipeline-depth knob (depth=1
-reproduces today). Make `StepInput`/`snapshot_step` mandatory at submit/execute
-so the runner never reads live scheduler state. Run the whole CPU suite through
-the unified loop; delete/demote the two unused cores.
+**Fix (landed).** Production `EngineLoop` owns schedule-ahead, immutable
+`StepInput` submission, oldest-step commit, streaming and late-result cleanup.
+`pipeline_depth=1` reproduces synchronous serving; depth 2+ overlaps CPU
+scheduling with the serial device lane or a native async/PP runner. Stop-string
+holdback, grammar termination, speculation (with variable-result commit
+barriers), preemption, chunked prefill and P-D carried tokens all use that same
+path. Finished requests retain scheduler/runner state until every scheduled-ahead
+surplus result is trimmed. `OverlapEngineCore` and `PipelinedEngineCore` are
+explicitly compatibility-only; the production acceptance suite enters through
+`EngineLoop`.
 
 ## TP — delta broadcast + sampling ownership (HIGH, **delta IMPLEMENTED**)
 

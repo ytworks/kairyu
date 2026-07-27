@@ -164,5 +164,6 @@ def run_engine_service(port_pipe, config: dict) -> None:
                     if update.finished:
                         del owners[request_id]
     finally:
+        engine_loop.close()
         socket.close(linger=0)
         context.term()

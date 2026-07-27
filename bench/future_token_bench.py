@@ -10,6 +10,7 @@ Example (Qwen3-32B on eight GPUs):
 
     python bench/future_token_bench.py \
       --model-path /models/qwen3-32b --tp 8 --label candidate \
+      --pipeline-depth 2 \
       --out bench/results/future-token-candidate.json
     python bench/future_token_bench.py --compare \
       bench/results/future-token-baseline.json \
@@ -92,10 +93,27 @@ def _run_generation(
     max_new_tokens: int,
     num_pages: int,
     page_size: int,
+    pipeline_depth: int,
 ) -> dict[str, tuple[int, ...]]:
-    from kairyu.engine.core.overlap import OverlapEngineCore
+    from kairyu import SamplingParams
     from kairyu.engine.core.radix_kv import RadixKVCache
     from kairyu.engine.core.scheduler import Scheduler
+    from kairyu.engine.engine_loop import EngineLoop
+
+    class _RequestTokenizer:
+        eos_token_id = None
+
+        def __init__(self, prompts: dict[str, tuple[int, ...]]) -> None:
+            self._prompts = prompts
+
+        def encode(self, text: str) -> tuple[int, ...]:
+            return self._prompts[text]
+
+        def decode(self, token_ids) -> str:
+            return ""
+
+        def vocab(self) -> list[str]:
+            return []
 
     scheduler = Scheduler(
         RadixKVCache(num_pages=num_pages, page_size=page_size),
@@ -103,15 +121,34 @@ def _run_generation(
         max_num_seqs=request_count,
         page_size=page_size,
     )
-    core = OverlapEngineCore(scheduler, runner)
     requests = _requests(prefix, request_count, max_new_tokens)
-    for request in requests:
-        core.add_request(request)
-    outputs = core.run_to_completion()
-    for request in requests:
-        release = getattr(runner, "release", None)
-        if release is not None:
-            release(request.request_id)
+    prompts = {
+        request.request_id: request.prompt_token_ids for request in requests
+    }
+    loop = EngineLoop(
+        _RequestTokenizer(prompts),
+        scheduler,
+        runner,
+        pipeline_depth=pipeline_depth,
+    )
+    outputs: dict[str, tuple[int, ...]] = {}
+    try:
+        for request in requests:
+            loop.submit(
+                request.request_id,
+                request.request_id,
+                SamplingParams(
+                    max_tokens=max_new_tokens,
+                    temperature=0.0,
+                    ignore_eos=True,
+                ),
+            )
+        while loop.has_work():
+            for request_id, update in loop.step():
+                if update.finished:
+                    outputs[request_id] = update.outputs
+    finally:
+        loop.close()
     expected = request_count * max_new_tokens
     actual = sum(len(tokens) for tokens in outputs.values())
     if actual != expected:
@@ -218,6 +255,7 @@ def _measure(args: argparse.Namespace) -> dict:
             max_new_tokens=args.warmup_tokens,
             num_pages=args.num_pages,
             page_size=args.page_size,
+            pipeline_depth=args.pipeline_depth,
         )
         torch.cuda.synchronize()
 
@@ -239,6 +277,7 @@ def _measure(args: argparse.Namespace) -> dict:
                 max_new_tokens=args.max_new_tokens,
                 num_pages=args.num_pages,
                 page_size=args.page_size,
+                pipeline_depth=args.pipeline_depth,
             )
             torch.cuda.synchronize()
             durations.append(time.perf_counter() - started)
@@ -263,7 +302,7 @@ def _measure(args: argparse.Namespace) -> dict:
             "max_new_tokens": args.max_new_tokens,
             "warmup_tokens": args.warmup_tokens,
             "repeats": args.repeats,
-            "pipeline_depth": 2,
+            "pipeline_depth": args.pipeline_depth,
             "sampling": "greedy",
         },
         "code": {
@@ -303,6 +342,8 @@ def _compare(baseline_path: Path, candidate_path: Path) -> dict:
             "outputs_identical": (
                 baseline["output_sha256"] == candidate["output_sha256"]
             ),
+            "baseline_pipeline_depth": baseline["workload"]["pipeline_depth"],
+            "candidate_pipeline_depth": candidate["workload"]["pipeline_depth"],
             "candidate_future_token_event_synchronize_count": candidate[
                 "feedback_profiler"
             ]["events"]["cudaEventSynchronize"],
@@ -346,6 +387,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--warmup-tokens", type=int, default=4)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--pipeline-depth", type=int, default=2)
     parser.add_argument("--num-pages", type=int, default=1024)
     parser.add_argument("--page-size", type=int, default=16)
     parser.add_argument("--label")
