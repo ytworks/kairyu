@@ -55,7 +55,12 @@ exact full-prefix fallback. One final full decode preserves byte-identical
 output. Qwen3-32B tokenizer parity passed 19 multilingual/code/random sequences
 (5,792 tokens); at 4,096 tokens the native path measured 0.0149 s versus
 2.038 s for repeated full-prefix decode (137.25×), with linear operation-count
-coverage and unchanged stop/stream semantics.
+coverage and unchanged stop/stream semantics. Stop matching now follows the
+same incremental contract: each request scans only newly stable text plus the
+maximum required overlap. On a 32,768-character/64-stop/1,024-update workload,
+the bounded matcher reduced the search-window upper bound 349.04× and measured
+20.73× faster than cumulative full scans while preserving randomized
+earliest-match equivalence.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -108,7 +113,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + `PipelinedModelRunner` consumed by the unified production `EngineLoop`; the old pipelined core is compatibility-only). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
-| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-27, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback + SSE-safe stop strings, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
+| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-27, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback + bounded-overlap SSE-safe stop matching, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
@@ -191,6 +196,24 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] stop matching scans only the newly stable tail
+- What: each engine request now owns an incremental multi-pattern stop matcher.
+  It remembers the prior stable-text length, searches only the new suffix plus
+  `max_stop_length - 1` overlap, caches the first observed minimum match, and
+  rejects retracted input. Final detokenizer bytes enter through the same path.
+  Randomized tests compare every update against the historical full scan, and a
+  long-output/many-stop test pins the search-work bound.
+- Why: scanning every stop from the beginning of cumulative output on each
+  update made a correctness-sensitive streaming path quadratic. A bounded
+  overlap is sufficient because any newly completed pattern can start no
+  earlier than its length minus one before the previously searched tail.
+- Verification: 1,895 CPU tests pass (12 skipped, 115 deselected). For 32,768
+  characters, 64 absent stops, and 1,024 updates, the search-window upper bound
+  fell from 1,074,790,400 to 3,079,232 character-pattern checks (349.04×);
+  median runtime fell from 0.1666 s to 0.0080 s (20.73×).
+- Refs: issue #217; m8 D1; `kairyu/engine/engine_loop.py`;
+  `tests/unit/test_stop_matcher.py`.
 
 ### 2026-07-27 — [amendment] streaming detokenization becomes native and linear
 - What: `IncrementalDetokenizer` now consumes an optional per-request
