@@ -182,8 +182,30 @@ def test_toy_results_record_the_running_commit(tmp_path):
     code = json.loads(out.read_text())["config"]["code"]
     assert code["commit"] and len(code["commit"]) == 40
     assert code["dirty"] in (True, False)
+    assert code["source"] == "git"
     # untracked scratch dirs must not be reported as modified code
     assert isinstance(code["untracked_files"], int)
+
+
+def test_code_provenance_can_be_supplied_to_a_gitless_benchmark_image(monkeypatch):
+    parity_tp = _parity_tp()
+
+    def git_is_missing(*args, **kwargs):
+        raise OSError
+
+    monkeypatch.setattr(parity_tp.subprocess, "run", git_is_missing)
+    monkeypatch.setenv("KAIRYU_BENCH_COMMIT", "a" * 40)
+    monkeypatch.setenv("KAIRYU_BENCH_DIRTY", "0")
+    monkeypatch.setenv("KAIRYU_BENCH_UNTRACKED_FILES", "3")
+
+    code = parity_tp._code_provenance()
+
+    assert code == {
+        "commit": "a" * 40,
+        "dirty": False,
+        "untracked_files": 3,
+        "source": "environment",
+    }
 
 
 def _parity_tp():

@@ -82,7 +82,7 @@ def _reference_file(tmp_path: Path, provenance: dict, entries: dict) -> Path:
 
 def _provenance(**overrides) -> dict:
     base = {
-        "schema": 3,
+        "schema": 4,
         "checkpoint_config_sha256": "aaaa",
         "checkpoint_weights_sha256": "aaab",
         "checkpoint_weight_files": {"model.safetensors": "a" * 64},
@@ -124,6 +124,18 @@ def test_a_matching_cache_is_accepted(tmp_path):
     want = _provenance()
     path = _reference_file(tmp_path, want, _entries(2, 4))
     assert len(parity_hf._load_reference(path, want)) == 2
+
+
+def test_reference_prompt_ids_match_kairyu_without_implicit_bos():
+    from bench.parity_hf import _prompt_ids
+
+    class Tokenizer:
+        def __call__(self, text, *, add_special_tokens):
+            assert text == "hello"
+            assert add_special_tokens is False
+            return type("Encoded", (), {"input_ids": [7, 8]})()
+
+    assert _prompt_ids(Tokenizer(), "hello") == [7, 8]
 
 
 def test_a_cache_from_another_checkpoint_is_rejected(tmp_path):

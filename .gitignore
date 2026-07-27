@@ -233,3 +233,4 @@ bench/data/
 !bench/results/parity-tp-*.json
 !bench/results/gate1-hf-parity-*.json
 !bench/results/hf-reference-*.json
+!bench/results/g2-a1-*.json

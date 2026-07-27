@@ -41,7 +41,7 @@ import argparse
 import json
 from pathlib import Path
 
-from bench.parity_tp import _TEXT_PROMPTS
+from bench.parity_tp import _TEXT_PROMPTS, _code_provenance
 
 #: G2 A2, amended 2026-07-25: the bar is the REFERENCE's own self-agreement, not
 #: a fixed percentage. HF's `generate()` and a teacher-forced forward over the
@@ -70,10 +70,20 @@ _MIN_TIE_GAP = 0.125
 _MAX_LOGPROB_DELTA = 0.25
 
 
-_REFERENCE_SCHEMA = 3
+_REFERENCE_SCHEMA = 4
 #: Read size for the checkpoint digest. Large enough that hashlib releases the
 #: GIL for the update, which is what makes the thread pool below worth having.
 _HASH_CHUNK = 8 << 20
+
+
+def _prompt_ids(tokenizer, text: str) -> list[int]:
+    """Use the production Kairyu prompt contract: no implicit BOS/EOS.
+
+    ``HFTokenizer.encode`` deliberately passes ``add_special_tokens=False``.
+    The reference must do the same or it scores a different prefix while
+    claiming to evaluate the full-continuation prompts from ``parity_tp.py``.
+    """
+    return list(tokenizer(text, add_special_tokens=False).input_ids)
 
 
 def _checkpoint_weight_digests(root: Path) -> dict[str, str]:
@@ -166,7 +176,7 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
     # the actual ids the run will feed, so a tokenizer change that alters
     # tokenization is caught even if every file hash somehow matched
     prompt_hash = hashlib.sha256(
-        json.dumps([list(tokenizer(text).input_ids) for text in prompts]).encode()
+        json.dumps([_prompt_ids(tokenizer, text) for text in prompts]).encode()
     ).hexdigest()[:16]
     return {
         "schema": _REFERENCE_SCHEMA,
@@ -277,7 +287,7 @@ def _build_reference(model_path: str, prompts: list[str], positions: int) -> dic
     )
     reference = {}
     for index, text in enumerate(prompts):
-        encoded = tokenizer(text, return_tensors="pt")
+        encoded = tokenizer(text, return_tensors="pt", add_special_tokens=False)
         ids = encoded.input_ids.to("cuda:0")
         with torch.no_grad():
             generated = model.generate(
@@ -607,6 +617,7 @@ def main() -> int:
         "config": {
             "model_path": args.model_path,
             "reference_provenance": provenance,
+            "code": _code_provenance(),
             "tensor_parallel_size": args.tp,
             "num_prompts": len(reference),
             "positions": args.positions,
