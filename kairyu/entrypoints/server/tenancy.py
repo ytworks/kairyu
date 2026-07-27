@@ -19,6 +19,9 @@ import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
+
+from kairyu.audit_io import BoundedJsonlWriter
 
 logger = logging.getLogger(__name__)
 
@@ -193,27 +196,38 @@ class TenantLimitMiddleware:
 
 
 class UsageLedger:
-    """O_APPEND JSONL (A7): one line per successful request or batch line.
+    """Bounded asynchronous JSONL (A7), one line per successful execution.
 
-    Keeps ONE append handle open (P4): the old open()/write()/close() per request
-    ran three syscalls synchronously on the event loop, stalling in-flight SSE
-    streams; a persistent append handle drops that to a buffered write+flush."""
+    ``record`` only admits to a bounded queue. The lifecycle-owned background
+    writer batches append+flush work; ``totals`` inserts an ordered flush
+    barrier before reading, and ``close`` drains all accepted records."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        max_pending_records: int = 4_096,
+        batch_size: int = 128,
+        _open_file: Callable[..., IO[str]] = open,
+    ) -> None:
         self._path = Path(path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._handle = None
+        self._writer = BoundedJsonlWriter(
+            self._path,
+            max_pending=max_pending_records,
+            batch_size=batch_size,
+            open_file=_open_file,
+        )
         self._malformed_lines = 0
+
+    @property
+    def _handle(self) -> IO[str] | None:
+        """Compatibility diagnostic for the app-lifecycle tests."""
+        return self._writer.handle
 
     @property
     def malformed_lines(self) -> int:
         """Number of malformed non-whitespace records in the latest scan."""
         return self._malformed_lines
-
-    def _get_handle(self):
-        if self._handle is None or self._handle.closed:
-            self._handle = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
-        return self._handle
 
     def record(
         self, tenant: str, model: str, prompt_tokens: int, completion_tokens: int
@@ -227,19 +241,18 @@ class UsageLedger:
                 "ts": time.time(),
             }
         )
-        handle = self._get_handle()
-        handle.write(line + "\n")
-        handle.flush()  # O_APPEND write is atomic; totals() readers see it at once
+        self._writer.append(line)
+
+    def flush(self) -> None:
+        """Wait until every accepted record is flushed and reader-visible."""
+        self._writer.flush()
 
     def close(self) -> None:
-        if self._handle is not None and not self._handle.closed:
-            try:
-                self._handle.flush()
-            finally:
-                self._handle.close()
+        self._writer.close()
 
     def totals(self, tenant: str | None = None) -> dict[str, dict[str, int]]:
         """Aggregate by tenant (optionally filtered) for /admin/usage."""
+        self.flush()
         totals: dict[str, dict[str, int]] = {}
         self._malformed_lines = 0
         if not self._path.is_file():

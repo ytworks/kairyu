@@ -153,12 +153,14 @@ def test_outcome_logging_joins_with_decisions(tmp_path):
     decision = RuleRouter().route(SHORT)
     log.record(SHORT, decision)
     log.record_outcome(SHORT, target=decision.target, quality=0.9, cost_usd=0.001)
+    log.flush()
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert records[0]["kind"] == "decision"
     assert records[1]["kind"] == "outcome"
     assert records[0]["query_sha256"] == records[1]["query_sha256"]
     dataset = build_dataset(records, cost_weight=1.0)
     assert dataset[0].label == decision.target
+    log.close()
 
 
 def test_bandit_exploration_rate_is_honored():

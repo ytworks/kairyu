@@ -387,6 +387,7 @@ class ReplicaPool:
             self._finish(entry)
 
     async def shutdown(self) -> None:
-        await shutdown_all(
-            (entry.backend for entry in self._entries.values()), "ReplicaPool"
-        )
+        resources = [entry.backend for entry in self._entries.values()]
+        if self._log is not None:
+            resources.append(self._log)
+        await shutdown_all(resources, "ReplicaPool")
