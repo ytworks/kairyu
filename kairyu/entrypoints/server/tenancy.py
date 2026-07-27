@@ -232,6 +232,13 @@ class UsageLedger:
     def record(
         self, tenant: str, model: str, prompt_tokens: int, completion_tokens: int
     ) -> None:
+        if (
+            type(prompt_tokens) is not int
+            or type(completion_tokens) is not int
+            or prompt_tokens < 0
+            or completion_tokens < 0
+        ):
+            raise ValueError("usage token counts must be non-negative integers")
         line = json.dumps(
             {
                 "tenant": tenant,
@@ -270,6 +277,8 @@ class UsageLedger:
                         not isinstance(record_tenant, str)
                         or type(prompt_tokens) is not int
                         or type(completion_tokens) is not int
+                        or prompt_tokens < 0
+                        or completion_tokens < 0
                     ):
                         raise TypeError("usage ledger record has invalid field types")
                 except (json.JSONDecodeError, KeyError, TypeError) as error:

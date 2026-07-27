@@ -47,6 +47,12 @@ route decision, role DAG, verifier verdicts — Fugu is a black box). Sources in
 | P-B4 (tiered auto models) | `kairyu-auto` (latency-biased routing) and `kairyu-auto-max` (Conductor/MoA depth) both in `/v1/models`; auto ≤1.5× direct-call latency, auto-max quality-wins on a fixed eval set | bench |
 | P-B5 (tenancy v1) | Key→tenant map in `DeploymentSpec`; per-key token-bucket limits in-gateway; append-only usage ledger + `/admin/usage`; two keys get isolated 429s; ledger reconciles with Prometheus counters to <0.1% | `tests/server/` |
 
+P-B5 is CPU-green as of 2026-07-27 (issue #199): the supported
+`DeploymentSpec` path proves isolated two-key 429s and exact (0% error)
+ledger-versus-Prometheus reconciliation. The same usage counters cover all
+supported execution modes and restore from the ledger after restart, including
+malformed-tail recovery and shutdown drain.
+
 ### Stage P-C — Competitive proof + developer completeness
 
 | Gate | Target | Where proven |

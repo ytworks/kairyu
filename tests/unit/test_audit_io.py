@@ -186,6 +186,20 @@ def test_flush_surfaces_sticky_disk_error(tmp_path):
         writer.close()
 
 
+def test_restart_separates_new_rows_from_a_truncated_tail(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    path.write_text('{"truncated":', encoding="utf-8")
+    writer = BoundedJsonlWriter(path)
+
+    writer.append('{"record":1}')
+    writer.close()
+
+    assert path.read_text().splitlines() == [
+        '{"truncated":',
+        '{"record":1}',
+    ]
+
+
 def test_concurrent_producers_preserve_complete_jsonl_records(tmp_path):
     path = tmp_path / "audit.jsonl"
     writer = BoundedJsonlWriter(path, max_pending=1_000, batch_size=32)

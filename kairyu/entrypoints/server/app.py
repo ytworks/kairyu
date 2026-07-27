@@ -608,6 +608,8 @@ def create_app(
 
         ledger = UsageLedger(settings.usage_ledger_path)
         app.state.usage_ledger = ledger
+        if metrics is not None:
+            metrics.restore_usage_totals(ledger.totals())
 
         @app.get("/admin/usage")
         async def admin_usage(http_request: Request, tenant: str | None = None):

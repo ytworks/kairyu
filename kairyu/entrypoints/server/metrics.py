@@ -82,11 +82,55 @@ class ServerMetrics:
             ["state"],
             registry=self.registry,
         )
+        self.usage_requests_total = Counter(
+            "kairyu_usage_requests",
+            "Successful metered executions by tenant",
+            ["tenant"],
+            registry=self.registry,
+        )
+        self.usage_tokens_total = Counter(
+            "kairyu_usage_tokens",
+            "Metered tokens by tenant and token type",
+            ["tenant", "type"],
+            registry=self.registry,
+        )
         self._pool_collector = _PoolCollector()
         self.registry.register(self._pool_collector)
 
     def track_pool(self, name: str, pool: ReplicaPool) -> None:
         self._pool_collector.add(name, pool)
+
+    def record_usage(
+        self,
+        tenant: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        """Mirror one accepted ledger row at the tenant aggregation boundary."""
+        self.usage_requests_total.labels(tenant=tenant).inc()
+        self.usage_tokens_total.labels(tenant=tenant, type="prompt").inc(
+            prompt_tokens
+        )
+        self.usage_tokens_total.labels(tenant=tenant, type="completion").inc(
+            completion_tokens
+        )
+
+    def restore_usage_totals(
+        self,
+        totals: dict[str, dict[str, int]],
+    ) -> None:
+        """Restore process-local counters from the append-only ledger on startup."""
+        for tenant, usage in totals.items():
+            self.usage_requests_total.labels(tenant=tenant).inc(
+                usage["requests"]
+            )
+            self.usage_tokens_total.labels(tenant=tenant, type="prompt").inc(
+                usage["prompt_tokens"]
+            )
+            self.usage_tokens_total.labels(
+                tenant=tenant,
+                type="completion",
+            ).inc(usage["completion_tokens"])
 
     def render(self) -> tuple[bytes, str]:
         return generate_latest(self.registry), CONTENT_TYPE_LATEST

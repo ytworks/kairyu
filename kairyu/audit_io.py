@@ -161,12 +161,24 @@ class BoundedJsonlWriter:
             )
 
     def _open(self) -> IO[str]:
+        needs_separator = False
+        if self.path.is_file():
+            with self.path.open("rb") as existing:
+                existing.seek(0, 2)
+                if existing.tell() > 0:
+                    existing.seek(-1, 2)
+                    needs_separator = existing.read(1) != b"\n"
         handle = self._open_file(
             self.path,
             "a",
             encoding="utf-8",
         )
         self._handle = handle
+        # A prior crash can leave one truncated JSON tail. Preserve that
+        # forensic row, but terminate it before accepting new complete rows.
+        if needs_separator:
+            handle.write("\n")
+            handle.flush()
         return handle
 
     def _write_batch(

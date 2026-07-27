@@ -225,6 +225,7 @@ class TestTenancy:
                 store,
                 {"m": MockBackend()},
                 max_concurrency=1,
+                metrics=app.state.metrics,
                 usage_ledger=app.state.usage_ledger,
                 tenant_limiter=limiter,
             )
@@ -277,6 +278,19 @@ class TestTenancy:
 
         totals = app.state.usage_ledger.totals()["default"]
         assert totals["requests"] == 1
+        rendered_metrics = app.state.metrics.render()[0].decode()
+        assert (
+            'kairyu_usage_requests_total{tenant="default"} 1.0'
+            in rendered_metrics
+        )
+        assert (
+            'kairyu_usage_tokens_total{tenant="default",type="prompt"} '
+            f'{float(totals["prompt_tokens"])}'
+        ) in rendered_metrics
+        assert (
+            'kairyu_usage_tokens_total{tenant="default",type="completion"} '
+            f'{float(totals["completion_tokens"])}'
+        ) in rendered_metrics
         assert limiter.charges == [
             (
                 "default",
@@ -615,6 +629,19 @@ class TestTenancy:
         assert totals["prompt_tokens"] == sum(p for p, _ in returned)  # exact (< 0.1%)
         assert totals["completion_tokens"] == sum(c for _, c in returned)
 
+    def test_ledger_rejects_negative_usage_before_sink_updates(self, tmp_path):
+        ledger = UsageLedger(tmp_path / "ledger.jsonl")
+
+        with pytest.raises(ValueError, match="non-negative integers"):
+            ledger.record(
+                "tenant-a",
+                "m",
+                prompt_tokens=-1,
+                completion_tokens=2,
+            )
+
+        assert not (tmp_path / "ledger.jsonl").exists()
+
     def test_ledger_skips_truncated_tail_and_warns_once(self, tmp_path, caplog):
         ledger_path = tmp_path / "ledger.jsonl"
         ledger = UsageLedger(ledger_path)
@@ -665,6 +692,13 @@ class TestTenancy:
                 }
             ),
             json.dumps({"prompt_tokens": 6, "completion_tokens": 7}),
+            json.dumps(
+                {
+                    "tenant": "tenant-a",
+                    "prompt_tokens": -1,
+                    "completion_tokens": 7,
+                }
+            ),
             "   ",
             json.dumps(
                 {
@@ -690,14 +724,17 @@ class TestTenancy:
                 "completion_tokens": 16,
             }
         }
-        assert ledger.malformed_lines == 3
+        assert ledger.malformed_lines == 4
         errors = [
             record.message
             for record in caplog.records
             if "malformed usage ledger record" in record.message
         ]
-        assert len(errors) == 3
-        assert all(f"line {line_number}" in " ".join(errors) for line_number in (2, 3, 4))
+        assert len(errors) == 4
+        assert all(
+            f"line {line_number}" in " ".join(errors)
+            for line_number in (2, 3, 4, 5)
+        )
 
     def test_admin_usage_returns_partial_totals_for_corrupt_ledger(
         self, tmp_path, caplog

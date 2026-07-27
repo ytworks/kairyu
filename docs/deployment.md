@@ -170,7 +170,8 @@ runs exactly this sequence against mock replicas.
 
 ## 6. Observability
 
-- `/metrics` (Prometheus): request counts by model/status, latency
+- `/metrics` (Prometheus): request counts by model/status, latency, and
+  ledger-reconcilable usage executions plus prompt/completion tokens by tenant
   histograms, per-replica outstanding/health, pool decision counts, batch
   job states. Scrape every gateway and replica.
 - JSON logs on stdout (one access line per request, prober/batch events);
