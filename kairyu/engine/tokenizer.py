@@ -33,8 +33,36 @@ class Tokenizer(Protocol):
     def vocab(self) -> list[str]: ...
 
 
+class TokenDecodeStream(Protocol):
+    """Optional tokenizer-native incremental decode contract.
+
+    Implementations return only the text contributed by ``token_ids`` and must
+    retain any decoder state needed across calls. Tokenizers without this
+    capability continue through ``IncrementalDetokenizer``'s exact full-prefix
+    fallback.
+    """
+
+    def push(self, token_ids: Sequence[int]) -> str: ...
+
+
 def _stable_hash(word: str) -> int:
     return int.from_bytes(hashlib.sha256(word.encode()).digest()[:8], "big")
+
+
+class _ToyDecodeStream:
+    """O(delta) stream for ToyTokenizer's context-free space joining."""
+
+    def __init__(self) -> None:
+        self._has_tokens = False
+
+    def push(self, token_ids: Sequence[int]) -> str:
+        if not token_ids:
+            return ""
+        text = " ".join(f"tok{token_id}" for token_id in token_ids)
+        if self._has_tokens:
+            text = f" {text}"
+        self._has_tokens = True
+        return text
 
 
 class ToyTokenizer:
@@ -53,6 +81,14 @@ class ToyTokenizer:
 
     def vocab(self) -> list[str]:
         return [f"tok{i}" for i in range(_TOY_VOCAB)]
+
+    def new_decode_stream(self) -> TokenDecodeStream | None:
+        # A subclass may override decode() while inheriting this factory. The
+        # Toy chunk format would then disagree with its public full decode, so
+        # capability detection must fall back unless both implementations match.
+        if type(self).decode is not ToyTokenizer.decode:
+            return None
+        return _ToyDecodeStream()
 
 
 def _import_tokenizers():
@@ -106,6 +142,35 @@ class HFTokenizer:
             self._vocab = table
         return self._vocab
 
+    def new_decode_stream(self) -> TokenDecodeStream | None:
+        """Use the Rust tokenizer's stateful decoder when the version supports it.
+
+        ``tokenizers`` added ``DecodeStream`` after Kairyu's original minimum
+        dependency. Older installations stay byte-correct through the generic
+        fallback instead of failing at startup.
+        """
+        if type(self).decode is not HFTokenizer.decode:
+            return None
+        tokenizers = _import_tokenizers()
+        stream_type = getattr(tokenizers.decoders, "DecodeStream", None)
+        if stream_type is None:
+            return None
+        return _HFDecodeStream(self._tok, stream_type(skip_special_tokens=True))
+
+
+class _HFDecodeStream:
+    """Adapter from tokenizers.DecodeStream's optional chunks to our contract."""
+
+    def __init__(self, tokenizer: object, stream: object) -> None:
+        self._tokenizer = tokenizer
+        self._stream = stream
+
+    def push(self, token_ids: Sequence[int]) -> str:
+        if not token_ids:
+            return ""
+        chunk = self._stream.step(self._tokenizer, list(token_ids))
+        return chunk if chunk is not None else ""
+
 
 def _locate_tokenizer_files(path: Path) -> tuple[Path, Path | None]:
     if path.is_dir():
@@ -147,9 +212,22 @@ class IncrementalDetokenizer:
         self._tokenizer = tokenizer
         self._ids: list[int] = []
         self._stable = ""
+        stream_factory = getattr(tokenizer, "new_decode_stream", None)
+        self._stream: TokenDecodeStream | None = (
+            stream_factory() if callable(stream_factory) else None
+        )
 
     def push(self, token_ids: Sequence[int]) -> str:
         self._ids.extend(token_ids)
+        if self._stream is not None:
+            # Native streams own decoder context and withhold incomplete UTF-8,
+            # so only the arriving delta is processed. Appending their chunks
+            # is never-retract by contract.
+            self._stable += self._stream.push(token_ids)
+            return self._stable
+
+        # Safe compatibility path for arbitrary Tokenizer implementations that
+        # cannot promise context-correct incremental chunks.
         text = self._tokenizer.decode(tuple(self._ids))
         stable = text.rstrip(_REPLACEMENT_CHAR)
         # never retract: only advance when the new stable text extends the old
@@ -158,4 +236,11 @@ class IncrementalDetokenizer:
         return self._stable
 
     def finalize(self) -> str:
+        # One exact O(n) decode preserves the historical final-output contract
+        # and flushes a genuinely incomplete byte sequence as U+FFFD.
         return self._tokenizer.decode(tuple(self._ids))
+
+    @property
+    def uses_native_stream(self) -> bool:
+        """Whether pushes use bounded native incremental work."""
+        return self._stream is not None

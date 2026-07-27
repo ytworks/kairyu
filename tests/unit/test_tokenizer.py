@@ -110,6 +110,7 @@ class TestIncrementalDetokenizer:
         for token_id in ids:
             detok.push((token_id,))
         assert detok.finalize() == tok.decode(ids)
+        assert detok.uses_native_stream
 
     def test_stable_text_never_retracts(self, hf_tokenizer_dir):
         tok = HFTokenizer(hf_tokenizer_dir)
@@ -146,3 +147,180 @@ class TestIncrementalDetokenizer:
         stable = detok.push((2,))
         assert stable == "tok1 tok2"
         assert detok.finalize() == "tok1 tok2"
+        assert detok.uses_native_stream
+
+    def test_native_stream_accepts_multi_token_commits(self, hf_tokenizer_dir):
+        tok = HFTokenizer(hf_tokenizer_dir)
+        ids = tok.encode("こんにちは世界 hello world 日本語")
+        detok = IncrementalDetokenizer(tok)
+
+        for start in range(0, len(ids), 3):
+            stable = detok.push(ids[start : start + 3])
+            assert tok.decode(ids[: start + 3]).startswith(stable)
+
+        assert detok.finalize() == tok.decode(ids)
+
+    def test_hf_stream_matches_wordpiece_decoder_and_skips_specials(self, tmp_path):
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(
+            models.WordPiece(
+                vocab={
+                    "[UNK]": 0,
+                    "hello": 1,
+                    "##s": 2,
+                    "world": 3,
+                    "[SEP]": 4,
+                },
+                unk_token="[UNK]",
+            )
+        )
+        raw.decoder = decoders.WordPiece(prefix="##", cleanup=True)
+        raw.add_special_tokens(["[SEP]"])
+        raw.save(str(tmp_path / "tokenizer.json"))
+        tok = HFTokenizer(tmp_path)
+        ids = (1, 2, 4, 3)
+        detok = IncrementalDetokenizer(tok)
+
+        stable = ""
+        for token_id in ids:
+            current = detok.push((token_id,))
+            assert current.startswith(stable)
+            stable = current
+
+        assert detok.finalize() == tok.decode(ids) == "hellos world"
+
+    def test_hf_stream_matches_metaspace_decoder(self, tmp_path):
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(
+            models.WordLevel(
+                vocab={"<unk>": 0, "▁hello": 1, "▁world": 2, "x": 3},
+                unk_token="<unk>",
+            )
+        )
+        raw.decoder = decoders.Metaspace(
+            replacement="▁", prepend_scheme="always", split=True
+        )
+        raw.save(str(tmp_path / "tokenizer.json"))
+        tok = HFTokenizer(tmp_path)
+        ids = (1, 3, 2)
+        detok = IncrementalDetokenizer(tok)
+
+        for token_id in ids:
+            detok.push((token_id,))
+
+        assert detok.finalize() == tok.decode(ids) == "hellox world"
+
+    def test_long_native_stream_has_linear_decode_work(self):
+        class _CountingStream:
+            def __init__(self, owner):
+                self._owner = owner
+
+            def push(self, token_ids):
+                self._owner.incremental_work += len(token_ids)
+                return "".join(chr(ord("a") + token_id % 26) for token_id in token_ids)
+
+        class _CountingTokenizer:
+            eos_token_id = None
+
+            def __init__(self):
+                self.incremental_work = 0
+                self.full_decode_work = 0
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids):
+                self.full_decode_work += len(token_ids)
+                return "".join(
+                    chr(ord("a") + token_id % 26) for token_id in token_ids
+                )
+
+            def vocab(self):
+                return []
+
+            def new_decode_stream(self):
+                return _CountingStream(self)
+
+        token_count = 4096
+        tok = _CountingTokenizer()
+        detok = IncrementalDetokenizer(tok)
+        for token_id in range(token_count):
+            detok.push((token_id,))
+
+        assert len(detok.finalize()) == token_count
+        assert tok.incremental_work == token_count
+        assert tok.full_decode_work == token_count
+        assert tok.incremental_work + tok.full_decode_work == 2 * token_count
+
+    def test_tokenizer_without_stream_uses_exact_safe_fallback(self):
+        class _ContextTokenizer:
+            eos_token_id = None
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids):
+                return "|".join(str(token_id) for token_id in token_ids)
+
+            def vocab(self):
+                return []
+
+        tok = _ContextTokenizer()
+        detok = IncrementalDetokenizer(tok)
+
+        assert not detok.uses_native_stream
+        assert detok.push((1,)) == "1"
+        assert detok.push((2, 3)) == "1|2|3"
+        assert detok.finalize() == "1|2|3"
+
+    def test_decode_override_does_not_inherit_incompatible_native_stream(self):
+        class _CustomToy(ToyTokenizer):
+            def decode(self, token_ids):
+                return "".join(chr(ord("a") + token_id % 26) for token_id in token_ids)
+
+        tok = _CustomToy()
+        detok = IncrementalDetokenizer(tok)
+
+        assert not detok.uses_native_stream
+        assert detok.push((1, 2, 3)) == tok.decode((1, 2, 3))
+
+    def test_hf_without_decode_stream_uses_safe_fallback(
+        self, hf_tokenizer_dir, monkeypatch
+    ):
+        from tokenizers import decoders
+
+        monkeypatch.delattr(decoders, "DecodeStream")
+        tok = HFTokenizer(hf_tokenizer_dir)
+        ids = tok.encode("こんにちは世界 hello")
+        detok = IncrementalDetokenizer(tok)
+
+        assert not detok.uses_native_stream
+        for token_id in ids:
+            stable = detok.push((token_id,))
+            assert tok.decode(ids).startswith(stable)
+        assert detok.finalize() == tok.decode(ids)
+
+    def test_fallback_holds_incomplete_replacement_suffix(self):
+        class _SplitUtf8Tokenizer:
+            eos_token_id = None
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids):
+                if tuple(token_ids) == (1,):
+                    return "�"
+                if tuple(token_ids) == (1, 2):
+                    return "あ"
+                return ""
+
+            def vocab(self):
+                return []
+
+        detok = IncrementalDetokenizer(_SplitUtf8Tokenizer())
+
+        assert detok.push((1,)) == ""
+        assert detok.push((2,)) == "あ"
+        assert detok.finalize() == "あ"

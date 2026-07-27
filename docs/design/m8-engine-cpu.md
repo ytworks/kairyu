@@ -37,11 +37,29 @@ New `kairyu/engine/tokenizer.py`:
 - `Tokenizer` protocol: `encode(text) -> tuple[int, ...]`, `decode(ids) -> str`,
   `vocab() -> list[str]`, `eos_token_id: int | None`.
 - `IncrementalDetokenizer`: per-request; emits only text that can no longer change
-  (holds back incomplete UTF-8 sequences / partial merges). Invariant pinned:
-  concatenated incremental output == full `decode()` at every step.
+  (holds back incomplete UTF-8 sequences / partial merges). Invariants pinned:
+  every cumulative stable update is a prefix of full `decode()` and `finalize()`
+  is byte-identical to full decode.
 - `ToyTokenizer` (today's word-hash + `tok<N>`) **remains the default**;
   `HFTokenizer` wraps the `tokenizers` library (deferred import, `structured.py`
   pattern), loads `tokenizer.json`, exposes real `eos_token_id`.
+
+**Incremental-performance amendment (2026-07-27, issue #211):**
+
+- `TokenDecodeStream` is an optional per-request capability. `HFTokenizer` uses
+  the Rust `tokenizers.decoders.DecodeStream` (including its incomplete-UTF-8
+  buffer and special-token policy), and `ToyTokenizer` joins only the arriving
+  token delta. Push work is O(delta); one exact O(n) decode at `finalize()`
+  flushes malformed trailing bytes and preserves the historical final contract.
+- A tokenizer without that capability, an older `tokenizers` version without
+  `DecodeStream`, or a subclass that overrides `decode()` without also defining
+  a matching stream uses the original full-prefix safe fallback. Capability is
+  never inferred merely from inheritance.
+- Operation-count coverage fixes 4,096 one-token pushes at N incremental work
+  plus N final work. ByteLevel, WordPiece, Metaspace, special-token skipping,
+  multi-token commits, and fallback parity are pinned. On the Qwen3-32B
+  tokenizer, 4,096 random tokens measured 2.038 s full-prefix versus 0.0149 s
+  native streaming (137.25×) while preserving final bytes.
 
 **Config surface (amended)**: `KairyuBackend(tokenizer: str | Tokenizer = "toy")` —
 `"toy"` → ToyTokenizer; any other string is a filesystem path (a `tokenizer.json`
@@ -75,7 +93,9 @@ already forwards as kwargs; verified builder.py → registry.py).
   this in spirit; M8 fixes it (submit enqueues an op; the step loop drains ops).
 
 Tests: tiny BPE built programmatically (no committed blobs); Japanese multi-byte
-boundaries; EOS/stop end-to-end; stop-string-across-deltas holdback pinned.
+boundaries; WordPiece and Metaspace decoder parity; linear operation count;
+custom-tokenizer fallback; EOS/stop end-to-end; stop-string-across-deltas
+holdback pinned.
 Deps: `tokenizers` (dev group + new `[project.optional-dependencies] hf` extra —
 the section is created in this milestone).
 
