@@ -34,8 +34,12 @@ results are ever reported (goal acceptance criteria, carried from G1).
 - **M6**: two such nodes, ≥400 Gb/s InfiniBand or RoCE. Record the actual fabric, link
   rate, and a raw fabric microbenchmark in `bench/results/env-<date>.json` (extends
   gpu-runbook §0).
-- **Models**: Llama-3.3-70B FP8 W8A8 (primary); Llama-3.1-8B (correctness stepping
-  stone — the only model that fits TP=1).
+- **Models**: `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` at immutable
+  revision `f50dbad2c84590ca17dc51e207c34321b65ff14b` is the primary dense
+  anchor: compressed-tensors FP8 E4M3 per-output-channel weights, dynamic
+  per-token FP8 activations, and BF16 model/KV dtype. Llama-3.1-8B is the
+  correctness stepping stone and the only model that fits TP=1 on the original
+  80 GB profile.
 - **Memory arithmetic (fixes the baseline)**: 70B FP8 weights ≈ 70 GB. A single 80 GB
   H100 cannot hold them with usable KV headroom, so **TP=1 is not a valid 70B config;
   TP=2 is the minimal viable config and the base for all scaling-efficiency ratios.**

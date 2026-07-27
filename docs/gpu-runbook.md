@@ -122,8 +122,20 @@ GPU-only remainder (design m5 §4.2).
   then pass all four files to `bench/gate_a1.py`. The assembler retains the raw
   continuations/reference and fails unless both amended teacher-forced verdicts,
   overlap transparency, checkpoint/prompt identity, and clean-code provenance pass.
-- Gate A2: 70B TP=4/8 vs TP=2 under the amended teacher-forced agreement and
-  logprob criteria in G2 §7.
+- Gate A2: use
+  `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic@f50dbad2c84590ca17dc51e207c34321b65ff14b`
+  with compressed-tensors FP8 W8A8 and BF16 model/KV dtype. First create one
+  shared 64×16 HF reference with `bench/parity_hf.py --reference-only
+  --reference-device-map auto --reference-batch-size 8`; then run the same
+  command without `--reference-only` at `--tp 2`, `--tp 4`, and `--tp 8`.
+  Always pass the pinned source through `--checkpoint-repo` and
+  `--checkpoint-revision`. Assemble the four raw files with
+  `bench/gate_a2.py --reference ... --teacher-tp2 ... --teacher-tp4 ...
+  --teacher-tp8 ... --out ...`. The assembler requires 64×16 raw positions
+  at every TP degree, all 15 complete safetensors SHA-256s, the measured
+  reference noise floor, CUDA/NCCL/topology provenance, and one clean commit;
+  it recomputes both amended HF-relative criteria and TP4/8-vs-TP2 instead of
+  trusting reported verdicts.
 - Gates A3–A5: `bench/serving_bench.py --sweep-tp 2,4,8` (TP=2 base in same file;
   conc-64 report-only point).
 - Gate A6: vs pinned vLLM TP=4/8 (ShareGPT@128 + shared-prefix trace).

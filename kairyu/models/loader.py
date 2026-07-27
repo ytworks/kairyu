@@ -100,11 +100,13 @@ def load_model(
     # state_dict() — NOT named_parameters+named_buffers: non-persistent buffers
     # (rotary inv_freq) are absent from checkpoints by contract (m14 A1)
     expected = model.state_dict()
-    quantized_buffers = {
-        f"{module_name}.{buffer_name}" if module_name else buffer_name
+    quantized_buffer_dtypes = {
+        (
+            f"{module_name}.{buffer_name}" if module_name else buffer_name
+        ): buffer.dtype
         for module_name, module in model.named_modules()
         if getattr(module, "is_quantized", False)
-        for buffer_name, _ in module.named_buffers(recurse=False)
+        for buffer_name, buffer in module.named_buffers(recurse=False)
     }
     for name, current in expected.items():
         if name == "lm_head.weight" and config.tie_word_embeddings:
@@ -112,13 +114,21 @@ def load_model(
         if name not in reader:
             raise KeyError(f"checkpoint at {path} is missing tensor {name!r}")
         tensor = reader.tensor(name)
-        if (
-            name not in quantized_buffers
+        quantized_dtype = quantized_buffer_dtypes.get(name)
+        if quantized_dtype is not None and tensor.dtype != quantized_dtype:
+            # The registered buffer is the fused-kernel ABI. In particular,
+            # real compressed-tensors FP8 checkpoints may serialize
+            # per-channel scales in bf16, while torch._scaled_mm requires
+            # float32 scales. Converting bf16 -> fp32 is value-preserving and
+            # must not follow the model's bf16 compute dtype.
+            tensor = tensor.to(quantized_dtype)
+        elif (
+            name not in quantized_buffer_dtypes
             and current.dtype == torch.float32
             and tensor.is_floating_point()
         ):
             # regular fp params follow the requested compute dtype; quantized
-            # payloads (int/fp8/uint8 packs, fp16 scales) load VERBATIM (m14 A2)
+            # payloads follow the dtype declared by their registered buffer
             tensor = tensor.to(dtype)
         state[name] = tensor
     model.load_state_dict(state, strict=False, assign=True)

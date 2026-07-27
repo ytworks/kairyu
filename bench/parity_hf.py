@@ -1,17 +1,11 @@
 """Teacher-forced next-token agreement vs HF transformers.
 
-NOT runbook §1 Gate 1 / G2 A1, and deliberately not named as one. Those are
-defined as Llama-3.1-8B, 64 fixed prompts, full greedy CONTINUATIONS, with the
-overlap pipeline ON and OFF. This runs each prefix as an independent
-`max_new_tokens=1` request through `EngineCore` only, so it exercises neither a
-continuation nor the overlap future-token path. What still separates this from
-the formal gate is the model (Llama-3.1-8B) and the full continuations — NOT the
-overlap path: `PagedModelRunner`'s in-flight token buffer removed the IndexError
-it used to raise under `OverlapEngineCore`, and A1's overlap-ON half is measured
-in `bench/results/parity-tp-qwen3-32b-2026-07-26.json`. The device-side half of
-m2 §2.2 remains open, but it is a performance invariant, not a blocker here.
-
-What it IS: the diagnostic that free-running comparison cannot provide.
+This is the formal HF-relative measurement for G2 A2 and the teacher-forced
+half of G2 A1. A1 additionally requires full Llama-3.1-8B continuations with
+the overlap pipeline ON and OFF, which ``bench/parity_tp.py`` records and
+``bench/gate_a1.py`` assembles. A2 instead requires the fixed 64-prompt
+Llama-3.3-70B FP8 measurement at TP=2/4/8; ``bench/gate_a2.py`` assembles those
+three runs with the shared HF reference and fails closed on incomplete evidence.
 
 Free-running greedy comparison cannot answer "are our kernels right?". Once one
 token differs the trajectories separate and every later token is compared against
@@ -30,9 +24,9 @@ for one token at each of those prefixes, through the ordinary request path, so
 paged KV, the attention backend and any TP sharding are all in the measurement.
 
 Run:
-  uv run python bench/parity_hf.py --model-path /models/qwen3-32b --tp 1
-  uv run python bench/parity_hf.py --model-path /models/qwen3-32b --tp 8 \\
-      --reference bench/results/hf-reference-<model>.json
+  uv run python bench/parity_hf.py --model-path /models/llama-3.3-70b-fp8 \\
+      --tp 2 --num-prompts 64 --positions 16 \\
+      --reference bench/results/hf-reference-llama33-70b-fp8.json
 """
 
 from __future__ import annotations
@@ -70,7 +64,7 @@ _MIN_TIE_GAP = 0.125
 _MAX_LOGPROB_DELTA = 0.25
 
 
-_REFERENCE_SCHEMA = 4
+_REFERENCE_SCHEMA = 5
 #: Read size for the checkpoint digest. Large enough that hashlib releases the
 #: GIL for the update, which is what makes the thread pool below worth having.
 _HASH_CHUNK = 8 << 20
@@ -159,6 +153,7 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
         ).encode()
     ).hexdigest()[:16]
     config_path = root / "config.json"
+    raw_config = json.loads(config_path.read_text())
     checkpoint = hashlib.sha256(config_path.read_bytes()).hexdigest()[:16]
     # the tokenizer's SERIALIZATION, not just its vocab: normalizer and
     # pre-tokenizer differences change tokenization while leaving get_vocab()
@@ -181,6 +176,17 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
     return {
         "schema": _REFERENCE_SCHEMA,
         "checkpoint_config_sha256": checkpoint,
+        "checkpoint_contract": {
+            "architectures": raw_config.get("architectures"),
+            "hidden_size": raw_config.get("hidden_size"),
+            "intermediate_size": raw_config.get("intermediate_size"),
+            "num_hidden_layers": raw_config.get("num_hidden_layers"),
+            "num_attention_heads": raw_config.get("num_attention_heads"),
+            "num_key_value_heads": raw_config.get("num_key_value_heads"),
+            "vocab_size": raw_config.get("vocab_size"),
+            "torch_dtype": raw_config.get("torch_dtype"),
+            "quantization_config": raw_config.get("quantization_config"),
+        },
         # rollup of the per-file digests below, not an independent measurement
         "checkpoint_weights_sha256": weight_id,
         # full SHA-256 per weight file: checkable against the Hub's LFS oid for
@@ -199,6 +205,8 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
             "temperature": None,
             "top_p": None,
             "top_k": None,
+            "min_new_tokens": positions,
+            "max_new_tokens": positions,
         },
     }
 
@@ -273,58 +281,100 @@ def _load_reference(path: Path, expected: dict) -> dict:
     return entries
 
 
-def _build_reference(model_path: str, prompts: list[str], positions: int) -> dict:
-    """HF greedy continuations. Freed before the engine loads — a 32B in bf16
-    twice over does not fit on one card."""
+def _build_reference(
+    model_path: str,
+    prompts: list[str],
+    positions: int,
+    device_map: str | None = None,
+    batch_size: int = 1,
+) -> dict:
+    """HF greedy continuations, optionally layer-dispatched across GPUs.
+
+    ``device_map=auto`` is the 70B path: Accelerate distributes the checkpoint
+    without changing HF's model implementation, and compressed-tensors keeps
+    the checkpoint's FP8 weights/scales intact. The model is freed before the
+    Kairyu TP candidate loads.
+    """
     import torch
     import transformers
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
-    model = (
-        transformers.AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16)
-        .to("cuda:0")
-        .eval()
+    load_kwargs = {"dtype": torch.bfloat16}
+    if device_map is not None:
+        load_kwargs["device_map"] = device_map
+    model = transformers.AutoModelForCausalLM.from_pretrained(
+        model_path, **load_kwargs
     )
+    if device_map is None:
+        model = model.to("cuda:0")
+    model = model.eval()
+    input_device = model.get_input_embeddings().weight.device
+    if batch_size < 1:
+        raise ValueError(f"reference batch_size must be positive, got {batch_size}")
+    if batch_size > 1:
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
     reference = {}
-    for index, text in enumerate(prompts):
-        encoded = tokenizer(text, return_tensors="pt", add_special_tokens=False)
-        ids = encoded.input_ids.to("cuda:0")
+    for batch_start in range(0, len(prompts), batch_size):
+        texts = prompts[batch_start : batch_start + batch_size]
+        encoded = tokenizer(
+            texts,
+            return_tensors="pt",
+            add_special_tokens=False,
+            padding=batch_size > 1,
+        )
+        ids = encoded.input_ids.to(input_device)
+        attention_mask = encoded.attention_mask.to(input_device)
         with torch.no_grad():
             generated = model.generate(
                 ids,
-                attention_mask=encoded.attention_mask.to("cuda:0"),
+                attention_mask=attention_mask,
                 max_new_tokens=positions,
+                min_new_tokens=positions,
                 do_sample=False,
                 temperature=None,
                 top_p=None,
                 top_k=None,
             )
-        continuation = generated[0][ids.shape[1] :].tolist()
-        # One teacher-forced forward over prompt+continuation yields HF's
-        # distribution at EVERY position at once. Recorded top-k, not just the
-        # argmax, because the question a disagreement raises is "how far below
-        # did HF rank what we picked?" — and a rate alone cannot answer it.
-        with torch.no_grad():
-            full = torch.tensor([ids[0].tolist() + continuation], device="cuda:0")
-            logits = model(full).logits[0].float()
-        log_probs = torch.log_softmax(logits, dim=-1)
-        prompt_length = ids.shape[1]
-        distributions = []
-        for step in range(len(continuation)):
-            # position predicting continuation[step] is the token before it
-            row = log_probs[prompt_length + step - 1]
-            values, indices = torch.topk(row, k=min(_TOP_K, row.shape[-1]))
-            distributions.append(
-                {str(int(t)): round(float(v), 5) for t, v in zip(indices, values, strict=True)}
-            )
-        reference[f"p{index}"] = {
-            "prompt": text,
-            "prompt_ids": ids[0].tolist(),
-            "continuation": continuation,
-            "hf_top_logprobs": distributions,
-        }
+        for batch_index, text in enumerate(texts):
+            index = batch_start + batch_index
+            prompt_ids = _prompt_ids(tokenizer, text)
+            continuation = generated[batch_index][ids.shape[1] :].tolist()
+            # One teacher-forced forward over prompt+continuation yields HF's
+            # distribution at EVERY position at once. Recorded top-k, not just
+            # argmax, because the question a disagreement raises is "how far
+            # below did HF rank what we picked?"
+            with torch.no_grad():
+                full = torch.tensor(
+                    [prompt_ids + continuation], device=input_device
+                )
+                logits = model(full).logits[0].float()
+            log_probs = torch.log_softmax(logits, dim=-1)
+            prompt_length = len(prompt_ids)
+            distributions = []
+            for step in range(len(continuation)):
+                # position predicting continuation[step] is the token before it
+                row = log_probs[prompt_length + step - 1]
+                values, indices = torch.topk(
+                    row, k=min(_TOP_K, row.shape[-1])
+                )
+                distributions.append(
+                    {
+                        str(int(token)): round(float(value), 5)
+                        for token, value in zip(indices, values, strict=True)
+                    }
+                )
+            reference[f"p{index}"] = {
+                "prompt": text,
+                "prompt_ids": prompt_ids,
+                "continuation": continuation,
+                "hf_top_logprobs": distributions,
+            }
     del model
-    torch.cuda.empty_cache()
+    for device_index in range(torch.cuda.device_count()):
+        with torch.cuda.device(device_index):
+            torch.cuda.empty_cache()
     return reference
 
 
@@ -488,11 +538,30 @@ def main() -> int:
     parser.add_argument(
         "--reference",
         type=Path,
-        help="reuse (or create) the HF reference here; skips reloading a 32B "
-        "just to reproduce the same greedy continuation",
+        help="reuse (or create) the HF reference here; skips reloading the "
+        "reference model for every TP degree",
     )
+    parser.add_argument(
+        "--reference-device-map",
+        choices=("auto",),
+        help="HF/Accelerate device map used only while creating the reference",
+    )
+    parser.add_argument("--reference-batch-size", type=int, default=1)
+    parser.add_argument(
+        "--reference-only",
+        action="store_true",
+        help="create/validate the reference and exit before loading Kairyu",
+    )
+    parser.add_argument("--checkpoint-repo")
+    parser.add_argument("--checkpoint-revision")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
+    if args.reference_only and args.reference is None:
+        parser.error("--reference-only requires --reference")
+    if bool(args.checkpoint_repo) != bool(args.checkpoint_revision):
+        parser.error(
+            "--checkpoint-repo and --checkpoint-revision must be provided together"
+        )
 
     prompts = list(_TEXT_PROMPTS[: args.num_prompts])
     if len(prompts) < args.num_prompts:
@@ -507,17 +576,48 @@ def main() -> int:
         # while config.positions still claimed 16.
         reference = _load_reference(args.reference, provenance)
     else:
-        reference = _build_reference(args.model_path, prompts, args.positions)
+        reference = _build_reference(
+            args.model_path,
+            prompts,
+            args.positions,
+            device_map=args.reference_device_map,
+            batch_size=args.reference_batch_size,
+        )
         if args.reference:
+            import torch
+            import transformers
+
             args.reference.parent.mkdir(parents=True, exist_ok=True)
             args.reference.write_text(
                 json.dumps(
-                    {"provenance": provenance, "reference": reference}, indent=2
+                    {
+                        "schema_version": _REFERENCE_SCHEMA,
+                        "provenance": provenance,
+                        "reference_runtime": {
+                            "backend": "HF transformers",
+                            "code": _code_provenance(),
+                            "transformers": transformers.__version__,
+                            "torch": torch.__version__,
+                            "torch_cuda": torch.version.cuda,
+                            "dtype": "bfloat16",
+                            "device_map": args.reference_device_map,
+                            "batch_size": args.reference_batch_size,
+                            "visible_device_count": torch.cuda.device_count(),
+                            "checkpoint_repo": args.checkpoint_repo,
+                            "checkpoint_revision": args.checkpoint_revision,
+                        },
+                        "reference": reference,
+                    },
+                    indent=2,
                 )
                 + "\n"
             )
 
     noise_floor = _reference_noise_floor(reference)
+    if args.reference_only:
+        print(json.dumps({"reference_noise_floor": noise_floor}, indent=2))
+        print(f"written: {args.reference}")
+        return 0
     # the tolerance is the reference's own instability, never tighter
     tie_gap = max(_MIN_TIE_GAP, noise_floor["max_gap_at_self_disagreement"])
 
@@ -531,6 +631,7 @@ def main() -> int:
     disagreements = []
     logprob_deltas: list[float] = []
     missing_deltas: list[dict] = []
+    raw_positions: list[dict] = []
     for name, entry in reference.items():
         expected = entry["continuation"]
         actual = predicted[name]
@@ -541,6 +642,23 @@ def main() -> int:
         ):
             hf_row = distributions[position] if position < len(distributions) else {}
             engine_token = token.token_id if token is not None else None
+            engine_logprob = token.logprob if token is not None else None
+            engine_top_logprobs = (
+                {str(token_id): value for token_id, value in token.top_logprobs}
+                if token is not None and token.top_logprobs is not None
+                else None
+            )
+            raw_position = {
+                "prompt": name,
+                "position": position,
+                "reference_token": hf_token,
+                "engine_token": engine_token,
+                "agreement": engine_token == hf_token,
+                "reference_token_logprob": hf_row.get(str(hf_token)),
+                "engine_token_logprob": engine_logprob,
+                "reference_top_logprobs": hf_row,
+                "engine_top_logprobs": engine_top_logprobs,
+            }
             if engine_token == hf_token:
                 hits += 1
                 # agreement is not the whole story: the same choice can still sit
@@ -550,8 +668,12 @@ def main() -> int:
                 hf_value = hf_row.get(str(hf_token))
                 if token is None or token.logprob is None or hf_value is None:
                     missing_deltas.append({"prompt": name, "position": position})
+                    raw_position["absolute_logprob_delta"] = None
                 else:
-                    logprob_deltas.append(abs(token.logprob - hf_value))
+                    delta = abs(token.logprob - hf_value)
+                    logprob_deltas.append(delta)
+                    raw_position["absolute_logprob_delta"] = delta
+                raw_positions.append(raw_position)
                 continue
             hf_best = hf_row.get(str(hf_token))
             hf_for_engine_choice = hf_row.get(str(engine_token))
@@ -575,6 +697,10 @@ def main() -> int:
                     "tie_break": gap is not None and gap <= tie_gap,
                 }
             )
+            raw_position["reference_logprob_gap"] = gap
+            raw_position["outside_reference_top_k"] = hf_for_engine_choice is None
+            raw_position["tie_break"] = gap is not None and gap <= tie_gap
+            raw_positions.append(raw_position)
         total += len(expected)
         agreed += hits
         per_prompt[name] = {
@@ -605,17 +731,21 @@ def main() -> int:
     mean_delta = (
         round(sum(logprob_deltas) / len(logprob_deltas), 5) if logprob_deltas else 0.0
     )
+    from bench.parity_tp import _gpu_runtime_provenance
     from kairyu.engine.core.hw_profile import probe
 
     profile = probe()
     payload = {
+        "schema_version": 5,
         "measurement": (
-            "teacher-forced next-token agreement vs HF transformers (DIAGNOSTIC — "
-            "not runbook §1 Gate 1 / G2 A1, which require full greedy "
-            "continuations with overlap ON and OFF)"
+            "teacher-forced next-token agreement vs HF transformers "
+            "(formal G2 A2 measurement; G2 A1 additionally requires full "
+            "greedy continuations with overlap ON and OFF)"
         ),
         "config": {
             "model_path": args.model_path,
+            "checkpoint_repo": args.checkpoint_repo,
+            "checkpoint_revision": args.checkpoint_revision,
             "reference_provenance": provenance,
             "code": _code_provenance(),
             "tensor_parallel_size": args.tp,
@@ -626,6 +756,11 @@ def main() -> int:
                 "arch": profile.arch,
                 "device_name": profile.device_name,
                 "device_count": profile.device_count,
+                "runtime": (
+                    _gpu_runtime_provenance()
+                    if profile.arch == "cuda"
+                    else None
+                ),
             },
             "method": (
                 "both sides receive the identical prefix at every position; only "
@@ -674,6 +809,7 @@ def main() -> int:
             "verdict": "PASS" if tolerance_ok else "FAIL",
         },
         "per_prompt": per_prompt,
+        "raw_positions": raw_positions,
         # kept in full: which positions disagree is the diagnostic, and a summary
         # rate alone cannot tell a scattered near-tie from a systematic fault
         "disagreements": disagreements,

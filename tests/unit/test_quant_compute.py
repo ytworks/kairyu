@@ -166,9 +166,11 @@ def test_quantized_checkpoint_runs_full_engine(scheme, fp32_reference, tmp_path)
     assert len(set(quantized)) > 1, f"{scheme}: degenerate output {quantized}"
 
 
-def test_quantized_scales_load_verbatim_at_bf16_compute_dtype(
+def test_quantized_scales_normalize_to_kernel_dtype_at_bf16_compute_dtype(
     fp32_reference, tmp_path
 ):
+    from safetensors.torch import load_file, save_file
+
     from kairyu.models.loader import load_model
     from kairyu.quant.linear import Fp8Linear
 
@@ -176,6 +178,15 @@ def test_quantized_scales_load_verbatim_at_bf16_compute_dtype(
     target = tmp_path / "fp8-scale-dtype"
     target.mkdir()
     write_quantized_checkpoint("fp8", source_path, hf_model, target)
+    checkpoint = target / "model.safetensors"
+    state = load_file(checkpoint)
+    for name, tensor in tuple(state.items()):
+        if name.endswith(".weight_scale"):
+            state[name] = tensor.to(torch.bfloat16)
+    save_file(state, checkpoint)
+    assert next(
+        tensor for name, tensor in state.items() if name.endswith(".weight_scale")
+    ).dtype is torch.bfloat16
 
     model, _, _ = load_model(target, dtype=torch.bfloat16)
     layer = next(module for module in model.modules() if isinstance(module, Fp8Linear))

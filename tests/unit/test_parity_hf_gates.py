@@ -82,7 +82,7 @@ def _reference_file(tmp_path: Path, provenance: dict, entries: dict) -> Path:
 
 def _provenance(**overrides) -> dict:
     base = {
-        "schema": 4,
+        "schema": 5,
         "checkpoint_config_sha256": "aaaa",
         "checkpoint_weights_sha256": "aaab",
         "checkpoint_weight_files": {"model.safetensors": "a" * 64},
@@ -185,10 +185,12 @@ def test_a_pre_envelope_cache_is_rejected(tmp_path):
         parity_hf._load_reference(path, _provenance())
 
 
-def test_the_harness_does_not_claim_to_be_the_formal_gate():
+def test_the_harness_is_formal_for_a2_but_scopes_the_extra_a1_evidence():
     from bench import parity_hf
 
-    assert "NOT runbook §1 Gate 1" in (parity_hf.__doc__ or "")
+    doc = parity_hf.__doc__ or ""
+    assert "formal HF-relative measurement for G2 A2" in doc
+    assert "A1 additionally requires full" in doc
 
 
 def test_a_reference_row_missing_its_own_token_is_rejected(tmp_path):

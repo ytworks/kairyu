@@ -15,7 +15,7 @@ _REPO = Path(__file__).resolve().parents[2]
 
 def _provenance() -> dict:
     return {
-        "schema": 4,
+        "schema": 5,
         "checkpoint_config_sha256": "a" * 16,
         "checkpoint_weights_sha256": "b" * 16,
         "checkpoint_weight_files": {"model.safetensors": "c" * 64},

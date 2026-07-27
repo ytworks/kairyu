@@ -23,7 +23,11 @@ the Llama shape, four weight SHA-256s, identical BOS-free prompt tokens,
 CUDA 13.0/NCCL 2.29.7, and one clean commit
 (`bench/results/g2-a1-llama31-8b-rtxpro6000-2026-07-26.json`). A2's existing
 Qwen3-32B TP1/8 teacher-forced measurement remains diagnostic evidence for the
-70B gate, not its completion. The device-side half of m2 §2.2 remains a
+70B gate, not its completion. The A2 implementation now supports sharded
+compressed-FP8 dense checkpoints, pins
+`RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic@f50dbad2c84590ca17dc51e207c34321b65ff14b`,
+and has a fail-closed TP2/4/8 raw-evidence assembler; the full 64×16 GPU
+measurement is in progress. The device-side half of m2 §2.2 remains a
 performance invariant, not an A1 blocker.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
@@ -159,6 +163,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [progress] G2 A2 70B FP8 TP gate is executable
+- What: dense tensor parallel loading now accepts compressed-tensors FP8,
+  shards projection weights and output-channel scales with their column
+  projections, replicates row-parallel output scales, and value-preservingly
+  widens serialized BF16 scales to the fused scaled-MM FP32 ABI. The shared HF
+  reference can use Accelerate multi-GPU placement and batching. Candidate
+  outputs retain all per-position tokens/logprobs, complete checkpoint and
+  topology provenance, and the new `gate_a2.py` independently recomputes the
+  amended HF-relative and TP4/8-vs-TP2 verdicts.
+- Why: A2 could not previously load its 70B FP8 anchor at any TP degree, nor
+  create a reference that exceeded one GPU's memory, and reported summary
+  verdicts alone could not fail closed on partial or fabricated evidence.
+- Refs: issue #152; G2 A2 and §7; GPU runbook §6;
+  `kairyu/models/{loader,parallel}.py`; `bench/{parity_hf,gate_a2}.py`
 
 ### 2026-07-27 — [amendment] m14 D2/D4: quantized CUDA forward is fused and production-wired
 - What: CUDA `QuantizedLinear.forward` now dispatches every advertised scheme
