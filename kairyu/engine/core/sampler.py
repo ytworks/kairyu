@@ -13,17 +13,19 @@ Order of operations (reviewed convention, m8 §6):
 6. softmax → seeded sample.
 
 Determinism: base seed is ``sampling.seed`` or sha256(request_id) (never
-Python ``hash()`` — process-randomized); the per-position generator seed is a
-splitmix64 mix of (base, position), so TP rank runners sample identically
-given identical logits, and repeated sampling of the same position (shared
-runner instance across CPU TP ranks) is idempotent. Grammar ``accept`` is
-likewise idempotent per position — the matcher advances exactly once per
-committed token.
+Python ``hash()`` — process-randomized); the per-position seed is a splitmix64
+mix of (base, position). CPU compatibility uses a seeded Generator. CUDA uses
+stateless Gumbel noise derived from (seed, position, vocab index), so TP rank
+runners sample identically given identical logits and replaying a position is
+idempotent without a host-owned RNG offset. Grammar ``accept`` is likewise
+idempotent per position — the matcher advances exactly once per committed
+token.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import torch
 
@@ -34,6 +36,21 @@ from kairyu.engine.core.sampling_types import (
     stable_request_seed,
 )
 from kairyu.engine.core.structured import XGrammarEnforcer
+
+
+@dataclass(frozen=True)
+class DeviceSample:
+    """A sampling result that remains on the logits device.
+
+    The runner owns when these tensors are copied to the host.  Keeping that
+    boundary out of ``sample_device`` is what lets overlap enqueue step N+1
+    before step N's EOS/streaming bookkeeping resolves on the CPU.
+    """
+
+    token_id: torch.Tensor  # scalar int64
+    logprob: torch.Tensor | None = None  # scalar float32
+    top_indices: torch.Tensor | None = None  # [K] int64
+    top_logprobs: torch.Tensor | None = None  # [K] float32
 
 
 class _RequestSamplerState:
@@ -141,21 +158,10 @@ class Sampler:
         state = self._state_for(request_id, sampling, eos_token_id)
         if self.can_argmax_logits(request_id, sampling, eos_token_id):
             return SampledToken(int(torch.argmax(logits).item()))
-        # Sampling runs on CPU: the seeded torch.Generator + multinomial and the
-        # penalty/enforcer index tensors are all CPU, and the reproducibility pins
-        # (m8 D2, spec ≡ greedy) are defined by the CPU RNG stream — a CUDA
-        # generator would diverge. On GPU this pulls the [vocab] logits row to host
-        # (cheap); on CPU it is the pre-existing no-op + private clone.
-        #
-        # CONSEQUENCE for m2 §2.2, stated here because it is decided here: the
-        # chosen index only ever exists on the HOST. There is no device tensor to
-        # hand back — manufacturing one (`torch.as_tensor(token_id, device=cuda)`)
-        # would be a fresh scalar H2D copy per row wearing a device-resident
-        # costume, strictly worse than one batched copy. The runner therefore owns
-        # a persistent device slot and copies the ids into it once per step
-        # (`PagedModelRunner._decode_input_slots`). A genuinely device-to-device
-        # patch requires the DECISION to move to the device, which redefines what
-        # the reproducibility pins mean — a separate decision, not an oversight.
+        # CPU and structured-output compatibility path. CUDA grammar-free
+        # requests use sample_device(), which keeps the decision and penalty
+        # history dependency on-device. XGrammar's matcher is stateful host code,
+        # so masking/acceptance deliberately stays here until it has a device FSM.
         logits = logits.detach().to(device="cpu", dtype=torch.float32).clone()
 
         raw_logsoftmax: torch.Tensor | None = None
@@ -177,6 +183,165 @@ class Sampler:
         if state.enforcer is not None:
             terminated = self._accept_once(state, position, token_id)
         return SampledToken(token_id, logprob, top_logprobs, terminated)
+
+    def sample_device(
+        self,
+        request_id: str,
+        sampling: EngineSampling,
+        position: int,
+        logits: torch.Tensor,
+        *,
+        prompt: tuple[int, ...] = (),
+        outputs: Sequence[int] = (),
+        pending_outputs: Sequence[torch.Tensor] = (),
+        eos_token_id: int | None = None,
+    ) -> DeviceSample:
+        """Sample without reading a device value on the host.
+
+        ``pending_outputs`` are the tokens already sampled by overlap but not
+        committed into the scheduler snapshot yet.  They stay as device
+        scalars, so penalties cover the same effective history as the CPU path
+        without first resolving those tokens to Python ints.
+
+        XGrammar's matcher is stateful CPU code: advancing it requires the
+        previous token as a host integer.  Structured requests therefore keep
+        the reviewed CPU compatibility path rather than silently applying a
+        stale grammar mask.  All other supported sampling modes use this path.
+        """
+        state = self._state_for(request_id, sampling, eos_token_id)
+        if state.enforcer is not None:
+            raise ValueError("structured sampling requires the CPU matcher path")
+
+        work = logits.detach().to(dtype=torch.float32).clone()
+        raw_logsoftmax: torch.Tensor | None = None
+        if sampling.logprobs is not None:
+            raw_logsoftmax = torch.log_softmax(work, dim=-1)
+
+        self._apply_penalties_device(
+            work,
+            sampling,
+            prompt,
+            outputs,
+            pending_outputs,
+        )
+
+        if sampling.temperature == 0.0:
+            token_id = torch.argmax(work).to(dtype=torch.int64)
+        else:
+            token_id = self._sample_scaled_device(
+                work, sampling, state.base_seed, position
+            )
+
+        logprob = None
+        top_indices = None
+        top_logprobs = None
+        if raw_logsoftmax is not None:
+            logprob = raw_logsoftmax.gather(0, token_id.view(1)).squeeze(0)
+            assert sampling.logprobs is not None
+            if sampling.logprobs > 0:
+                k = min(sampling.logprobs, raw_logsoftmax.shape[-1])
+                top_logprobs, top_indices = torch.topk(raw_logsoftmax, k)
+        return DeviceSample(
+            token_id=token_id,
+            logprob=logprob,
+            top_indices=top_indices,
+            top_logprobs=top_logprobs,
+        )
+
+    @staticmethod
+    def _apply_penalties_device(
+        logits: torch.Tensor,
+        sampling: EngineSampling,
+        prompt: tuple[int, ...],
+        outputs: Sequence[int],
+        pending_outputs: Sequence[torch.Tensor],
+    ) -> None:
+        """Device equivalent of ``_apply_penalties`` for an overlap history."""
+        device = logits.device
+        vocab = logits.shape[-1]
+        host_outputs = tuple(outputs)
+
+        if sampling.repetition_penalty != 1.0:
+            seen = torch.zeros(vocab, dtype=torch.bool, device=device)
+            host_seen = tuple(sorted(set(prompt) | set(host_outputs)))
+            if host_seen:
+                seen.scatter_(
+                    0,
+                    torch.as_tensor(host_seen, dtype=torch.long, device=device),
+                    True,
+                )
+            for token in pending_outputs:
+                seen.scatter_(0, token.to(device=device, dtype=torch.long).view(1), True)
+            logits.copy_(
+                torch.where(
+                    seen,
+                    torch.where(
+                        logits > 0,
+                        logits / sampling.repetition_penalty,
+                        logits * sampling.repetition_penalty,
+                    ),
+                    logits,
+                )
+            )
+
+        if sampling.presence_penalty != 0.0 or sampling.frequency_penalty != 0.0:
+            counts = torch.zeros(vocab, dtype=torch.float32, device=device)
+            if host_outputs:
+                host_indices = torch.as_tensor(
+                    host_outputs, dtype=torch.long, device=device
+                )
+                counts.scatter_add_(
+                    0, host_indices, torch.ones_like(host_indices, dtype=torch.float32)
+                )
+            for token in pending_outputs:
+                index = token.to(device=device, dtype=torch.long).view(1)
+                counts.scatter_add_(0, index, torch.ones(1, device=device))
+            logits.sub_(sampling.frequency_penalty * counts)
+            logits.sub_(sampling.presence_penalty * (counts > 0).to(logits.dtype))
+
+    @staticmethod
+    def _sample_scaled_device(
+        logits: torch.Tensor,
+        sampling: EngineSampling,
+        base_seed: int,
+        position: int,
+    ) -> torch.Tensor:
+        """The reviewed filter order with no scalar extraction."""
+        probs = torch.softmax(logits / sampling.temperature, dim=-1)
+        if sampling.min_p > 0.0:
+            probs = torch.where(
+                probs >= sampling.min_p * probs.max(), probs, torch.zeros_like(probs)
+            )
+        if 0 < sampling.top_k < probs.shape[-1]:
+            threshold = torch.topk(probs, sampling.top_k).values[-1]
+            probs = torch.where(probs >= threshold, probs, torch.zeros_like(probs))
+        if sampling.top_p < 1.0:
+            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
+            cumulative = torch.cumsum(sorted_probs, dim=-1)
+            cut = (
+                cumulative - sorted_probs
+                >= sampling.top_p * cumulative[-1].clamp(min=1e-12)
+            )
+            sorted_probs = sorted_probs.masked_fill(cut, 0.0)
+            probs = torch.zeros_like(probs).scatter(-1, sorted_idx, sorted_probs)
+
+        # Grammar-free filtering always retains one token, but keep the CPU
+        # path's degenerate fallback without branching on a device scalar.
+        total = probs.sum()
+        argmax = torch.argmax(logits).to(dtype=torch.int64)
+        fallback = torch.zeros_like(probs).scatter(
+            0, argmax.view(1), torch.ones(1, dtype=probs.dtype, device=probs.device)
+        )
+        safe = torch.where(total > 0, probs, fallback)
+        safe = safe / safe.sum().clamp(min=1e-12)
+        mixed_seed = mix_seed(base_seed, position)
+        if logits.device.type == "cuda":
+            from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax
+
+            return stateless_gumbel_argmax(torch.log(safe), mixed_seed)
+        generator = torch.Generator(device=logits.device)
+        generator.manual_seed(mixed_seed)
+        return torch.multinomial(safe, 1, generator=generator).squeeze(0)
 
     @staticmethod
     def _apply_penalties(

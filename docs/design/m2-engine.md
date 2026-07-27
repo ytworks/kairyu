@@ -1,7 +1,8 @@
 # M2 Design: Kairyu Core Engine (Overlap Scheduler + Radix-Paged KV)
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (agent design-review panel, 2026-07-02; see §6).
-GPU hardware (H100/A100) still required for the GPU phase; human sign-off pending.
+Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (agent design-review panel,
+2026-07-02; see §6). The future-token GPU phase is validated on 8× RTX PRO
+6000 Blackwell; NVLink-HBM gates still require H100/A100-class hardware.
 Milestone: M2
 Date: 2026-07-02
 Depends on: M1 (`EngineBackend` protocol is the integration seam; no L2/L3 changes needed)
@@ -51,23 +52,27 @@ scheduler hides CPU work under the GPU step; we adopt the same structure:
 - Invariant to test: engine step loop never blocks on `.item()`/`.cpu()` in the hot path
   (asserted by a torch profiler check in the perf test suite).
 
-Implementation status (amended 2026-07-26, PR #143 review; the prose above is the target,
-this is what exists). The scheduler half is done: the schedule-ahead pipeline runs, decode
-chunks carry an explicit `position`, and `PagedModelRunner` retains its uncommitted tokens,
-so planning N+1 never reads a committed output. The *slot* half is done as a slot: the
-decode inputs live in persistent device tensors allocated once and written in place
-(`PagedModelRunner._decode_input_slots`), used identically by the batched and the
-single-request decode path.
+Implementation status (amended 2026-07-27, issue #206). The schedule-ahead
+pipeline carries explicit positions and the runner retains uncommitted device
+tokens. Grammar-free CUDA requests — greedy, min-p/top-k/top-p stochastic,
+presence/frequency/repetition penalties, and logprobs — select on-device.
+Their device scalar token IDs patch persistent decode slots D2D. Public token
+and logprob copies are batched on a dedicated copy stream and resolved one step
+late for EOS/stop/streaming; surplus work is trimmed by the existing scheduler.
 
-What is NOT done for general stochastic/penalized/grammar sampling is the
-**device-to-device** fill and the `.item()`/`.cpu()` invariant. The m8 D2 CPU
-RNG stream remains binding for those requests. Pure greedy requests are the
-safe exception: a whole batch now argmaxes on-device and copies one `[B]`
-token-id vector to the host instead of B full-vocabulary float32 rows. The ids
-still reach the persistent input slots as one batched H2D copy per step.
-Closing that final round trip for every sampling mode requires moving RNG,
-penalties, grammar masks, and stop decisions onto the device, which redefines
-what m8 D2 pins mean; that remains a separate decision.
+The isolated steady-decode profiler gate records zero
+`aten::_local_scalar_dense`, `.item()`, and `cudaEventSynchronize` in this
+feedback interval. On Qwen3-32B TP8, the pre-fix and candidate produced the
+same output digest; the candidate removed the future-token event wait and
+improved median throughput from 68.161 to 68.686 token/s (+0.77%, wall −0.76%)
+on 8 requests × 32 output tokens
+(`bench/results/future-token-qwen3-32b-tp8-2026-07-27.json`).
+
+XGrammar remains an explicit CPU compatibility path: its stateful matcher must
+mask and accept against a host token, so structured requests preserve the
+reviewed grammar semantics rather than applying a stale device FSM. This
+exception does not sit on the grammar-free serving hot path and is separately
+pinned by a GPU fallback test.
 
 The second, independent violation was closed on 2026-07-26 (#207): supported eager and
 captured batched decode now share `forward_decode_tensors`. Positions, page tables,
@@ -179,11 +184,11 @@ committed alongside results (`bench/results/<date>-<gpu>.json`).
   CPU-side design carries an explicit ``position`` on each decode chunk plus per-request
   ``in_flight`` accounting (scheduler.py/overlap.py); §2.2's "placeholder patching" prose
   and this mechanism are the same technique — the GPU runner owns a future-token device
-  buffer indexed by (request, position). Restated invariant: the *scheduling* thread never
-  blocks on device sync; the worker thread syncs once per step to produce sampled ids.
-  (2026-07-26: that restatement is the honest one and is what holds — the worker's
-  once-per-step sync is the CPU sampling decision. §2.2's stronger "no host sync at all"
-  invariant does not hold; see the status note in §2.2.)
+  buffer indexed by (request, position). Since 2026-07-27 (#206), grammar-free
+  CUDA sampling patches that buffer D2D and the worker feedback interval does
+  not block on a token scalar or copy-completion event. Host finish/streaming
+  materialization remains one step late by design; structured xgrammar uses
+  the documented CPU compatibility path.
 - FP8 accuracy drift on Llama-3.1-8B: measured via logprob tolerance gate before any perf
   claim. FP8 **KV-cache** dtype is a separate decision from W8A8 weights (changes
   FlashInfer kernel selection) — decide at GPU-phase start; default bf16 KV.

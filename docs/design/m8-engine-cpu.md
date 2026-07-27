@@ -139,6 +139,21 @@ property); it cannot repair divergent logits. torch CPU multinomial with a
 seeded Generator is deterministic per build (stated assumption; cross-platform
 bitwise identity is not claimed).
 
+**GPU amendment (2026-07-27, issue #206):** grammar-free CUDA sampling keeps
+the same reviewed processing order but uses stateless Gumbel-max. Each uniform
+is a pure function of `(base_seed, output_position, vocab_index)`, so replay,
+TP rank execution, and batch reordering need no host-owned generator offset.
+The guarantee remains “same seed/position/logits → same CUDA token”; the exact
+stochastic sequence is not claimed to match torch CPU multinomial. Greedy
+sampling (and therefore spec ≡ greedy) is unchanged. Device penalties include
+committed host history plus uncommitted device scalars. Logprobs remain raw and
+temperature-independent.
+
+XGrammar is intentionally excluded from the device path because its matcher is
+a stateful CPU FSM. Structured requests retain the mask-first/accept-once path
+below; this preserves grammar correctness at the cost of the documented host
+compatibility boundary rather than advancing a stale mask.
+
 **Grammar state (amended)**: `accept()` runs **exactly once per committed token,
 backend/driver-side after rank agreement** — never inside the per-rank sample
 path (the CPU TP path runs the sampler N times; `GrammarMatcher` is stateful and
