@@ -38,6 +38,17 @@ token on-device, patch the next decode slot D2D, and defer one batched public
 D2H copy to the late EOS/streaming boundary. The isolated steady-decode
 profiler records zero host-sync events. Structured xgrammar remains an explicit
 stateful CPU compatibility path.
+Penalty-active requests now maintain lazy per-device prompt/seen/count rows and
+an append-only committed shadow; a scheduler-owned epoch makes normal sampling
+skip retained-history copies and comparisons. Exact pending commits require no
+state mutation, rollback/correction rebuilds only on the exceptional path, P-D
+handoff reclaims the old device row, and release drops the request state.
+Across all 52 non-trivial penalty combinations, incremental logits and seeded
+samples exactly match the former full-history oracle. At Qwen's 151,936-word
+vocabulary with 32,768 outputs, complete one-token commit/pending-shift steps
+measured 18.03× faster than the old CPU rebuild and 36.07× faster on CUDA; the
+selected effective-count design also beat a fairly optimized
+committed-count/transient-pending alternative by 1.31× and 1.76× respectively.
 Production execution now converges on that same `EngineLoop` for synchronous,
 schedule/device-overlapped, and native async/PP runners. `pipeline_depth=1`
 preserves synchronous behavior; depth 2+ submits immutable `StepInput`
@@ -138,7 +149,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + `PipelinedModelRunner` consumed by the unified production `EngineLoop`; the old pipelined core is compatibility-only). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
-| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-27, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
+| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-27, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
@@ -221,6 +232,44 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] sampler penalties use measured incremental effective counts
+- What: penalty-active sampler states lazily allocate prompt membership,
+  repetition membership, output-count, and output-membership rows for the
+  active device/vocabulary. A private committed shadow plus scheduler-owned
+  output epoch removes normal retained-prefix copies/comparisons. Exact pending
+  commit advances the boundary without recounting; rollback/correction takes
+  the exceptional rebuild path. CPU sparse active IDs use growing buffers and
+  position maps. P-D migration releases the prior device row, and normal
+  sampler release reclaims the state.
+- Why: rebuilding prompt/output sets, tensors, zero rows, and `bincount` from
+  the full history at every token made penalty sampling scale with generation
+  length. Current vLLM main
+  (`5f89a03dcb52702a62644e15b93f766765d06b28`) still converts complete output
+  lists to a padded tensor per penalty application and marks that path
+  inefficient. Kairyu's persistent request-state/lifecycle boundary is native
+  to its overlap/P-D ownership, so we also measured a fairly optimized
+  committed-count/transient-pending alternative: effective counts win the
+  complete normal step by 1.31× on CPU and 1.76× on CUDA.
+- Verification: 2,020 CPU tests pass (12 skipped, 118 deselected), plus 14/14
+  focused CUDA/full-model tests. All 52 non-trivial
+  repetition/presence/frequency combinations preserve exact processed logits
+  and seeded samples against the pre-change oracle through append and
+  rollback. Same-length and epoch-signalled correction, pending commit,
+  repeated-token counts, lifecycle release, same-device handoff, cross-GPU
+  handoff, TP epoch propagation, and eager/overlap GPU sampling pass. The
+  production-shaped 151,936-vocabulary/32,768-history benchmark commits one
+  token and shifts pending each iteration. The alternative receives the same
+  CPU direct-update optimization and prior pending CUDA scalar, and preserves
+  the legacy total-count floating-point order. Every transition plus duplicate
+  pending is bitwise-checked outside the timer. CPU measured 9,265.6 → 513.9
+  µs (18.03×; alternative 672.8 µs), while CUDA measured 6,879.2 → 190.7 µs
+  (36.07×; alternative 334.7 µs). A 32-token repetition-only step also wins
+  501.1 → 138.7 µs (alternative 176.0 µs).
+- Refs: issue #216; m8 D2; `kairyu/engine/core/sampler.py`;
+  `tests/unit/test_sampler_incremental_state.py`;
+  `tests/gpu/test_sampler_incremental_state_gpu.py`;
+  `bench/sampler_penalty_state_bench.py`.
 
 ### 2026-07-27 — [amendment] RadixKV eviction selects indexed live leaves
 - What: every radix node carries an eviction generation. A min-heap orders

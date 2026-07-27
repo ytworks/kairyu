@@ -81,6 +81,55 @@ def test_different_seeds_diverge_through_engine():
     assert len(set(outs)) > 1
 
 
+def test_finished_penalty_request_releases_sampler_state():
+    from kairyu import SamplingParams
+    from kairyu.engine.engine_loop import EngineLoop
+
+    class _Tokenizer:
+        eos_token_id = None
+
+        def encode(self, text):
+            return (3, 1, 4, 1, 5)
+
+        def decode(self, token_ids):
+            return "".join(chr(32 + token_id) for token_id in token_ids)
+
+        def vocab(self):
+            return [chr(32 + index) for index in range(128)]
+
+    sampler = Sampler()
+    model = TinyAttentionLM(vocab=128, seed=0)
+    cache = RadixKVCache(num_pages=128, page_size=PAGE)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=64,
+        page_size=PAGE,
+    )
+    runner = TorchPagedRunner(
+        model,
+        num_pages=128,
+        page_size=PAGE,
+        sampler=sampler,
+    )
+    engine = EngineLoop(_Tokenizer(), scheduler, runner)
+    engine.submit(
+        "penalty",
+        "prompt",
+        SamplingParams(
+            max_tokens=3,
+            repetition_penalty=1.2,
+            presence_penalty=0.4,
+            frequency_penalty=0.7,
+        ),
+    )
+
+    while engine.has_work():
+        engine.step()
+
+    assert not sampler._states
+    engine.close()
+
+
 # bounded-output schemas: an untrained greedy toy model can loop forever in
 # unbounded regions (free strings / digit runs), so the engine gate uses
 # schemas whose every position is tightly constrained

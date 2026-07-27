@@ -64,6 +64,7 @@ class _RequestState:
         "status",
         "computed_prompt",
         "outputs",
+        "output_epoch",
         "in_flight",
         "surplus_in_flight",
         "allocation",
@@ -77,6 +78,10 @@ class _RequestState:
         self.status = _Status.WAITING
         self.computed_prompt = 0
         self.outputs: list[int] = []
+        # Committed outputs are append-only in production. Owners must bump
+        # this epoch before replacing/truncating an existing prefix so
+        # incremental consumers can rebuild only on that exceptional path.
+        self.output_epoch = 0
         # sampled tokens scheduled but not yet committed via update() — this is
         # what lets the overlap loop plan step N+1 before step N's tokens land
         self.in_flight = 0

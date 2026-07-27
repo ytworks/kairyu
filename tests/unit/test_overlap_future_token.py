@@ -273,6 +273,7 @@ def test_the_runner_hands_the_sampler_the_in_flight_history(llama_dir):
     class _Recording:
         def sample(self, request_id, sampling, position, logits, **kwargs):
             seen["outputs"] = kwargs["outputs"]
+            seen["pending_outputs"] = kwargs["pending_outputs"]
             return SampledToken(0)
 
         def release(self, request_id):
@@ -296,7 +297,8 @@ def test_the_runner_hands_the_sampler_the_in_flight_history(llama_dir):
     runner._sample(_State(), torch.tensor([0.0, 1.0, 0.9]), position=1)
 
     # the stale snapshot would have handed over (); the pick differs on that
-    assert seen["outputs"] == (1,)
+    assert seen["outputs"] == ()
+    assert seen["pending_outputs"] == (1,)
 
 
 @pytest.mark.parametrize("depth", [1, 2, 4, 10])
