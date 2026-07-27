@@ -93,12 +93,16 @@ engines:
     options:
       model_path: "meta-llama/Llama-3.3-70B-Instruct"
       tensor_parallel_size: 4
+      pipeline_depth: 2        # unified schedule/device overlap; default 1
       decode_mode: cuda_graph   # explicit opt-in; eager is the safe default
       cuda_graph_max_batch: 8
       cuda_graph_max_pages: 64
 ```
 
-CUDA-graph decode reserves one KV page for padding rows and captures buckets up
+`pipeline_depth: 1` reproduces the synchronous serving path. Depth 2 or greater
+submits immutable request snapshots ahead of the oldest commit while preserving
+the same streaming, stop, grammar, speculative, preemption, and chunked-prefill
+commit path. CUDA-graph decode reserves one KV page for padding rows and captures buckets up
 to the configured batch and page-table limits. Oversized decode steps fall back
 to eager execution. Invalid modes, CPU placement, unsupported attention/model
 paths, or a page limit that leaves no scratch page fail during startup rather

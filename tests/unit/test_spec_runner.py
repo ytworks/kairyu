@@ -134,8 +134,8 @@ async def test_backend_speculative_matches_plain():
     def _req(rid):
         return GenerationRequest(
             request_id=rid,
-            prompt="speculative backend parity",
-            sampling_params=SamplingParams(max_tokens=8),
+            prompt="repeat repeat repeat repeat",
+            sampling_params=SamplingParams(max_tokens=8, temperature=0.0),
         )
 
     model = TinyAttentionLM(seed=1)
@@ -152,6 +152,7 @@ async def test_backend_speculative_matches_plain():
         tokenizer=_SmallVocabTokenizer(),
         speculative="ngram",
         speculative_tokens=3,
+        pipeline_depth=2,
     )
     result = await spec.generate(_req("a"))
     assert result.completions[0].token_ids == reference.completions[0].token_ids

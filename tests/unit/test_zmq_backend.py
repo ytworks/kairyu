@@ -125,12 +125,14 @@ async def test_rejects_non_string_tokenizer():
 async def test_cuda_graph_serving_options_cross_the_process_boundary():
     backend = ZmqEngineBackend(
         model_path="/models/tiny",
+        pipeline_depth=2,
         decode_mode="cuda_graph",
         cuda_graph_max_batch=4,
         cuda_graph_max_pages=32,
         cuda_graph_warmup_iters=1,
     )
 
+    assert backend._config["pipeline_depth"] == 2
     assert backend._config["decode_mode"] == "cuda_graph"
     assert backend._config["cuda_graph_max_batch"] == 4
     assert backend._config["cuda_graph_max_pages"] == 32

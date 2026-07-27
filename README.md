@@ -337,7 +337,8 @@ checkpoints (**FP8 / INT8 / AWQ / GPTQ / NVFP4**) are auto-detected from the che
 config. Key constructor options (also available as `options:` in a DeploymentSpec — see
 the [backend options table](#backend-options-enginesoptions)): `tokenizer`, `num_pages`,
 `page_size`, `max_num_batched_tokens`, `speculative="ngram"`, `tensor_parallel_size`,
-and `decode_mode="cuda_graph"` on CUDA.
+`pipeline_depth` (1 is synchronous compatibility; 2 enables schedule/device
+overlap), and `decode_mode="cuda_graph"` on CUDA.
 
 **Hosted API instead of local weights** — the `openai` backend points at any
 OpenAI-compatible endpoint; the API key is read from the environment variable named by
@@ -379,6 +380,7 @@ engines:
     backend: kairyu              # or: kairyu-proc | vllm | openai | mock
     options:
       model_path: /models/qwen2.5-0.5b-instruct
+      pipeline_depth: 2        # 1 preserves synchronous behavior
       decode_mode: cuda_graph   # explicit opt-in; eager remains the default
       cuda_graph_max_batch: 8
       cuda_graph_max_pages: 64  # longer page tables safely fall back to eager
@@ -645,6 +647,7 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
 | | `speculative` | null | `"ngram"` enables speculative decoding |
 | | `speculative_tokens` | 4 | draft length k |
 | | `tensor_parallel_size` | 1 | TP degree; >1 spawns a multi-process TP worker group from the serve process (gloo on CPU, NCCL on GPU) |
+| | `pipeline_depth` | 1 | unified engine-loop depth; 1 preserves synchronous scheduling, 2+ schedules immutable step snapshots ahead of the oldest device commit |
 | | `decode_mode` | `"eager"` | `"cuda_graph"` enables bucketed CUDA-graph decode for a real CUDA model; unsupported hardware/model/attention combinations fail at startup |
 | | `cuda_graph_max_batch` | 8 | largest captured decode batch; larger batches use eager decode |
 | | `cuda_graph_max_pages` | 512 | fixed page-table width per captured bucket; longer sequences use eager decode; must be smaller than `num_pages` |

@@ -1,4 +1,9 @@
-"""Overlap engine loop: CPU scheduling pipelined with device execution (design m2 §2.2).
+"""Compatibility-only overlap harness (superseded by production ``EngineLoop``).
+
+New production and parity work must use ``EngineLoop(pipeline_depth=N)`` so
+streaming, stop holdback, grammar, speculation, preemption and P-D behavior all
+share one commit path. This run-to-completion helper remains temporarily for
+downstream imports and the historical device-future-token regression suite.
 
 While the device executes step N, the scheduler plans step N+1 using the
 in-flight token accounting in Scheduler: decode chunks carry an explicit
@@ -35,6 +40,8 @@ _DEFAULT_PIPELINE_DEPTH = 2
 
 
 class OverlapEngineCore:
+    """Deprecated compatibility harness; use production ``EngineLoop``."""
+
     def __init__(
         self,
         scheduler: Scheduler,

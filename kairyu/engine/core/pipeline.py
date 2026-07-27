@@ -1,9 +1,10 @@
-"""PP inter-step pipelining: async runner contract + stage pipeline (m6 D5).
+"""PP async runner contract plus a compatibility run-to-completion harness.
 
 The review made this structure load-bearing: PP=2 cannot meet B4 under a
 synchronous ``execute()`` contract (the pipe drains every step, utilization
-caps at ~1.33x). So the runner contract gains the async submit/handle form
-reserved by m2 §5 item 3, and ``PipelinedEngineCore`` keeps up to ``depth``
+caps at ~1.33x). The async runner contract and ``PipelinedModelRunner`` remain
+production seams consumed by ``EngineLoop(pipeline_depth=N)``. The older
+``PipelinedEngineCore`` is compatibility-only; it keeps up to ``depth``
 scheduler steps in flight — step N occupies stage 1 while step N+1 occupies
 stage 0, each stage always processing a FULL batch (decode is never split into
 micro-batches). CPU stage workers are deterministic tick-simulated; the GPU
@@ -162,7 +163,7 @@ class PipelinedModelRunner:
 
 
 class PipelinedEngineCore:
-    """Engine loop over the async runner contract: up to ``depth`` steps in flight."""
+    """Deprecated compatibility harness; production uses ``EngineLoop``."""
 
     def __init__(self, scheduler: Scheduler, runner: AsyncModelRunner, depth: int = 2) -> None:
         if depth < 1:

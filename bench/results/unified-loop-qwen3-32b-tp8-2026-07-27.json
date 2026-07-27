@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-27T05:54:34+00:00",
+  "verdict": {
+    "outputs_identical": true,
+    "baseline_pipeline_depth": 1,
+    "candidate_pipeline_depth": 2,
+    "candidate_future_token_event_synchronize_count": 0,
+    "baseline_future_token_event_synchronize_count": 0,
+    "candidate_full_tp_host_sync_envelope": 22,
+    "baseline_full_tp_host_sync_envelope": 22,
+    "throughput_increase_percent": 1.29,
+    "wall_reduction_percent": 1.27
+  },
+  "profiler_interpretation": {
+    "isolated_future_token_gpu_gate": "tests/gpu/test_overlap_future_token_gpu.py::test_steady_decode_feedback_profiler_has_no_host_scalar_sync",
+    "isolated_candidate_host_sync_count": 0,
+    "full_tp_residual_scope": "shared TP control-plane/attention envelope, outside the sampling/future-token component isolated by the GPU gate"
+  },
+  "baseline": {
+    "schema_version": 1,
+    "date": "2026-07-27T05:52:54+00:00",
+    "label": "issue-222-depth1",
+    "hardware": {
+      "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "device_count": 8,
+      "compute_capability": "12.0",
+      "torch": "2.12.1+cu130",
+      "cuda": "13.0"
+    },
+    "model": {
+      "path": "/models/qwen3-32b",
+      "name": "Qwen/Qwen3-32B",
+      "tensor_parallel": 8
+    },
+    "workload": {
+      "requests": 8,
+      "max_new_tokens": 32,
+      "warmup_tokens": 4,
+      "repeats": 3,
+      "pipeline_depth": 1,
+      "sampling": "greedy"
+    },
+    "code": {
+      "commit": null,
+      "dirty": false,
+      "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "declared_source": "codex/issue-222-unified-engine-loop"
+    },
+    "feedback_profiler": {
+      "scope": "full TP rank-0 DistTPModelRunner.execute, including control-plane broadcast and attention planning; host commit excluded",
+      "batch_size": 8,
+      "events": {
+        "aten::_local_scalar_dense": 8,
+        "cudaEventSynchronize": 0,
+        "cudaStreamSynchronize": 13,
+        "cudaDeviceSynchronize": 1
+      },
+      "host_sync_count": 22
+    },
+    "performance": {
+      "durations_s": [
+        3.846064,
+        3.823692,
+        3.819149
+      ],
+      "median_s": 3.823692,
+      "output_tokens": 256,
+      "median_tokens_per_s": 66.951
+    },
+    "output_sha256": "7a9405129e7f1ce6b4d1653d4cf912abdb359fa66ec9281ea81ed47507b5e2c8"
+  },
+  "candidate": {
+    "schema_version": 1,
+    "date": "2026-07-27T05:54:11+00:00",
+    "label": "issue-222-depth2",
+    "hardware": {
+      "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "device_count": 8,
+      "compute_capability": "12.0",
+      "torch": "2.12.1+cu130",
+      "cuda": "13.0"
+    },
+    "model": {
+      "path": "/models/qwen3-32b",
+      "name": "Qwen/Qwen3-32B",
+      "tensor_parallel": 8
+    },
+    "workload": {
+      "requests": 8,
+      "max_new_tokens": 32,
+      "warmup_tokens": 4,
+      "repeats": 3,
+      "pipeline_depth": 2,
+      "sampling": "greedy"
+    },
+    "code": {
+      "commit": null,
+      "dirty": false,
+      "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "declared_source": "codex/issue-222-unified-engine-loop"
+    },
+    "feedback_profiler": {
+      "scope": "full TP rank-0 DistTPModelRunner.execute, including control-plane broadcast and attention planning; host commit excluded",
+      "batch_size": 8,
+      "events": {
+        "aten::_local_scalar_dense": 8,
+        "cudaEventSynchronize": 0,
+        "cudaStreamSynchronize": 13,
+        "cudaDeviceSynchronize": 1
+      },
+      "host_sync_count": 22
+    },
+    "performance": {
+      "durations_s": [
+        3.790726,
+        3.775056,
+        3.733271
+      ],
+      "median_s": 3.775056,
+      "output_tokens": 256,
+      "median_tokens_per_s": 67.814
+    },
+    "output_sha256": "7a9405129e7f1ce6b4d1653d4cf912abdb359fa66ec9281ea81ed47507b5e2c8"
+  }
+}
