@@ -60,7 +60,12 @@ same incremental contract: each request scans only newly stable text plus the
 maximum required overlap. On a 32,768-character/64-stop/1,024-update workload,
 the bounded matcher reduced the search-window upper bound 349.04× and measured
 20.73× faster than cumulative full scans while preserving randomized
-earliest-match equivalence.
+earliest-match equivalence. Engine producer operations are now lock-reserved
+and coalesced into frozen add/abort batches. Scheduler consumes an atomic bulk
+add where supported; partial failures restore untouched work ahead of
+concurrent arrivals. In the committed 100,000-operation A/B harness, add
+containers fell from 100,000 to one while throughput rose 1.05×; duplicate
+abort containers fell from 100,000 to one while throughput rose 1.64×.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -113,7 +118,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + `PipelinedModelRunner` consumed by the unified production `EngineLoop`; the old pipelined core is compatibility-only). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
-| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-27, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback + bounded-overlap SSE-safe stop matching, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
+| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-27, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, full sampler + xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
@@ -196,6 +201,29 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] engine producer operations drain as safe batches
+- What: `EngineLoop` now protects request reservation and producer queue
+  mutation with one lock, groups consecutive adds and aborts, and coalesces
+  lifecycle-duplicate aborts. The step thread drains a frozen snapshot;
+  `Scheduler.add_requests_atomic` consumes compatible add batches, while
+  generic adapters retain ordered per-request admission. Partial failures
+  restore only untouched suffixes before concurrent batches. Purge filters the
+  same structures under lock, and close seals the queue before reclamation.
+- Why: per-request Python tuples and repeated abort operations amplified
+  allocation/drain work under churn, while the old compound set-check/append
+  sequence did not make concurrent duplicate reservation atomic. Explicit
+  batches reduce queue objects without erasing add-then-abort terminal
+  semantics or weakening failure ownership.
+- Verification: 1,903 CPU tests pass (12 skipped, 115 deselected). Concurrent
+  duplicate, 8-producer unique-add, 16-producer repeated-abort, 10,000-op,
+  purge, close, atomic rollback, and partial-failure recovery tests pass. A
+  reproducible 100,000-operation/5-repeat A/B run measured add throughput at
+  95,712 → 100,463 op/s (1.05×, 100,000 → 1 queue containers) and duplicate
+  abort throughput at 7.30M → 11.95M op/s (1.64×, 100,000 → 1 abort IDs).
+- Refs: issue #218; m8 D1; `kairyu/engine/engine_loop.py`;
+  `kairyu/engine/core/scheduler.py`; `tests/unit/test_engine_op_queue.py`;
+  `bench/op_queue_bench.py`.
 
 ### 2026-07-27 — [amendment] stop matching scans only the newly stable tail
 - What: each engine request now owns an incremental multi-pattern stop matcher.

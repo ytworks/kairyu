@@ -167,6 +167,28 @@ class Scheduler:
         self._waiting.append(request.request_id)
         self._arrivals[request.request_id] = self._clock()
 
+    def add_requests_atomic(self, requests: Sequence[EngineRequest]) -> None:
+        """Admit one producer batch, or mutate nothing if any ID is invalid.
+
+        EngineLoop uses this explicit atomic contract for consecutive adds.
+        Scheduler adapters without an equivalent guarantee deliberately stay on
+        the one-request path.
+        """
+        states: dict[str, _RequestState] = {}
+        arrivals: dict[str, float] = {}
+        request_ids: list[str] = []
+        for request in requests:
+            request_id = request.request_id
+            if request_id in self._states or request_id in states:
+                raise ValueError(f"duplicate request_id {request_id!r}")
+            request_ids.append(request_id)
+            states[request_id] = _RequestState(request)
+            arrivals[request_id] = self._clock()
+
+        self._states.update(states)
+        self._waiting.extend(request_ids)
+        self._arrivals.update(arrivals)
+
     def has_unfinished(self) -> bool:
         return bool(self._waiting or self._running)
 
