@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from kairyu.engine.backend import (
@@ -17,6 +17,7 @@ from kairyu.engine.backend import (
     EngineBackend,
     GenerationRequest,
     GenerationResult,
+    GenerationUsage,
 )
 from kairyu.sampling_params import SamplingParams
 
@@ -47,6 +48,28 @@ class MoAEvent:
     result: MoAResult | None = None
 
 
+class MoAExecutionError(RuntimeError):
+    """Sanitized carrier for partial MoA accounting after a backend failure."""
+
+    def __init__(
+        self,
+        cause: BaseException,
+        *,
+        stage: str,
+        proposals: tuple[str, ...],
+        usage: tuple[int, int],
+        cached_tokens: int,
+        final_text: str = "",
+    ) -> None:
+        super().__init__(type(cause).__name__)
+        self.cause = cause
+        self.stage = stage
+        self.proposals = proposals
+        self.usage = usage
+        self.cached_tokens = cached_tokens
+        self.final_text = final_text
+
+
 async def _prepare_moa(
     backend: EngineBackend,
     query: str,
@@ -54,6 +77,7 @@ async def _prepare_moa(
     n_samples: int,
     sampling_params: SamplingParams | None,
     shared_prefix: str,
+    usage_observer: Callable[[GenerationUsage], None] | None,
 ) -> tuple[tuple[str, ...], list[int], GenerationRequest]:
     if n_samples < 1:
         raise ValueError(f"n_samples must be >= 1, got {n_samples}")
@@ -63,11 +87,22 @@ async def _prepare_moa(
 
     usage_totals = [0, 0, 0]
 
+    def _observe() -> None:
+        if usage_observer is not None:
+            usage_observer(
+                GenerationUsage(
+                    prompt_tokens=usage_totals[0],
+                    completion_tokens=usage_totals[1],
+                    cached_tokens=usage_totals[2],
+                )
+            )
+
     def _account(result) -> str:
         if result.usage is not None:
             usage_totals[0] += result.usage.prompt_tokens
             usage_totals[1] += result.usage.completion_tokens
             usage_totals[2] += result.usage.cached_tokens
+            _observe()
         return result.text
 
     async def propose(index: int) -> str:
@@ -79,7 +114,29 @@ async def _prepare_moa(
         )
         return _account(await backend.generate(request))
 
-    proposals = tuple(await asyncio.gather(*(propose(i) for i in range(n_samples))))
+    proposal_results = await asyncio.gather(
+        *(propose(i) for i in range(n_samples)),
+        return_exceptions=True,
+    )
+    proposals_list: list[str] = []
+    first_error: BaseException | None = None
+    for result in proposal_results:
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, BaseException):
+            if first_error is None:
+                first_error = result
+            continue
+        proposals_list.append(result)
+    proposals = tuple(proposals_list)
+    if first_error is not None:
+        raise MoAExecutionError(
+            first_error,
+            stage="proposal",
+            proposals=proposals,
+            usage=(usage_totals[0], usage_totals[1]),
+            cached_tokens=usage_totals[2],
+        ) from first_error
     numbered = "\n\n".join(
         f"Candidate {i + 1}:\n{proposal}" for i, proposal in enumerate(proposals)
     )
@@ -99,6 +156,7 @@ async def run_moa(
     synthesizer: EngineBackend | None = None,
     sampling_params: SamplingParams | None = None,
     shared_prefix: str = "",
+    usage_observer: Callable[[GenerationUsage], None] | None = None,
 ) -> MoAResult:
     proposals, usage_totals, synthesis_request = await _prepare_moa(
         backend,
@@ -106,13 +164,31 @@ async def run_moa(
         n_samples=n_samples,
         sampling_params=sampling_params,
         shared_prefix=shared_prefix,
+        usage_observer=usage_observer,
     )
     synthesis_backend = synthesizer or backend
-    final_result = await synthesis_backend.generate(synthesis_request)
+    try:
+        final_result = await synthesis_backend.generate(synthesis_request)
+    except Exception as error:
+        raise MoAExecutionError(
+            error,
+            stage="synthesis",
+            proposals=proposals,
+            usage=(usage_totals[0], usage_totals[1]),
+            cached_tokens=usage_totals[2],
+        ) from error
     if final_result.usage is not None:
         usage_totals[0] += final_result.usage.prompt_tokens
         usage_totals[1] += final_result.usage.completion_tokens
         usage_totals[2] += final_result.usage.cached_tokens
+        if usage_observer is not None:
+            usage_observer(
+                GenerationUsage(
+                    prompt_tokens=usage_totals[0],
+                    completion_tokens=usage_totals[1],
+                    cached_tokens=usage_totals[2],
+                )
+            )
     return MoAResult(
         final_text=final_result.text,
         proposals=proposals,
@@ -128,6 +204,7 @@ async def stream_moa(
     synthesizer: EngineBackend | None = None,
     sampling_params: SamplingParams | None = None,
     shared_prefix: str = "",
+    usage_observer: Callable[[GenerationUsage], None] | None = None,
 ) -> AsyncIterator[MoAEvent]:
     """Generate proposals concurrently and pull synthesis deltas through.
 
@@ -142,27 +219,54 @@ async def stream_moa(
         n_samples=n_samples,
         sampling_params=sampling_params,
         shared_prefix=shared_prefix,
+        usage_observer=usage_observer,
     )
     synthesis_backend = synthesizer or backend
     emitted = 0
     last_result: GenerationResult | None = None
     latest_usage = None
     previous_text = ""
-    async for partial in synthesis_backend.stream(synthesis_request):
-        last_result = partial
-        if partial.usage is not None:
-            latest_usage = partial.usage
-        text = partial.text
-        if not text.startswith(previous_text):
-            raise RuntimeError(
-                "MoA synthesis stream must emit cumulative, prefix-stable text"
-            )
-        previous_text = text
-        if len(text) > emitted:
-            yield MoAEvent(kind="delta", text=text[emitted:])
-            emitted = len(text)
-    if last_result is None:
-        raise RuntimeError("MoA synthesis stream produced no result")
+    try:
+        async for partial in synthesis_backend.stream(synthesis_request):
+            last_result = partial
+            if partial.usage is not None:
+                latest_usage = partial.usage
+                if usage_observer is not None:
+                    usage_observer(
+                        GenerationUsage(
+                            prompt_tokens=usage_totals[0] + latest_usage.prompt_tokens,
+                            completion_tokens=usage_totals[1]
+                            + latest_usage.completion_tokens,
+                            cached_tokens=usage_totals[2] + latest_usage.cached_tokens,
+                        )
+                    )
+            text = partial.text
+            if not text.startswith(previous_text):
+                raise RuntimeError(
+                    "MoA synthesis stream must emit cumulative, prefix-stable text"
+                )
+            previous_text = text
+            if len(text) > emitted:
+                yield MoAEvent(
+                    kind="delta",
+                    text=text[emitted:],
+                )
+                emitted = len(text)
+        if last_result is None:
+            raise RuntimeError("MoA synthesis stream produced no result")
+    except Exception as error:
+        if latest_usage is not None:
+            usage_totals[0] += latest_usage.prompt_tokens
+            usage_totals[1] += latest_usage.completion_tokens
+            usage_totals[2] += latest_usage.cached_tokens
+        raise MoAExecutionError(
+            error,
+            stage="synthesis",
+            proposals=proposals,
+            usage=(usage_totals[0], usage_totals[1]),
+            cached_tokens=usage_totals[2],
+            final_text=previous_text,
+        ) from error
     if latest_usage is not None:
         usage_totals[0] += latest_usage.prompt_tokens
         usage_totals[1] += latest_usage.completion_tokens

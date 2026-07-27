@@ -1,6 +1,6 @@
 # Structured orchestration trace contract
 
-Status: implemented on the observability fork branch (unary responses)
+Status: implemented for unary and streaming AUTO responses
 
 ## Goal
 
@@ -19,8 +19,11 @@ break clients that use the existing string trace.
 - The schema is versioned independently with `trace_version: "2.0"`.
 - Without the header, route and trace extension fields are omitted rather than
   serialized as null.
-- This first contract covers completed unary responses. Streaming continues to
-  expose the legacy SSE trace comment; live structured events are deferred.
+- Streaming preserves the legacy SSE trace comment and also returns
+  `kairyu_trace_v2`, `kairyu_route`, and `kairyu_trace` together on one
+  terminal `choices: []` metadata chunk. Stage events are not emitted live, so
+  clients see one stable trace envelope after execution rather than having to
+  assemble mutable fragments.
 
 ## Envelope
 
@@ -84,7 +87,29 @@ Timestamps are UTC RFC 3339 strings with millisecond precision.
 - `first_token_at`: null for unary backend calls
 - `completed_at`: after the backend result or controlled failure is observed
 
-First-token timing becomes available when structured live streaming is added.
+For a streamed final worker/synthesizer, `first_token_at` is the time Kairyu
+observes its first non-empty cumulative backend result. Unary calls leave it
+null.
+
+## Usage and failure finalization
+
+AUTO usage adds `orchestration_input_tokens` and
+`orchestration_output_tokens`. They are the cumulative backend-reported totals
+for every internal call, including retries, verifier calls, fallback engines,
+proposals, and synthesis. Non-stream responses always carry them. Streaming
+follows the existing OpenAI contract: the usage-bearing terminal metadata
+chunk is present when `stream_options.include_usage` is true; internal
+accounting still finalizes on every dispatched stream, including disconnects.
+
+Direct, Conductor, and MoA publish cumulative values through a synchronous
+accounting observer between the execution and HTTP layers. It is not an SSE
+event or a task/queue bridge: each backend-reported usage update replaces the
+request owner's latest total immediately. This lets the owner commit completed
+pre-final and partial-final usage even if a client disconnects between
+user-visible events. On a backend failure, Kairyu emits known partial usage and
+the opt-in structured trace before the sanitized SSE error. Failure events
+expose only the exception class; arbitrary exception messages remain
+server-side.
 
 ## Extension rules
 

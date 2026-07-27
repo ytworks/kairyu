@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import asdict, dataclass
 
 from kairyu.engine.backend import (
@@ -15,11 +15,18 @@ from kairyu.engine.backend import (
     shutdown_all,
 )
 from kairyu.orchestration.budget import Budget, BudgetState
-from kairyu.orchestration.conductor import Conductor, CostModel, RoleSpec, zero_cost
+from kairyu.orchestration.conductor import (
+    Conductor,
+    ConductorStreamError,
+    CostModel,
+    RoleSpec,
+    zero_cost,
+)
 from kairyu.orchestration.router import RouteDecision, Router, RuleRouter
 from kairyu.orchestration.trace import (
     StructuredTrace,
     TraceBudget,
+    TraceError,
     TraceEvent,
     TraceTiming,
     TraceUsage,
@@ -30,6 +37,7 @@ from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 _KEEPALIVE_INTERVAL_S = 15.0  # SSE keep-alive cadence for long multi-stage runs (M8)
+
 
 _DEFAULT_ROLES = (
     RoleSpec(
@@ -83,9 +91,30 @@ class OrchestratorResult:
 class OrchestratorEvent:
     """Streaming event (m11 D1): status keep-alive, token delta, or final."""
 
-    kind: str  # "status" | "delta" | "result"
+    kind: str  # "status" | "delta" | "error" | "result"
     text: str = ""
     result: OrchestratorResult | None = None
+    error_type: str | None = None
+
+
+class OrchestratorExecutionError(RuntimeError):
+    """Backend failure plus the partial accounting/trace safe to return."""
+
+    def __init__(
+        self,
+        cause: BaseException,
+        result: OrchestratorResult,
+    ) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.result = result
+
+
+class _DirectExecutionError(RuntimeError):
+    def __init__(self, cause: BaseException, event: TraceEvent) -> None:
+        super().__init__(type(cause).__name__)
+        self.cause = cause
+        self.event = event
 
 
 class PreviewNotSupportedError(RuntimeError):
@@ -273,7 +302,28 @@ class Orchestrator:
             cache_hint=None,
         )
         started_at = utc_now_iso()
-        result = await engine.generate(request)
+        try:
+            result = await engine.generate(request)
+        except Exception as error:
+            raise _DirectExecutionError(
+                error,
+                TraceEvent(
+                    node=tier,
+                    kind="failed",
+                    operation="generation",
+                    status="failed",
+                    role="direct",
+                    worker=tier,
+                    engine=engine_name,
+                    model=descriptor.model,
+                    timing=TraceTiming(
+                        queued_at=queued_at,
+                        started_at=started_at,
+                        completed_at=utc_now_iso(),
+                    ),
+                    error=TraceError(type=type(error).__name__),
+                ),
+            ) from error
         usage = (
             (
                 result.usage.prompt_tokens,
@@ -352,7 +402,7 @@ class Orchestrator:
 
         if decision.target == "multi_agent":
             if self._moa_samples > 0:  # m11 A4: the deep tier's MoA route
-                from kairyu.orchestration.moa import run_moa
+                from kairyu.orchestration.moa import MoAExecutionError, run_moa
 
                 moa_queued_at = utc_now_iso()
                 budget_before = BudgetState(budget=self._budget)
@@ -381,10 +431,9 @@ class Orchestrator:
                 proposal_engine_name = self._resolve_engine_name("tier1", notes)
                 synthesizer_engine_name = self._resolve_engine_name("tier2", notes)
                 proposal_descriptor = self._engine_descriptors[proposal_engine_name]
-                synthesizer_descriptor = self._engine_descriptors[
-                    synthesizer_engine_name
-                ]
+                synthesizer_descriptor = self._engine_descriptors[synthesizer_engine_name]
                 moa_started_at = utc_now_iso()
+                moa = None
                 try:
                     moa = await run_moa(
                         self._engines[proposal_engine_name],
@@ -398,15 +447,15 @@ class Orchestrator:
                     # one admitted operation may visibly cross a result-priced cap.
                     moa_cost = self._cost_model(
                         GenerationRequest(
-                            request_id="moa", prompt=query,
+                            request_id="moa",
+                            prompt=query,
                             sampling_params=self._sampling_params,
                         ),
                         GenerationResult(
-                            request_id="moa", prompt=query,
+                            request_id="moa",
+                            prompt=query,
                             completions=(
-                                CompletionOutput(
-                                    index=0, text=moa.final_text, token_ids=()
-                                ),
+                                CompletionOutput(index=0, text=moa.final_text, token_ids=()),
                             ),
                             usage=GenerationUsage(
                                 prompt_tokens=moa.usage[0],
@@ -420,6 +469,72 @@ class Orchestrator:
                         cost=moa_cost,
                         unknown_cost=True,
                     )
+                except Exception as error:
+                    released = reservation.release(
+                        steps=moa_steps,
+                        unknown_cost=True,
+                    )
+                    if not isinstance(error, MoAExecutionError):
+                        raise
+                    cause = error.cause
+                    usage = error.usage
+                    cached_tokens = error.cached_tokens
+                    final_text = error.final_text
+                    stage = error.stage
+                    trace_events.append(
+                        TraceEvent(
+                            node="moa",
+                            kind="failed",
+                            operation="synthesis",
+                            status="failed",
+                            role="moa",
+                            worker="tier1,tier2",
+                            engine=",".join(
+                                dict.fromkeys(
+                                    (
+                                        proposal_engine_name,
+                                        synthesizer_engine_name,
+                                    )
+                                )
+                            ),
+                            model=",".join(
+                                dict.fromkeys(
+                                    model
+                                    for model in (
+                                        proposal_descriptor.model,
+                                        synthesizer_descriptor.model,
+                                    )
+                                    if model is not None
+                                )
+                            )
+                            or None,
+                            timing=TraceTiming(
+                                queued_at=moa_queued_at,
+                                started_at=moa_started_at,
+                                completed_at=utc_now_iso(),
+                            ),
+                            usage=TraceUsage(
+                                prompt_tokens=usage[0],
+                                completion_tokens=usage[1],
+                                cached_tokens=cached_tokens,
+                            ),
+                            budget=TraceBudget.between(
+                                budget_before,
+                                released,
+                            ),
+                            metadata={"stage": stage},
+                            error=TraceError(type=type(cause).__name__),
+                        )
+                    )
+                    raise OrchestratorExecutionError(
+                        cause,
+                        result_with_trace(
+                            text=final_text,
+                            prompt_tokens=usage[0],
+                            completion_tokens=usage[1],
+                            cached_tokens=cached_tokens,
+                        ),
+                    ) from cause
                 except BaseException:
                     reservation.release(steps=moa_steps, unknown_cost=True)
                     raise
@@ -430,9 +545,7 @@ class Orchestrator:
                 if budget_state.is_exhausted:
                     notes.append("moa: budget exceeded")
                 resolved_engines = tuple(
-                    dict.fromkeys(
-                        (proposal_engine_name, synthesizer_engine_name)
-                    )
+                    dict.fromkeys((proposal_engine_name, synthesizer_engine_name))
                 )
                 resolved_models = tuple(
                     dict.fromkeys(
@@ -504,11 +617,18 @@ class Orchestrator:
                 completion_tokens=result.usage[1],
                 cached_tokens=result.cached_tokens,
             )
-        text, usage, direct_event = await self._run_direct(
-            query,
-            decision.target,
-            notes,
-        )
+        try:
+            text, usage, direct_event = await self._run_direct(
+                query,
+                decision.target,
+                notes,
+            )
+        except _DirectExecutionError as error:
+            trace_events.append(error.event)
+            raise OrchestratorExecutionError(
+                error.cause,
+                result_with_trace(text=""),
+            ) from error.cause
         trace_events.append(direct_event)
         return result_with_trace(
             text=text,
@@ -517,7 +637,12 @@ class Orchestrator:
             cached_tokens=usage[2],
         )
 
-    async def run_chat(self, prompt: str, stream: bool = False):
+    async def run_chat(
+        self,
+        prompt: str,
+        stream: bool = False,
+        usage_observer: Callable[[GenerationUsage], None] | None = None,
+    ):
         """The m11 D1 surface: pre-rendered prompt in (A4), events out.
 
         Non-stream: returns OrchestratorResult (same as run()). Stream:
@@ -527,7 +652,7 @@ class Orchestrator:
         """
         if not stream:
             return await self.run(prompt)
-        return self._run_chat_stream(prompt)
+        return self._run_chat_stream(prompt, usage_observer=usage_observer)
 
     async def _with_initial_keepalives(self, stream) -> AsyncIterator[object | None]:
         """Emit timer sentinels until the first final-stage event is available.
@@ -562,7 +687,12 @@ class Orchestrator:
             if close is not None:
                 await close()
 
-    async def _run_chat_stream(self, prompt: str):
+    async def _run_chat_stream(
+        self,
+        prompt: str,
+        *,
+        usage_observer: Callable[[GenerationUsage], None] | None,
+    ):
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
         trace_started_at = utc_now_iso()
         route_started_at = utc_now_iso()
@@ -614,14 +744,73 @@ class Orchestrator:
             last = None
             latest_usage = None
             started_at = utc_now_iso()
-            async for partial in engine.stream(request):
-                last = partial
-                if partial.usage is not None:
-                    latest_usage = partial.usage
-                text = partial.text
-                if len(text) > emitted:
-                    yield OrchestratorEvent(kind="delta", text=text[emitted:])
-                    emitted = len(text)
+            first_token_at = None
+            previous_text = ""
+            try:
+                async for partial in engine.stream(request):
+                    last = partial
+                    if partial.usage is not None:
+                        latest_usage = partial.usage
+                        if usage_observer is not None:
+                            usage_observer(latest_usage)
+                    text = partial.text
+                    if not text.startswith(previous_text):
+                        raise RuntimeError("direct stream must emit cumulative, prefix-stable text")
+                    previous_text = text
+                    if len(text) > emitted:
+                        if first_token_at is None:
+                            first_token_at = utc_now_iso()
+                        yield OrchestratorEvent(
+                            kind="delta",
+                            text=text[emitted:],
+                        )
+                        emitted = len(text)
+                if last is None:
+                    raise RuntimeError("direct stream produced no result")
+            except Exception as error:
+                trace_usage = (
+                    TraceUsage(
+                        prompt_tokens=latest_usage.prompt_tokens,
+                        completion_tokens=latest_usage.completion_tokens,
+                        cached_tokens=latest_usage.cached_tokens,
+                    )
+                    if latest_usage is not None
+                    else None
+                )
+                trace_events.append(
+                    TraceEvent(
+                        node=decision.target,
+                        kind="failed",
+                        operation="generation",
+                        status="failed",
+                        role="direct",
+                        worker=decision.target,
+                        engine=engine_name,
+                        model=descriptor.model,
+                        timing=TraceTiming(
+                            queued_at=queued_at,
+                            started_at=started_at,
+                            first_token_at=first_token_at,
+                            completed_at=utc_now_iso(),
+                        ),
+                        usage=trace_usage,
+                        metadata={"streamed": True},
+                        error=TraceError(type=type(error).__name__),
+                    )
+                )
+                usage = latest_usage or GenerationUsage()
+                partial_result = result_with_trace(
+                    text=previous_text,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    cached_tokens=usage.cached_tokens,
+                )
+                yield OrchestratorEvent(
+                    kind="error",
+                    result=partial_result,
+                    error_type=type(error).__name__,
+                )
+                return
             trace_usage = (
                 TraceUsage(
                     prompt_tokens=latest_usage.prompt_tokens,
@@ -644,6 +833,7 @@ class Orchestrator:
                     timing=TraceTiming(
                         queued_at=queued_at,
                         started_at=started_at,
+                        first_token_at=first_token_at,
                         completed_at=utc_now_iso(),
                     ),
                     usage=trace_usage,
@@ -675,7 +865,7 @@ class Orchestrator:
         # Conductor/MoA without a queue bridge.
         yield OrchestratorEvent(kind="status", text=f"routing: {decision.target}")
         if self._moa_samples > 0:
-            from kairyu.orchestration.moa import stream_moa
+            from kairyu.orchestration.moa import MoAExecutionError, stream_moa
 
             moa_queued_at = utc_now_iso()
             budget_before = BudgetState(budget=self._budget)
@@ -712,6 +902,15 @@ class Orchestrator:
             synthesizer_descriptor = self._engine_descriptors[synthesizer_engine_name]
             moa_started_at = utc_now_iso()
             moa_result = None
+            latest_usage = GenerationUsage()
+            first_token_at = None
+
+            def observe_moa_usage(usage: GenerationUsage) -> None:
+                nonlocal latest_usage
+                latest_usage = usage
+                if usage_observer is not None:
+                    usage_observer(usage)
+
             try:
                 moa_stream = stream_moa(
                     self._engines[proposal_engine_name],
@@ -719,12 +918,18 @@ class Orchestrator:
                     n_samples=self._moa_samples,
                     synthesizer=self._engines[synthesizer_engine_name],
                     shared_prefix=self._shared_prefix,
+                    usage_observer=observe_moa_usage,
                 )
                 async for event in self._with_initial_keepalives(moa_stream):
                     if event is None:
                         yield OrchestratorEvent(kind="status", text="working")
                     elif event.kind == "delta":
-                        yield OrchestratorEvent(kind="delta", text=event.text)
+                        if first_token_at is None:
+                            first_token_at = utc_now_iso()
+                        yield OrchestratorEvent(
+                            kind="delta",
+                            text=event.text,
+                        )
                     else:
                         moa_result = event.result
                 if moa_result is None:
@@ -757,6 +962,91 @@ class Orchestrator:
                     cost=moa_cost,
                     unknown_cost=True,
                 )
+            except Exception as error:
+                released = reservation.release(
+                    steps=moa_steps,
+                    unknown_cost=True,
+                )
+                if isinstance(error, MoAExecutionError):
+                    cause = error.cause
+                    usage = error.usage
+                    cached_tokens = error.cached_tokens
+                    partial_text = error.final_text
+                    stage = error.stage
+                else:
+                    cause = error
+                    usage = (
+                        moa_result.usage
+                        if moa_result is not None
+                        else (
+                            latest_usage.prompt_tokens,
+                            latest_usage.completion_tokens,
+                        )
+                    )
+                    cached_tokens = (
+                        moa_result.cached_tokens
+                        if moa_result is not None
+                        else latest_usage.cached_tokens
+                    )
+                    partial_text = moa_result.final_text if moa_result is not None else ""
+                    stage = "accounting"
+                trace_events.append(
+                    TraceEvent(
+                        node="moa",
+                        kind="failed",
+                        operation="synthesis",
+                        status="failed",
+                        role="moa",
+                        worker="tier1,tier2",
+                        engine=",".join(
+                            dict.fromkeys(
+                                (
+                                    proposal_engine_name,
+                                    synthesizer_engine_name,
+                                )
+                            )
+                        ),
+                        model=",".join(
+                            dict.fromkeys(
+                                model
+                                for model in (
+                                    proposal_descriptor.model,
+                                    synthesizer_descriptor.model,
+                                )
+                                if model is not None
+                            )
+                        )
+                        or None,
+                        timing=TraceTiming(
+                            queued_at=moa_queued_at,
+                            started_at=moa_started_at,
+                            first_token_at=first_token_at,
+                            completed_at=utc_now_iso(),
+                        ),
+                        usage=TraceUsage(
+                            prompt_tokens=usage[0],
+                            completion_tokens=usage[1],
+                            cached_tokens=cached_tokens,
+                        ),
+                        budget=TraceBudget.between(
+                            budget_before,
+                            released,
+                        ),
+                        metadata={"stage": stage, "streamed": True},
+                        error=TraceError(type=type(cause).__name__),
+                    )
+                )
+                yield OrchestratorEvent(
+                    kind="error",
+                    result=result_with_trace(
+                        text=partial_text,
+                        prompt_tokens=usage[0],
+                        completion_tokens=usage[1],
+                        cached_tokens=cached_tokens,
+                    ),
+                    error_type=type(cause).__name__,
+                )
+                return
             except BaseException:
                 reservation.release(steps=moa_steps, unknown_cost=True)
                 raise
@@ -793,6 +1083,7 @@ class Orchestrator:
                     timing=TraceTiming(
                         queued_at=moa_queued_at,
                         started_at=moa_started_at,
+                        first_token_at=first_token_at,
                         completed_at=utc_now_iso(),
                     ),
                     usage=TraceUsage(
@@ -836,17 +1127,39 @@ class Orchestrator:
             sampling_params=self._sampling_params,
             cost_model=self._cost_model,
             worker_trace=self._conductor_worker_trace(),
+            usage_observer=usage_observer,
         )
         conductor_result = None
-        async for event in self._with_initial_keepalives(
-            conductor.stream(prompt, budget=self._budget)
-        ):
-            if event is None:
-                yield OrchestratorEvent(kind="status", text="working")
-            elif event.kind == "delta":
-                yield OrchestratorEvent(kind="delta", text=event.text)
-            else:
-                conductor_result = event.result
+        try:
+            async for event in self._with_initial_keepalives(
+                conductor.stream(prompt, budget=self._budget)
+            ):
+                if event is None:
+                    yield OrchestratorEvent(kind="status", text="working")
+                elif event.kind == "delta":
+                    yield OrchestratorEvent(
+                        kind="delta",
+                        text=event.text,
+                    )
+                else:
+                    conductor_result = event.result
+        except ConductorStreamError as error:
+            conductor_result = error.result
+            notes.extend(
+                f"{event.node}: {event.kind} {event.detail}" for event in conductor_result.trace
+            )
+            trace_events.extend(conductor_result.trace)
+            yield OrchestratorEvent(
+                kind="error",
+                result=result_with_trace(
+                    text=conductor_result.final_text,
+                    prompt_tokens=conductor_result.usage[0],
+                    completion_tokens=conductor_result.usage[1],
+                    cached_tokens=conductor_result.cached_tokens,
+                ),
+                error_type=type(error.cause).__name__,
+            )
+            return
         if conductor_result is None:
             raise RuntimeError("Conductor stream did not produce a final result")
         notes.extend(

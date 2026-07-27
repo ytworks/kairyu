@@ -141,6 +141,14 @@ On Qwen3-32B TP8, 24 alternating direct/AUTO pairs measured AUTO/direct TTFT
 1.0096x p50 and 1.0122x p99. An isolated seven-round A/B measured a bounded
 task/queue bridge 43.721x slower per event than the selected pull-through path
 (`bench/results/orchestration-stream-qwen3-32b-tp8-2026-07-27.json`).
+G6 P-B2 orchestration accounting and trace are now closed. Every AUTO route
+reports cumulative internal input/output tokens on unary and usage-enabled
+stream responses, including retries, verifier calls, fallback resolution, MoA
+proposals, and synthesis. Streaming trace opt-in now returns the same
+versioned route/DAG/verifier envelope as unary. A synchronous accounting
+observer preserves completed pre-final and partial-final usage across
+disconnects and failures without a task/queue bridge; returned failure data
+contains only sanitized exception types.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-27_
@@ -173,8 +181,8 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
-| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D6 amended 2026-07-27, `docs/design/m11-product.md`): Conductor/MoA final-stage pull-through streaming and indexed FIFO/priority admission are production-wired. |
-| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, and P-B5 are green; remaining P-B latency/quality and P-C gates continue. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D6 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, cumulative orchestration usage/trace, and indexed FIFO/priority admission are production-wired. |
+| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, and P-B5 are green; remaining P-B latency/quality and P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -267,6 +275,27 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [contract] P-B2 closes truthful orchestration usage and trace
+- What: AUTO unary and usage-enabled streaming responses now expose
+  `orchestration_input_tokens` / `orchestration_output_tokens` reconciled to
+  cumulative backend-reported internal calls. Direct, Conductor, and MoA cover
+  retries, verifier calls, fallback resolution, proposals, and synthesis.
+  Streaming trace opt-in returns the same versioned route/DAG/verifier/timing
+  envelope as unary on one terminal metadata chunk. A synchronous cumulative
+  accounting observer preserves completed pre-final and partial-final usage on
+  disconnect without a queue; unary and streaming partial failures return
+  known usage plus sanitized typed failure events.
+- Why: The prior result counters were internally summed but indistinguishable
+  from standard usage on the public wire, streaming exposed only a legacy
+  comment, and exceptions discarded partial MoA/final-stream accounting. The
+  unified terminal contract makes orchestration spend auditable without
+  exposing prompts, intermediate generations, exception messages, credentials,
+  or changing ordinary engine response shapes.
+- Refs: m11 D1, G6 P-B2, issue #196;
+  `kairyu/entrypoints/server/{protocol,app}.py`,
+  `kairyu/orchestration/{conductor,moa,orchestrator}.py`,
+  `tests/server/test_orchestration_usage_trace.py`
 
 ### 2026-07-27 — [design] P-B1 final-stage pull-through streaming closes issue #195
 - What: Conductor and MoA now own their final backend iterators and expose typed
