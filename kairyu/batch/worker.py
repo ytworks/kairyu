@@ -264,6 +264,7 @@ class BatchWorker:
                                 prompt_tokens=usage.prompt_tokens,
                                 completion_tokens=usage.completion_tokens,
                                 ledger=self._usage_ledger,
+                                metrics=self._metrics,
                                 limiter=self._tenant_limiter,
                             )
                         if output is not None:

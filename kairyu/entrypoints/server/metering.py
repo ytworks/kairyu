@@ -24,6 +24,15 @@ class TokenLimiterSink(Protocol):
     def charge_tokens(self, tenant: str, tokens: int) -> None: ...
 
 
+class UsageMetricsSink(Protocol):
+    def record_usage(
+        self,
+        tenant: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None: ...
+
+
 def _approx_tokens(text: str) -> int:
     return len(text.split())
 
@@ -54,11 +63,25 @@ def record_tenant_usage(
     prompt_tokens: int,
     completion_tokens: int,
     ledger: UsageLedgerSink | None = None,
+    metrics: UsageMetricsSink | None = None,
     limiter: TokenLimiterSink | None = None,
 ) -> None:
     """Record one explicit tenant event to whichever sinks are configured."""
+    if (
+        type(prompt_tokens) is not int
+        or type(completion_tokens) is not int
+        or prompt_tokens < 0
+        or completion_tokens < 0
+    ):
+        raise ValueError("usage token counts must be non-negative integers")
     if ledger is not None:
         ledger.record(tenant, model, prompt_tokens, completion_tokens)
+    if metrics is not None:
+        metrics.record_usage(
+            tenant,
+            prompt_tokens,
+            completion_tokens,
+        )
     if limiter is not None:
         limiter.charge_tokens(tenant, prompt_tokens + completion_tokens)
 
@@ -73,12 +96,14 @@ class StreamUsageOwner:
         model: str,
         prompt: str,
         ledger: UsageLedgerSink | None = None,
+        metrics: UsageMetricsSink | None = None,
         limiter: TokenLimiterSink | None = None,
     ) -> None:
         self._tenant = tenant
         self._model = model
         self._prompt = prompt
         self._ledger = ledger
+        self._metrics = metrics
         self._limiter = limiter
         self._dispatched = False
         self._finalized = False
@@ -121,6 +146,7 @@ class StreamUsageOwner:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             ledger=self._ledger,
+            metrics=self._metrics,
             limiter=self._limiter,
         )
 
@@ -138,6 +164,7 @@ def stream_usage_owner_from_state(
         model=model,
         prompt=prompt,
         ledger=getattr(state, "usage_ledger", None),
+        metrics=getattr(state, "metrics", None),
         limiter=getattr(state, "tenant_limiter", None),
     )
 
@@ -157,5 +184,6 @@ def record_state_usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         ledger=getattr(state, "usage_ledger", None),
+        metrics=getattr(state, "metrics", None),
         limiter=getattr(state, "tenant_limiter", None),
     )

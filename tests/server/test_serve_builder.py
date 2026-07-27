@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 
 import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_config, build_app_from_spec
@@ -48,6 +49,18 @@ def _chat_body(content: str, model: str = "pooled", **extra) -> dict:
         "messages": [{"role": "user", "content": content}],
         **extra,
     }
+
+
+def _metric_value(
+    text: str,
+    name: str,
+    labels: dict[str, str],
+) -> float:
+    for family in text_string_to_metric_families(text):
+        for sample in family.samples:
+            if sample.name == name and sample.labels == labels:
+                return float(sample.value)
+    raise AssertionError(f"missing metric {name}{labels}")
 
 
 async def test_pool_is_served_and_affinity_sticks():
@@ -391,6 +404,7 @@ batch:
 
     app = build_app_from_spec(spec)
 
+    assert app.state.batch_worker._metrics is app.state.metrics
     assert app.state.batch_worker._usage_ledger is app.state.usage_ledger
     assert app.state.batch_worker._tenant_limiter is app.state.tenant_limiter
 
@@ -598,6 +612,7 @@ tenants:
         )
         usage_a = await client.get("/admin/usage", headers=tenant_a)
         usage_b = await client.get("/admin/usage", headers=tenant_b)
+        metrics = (await client.get("/metrics")).text
 
     assert first_a.status_code == 200
     assert limited_a.status_code == 429
@@ -615,6 +630,92 @@ tenants:
     assert totals["tenant-a"]["requests"] == 1
     assert totals["tenant-b"]["requests"] == 1
     assert "default" not in totals
+    for tenant, usage in totals.items():
+        assert _metric_value(
+            metrics,
+            "kairyu_usage_requests_total",
+            {"tenant": tenant},
+        ) == usage["requests"]
+        assert _metric_value(
+            metrics,
+            "kairyu_usage_tokens_total",
+            {"tenant": tenant, "type": "prompt"},
+        ) == usage["prompt_tokens"]
+        assert _metric_value(
+            metrics,
+            "kairyu_usage_tokens_total",
+            {"tenant": tenant, "type": "completion"},
+        ) == usage["completion_tokens"]
+
+
+async def test_deployment_usage_metrics_restore_after_truncated_tail_restart(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a,key-b")
+    ledger_path = tmp_path / "usage.jsonl"
+    spec = load_deployment_spec(
+        f"""
+server:
+  api_keys_env: KAIRYU_DEPLOYMENT_KEYS
+  usage_ledger_path: {ledger_path}
+engines:
+  m: {{ backend: mock }}
+tenants:
+  key_tenants:
+    key-a: tenant-a
+    key-b: tenant-b
+"""
+    )
+    payload = _chat_body("before restart", model="m")
+
+    first_app = build_app_from_spec(spec)
+    async with first_app.router.lifespan_context(first_app):
+        async with _client(first_app) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json=payload,
+                headers={"Authorization": "Bearer key-a"},
+            )
+            assert response.status_code == 200
+    first_handle = first_app.state.usage_ledger._handle
+    assert first_handle is not None and first_handle.closed
+
+    with ledger_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"tenant":"truncated"')
+
+    restarted_app = build_app_from_spec(spec)
+    async with restarted_app.router.lifespan_context(restarted_app):
+        async with _client(restarted_app) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json=_chat_body("after restart", model="m"),
+                headers={"Authorization": "Bearer key-b"},
+            )
+            metrics = (await client.get("/metrics")).text
+        totals = restarted_app.state.usage_ledger.totals()
+
+    assert response.status_code == 200
+    restarted_handle = restarted_app.state.usage_ledger._handle
+    assert restarted_handle is not None and restarted_handle.closed
+    assert restarted_app.state.usage_ledger.malformed_lines == 1
+    assert set(totals) == {"tenant-a", "tenant-b"}
+    for tenant, usage in totals.items():
+        assert _metric_value(
+            metrics,
+            "kairyu_usage_requests_total",
+            {"tenant": tenant},
+        ) == usage["requests"]
+        assert _metric_value(
+            metrics,
+            "kairyu_usage_tokens_total",
+            {"tenant": tenant, "type": "prompt"},
+        ) == usage["prompt_tokens"]
+        assert _metric_value(
+            metrics,
+            "kairyu_usage_tokens_total",
+            {"tenant": tenant, "type": "completion"},
+        ) == usage["completion_tokens"]
 
 
 def test_tenant_preflight_revalidates_before_constructing_owned_backends(monkeypatch):

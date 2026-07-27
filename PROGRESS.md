@@ -163,7 +163,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D6 amended 2026-07-27, `docs/design/m11-product.md`): indexed FIFO/priority Scheduler waiting queue preserves aging and HoL contracts without linear list operations. |
-| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
+| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A and P-B5 tenancy reconciliation are CPU-green; remaining P-B latency/quality and P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -201,6 +201,11 @@ Tenant usage accounting now covers synchronous and streaming generation, Respons
 embeddings, and successful batch lines with authenticated ownership and backend-or-derived
 wire-count parity; each dispatched execution records exactly once even when a stream closes
 early or a completed batch line is later rolled back by cancellation or spool failure.
+Dedicated tenant usage counters mirror that same metering seam and restore from the
+single-gateway ledger at startup. The complete execution-mode matrix reconciles
+Prometheus execution/prompt/completion totals with the ledger exactly; the supported
+DeploymentSpec path also proves isolated two-key 429s, restart recovery, malformed-tail
+separation, and shutdown drain.
 Usage-ledger and router JSONL records now enter a bounded non-blocking queue; a
 lifecycle-owned thread batches append+flush work outside request/stream execution.
 Normal shutdown drains every accepted row, queue saturation fails immediately without
@@ -238,6 +243,31 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] P-B5 usage counters reconcile from the ledger
+- What: successful metering events now increment tenant-bounded Prometheus
+  counters for executions, prompt tokens, and completion tokens at the same
+  seam as ledger admission. Batch workers use the same sink. A
+  single-gateway restart restores counter totals from the app-owned ledger
+  before serving. The JSONL writer terminates a preserved truncated tail before
+  appending the first post-restart row.
+- Why: generic HTTP request counters include rejections and unknown models, so
+  they cannot reconcile to successful billable executions. Process-local
+  counters also reset on restart unless the append-only source of truth seeds
+  them. Separating a crash tail prevents the first recovered request from being
+  concatenated into—and lost with—the malformed row.
+- Verification: the nine-mode usage matrix covers sync/stream chat,
+  completions, AUTO, Responses, embeddings, and batch with exact ledger/counter
+  equality. The supported DeploymentSpec path proves independent two-key 429s,
+  and a restart gate proves counter restoration, malformed-tail recovery, and
+  shutdown drain with 0% reconciliation error. Focused server/audit regression:
+  127 passed; the complete CPU suite passed 2,030 tests (12 skipped,
+  118 deselected).
+- Refs: issue #199; m11 D3/A13; G6 P-B5;
+  `kairyu/entrypoints/server/metrics.py`;
+  `kairyu/entrypoints/server/metering.py`;
+  `tests/server/test_m11_product.py`;
+  `tests/server/test_serve_builder.py`.
 
 ### 2026-07-27 — [amendment] audit JSONL filesystem work leaves request loops
 - What: usage-ledger and router-log producers now admit complete JSON rows to a

@@ -55,7 +55,13 @@ loop. A barrier flushes language/runtime buffers to the OS for reader
 visibility; it deliberately does not call `fsync`, so no power-loss durability
 is claimed.
 Isolation gate: tenant A at its limit 429s while tenant B proceeds; ledger
-totals reconcile with returned usage to <0.1%.
+totals reconcile with returned usage to <0.1%. Dedicated Prometheus counters
+mirror only accepted usage rows (not generic HTTP requests): executions and
+prompt/completion tokens are labeled by the bounded tenant identity. On
+single-gateway restart those counters are restored from ledger totals before
+serving, so ledger-versus-Prometheus reconciliation remains exact across a
+clean process restart. A truncated crash tail is preserved for diagnostics and
+terminated before the next complete row is appended.
 
 ### D4 — `/v1/responses` (subset) + `/v1/embeddings`
 
@@ -174,6 +180,15 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   each non-whitespace record independently: a malformed final line without a
   newline is a truncated tail (skip + warning), complete malformed lines are
   corruption (skip + per-line error), and all valid rows still count.
+- **A13 (D3, Issue #199)**: generic HTTP request counters cannot reconcile
+  usage because they intentionally include rejected/unknown requests.
+  `kairyu_usage_requests_total{tenant}` and
+  `kairyu_usage_tokens_total{tenant,type}` therefore increment at the same
+  exactly-once metering seam as ledger admission across sync/stream chat,
+  completions, AUTO, Responses, embeddings, and batch lines. Startup restores
+  their tenant totals from the app-owned ledger; model is deliberately not a
+  label because the aggregate ledger API has no model dimension and tenant
+  reconciliation must survive restart without inventing attribution.
 - **A8 (D4)**: Responses usage names are input_tokens/output_tokens/
   total_tokens; output item = {type: message, role: assistant, status,
   content: [{type: output_text, text, annotations: []}]}; instructions
