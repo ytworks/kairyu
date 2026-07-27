@@ -65,12 +65,14 @@ def test_multi_gateway_ledger_aggregation_exports_cached_tokens(tmp_path):
         "tenant-a": {
             "requests": 2,
             "prompt_tokens": 30,
+            "uncached_tokens": 6,
             "completion_tokens": 7,
             "cached_tokens": 24,
         },
         "tenant-b": {
             "requests": 1,
             "prompt_tokens": 5,
+            "uncached_tokens": 5,
             "completion_tokens": 1,
             "cached_tokens": 0,
         },
@@ -115,12 +117,14 @@ def test_request_log_aggregation_counts_only_metered_execution_outcomes(tmp_path
         "tenant-a": {
             "requests": 1,
             "prompt_tokens": 10,
+            "uncached_tokens": 2,
             "completion_tokens": 2,
             "cached_tokens": 8,
         },
         "tenant-b": {
             "requests": 1,
             "prompt_tokens": 7,
+            "uncached_tokens": 7,
             "completion_tokens": 3,
             "cached_tokens": 0,
         },
@@ -135,7 +139,7 @@ def test_reconciliation_reports_any_metric_outside_point_one_percent(tmp_path):
                 "tenant": "tenant-a",
                 "prompt_tokens": 999,
                 "completion_tokens": 100,
-                "cached_tokens": 200,
+                "cached_tokens": 0,
             }
         ],
     )
@@ -149,7 +153,7 @@ def test_reconciliation_reports_any_metric_outside_point_one_percent(tmp_path):
                 "tenant": "tenant-a",
                 "prompt_tokens": 1000,
                 "completion_tokens": 100,
-                "cached_tokens": 200,
+                "cached_tokens": 0,
             }
         ],
     )

@@ -1,2 +1,2 @@
-{"cached_tokens":48,"completion_tokens":10,"model":"qwen","prompt_tokens":90,"tenant":"tenant-b","ts":1785110407}
-{"cached_tokens":192,"completion_tokens":50,"model":"kairyu-auto","prompt_tokens":300,"tenant":"tenant-c","ts":1785110408}
+{"cached_tokens":48,"completion_tokens":10,"model":"qwen","prompt_tokens":90,"tenant":"tenant-b","ts":1785110407,"uncached_tokens":42}
+{"cached_tokens":192,"completion_tokens":50,"model":"kairyu-auto","prompt_tokens":300,"tenant":"tenant-c","ts":1785110408,"uncached_tokens":108}

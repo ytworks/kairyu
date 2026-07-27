@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from kairyu.engine.backend import (
     CacheHint,
@@ -85,6 +85,7 @@ from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator, PreviewNotSupportedError
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
+from kairyu.pricing import InvoiceExportError, PriceSheet, export_invoice_csv
 from kairyu.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
@@ -526,8 +527,24 @@ def create_app(
     embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
     resolved_api_keys: frozenset[str] | None = None,
     resolved_admin_keys: frozenset[str] | None = None,
+    price_sheet: PriceSheet | None = None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
+    if price_sheet is not None and settings.usage_ledger_path is None:
+        raise ValueError("price_sheet requires usage_ledger_path")
+    if price_sheet is not None:
+        known_tenants = {"default"}
+        if tenant_config is not None:
+            known_tenants = {
+                tenant_config.default_tenant,
+                *tenant_config.key_tenants.values(),
+            }
+        unknown_discounts = price_sheet.tenant_discounts.keys() - known_tenants
+        if unknown_discounts:
+            raise ValueError(
+                "price_sheet discounts reference unknown tenants "
+                f"{sorted(unknown_discounts)}"
+            )
     app = FastAPI(
         title="kairyu",
         version="0.1.0",
@@ -651,6 +668,64 @@ def create_app(
                     tenant,
                 )
             }
+
+        if price_sheet is not None:
+            app.state.price_sheet = price_sheet
+
+            @app.get("/admin/usage.csv")
+            async def admin_usage_csv(
+                http_request: Request,
+                tenant: str | None = None,
+                start_ts: float | None = None,
+                end_ts: float | None = None,
+            ):
+                """Export a deterministic, caller-scoped invoice snapshot."""
+                state = http_request.scope.get("state", {})
+                scoped_tenant = tenant
+                if not state.get("is_admin") and tenant_config is not None:
+                    caller = getattr(http_request.state, "tenant", None)
+                    if caller is None:
+                        caller = tenant_config.default_tenant
+                    if tenant is not None and tenant != caller:
+                        return JSONResponse(
+                            status_code=403,
+                            content={"error": {
+                                "message": (
+                                    "cannot export another tenant's invoice"
+                                ),
+                                "type": "invalid_request_error",
+                                "code": "tenant_forbidden",
+                            }},
+                        )
+                    scoped_tenant = caller
+                try:
+                    snapshot = await asyncio.to_thread(ledger.snapshot_bytes)
+                    payload = await asyncio.to_thread(
+                        export_invoice_csv,
+                        {"gateway-local": snapshot},
+                        price_sheet,
+                        tenant=scoped_tenant,
+                        start_ts=start_ts,
+                        end_ts=end_ts,
+                    )
+                except InvoiceExportError as error:
+                    return JSONResponse(
+                        status_code=409,
+                        content={"error": {
+                            "message": str(error),
+                            "type": "invoice_export_error",
+                            "code": "invoice_ledger_invalid",
+                        }},
+                    )
+                return Response(
+                    content=payload,
+                    media_type="text/csv",
+                    headers={
+                        "content-disposition": (
+                            'attachment; filename="kairyu-usage-invoice.csv"'
+                        )
+                    },
+                )
 
     if settings.tracing:
         from kairyu.entrypoints.server.middleware import TracingMiddleware

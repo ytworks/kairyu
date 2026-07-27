@@ -61,7 +61,7 @@ malformed-tail recovery and shutdown drain.
 | P-C2 (Responses API) | `/v1/responses` subset (`input`, streaming events, tool calls, `previous_response_id` server-side state): OpenAI SDK `responses.create` and a Codex-class agent work unmodified (vLLM gap, Fugu parity) | `tests/server/` |
 | P-C3 (embeddings) | `/v1/embeddings` (+optional rerank) as a new engine-backend kind; Open WebUI RAG works end-to-end against Kairyu alone | compose smoke |
 | P-C4 (vision) | Content-parts (`[{type:"text"|"image_url"}]`) through template + engine; image chat works in Open WebUI against a VLM replica | manual + tests |
-| P-C5 (pricing signals) | Per-tenant cached-token discount fields in the ledger + price-sheet config; invoice-grade CSV export distinguishes cached vs uncached input | `tests/server/` |
+| P-C5 (pricing signals) | Per-tenant cached-token discount fields in the ledger + price-sheet config; invoice-grade CSV export distinguishes cached vs uncached input | `tests/server/test_pricing_invoice.py` |
 
 ## 3. Non-goals
 

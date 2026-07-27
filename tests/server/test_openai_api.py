@@ -1014,6 +1014,7 @@ async def test_malformed_auto_tool_output_records_actual_backend_usage(tmp_path)
         "prompt_tokens": 7,
         "completion_tokens": 3,
         "cached_tokens": 0,
+        "uncached_tokens": 7,
     }
 
 
@@ -1052,9 +1053,14 @@ async def test_cached_usage_is_exported_to_wire_ledger_and_metrics(tmp_path):
         "prompt_tokens": 17,
         "completion_tokens": 3,
         "cached_tokens": 12,
+        "uncached_tokens": 5,
     }
     assert (
         'kairyu_usage_tokens_total{tenant="default",type="cached"} 12.0'
+        in metrics
+    )
+    assert (
+        'kairyu_usage_tokens_total{tenant="default",type="uncached"} 5.0'
         in metrics
     )
 
@@ -1083,6 +1089,7 @@ async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
         "prompt_tokens": wire_usage["prompt_tokens"],
         "completion_tokens": wire_usage["completion_tokens"],
         "cached_tokens": 0,
+        "uncached_tokens": wire_usage["prompt_tokens"],
     }
 
 
@@ -1124,6 +1131,7 @@ async def test_sync_orchestrator_zero_usage_derives_wire_and_ledger(tmp_path):
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
         "cached_tokens": 0,
+        "uncached_tokens": expected[0],
     }
 
 
@@ -1175,6 +1183,7 @@ async def test_sync_completions_derives_each_missing_usage(
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
         "cached_tokens": 0,
+        "uncached_tokens": expected[0],
     }
 
 
@@ -1223,6 +1232,7 @@ async def test_every_dispatched_stream_is_metered_exactly_once(
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
         "cached_tokens": 0,
+        "uncached_tokens": expected[0],
     }
 
     if case in {"reported", "usage-none"}:
@@ -1272,6 +1282,7 @@ async def test_stream_retains_reported_usage_when_final_partial_has_none(
         "prompt_tokens": 17,
         "completion_tokens": 9,
         "cached_tokens": 0,
+        "uncached_tokens": 17,
     }
 
 
@@ -1372,6 +1383,7 @@ async def test_generate_fully_tool_stream_keeps_single_sync_metering_owner(tmp_p
         "prompt_tokens": 13,
         "completion_tokens": 8,
         "cached_tokens": 0,
+        "uncached_tokens": 13,
     }
 
 
@@ -1418,6 +1430,7 @@ async def test_unsatisfied_tool_choice_is_metered_once(
         "prompt_tokens": 11,
         "completion_tokens": 5,
         "cached_tokens": 0,
+        "uncached_tokens": 11,
     }
 
 

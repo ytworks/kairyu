@@ -88,6 +88,7 @@ def test_mixed_tool_choice_rejection_is_metered_once(tmp_path):
         "prompt_tokens": 19,
         "completion_tokens": 7,
         "cached_tokens": 0,
+        "uncached_tokens": 19,
     }
 
 
@@ -325,6 +326,7 @@ class TestTenancy:
             "prompt_tokens": 7,
             "completion_tokens": 5,
             "cached_tokens": 0,
+            "uncached_tokens": 7,
         }
 
     def test_stream_usage_owner_skips_undispatched_stream(self, tmp_path):
@@ -377,6 +379,7 @@ class TestTenancy:
                 "prompt_tokens": 7,
                 "completion_tokens": 5,
                 "cached_tokens": 0,
+                "uncached_tokens": 7,
             }
         else:
             assert not ledger_path.exists()
@@ -665,6 +668,7 @@ class TestTenancy:
                 "prompt_tokens": 7,
                 "completion_tokens": 3,
                 "cached_tokens": 0,
+                "uncached_tokens": 7,
             }
         }
         assert ledger.malformed_lines == 1
@@ -727,6 +731,7 @@ class TestTenancy:
                 "prompt_tokens": 13,
                 "completion_tokens": 16,
                 "cached_tokens": 0,
+                "uncached_tokens": 13,
             }
         }
         assert ledger.malformed_lines == 4
@@ -780,6 +785,7 @@ class TestTenancy:
                     "prompt_tokens": 5,
                     "completion_tokens": 8,
                     "cached_tokens": 0,
+                    "uncached_tokens": 5,
                 }
             }
         }
@@ -957,6 +963,7 @@ class TestResponsesApi:
             "prompt_tokens": 17 + derived_usage["input_tokens"] + 3,
             "completion_tokens": 9 + derived_usage["output_tokens"],
             "cached_tokens": 11,
+            "uncached_tokens": derived_usage["input_tokens"] + 9,
         }
 
     def test_extra_route_failures_before_usable_results_are_unmetered(

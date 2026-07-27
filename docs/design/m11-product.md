@@ -70,8 +70,18 @@ ledgers by tenant. The fixed F5e replay covers all public endpoint families,
 post-dispatch disconnect/failure, pre-result failure, batch-output rollback,
 three gateways, and cached-token export. A same-host shared SQLite candidate
 with no network latency and durability disabled still measured worse than the
-selected local asynchronous boundary: median-of-five producer p99
-27.970 → 19.062 us and throughput 72,272 → 99,474 rows/s over 30,000 rows.
+selected local asynchronous boundary: the explicit-uncached rerun's
+median-of-five producer p99 was 28.026 → 19.696 us and throughput
+72,374 → 95,029 rows/s over 30,000 rows.
+
+Pricing also remains outside the request path. New ledger rows freeze both
+cached and uncached input counts; legacy rows derive uncached input as
+prompt-minus-cached. A validated, versioned blended `PriceSheet` applies one
+cached-input discount rule and optional tenant discounts with Decimal
+arithmetic. `/admin/usage.csv` reads a size-bounded ledger snapshot and exports
+`[start_ts,end_ts)` invoice rows with separated input/output quantities, unit
+rates, component charges, discount, total, source SHA-256, and deterministic
+invoice ID. Any malformed/truncated record fails the export closed.
 
 ### D4 — `/v1/responses` (subset) + `/v1/embeddings`
 
@@ -207,6 +217,14 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   with 0.0% maximum error; the committed A/B selects local async writes by
   measured request-path p99 and throughput against a favorable same-host
   synchronous shared-store candidate.
+- **A15 (D3, Issue #204)**: every new usage row stores
+  `cached_tokens + uncached_tokens == prompt_tokens`; old rows derive the
+  missing uncached count. DeploymentSpec validates a versioned blended price
+  sheet, cached-input and tenant discount fractions, known tenants, and the
+  required ledger. Invoice export uses Decimal half-even rounding at six
+  currency decimal places and a reader-stable ledger snapshot; streaming,
+  Responses, embeddings, and batch executions reconcile into the CSV while
+  corrupt records produce no partial invoice.
 - **A8 (D4)**: Responses usage names are input_tokens/output_tokens/
   total_tokens; output item = {type: message, role: assistant, status,
   content: [{type: output_text, text, annotations: []}]}; instructions

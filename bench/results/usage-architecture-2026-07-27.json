@@ -2,129 +2,129 @@
   "aggregation": "median of independent runs",
   "batch_size": 128,
   "gateway_local_async": {
-    "drain_complete_seconds": 0.3137170320842415,
-    "drain_records_per_second": 95627.57814164259,
-    "max_us": 46085.86,
-    "p50_us": 6.858,
-    "p95_us": 13.209,
-    "p99_us": 19.062,
-    "producer_records_per_second": 99473.67347501608,
-    "producer_seconds": 0.3015873341355473
+    "drain_complete_seconds": 0.33157091890461743,
+    "drain_records_per_second": 90478.38121361319,
+    "max_us": 46880.247,
+    "p50_us": 7.102,
+    "p95_us": 12.107,
+    "p99_us": 19.696,
+    "producer_records_per_second": 95028.80468168041,
+    "producer_seconds": 0.31569375307299197
   },
   "gateways": 3,
-  "producer_p99_speedup": 1.4673171755324728,
-  "producer_throughput_speedup": 1.3763883624513549,
+  "producer_p99_speedup": 1.4229285134037366,
+  "producer_throughput_speedup": 1.3130287345508471,
   "records": 30000,
   "repeats": 5,
   "runs": [
     {
       "gateway_local_async": {
-        "drain_complete_seconds": 0.34449228388257325,
-        "drain_records_per_second": 87084.67911643,
-        "max_us": 46739.165,
-        "p50_us": 7.013,
-        "p95_us": 16.537,
-        "p99_us": 22.855,
-        "producer_records_per_second": 90416.87898392144,
-        "producer_seconds": 0.3317964558955282
+        "drain_complete_seconds": 0.32984895701520145,
+        "drain_records_per_second": 90950.71960047889,
+        "max_us": 52095.431,
+        "p50_us": 7.132,
+        "p95_us": 12.107,
+        "p99_us": 19.815,
+        "producer_records_per_second": 95028.80468168041,
+        "producer_seconds": 0.31569375307299197
       },
       "shared_sync_commit": {
-        "drain_complete_seconds": 0.41510129696689546,
-        "drain_records_per_second": 72271.51593889747,
-        "max_us": 178877.602,
-        "p50_us": 11.04,
-        "p95_us": 15.416,
-        "p99_us": 28.899,
-        "producer_records_per_second": 72271.51593889747,
-        "producer_seconds": 0.41510129696689546
+        "drain_complete_seconds": 0.39744633599184453,
+        "drain_records_per_second": 75481.88845453488,
+        "max_us": 129080.117,
+        "p50_us": 10.895,
+        "p95_us": 13.423,
+        "p99_us": 27.585,
+        "producer_records_per_second": 75481.88845453488,
+        "producer_seconds": 0.39744633599184453
       }
     },
     {
       "gateway_local_async": {
-        "drain_complete_seconds": 0.31352126807905734,
-        "drain_records_per_second": 95687.28840569507,
-        "max_us": 47986.521,
-        "p50_us": 6.828,
-        "p95_us": 13.209,
-        "p99_us": 19.16,
-        "producer_records_per_second": 99473.67347501608,
-        "producer_seconds": 0.3015873341355473
+        "drain_complete_seconds": 0.33416514098644257,
+        "drain_records_per_second": 89775.97098081853,
+        "max_us": 47281.767,
+        "p50_us": 7.102,
+        "p95_us": 13.692,
+        "p99_us": 19.696,
+        "producer_records_per_second": 92906.02452048549,
+        "producer_seconds": 0.322906939079985
       },
       "shared_sync_commit": {
-        "drain_complete_seconds": 0.4734103358350694,
-        "drain_records_per_second": 63369.972577978624,
-        "max_us": 329068.534,
-        "p50_us": 11.029,
-        "p95_us": 12.873,
-        "p99_us": 21.176,
-        "producer_records_per_second": 63369.972577978624,
-        "producer_seconds": 0.4734103358350694
+        "drain_complete_seconds": 0.4192151320166886,
+        "drain_records_per_second": 71562.30228541876,
+        "max_us": 128933.568,
+        "p50_us": 11.151,
+        "p95_us": 17.964,
+        "p99_us": 29.657,
+        "producer_records_per_second": 71562.30228541876,
+        "producer_seconds": 0.4192151320166886
       }
     },
     {
       "gateway_local_async": {
-        "drain_complete_seconds": 0.32790213311091065,
-        "drain_records_per_second": 91490.71314474403,
-        "max_us": 36382.72,
-        "p50_us": 6.858,
-        "p95_us": 17.379,
-        "p99_us": 19.062,
-        "producer_records_per_second": 98504.76267464737,
-        "producer_seconds": 0.3045538021251559
+        "drain_complete_seconds": 0.3228745509404689,
+        "drain_records_per_second": 92915.34409452838,
+        "max_us": 46880.247,
+        "p50_us": 7.091,
+        "p95_us": 11.074,
+        "p99_us": 18.76,
+        "producer_records_per_second": 96127.82359288444,
+        "producer_seconds": 0.31208446086384356
       },
       "shared_sync_commit": {
-        "drain_complete_seconds": 0.39188214810565114,
-        "drain_records_per_second": 76553.6275255693,
-        "max_us": 179030.046,
-        "p50_us": 10.989,
-        "p95_us": 16.292,
-        "p99_us": 28.935,
-        "producer_records_per_second": 76553.6275255693,
-        "producer_seconds": 0.39188214810565114
+        "drain_complete_seconds": 0.4145149691030383,
+        "drain_records_per_second": 72373.74337751053,
+        "max_us": 128979.384,
+        "p50_us": 10.93,
+        "p95_us": 17.449,
+        "p99_us": 28.026,
+        "producer_records_per_second": 72373.74337751053,
+        "producer_seconds": 0.4145149691030383
       }
     },
     {
       "gateway_local_async": {
-        "drain_complete_seconds": 0.3137170320842415,
-        "drain_records_per_second": 95627.57814164259,
-        "max_us": 46085.86,
-        "p50_us": 6.887,
-        "p95_us": 11.448,
-        "p99_us": 18.723,
-        "producer_records_per_second": 100525.69211317216,
-        "producer_seconds": 0.2984311708714813
+        "drain_complete_seconds": 0.33157091890461743,
+        "drain_records_per_second": 90478.38121361319,
+        "max_us": 37581.579,
+        "p50_us": 7.075,
+        "p95_us": 11.294,
+        "p99_us": 53.601,
+        "producer_records_per_second": 97001.58403776574,
+        "producer_seconds": 0.30927329999394715
       },
       "shared_sync_commit": {
-        "drain_complete_seconds": 0.38850231491960585,
-        "drain_records_per_second": 77219.61709856994,
-        "max_us": 229197.668,
-        "p50_us": 10.979,
-        "p95_us": 12.582,
-        "p99_us": 27.97,
-        "producer_records_per_second": 77219.61709856994,
-        "producer_seconds": 0.38850231491960585
+        "drain_complete_seconds": 0.3903099319431931,
+        "drain_records_per_second": 76861.99490400437,
+        "max_us": 179146.266,
+        "p50_us": 10.874,
+        "p95_us": 14.081,
+        "p99_us": 27.659,
+        "producer_records_per_second": 76861.99490400437,
+        "producer_seconds": 0.3903099319431931
       }
     },
     {
       "gateway_local_async": {
-        "drain_complete_seconds": 0.3114812469575554,
-        "drain_records_per_second": 96313.98452725472,
-        "max_us": 32783.123,
-        "p50_us": 6.807,
-        "p95_us": 10.649,
-        "p99_us": 18.495,
-        "producer_records_per_second": 100622.81772016689,
-        "producer_seconds": 0.29814311186783016
+        "drain_complete_seconds": 0.34097665292210877,
+        "drain_records_per_second": 87982.56344798209,
+        "max_us": 35426.822,
+        "p50_us": 7.154,
+        "p95_us": 17.744,
+        "p99_us": 19.687,
+        "producer_records_per_second": 90954.18104440744,
+        "producer_seconds": 0.32983640395104885
       },
       "shared_sync_commit": {
-        "drain_complete_seconds": 0.4538387379143387,
-        "drain_records_per_second": 66102.77504707509,
-        "max_us": 328981.246,
-        "p50_us": 10.91,
-        "p95_us": 12.986,
-        "p99_us": 24.564,
-        "producer_records_per_second": 66102.77504707509,
-        "producer_seconds": 0.4538387379143387
+        "drain_complete_seconds": 0.42491845693439245,
+        "drain_records_per_second": 70601.78137809629,
+        "max_us": 128878.012,
+        "p50_us": 11.137,
+        "p95_us": 20.353,
+        "p99_us": 30.08,
+        "producer_records_per_second": 70601.78137809629,
+        "producer_seconds": 0.42491845693439245
       }
     }
   ],
@@ -136,13 +136,13 @@
     "network_latency_included": false
   },
   "shared_sync_commit": {
-    "drain_complete_seconds": 0.41510129696689546,
-    "drain_records_per_second": 72271.51593889747,
-    "max_us": 229197.668,
-    "p50_us": 10.989,
-    "p95_us": 12.986,
-    "p99_us": 27.97,
-    "producer_records_per_second": 72271.51593889747,
-    "producer_seconds": 0.41510129696689546
+    "drain_complete_seconds": 0.4145149691030383,
+    "drain_records_per_second": 72373.74337751053,
+    "max_us": 128979.384,
+    "p50_us": 10.93,
+    "p95_us": 17.449,
+    "p99_us": 28.026,
+    "producer_records_per_second": 72373.74337751053,
+    "producer_seconds": 0.4145149691030383
   }
 }

@@ -651,6 +651,11 @@ tenants:
             "kairyu_usage_tokens_total",
             {"tenant": tenant, "type": "cached"},
         ) == usage["cached_tokens"]
+        assert _metric_value(
+            metrics,
+            "kairyu_usage_tokens_total",
+            {"tenant": tenant, "type": "uncached"},
+        ) == usage["uncached_tokens"]
 
 
 async def test_deployment_usage_metrics_restore_after_truncated_tail_restart(
@@ -726,6 +731,11 @@ tenants:
             "kairyu_usage_tokens_total",
             {"tenant": tenant, "type": "cached"},
         ) == usage["cached_tokens"]
+        assert _metric_value(
+            metrics,
+            "kairyu_usage_tokens_total",
+            {"tenant": tenant, "type": "uncached"},
+        ) == usage["uncached_tokens"]
 
 
 def test_tenant_preflight_revalidates_before_constructing_owned_backends(monkeypatch):
