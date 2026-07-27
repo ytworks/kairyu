@@ -149,6 +149,15 @@ versioned route/DAG/verifier envelope as unary. A synchronous accounting
 observer preserves completed pre-final and partial-final usage across
 disconnects and failures without a task/queue bridge; returned failure data
 contains only sanitized exception types.
+G6 P-B4 tiered AUTO proof is now closed. Declarative specs can configure
+bounded MoA proposal counts, and the Qwen3-32B TP8 production gateway exposes
+direct, standard AUTO (Conductor), and max AUTO (three proposals plus
+synthesis). Twelve alternating latency pairs measured standard/direct TTFT at
+1.0207x p50 and 0.9674x p99. A fixed eight-item LiveCodeBench multi-agent slice
+scored max 25.0% versus standard 0.0%; max also used 32 versus 44 internal
+calls, 45,759 versus 60,369 internal tokens, and 1,549.6 versus 2,602.8
+allocated GPU-seconds. The artifact explicitly limits the claim to this subset
+and records issue #208's effective-sampling caveat.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-27_
@@ -181,8 +190,8 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
-| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D6 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, cumulative orchestration usage/trace, and indexed FIFO/priority admission are production-wired. |
-| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, and P-B5 are green; remaining P-B latency/quality and P-C gates continue. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D6 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission are production-wired. |
+| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, and P-B5 are green; P-B3 and P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -275,6 +284,27 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [evidence] P-B4 proves distinct AUTO tiers on Qwen3-32B TP8
+- What: The declarative orchestrator spec now wires a bounded `moa_samples`
+  value into `Orchestrator`, making `kairyu-auto-max` a real three-proposal MoA
+  tier while standard AUTO remains Conductor. One production DeploymentSpec
+  lists Qwen3-32B, standard, and max together. A reproducible benchmark records
+  model discovery, alternating TTFT, fixed LiveCodeBench sandbox scores,
+  structured-trace call counts, internal tokens, response hashes, latency, and
+  allocated GPU-seconds. Twelve latency pairs measured 1.0207x p50 / 0.9674x
+  p99. The fixed eight-item multi-agent slice scored max 2/8 versus standard
+  0/8; max used 32 calls and 45,759 tokens versus 44 calls and 60,369 tokens.
+- Why: A larger budget in YAML did not select the already-implemented MoA path,
+  so the two advertised tiers were not operationally distinct. The new gate
+  compares the same checkpoint, hardware, dataset items, route class, and
+  alternating request order, isolating orchestration depth. The result is
+  deliberately scoped to the fixed subset and records that request sampling
+  propagation remains issue #208.
+- Refs: m11 D2, G6 P-B4, issue #198;
+  `bench/tiered_auto_bench.py`,
+  `bench/results/tiered-auto-qwen3-32b-tp8-2026-07-27.json`,
+  `examples/qwen3-32b-multi-gpu/{auto-gateway,auto-orchestrator,auto-max-orchestrator}.yaml`
 
 ### 2026-07-27 — [contract] P-B2 closes truthful orchestration usage and trace
 - What: AUTO unary and usage-enabled streaming responses now expose

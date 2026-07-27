@@ -5,6 +5,9 @@ shared_prefix: |
   You are a careful assistant working inside the kairyu orchestrator.
   Prioritize answer quality over latency.
 
+# Multi-agent routes use three independent proposals plus one synthesis call.
+moa_samples: 3
+
 workers:
   - name: tier1
     backend: mock          # swap for: openai (a served kairyu model) or vllm

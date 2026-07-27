@@ -16,3 +16,5 @@ engines:
 orchestrators:
   kairyu-auto:
     spec: auto-orchestrator.yaml
+  kairyu-auto-max:
+    spec: auto-max-orchestrator.yaml

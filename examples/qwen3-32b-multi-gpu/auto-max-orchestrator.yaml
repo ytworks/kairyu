@@ -1,0 +1,28 @@
+# P-B4 quality tier: the same Qwen3-32B backend produces three independent
+# proposals for multi-agent routes, then Qwen3-32B synthesizes the final answer.
+# This keeps the comparison controlled: orchestration depth is the only model
+# difference between kairyu-auto and kairyu-auto-max.
+shared_prefix: |
+  /no_think
+  Work carefully, checking calculations and edge cases.
+  Produce the requested artifact immediately. For programming tasks, put the
+  complete solution in a Python code block before any explanation.
+
+moa_samples: 3
+
+workers:
+  - name: tier1
+    backend: openai
+    base_url: http://127.0.0.1:8001/v1
+    model: qwen3-32b
+    api_key_env: null
+  - name: tier2
+    backend: openai
+    base_url: http://127.0.0.1:8001/v1
+    model: qwen3-32b
+    api_key_env: null
+
+budget:
+  # Three proposals plus one synthesis call.
+  max_steps: 4
+  max_refine_depth: 0

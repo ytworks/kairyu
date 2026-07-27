@@ -1,6 +1,12 @@
 # Both tiers intentionally resolve to the same real backend for a controlled
 # direct-route latency comparison. Complex prompts still exercise the complete
 # Conductor path, including a verifier-before-final streaming boundary.
+shared_prefix: |
+  /no_think
+  Work carefully, checking calculations and edge cases.
+  Produce the requested artifact immediately. For programming tasks, put the
+  complete solution in a Python code block before any explanation.
+
 workers:
   - name: tier1
     backend: openai

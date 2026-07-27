@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Implemented** (2026-07-03; D1/D3/D6 amended 2026-07-27). Reviewed
+Status: **Implemented** (2026-07-03; D1/D2/D3/D6 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
 Milestone: M11 (roadmap P-B/P-C + F5 CPU halves; goal G6)
@@ -66,6 +66,20 @@ or generated intermediate text.
 the single `orchestrator=` kwarg): `kairyu-auto` (default tier) and
 `kairyu-auto-max` (deep tier: bigger budget, MoA enabled) are just two
 configured Orchestrator instances listed in /v1/models.
+
+**Production proof amendment (2026-07-27, issue #198).** `OrchestratorSpec`
+now exposes bounded `moa_samples`, so declarative YAML can actually select MoA
+instead of merely giving an identical Conductor a deeper budget. The
+Qwen3-32B TP8 DeploymentSpec serves direct, standard AUTO, and max AUTO
+together. Twelve alternating direct/standard pairs measured standard/direct
+TTFT at 1.0207x p50 and 0.9674x p99. On a fixed seed-198 eight-item
+LiveCodeBench release-v6 slice restricted before execution to prompts routed
+to `multi_agent`, max scored 2/8 versus standard 0/8. Max also consumed 32
+internal calls, 33,573 input + 12,186 output tokens, and 1,549.6 allocated
+GPU-seconds versus standard's 44 calls, 47,152 + 13,217 tokens, and 2,602.8
+GPU-seconds. This small fixed subset closes the product gate but is not a
+full-suite accuracy claim; the raw per-item evidence records that issue #208
+still prevents request sampling parameters from reaching AUTO internals.
 
 ### D3 — Tenancy v1
 
@@ -183,6 +197,10 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 - AUTO accounting matrix: direct/Conductor/MoA × unary/stream reconciles
   `orchestration_input/output_tokens` to recorded internal calls; retry,
   fallback, partial-failure, cancellation, and privacy cases are fixed tests.
+- Tiered AUTO production gate: both named tiers appear beside Qwen3-32B in
+  `/v1/models`; paired direct-route TTFT stays <=1.5x and the fixed,
+  sandbox-scored multi-agent quality slice is a strict auto-max win with call,
+  token, latency, and allocated-GPU cost evidence.
 - Real direct-route gate: 24 alternating-order Qwen3-32B TP8 pairs measured
   AUTO/direct TTFT ratios of 1.0096x p50 and 1.0122x p99 (both <= 1.5);
   raw samples and method are committed in
