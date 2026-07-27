@@ -1,8 +1,9 @@
 # M2 Design: Kairyu Core Engine (Overlap Scheduler + Radix-Paged KV)
 
 Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (agent design-review panel,
-2026-07-02; see §6). The future-token GPU phase is validated on 8× RTX PRO
-6000 Blackwell; NVLink-HBM gates still require H100/A100-class hardware.
+2026-07-02; eviction amendment 2026-07-27; see §6). The future-token GPU phase
+is validated on 8× RTX PRO 6000 Blackwell; NVLink-HBM gates still require
+H100/A100-class hardware.
 Milestone: M2
 Date: 2026-07-02
 Depends on: M1 (`EngineBackend` protocol is the integration seam; no L2/L3 changes needed)
@@ -93,6 +94,15 @@ measured 47.1% lower wall time and 56.5% lower TPOT than the list path on the sa
   eviction is leaf-LRU over refcount==0 nodes (SGLang's RadixAttention policy) — this beats
   vLLM's hash-per-block prefix caching on multi-turn reuse because partial-prefix matches
   don't require exact block-aligned hash hits.
+- Eviction indexing (2026-07-27, issue #214): every eligibility or LRU
+  transition increments a node generation. A min-heap stores
+  `(last_access, stable_sequence, generation, node)` and an ID index owns the
+  current valid entry. Insert, lock/unlock, touch, split, and delete refresh the
+  index; stale entries are skipped and periodically compacted. A failed
+  BlockRemoved sink restores its selected victim for retry. Thus the oldest
+  valid refcount-0 leaf is selected without walking the radix tree, while the
+  exact LRU and event order remain unchanged. Reproduce with
+  `uv run python bench/radix_eviction_bench.py --leaves 100000 --evictions 100`.
 - `GenerationRequest.cache_hint.session_id` (plumbed in M1) pins a session's radix path
   against eviction between orchestration steps (bounded TTL so abandoned sessions drain).
 - No copy-on-write needed (amended per review): sharing is page-aligned and partial pages
@@ -211,8 +221,9 @@ Mandatory pre-GPU work items from the design review:
    GPU runner since its shape depends on FlashInfer metadata layout.
 4. ~~Session-pin TTL~~ **DONE 2026-07-02**: `pin(..., ttl_allocations=N)` expires lazily on
    allocation ticks; tested.
-5. Eviction victim scan is O(nodes) per eviction — switch to a heap before measuring
-   scheduler overhead (profiling first; only matters at large tree sizes).
+5. ~~Eviction victim scan is O(nodes) per eviction~~ **DONE 2026-07-27**:
+   generation-validated leaf heap/index with bounded stale-entry compaction,
+   randomized scan-oracle equivalence, and a 100k-leaf benchmark.
 
 Bench controls (amended per review, applies to §4): pin exact versions of vLLM/SGLang/
 FlashInfer/driver; disclose that vLLM V1 runs CUDA graphs by default while kairyu M2 has
@@ -235,5 +246,5 @@ doc + implemented CPU-side code). Verdict: **APPROVE-WITH-AMENDMENTS**. Disposit
   with the implemented position/in-flight mechanism; bench controls added to §5.
 - Deferred to GPU-phase start (tracked in §5 "mandatory pre-GPU work items"): EOS-under-
   overlap surplus handling, preemption + decode watermark, typed StepInput/abort/streaming
-  /tokenizer/ZMQ spec, pin TTL, eviction heap.
+  /tokenizer/ZMQ spec, pin TTL. The eviction heap was completed on 2026-07-27.
 - Human sign-off: pending.

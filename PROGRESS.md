@@ -79,6 +79,13 @@ radix splits, branches, decode extensions, and eviction remain byte-compatible
 with the existing protocol. On 32,768 tokens / 2,048 blocks, publication hash
 generation measured 2.3222 s → 0.00871 s (266.67×). Event-disabled caches do
 not allocate hashers or block-digest arrays and perform no SHA work.
+RadixKV leaf eviction now uses a generation-validated LRU heap and live-entry
+index updated across insert, lock/unlock, touch, split, and delete. Stale heap
+entries are skipped and compacted; a refused BlockRemoved event restores the
+victim for retry. Ten randomized 1,000-operation traces produced byte-identical
+page allocation, hit rate, and event order versus the former full-tree scan.
+Selecting 100 victims from 100,000 leaves measured 1.7183 s → 0.000609 s
+(2,823×).
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -125,7 +132,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | Milestone | Status |
 |-----------|--------|
 | M1 — Orchestration (L2) + Interface (L3) | Complete and merged. Router / Conductor / MoA, vLLM-compatible `LLM` + `AsyncLLMEngine`, OpenAI-compatible server, YAML/decorator DSL. Atomic pre-dispatch reservations enforce strict step admission and serialize result-priced work under configured cost caps without hiding a single admitted generation's actual-cost overrun. |
-| M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done and the unified production loop/device future-token phase GPU-validated on 8× RTX PRO 6000: immutable schedule-ahead snapshots, scheduler/KV lifecycle, streaming/stop/grammar/spec/preemption parity, tensor attention metadata, device sampling, D2D decode-slot feedback, late commit. Formal NVLink-HBM performance gates still require H100/A100-class hardware. |
+| M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done and the unified production loop/device future-token phase GPU-validated on 8× RTX PRO 6000: immutable schedule-ahead snapshots, scheduler/KV lifecycle, generation-indexed RadixKV leaf-LRU eviction, streaming/stop/grammar/spec/preemption parity, tensor attention metadata, device sampling, D2D decode-slot feedback, late commit. Formal NVLink-HBM performance gates still require H100/A100-class hardware. |
 | M3 — Spec decode / CUDA graphs / P-D separation | n-gram draft spec-decode policy and xgrammar structured output implemented CPU-side. CUDA graphs and the rest gated on M2 GPU phase. |
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
@@ -214,6 +221,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] RadixKV eviction selects indexed live leaves
+- What: every radix node carries an eviction generation. A min-heap orders
+  leaf candidates by LRU stamp and stable sequence, while an index identifies
+  the one live generation. Insert, lock/unlock, touch, split, and delete
+  transitions refresh eligibility. Stale entries are skipped and compacted at
+  a bounded ratio; a failed BlockRemoved delivery requeues the selected victim.
+- Why: collecting every refcount-zero leaf and taking `min` for each reclaimed
+  page repeated an O(nodes) traversal per eviction. The indexed heap makes
+  selection O(log leaves) without changing leaf-only, refcount, LRU, page, or
+  event ownership semantics.
+- Verification: 1,960 CPU tests pass (12 skipped, 115 deselected). Ten seeded
+  1,000-operation traces match the legacy scanner after every allocation on
+  page IDs, cached-token counts, free pages, hit rate, and complete event
+  order. Repeated-hit compaction and BlockRemoved failure retry are pinned. A
+  reproducible 100,000-leaf/100-eviction/3-repeat A/B run measured 1.7183 s →
+  0.000609 s median selection time (2,823×).
+- Refs: issue #214; m2 §2.3/§5; `kairyu/engine/core/radix_kv.py`;
+  `tests/unit/test_radix_eviction_index.py`;
+  `bench/radix_eviction_bench.py`.
 
 ### 2026-07-27 — [amendment] RadixKV event hashes extend a node-local chain
 - What: event-enabled radix nodes now store the open canonical tuple SHA-256
