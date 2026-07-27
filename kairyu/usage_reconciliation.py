@@ -15,8 +15,9 @@ from typing import Any
 USAGE_FIELDS = (
     "requests",
     "prompt_tokens",
-    "completion_tokens",
+    "uncached_tokens",
     "cached_tokens",
+    "completion_tokens",
 )
 TOKEN_FIELDS = USAGE_FIELDS[1:]
 
@@ -59,17 +60,32 @@ def _usage_values(
     tenant = record.get("tenant")
     if not isinstance(tenant, str) or not tenant:
         raise UsageReconciliationError(f"{source}: tenant must be a non-empty string")
-    values: dict[str, int] = {}
-    for field in TOKEN_FIELDS:
-        value = record.get(field, 0 if field == "cached_tokens" else None)
+    prompt = record.get("prompt_tokens")
+    cached = record.get("cached_tokens", 0)
+    values: dict[str, int] = {
+        "prompt_tokens": prompt,
+        "cached_tokens": cached,
+        "uncached_tokens": record.get(
+            "uncached_tokens",
+            (
+                prompt - cached
+                if type(prompt) is int and type(cached) is int
+                else None
+            ),
+        ),
+        "completion_tokens": record.get("completion_tokens"),
+    }
+    for field, value in values.items():
         if type(value) is not int or value < 0:
             raise UsageReconciliationError(
                 f"{source}: {field} must be a non-negative integer"
             )
-        values[field] = value
-    if values["cached_tokens"] > values["prompt_tokens"]:
+    if (
+        values["cached_tokens"] + values["uncached_tokens"]
+        != values["prompt_tokens"]
+    ):
         raise UsageReconciliationError(
-            f"{source}: cached_tokens must not exceed prompt_tokens"
+            f"{source}: cached_tokens + uncached_tokens must equal prompt_tokens"
         )
     return tenant, values
 

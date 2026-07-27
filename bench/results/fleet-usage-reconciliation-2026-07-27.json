@@ -23,20 +23,23 @@
         "cached_tokens": 96,
         "completion_tokens": 28,
         "prompt_tokens": 240,
-        "requests": 3
+        "requests": 3,
+        "uncached_tokens": 144
       },
       "max_relative_error_percent": 0.0,
       "relative_error_percent": {
         "cached_tokens": 0.0,
         "completion_tokens": 0.0,
         "prompt_tokens": 0.0,
-        "requests": 0.0
+        "requests": 0.0,
+        "uncached_tokens": 0.0
       },
       "request_log": {
         "cached_tokens": 96,
         "completion_tokens": 28,
         "prompt_tokens": 240,
-        "requests": 3
+        "requests": 3,
+        "uncached_tokens": 144
       }
     },
     "tenant-b": {
@@ -44,20 +47,23 @@
         "cached_tokens": 176,
         "completion_tokens": 50,
         "prompt_tokens": 302,
-        "requests": 3
+        "requests": 3,
+        "uncached_tokens": 126
       },
       "max_relative_error_percent": 0.0,
       "relative_error_percent": {
         "cached_tokens": 0.0,
         "completion_tokens": 0.0,
         "prompt_tokens": 0.0,
-        "requests": 0.0
+        "requests": 0.0,
+        "uncached_tokens": 0.0
       },
       "request_log": {
         "cached_tokens": 176,
         "completion_tokens": 50,
         "prompt_tokens": 302,
-        "requests": 3
+        "requests": 3,
+        "uncached_tokens": 126
       }
     },
     "tenant-c": {
@@ -65,20 +71,23 @@
         "cached_tokens": 192,
         "completion_tokens": 50,
         "prompt_tokens": 300,
-        "requests": 1
+        "requests": 1,
+        "uncached_tokens": 108
       },
       "max_relative_error_percent": 0.0,
       "relative_error_percent": {
         "cached_tokens": 0.0,
         "completion_tokens": 0.0,
         "prompt_tokens": 0.0,
-        "requests": 0.0
+        "requests": 0.0,
+        "uncached_tokens": 0.0
       },
       "request_log": {
         "cached_tokens": 192,
         "completion_tokens": 50,
         "prompt_tokens": 300,
-        "requests": 1
+        "requests": 1,
+        "uncached_tokens": 108
       }
     }
   },

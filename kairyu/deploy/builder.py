@@ -168,6 +168,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         embedding_backends=embedding_backends,
         resolved_api_keys=api_keys,
         resolved_admin_keys=admin_keys,
+        price_sheet=spec.pricing,
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)

@@ -601,6 +601,16 @@ tenants:                       # optional authenticated API-key -> tenant mappin
     team-a: {requests_per_minute: 60, tokens_per_minute: 10000}
     team-b: {requests_per_minute: 120, tokens_per_minute: 20000}
 
+pricing:                       # optional; requires server.usage_ledger_path
+  version: "2026-07-27"        # immutable identifier included in every CSV row
+  currency: USD
+  rates:                       # blended rates per million tokens
+    uncached_input_per_million: "2.00"
+    cached_input_discount: "0.50"  # fraction off the uncached-input rate
+    output_per_million: "10.00"
+  tenant_discounts:            # optional fractions applied after component charges
+    team-a: "0.10"
+
 engines:                       # served model name -> one backend
   qwen:
     backend: kairyu            # mock | kairyu | kairyu-proc | openai | vllm
@@ -676,6 +686,8 @@ vision content-parts wire format), `/v1/completions`, `/v1/embeddings`
 `/v1/route`, `/routing`,
 `/readyz`, `/metrics`, `POST /admin/drain` / `POST /admin/undrain` (auth-protected;
 drain flips readyz to 503), `GET /admin/usage?tenant=` (when the ledger is enabled).
+With `pricing:` configured, `GET /admin/usage.csv?tenant=&start_ts=&end_ts=`
+exports a caller-scoped invoice CSV.
 
 Request extras: `X-Session-ID` (or the OpenAI `user` field) pins a session to the
 replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds the legacy
@@ -708,11 +720,30 @@ without an explicit profile uses the defaults (600 requests and 200,000 tokens p
 minute). Authentication runs before tenant limiting, so a rejected credential does not
 consume a bucket. When `server.usage_ledger_path` is configured, successful request usage
 is grouped under the mapped tenant name in the JSONL ledger and `/admin/usage` totals.
+Every new row stores cached and uncached input explicitly. Older rows derive uncached
+input as `prompt_tokens - cached_tokens`.
 
 Programmatic callers can still pass the existing runtime configuration directly:
 `create_app(..., tenant_config=TenantConfig(key_tenants={"key-a": "team-a"},
 limits={"team-a": TenantLimits(requests_per_minute=600,
 tokens_per_minute=200_000)}))`.
+
+### Pricing and invoice export
+
+`pricing:` is a versioned blended price sheet, not model-attribution billing.
+All monetary inputs are parsed as decimal values; quote them in YAML to retain
+the intended precision. `cached_input_discount` and `tenant_discounts` are
+fractions in `[0, 1]`. Charges are rounded half-even to six currency decimal
+places, component rows reconcile to the displayed subtotal, and the tenant
+discount is then applied.
+
+Invoice periods use `[start_ts, end_ts)` Unix timestamps. The CSV separates
+uncached input, cached input, and output quantities, unit rates, component
+charges, discount, and total. Each row includes the price-sheet version,
+currency, a SHA-256 of the immutable ledger snapshot, and a deterministic
+invoice ID. Admin keys can export all tenants or select one; data-plane keys
+remain scoped to their mapped tenant. Malformed or truncated ledger input
+returns `invoice_ledger_invalid` instead of a partial invoice.
 
 ### Deployment artifacts
 

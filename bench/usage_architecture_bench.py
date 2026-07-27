@@ -125,6 +125,7 @@ def _shared_sync(
                 tenant TEXT NOT NULL,
                 model TEXT NOT NULL,
                 prompt_tokens INTEGER NOT NULL,
+                uncached_tokens INTEGER NOT NULL,
                 completion_tokens INTEGER NOT NULL,
                 cached_tokens INTEGER NOT NULL
             )
@@ -138,10 +139,19 @@ def _shared_sync(
         try:
             for index in range(gateway_index, records, gateways):
                 row = _record(index)
+                tenant, model, prompt, completion, cached = row
                 started = time.perf_counter_ns()
                 connection.execute(
-                    "INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?)",
-                    (f"gateway-{gateway_index}", *row),
+                    "INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        f"gateway-{gateway_index}",
+                        tenant,
+                        model,
+                        prompt,
+                        prompt - cached,
+                        completion,
+                        cached,
+                    ),
                 )
                 connection.commit()
                 durations.append(time.perf_counter_ns() - started)
@@ -159,18 +169,27 @@ def _shared_sync(
     complete = time.perf_counter()
     totals: dict[str, dict[str, int]] = {}
     with sqlite3.connect(path) as connection:
-        for tenant, requests, prompt, completion, cached in connection.execute(
+        for (
+            tenant,
+            requests,
+            prompt,
+            uncached,
+            cached,
+            completion,
+        ) in connection.execute(
             """
             SELECT tenant, COUNT(*), SUM(prompt_tokens),
-                   SUM(completion_tokens), SUM(cached_tokens)
+                   SUM(uncached_tokens), SUM(cached_tokens),
+                   SUM(completion_tokens)
             FROM usage GROUP BY tenant ORDER BY tenant
             """
         ):
             totals[tenant] = {
                 "requests": requests,
                 "prompt_tokens": prompt,
-                "completion_tokens": completion,
+                "uncached_tokens": uncached,
                 "cached_tokens": cached,
+                "completion_tokens": completion,
             }
     return (
         {

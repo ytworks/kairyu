@@ -171,9 +171,15 @@ runs exactly this sequence against mock replicas.
 ## 6. Observability
 
 - `/metrics` (Prometheus): request counts by model/status, latency, and
-  ledger-reconcilable usage executions plus prompt/completion tokens by tenant
+  ledger-reconcilable usage executions plus prompt/completion/cached/uncached
+  tokens by tenant,
   histograms, per-replica outstanding/health, pool decision counts, batch
   job states. Scrape every gateway and replica.
+- With a versioned `pricing:` section, `/admin/usage.csv` snapshots the local
+  immutable ledger and exports tenant charges for a `[start_ts,end_ts)` period.
+  The CSV carries source SHA-256, price-sheet version, Decimal unit rates,
+  cached/uncached/output components, tenant discount, and total. Corrupt or
+  truncated input fails closed with `invoice_ledger_invalid`.
 - JSON logs on stdout (one access line per request, prober/batch events);
   ship with the log collector of your choice.
 - `/readyz` is the LB health check for gateways; `/health` is the container

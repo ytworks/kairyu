@@ -203,7 +203,7 @@ wire-count parity; each dispatched execution records exactly once even when a st
 early or a completed batch line is later rolled back by cancellation or spool failure.
 Dedicated tenant usage counters mirror that same metering seam and restore from the
 single-gateway ledger at startup. The complete execution-mode matrix reconciles
-Prometheus execution/prompt/completion/cached totals with the ledger exactly; the supported
+Prometheus execution/prompt/completion/cached/uncached totals with the ledger exactly; the supported
 DeploymentSpec path also proves isolated two-key 429s, restart recovery, malformed-tail
 separation, and shutdown drain.
 Fleet usage keeps those gateway ledgers independently owned and aggregates immutable
@@ -211,8 +211,14 @@ inputs offline. The committed nine-event replay covers every public endpoint fam
 disconnects, upstream failures, batch rollback, three gateways, and tenant cached-token
 exports; independently aggregated request logs reconcile with ledger totals at 0.0%
 maximum error. A five-run 30,000-row A/B selected gateway-local async writes over a
-same-host/no-network synchronous shared store: producer p99 19.062 vs 27.970 us and
-throughput 99,474 vs 72,272 rows/s.
+same-host/no-network synchronous shared store: producer p99 19.696 vs 28.026 us and
+throughput 95,029 vs 72,374 rows/s after the explicit uncached-column rerun.
+Versioned blended price sheets now turn those immutable rows into deterministic
+tenant invoice CSVs outside the request path. New rows freeze cached and
+uncached input separately; exports include a bounded period, Decimal unit rates
+and component charges, tenant discount, source SHA-256, and deterministic
+invoice ID. Malformed or truncated snapshots fail closed rather than emitting
+partial charges.
 Usage-ledger and router JSONL records now enter a bounded non-blocking queue; a
 lifecycle-owned thread batches append+flush work outside request/stream execution.
 Normal shutdown drains every accepted row, queue saturation fails immediately without
@@ -250,6 +256,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] P-C5 emits versioned cached-token invoices
+- What: usage rows and Prometheus totals now expose explicit uncached input in
+  addition to cached input. DeploymentSpec validates a versioned blended
+  price sheet with cached-input and tenant discount fractions. The
+  caller-scoped `/admin/usage.csv` endpoint exports deterministic period
+  invoices with separated quantities, Decimal rates/charges, source SHA-256,
+  and invoice ID.
+- Why: prompt totals alone cannot apply cache discounts, and computing charges
+  during inference would couple availability and latency to billing. Immutable
+  usage plus an explicit price-sheet version makes recalculation deterministic
+  while preserving the faster gateway-local request path.
+- Verification: pricing/reconciliation/server tests cover sync and streaming
+  chat, Responses, embeddings, batch, old rows, three gateways, periods,
+  tenant scope, discounts, rounding, contradictory fields, corrupt JSON, and
+  truncated tails; the full CPU suite passes 2,054 tests. The uncached-aware
+  five-run A/B still selects local async: producer p99 19.696 vs 28.026 us and
+  throughput 95,029 vs 72,374 rows/s.
+- Refs: m11 D3/A15; G6 P-C5; Issue #204; `kairyu/pricing.py`;
+  `tests/server/test_pricing_invoice.py`.
 
 ### 2026-07-27 — [amendment] F5e fleet usage stays gateway-local and reconciles offline
 - What: cached prompt-token counts now flow through chat, completions,

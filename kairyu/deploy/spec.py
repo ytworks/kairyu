@@ -18,6 +18,7 @@ from yaml.resolver import BaseResolver
 
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
+from kairyu.pricing import PriceSheet
 
 _DEFAULT_PORT = 8000
 _MERGE_TAG = "tag:yaml.org,2002:merge"
@@ -138,6 +139,7 @@ class DeploymentSpec(BaseModel):
     embeddings: dict[str, EmbeddingSection] = Field(default_factory=dict)
     batch: BatchSection | None = None
     tenants: TenantSection | None = None
+    pricing: PriceSheet | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> DeploymentSpec:
@@ -197,6 +199,25 @@ class DeploymentSpec(BaseModel):
                 default_tenant=self.tenants.default_tenant,
                 resolved_api_keys=self.server.resolve_api_keys(),
             )
+        if self.pricing is not None:
+            if self.server.usage_ledger_path is None:
+                raise ValueError(
+                    "pricing requires server.usage_ledger_path"
+                )
+            known_tenants = {"default"}
+            if self.tenants is not None:
+                known_tenants = {
+                    self.tenants.default_tenant,
+                    *self.tenants.key_tenants.values(),
+                }
+            unknown_discounts = (
+                self.pricing.tenant_discounts.keys() - known_tenants
+            )
+            if unknown_discounts:
+                raise ValueError(
+                    "pricing discounts reference unknown tenants "
+                    f"{sorted(unknown_discounts)}"
+                )
         return self
 
 

@@ -118,6 +118,9 @@ class ServerMetrics:
         self.usage_tokens_total.labels(tenant=tenant, type="cached").inc(
             cached_tokens
         )
+        self.usage_tokens_total.labels(tenant=tenant, type="uncached").inc(
+            prompt_tokens - cached_tokens
+        )
 
     def restore_usage_totals(
         self,
@@ -137,6 +140,9 @@ class ServerMetrics:
             ).inc(usage["completion_tokens"])
             self.usage_tokens_total.labels(tenant=tenant, type="cached").inc(
                 usage["cached_tokens"]
+            )
+            self.usage_tokens_total.labels(tenant=tenant, type="uncached").inc(
+                usage["uncached_tokens"]
             )
 
     def render(self) -> tuple[bytes, str]:

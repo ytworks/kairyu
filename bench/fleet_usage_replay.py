@@ -149,7 +149,13 @@ def generate_replay(output_dir: Path, date: str) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     request_log = output_dir / f"fleet-usage-request-log-{date}.jsonl"
     request_records = [
-        {**record, "observed_at": f"{date}T00:00:{index:02d}Z"}
+        {
+            **record,
+            "uncached_tokens": (
+                record["prompt_tokens"] - record["cached_tokens"]
+            ),
+            "observed_at": f"{date}T00:00:{index:02d}Z",
+        }
         for index, record in enumerate(_TRACE, start=1)
     ]
     _write_jsonl(request_log, request_records)
@@ -164,6 +170,9 @@ def generate_replay(output_dir: Path, date: str) -> dict[str, Path]:
                 "prompt_tokens": record["prompt_tokens"],
                 "completion_tokens": record["completion_tokens"],
                 "cached_tokens": record["cached_tokens"],
+                "uncached_tokens": (
+                    record["prompt_tokens"] - record["cached_tokens"]
+                ),
                 "ts": replay_epoch + index,
             }
             for index, record in enumerate(_TRACE, start=1)

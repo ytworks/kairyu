@@ -1,6 +1,8 @@
 """Batch API lifecycle, caps, cancel, restart recovery (goal G3 gate C4)."""
 
 import asyncio
+import csv
+import io
 import json
 import tracemalloc
 
@@ -18,6 +20,11 @@ from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.errors import sanitize_backend_error
 from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.outputs import CompletionOutput
+from kairyu.pricing import (
+    PriceRates,
+    PriceSheet,
+    export_invoice_csv,
+)
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -378,18 +385,44 @@ async def test_batch_metering_uses_explicit_owner_wire_counts_and_skips_line_err
             "prompt_tokens": wire_a["prompt_tokens"],
             "completion_tokens": wire_a["completion_tokens"],
             "cached_tokens": cached_a,
+            "uncached_tokens": wire_a["prompt_tokens"] - cached_a,
         },
         "tenant-b": {
             "requests": 1,
             "prompt_tokens": wire_b["prompt_tokens"],
             "completion_tokens": wire_b["completion_tokens"],
             "cached_tokens": 0,
+            "uncached_tokens": wire_b["prompt_tokens"],
         },
     }
     assert limiter.charges == [
         ("tenant-a", wire_a["total_tokens"]),
         ("tenant-b", wire_b["total_tokens"]),
     ]
+    invoice_rows = list(csv.DictReader(io.StringIO(export_invoice_csv(
+        {"batch-gateway": ledger.snapshot_bytes()},
+        PriceSheet(
+            version="batch-v1",
+            currency="USD",
+            rates=PriceRates(
+                uncached_input_per_million="2",
+                cached_input_discount="0.5",
+                output_per_million="10",
+            ),
+        ),
+    ))))
+    assert [row["tenant"] for row in invoice_rows] == [
+        "tenant-a",
+        "tenant-b",
+    ]
+    assert invoice_rows[0]["cached_input_tokens"] == str(cached_a)
+    assert invoice_rows[0]["uncached_input_tokens"] == str(
+        wire_a["prompt_tokens"] - cached_a
+    )
+    assert invoice_rows[1]["cached_input_tokens"] == "0"
+    assert invoice_rows[1]["uncached_input_tokens"] == str(
+        wire_b["prompt_tokens"]
+    )
 
 
 def _stored_file_names(tmp_path):

@@ -229,6 +229,10 @@ class UsageLedger:
         """Number of malformed non-whitespace records in the latest scan."""
         return self._malformed_lines
 
+    @property
+    def path(self) -> Path:
+        return self._path
+
     def record(
         self,
         tenant: str,
@@ -257,6 +261,7 @@ class UsageLedger:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "cached_tokens": cached_tokens,
+                "uncached_tokens": prompt_tokens - cached_tokens,
                 "ts": time.time(),
             }
         )
@@ -268,6 +273,15 @@ class UsageLedger:
 
     def close(self) -> None:
         self._writer.close()
+
+    def snapshot_bytes(self) -> bytes:
+        """Return a reader-stable byte snapshot through the latest barrier."""
+        self.flush()
+        if not self._path.is_file():
+            return b""
+        size = self._path.stat().st_size
+        with open(self._path, "rb") as handle:
+            return handle.read(size)
 
     def totals(self, tenant: str | None = None) -> dict[str, dict[str, int]]:
         """Aggregate by tenant (optionally filtered) for /admin/usage."""
@@ -286,15 +300,26 @@ class UsageLedger:
                     prompt_tokens = record["prompt_tokens"]
                     completion_tokens = record["completion_tokens"]
                     cached_tokens = record.get("cached_tokens", 0)
+                    uncached_tokens = record.get(
+                        "uncached_tokens",
+                        (
+                            prompt_tokens - cached_tokens
+                            if type(prompt_tokens) is int
+                            and type(cached_tokens) is int
+                            else None
+                        ),
+                    )
                     if (
                         not isinstance(record_tenant, str)
                         or type(prompt_tokens) is not int
                         or type(completion_tokens) is not int
                         or type(cached_tokens) is not int
+                        or type(uncached_tokens) is not int
                         or prompt_tokens < 0
                         or completion_tokens < 0
                         or cached_tokens < 0
-                        or cached_tokens > prompt_tokens
+                        or uncached_tokens < 0
+                        or cached_tokens + uncached_tokens != prompt_tokens
                     ):
                         raise TypeError("usage ledger record has invalid field types")
                 except (json.JSONDecodeError, KeyError, TypeError) as error:
@@ -323,10 +348,12 @@ class UsageLedger:
                         "prompt_tokens": 0,
                         "completion_tokens": 0,
                         "cached_tokens": 0,
+                        "uncached_tokens": 0,
                     },
                 )
                 bucket["requests"] += 1
                 bucket["prompt_tokens"] += prompt_tokens
                 bucket["completion_tokens"] += completion_tokens
                 bucket["cached_tokens"] += cached_tokens
+                bucket["uncached_tokens"] += uncached_tokens
         return totals
