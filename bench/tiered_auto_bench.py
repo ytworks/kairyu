@@ -95,13 +95,9 @@ def load_fixed_items(
     manifest_path, data_path = _cache_paths(cache_root)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("dataset") != LIVE_CODE_BENCH_DATASET:
-        raise RuntimeError(
-            f"unexpected LiveCodeBench dataset: {manifest.get('dataset')!r}"
-        )
+        raise RuntimeError(f"unexpected LiveCodeBench dataset: {manifest.get('dataset')!r}")
     if manifest.get("revision") != LIVE_CODE_BENCH_REVISION:
-        raise RuntimeError(
-            f"unexpected LiveCodeBench revision: {manifest.get('revision')!r}"
-        )
+        raise RuntimeError(f"unexpected LiveCodeBench revision: {manifest.get('revision')!r}")
 
     wanted = set(item_ids)
     found: dict[str, BenchItem] = {}
@@ -111,9 +107,7 @@ def load_fixed_items(
             # large private-test payload for every one of the 1,055 rows.
             prefix = line[:128]
             candidates = [
-                item_id
-                for item_id in wanted - found.keys()
-                if f'"id": "{item_id}"' in prefix
+                item_id for item_id in wanted - found.keys() if f'"id": "{item_id}"' in prefix
             ]
             if not candidates:
                 continue
@@ -156,10 +150,7 @@ def estimated_cost_usd(
 ) -> float | None:
     if input_usd_per_mtok == 0 and output_usd_per_mtok == 0:
         return None
-    return (
-        input_tokens * input_usd_per_mtok
-        + output_tokens * output_usd_per_mtok
-    ) / 1_000_000
+    return (input_tokens * input_usd_per_mtok + output_tokens * output_usd_per_mtok) / 1_000_000
 
 
 def summarize_quality(
@@ -167,9 +158,7 @@ def summarize_quality(
 ) -> dict[str, float | int | None]:
     latencies = [item.latency_s for item in measurements]
     estimated = [
-        item.estimated_cost_usd
-        for item in measurements
-        if item.estimated_cost_usd is not None
+        item.estimated_cost_usd for item in measurements if item.estimated_cost_usd is not None
     ]
     return {
         "items": len(measurements),
@@ -178,16 +167,12 @@ def summarize_quality(
         "latency_p50_s": round(statistics.median(latencies), 3),
         "latency_total_s": round(sum(latencies), 3),
         "internal_calls": sum(item.internal_calls for item in measurements),
-        "orchestration_input_tokens": sum(
-            item.orchestration_input_tokens for item in measurements
-        ),
+        "orchestration_input_tokens": sum(item.orchestration_input_tokens for item in measurements),
         "orchestration_output_tokens": sum(
             item.orchestration_output_tokens for item in measurements
         ),
         "cached_tokens": sum(item.cached_tokens for item in measurements),
-        "allocated_gpu_seconds": round(
-            sum(item.allocated_gpu_seconds for item in measurements), 3
-        ),
+        "allocated_gpu_seconds": round(sum(item.allocated_gpu_seconds for item in measurements), 3),
         "estimated_cost_usd": round(sum(estimated), 8) if estimated else None,
     }
 
@@ -319,20 +304,15 @@ async def run_latency(args: argparse.Namespace, client: httpx.AsyncClient) -> di
             )
             by_model[model].append(measured)
             print(
-                f"[latency {index + 1}/{args.latency_pairs}] {model} "
-                f"TTFT={measured.ttft_ms:.2f}ms",
+                f"[latency {index + 1}/{args.latency_pairs}] {model} TTFT={measured.ttft_ms:.2f}ms",
                 flush=True,
             )
 
     direct = summarize_requests(by_model[args.direct_model])
     auto = summarize_requests(by_model[args.auto_model])
     ratios = {
-        "ttft_p50_auto_over_direct": round(
-            auto["ttft_p50_ms"] / direct["ttft_p50_ms"], 4
-        ),
-        "ttft_p99_auto_over_direct": round(
-            auto["ttft_p99_ms"] / direct["ttft_p99_ms"], 4
-        ),
+        "ttft_p50_auto_over_direct": round(auto["ttft_p50_ms"] / direct["ttft_p50_ms"], 4),
+        "ttft_p99_auto_over_direct": round(auto["ttft_p99_ms"] / direct["ttft_p99_ms"], 4),
     }
     return {
         "config": {
@@ -347,9 +327,7 @@ async def run_latency(args: argparse.Namespace, client: httpx.AsyncClient) -> di
         "auto": auto,
         "ratios": ratios,
         "passed": all(value <= args.max_ttft_ratio for value in ratios.values()),
-        "samples": {
-            model: [asdict(item) for item in items] for model, items in by_model.items()
-        },
+        "samples": {model: [asdict(item) for item in items] for model, items in by_model.items()},
     }
 
 
@@ -375,9 +353,7 @@ async def run(args: argparse.Namespace) -> dict:
         discovery_passed = required_models <= set(served_models)
         if not discovery_passed:
             missing = sorted(required_models - set(served_models))
-            raise RuntimeError(
-                f"gateway is missing required models: {missing}"
-            )
+            raise RuntimeError(f"gateway is missing required models: {missing}")
 
         latency = await run_latency(args, client)
         measurements: list[QualityMeasurement] = []
@@ -430,9 +406,11 @@ async def run(args: argparse.Namespace) -> dict:
             "temperature_requested": 0,
             "max_tokens_requested": args.quality_max_tokens,
             "effective_internal_sampling": (
-                "Issue #208 remains open: AUTO does not yet forward request sampling. "
-                "Conductor uses temperature=1.0/max_tokens=1024; MoA uses "
-                "proposal temperature=0.9, synthesis temperature=0.3, max_tokens=1024."
+                "Issue #208 is implemented: scalar sampling reaches every stage; private "
+                "stages use n=1, min(public max_tokens, internal 1024-token policy), and "
+                "no logprobs, tools, or response grammar. The selected final worker or "
+                "MoA synthesis receives the exact public max_tokens/n/logprobs/tools/"
+                "response_format intent."
             ),
             "pair_order": "alternating",
             "gpu_count": args.gpu_count,
@@ -454,17 +432,14 @@ async def run(args: argparse.Namespace) -> dict:
     auto_score = quality["models"][args.auto_model]["summary"]["score"]
     max_score = quality["models"][args.auto_max_model]["summary"]["score"]
     quality["score_delta_auto_max_minus_auto"] = round(max_score - auto_score, 6)
-    quality["all_routes_multi_agent"] = all(
-        item.route == "multi_agent" for item in measurements
-    )
-    quality["passed"] = (
-        max_score > auto_score and quality["all_routes_multi_agent"]
-    )
+    quality["all_routes_multi_agent"] = all(item.route == "multi_agent" for item in measurements)
+    quality["passed"] = max_score > auto_score and quality["all_routes_multi_agent"]
 
     return {
         "schema_version": SCHEMA_VERSION,
         "recorded_at": datetime.now(tz=UTC).isoformat(),
         "issue": 198,
+        "revalidation_issue": 208,
         "hardware": args.hardware,
         "served_models": served_models,
         "required_models": sorted(required_models),

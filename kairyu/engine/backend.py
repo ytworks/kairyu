@@ -7,7 +7,8 @@ on this module, never on a concrete engine. The M2 custom engine plugs in here.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterable
+import json
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -59,6 +60,35 @@ class GenerationRequest:
     prompt: str
     sampling_params: SamplingParams
     cache_hint: CacheHint | None = None
+    tools: tuple[Mapping[str, object], ...] = ()
+    tool_choice: str | Mapping[str, object] | None = None
+    tools_in_prompt: bool = False
+
+
+def prompt_with_tool_intent(request: GenerationRequest) -> str:
+    """Render native-engine tool intent exactly once when no HF template did."""
+
+    if not request.tools or request.tools_in_prompt or request.tool_choice == "none":
+        return request.prompt
+    choice = request.tool_choice
+    if isinstance(choice, Mapping):
+        named = (choice.get("function") or {}).get("name")
+        policy = f"You must call the function {named!r}."
+    elif choice == "required":
+        policy = "You must call one of the available functions."
+    else:
+        policy = "Call a function when it is useful."
+    schemas = json.dumps(
+        list(request.tools),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        f"{request.prompt}\n\nAvailable functions:\n{schemas}\n"
+        f"{policy} Emit each call exactly as "
+        '<tool_call>{"name":"function_name","arguments":{}}</tool_call>.'
+    )
 
 
 @dataclass(frozen=True)

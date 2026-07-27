@@ -106,6 +106,7 @@ class RoutingModelDescriptorPayload(BaseModel):
     roles: list[RoleDescriptorPayload]
     budget: BudgetDescriptorPayload
     moa_samples: int
+    internal_max_tokens: int | None
 
 
 class RoutingResponse(BaseModel):

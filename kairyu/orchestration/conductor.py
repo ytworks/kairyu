@@ -31,6 +31,7 @@ from kairyu.orchestration.trace import (
     WorkerTraceIdentity,
     utc_now_iso,
 )
+from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 _PASS_PREFIX = "PASS"
@@ -68,6 +69,7 @@ class RoleSpec:
 @dataclass(frozen=True)
 class ConductorResult:
     final_text: str
+    completions: tuple[CompletionOutput, ...]
     outputs: dict[str, str]
     budget_state: BudgetState
     trace: tuple[TraceEvent, ...]
@@ -87,6 +89,7 @@ class ConductorEvent:
 
     kind: str  # "delta" | "result"
     text: str = ""
+    completions: tuple[CompletionOutput, ...] = ()
     result: ConductorResult | None = None
 
 
@@ -118,6 +121,7 @@ class _RunState:
     completion_order: list[str] = field(default_factory=list)
     usage: list[int] = field(default_factory=lambda: [0, 0])
     cached_tokens: int = 0
+    final_completions: tuple[CompletionOutput, ...] = ()
 
 
 class _BudgetRefused(Exception):
@@ -131,6 +135,7 @@ class _ObservedGenerationError(Exception):
 @dataclass(frozen=True)
 class _GenerationObservation:
     text: str
+    completions: tuple[CompletionOutput, ...]
     timing: TraceTiming
     usage: TraceUsage | None
     budget: TraceBudget
@@ -148,6 +153,10 @@ class Conductor:
         workers: Mapping[str, EngineBackend],
         shared_prefix: str = "",
         sampling_params: SamplingParams | None = None,
+        final_sampling_params: SamplingParams | None = None,
+        final_tools: tuple[Mapping[str, object], ...] = (),
+        final_tool_choice: str | Mapping[str, object] | None = None,
+        final_tools_in_prompt: bool = False,
         cost_model: CostModel = zero_cost,
         worker_trace: Mapping[str, WorkerTraceIdentity] | None = None,
         usage_observer: Callable[[GenerationUsage], None] | None = None,
@@ -156,6 +165,10 @@ class Conductor:
         self._workers = dict(workers)
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
+        self._final_sampling_params = final_sampling_params or self._sampling_params
+        self._final_tools = tuple(final_tools)
+        self._final_tool_choice = final_tool_choice
+        self._final_tools_in_prompt = final_tools_in_prompt
         self._cost_model = cost_model
         self._usage_observer = usage_observer
         supplied_trace = dict(worker_trace or {})
@@ -174,6 +187,31 @@ class Conductor:
         self._unit_deps = {unit.name: self._remapped_deps(unit) for unit in self._units}
         self._validate()
 
+    def _selected_final_unit(self) -> RoleSpec:
+        terminal = self._terminal_units()
+        if not terminal:
+            raise ValueError("orchestration requires at least one generation role")
+        synthesizers = [unit for unit in terminal if unit.role_type == "synthesizer"]
+        return (synthesizers + terminal)[0]
+
+    def _request_intent(
+        self,
+        spec: RoleSpec,
+    ) -> tuple[
+        SamplingParams,
+        tuple[Mapping[str, object], ...],
+        str | Mapping[str, object] | None,
+        bool,
+    ]:
+        if spec.name == self._selected_final_unit().name:
+            return (
+                self._final_sampling_params,
+                self._final_tools,
+                self._final_tool_choice,
+                self._final_tools_in_prompt,
+            )
+        return self._sampling_params, (), None, False
+
     def _observe_usage(
         self,
         run: _RunState,
@@ -183,8 +221,7 @@ class Conductor:
             return
         self._usage_observer(
             GenerationUsage(
-                prompt_tokens=run.usage[0]
-                + (pending.prompt_tokens if pending is not None else 0),
+                prompt_tokens=run.usage[0] + (pending.prompt_tokens if pending is not None else 0),
                 completion_tokens=run.usage[1]
                 + (pending.completion_tokens if pending is not None else 0),
                 cached_tokens=run.cached_tokens
@@ -301,11 +338,15 @@ class Conductor:
     ) -> _GenerationObservation:
         event_spec = spec or RoleSpec(name=node, worker=worker, prompt="")
         backend = self._workers[worker]
+        sampling_params, tools, tool_choice, tools_in_prompt = self._request_intent(event_spec)
         request = GenerationRequest(
             request_id=f"{session}-{node}-{attempt}",
             prompt=prompt,
-            sampling_params=self._sampling_params,
+            sampling_params=sampling_params,
             cache_hint=self._cache_hint(session),
+            tools=tools,
+            tool_choice=tool_choice,
+            tools_in_prompt=tools_in_prompt,
         )
         queued_at = utc_now_iso()
         budget_before = run.budget
@@ -359,6 +400,7 @@ class Conductor:
             )
         return _GenerationObservation(
             text=result.text,
+            completions=result.completions,
             timing=TraceTiming(
                 queued_at=queued_at,
                 started_at=started_at,
@@ -420,6 +462,8 @@ class Conductor:
                 break
             text = observed.text
             run.outputs[spec.name] = text
+            if spec.name == self._selected_final_unit().name:
+                run.final_completions = observed.completions
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -526,11 +570,7 @@ class Conductor:
         return [unit for unit in self._units if unit.name not in dependents]
 
     def _stream_final_unit(self) -> RoleSpec:
-        terminal = self._terminal_units()
-        if not terminal:
-            raise ValueError("streaming requires at least one generation role")
-        synthesizers = [unit for unit in terminal if unit.role_type == "synthesizer"]
-        final = (synthesizers + terminal)[0]
+        final = self._selected_final_unit()
         if final.name in self._verifier_for:
             raise ValueError(
                 "the final streamed role cannot have a post-generation verifier; "
@@ -546,18 +586,11 @@ class Conductor:
         *,
         exclude: frozenset[str] = frozenset(),
     ) -> None:
-        pending = {
-            name: set(deps)
-            for name, deps in self._unit_deps.items()
-            if name not in exclude
-        }
+        pending = {name: set(deps) for name, deps in self._unit_deps.items() if name not in exclude}
         while pending:
             ready = [name for name, deps in pending.items() if not deps]
             await asyncio.gather(
-                *(
-                    self._run_unit_safe(run, session, query, self._by_name[name])
-                    for name in ready
-                )
+                *(self._run_unit_safe(run, session, query, self._by_name[name]) for name in ready)
             )
             for name in ready:
                 del pending[name]
@@ -587,11 +620,15 @@ class Conductor:
 
         prompt = self._render(spec.prompt, query, run.outputs)
         backend = self._workers[spec.worker]
+        sampling_params, tools, tool_choice, tools_in_prompt = self._request_intent(spec)
         request = GenerationRequest(
             request_id=f"{session}-{spec.name}-0",
             prompt=prompt,
-            sampling_params=self._sampling_params,
+            sampling_params=sampling_params,
             cache_hint=self._cache_hint(session),
+            tools=tools,
+            tool_choice=tool_choice,
+            tools_in_prompt=tools_in_prompt,
         )
         queued_at = utc_now_iso()
         budget_before = run.budget
@@ -629,14 +666,14 @@ class Conductor:
                         "final worker stream must emit cumulative, prefix-stable text"
                     )
                 run.outputs[spec.name] = text
-                if len(text) > emitted:
-                    if first_token_at is None:
-                        first_token_at = utc_now_iso()
-                    yield ConductorEvent(
-                        kind="delta",
-                        text=text[emitted:],
-                    )
-                    emitted = len(text)
+                if first_token_at is None and partial.completions:
+                    first_token_at = utc_now_iso()
+                yield ConductorEvent(
+                    kind="delta",
+                    text=text[emitted:],
+                    completions=partial.completions,
+                )
+                emitted = len(text)
             if last_result is None:
                 raise RuntimeError("final worker stream produced no result")
             actual_cost = self._cost_model(request, last_result)
@@ -718,6 +755,7 @@ class Conductor:
             )
         )
         run.completion_order.append(spec.name)
+        run.final_completions = last_result.completions
 
     async def run(self, query: str, budget: Budget | None = None) -> ConductorResult:
         run = _RunState(budget=BudgetState(budget=budget or Budget()))
@@ -725,6 +763,7 @@ class Conductor:
         await self._run_pending(run, session, query)
         return ConductorResult(
             final_text=self._final_text(run),
+            completions=run.final_completions,
             outputs=dict(run.outputs),
             budget_state=run.budget,
             trace=tuple(run.trace),
@@ -761,6 +800,7 @@ class Conductor:
         except Exception as error:
             result = ConductorResult(
                 final_text=self._final_text(run),
+                completions=run.final_completions,
                 outputs=dict(run.outputs),
                 budget_state=run.budget,
                 trace=tuple(run.trace),
@@ -771,17 +811,16 @@ class Conductor:
         final_text = self._final_text(run)
         if final_text != emitted_text:
             if not final_text.startswith(emitted_text):
-                raise RuntimeError(
-                    "final Conductor result does not extend its streamed deltas"
-                )
+                raise RuntimeError("final Conductor result does not extend its streamed deltas")
             yield ConductorEvent(
                 kind="delta",
-                text=final_text[len(emitted_text):],
+                text=final_text[len(emitted_text) :],
             )
         yield ConductorEvent(
             kind="result",
             result=ConductorResult(
                 final_text=final_text,
+                completions=run.final_completions,
                 outputs=dict(run.outputs),
                 budget_state=run.budget,
                 trace=tuple(run.trace),

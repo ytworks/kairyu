@@ -1,6 +1,6 @@
 # M8 Design: Engine CPU Core — Real Tokens, Real Sampling, Multi-Token Commit
 
-Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D1/D2 amended 2026-07-28). Reviewed — APPROVE-WITH-AMENDMENTS
 (3-reviewer agent panel, 2026-07-03; all amendments applied inline, see §6).
 All six phases (D1–D6) landed with tests: 328 → 437 tests, 95% coverage.
 Local-complete mandate: everything here is implemented and tested on CPU; no
@@ -239,6 +239,25 @@ a stateful CPU FSM. Structured requests retain the mask-first/accept-once path
 below; this preserves grammar correctness at the cost of the documented host
 compatibility boundary rather than advancing a stale mask.
 
+**Tokenizer-metadata amendment (2026-07-28, issue #208):** grammar compilation
+receives a serializable `GrammarVocabulary`, not an untyped token-string list.
+It preserves xgrammar's RAW / BYTE_FALLBACK / BYTE_LEVEL interpretation,
+`add_prefix_space`, the tokenizer's encoded vocabulary, and the model lm-head
+width. The last value is deliberately distinct from tokenizer vocabulary
+length (Qwen3-32B has 151,669 tokenizer ids but 151,936 logits); padded model
+ids are represented through `TokenizerInfo.vocab_size`, not fabricated empty
+tokens. The same object is passed to every spawned TP rank and both P-D
+samplers.
+
+This follows the correctness boundary used by vLLM's xgrammar backend
+(`TokenizerInfo.from_huggingface(..., vocab_size=model_vocab_size)`) while
+retaining Kairyu's lighter `tokenizers.Tokenizer` dependency and sampler
+lifecycle. A real Qwen byte-level token such as `Ġ` must decode as a space:
+treating it as RAW can produce a grammar state with zero legal tokens, turn an
+all-`-inf` argmax into token 0, and fatally reject that token under the mask.
+The minimal byte-level regression and Qwen3-32B TP8 `n=1` / `n=2` schema gates
+pin the corrected behavior and post-request runner health.
+
 **Grammar state (amended)**: `accept()` runs **exactly once per committed token,
 backend/driver-side after rank agreement** — never inside the per-rank sample
 path (the CPU TP path runs the sampler N times; `GrammarMatcher` is stateful and
@@ -249,7 +268,7 @@ mask-first is an invariant violation → raise into the engine error path (the
 pump already propagates). `response_format` mapping (P-A gate):
 `{"type":"json_object"}` → builtin JSON grammar; `{"type":"json_schema",
 "json_schema":{"schema":{...}}}` → `EngineSampling.json_schema`; enforcer built
-per-request in `_submit` from `tokenizer.vocab()`.
+per-request in `_submit` from the tokenizer's `GrammarVocabulary`.
 
 Logprobs land in `CompletionOutput.logprobs`/`cumulative_logprob`, filled by the
 backend from accumulated `SampledToken`s.

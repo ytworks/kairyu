@@ -151,17 +151,23 @@ class DeploymentSpec(BaseModel):
                 f"names {sorted(overlap)} appear in both engines: and pools:; "
                 "served model names must be unique"
             )
-        unknown = self.chat_templates.keys() - self.engines.keys() - self.pools.keys()
+        orchestration_names = set(self.orchestrators)
+        if self.orchestrator is not None:
+            orchestration_names.add("kairyu-auto")
+        unknown = (
+            self.chat_templates.keys()
+            - self.engines.keys()
+            - self.pools.keys()
+            - orchestration_names
+        )
         if unknown:
             raise ValueError(
                 f"chat_templates for unknown models {sorted(unknown)}; "
-                "keys must match engines: or pools: names"
+                "keys must match engines:, pools:, or orchestrators: names"
             )
         if any(not name for name in self.orchestrators):
             raise ValueError("orchestrators: names must be non-empty strings")
-        auto_overlap = self.orchestrators.keys() & (
-            self.engines.keys() | self.pools.keys()
-        )
+        auto_overlap = self.orchestrators.keys() & (self.engines.keys() | self.pools.keys())
         if auto_overlap:
             raise ValueError(
                 f"orchestrators names {sorted(auto_overlap)} collide with "
@@ -175,9 +181,6 @@ class DeploymentSpec(BaseModel):
             )
         if any(not name.strip() for name in self.embeddings):
             raise ValueError("embeddings: names must be non-empty strings")
-        orchestration_names = set(self.orchestrators)
-        if self.orchestrator is not None:
-            orchestration_names.add("kairyu-auto")
         embedding_overlap = self.embeddings.keys() & (
             self.engines.keys() | self.pools.keys() | orchestration_names
         )
@@ -201,22 +204,17 @@ class DeploymentSpec(BaseModel):
             )
         if self.pricing is not None:
             if self.server.usage_ledger_path is None:
-                raise ValueError(
-                    "pricing requires server.usage_ledger_path"
-                )
+                raise ValueError("pricing requires server.usage_ledger_path")
             known_tenants = {"default"}
             if self.tenants is not None:
                 known_tenants = {
                     self.tenants.default_tenant,
                     *self.tenants.key_tenants.values(),
                 }
-            unknown_discounts = (
-                self.pricing.tenant_discounts.keys() - known_tenants
-            )
+            unknown_discounts = self.pricing.tenant_discounts.keys() - known_tenants
             if unknown_discounts:
                 raise ValueError(
-                    "pricing discounts reference unknown tenants "
-                    f"{sorted(unknown_discounts)}"
+                    f"pricing discounts reference unknown tenants {sorted(unknown_discounts)}"
                 )
         return self
 
@@ -267,9 +265,7 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
                         duplicate = False
                     if duplicate:
                         location = ".".join(path) or "<root>"
-                        raise ValueError(
-                            f"duplicate mapping key {display_key!r} at {location}"
-                        )
+                        raise ValueError(f"duplicate mapping key {display_key!r} at {location}")
                 segment = key_node.value if isinstance(key_node, ScalarNode) else "<key>"
                 self._index_paths(value_node, (*path, segment), visited)
         elif isinstance(node, SequenceNode):

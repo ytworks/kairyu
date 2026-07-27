@@ -1,0 +1,84 @@
+{
+  "base_url": "http://127.0.0.1:8002/v1",
+  "created_at": "2026-07-27T15:44:31.573359+00:00",
+  "model": "kairyu-auto",
+  "passed": true,
+  "required_named_tool": {
+    "arguments": {
+      "a": 2,
+      "b": 3
+    },
+    "name": "add",
+    "passed": true,
+    "route": {
+      "confidence": 0.7,
+      "features": {
+        "char_len": 90,
+        "has_code_fence": false,
+        "math_symbol_count": 3,
+        "multi_step_marker_count": 0,
+        "question_count": 0,
+        "reasoning_keyword_count": 0,
+        "word_count": 15
+      },
+      "reason": "code_fence=False reasoning_keywords=0 math_symbols=3",
+      "target": "tier2"
+    },
+    "usage": {
+      "completion_tokens": 29,
+      "orchestration_input_tokens": 151,
+      "orchestration_output_tokens": 29,
+      "prompt_tokens": 151,
+      "prompt_tokens_details": {
+        "cached_tokens": 144
+      },
+      "total_tokens": 180
+    }
+  },
+  "schema_version": 1,
+  "served_models": [
+    "kairyu-auto",
+    "kairyu-auto-max",
+    "qwen3-32b"
+  ],
+  "structured_n_logprobs": {
+    "choice_indices": [
+      0,
+      1
+    ],
+    "passed": true,
+    "response_sha256": "2a162962800917e7b07839bb93edc13c254eb5b1e47cf45655ca5b8ce31960d3",
+    "route": {
+      "confidence": 0.8,
+      "features": {
+        "char_len": 62,
+        "has_code_fence": false,
+        "math_symbol_count": 1,
+        "multi_step_marker_count": 0,
+        "question_count": 0,
+        "reasoning_keyword_count": 0,
+        "word_count": 10
+      },
+      "reason": "no heavy signals; short query",
+      "target": "tier1"
+    },
+    "usage": {
+      "completion_tokens": 14,
+      "orchestration_input_tokens": 60,
+      "orchestration_output_tokens": 14,
+      "prompt_tokens": 60,
+      "prompt_tokens_details": {
+        "cached_tokens": 48
+      },
+      "total_tokens": 74
+    },
+    "values": [
+      {
+        "answer": 4
+      },
+      {
+        "answer": 4
+      }
+    ]
+  }
+}

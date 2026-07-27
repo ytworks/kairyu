@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 
 from kairyu.engine.backend import (
@@ -19,6 +19,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
 )
+from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 _DEFAULT_N_SAMPLES = 3
@@ -35,6 +36,7 @@ _SYNTHESIS_TEMPLATE = (
 class MoAResult:
     final_text: str
     proposals: tuple[str, ...]
+    completions: tuple[CompletionOutput, ...] = ()
     usage: tuple[int, int] = (0, 0)  # (prompt_tokens, completion_tokens) summed
     cached_tokens: int = 0
 
@@ -45,6 +47,7 @@ class MoAEvent:
 
     kind: str  # "delta" | "result"
     text: str = ""
+    completions: tuple[CompletionOutput, ...] = ()
     result: MoAResult | None = None
 
 
@@ -76,12 +79,20 @@ async def _prepare_moa(
     *,
     n_samples: int,
     sampling_params: SamplingParams | None,
+    final_sampling_params: SamplingParams | None,
+    final_tools: tuple[Mapping[str, object], ...],
+    final_tool_choice: str | Mapping[str, object] | None,
+    final_tools_in_prompt: bool,
     shared_prefix: str,
     usage_observer: Callable[[GenerationUsage], None] | None,
 ) -> tuple[tuple[str, ...], list[int], GenerationRequest]:
     if n_samples < 1:
         raise ValueError(f"n_samples must be >= 1, got {n_samples}")
     params = sampling_params or SamplingParams(temperature=_PROPOSAL_TEMPERATURE, max_tokens=1024)
+    synthesis_params = final_sampling_params or params.clone(
+        temperature=0.3,
+        seed=None,
+    )
     session = uuid.uuid4().hex[:12]
     hint = CacheHint(session_id=session)
 
@@ -106,10 +117,11 @@ async def _prepare_moa(
         return result.text
 
     async def propose(index: int) -> str:
+        proposal_seed = index if params.seed is None else params.seed + index
         request = GenerationRequest(
             request_id=f"{session}-propose-{index}",
             prompt=f"{shared_prefix}[proposer {index}] Answer the question: {query}",
-            sampling_params=params.clone(seed=index),
+            sampling_params=params.clone(seed=proposal_seed),
             cache_hint=hint,
         )
         return _account(await backend.generate(request))
@@ -143,8 +155,11 @@ async def _prepare_moa(
     synthesis_request = GenerationRequest(
         request_id=f"{session}-synthesize",
         prompt=shared_prefix + _SYNTHESIS_TEMPLATE.format(query=query, proposals=numbered),
-        sampling_params=params.clone(temperature=0.3, seed=None),
+        sampling_params=synthesis_params,
         cache_hint=hint,
+        tools=final_tools,
+        tool_choice=final_tool_choice,
+        tools_in_prompt=final_tools_in_prompt,
     )
     return proposals, usage_totals, synthesis_request
 
@@ -155,6 +170,10 @@ async def run_moa(
     n_samples: int = _DEFAULT_N_SAMPLES,
     synthesizer: EngineBackend | None = None,
     sampling_params: SamplingParams | None = None,
+    final_sampling_params: SamplingParams | None = None,
+    final_tools: tuple[Mapping[str, object], ...] = (),
+    final_tool_choice: str | Mapping[str, object] | None = None,
+    final_tools_in_prompt: bool = False,
     shared_prefix: str = "",
     usage_observer: Callable[[GenerationUsage], None] | None = None,
 ) -> MoAResult:
@@ -163,6 +182,10 @@ async def run_moa(
         query,
         n_samples=n_samples,
         sampling_params=sampling_params,
+        final_sampling_params=final_sampling_params,
+        final_tools=final_tools,
+        final_tool_choice=final_tool_choice,
+        final_tools_in_prompt=final_tools_in_prompt,
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
     )
@@ -192,6 +215,7 @@ async def run_moa(
     return MoAResult(
         final_text=final_result.text,
         proposals=proposals,
+        completions=final_result.completions,
         usage=(usage_totals[0], usage_totals[1]),
         cached_tokens=usage_totals[2],
     )
@@ -203,6 +227,10 @@ async def stream_moa(
     n_samples: int = _DEFAULT_N_SAMPLES,
     synthesizer: EngineBackend | None = None,
     sampling_params: SamplingParams | None = None,
+    final_sampling_params: SamplingParams | None = None,
+    final_tools: tuple[Mapping[str, object], ...] = (),
+    final_tool_choice: str | Mapping[str, object] | None = None,
+    final_tools_in_prompt: bool = False,
     shared_prefix: str = "",
     usage_observer: Callable[[GenerationUsage], None] | None = None,
 ) -> AsyncIterator[MoAEvent]:
@@ -218,6 +246,10 @@ async def stream_moa(
         query,
         n_samples=n_samples,
         sampling_params=sampling_params,
+        final_sampling_params=final_sampling_params,
+        final_tools=final_tools,
+        final_tool_choice=final_tool_choice,
+        final_tools_in_prompt=final_tools_in_prompt,
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
     )
@@ -235,23 +267,20 @@ async def stream_moa(
                     usage_observer(
                         GenerationUsage(
                             prompt_tokens=usage_totals[0] + latest_usage.prompt_tokens,
-                            completion_tokens=usage_totals[1]
-                            + latest_usage.completion_tokens,
+                            completion_tokens=usage_totals[1] + latest_usage.completion_tokens,
                             cached_tokens=usage_totals[2] + latest_usage.cached_tokens,
                         )
                     )
             text = partial.text
             if not text.startswith(previous_text):
-                raise RuntimeError(
-                    "MoA synthesis stream must emit cumulative, prefix-stable text"
-                )
+                raise RuntimeError("MoA synthesis stream must emit cumulative, prefix-stable text")
             previous_text = text
-            if len(text) > emitted:
-                yield MoAEvent(
-                    kind="delta",
-                    text=text[emitted:],
-                )
-                emitted = len(text)
+            yield MoAEvent(
+                kind="delta",
+                text=text[emitted:],
+                completions=partial.completions,
+            )
+            emitted = len(text)
         if last_result is None:
             raise RuntimeError("MoA synthesis stream produced no result")
     except Exception as error:
@@ -276,6 +305,7 @@ async def stream_moa(
         result=MoAResult(
             final_text=last_result.text,
             proposals=proposals,
+            completions=last_result.completions,
             usage=(usage_totals[0], usage_totals[1]),
             cached_tokens=usage_totals[2],
         ),

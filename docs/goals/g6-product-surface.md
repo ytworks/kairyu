@@ -52,13 +52,29 @@ MoA unary/streaming paths expose cumulative internal usage; retry, fallback,
 partial-failure, cancellation, structured-trace, and privacy cases are fixed
 server tests.
 
-P-B4 is GPU-green as of 2026-07-27 (issue #198): one Qwen3-32B TP8
+Direct/AUTO OpenAI request parity is GPU-green as of 2026-07-28 (issue #208).
+An immutable per-request intent carries sampling, `n`, logprobs, tools/tool
+choice, and response format through direct, Conductor, and MoA routes without
+shared-orchestrator mutation. Private stages keep scalar sampling but use
+single unstructured/tool-free generations; the final boundary preserves every
+public choice and logprob and enforces tools/schema. Qwen3-32B TP8 produced two
+schema-valid choices with choice-scoped logprobs plus the required named tool,
+then completed a plain request with healthy readiness. The reproducible raw
+artifact is
+`bench/results/auto-params-qwen3-32b-tp8-2026-07-28.json`.
+
+P-B4 was revalidated after request-intent propagation on 2026-07-28
+(issues #198/#208): one Qwen3-32B TP8
 DeploymentSpec lists direct, standard AUTO, and max AUTO. Twelve alternating
-direct/standard pairs measured 1.0207x p50 and 0.9674x p99 TTFT ratios. On a
+direct/standard pairs measured 1.0123x p50 and 0.7666x p99 TTFT ratios. On the
 fixed, sandbox-scored eight-item LiveCodeBench multi-agent slice, max scored
-25.0% versus standard's 0.0% while using fewer calls, tokens, and allocated
-GPU-seconds. The subset and effective internal sampling caveat are explicit in
-the committed raw artifact.
+37.5% versus standard's 12.5% while using 32 versus 38 calls, 47,266 versus
+50,504 internal tokens, and 1,499.274 versus 2,567.389 allocated GPU-seconds.
+The private 1024-token policy completed the full gate; uncapped propagation
+exceeded an internal 60 s timeout and returned 502. The committed artifact
+contains the effective policy and per-item evidence without the former #208
+caveat:
+`bench/results/tiered-auto-qwen3-32b-tp8-2026-07-28.json`.
 
 P-B5 is CPU-green as of 2026-07-27 (issue #199): the supported
 `DeploymentSpec` path proves isolated two-key 429s and exact (0% error)

@@ -46,9 +46,7 @@ def _auto_app(tmp_path, **kwargs):
 def test_mixed_tool_choice_rejection_is_metered_once(tmp_path):
     class MixedToolBackend(MockBackend):
         async def generate(self, request):
-            tool_call = (
-                '<tool_call>{"name":"get_weather","arguments":{}}</tool_call>'
-            )
+            tool_call = '<tool_call>{"name":"get_weather","arguments":{}}</tool_call>'
             return GenerationResult(
                 request_id=request.request_id,
                 prompt=request.prompt,
@@ -100,8 +98,7 @@ class TestOrchestratorSurface:
 
             response = client.post(
                 "/v1/chat/completions",
-                json={"model": "kairyu-auto",
-                      "messages": [{"role": "user", "content": "hello"}]},
+                json={"model": "kairyu-auto", "messages": [{"role": "user", "content": "hello"}]},
             )
             assert response.status_code == 200
             payload = response.json()
@@ -111,9 +108,7 @@ class TestOrchestratorSurface:
             assert "kairyu_trace_v2" not in payload
             assert "kairyu_route" not in payload
 
-    def test_auto_model_rejects_unsupported_params(self, tmp_path):
-        # M4: params the orchestrator can't honor (n>1, logprobs, tools,
-        # response_format) must 400, not be silently dropped.
+    def test_auto_model_accepts_orchestration_params(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:
             for extra in (
                 {"n": 2},
@@ -123,18 +118,25 @@ class TestOrchestratorSurface:
             ):
                 resp = client.post(
                     "/v1/chat/completions",
-                    json={"model": "kairyu-auto",
-                          "messages": [{"role": "user", "content": "hi"}], **extra},
+                    json={
+                        "model": "kairyu-auto",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        **extra,
+                    },
                 )
-                assert resp.status_code == 400, extra
+                assert resp.status_code == 200, extra
+                if extra.get("n"):
+                    assert [choice["index"] for choice in resp.json()["choices"]] == [
+                        0,
+                        1,
+                    ]
 
     def test_trace_header_opt_in(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:
             response = client.post(
                 "/v1/chat/completions",
                 headers={"X-Kairyu-Trace": "1"},
-                json={"model": "kairyu-auto",
-                      "messages": [{"role": "user", "content": "hello"}]},
+                json={"model": "kairyu-auto", "messages": [{"role": "user", "content": "hello"}]},
             )
             trace = response.json().get("kairyu_trace")
             assert trace and any("route:" in line for line in trace)
@@ -160,11 +162,15 @@ class TestOrchestratorSurface:
     def test_auto_stream_chunks_and_usage(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:
             with client.stream(
-                "POST", "/v1/chat/completions",
+                "POST",
+                "/v1/chat/completions",
                 headers={"X-Kairyu-Trace": "1"},
-                json={"model": "kairyu-auto", "stream": True,
-                      "stream_options": {"include_usage": True},
-                      "messages": [{"role": "user", "content": "hello"}]},
+                json={
+                    "model": "kairyu-auto",
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
             ) as response:
                 body = "".join(response.iter_text())
         assert "data: [DONE]" in body
@@ -172,7 +178,7 @@ class TestOrchestratorSurface:
         import json as _json
 
         data_lines = [
-            line[len("data: "):]
+            line[len("data: ") :]
             for line in body.splitlines()
             if line.startswith("data: ") and "[DONE]" not in line
         ]
@@ -209,11 +215,7 @@ class TestOrchestratorSurface:
         ledger_path = tmp_path / "usage.jsonl"
         app = create_app(
             {},
-            orchestrators={
-                "kairyu-auto": Orchestrator(
-                    {"tier1": backend, "tier2": backend}
-                )
-            },
+            orchestrators={"kairyu-auto": Orchestrator({"tier1": backend, "tier2": backend})},
             settings=ServerSettings(usage_ledger_path=str(ledger_path)),
         )
 
@@ -242,9 +244,12 @@ class TestOrchestratorSurface:
             response = client.post(
                 "/v1/chat/completions",
                 headers={"X-Kairyu-Trace": "1"},
-                json={"model": "kairyu-auto-max",
-                      "messages": [{"role": "user", "content":
-                                    "analyze compare and plan: " + "x" * 2500}]},
+                json={
+                    "model": "kairyu-auto-max",
+                    "messages": [
+                        {"role": "user", "content": "analyze compare and plan: " + "x" * 2500}
+                    ],
+                },
             )
             trace = response.json().get("kairyu_trace") or []
             assert any("moa" in line for line in trace), trace
@@ -327,9 +332,7 @@ class TestTenancy:
                 body = {"model": model, "input": "matrix prompt"}
 
             transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as client:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(path, json=body)
 
             assert response.status_code == 200
@@ -339,17 +342,14 @@ class TestTenancy:
         totals = app.state.usage_ledger.totals()["default"]
         assert totals["requests"] == 1
         rendered_metrics = app.state.metrics.render()[0].decode()
-        assert (
-            'kairyu_usage_requests_total{tenant="default"} 1.0'
-            in rendered_metrics
-        )
+        assert 'kairyu_usage_requests_total{tenant="default"} 1.0' in rendered_metrics
         assert (
             'kairyu_usage_tokens_total{tenant="default",type="prompt"} '
-            f'{float(totals["prompt_tokens"])}'
+            f"{float(totals['prompt_tokens'])}"
         ) in rendered_metrics
         assert (
             'kairyu_usage_tokens_total{tenant="default",type="completion"} '
-            f'{float(totals["completion_tokens"])}'
+            f"{float(totals['completion_tokens'])}"
         ) in rendered_metrics
         assert limiter.charges == [
             (
@@ -491,15 +491,9 @@ class TestTenancy:
     def test_from_mapping_builds_distinct_tenants_and_copies_inputs(self):
         key_tenants = {"key-a": "tenant-a", "key-b": "tenant-b"}
         limits = {
-            "tenant-a": TenantLimits(
-                requests_per_minute=10, tokens_per_minute=1_000
-            ),
-            "tenant-b": TenantLimits(
-                requests_per_minute=20, tokens_per_minute=2_000
-            ),
-            "default": TenantLimits(
-                requests_per_minute=30, tokens_per_minute=3_000
-            ),
+            "tenant-a": TenantLimits(requests_per_minute=10, tokens_per_minute=1_000),
+            "tenant-b": TenantLimits(requests_per_minute=20, tokens_per_minute=2_000),
+            "default": TenantLimits(requests_per_minute=30, tokens_per_minute=3_000),
         }
 
         config = TenantConfig.from_mapping(
@@ -587,9 +581,7 @@ class TestTenancy:
                 resolved_api_keys=frozenset({"key-a"}),
             )
 
-    def test_admin_only_usage_is_not_mapped_to_default_tenant(
-        self, tmp_path, monkeypatch
-    ):
+    def test_admin_only_usage_is_not_mapped_to_default_tenant(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KAIRYU_DATA_KEYS", "data")
         monkeypatch.setenv("KAIRYU_ADMIN_KEYS", "admin")
         app = create_app(
@@ -609,8 +601,7 @@ class TestTenancy:
             data = {"Authorization": "Bearer data"}
             admin = {"Authorization": "Bearer admin"}
             assert (
-                client.post("/v1/chat/completions", json=payload, headers=data).status_code
-                == 200
+                client.post("/v1/chat/completions", json=payload, headers=data).status_code == 200
             )
             admin_usage = client.get("/admin/usage", headers=admin)
 
@@ -667,7 +658,8 @@ class TestTenancy:
         )
         with TestClient(app) as client:
             with client.stream(
-                "POST", "/v1/chat/completions",
+                "POST",
+                "/v1/chat/completions",
                 json={
                     "model": "m",
                     "messages": [{"role": "user", "content": "hi"}],
@@ -731,15 +723,11 @@ class TestTenancy:
         }
         assert ledger.malformed_lines == 1
         warnings = [
-            record
-            for record in caplog.records
-            if "truncated usage ledger tail" in record.message
+            record for record in caplog.records if "truncated usage ledger tail" in record.message
         ]
         assert len(warnings) == 1
 
-    def test_ledger_skips_complete_corruption_and_whitespace(
-        self, tmp_path, caplog
-    ):
+    def test_ledger_skips_complete_corruption_and_whitespace(self, tmp_path, caplog):
         ledger_path = tmp_path / "ledger.jsonl"
         lines = [
             json.dumps(
@@ -799,14 +787,9 @@ class TestTenancy:
             if "malformed usage ledger record" in record.message
         ]
         assert len(errors) == 4
-        assert all(
-            f"line {line_number}" in " ".join(errors)
-            for line_number in (2, 3, 4, 5)
-        )
+        assert all(f"line {line_number}" in " ".join(errors) for line_number in (2, 3, 4, 5))
 
-    def test_admin_usage_returns_partial_totals_for_corrupt_ledger(
-        self, tmp_path, caplog
-    ):
+    def test_admin_usage_returns_partial_totals_for_corrupt_ledger(self, tmp_path, caplog):
         ledger_path = tmp_path / "ledger.jsonl"
         ledger_path.write_text(
             "\n".join(
@@ -829,10 +812,13 @@ class TestTenancy:
             settings=ServerSettings(usage_ledger_path=str(ledger_path)),
         )
 
-        with caplog.at_level(
-            logging.ERROR,
-            logger="kairyu.entrypoints.server.tenancy",
-        ), TestClient(app) as client:
+        with (
+            caplog.at_level(
+                logging.ERROR,
+                logger="kairyu.entrypoints.server.tenancy",
+            ),
+            TestClient(app) as client,
+        ):
             response = client.get("/admin/usage")
 
         assert response.status_code == 200
@@ -870,9 +856,7 @@ class TestTenancy:
         assert not ledger._handle.closed
         ledger.close()
 
-    def test_create_app_closes_ledger_when_caller_lifespan_shutdown_fails(
-        self, tmp_path
-    ):
+    def test_create_app_closes_ledger_when_caller_lifespan_shutdown_fails(self, tmp_path):
         @contextlib.asynccontextmanager
         async def failing_lifespan(_app):
             yield
@@ -973,9 +957,7 @@ class TestResponsesApi:
                 usage_ledger_path=str(ledger_path),
             ),
             tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
-            embedding_backends={
-                "embedding-model": MockEmbeddingBackend(dimensions=8)
-            },
+            embedding_backends={"embedding-model": MockEmbeddingBackend(dimensions=8)},
         )
         headers = {"Authorization": "Bearer key-a"}
 
@@ -1024,9 +1006,7 @@ class TestResponsesApi:
             "uncached_tokens": derived_usage["input_tokens"] + 9,
         }
 
-    def test_extra_route_failures_before_usable_results_are_unmetered(
-        self, tmp_path, monkeypatch
-    ):
+    def test_extra_route_failures_before_usable_results_are_unmetered(self, tmp_path, monkeypatch):
         class FailingBackend(MockBackend):
             async def generate(self, request):
                 raise RuntimeError("backend unavailable")
@@ -1044,9 +1024,7 @@ class TestResponsesApi:
                 usage_ledger_path=str(ledger_path),
             ),
             tenant_config=TenantConfig(key_tenants={"key-a": "tenant-a"}),
-            embedding_backends={
-                "embedding-model": FailingEmbeddingBackend(dimensions=8)
-            },
+            embedding_backends={"embedding-model": FailingEmbeddingBackend(dimensions=8)},
         )
         headers = {"Authorization": "Bearer key-a"}
 
@@ -1094,7 +1072,9 @@ class TestResponsesApi:
             assert first.usage.input_tokens >= 0
 
             second = client.responses.create(
-                model="m", input="and again", previous_response_id=first.id,
+                model="m",
+                input="and again",
+                previous_response_id=first.id,
                 instructions="be brief",
             )
             assert second.output_text
@@ -1121,12 +1101,11 @@ class TestEmbeddings:
 
         with TestClient(_auto_app(tmp_path)) as http:
             client = openai.OpenAI(
-                base_url=str(http.base_url) + "/v1", api_key="sk-local",
+                base_url=str(http.base_url) + "/v1",
+                api_key="sk-local",
                 http_client=http,
             )
-            result = client.embeddings.create(
-                model="embedding-model", input=["hello", "world"]
-            )
+            result = client.embeddings.create(model="embedding-model", input=["hello", "world"])
             assert len(result.data) == 2
             assert len(result.data[0].embedding) == 8  # SDK decodes base64 (A9)
             assert result.usage.prompt_tokens > 0
@@ -1149,9 +1128,7 @@ class TestEmbeddings:
                     "encoding_format": "base64",
                 },
             ).json()["data"][0]["embedding"]
-            decoded = struct.unpack(
-                f"<{len(as_float)}f", base64.b64decode(as_b64)
-            )
+            decoded = struct.unpack(f"<{len(as_float)}f", base64.b64decode(as_b64))
             assert list(decoded) == pytest.approx(as_float)
 
     def test_invalid_encoding_format_is_400(self, tmp_path):
@@ -1174,10 +1151,15 @@ class TestVisionWire:
         with TestClient(_auto_app(tmp_path)) as client:
             response = client.post(
                 "/v1/chat/completions",
-                json={"model": "m", "messages": [{
-                    "role": "user",
-                    "content": [{"type": "text", "text": "hello parts"}],
-                }]},
+                json={
+                    "model": "m",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "hello parts"}],
+                        }
+                    ],
+                },
             )
             assert response.status_code == 200
 
@@ -1185,13 +1167,18 @@ class TestVisionWire:
         with TestClient(_auto_app(tmp_path)) as client:
             response = client.post(
                 "/v1/chat/completions",
-                json={"model": "m", "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "look:"},
-                        {"type": "image_url", "image_url": {"url": "http://x/i.png"}},
+                json={
+                    "model": "m",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "look:"},
+                                {"type": "image_url", "image_url": {"url": "http://x/i.png"}},
+                            ],
+                        }
                     ],
-                }]},
+                },
             )
             assert response.status_code == 400
             assert "image" in response.json()["error"]["message"]
@@ -1205,8 +1192,11 @@ class TestF5Logic:
         clock = {"t": 0.0}
         cache = RadixKVCache(num_pages=64, page_size=4)
         scheduler = Scheduler(
-            cache, max_num_batched_tokens=8, page_size=4,
-            priority_age_s=10.0, clock=lambda: clock["t"],
+            cache,
+            max_num_batched_tokens=8,
+            page_size=4,
+            priority_age_s=10.0,
+            clock=lambda: clock["t"],
         )
         scheduler.add_request(EngineRequest("low", (1, 2, 3, 4), max_new_tokens=1, priority=0))
         clock["t"] = 1.0
@@ -1216,8 +1206,11 @@ class TestF5Logic:
 
         # aging: a very old low-priority request overtakes a fresh mid one
         scheduler2 = Scheduler(
-            cache, max_num_batched_tokens=4, page_size=4,
-            priority_age_s=1.0, clock=lambda: clock["t"],
+            cache,
+            max_num_batched_tokens=4,
+            page_size=4,
+            priority_age_s=1.0,
+            clock=lambda: clock["t"],
         )
         clock["t"] = 0.0
         scheduler2.add_request(
@@ -1301,9 +1294,7 @@ class _FakeFrontierClient:
 
 def _frontier_chunk(content=None, *, completion_tokens=None):
     choices = (
-        [SimpleNamespace(delta=SimpleNamespace(content=content))]
-        if content is not None
-        else []
+        [SimpleNamespace(delta=SimpleNamespace(content=content))] if content is not None else []
     )
     usage = (
         SimpleNamespace(completion_tokens=completion_tokens)
@@ -1342,9 +1333,7 @@ async def test_frontier_tpot_uses_final_completion_tokens(monkeypatch):
 async def test_frontier_missing_usage_never_substitutes_chunk_count(monkeypatch):
     from bench import frontier_compare
 
-    client = _FakeFrontierClient(
-        [_frontier_chunk("first"), _frontier_chunk("second")]
-    )
+    client = _FakeFrontierClient([_frontier_chunk("first"), _frontier_chunk("second")])
     clock = iter([0.0, 1.0, 4.0, 5.0])
     monkeypatch.setattr(frontier_compare.time, "perf_counter", lambda: next(clock))
 

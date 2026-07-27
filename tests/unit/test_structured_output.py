@@ -4,6 +4,7 @@ xgr = pytest.importorskip("xgrammar")
 torch = pytest.importorskip("torch")
 
 from kairyu.engine.core.structured import XGrammarEnforcer  # noqa: E402
+from kairyu.engine.tokenizer import GrammarVocabulary  # noqa: E402
 
 # a tiny vocab sufficient to build JSON fragments
 VOCAB = ["{", "}", "[", "]", '"', "a", "b", "1", "2", ":", ",", " ", "true", "null"]
@@ -38,3 +39,38 @@ def test_schema_constrained_grammar_compiles():
     logits = torch.zeros(len(VOCAB))
     masked = enforcer.mask_logits(logits.clone())
     assert masked[VOCAB.index("{")] != float("-inf")
+
+
+def test_byte_level_space_marker_remains_legal_after_schema_colon():
+    # Qwen's tokenizer stores a space as Ġ. Interpreting this vocabulary as RAW
+    # leaves no legal token after the schema's canonical `": ` prefix, causing
+    # an all--inf argmax of token 0 and the production invariant failure.
+    vocab = ["!", '{"', "answer", '":', "Ġ", "4", "}", "<eos>"]
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "integer"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    raw = XGrammarEnforcer(
+        GrammarVocabulary(vocab, vocab_type="raw", vocab_size=len(vocab)),
+        json_schema=schema,
+        stop_token_id=7,
+    )
+    byte_level = XGrammarEnforcer(
+        GrammarVocabulary(vocab, vocab_type="byte_level", vocab_size=len(vocab)),
+        json_schema=schema,
+        stop_token_id=7,
+    )
+    for token_id in (1, 2, 3):
+        assert raw.accept(token_id)
+        assert byte_level.accept(token_id)
+
+    raw_masked = raw.mask_logits(torch.zeros(len(vocab)))
+    assert torch.isfinite(raw_masked).sum().item() == 0
+    byte_masked = byte_level.mask_logits(torch.zeros(len(vocab)))
+    assert torch.isfinite(byte_masked).nonzero().flatten().tolist() == [4]
+
+    for token_id in (4, 5, 6, 7):
+        assert byte_level.accept(token_id)
+    assert byte_level.is_terminated()

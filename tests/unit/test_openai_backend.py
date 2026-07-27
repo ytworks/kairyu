@@ -15,8 +15,7 @@ def _request(
     return GenerationRequest(
         request_id="r1",
         prompt=prompt,
-        sampling_params=sampling_params
-        or SamplingParams(temperature=0.2, max_tokens=64),
+        sampling_params=sampling_params or SamplingParams(temperature=0.2, max_tokens=64),
     )
 
 
@@ -109,9 +108,7 @@ async def test_generate_maps_upstream_logprobs():
             ]
         },
     }
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, json={"choices": [choice]})
-    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"choices": [choice]}))
     backend = OpenAICompatBackend(
         base_url="https://api.example.com/v1",
         model="m",
@@ -159,9 +156,7 @@ async def test_generate_maps_upstream_logprobs():
             logprob=-0.75,
             bytes_=None,
             top=(
-                TokenLogprob(
-                    token="lo", token_id=-1, logprob=-0.75, bytes_=None
-                ),
+                TokenLogprob(token="lo", token_id=-1, logprob=-0.75, bytes_=None),
                 TokenLogprob(
                     token=" low",
                     token_id=-1,
@@ -187,9 +182,7 @@ async def test_generate_no_logprobs_content_remains_none(content_state):
         choice["logprobs"] = {}
     elif content_state == "null":
         choice["logprobs"] = {"content": None}
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, json={"choices": [choice]})
-    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"choices": [choice]}))
     backend = OpenAICompatBackend(
         base_url="https://api.example.com/v1",
         model="m",
@@ -214,9 +207,7 @@ async def test_generate_maps_upstream_logprobs_empty_content():
         "finish_reason": "stop",
         "logprobs": {"content": []},
     }
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, json={"choices": [choice]})
-    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"choices": [choice]}))
     backend = OpenAICompatBackend(
         base_url="https://api.example.com/v1",
         model="m",
@@ -229,6 +220,69 @@ async def test_generate_maps_upstream_logprobs_empty_content():
     assert output.logprob_content == ()
     assert output.cumulative_logprob == 0.0
     assert output.logprobs is None
+    await backend.shutdown()
+
+
+async def test_generate_forwards_and_preserves_native_tool_calls():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_upstream",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup",
+                                        "arguments": '{"city":"Tokyo"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        )
+
+    tools = (
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object"},
+            },
+        },
+    )
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+    )
+    request = GenerationRequest(
+        request_id="tools",
+        prompt="weather",
+        sampling_params=SamplingParams(),
+        tools=tools,
+        tool_choice="required",
+    )
+
+    result = await backend.generate(request)
+
+    assert captured["body"]["tools"] == list(tools)
+    assert captured["body"]["tool_choice"] == "required"
+    assert result.completions[0].finish_reason == "tool_calls"
+    assert result.text == ('<tool_call>{"name":"lookup","arguments":{"city":"Tokyo"}}</tool_call>')
     await backend.shutdown()
 
 
@@ -270,9 +324,7 @@ async def test_generate_forwards_logprobs_zero():
         transport=_ok_transport(captured),
     )
 
-    await backend.generate(
-        _request(sampling_params=SamplingParams(logprobs=0))
-    )
+    await backend.generate(_request(sampling_params=SamplingParams(logprobs=0)))
 
     assert captured["body"]["logprobs"] is True
     assert captured["body"]["top_logprobs"] == 0
@@ -321,9 +373,7 @@ async def test_generate_default_payload_omits_unrequested_controls():
         ("extra_args", SamplingParams(extra_args=[])),
     ],
 )
-async def test_generate_rejects_unsupported_intent_before_client_or_transport(
-    field, params
-):
+async def test_generate_rejects_unsupported_intent_before_client_or_transport(field, params):
     transport_calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -361,9 +411,7 @@ async def test_stream_rejects_unsupported_intent_before_client_or_transport():
     )
 
     with pytest.raises(UpstreamClientError, match="best_of"):
-        async for _ in backend.stream(
-            _request(sampling_params=SamplingParams(best_of=2))
-        ):
+        async for _ in backend.stream(_request(sampling_params=SamplingParams(best_of=2))):
             pass
 
     assert transport_calls == []
@@ -424,17 +472,16 @@ _SSE_BODY = (
 def _sse_transport(captured: dict) -> httpx.MockTransport:
     def handler(http_request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(http_request.content)
-        return httpx.Response(
-            200, content=_SSE_BODY, headers={"content-type": "text/event-stream"}
-        )
+        return httpx.Response(200, content=_SSE_BODY, headers={"content-type": "text/event-stream"})
 
     return httpx.MockTransport(handler)
 
 
 def _sse_chunks_transport(*chunks: dict) -> httpx.MockTransport:
-    body = b"".join(
-        f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks
-    ) + b"data: [DONE]\n\n"
+    body = (
+        b"".join(f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks)
+        + b"data: [DONE]\n\n"
+    )
     return httpx.MockTransport(
         lambda request: httpx.Response(
             200,
@@ -478,11 +525,7 @@ async def test_stream_returns_empty_text_for_valid_empty_single_choice():
                     }
                 ]
             },
-            {
-                "choices": [
-                    {"index": 0, "delta": {}, "finish_reason": "stop"}
-                ]
-            },
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
         ),
     )
 
@@ -521,10 +564,7 @@ async def test_stream_preserves_empty_choice_alongside_nonempty_with_n_gt_1():
     )
 
     results = [
-        result
-        async for result in backend.stream(
-            _request(sampling_params=SamplingParams(n=2))
-        )
+        result async for result in backend.stream(_request(sampling_params=SamplingParams(n=2)))
     ]
 
     final = results[-1]
@@ -535,6 +575,68 @@ async def test_stream_preserves_empty_choice_alongside_nonempty_with_n_gt_1():
         "stop",
         "stop",
     ]
+    await backend.shutdown()
+
+
+async def test_stream_preserves_choice_scoped_logprobs_cumulatively():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "a"},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "a",
+                                    "logprob": -0.1,
+                                    "bytes": [97],
+                                    "top_logprobs": [],
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "delta": {"content": "b"},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "b",
+                                    "logprob": -0.2,
+                                    "bytes": [98],
+                                    "top_logprobs": [],
+                                }
+                            ]
+                        },
+                    },
+                ]
+            },
+            {
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"},
+                    {"index": 1, "delta": {}, "finish_reason": "stop"},
+                ]
+            },
+        ),
+    )
+
+    results = [
+        result
+        async for result in backend.stream(
+            _request(sampling_params=SamplingParams(n=2, logprobs=1))
+        )
+    ]
+
+    final = results[-1]
+    assert [
+        [entry.token for entry in completion.logprob_content] for completion in final.completions
+    ] == [["a"], ["b"]]
+    assert [completion.cumulative_logprob for completion in final.completions] == [-0.1, -0.2]
     await backend.shutdown()
 
 
