@@ -539,9 +539,9 @@ health probing, and the batch API:
 pools:
   fleet:
     replicas:
-      - {backend: openai, options: {base_url: "http://replica-a:8000/v1"}}
-      - {backend: openai, options: {base_url: "http://replica-b:8000/v1"}}
-      - {backend: openai, options: {base_url: "http://replica-c:8000/v1"}}
+      - {backend: openai, options: {base_url: "http://replica-a:8000/v1", upstream: kairyu}}
+      - {backend: openai, options: {base_url: "http://replica-b:8000/v1", upstream: kairyu}}
+      - {backend: openai, options: {base_url: "http://replica-c:8000/v1", upstream: kairyu}}
     unhealthy_after: 3
     queue_depth_threshold: 8
     probe_interval_s: 5.0
@@ -618,14 +618,14 @@ engines:                       # served model name -> one backend
       model_path: /models/qwen2.5-0.5b
   remote-a:
     backend: openai
-    options: {base_url: "http://replica-a:8000/v1"}
+    options: {base_url: "http://replica-a:8000/v1", upstream: kairyu}
     health_url: null           # default: <base_url minus /v1>/health
 
 pools:                         # served model name -> ReplicaPool of N replicas
   fleet:
     replicas:
-      - {backend: openai, options: {base_url: "http://replica-a:8000/v1"}}
-      - {backend: openai, options: {base_url: "http://replica-b:8000/v1"}}
+      - {backend: openai, options: {base_url: "http://replica-a:8000/v1", upstream: kairyu}}
+      - {backend: openai, options: {base_url: "http://replica-b:8000/v1", upstream: kairyu}}
     unhealthy_after: 3         # consecutive failures before leaving the ring
     queue_depth_threshold: 8   # session-affinity load valve
     probe_interval_s: 5.0      # background health prober

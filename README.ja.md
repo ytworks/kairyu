@@ -549,9 +549,9 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 pools:
   fleet:
     replicas:
-      - {backend: openai, options: {base_url: "http://replica-a:8000/v1"}}
-      - {backend: openai, options: {base_url: "http://replica-b:8000/v1"}}
-      - {backend: openai, options: {base_url: "http://replica-c:8000/v1"}}
+      - {backend: openai, options: {base_url: "http://replica-a:8000/v1", upstream: kairyu}}
+      - {backend: openai, options: {base_url: "http://replica-b:8000/v1", upstream: kairyu}}
+      - {backend: openai, options: {base_url: "http://replica-c:8000/v1", upstream: kairyu}}
     unhealthy_after: 3
     queue_depth_threshold: 8
     probe_interval_s: 5.0
@@ -619,14 +619,14 @@ engines:                       # 提供モデル名 -> バックエンド 1 つ
       model_path: /models/qwen2.5-0.5b
   remote-a:
     backend: openai
-    options: {base_url: "http://replica-a:8000/v1"}
+    options: {base_url: "http://replica-a:8000/v1", upstream: kairyu}
     health_url: null           # デフォルト: <base_url から /v1 を除いた>/health
 
 pools:                         # 提供モデル名 -> N レプリカの ReplicaPool
   fleet:
     replicas:
-      - {backend: openai, options: {base_url: "http://replica-a:8000/v1"}}
-      - {backend: openai, options: {base_url: "http://replica-b:8000/v1"}}
+      - {backend: openai, options: {base_url: "http://replica-a:8000/v1", upstream: kairyu}}
+      - {backend: openai, options: {base_url: "http://replica-b:8000/v1", upstream: kairyu}}
     unhealthy_after: 3         # リングから外れるまでの連続失敗回数
     queue_depth_threshold: 8   # セッション親和の負荷バルブ
     probe_interval_s: 5.0      # バックグラウンドヘルスプローバー

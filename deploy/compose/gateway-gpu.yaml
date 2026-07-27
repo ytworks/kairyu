@@ -16,7 +16,7 @@ pools:
   default:
     replicas:
       - backend: openai
-        options: { base_url: "http://replica:8000/v1", model: "default", api_key_env: null }
+        options: { base_url: "http://replica:8000/v1", model: "default", api_key_env: null, upstream: kairyu }
     unhealthy_after: 1
     probe_interval_s: 1.0
 orchestrators:

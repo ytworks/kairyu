@@ -6,11 +6,13 @@ workers:
     model: default
     base_url: http://replica:8000/v1
     api_key_env: null
+    options: { upstream: kairyu }
   - name: tier2
     backend: openai
     model: default
     base_url: http://replica:8000/v1
     api_key_env: null
+    options: { upstream: kairyu }
 roles:
   - name: planner
     worker: tier2

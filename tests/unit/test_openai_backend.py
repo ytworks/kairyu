@@ -6,6 +6,10 @@ import pytest
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest, UpstreamClientError
 from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.engine.openai_capabilities import (
+    OpenAIRequestCapabilities,
+    known_openai_upstreams,
+)
 from kairyu.outputs import TokenLogprob
 
 
@@ -394,6 +398,321 @@ async def test_generate_rejects_unsupported_intent_before_client_or_transport(fi
     assert field in str(exc_info.value)
     assert transport_calls == []
     assert backend._client is None
+
+
+@pytest.mark.parametrize(
+    ("upstream", "params", "expected"),
+    [
+        (
+            "openai",
+            SamplingParams(
+                temperature=0.4,
+                top_p=0.8,
+                n=2,
+                presence_penalty=0.2,
+                frequency_penalty=-0.1,
+                max_tokens=31,
+                stop=["END"],
+                seed=9,
+                logprobs=2,
+                extra_args={
+                    "response_format": {"type": "json_object"},
+                    "reasoning_effort": "low",
+                },
+            ),
+            {
+                "temperature": 0.4,
+                "top_p": 0.8,
+                "n": 2,
+                "presence_penalty": 0.2,
+                "frequency_penalty": -0.1,
+                "max_completion_tokens": 31,
+                "stop": ["END"],
+                "seed": 9,
+                "logprobs": True,
+                "top_logprobs": 2,
+                "response_format": {"type": "json_object"},
+                "reasoning_effort": "low",
+            },
+        ),
+        (
+            "vllm",
+            SamplingParams(
+                max_tokens=23,
+                top_k=7,
+                min_p=0.2,
+                repetition_penalty=1.1,
+                stop_token_ids=[3, 4],
+                min_tokens=2,
+                ignore_eos=True,
+                skip_special_tokens=False,
+            ),
+            {
+                "max_tokens": 23,
+                "top_k": 7,
+                "min_p": 0.2,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [3, 4],
+                "min_tokens": 2,
+                "ignore_eos": True,
+                "skip_special_tokens": False,
+            },
+        ),
+        (
+            "kairyu",
+            SamplingParams(
+                max_tokens=19,
+                top_k=5,
+                min_p=0.1,
+                repetition_penalty=1.2,
+                stop_token_ids=[8],
+                min_tokens=4,
+                ignore_eos=True,
+            ),
+            {
+                "max_completion_tokens": 19,
+                "top_k": 5,
+                "min_p": 0.1,
+                "repetition_penalty": 1.2,
+                "stop_token_ids": [8],
+                "min_tokens": 4,
+                "ignore_eos": True,
+            },
+        ),
+        (
+            "anthropic",
+            SamplingParams(
+                max_tokens=17,
+                temperature=0.7,
+                top_p=0.9,
+                stop=["DONE"],
+            ),
+            {
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "max_completion_tokens": 17,
+                "stop": ["DONE"],
+            },
+        ),
+        (
+            "gemini",
+            SamplingParams(
+                max_tokens=13,
+                extra_args={
+                    "response_format": {"type": "json_object"},
+                    "extra_body": {
+                        "google": {"thinking_config": {"thinking_budget": 64}}
+                    },
+                },
+            ),
+            {
+                "max_completion_tokens": 13,
+                "response_format": {"type": "json_object"},
+                "extra_body": {
+                    "google": {"thinking_config": {"thinking_budget": 64}}
+                },
+            },
+        ),
+    ],
+)
+async def test_upstream_profiles_forward_exact_supported_body(upstream, params, expected):
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream=upstream,
+    )
+
+    await backend.generate(_request(sampling_params=params))
+
+    body = captured["body"]
+    assert {key: body[key] for key in expected} == expected
+    assert set(body) == {"model", "messages", *expected}
+    await backend.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("upstream", "field", "params"),
+    [
+        ("openai", "top_k", SamplingParams(top_k=8)),
+        ("anthropic", "n", SamplingParams(n=2)),
+        ("anthropic", "temperature", SamplingParams(temperature=1.1)),
+        ("anthropic", "logprobs", SamplingParams(logprobs=1)),
+        (
+            "anthropic",
+            "response_format",
+            SamplingParams(extra_args={"response_format": {"type": "json_object"}}),
+        ),
+        ("gemini", "logprobs", SamplingParams(logprobs=1)),
+        ("vllm", "prompt_logprobs", SamplingParams(prompt_logprobs=1)),
+        ("kairyu", "prompt_logprobs", SamplingParams(prompt_logprobs=1)),
+        (
+            "openai",
+            "extra_args.extra_body",
+            SamplingParams(extra_args={"extra_body": {"google": {}}}),
+        ),
+        (
+            "gemini",
+            "temperature",
+            SamplingParams(temperature=0.5),
+        ),
+    ],
+)
+async def test_upstream_profile_mismatch_is_400_before_transport(upstream, field, params):
+    transport_calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        transport_calls.append(request)
+        return httpx.Response(200, json={"choices": []})
+
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream=upstream,
+    )
+
+    with pytest.raises(UpstreamClientError, match=field) as exc_info:
+        await backend.generate(_request(sampling_params=params))
+
+    assert exc_info.value.status_code == 400
+    assert transport_calls == []
+    assert backend._client is None
+
+
+async def test_anthropic_strict_tool_schema_is_rejected_before_transport():
+    transport_calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="https://api.anthropic.example/v1",
+        model="claude",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+        upstream="anthropic",
+    )
+    request = GenerationRequest(
+        request_id="strict",
+        prompt="call",
+        sampling_params=SamplingParams(),
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                    "strict": True,
+                },
+            },
+        ),
+    )
+
+    with pytest.raises(UpstreamClientError, match=r"tools\[0\]\.function\.strict"):
+        await backend.generate(request)
+
+    assert transport_calls == []
+    assert backend._client is None
+
+
+async def test_custom_capability_allows_reviewed_sampling_and_vendor_extensions():
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream="generic",
+        capabilities={
+            "allow_sampling_fields": ["best_of"],
+            "allow_extra_args": ["vendor_cache"],
+        },
+    )
+    params = SamplingParams(
+        n=2,
+        best_of=3,
+        extra_args={"vendor_cache": {"mode": "ephemeral"}},
+    )
+
+    await backend.generate(_request(sampling_params=params))
+
+    assert captured["body"]["best_of"] == 3
+    assert captured["body"]["vendor_cache"] == {"mode": "ephemeral"}
+    await backend.shutdown()
+
+
+@pytest.mark.parametrize("reserved", ["model", "stream", "temperature", "response_format"])
+def test_capability_configuration_cannot_allow_core_overrides(reserved):
+    with pytest.raises(ValueError, match="may not override"):
+        OpenAICompatBackend(
+            base_url="https://api.example.com/v1",
+            model="m",
+            capabilities={"allow_extra_args": [reserved]},
+        )
+
+
+def test_named_provider_capability_configuration_cannot_broaden_sampling_contract():
+    with pytest.raises(ValueError, match="require upstream='generic'"):
+        OpenAICompatBackend(
+            base_url="https://api.example.com/v1",
+            model="m",
+            upstream="anthropic",
+            capabilities={"allow_sampling_fields": ["frequency_penalty"]},
+        )
+
+
+def test_unrepresentable_prompt_logprobs_cannot_be_enabled_by_custom_policy():
+    with pytest.raises(ValueError, match="unknown OpenAI sampling capability fields"):
+        OpenAICompatBackend(
+            base_url="https://verified.example/v1",
+            model="m",
+            upstream="generic",
+            capabilities={"allow_sampling_fields": ["prompt_logprobs"]},
+        )
+    with pytest.raises(ValueError, match="may not override"):
+        OpenAICompatBackend(
+            base_url="https://verified.example/v1",
+            model="m",
+            upstream="generic",
+            capabilities={"allow_extra_args": ["prompt_logprobs"]},
+        )
+    with pytest.raises(ValueError, match="unknown OpenAI sampling capability fields"):
+        OpenAIRequestCapabilities(
+            upstream="custom",
+            sampling_fields={"prompt_logprobs"},
+        )
+
+
+def test_upstream_profile_names_are_explicit_and_unknown_fails_at_construction():
+    assert known_openai_upstreams() == (
+        "anthropic",
+        "gemini",
+        "generic",
+        "kairyu",
+        "openai",
+        "vllm",
+    )
+    with pytest.raises(ValueError, match="unknown OpenAI-compatible upstream"):
+        OpenAICompatBackend(
+            base_url="https://api.example.com/v1",
+            model="m",
+            upstream="url-guessed-provider",
+        )
+
+
+def test_resolved_capability_policy_is_deeply_immutable():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        upstream="openai",
+    )
+    assert isinstance(backend.capabilities.sampling_fields, frozenset)
+    assert isinstance(backend.capabilities.extra_args, frozenset)
 
 
 async def test_stream_rejects_unsupported_intent_before_client_or_transport():

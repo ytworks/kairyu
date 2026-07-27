@@ -120,3 +120,38 @@ workers:
             "api_key_env": None,
         },
     }
+
+
+def test_openai_worker_profile_is_forwarded_and_validated(monkeypatch):
+    captured = {}
+
+    def fake_create_backend(name, **options):
+        captured["name"] = name
+        captured["options"] = options
+        return object()
+
+    monkeypatch.setattr("kairyu.dsl.loader.create_backend", fake_create_backend)
+    build_orchestrator(
+        load_spec(
+            """
+workers:
+  - name: local
+    backend: openai
+    model: default
+    base_url: http://replica:8000/v1
+    api_key_env: null
+    options: {upstream: kairyu}
+"""
+        )
+    )
+    assert captured["options"]["upstream"] == "kairyu"
+
+    with pytest.raises(ValidationError, match="unknown OpenAI-compatible upstream"):
+        load_spec(
+            """
+workers:
+  - name: invalid
+    backend: openai
+    options: {upstream: inferred}
+"""
+        )

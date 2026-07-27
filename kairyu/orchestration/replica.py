@@ -280,6 +280,29 @@ class ReplicaPool:
             if self._is_healthy(entry) and not entry.draining
         )
 
+    def validate_request(self, request: GenerationRequest) -> None:
+        """Validate against the intersection of all placeable replicas.
+
+        Placement may select any eligible member after preflight, so accepting
+        a request that only some members can execute would make behavior depend
+        on load or affinity. Backends without a validator retain the historical
+        assumption that they accept the canonical request.
+        """
+
+        failures: list[str] = []
+        for replica_id in self._eligible_ids():
+            validate = getattr(self._entries[replica_id].backend, "validate_request", None)
+            if validate is None:
+                continue
+            try:
+                validate(request)
+            except ValueError as error:
+                failures.append(f"{replica_id}: {error}")
+        if failures:
+            raise ValueError(
+                "request is not supported by every eligible replica: " + "; ".join(failures)
+            )
+
     def _least_outstanding(self, candidates: Sequence[str]) -> str:
         order = {rid: position for position, rid in enumerate(self._entries)}
         return min(candidates, key=lambda rid: (self._entries[rid].outstanding, order[rid]))

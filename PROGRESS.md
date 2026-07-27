@@ -159,6 +159,16 @@ intent applies at the final boundary. Qwen3-32B TP8 produced schema-valid
 for a plain request. The same run fixed the native xgrammar path by preserving
 BYTE_LEVEL/BYTE_FALLBACK metadata and the model lm-head vocabulary width
 through every TP rank.
+OpenAI-compatible outbound requests now resolve an immutable, explicitly
+configured `generic`, `openai`, `vllm`, `anthropic`, `gemini`, or `kairyu`
+capability profile. Non-neutral unsupported intent fails with a pre-dispatch
+400 instead of relying on compatibility layers that may silently ignore it;
+reviewed vendor extensions are allowlisted without being able to override
+backend-owned fields. Direct, ReplicaPool, and AUTO routes validate the final
+capability intersection before placement or private-stage work. Kairyu replicas
+now type and preserve their supported vLLM-style sampling controls at the HTTP
+boundary. A live Qwen3-32B TP8 gateway-to-replica smoke preserved all six Kairyu
+extension controls, and the full CPU suite remains green (2,161 passed).
 G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
 specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
 production gateway exposes direct, standard AUTO (Conductor), and max AUTO
@@ -297,6 +307,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] OpenAI-compatible forwarding becomes capability-aware
+- What: Added immutable `generic`/`openai`/`vllm`/`anthropic`/`gemini`/`kairyu` request profiles, canonical max-token wire names, configurable sampling capabilities and vendor-extension allowlists, load-time configuration validation, and direct/ReplicaPool/AUTO pre-dispatch 400s for unsupported or unsafe intent. The Kairyu HTTP boundary now types and preserves `top_k`, `min_p`, `repetition_penalty`, `stop_token_ids`, `min_tokens`, and `ignore_eos`, while explicitly rejecting unimplemented `best_of`, prompt-logprob, skip-special-token, vendor, and strict-tool intent; dynamic and documented Kairyu replica configurations select that profile explicitly. Exact request-body, negative mismatch, configuration, HTTP-boundary, and live Qwen3-32B TP8 gateway-to-replica checks are green; the full CPU suite reports 2,161 passed.
+- Why: OpenAI-compatible endpoints do not share one truthful field contract—Anthropic explicitly ignores several accepted fields, while vLLM and Kairyu execute non-standard sampling controls. An explicit constructor-resolved policy prevents silent intent loss and URL heuristics without adding provider-specific registries or request-hot-path schema work.
+- Refs: issue #209; `kairyu/engine/openai_capabilities.py`; `kairyu/engine/openai_backend.py`; `kairyu/entrypoints/server/protocol.py`; `kairyu/entrypoints/server/chat_service.py`; `docs/deployment.md`
 
 ### 2026-07-28 — [amendment] AUTO preserves OpenAI intent at a bounded final-output boundary
 - What: Issue #208 replaces prompt-only AUTO dispatch with an immutable

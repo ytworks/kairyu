@@ -45,6 +45,45 @@ def test_gateway_spec_parses():
     assert pool.replicas[0].options["api_key_env"] is None  # keyless node-to-node
 
 
+@pytest.mark.parametrize("upstream", ["openai", "anthropic", "gemini", "kairyu", "vllm"])
+def test_openai_capability_profile_is_validated_while_loading(upstream):
+    spec = load_deployment_spec(
+        f"""
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://remote/v1
+      model: model
+      upstream: {upstream}
+"""
+    )
+    assert spec.engines["remote"].options["upstream"] == upstream
+
+
+def test_invalid_openai_capability_configuration_fails_while_loading():
+    with pytest.raises(ValidationError, match="unknown OpenAI-compatible upstream"):
+        load_deployment_spec(
+            """
+engines:
+  remote:
+    backend: openai
+    options: {upstream: inferred}
+"""
+        )
+    with pytest.raises(ValidationError, match="may not override"):
+        load_deployment_spec(
+            """
+engines:
+  remote:
+    backend: openai
+    options:
+      upstream: openai
+      capabilities: {allow_extra_args: [model]}
+"""
+        )
+
+
 def test_defaults():
     spec = load_deployment_spec("engines:\n  m:\n    backend: mock\n")
     assert spec.server.host == "0.0.0.0"

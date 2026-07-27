@@ -92,6 +92,49 @@ async def test_zero_token_prompt_is_rejected_before_backend_state():
     assert result.finished is True
 
 
+@pytest.mark.parametrize(
+    ("field", "params"),
+    [
+        ("best_of", SamplingParams(best_of=2)),
+        ("prompt_logprobs", SamplingParams(prompt_logprobs=1)),
+        ("skip_special_tokens", SamplingParams(skip_special_tokens=False)),
+        ("extra_args.vendor", SamplingParams(extra_args={"vendor": True})),
+    ],
+)
+def test_validate_request_rejects_native_unsupported_intent(field, params):
+    backend = KairyuBackend()
+    request = GenerationRequest(
+        request_id="unsupported",
+        prompt="hello",
+        sampling_params=params,
+    )
+
+    with pytest.raises(ValueError, match=field):
+        backend.validate_request(request)
+
+
+def test_validate_request_rejects_native_strict_tool_semantics():
+    backend = KairyuBackend()
+    request = GenerationRequest(
+        request_id="strict",
+        prompt="hello",
+        sampling_params=SamplingParams(),
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                    "strict": True,
+                },
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"tools\[0\]\.function\.strict"):
+        backend.validate_request(request)
+
+
 async def test_generate_runs_through_engine_core():
     backend = KairyuBackend(num_pages=256)
     result = await backend.generate(_request("r1", "hello world from kairyu"))

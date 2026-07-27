@@ -8,10 +8,12 @@ import pytest
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
 
 TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
@@ -1699,3 +1701,175 @@ async def test_response_format_passes_through_to_engine():
     assert engine.seen.sampling_params.extra_args["response_format"] == {
         "type": "json_object"
     }
+
+
+async def test_chat_sampling_extensions_are_typed_and_preserved_to_engine():
+    class CapturingBackend(StubBackend):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        async def generate(self, request):
+            self.seen = request
+            return await super().generate(request)
+
+    engine = CapturingBackend()
+    app = create_app(engines={"stub": engine})
+    body = _chat_body("sample")
+    body.update(
+        {
+            "model": "stub",
+            "best_of": 2,
+            "top_k": 8,
+            "min_p": 0.15,
+            "repetition_penalty": 1.2,
+            "stop_token_ids": [7, 9],
+            "min_tokens": 3,
+            "ignore_eos": True,
+            "prompt_logprobs": 2,
+            "skip_special_tokens": False,
+            "extra_args": {"vendor_cache": {"mode": "ephemeral"}},
+        }
+    )
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    params = engine.seen.sampling_params
+    assert params.best_of == 2
+    assert params.top_k == 8
+    assert params.min_p == 0.15
+    assert params.repetition_penalty == 1.2
+    assert params.stop_token_ids == (7, 9)
+    assert params.min_tokens == 3
+    assert params.ignore_eos is True
+    assert params.prompt_logprobs == 2
+    assert params.skip_special_tokens is False
+    assert params.extra_args == {"vendor_cache": {"mode": "ephemeral"}}
+
+
+async def test_unknown_chat_field_is_clear_predispatch_400():
+    engine = StubBackend()
+    app = create_app(engines={"stub": engine})
+    body = _chat_body("sample", model="stub", misspelled_temprature=0.5)
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert "misspelled_temprature" in response.json()["error"]["message"]
+
+
+async def test_openai_upstream_capability_mismatch_is_predispatch_400():
+    transport_calls = []
+
+    def handler(request):
+        transport_calls.append(request)
+        return httpx.Response(200, json={"choices": []})
+
+    engine = OpenAICompatBackend(
+        base_url="https://api.anthropic.example/v1",
+        model="claude",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="anthropic",
+    )
+    app = create_app(engines={"claude": engine})
+    body = _chat_body("two", model="claude", n=2)
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert "n must be <= 1" in response.json()["error"]["message"]
+    assert transport_calls == []
+    assert engine._client is None
+
+
+@pytest.mark.parametrize("wrapper", ["pool", "auto"])
+async def test_wrapped_upstream_capability_mismatch_is_predispatch_400(wrapper):
+    transport_calls = []
+
+    def handler(request):
+        transport_calls.append(request)
+        return httpx.Response(200, json={"choices": []})
+
+    upstream = OpenAICompatBackend(
+        base_url="https://api.anthropic.example/v1",
+        model="claude",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="anthropic",
+    )
+    body = _chat_body("two", n=2)
+    if wrapper == "pool":
+        app = create_app(engines={"wrapped": ReplicaPool([upstream])})
+        body["model"] = "wrapped"
+    else:
+        app = create_app(
+            engines={},
+            orchestrators={
+                "auto": Orchestrator({"tier1": upstream, "tier2": upstream})
+            },
+        )
+        body["model"] = "auto"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert "n must be <= 1" in response.json()["error"]["message"]
+    assert transport_calls == []
+    assert upstream._client is None
+
+
+@pytest.mark.parametrize("moa_samples", [0, 2])
+async def test_auto_internal_engine_capability_mismatch_is_predispatch_400(
+    moa_samples,
+):
+    transport_calls = []
+
+    def handler(request):
+        transport_calls.append(request)
+        return httpx.Response(200, json={"choices": []})
+
+    proposal = OpenAICompatBackend(
+        base_url="https://api.anthropic.example/v1",
+        model="claude",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="anthropic",
+    )
+    final = OpenAICompatBackend(
+        base_url="https://verified.example/v1",
+        model="final",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="generic",
+        capabilities={"allow_sampling_fields": ["best_of"]},
+    )
+    app = create_app(
+        engines={},
+        orchestrators={
+            "auto": Orchestrator(
+                {"tier1": proposal, "tier2": final},
+                moa_samples=moa_samples,
+            )
+        },
+    )
+    body = _chat_body(
+        "First research. Then plan. After that implement. Finally verify.",
+        model="auto",
+        best_of=2,
+    )
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert "internal orchestration intent" in response.json()["error"]["message"]
+    assert "best_of" in response.json()["error"]["message"]
+    assert transport_calls == []
+    assert proposal._client is None
+    assert final._client is None
