@@ -72,6 +72,13 @@ sorts. Randomized reference-model tests preserve FIFO, priority aging, stable
 ties, preemption-front, and head-of-line KV behavior. At 100,000 queued
 requests, full FIFO drain measured 13.81× faster, 10,000 distributed removals
 94.88× faster, and full priority drain 4.79× faster.
+Event-enabled RadixKV nodes now maintain a canonical incremental prefix-hash
+continuation and block digests. Stored/removed events no longer reconstruct
+root paths or repeatedly hash growing tuple slices; singleton punctuation,
+radix splits, branches, decode extensions, and eviction remain byte-compatible
+with the existing protocol. On 32,768 tokens / 2,048 blocks, publication hash
+generation measured 2.3222 s → 0.00871 s (266.67×). Event-disabled caches do
+not allocate hashers or block-digest arrays and perform no SHA work.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -135,7 +142,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
-| M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03). 610 tests. |
+| M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D6 amended 2026-07-27, `docs/design/m11-product.md`): indexed FIFO/priority Scheduler waiting queue preserves aging and HoL contracts without linear list operations. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
@@ -207,6 +214,27 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] RadixKV event hashes extend a node-local chain
+- What: event-enabled radix nodes now store the open canonical tuple SHA-256
+  state, prefix token count, and local block digests. Child creation copies the
+  parent state and feeds only new tokens; digest snapshots add exact tuple
+  punctuation without mutating the continuation. Splits partition existing
+  block hashes and derive only the upper continuation. Stored and removed
+  events read these node-local values directly; event-disabled caches skip all
+  hash state and SHA work.
+- Why: reconstructing every root-to-node prefix and hashing every growing tuple
+  slice made long-prefix event publication quadratic. A streaming continuation
+  makes node creation linear and emission proportional only to the output list,
+  while preserving the existing wire hashes so gateway migration is unnecessary.
+- Verification: 1,948 CPU tests pass (12 skipped, 115 deselected). Randomized
+  branches and splits across four page sizes and five seeds, singleton tuple
+  punctuation, decode extensions, and randomized eviction all match the legacy
+  SHA formula exactly. A reproducible 32,768-token/2,048-block/3-repeat A/B run
+  measured 2.3222 s → 0.00871 s median hash generation (266.67×).
+- Refs: issue #220; m10b D7/A13; `kairyu/engine/core/radix_kv.py`;
+  `tests/unit/test_kv_event_hash_chain.py`;
+  `bench/kv_event_hash_bench.py`.
 
 ### 2026-07-27 — [amendment] scheduler waiting admission uses indexed queues
 - What: the Scheduler waiting list is replaced by an ID-indexed queue. FIFO
