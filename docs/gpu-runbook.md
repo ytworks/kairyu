@@ -135,7 +135,10 @@ GPU-only remainder (design m5 §4.2).
   at every TP degree, all 15 complete safetensors SHA-256s, the measured
   reference noise floor, CUDA/NCCL/topology provenance, and one clean commit;
   it recomputes both amended HF-relative criteria and TP4/8-vs-TP2 instead of
-  trusting reported verdicts.
+  trusting reported verdicts. Closure evidence:
+  `bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json` (HF
+  1005/1024; TP2/4/8 1006/1005/1006; zero substantive disagreements at every
+  degree; all ten assembler checks pass).
 - Gates A3–A5: `bench/serving_bench.py --sweep-tp 2,4,8` (TP=2 base in same file;
   conc-64 report-only point).
 - Gate A6: vs pinned vLLM TP=4/8 (ShareGPT@128 + shared-prefix trace).

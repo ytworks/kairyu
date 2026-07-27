@@ -270,6 +270,22 @@ prefix the other side never produced, so a single moved near-tie is
 indistinguishable from a broken shard. `bench/parity_tp.py` still reports
 free-running match rates for orientation; only the teacher-forced numbers gate.
 
+**A2 closure (2026-07-27).** The dense anchor is
+`RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic@f50dbad2c84590ca17dc51e207c34321b65ff14b`
+(compressed-tensors per-channel FP8 weights, dynamic per-token FP8
+activations, BF16 model/KV dtype). On the fixed 64×16 BOS-free prefixes, HF
+agrees with its own greedy reference on 1005/1024 positions (0.981445) and
+sets the measured tie gap at 0.5 nats. Kairyu achieves TP2 1006/1024, TP4
+1005/1024, and TP8 1006/1024; every TP degree has zero substantive
+disagreements and no missing raw positions/logprobs. Direct TP4/8-vs-TP2 each
+agree on 1004/1024 with zero substantive differences. The self-contained
+`bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json` embeds all
+four source envelopes, 15 full safetensors SHA-256s, CUDA 13.0/NCCL 2.29.7
+and physical PCIe topology, and passes all ten `bench/gate_a2.py` checks.
+The result retains agreeing-position maximum logprob deltas
+0.56900/0.54147/0.25563 as diagnostics; they are not a third A2 criterion
+beyond the two binding amended criteria above.
+
 ## 8. Evidence and reporting rules
 
 G1 rules carried forward verbatim, plus:
