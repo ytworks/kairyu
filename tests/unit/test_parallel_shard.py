@@ -31,6 +31,9 @@ class _FakeTensorComm:
     def tensor_all_reduce(self, tensor):
         return tensor
 
+    def tensor_all_reduce_max(self, tensor):
+        return tensor
+
 
 class TestShardMath:
     def test_shard_bounds(self):
@@ -93,6 +96,43 @@ class TestRowParallelLinear:
         assert linear.bias is None  # detached from the local matmul
         out = wrapped(torch.ones(2, 8))
         assert torch.allclose(out, expected)
+
+    def test_dynamic_fp8_uses_global_per_token_scale(self):
+        from kairyu.quant.linear import Fp8Linear
+
+        class RecordingFp8(Fp8Linear):
+            def __init__(self):
+                super().__init__(4, 3, bias=False)
+                self.seen_scale = None
+
+            def activation_amax(self, x):
+                return torch.tensor([[2.0], [6.0]])
+
+            def forward_with_activation_scale(self, x, activation_scale):
+                self.seen_scale = activation_scale.clone()
+                return x.new_zeros((x.shape[0], self.out_features))
+
+        class GlobalMaxComm:
+            def __init__(self):
+                self.local_amax = None
+
+            def tensor_all_reduce_max(self, tensor):
+                self.local_amax = tensor.clone()
+                return torch.tensor([[4.0], [8.0]])
+
+            def tensor_all_reduce(self, tensor):
+                return tensor
+
+        local = RecordingFp8()
+        comm = GlobalMaxComm()
+        wrapped = RowParallelLinear(local, comm)
+        wrapped(torch.ones(2, 4))
+
+        assert torch.equal(comm.local_amax, torch.tensor([[2.0], [6.0]]))
+        torch.testing.assert_close(
+            local.seen_scale,
+            torch.tensor([[4.0 / 448.0], [8.0 / 448.0]]),
+        )
 
 
 class TestTp1Equivalence:

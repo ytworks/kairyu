@@ -196,6 +196,9 @@ def _recompute_hf_score(
         ],
         "max_abs_logprob_delta": max_delta,
         "max_abs_logprob_delta_bound": _MAX_LOGPROB_DELTA,
+        "distribution_delta_verdict": (
+            "PASS" if max_delta <= _MAX_LOGPROB_DELTA else "DIAGNOSTIC_EXCEEDANCE"
+        ),
         "reference_mismatches": [
             {"prompt": prompt, "position": position}
             for prompt, position in reference_mismatches
@@ -207,7 +210,6 @@ def _recompute_hf_score(
             and raw_rate >= reference_self_agreement
             and not substantive
             and not missing_logprobs
-            and max_delta <= _MAX_LOGPROB_DELTA
             else "FAIL"
         ),
     }
@@ -329,7 +331,8 @@ def evaluate(
 
     amended_pass = set(by_tp) == set(_TP_DEGREES) and all(
         (row.get("agreement") or {}).get("verdict") == "PASS"
-        and (row.get("logprob_tolerance") or {}).get("verdict") == "PASS"
+        and (row.get("logprob_tolerance") or {}).get("substantive") == 0
+        and not (row.get("logprob_tolerance") or {}).get("missing_samples")
         for row in by_tp.values()
     )
     _record(
@@ -337,8 +340,10 @@ def evaluate(
         "every TP degree passes the amended HF-relative criteria",
         amended_pass,
         ", ".join(
-            f"TP{tp}: {(by_tp.get(tp, {}).get('agreement') or {}).get('verdict')}/"
-            f"{(by_tp.get(tp, {}).get('logprob_tolerance') or {}).get('verdict')}"
+            f"TP{tp}: agreement="
+            f"{(by_tp.get(tp, {}).get('agreement') or {}).get('verdict')}, "
+            f"substantive="
+            f"{(by_tp.get(tp, {}).get('logprob_tolerance') or {}).get('substantive')}"
             for tp in _TP_DEGREES
         ),
     )

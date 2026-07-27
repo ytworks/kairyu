@@ -35,6 +35,7 @@ if triton is not None:
         stride_qk,
         QUANT_MAX: tl.constexpr,
         DYNAMIC: tl.constexpr,
+        ROW_SCALE: tl.constexpr,
         ROUND_TO_INT: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
@@ -49,6 +50,8 @@ if triton is not None:
         if DYNAMIC:
             amax = tl.max(tl.abs(values), axis=0)
             scale = tl.maximum(amax / QUANT_MAX, 1e-12)
+        elif ROW_SCALE:
+            scale = tl.load(input_scale_ptr + row).to(tl.float32)
         else:
             scale = tl.load(input_scale_ptr).to(tl.float32)
         scaled = tl.maximum(tl.minimum(values / scale, QUANT_MAX), -QUANT_MAX)
@@ -60,6 +63,24 @@ if triton is not None:
             mask=mask,
         )
         tl.store(output_scale_ptr + row, scale)
+
+    @triton.jit
+    def _row_amax_kernel(
+        x_ptr,
+        output_ptr,
+        k_size,
+        stride_xm,
+        stride_xk,
+        BLOCK_K: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        offsets = tl.arange(0, BLOCK_K)
+        values = tl.load(
+            x_ptr + row * stride_xm + offsets * stride_xk,
+            mask=offsets < k_size,
+            other=0.0,
+        ).to(tl.float32)
+        tl.store(output_ptr + row, tl.max(tl.abs(values), axis=0))
 
     @triton.jit
     def _fp8_w8a8_kernel(
@@ -471,14 +492,22 @@ def _quantize_activation(
     dtype: torch.dtype,
     quant_max: float,
     static_scale: torch.Tensor | None = None,
+    row_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if static_scale is not None and row_scale is not None:
+        raise ValueError("activation quantization accepts one scale source")
     quantized = torch.empty_like(flat, dtype=dtype)
     scales = torch.empty((flat.shape[0], 1), device=flat.device, dtype=torch.float32)
+    if row_scale is not None:
+        row_scale = row_scale.reshape(flat.shape[0], 1).to(
+            device=flat.device, dtype=torch.float32
+        ).contiguous()
+    input_scale = row_scale if row_scale is not None else static_scale
     block_k = triton.next_power_of_2(flat.shape[1])
     _scaled_activation_quant_kernel[(flat.shape[0],)](
         flat,
         quantized,
-        scales if static_scale is None else static_scale,
+        scales if input_scale is None else input_scale,
         scales,
         flat.shape[1],
         flat.stride(0),
@@ -486,7 +515,8 @@ def _quantize_activation(
         quantized.stride(0),
         quantized.stride(1),
         QUANT_MAX=quant_max,
-        DYNAMIC=static_scale is None,
+        DYNAMIC=input_scale is None,
+        ROW_SCALE=row_scale is not None,
         ROUND_TO_INT=dtype is torch.int8,
         BLOCK_K=block_k,
         num_warps=8 if block_k >= 2048 else 4,
@@ -494,7 +524,32 @@ def _quantize_activation(
     return quantized, scales
 
 
-def fp8_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
+def fp8_activation_amax(x: torch.Tensor) -> torch.Tensor:
+    """Return per-token FP32 amax without a full FP32 activation temporary."""
+    if triton is None:
+        raise RuntimeError("Triton is required for FP8 CUDA activation scaling")
+    flat = x.reshape(-1, x.shape[-1]).contiguous()
+    output = torch.empty(
+        (flat.shape[0], 1), device=flat.device, dtype=torch.float32
+    )
+    block_k = triton.next_power_of_2(flat.shape[1])
+    _row_amax_kernel[(flat.shape[0],)](
+        flat,
+        output,
+        flat.shape[1],
+        flat.stride(0),
+        flat.stride(1),
+        BLOCK_K=block_k,
+        num_warps=8 if block_k >= 2048 else 4,
+    )
+    return output.reshape(*x.shape[:-1], 1)
+
+
+def fp8_linear_forward(
+    x: torch.Tensor,
+    module,
+    activation_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
     flat, output = _prepare(x, module, "fp8")
     # Dynamic per-token W8A8 activation quantization. Materializing this [M,K]
     # tensor is bounded by the live activation; the forbidden [N,K] floating
@@ -505,6 +560,7 @@ def fp8_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
         torch.float8_e4m3fn,
         448.0,
         static_scale=input_scale,
+        row_scale=activation_scale,
     )
     per_channel = module.weight_scale.numel() != 1
     if module.in_features % 16 == 0 and module.out_features % 16 == 0:

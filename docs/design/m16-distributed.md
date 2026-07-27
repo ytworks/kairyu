@@ -2,9 +2,10 @@
 
 Status: **Implemented** (2026-07-03). Reviewed (1-reviewer panel with gloo
 spawn verification incl. uneven all_to_all splits, 2026-07-03; §6 binding).
-Amended 2026-07-25 (D1: `tensor_reduce_scatter`, measured) and 2026-07-26
+Amended 2026-07-25 (D1: `tensor_reduce_scatter`, measured), 2026-07-26
 (**D4**: separate TP control/model serving groups; **D6**: opt-in sequence
-parallelism, lifting the §3 call-site non-goal).
+parallelism, lifting the §3 call-site non-goal), and 2026-07-27
+(**D2/A10**: compressed-FP8 dense TP).
 Milestone: M16 (roadmap Track E3 local half; G2-as-amended multi-GPU gates'
 code, NCCL swapped in on deploy day)
 Date: 2026-07-03
@@ -84,6 +85,22 @@ are thin wrappers. A `TpDenseDecoder` builder maps the M12 tree: q/k/v/gate/up
 column-parallel, o/down row-parallel, embed/lm_head vocab-parallel, norms
 replicated. Per-rank weights load via `CheckpointReader.get_slice` along the
 module's shard dim (the m8 seam, unused until now).
+
+> **Amended 2026-07-27 (G2 A2).** Dense compressed-tensors FP8 is the first
+> quantized TP contract. Projection weights follow D2's existing column/row
+> shard axis. Per-output-channel `weight_scale` shards with a column-parallel
+> output axis and remains replicated for row-parallel projections. Serialized
+> BF16 scales widen value-preservingly to the FP32 fused scaled-MM ABI.
+>
+> Dynamic activation scaling is also topology-aware. Column-parallel ranks see
+> the same full activation and independently obtain the same scale. A
+> row-parallel rank sees only one input-feature shard, so a rank-local amax
+> silently changes W8A8 quantization as TP changes. `RowParallelLinear`
+> therefore MAX-reduces one FP32 amax per token, then every rank quantizes its
+> local feature shard with that global per-token scale before the ordinary
+> partial GEMM and output sum. No full FP32 activation or dequantized weight is
+> materialized. Other quantization formats remain rejected until their packed
+> shard/scale contracts are specified.
 
 ### D3 — EP dispatch/combine (`models/moe_parallel.py`)
 
@@ -271,8 +288,10 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   input mid, norm+logits final), per-stage pools with rebased layer indices
   (runner sizing check accommodates), final stage samples and returns
   StepOutput to the driver.
-- **A10**: quantized checkpoints × TP rejected loudly in M16 (group-crossing
-  slices are real machinery with no G2 payoff).
+- **A10 (amended 2026-07-27)**: dense compressed-FP8 TP is supported under
+  D2's explicit weight/scale/global-activation-scale contract. Other quantized
+  checkpoints × TP are still rejected loudly; packed formats require their own
+  group-crossing shard specification.
 - **A11**: worker startup handshake (rank 0 broadcasts num_pages/page_size/
   num_layers/config hash; workers validate) — workers have no cache object so
   the m12 sizing check doesn't fire; shutdown = broadcast None sentinel;

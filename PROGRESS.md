@@ -168,7 +168,10 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - What: dense tensor parallel loading now accepts compressed-tensors FP8,
   shards projection weights and output-channel scales with their column
   projections, replicates row-parallel output scales, and value-preservingly
-  widens serialized BF16 scales to the fused scaled-MM FP32 ABI. The shared HF
+  widens serialized BF16 scales to the fused scaled-MM FP32 ABI. Dynamic FP8
+  row-parallel projections MAX-reduce one amax per token so all ranks use the
+  unsharded activation's scale instead of a TP-degree-dependent local scale.
+  The shared HF
   reference can use Accelerate multi-GPU placement and batching. Candidate
   outputs retain all per-position tokens/logprobs, complete checkpoint and
   topology provenance, and the new `gate_a2.py` independently recomputes the
@@ -176,7 +179,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - Why: A2 could not previously load its 70B FP8 anchor at any TP degree, nor
   create a reference that exceeded one GPU's memory, and reported summary
   verdicts alone could not fail closed on partial or fabricated evidence.
-- Refs: issue #152; G2 A2 and §7; GPU runbook §6;
+- Refs: issue #152; m16 D2/A10; G2 A2 and §7; GPU runbook §6;
   `kairyu/models/{loader,parallel}.py`; `bench/{parity_hf,gate_a2}.py`
 
 ### 2026-07-27 — [amendment] m14 D2/D4: quantized CUDA forward is fused and production-wired

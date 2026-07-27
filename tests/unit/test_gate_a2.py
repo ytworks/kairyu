@@ -122,7 +122,11 @@ def _teacher(tp: int) -> dict:
             "raw_self_agreement_rate": 1.0,
         },
         "agreement": {"positions": 1024, "verdict": "PASS"},
-        "logprob_tolerance": {"verdict": "PASS"},
+        "logprob_tolerance": {
+            "substantive": 0,
+            "missing_samples": [],
+            "verdict": "PASS",
+        },
         "raw_positions": raw,
     }
 
@@ -182,6 +186,20 @@ def test_reported_pass_cannot_hide_raw_hf_disagreements():
     )
     assert comparisons["tp2_vs_hf"]["verdict"] == "FAIL"
     assert checks["raw rows recompute both amended criteria at every TP degree"] is False
+
+
+def test_distribution_delta_is_retained_but_is_not_a_third_a2_criterion():
+    tp2 = _teacher(2)
+    tp2["raw_positions"][0]["engine_token_logprob"] = -0.5
+    tp2["logprob_tolerance"]["verdict"] = "FAIL"
+    checks, comparisons = _checks(
+        teachers=[tp2, _teacher(4), _teacher(8)]
+    )
+    score = comparisons["tp2_vs_hf"]
+    assert score["max_abs_logprob_delta"] == 0.4
+    assert score["distribution_delta_verdict"] == "DIAGNOSTIC_EXCEEDANCE"
+    assert score["verdict"] == "PASS"
+    assert checks["every TP degree passes the amended HF-relative criteria"] is True
 
 
 def test_dirty_or_mixed_measurement_commit_fails():

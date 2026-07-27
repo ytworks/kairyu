@@ -100,6 +100,40 @@ class Fp8Linear(QuantizedLinearBase):
             out = out + self.bias
         return out.to(x.dtype)
 
+    def activation_amax(self, x: torch.Tensor) -> torch.Tensor:
+        """Per-token amax used to synchronize row-parallel quantization."""
+        if x.device.type == "cuda":
+            from kairyu.kernels.quant_gemm_gpu import fp8_activation_amax
+
+            return fp8_activation_amax(x)
+        return x.to(torch.float32).abs().amax(dim=-1, keepdim=True)
+
+    def forward_with_activation_scale(
+        self, x: torch.Tensor, activation_scale: torch.Tensor
+    ) -> torch.Tensor:
+        """Run dynamic FP8 with a precomputed per-token global TP scale."""
+        if not self.activation_dynamic:
+            raise ValueError("a global per-token scale requires dynamic FP8 activation")
+        activation_scale = activation_scale.to(
+            device=x.device, dtype=torch.float32
+        ).clamp(min=1e-12)
+        if x.device.type == "cuda":
+            from kairyu.kernels.quant_gemm_gpu import fp8_linear_forward
+
+            return fp8_linear_forward(
+                x, self, activation_scale=activation_scale
+            )
+        scaled = (x.to(torch.float32) / activation_scale).clamp(
+            -fp8.FP8_MAX, fp8.FP8_MAX
+        )
+        x_q = scaled.to(torch.float8_e4m3fn)
+        out = fp8.fp8_w8a8_matmul(
+            x_q, activation_scale, self.weight, self.weight_scale
+        )
+        if self.bias is not None:
+            out = out + self.bias
+        return out.to(x.dtype)
+
 
 class Int8Linear(QuantizedLinearBase):
     """compressed-tensors INT8 W8A8: dynamic per-token activations."""

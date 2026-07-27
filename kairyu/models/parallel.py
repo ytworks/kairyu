@@ -210,7 +210,23 @@ class RowParallelLinear(nn.Module):
         local.bias = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        partial = self.local(x)
+        from kairyu.quant.linear import Fp8Linear
+
+        if isinstance(self.local, Fp8Linear) and self.local.activation_dynamic:
+            # A row-parallel rank sees only its input-feature shard. Dynamic
+            # W8A8 quantization must nevertheless use the same per-token scale
+            # the unsharded activation would use; rank-local scales change the
+            # numeric contract with TP degree. Synchronize only the M amax
+            # values, then quantize each local feature shard with that global
+            # scale (the extra collective is tiny relative to the output sum).
+            local_amax = self.local.activation_amax(x).contiguous()
+            global_amax = self._comm.tensor_all_reduce_max(local_amax)
+            activation_scale = (global_amax / 448.0).clamp(min=1e-12)
+            partial = self.local.forward_with_activation_scale(
+                x, activation_scale
+            )
+        else:
+            partial = self.local(x)
         if self._context is None:
             reduced = self._comm.tensor_all_reduce(partial.contiguous())
         else:
