@@ -93,7 +93,13 @@ class ExecutedChat:
 
 
 def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
-    extra_args = {"response_format": request.response_format} if request.response_format else {}
+    extra_args = dict(request.extra_args or {})
+    if "response_format" in extra_args:
+        raise ValueError(
+            "extra_args.response_format is reserved; use the top-level response_format field"
+        )
+    if request.response_format:
+        extra_args["response_format"] = request.response_format
     logprobs = None
     if request.logprobs:
         logprobs = request.top_logprobs or 0
@@ -103,13 +109,22 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
     return SamplingParams(
         temperature=request.temperature,
         top_p=request.top_p,
+        top_k=request.top_k,
+        min_p=request.min_p,
         n=request.n,
+        best_of=request.best_of,
         max_tokens=max_tokens,
         presence_penalty=request.presence_penalty,
         frequency_penalty=request.frequency_penalty,
+        repetition_penalty=request.repetition_penalty,
         stop=request.stop,
+        stop_token_ids=request.stop_token_ids,
+        min_tokens=request.min_tokens,
+        ignore_eos=request.ignore_eos,
         seed=request.seed,
         logprobs=logprobs,
+        prompt_logprobs=request.prompt_logprobs,
+        skip_special_tokens=request.skip_special_tokens,
         extra_args=extra_args,
     )
 
@@ -184,6 +199,10 @@ def validate_chat_input(
     request: ChatCompletionRequest,
     chat_templates: Mapping[str, ChatTemplate] | None,
 ) -> ValidatedChatInput:
+    if request.model_extra:
+        raise ChatRequestError(
+            "unsupported request fields: " + ", ".join(sorted(request.model_extra))
+        )
     normalized_tool_choice = _normalize_tool_choice(request)
     if request.stream_options is not None and not request.stream:
         raise ChatRequestError("stream_options is only allowed when stream is true")

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 from yaml.resolver import BaseResolver
 
+from kairyu.engine.openai_capabilities import resolve_openai_capabilities
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.pricing import PriceSheet
@@ -40,6 +41,15 @@ class BackendSpec(BaseModel):
             "Readiness (not liveness) so a drained/wedged node stays ejected (O3)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_openai_capabilities(self) -> BackendSpec:
+        if self.backend == "openai":
+            resolve_openai_capabilities(
+                self.options.get("upstream", "generic"),
+                self.options.get("capabilities"),
+            )
+        return self
 
     def resolved_health_url(self) -> str | None:
         if self.health_url is not None:

@@ -418,6 +418,31 @@ class KairyuBackend:
         self._engine_error: Exception | None = None  # last step failure, for readiness()
 
     def validate_request(self, request: GenerationRequest) -> None:
+        params = request.sampling_params
+        unsupported: list[str] = []
+        if params.best_of is not None:
+            unsupported.append("best_of")
+        if params.prompt_logprobs is not None:
+            unsupported.append("prompt_logprobs")
+        if not params.skip_special_tokens:
+            unsupported.append("skip_special_tokens")
+        if not isinstance(params.extra_args, Mapping):
+            unsupported.append("extra_args")
+        else:
+            unsupported.extend(
+                f"extra_args.{key}"
+                for key in params.extra_args
+                if key != "response_format"
+            )
+        for index, tool in enumerate(request.tools):
+            function = tool.get("function")
+            if isinstance(function, Mapping) and function.get("strict") is True:
+                unsupported.append(f"tools[{index}].function.strict")
+        if unsupported:
+            raise ValueError(
+                "Kairyu backend does not support request fields: "
+                + ", ".join(sorted(unsupported))
+            )
         self._loop.tokenize_prompt(request.prompt)
 
     async def _pump(self) -> None:

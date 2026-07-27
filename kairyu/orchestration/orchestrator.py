@@ -275,6 +275,24 @@ class Orchestrator:
         fallback = next(iter(self._engines))
         return tuple(key if key in self._engines else fallback for key in sorted(keys))
 
+    def _internal_engine_keys(
+        self,
+        decision: RouteDecision | None,
+    ) -> tuple[str, ...]:
+        if decision is not None and decision.target != "multi_agent":
+            return ()
+        if self._moa_samples > 0:
+            keys = {"tier1"}
+        else:
+            final_role = self._conductor_final_role()
+            keys = {
+                role.worker
+                for role in self._roles
+                if role.name != final_role.name
+            }
+        fallback = next(iter(self._engines))
+        return tuple(key if key in self._engines else fallback for key in sorted(keys))
+
     def _validate_call(
         self,
         call: OrchestrationRequest,
@@ -305,6 +323,58 @@ class Orchestrator:
                 "n > 1 is not supported by final orchestration engine(s): " + ", ".join(unsupported)
             )
 
+    def _validate_final_intent(
+        self,
+        call: OrchestrationRequest,
+        decision: RouteDecision | None,
+    ) -> None:
+        failures: list[str] = []
+        for key in self._final_engine_keys(decision):
+            validate = getattr(self._engines[key], "validate_request", None)
+            if validate is None:
+                continue
+            request = GenerationRequest(
+                request_id=f"preflight-{key}",
+                prompt=f"{self._shared_prefix}{call.prompt}",
+                sampling_params=call.sampling_params,
+                tools=call.tools,
+                tool_choice=call.tool_choice,
+                tools_in_prompt=call.tools_in_prompt,
+            )
+            try:
+                validate(request)
+            except ValueError as error:
+                failures.append(f"{key}: {error}")
+        if failures:
+            raise ValueError(
+                "final orchestration intent is unsupported: " + "; ".join(failures)
+            )
+
+    def _validate_internal_intent(
+        self,
+        call: OrchestrationRequest,
+        decision: RouteDecision | None,
+    ) -> None:
+        failures: list[str] = []
+        sampling_params = self._internal_sampling_params(call)
+        for key in self._internal_engine_keys(decision):
+            validate = getattr(self._engines[key], "validate_request", None)
+            if validate is None:
+                continue
+            request = GenerationRequest(
+                request_id=f"preflight-internal-{key}",
+                prompt=f"{self._shared_prefix}{call.prompt}",
+                sampling_params=sampling_params,
+            )
+            try:
+                validate(request)
+            except ValueError as error:
+                failures.append(f"{key}: {error}")
+        if failures:
+            raise ValueError(
+                "internal orchestration intent is unsupported: " + "; ".join(failures)
+            )
+
     def validate_request(self, request: str | OrchestrationRequest) -> None:
         """Preflight capability checks without dispatching generation."""
 
@@ -318,6 +388,8 @@ class Orchestrator:
             except NotImplementedError:
                 decision = None
         self._validate_call(call, decision)
+        self._validate_final_intent(call, decision)
+        self._validate_internal_intent(call, decision)
 
     def _conductor_workers(self, notes: list[str]) -> dict[str, EngineBackend]:
         needed = {role.worker for role in self._roles}

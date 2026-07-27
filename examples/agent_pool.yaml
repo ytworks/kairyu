@@ -11,6 +11,7 @@ workers:
     # base_url: https://api.openai.com/v1
     # model: gpt-4o
     # api_key_env: OPENAI_API_KEY
+    # options: { upstream: openai }
 
 roles:
   - name: planner

@@ -141,20 +141,30 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     temperature: float = 1.0
     top_p: float = 1.0
+    top_k: int = -1
+    min_p: float = 0.0
     n: int = 1
+    best_of: int | None = None
     logprobs: bool = False
     top_logprobs: int | None = None
+    prompt_logprobs: int | None = None
     stream: bool = False
     stream_options: StreamOptions | None = None
     max_tokens: int | None = None
     max_completion_tokens: int | None = None  # modern-SDK alias of max_tokens
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    repetition_penalty: float = 1.0
     stop: str | list[str] | None = None
+    stop_token_ids: list[int] | None = None
+    min_tokens: int = 0
+    ignore_eos: bool = False
+    skip_special_tokens: bool = True
     seed: int | None = None
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
     response_format: dict | None = None
+    extra_args: dict[str, object] | None = None
     user: str | None = None
 
 

@@ -73,8 +73,8 @@ engines:            # name -> single backend
 pools:              # name -> ReplicaPool of backends
   llama-70b:
     replicas:
-      - { backend: openai, options: { base_url: "http://gpu-0:8000/v1", model: "...", api_key_env: null } }
-      - { backend: openai, options: { base_url: "http://gpu-1:8000/v1", model: "...", api_key_env: null } }
+      - { backend: openai, options: { base_url: "http://gpu-0:8000/v1", model: "...", api_key_env: null, upstream: kairyu } }
+      - { backend: openai, options: { base_url: "http://gpu-1:8000/v1", model: "...", api_key_env: null, upstream: kairyu } }
     unhealthy_after: 3
     queue_depth_threshold: 8
     probe_interval_s: 5.0

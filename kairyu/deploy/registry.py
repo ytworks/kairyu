@@ -138,6 +138,7 @@ def openai_replica_factory(
         base_url=identity.address,
         model=identity.model,
         api_key_env=identity.api_key_env,
+        upstream="kairyu",
     )
     base = identity.address.removesuffix("/v1")
     # readiness, not liveness: a drained/wedged replica must stay ejected (O3)

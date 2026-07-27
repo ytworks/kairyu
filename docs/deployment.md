@@ -120,9 +120,9 @@ pools:
   llama-70b:
     replicas:
       - backend: openai
-        options: { base_url: "http://gpu-0:8000/v1", model: "llama-70b", api_key_env: null }
+        options: { base_url: "http://gpu-0:8000/v1", model: "llama-70b", api_key_env: null, upstream: kairyu }
       - backend: openai
-        options: { base_url: "http://gpu-1:8000/v1", model: "llama-70b", api_key_env: null }
+        options: { base_url: "http://gpu-1:8000/v1", model: "llama-70b", api_key_env: null, upstream: kairyu }
     unhealthy_after: 3
     queue_depth_threshold: 8
     probe_interval_s: 5.0
@@ -133,6 +133,73 @@ embeddings:
     dimensions: 384
 batch: { data_dir: /var/lib/kairyu/batch, max_concurrency: 8 }
 ```
+
+### OpenAI-compatible upstream capabilities
+
+Set `options.upstream` explicitly whenever the provider is known. Kairyu
+validates non-default request intent before opening the HTTP client, so a
+compatibility endpoint cannot return 200 while silently discarding a field.
+The `generic` default preserves older deployments but should be treated as a
+migration profile.
+
+| `upstream` | Portable request controls | Provider-specific notes |
+|---|---|---|
+| `openai` | OpenAI Chat Completions sampling, logprobs, structured output, tools | Emits the canonical `max_completion_tokens`; allows `reasoning_effort`, `service_tier`, and `parallel_tool_calls` in `extra_args`. |
+| `anthropic` | temperature (0–1), top-p, one completion, max tokens, stop, non-strict tools | Rejects penalties, seed, logprobs, `response_format`, and strict tool schemas because the [Anthropic compatibility layer](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk) documents them as ignored. Anthropic recommends its native API for production features. |
+| `gemini` | max tokens, structured output, and non-strict tools | Allows `reasoning_effort` and the documented `extra_body.google` extension object. Sampling controls vary across Gemini model families, so fields not guaranteed by the [Gemini OpenAI compatibility contract](https://ai.google.dev/gemini-api/docs/openai) fail closed unless a pinned deployment declares a verified custom contract. |
+| `kairyu` | OpenAI controls plus `top_k`, `min_p`, `repetition_penalty`, `stop_token_ids`, `min_tokens`, and `ignore_eos` | Use for gateway-to-Kairyu replica traffic. These extensions are typed and preserved at the receiving HTTP boundary. |
+| `vllm` | OpenAI controls plus result-preserving [vLLM Chat extensions](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/) | Includes `skip_special_tokens` in addition to the Kairyu extension set. `prompt_logprobs` fails closed until Kairyu's result/API types can return the upstream prompt distribution. |
+
+Example provider configurations:
+
+```yaml
+engines:
+  hosted-openai:
+    backend: openai
+    options:
+      base_url: https://api.openai.com/v1
+      model: gpt-4o
+      api_key_env: OPENAI_API_KEY
+      upstream: openai
+  hosted-anthropic:
+    backend: openai
+    options:
+      base_url: https://api.anthropic.com/v1
+      model: claude-sonnet-4-5
+      api_key_env: ANTHROPIC_API_KEY
+      upstream: anthropic
+  hosted-gemini:
+    backend: openai
+    options:
+      base_url: https://generativelanguage.googleapis.com/v1beta/openai
+      model: gemini-2.5-flash
+      api_key_env: GEMINI_API_KEY
+      upstream: gemini
+```
+
+Vendor extensions use `SamplingParams(extra_args=...)`. Each key must be in
+the selected preset's allowlist or added by deployment configuration:
+for example, Gemini thinking configuration is
+`extra_args={"extra_body": {"google": {"thinking_config": {...}}}}`.
+
+```yaml
+options:
+  upstream: generic
+  capabilities:
+    allow_extra_args: [vendor_cache]
+    allow_sampling_fields: [best_of]  # only after verifying this endpoint executes it
+```
+
+Core keys such as `model`, `messages`, `temperature`, `tools`, and `stream`
+cannot be allowlisted or overwritten through vendor extensions.
+`response_format` remains a reserved canonical intent in the existing
+`SamplingParams.extra_args` representation and cannot be reclassified by the
+vendor allowlist. Capability overrides are validated while loading deployment
+and orchestrator specs; unsupported non-neutral request values return a
+pre-dispatch HTTP 400.
+Additive sampling overrides are limited to the `generic` custom-provider
+profile. Named provider presets may be narrowed but not broadened, preventing
+configuration from re-enabling fields that the provider documents as ignored.
 
 Operational notes:
 

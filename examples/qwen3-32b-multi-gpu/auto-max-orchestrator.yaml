@@ -16,11 +16,13 @@ workers:
     base_url: http://127.0.0.1:8001/v1
     model: qwen3-32b
     api_key_env: null
+    options: {upstream: kairyu}
   - name: tier2
     backend: openai
     base_url: http://127.0.0.1:8001/v1
     model: qwen3-32b
     api_key_env: null
+    options: {upstream: kairyu}
 
 budget:
   # Three proposals plus one synthesis call.

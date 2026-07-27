@@ -10,6 +10,7 @@ from prometheus_client.parser import text_string_to_metric_families
 import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_config, build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
+from kairyu.dsl.loader import load_spec
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantLimits, UsageLedger
@@ -27,6 +28,8 @@ pools:
 """
 
 GATEWAY_GPU_YAML = Path(__file__).parents[2] / "deploy/compose/gateway-gpu.yaml"
+GATEWAY_YAML = Path(__file__).parents[2] / "deploy/compose/gateway.yaml"
+ROUTING_YAML = Path(__file__).parents[2] / "deploy/compose/routing.yaml"
 QWEN_AUTO_GATEWAY_YAML = (
     Path(__file__).parents[2]
     / "examples/qwen3-32b-multi-gpu/auto-gateway.yaml"
@@ -94,6 +97,18 @@ async def test_gpu_gateway_exposes_canonical_default_model():
 
     assert "default" in ids
     assert "llama" not in ids
+
+
+def test_shipped_kairyu_gateway_hops_select_kairyu_capabilities():
+    for path in (GATEWAY_YAML, GATEWAY_GPU_YAML):
+        spec = load_deployment_spec(path)
+        replicas = next(iter(spec.pools.values())).replicas
+        assert replicas
+        assert all(entry.options["upstream"] == "kairyu" for entry in replicas)
+
+    routing = load_spec(ROUTING_YAML)
+    assert routing.workers
+    assert all(worker.options["upstream"] == "kairyu" for worker in routing.workers)
 
 
 async def test_qwen_auto_gate_resolves_relative_orchestrator_spec():

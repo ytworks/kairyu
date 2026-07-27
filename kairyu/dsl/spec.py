@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from kairyu.engine.openai_capabilities import resolve_openai_capabilities
+
 
 class WorkerSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -14,6 +16,15 @@ class WorkerSpec(BaseModel):
     base_url: str | None = None
     api_key_env: str | None = None
     options: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_openai_capabilities(self) -> WorkerSpec:
+        if self.backend == "openai":
+            resolve_openai_capabilities(
+                self.options.get("upstream", "generic"),
+                self.options.get("capabilities"),
+            )
+        return self
 
 
 class RoleNodeSpec(BaseModel):
