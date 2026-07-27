@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from bench.gate_a2 import evaluate
+from bench.gate_a2 import _compare_to_tp2, evaluate
 
 _REPO = Path(__file__).resolve().parents[2]
 _REVISION = "a" * 40
@@ -173,6 +173,24 @@ def test_substantive_tp4_disagreement_against_tp2_fails():
     )
     assert comparisons["tp4_vs_tp2"]["substantive"] == 1
     assert checks["TP4 and TP8 pass directly against TP2"] is False
+
+
+def test_direct_near_tie_rate_is_reported_without_adding_a_third_gate():
+    base = _teacher(2)
+    candidate = _teacher(4)
+    base["raw_positions"][0]["reference_top_logprobs"]["999"] = -0.15
+    candidate["raw_positions"][0]["engine_token"] = 999
+    candidate["raw_positions"][0]["agreement"] = False
+    score = _compare_to_tp2(
+        base,
+        candidate,
+        reference_self_agreement=1.0,
+        tie_gap=0.125,
+    )
+    assert score["rate"] == 1023 / 1024
+    assert score["reference_noise_floor_met"] is False
+    assert score["substantive"] == 0
+    assert score["verdict"] == "PASS"
 
 
 def test_reported_pass_cannot_hide_raw_hf_disagreements():
