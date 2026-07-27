@@ -447,9 +447,30 @@ class PagedModelRunner:
             # frequency and repetition penalties are computed over this history,
             # so an overlap snapshot missing the in-flight token would penalise a
             # different set of tokens than the eager path and pick differently
-            outputs=self._effective_outputs(state, position),
+            outputs=state.outputs,
+            pending_outputs=self._pending_host_outputs(state, position),
+            history_epoch=getattr(state, "output_epoch", 0),
             eos_token_id=state.request.eos_token_id,
         )
+
+    def _pending_host_outputs(
+        self, state: object, position: int
+    ) -> tuple[int, ...]:
+        """Uncommitted CPU completion history, bounded by overlap depth."""
+        committed = len(state.outputs)
+        if position <= committed:
+            return ()
+        pending = self._future_tokens.get(state.request.request_id, {})
+        values: list[int] = []
+        for index in range(committed, position):
+            token = pending.get(index)
+            if token is None:
+                raise RuntimeError(
+                    f"no token for {state.request.request_id} at position "
+                    f"{index} while sampling position {position}"
+                )
+            values.append(token)
+        return tuple(values)
 
     def _pending_device_outputs(
         self, state: object, position: int
@@ -484,6 +505,7 @@ class PagedModelRunner:
                 prompt=state.request.prompt_token_ids,
                 outputs=state.outputs,
                 pending_outputs=self._pending_device_outputs(state, position),
+                history_epoch=getattr(state, "output_epoch", 0),
                 eos_token_id=state.request.eos_token_id,
             )
         request_id = state.request.request_id

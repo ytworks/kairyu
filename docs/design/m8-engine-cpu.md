@@ -186,6 +186,54 @@ sampling (and therefore spec ≡ greedy) is unchanged. Device penalties include
 committed host history plus uncommitted device scalars. Logprobs remain raw and
 temperature-independent.
 
+**Incremental penalty-state amendment (2026-07-27, issue #216):** a
+penalty-active request lazily allocates one dense row for its logits
+device/vocabulary: prompt membership, repetition membership, output counts,
+and output membership. It retains its own append-only committed shadow, while
+the scheduler supplies an output epoch that changes only when an existing
+prefix is replaced. The normal path therefore neither copies nor compares the
+retained history: it updates only newly committed tokens and the bounded
+overlap-ahead suffix. A shorter history, changed epoch, or replaced pending
+suffix rebuilds or subtracts only on that exceptional path, so rejected or
+restarted positions never leak into later penalties. The exact device scalar
+already counted as pending becomes the scheduler's committed result without a
+second state mutation; pending device tokens otherwise reconcile by tensor
+identity, with no scalar D2H comparison. CPU active IDs use growing buffers
+plus position maps, with a one-time initial sort and O(1)-amortized normal
+insert/remove instead of rebuilding a sorted tensor every token.
+`Sampler.hand_over()` moves the request state, and the first sample on a
+different P-D device rebuilds the row from authoritative prompt/output history
+while releasing the old device row.
+
+This responsibility boundary is Kairyu-native: request-owned persistent state
+fits its overlap scheduler, sampler lifecycle, and P-D handoff. It is not copied
+from current vLLM. vLLM main at
+`5f89a03dcb52702a62644e15b93f766765d06b28` converts full per-request output
+lists to a padded CPU tensor and transfers it to the logits device on each
+penalty application; its source labels that implementation inefficient and
+planned for rework. We therefore compared both the legacy rebuild and an
+independently optimized committed-count plus transient-pending alternative.
+
+Selection uses the complete normal step, not steady apply alone. At Qwen's
+151,936-word vocabulary, 32,768 output tokens, and pending depth 2,
+committed-plus-effective-pending counts measured 513.9 µs on CPU versus 672.8
+µs for the optimized alternative and 9,265.6 µs for the former full-history
+rebuild (1.31× and 18.03× faster). CUDA measured 190.7 µs versus 334.7 µs and
+6,879.2 µs (1.76× and 36.07× faster). The comparison gives the alternative the
+same single-token CPU direct update, reuses the prior pending CUDA scalar, and
+applies total counts in one operation for exact floating-point order; it does
+not charge avoidable tensor construction or rounding changes to that design.
+The benchmark commits one token and shifts the pending window on every measured
+iteration, uses the production mutable-list/epoch contract, and checks every
+transition plus a duplicate-pending adversarial case bitwise against the legacy
+oracle outside the timer. Repetition-only short history (32 tokens) also wins:
+138.7 µs versus 176.0 µs alternative and 501.1 µs legacy. Steady apply retains
+the win on both devices (1.10× CPU and 2.71× CUDA versus the alternative). The
+dense tensors cost 7 bytes per vocabulary entry (1,063,552 bytes at 151,936);
+CPU additionally owns sparse active-ID containers. Reproduce with
+`uv run python bench/sampler_penalty_state_bench.py --device cpu` and the same
+command with `--device cuda:0`.
+
 XGrammar is intentionally excluded from the device path because its matcher is
 a stateful CPU FSM. Structured requests retain the mask-first/accept-once path
 below; this preserves grammar correctness at the cost of the documented host

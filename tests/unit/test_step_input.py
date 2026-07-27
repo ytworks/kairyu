@@ -143,3 +143,20 @@ def test_state_sync_delta_reconstructs_full_snapshot_each_step():
     drive_one_step({"a": 101, "b": 200})  # both decode; a hits max_new_tokens -> finishes
     drive_one_step({"b": 201})  # only b remains; "a" must be dropped from sync
     assert "a" not in worker._states
+
+
+def test_state_sync_propagates_output_epoch_as_full_snapshot():
+    from kairyu.engine.core.step_input import StateSync
+
+    scheduler = _scheduler()
+    scheduler.add_request(EngineRequest("a", (1, 2, 3, 4)))
+    plan = scheduler.schedule()
+    sync = StateSync()
+    sync.apply(sync.diff(plan.scheduled, scheduler.states))
+
+    scheduler.states["a"].output_epoch += 1
+    delta = sync.diff(plan.scheduled, scheduler.states)
+
+    assert len(delta.new) == 1
+    assert not delta.updates
+    assert sync.apply(delta)["a"].output_epoch == 1

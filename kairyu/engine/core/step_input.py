@@ -42,6 +42,7 @@ class RequestSnapshot:
     max_new_tokens: int
     num_cached_tokens: int = 0
     sampling: EngineSampling = field(default_factory=EngineSampling)
+    output_epoch: int = 0
     # P-D runs prefill under an internal clone id while decode uses the public
     # one, so the id a sampler keys state under is NOT always `request_id`
     # (m5 D5). The snapshot has to carry it: the overlap path and the TP workers
@@ -110,6 +111,7 @@ def _snapshot_state(state: object) -> RequestSnapshot:
         num_cached_tokens=allocation.num_cached_tokens if allocation is not None else 0,
         sampling=getattr(request, "sampling", EngineSampling()),
         sampling_id=getattr(request, "sampling_id", None),
+        output_epoch=getattr(state, "output_epoch", 0),
     )
 
 
@@ -175,6 +177,7 @@ class StateSync:
                 prev is None
                 or prev.page_ids != snap.page_ids
                 or prev.prompt_token_ids != snap.prompt_token_ids
+                or prev.output_epoch != snap.output_epoch
                 or snap.outputs[: len(prev.outputs)] != prev.outputs
             ):
                 new.append(snap)

@@ -93,6 +93,11 @@ class TorchPagedRunner:
         self._k_pool = torch.zeros(num_pages, page_size, model.dim)
         self._v_pool = torch.zeros(num_pages, page_size, model.dim)
 
+    def release(self, request_id: str) -> None:
+        """Drop request-local sampling state after finish or abort."""
+        if self._sampler is not None:
+            self._sampler.release(request_id)
+
     def _write_kv(self, token: int, position: int, pages: list[int]) -> None:
         keys, values = self._model.kv_for(torch.tensor([token]))
         page = pages[position // self._page_size]
@@ -124,7 +129,8 @@ class TorchPagedRunner:
             position,
             logits,
             prompt=state.request.prompt_token_ids,
-            outputs=tuple(state.outputs),
+            outputs=state.outputs,
+            history_epoch=getattr(state, "output_epoch", 0),
             eos_token_id=state.request.eos_token_id,
         )
 
