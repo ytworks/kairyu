@@ -14,7 +14,13 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 
-from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest, GenerationResult
+from kairyu.engine.backend import (
+    CacheHint,
+    EngineBackend,
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+)
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.trace import (
     TraceBudget,
@@ -84,6 +90,19 @@ class ConductorEvent:
     result: ConductorResult | None = None
 
 
+class ConductorStreamError(RuntimeError):
+    """Carry privacy-safe partial state when the final backend stream fails."""
+
+    def __init__(
+        self,
+        cause: BaseException,
+        result: ConductorResult,
+    ) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.result = result
+
+
 class _SafeDict(dict):
     def __missing__(self, key: str) -> str:
         return ""
@@ -131,12 +150,14 @@ class Conductor:
         sampling_params: SamplingParams | None = None,
         cost_model: CostModel = zero_cost,
         worker_trace: Mapping[str, WorkerTraceIdentity] | None = None,
+        usage_observer: Callable[[GenerationUsage], None] | None = None,
     ) -> None:
         self._roles = tuple(roles)
         self._workers = dict(workers)
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
         self._cost_model = cost_model
+        self._usage_observer = usage_observer
         supplied_trace = dict(worker_trace or {})
         self._worker_trace = {
             worker: supplied_trace.get(
@@ -152,6 +173,24 @@ class Conductor:
         self._units = tuple(role for role in self._roles if role.role_type != "verifier")
         self._unit_deps = {unit.name: self._remapped_deps(unit) for unit in self._units}
         self._validate()
+
+    def _observe_usage(
+        self,
+        run: _RunState,
+        pending: GenerationUsage | None = None,
+    ) -> None:
+        if self._usage_observer is None:
+            return
+        self._usage_observer(
+            GenerationUsage(
+                prompt_tokens=run.usage[0]
+                + (pending.prompt_tokens if pending is not None else 0),
+                completion_tokens=run.usage[1]
+                + (pending.completion_tokens if pending is not None else 0),
+                cached_tokens=run.cached_tokens
+                + (pending.cached_tokens if pending is not None else 0),
+            )
+        )
 
     def _remapped_deps(self, unit: RoleSpec) -> frozenset[str]:
         """Dependencies at unit granularity: a dep on a verifier maps to its target."""
@@ -312,6 +351,7 @@ class Conductor:
             run.usage[0] += result.usage.prompt_tokens
             run.usage[1] += result.usage.completion_tokens
             run.cached_tokens += result.usage.cached_tokens
+            self._observe_usage(run)
             trace_usage = TraceUsage(
                 prompt_tokens=result.usage.prompt_tokens,
                 completion_tokens=result.usage.completion_tokens,
@@ -576,11 +616,13 @@ class Conductor:
         emitted = 0
         last_result: GenerationResult | None = None
         latest_usage = None
+        first_token_at = None
         try:
             async for partial in backend.stream(request):
                 last_result = partial
                 if partial.usage is not None:
                     latest_usage = partial.usage
+                    self._observe_usage(run, latest_usage)
                 text = partial.text
                 if not text.startswith(run.outputs.get(spec.name, "")):
                     raise RuntimeError(
@@ -588,7 +630,12 @@ class Conductor:
                     )
                 run.outputs[spec.name] = text
                 if len(text) > emitted:
-                    yield ConductorEvent(kind="delta", text=text[emitted:])
+                    if first_token_at is None:
+                        first_token_at = utc_now_iso()
+                    yield ConductorEvent(
+                        kind="delta",
+                        text=text[emitted:],
+                    )
                     emitted = len(text)
             if last_result is None:
                 raise RuntimeError("final worker stream produced no result")
@@ -599,6 +646,17 @@ class Conductor:
             )
         except Exception as error:
             run.budget = run.budget.release(unknown_cost=unknown_cost)
+            trace_usage = None
+            if latest_usage is not None:
+                run.usage[0] += latest_usage.prompt_tokens
+                run.usage[1] += latest_usage.completion_tokens
+                run.cached_tokens += latest_usage.cached_tokens
+                self._observe_usage(run)
+                trace_usage = TraceUsage(
+                    prompt_tokens=latest_usage.prompt_tokens,
+                    completion_tokens=latest_usage.completion_tokens,
+                    cached_tokens=latest_usage.cached_tokens,
+                )
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -610,8 +668,10 @@ class Conductor:
                     timing=TraceTiming(
                         queued_at=queued_at,
                         started_at=started_at,
+                        first_token_at=first_token_at,
                         completed_at=utc_now_iso(),
                     ),
+                    usage=trace_usage,
                     budget=TraceBudget.between(budget_before, run.budget),
                     error=TraceError(type=type(error).__name__),
                 )
@@ -627,6 +687,7 @@ class Conductor:
             run.usage[0] += latest_usage.prompt_tokens
             run.usage[1] += latest_usage.completion_tokens
             run.cached_tokens += latest_usage.cached_tokens
+            self._observe_usage(run)
             trace_usage = TraceUsage(
                 prompt_tokens=latest_usage.prompt_tokens,
                 completion_tokens=latest_usage.completion_tokens,
@@ -643,6 +704,7 @@ class Conductor:
                 timing=TraceTiming(
                     queued_at=queued_at,
                     started_at=started_at,
+                    first_token_at=first_token_at,
                     completed_at=utc_now_iso(),
                 ),
                 usage=trace_usage,
@@ -691,10 +753,21 @@ class Conductor:
             exclude=frozenset({final.name}),
         )
         emitted_text = ""
-        async for event in self._stream_unit(run, session, query, final):
-            if event.kind == "delta":
-                emitted_text += event.text
-            yield event
+        try:
+            async for event in self._stream_unit(run, session, query, final):
+                if event.kind == "delta":
+                    emitted_text += event.text
+                yield event
+        except Exception as error:
+            result = ConductorResult(
+                final_text=self._final_text(run),
+                outputs=dict(run.outputs),
+                budget_state=run.budget,
+                trace=tuple(run.trace),
+                usage=tuple(run.usage),
+                cached_tokens=run.cached_tokens,
+            )
+            raise ConductorStreamError(error, result) from error
         final_text = self._final_text(run)
         if final_text != emitted_text:
             if not final_text.startswith(emitted_text):

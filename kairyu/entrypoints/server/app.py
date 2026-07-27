@@ -41,6 +41,7 @@ from kairyu.entrypoints.server.chat_service import (
 from kairyu.entrypoints.server.errors import (
     invalid_request,
     model_not_found,
+    sanitize_backend_error,
     upstream_error,
 )
 from kairyu.entrypoints.server.health import add_health_routes
@@ -82,7 +83,11 @@ from kairyu.entrypoints.server.protocol import (
     Usage,
 )
 from kairyu.entrypoints.server.settings import ServerSettings
-from kairyu.orchestration.orchestrator import Orchestrator, PreviewNotSupportedError
+from kairyu.orchestration.orchestrator import (
+    Orchestrator,
+    OrchestratorExecutionError,
+    PreviewNotSupportedError,
+)
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
 from kairyu.pricing import InvoiceExportError, PriceSheet, export_invoice_csv
@@ -116,6 +121,32 @@ def _chat_response_payload(response: ChatCompletionResponse) -> dict:
         mode="json",
         exclude=_KAIRYU_CHAT_EXTENSION_FIELDS,
     )
+
+
+def _orchestration_wire_usage(
+    prompt: str,
+    completions: Sequence[CompletionOutput],
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int,
+    approximate_missing_standard_usage: bool = False,
+) -> Usage:
+    """Build OpenAI usage plus exact cumulative AUTO internal-call totals."""
+
+    reported = (
+        None
+        if approximate_missing_standard_usage and prompt_tokens == 0 and completion_tokens == 0
+        else GenerationUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+        )
+    )
+    usage = _wire_usage(prompt, completions, reported)
+    usage.orchestration_input_tokens = prompt_tokens
+    usage.orchestration_output_tokens = completion_tokens
+    return usage
 
 
 def _with_usage_ledger_cleanup(lifespan):
@@ -180,7 +211,9 @@ def _sse_chunk(
     )
     # OpenAI contract: usage key omitted unless include_usage; then explicit
     # null on non-final chunks, populated on the final choices-less chunk
-    exclude = None if include_usage else {"usage"}
+    exclude = set(_KAIRYU_CHAT_EXTENSION_FIELDS)
+    if not include_usage:
+        exclude.add("usage")
     return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
 
 
@@ -188,7 +221,46 @@ def _usage_chunk(response_id: str, created: int, model: str, usage: Usage) -> st
     payload = ChatCompletionChunk(
         id=response_id, created=created, model=model, choices=[], usage=usage
     )
-    return f"data: {payload.model_dump_json()}\n\n"
+    return f"data: {payload.model_dump_json(exclude=_KAIRYU_CHAT_EXTENSION_FIELDS)}\n\n"
+
+
+def _orchestrator_metadata_chunk(
+    response_id: str,
+    created: int,
+    model: str,
+    *,
+    usage: Usage | None,
+    result,
+    include_usage: bool,
+    want_trace: bool,
+) -> str | None:
+    """One terminal AUTO chunk carrying requested usage and/or trace data."""
+
+    if not include_usage and not want_trace:
+        return None
+    trace = (
+        result.structured_trace.as_dict(request_id=response_id)
+        if want_trace and result.structured_trace is not None
+        else None
+    )
+    payload = ChatCompletionChunk(
+        id=response_id,
+        created=created,
+        model=model,
+        choices=[],
+        usage=usage if include_usage else None,
+        kairyu_trace=list(result.trace) if want_trace else None,
+        kairyu_trace_v2=trace,
+        kairyu_route=_route_payload(result.route) if want_trace else None,
+    )
+    exclude: set[str] = set()
+    if not include_usage:
+        exclude.add("usage")
+    if not want_trace:
+        exclude.update(_KAIRYU_CHAT_EXTENSION_FIELDS)
+    elif trace is None:
+        exclude.add("kairyu_trace_v2")
+    return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
 
 
 async def _stream_engine(
@@ -278,11 +350,20 @@ async def _stream_orchestrator(
     completion_text = ""
     completions: tuple[CompletionOutput, ...] = ()
     reported_usage: GenerationUsage | None = None
+    terminal_error_type: str | None = None
     owner = _stream_usage_owner(http_request, request.model, prompt)
+
+    def observe_internal_usage(usage: GenerationUsage) -> None:
+        owner.observe(usage, completions)
+
     try:
         try:
             owner.mark_dispatched()
-            stream = await orchestrator.run_chat(prompt, stream=True)
+            stream = await orchestrator.run_chat(
+                prompt,
+                stream=True,
+                usage_observer=observe_internal_usage,
+            )
             async for event in stream:
                 if event.kind == "status":
                     yield f": status {event.text}\n\n"  # SSE comment (A2)
@@ -307,7 +388,7 @@ async def _stream_orchestrator(
                         response_id, created, request.model, 0, delta,
                         include_usage=include_usage,
                     )
-                else:
+                elif event.kind in {"result", "error"}:
                     final_result = event.result
                     if final_result is not None:
                         completion_text = final_result.text or completion_text
@@ -329,20 +410,74 @@ async def _stream_orchestrator(
                                 cached_tokens=final_result.cached_tokens,
                             )
                         owner.observe(reported_usage, completions)
+                    if event.kind == "error":
+                        terminal_error_type = event.error_type or "RuntimeError"
+                        break
         except Exception as error:  # surface as an SSE error event, then close
             logger.exception("orchestrator stream error")
-            yield f"data: {{\"error\": {{\"message\": \"{type(error).__name__}\"}}}}\n\n"
+            yield f'data: {{"error": {{"message": "{type(error).__name__}"}}}}\n\n'
+            yield "data: [DONE]\n\n"
+            return
+        if terminal_error_type is not None and final_result is not None:
+            usage = _orchestration_wire_usage(
+                prompt,
+                completions,
+                prompt_tokens=final_result.prompt_tokens,
+                completion_tokens=final_result.completion_tokens,
+                cached_tokens=final_result.cached_tokens,
+            )
+            metadata = _orchestrator_metadata_chunk(
+                response_id,
+                created,
+                request.model,
+                usage=usage,
+                result=final_result,
+                include_usage=include_usage,
+                want_trace=want_trace,
+            )
+            if metadata is not None:
+                yield metadata
+            if want_trace:
+                yield f": trace {' | '.join(final_result.trace)}\n\n"
+            safe_type = (
+                terminal_error_type if terminal_error_type.isidentifier() else "RuntimeError"
+            )
+            payload = {
+                "error": {
+                    "message": f"upstream backend error ({safe_type})",
+                    "type": "upstream_error",
+                    "code": "backend_error",
+                }
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
             yield "data: [DONE]\n\n"
             return
         yield _sse_chunk(
             response_id, created, request.model, 0, ChunkDelta(),
             finish_reason="stop", include_usage=include_usage,
         )
-        if include_usage and final_result is not None:
-            usage = _wire_usage(prompt, completions, reported_usage)
-            yield _usage_chunk(response_id, created, request.model, usage)
-        if want_trace and final_result is not None:
-            yield f": trace {' | '.join(final_result.trace)}\n\n"
+        if final_result is not None:
+            usage = _orchestration_wire_usage(
+                prompt,
+                completions,
+                prompt_tokens=final_result.prompt_tokens,
+                completion_tokens=final_result.completion_tokens,
+                cached_tokens=final_result.cached_tokens,
+                approximate_missing_standard_usage=True,
+            )
+            metadata = _orchestrator_metadata_chunk(
+                response_id,
+                created,
+                request.model,
+                usage=usage,
+                result=final_result,
+                include_usage=include_usage,
+                want_trace=want_trace,
+            )
+            if metadata is not None:
+                yield metadata
+            if want_trace:
+                yield f": trace {' | '.join(final_result.trace)}\n\n"
         yield "data: [DONE]\n\n"
     finally:
         owner.finalize()
@@ -848,6 +983,41 @@ def create_app(
                 )
             try:
                 result = await selected.run(prompt)
+            except OrchestratorExecutionError as error:
+                logger.exception("orchestrator backend error")
+                result = error.result
+                completions = (
+                    CompletionOutput(
+                        index=0,
+                        text=result.text,
+                        token_ids=(),
+                        finish_reason=None,
+                    ),
+                )
+                usage = _orchestration_wire_usage(
+                    prompt,
+                    completions,
+                    prompt_tokens=result.prompt_tokens,
+                    completion_tokens=result.completion_tokens,
+                    cached_tokens=result.cached_tokens,
+                )
+                _record_usage(
+                    http_request,
+                    request.model,
+                    usage,
+                    prompt=prompt,
+                    completions=completions,
+                )
+                payload = {
+                    "error": sanitize_backend_error(error.cause),
+                    "usage": usage.model_dump(mode="json"),
+                }
+                if want_trace:
+                    payload["kairyu_trace"] = list(result.trace)
+                    if result.structured_trace is not None:
+                        payload["kairyu_trace_v2"] = result.structured_trace.as_dict()
+                    payload["kairyu_route"] = _route_payload(result.route).model_dump(mode="json")
+                return JSONResponse(status_code=502, content=payload)
             except Exception as error:
                 return upstream_error(error)
             completions = (
@@ -871,6 +1041,8 @@ def create_app(
                 usage=usage,
                 normalized_tool_choice=normalized_tool_choice,
             )
+            response.usage.orchestration_input_tokens = result.prompt_tokens
+            response.usage.orchestration_output_tokens = result.completion_tokens
             _record_usage(
                 http_request,
                 request.model,

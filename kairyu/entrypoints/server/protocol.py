@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 
 class ContentPart(BaseModel):
@@ -190,6 +190,21 @@ class Usage(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     prompt_tokens_details: PromptTokensDetails | None = None
+    # Additive AUTO-model accounting.  These are absent on ordinary engine
+    # responses and are cumulative across every internal generation call.
+    orchestration_input_tokens: int | None = Field(default=None, ge=0)
+    orchestration_output_tokens: int | None = Field(default=None, ge=0)
+
+    @model_serializer(mode="wrap")
+    def _omit_non_orchestrated_fields(self, handler):
+        """Keep the existing OpenAI wire shape for non-AUTO responses."""
+
+        payload = handler(self)
+        if self.orchestration_input_tokens is None:
+            payload.pop("orchestration_input_tokens", None)
+        if self.orchestration_output_tokens is None:
+            payload.pop("orchestration_output_tokens", None)
+        return payload
 
 
 class KairyuTraceTiming(BaseModel):
@@ -295,6 +310,11 @@ class ChatCompletionChunk(BaseModel):
     # OpenAI contract (m9 D1): key OMITTED unless stream_options.include_usage,
     # then null on every chunk except the final usage chunk (choices: [])
     usage: Usage | None = None
+    # AUTO-only terminal metadata.  The server omits these fields from ordinary
+    # chunks and emits them only after an explicit X-Kairyu-Trace opt-in.
+    kairyu_trace: list[str] | None = None
+    kairyu_trace_v2: KairyuTraceV2 | None = None
+    kairyu_route: RouteDecisionPayload | None = None
 
 
 class CompletionRequest(BaseModel):

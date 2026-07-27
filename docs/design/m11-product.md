@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Implemented** (2026-07-03; D3/D6 amended 2026-07-27). Reviewed
+Status: **Implemented** (2026-07-03; D1/D3/D6 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
 Milestone: M11 (roadmap P-B/P-C + F5 CPU halves; goal G6)
@@ -44,6 +44,21 @@ SSE cannot retract provisional deltas; supported DAGs verify a draft before an
 unverified final worker/synthesizer. This boundary was selected by measurement,
 not implementation parity: a seven-round 100,000-event A/B measured 161.14
 ns/event pull-through versus 7,045.2 ns/event through a bounded queue (43.721x).
+
+**Accounting/trace amendment (2026-07-27, issue #196).** Every AUTO terminal
+response exposes cumulative backend-reported internal call totals as
+`usage.orchestration_input_tokens` and
+`usage.orchestration_output_tokens`; usage-enabled streams carry the same
+fields on their final `choices: []` metadata chunk. Direct, Conductor, and MoA
+paths include retries, verifier calls, resolved fallback engines, proposals,
+and synthesis. A synchronous cumulative accounting observer reaches the
+request-owned meter as each internal usage result completes, so disconnect and
+partial-failure finalization includes completed pre-final work without adding
+a task/queue bridge. `X-Kairyu-Trace: 1` now returns
+the versioned structured route/DAG/verifier trace on streaming as well as unary
+responses while retaining the legacy field/comment. Partial failures return
+known usage and typed failure events, never raw exception messages, prompts,
+or generated intermediate text.
 
 ### D2 — Tiered auto models
 
@@ -165,6 +180,9 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 
 - Streaming orchestrator: SSE event sequence (status* delta+ result) with
   usage totals == sum of stage usages; trace opt-in only with the header.
+- AUTO accounting matrix: direct/Conductor/MoA × unary/stream reconciles
+  `orchestration_input/output_tokens` to recorded internal calls; retry,
+  fallback, partial-failure, cancellation, and privacy cases are fixed tests.
 - Real direct-route gate: 24 alternating-order Qwen3-32B TP8 pairs measured
   AUTO/direct TTFT ratios of 1.0096x p50 and 1.0122x p99 (both <= 1.5);
   raw samples and method are committed in
