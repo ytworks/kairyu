@@ -170,3 +170,25 @@ def test_static_fp8_uses_checkpoint_input_scale(cuda):
     expected = module.forward_reference(x)
     actual = module.to(cuda)(x.to(device=cuda, dtype=torch.bfloat16)).float().cpu()
     torch.testing.assert_close(actual, expected, rtol=0.03, atol=0.40)
+
+
+def test_dynamic_fp8_accepts_global_per_token_scale(cuda):
+    torch.manual_seed(19)
+    module = _fp8_module(in_features=64, out_features=32)
+    x = torch.randn(7, 64).to(torch.bfloat16).float()
+    amax = x.abs().amax(dim=-1, keepdim=True)
+    scale = (amax * 1.25 / 448.0).clamp(min=1e-12)
+    expected = module.forward_with_activation_scale(x, scale)
+
+    module = module.to(cuda)
+    x_cuda = x.to(device=cuda, dtype=torch.bfloat16)
+    torch.testing.assert_close(
+        module.activation_amax(x_cuda).cpu(),
+        amax,
+        rtol=0,
+        atol=0,
+    )
+    actual = module.forward_with_activation_scale(
+        x_cuda, scale.to(cuda)
+    ).float().cpu()
+    torch.testing.assert_close(actual, expected, rtol=0.03, atol=0.40)

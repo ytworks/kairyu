@@ -106,6 +106,11 @@ class TorchDistCommunicator:
         dist.all_reduce(tensor, group=self._group)
         return tensor
 
+    def tensor_all_reduce_max(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Elementwise maximum, used by row-parallel activation scaling."""
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=self._group)
+        return tensor
+
     def tensor_reduce_scatter(self, tensor: torch.Tensor) -> torch.Tensor:
         """Sum across ranks, keep only this rank's contiguous shard of dim 0.
 

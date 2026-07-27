@@ -20,7 +20,7 @@ import dataclasses
 import torch
 from torch import nn
 
-from kairyu.engine.core.quant_config import QuantMethod, detect_quantization
+from kairyu.engine.core.quant_config import QuantConfig, QuantMethod, detect_quantization
 from kairyu.engine.core.tp_runner import validate_tp_degree
 from kairyu.models.config import ModelConfig
 
@@ -199,7 +199,7 @@ class RowParallelLinear(nn.Module):
     """
 
     def __init__(
-        self, local: nn.Linear, comm, context: SequenceParallelContext | None = None
+        self, local: nn.Module, comm, context: SequenceParallelContext | None = None
     ) -> None:
         super().__init__()
         self.local = local
@@ -210,7 +210,23 @@ class RowParallelLinear(nn.Module):
         local.bias = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        partial = self.local(x)
+        from kairyu.quant.linear import Fp8Linear
+
+        if isinstance(self.local, Fp8Linear) and self.local.activation_dynamic:
+            # A row-parallel rank sees only its input-feature shard. Dynamic
+            # W8A8 quantization must nevertheless use the same per-token scale
+            # the unsharded activation would use; rank-local scales change the
+            # numeric contract with TP degree. Synchronize only the M amax
+            # values, then quantize each local feature shard with that global
+            # scale (the extra collective is tiny relative to the output sum).
+            local_amax = self.local.activation_amax(x).contiguous()
+            global_amax = self._comm.tensor_all_reduce_max(local_amax)
+            activation_scale = (global_amax / 448.0).clamp(min=1e-12)
+            partial = self.local.forward_with_activation_scale(
+                x, activation_scale
+            )
+        else:
+            partial = self.local(x)
         if self._context is None:
             reduced = self._comm.tensor_all_reduce(partial.contiguous())
         else:
@@ -220,24 +236,60 @@ class RowParallelLinear(nn.Module):
         return reduced
 
 
-def load_tp_shard(model: nn.Module, config: ModelConfig, reader, tp: int, rank: int,
-                  dtype: torch.dtype = torch.float32) -> None:
+def _checkpoint_shard_dim(
+    name: str,
+    spec: dict[str, int | None],
+    quant: QuantConfig,
+) -> int | None:
+    """Resolve the checkpoint tensor axis owned by one TP rank.
+
+    FP8 weights follow the dense projection axis. Their per-output-channel
+    scale follows a column-parallel weight (dim 0), but is replicated for a
+    row-parallel weight (dim 1) because every rank still produces every output
+    channel.
+    """
+    dim = shard_dim_for(name, spec)
+    if quant.method is QuantMethod.FP8 and name.endswith(".weight_scale"):
+        weight_dim = shard_dim_for(name.removesuffix("_scale"), spec)
+        return 0 if weight_dim == 0 else None
+    return dim
+
+
+def load_tp_shard(
+    model: nn.Module,
+    config: ModelConfig,
+    reader,
+    tp: int,
+    rank: int,
+    dtype: torch.dtype = torch.float32,
+    quant: QuantConfig | None = None,
+) -> None:
     """Per-rank weights via CheckpointReader.get_slice (the m8 seam).
 
-    Bounds computed from the FULL config; embeddings/lm_head shard vocab rows;
-    norms and biasless row-parallel load replicated. Quantized checkpoints are
-    rejected upstream (A10).
+    Bounds are computed from the FULL config. Dense and FP8 projection weights
+    shard on their projection axis; FP8 scales shard only with output-channel
+    (column-parallel) weights. Embeddings, lm_head, norms, row-parallel scales,
+    and biases are replicated.
     """
+    quant = quant or QuantConfig(QuantMethod.NONE)
     spec = tp_shard_spec(config)
     state: dict[str, torch.Tensor] = {}
     expected = model.state_dict()
+    quantized_buffer_dtypes = {
+        (
+            f"{module_name}.{buffer_name}" if module_name else buffer_name
+        ): buffer.dtype
+        for module_name, module in model.named_modules()
+        if getattr(module, "is_quantized", False)
+        for buffer_name, buffer in module.named_buffers(recurse=False)
+    }
     for name, current in expected.items():
         if name == "lm_head.weight" and config.tie_word_embeddings:
             continue  # re-tied to the LOCAL embed shard after load (A3)
         source = name
         if source not in reader:
             raise KeyError(f"checkpoint missing tensor {source!r}")
-        dim = shard_dim_for(name, spec)
+        dim = _checkpoint_shard_dim(name, spec, quant)
         if dim is None:
             tensor = reader.tensor(source)
         else:
@@ -245,7 +297,17 @@ def load_tp_shard(model: nn.Module, config: ModelConfig, reader, tp: int, rank: 
             total = current.shape[dim] * tp
             start, end = shard_bounds(total, tp, rank)
             tensor = reader.get_slice(source, dim=dim, start=start, end=end)
-        if current.dtype == torch.float32 and tensor.is_floating_point():
+        quantized_dtype = quantized_buffer_dtypes.get(name)
+        if quantized_dtype is not None and tensor.dtype != quantized_dtype:
+            # Match the quantized module's fused-kernel ABI rather than the
+            # model compute dtype. Real FP8 checkpoints commonly store scale
+            # values as bf16; scaled_mm requires the same values in fp32.
+            tensor = tensor.to(quantized_dtype)
+        elif (
+            name not in quantized_buffer_dtypes
+            and current.dtype == torch.float32
+            and tensor.is_floating_point()
+        ):
             tensor = tensor.to(dtype)
         state[name] = tensor
     model.load_state_dict(state, strict=False, assign=True)
@@ -278,17 +340,35 @@ def build_tp_model(
     from kairyu.models.llama import DenseDecoder
 
     raw = json.loads((Path(model_dir) / "config.json").read_text())
-    if detect_quantization(raw).method is not QuantMethod.NONE:
-        raise ValueError("quantized checkpoints with tensor parallelism arrive later (m16 A10)")
+    quant = detect_quantization(raw)
+    if quant.method not in (QuantMethod.NONE, QuantMethod.FP8):
+        raise ValueError(
+            "tensor parallelism currently supports dense and FP8 checkpoints; "
+            f"got {quant.method.value}"
+        )
     full_config = parse_model_config(raw)
     local_config = tp_view(full_config, tp, rank)
     if sequence_parallel and tp < 2:
         raise ValueError("sequence parallelism needs tp >= 2")
-    model = DenseDecoder(local_config, attention_backend=attention_backend)
+    from kairyu.quant.linear import linear_factory
+
+    model = DenseDecoder(
+        local_config,
+        attention_backend=attention_backend,
+        linear_factory=linear_factory(quant),
+    )
     reader = CheckpointReader(model_dir)
     # dtype is applied while loading, so a bf16 target never materializes the
     # fp32 shard on the host first
-    load_tp_shard(model, full_config, reader, tp, rank, dtype=dtype)
+    load_tp_shard(
+        model,
+        full_config,
+        reader,
+        tp,
+        rank,
+        dtype=dtype,
+        quant=quant,
+    )
     # add communication: o_proj/down_proj partial sums (lm_head replicated)
     context = SequenceParallelContext(comm) if sequence_parallel else None
     for layer in model.model.layers:

@@ -42,6 +42,19 @@ def llama_dir(tmp_path_factory):
     return str(path)
 
 
+@pytest.fixture(scope="module")
+def fp8_llama_dir(tmp_path_factory):
+    from tests.quant_checkpoint_fixtures import write_quantized_checkpoint
+
+    torch.manual_seed(73)
+    model = transformers.LlamaForCausalLM(transformers.LlamaConfig(**TINY_LLAMA))
+    source = tmp_path_factory.mktemp("gpu-tp-fp8-source")
+    target = tmp_path_factory.mktemp("gpu-tp-fp8")
+    model.to(torch.float32).eval().save_pretrained(source, safe_serialization=True)
+    write_quantized_checkpoint("fp8", source, model, target)
+    return str(target)
+
+
 def _single_process_gpu_greedy(model_dir: str, prompt: list[int], max_new: int):
     """The TP=1 reference, placed exactly the way the single-process path places it."""
     from kairyu.engine.core.engine_core import EngineCore
@@ -152,3 +165,47 @@ def test_tp2_gpu_greedy_matches_single_process(llama_dir):
     finally:
         launcher.shutdown()
     assert outputs == reference
+
+
+def test_tp2_fp8_checkpoint_runs_fused_on_every_rank(fp8_llama_dir):
+    """FP8 weight and scale shards must survive NCCL production execution."""
+    from kairyu.engine.core.engine_core import EngineCore
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+    from kairyu.engine.core.worker import DistTPLauncher
+    from kairyu.quant.linear import Fp8Linear
+
+    _require_devices(WORLD_SIZE)
+    launcher = DistTPLauncher(
+        fp8_llama_dir,
+        tp=WORLD_SIZE,
+        num_pages=64,
+        page_size=4,
+        vocab=TP_VOCAB,
+    )
+    try:
+        local_q = launcher.runner._local._model.model.layers[0].self_attn.q_proj
+        assert isinstance(local_q, Fp8Linear)
+        assert local_q.weight.device.type == "cuda"
+        assert local_q.weight_scale.shape == (TINY_LLAMA["hidden_size"] // 2, 1)
+
+        scheduler = Scheduler(
+            RadixKVCache(num_pages=64, page_size=4),
+            max_num_batched_tokens=6,
+            page_size=4,
+        )
+        engine = EngineCore(scheduler, launcher.runner)
+        engine.add_request(
+            EngineRequest(
+                "fp8",
+                tuple(range(11)),
+                max_new_tokens=8,
+                sampling=EngineSampling(),
+            )
+        )
+        generated = engine.run_to_completion()["fp8"]
+        assert len(generated) == 8
+        assert len(set(generated)) > 1
+    finally:
+        launcher.shutdown()

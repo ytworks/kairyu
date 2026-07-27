@@ -359,6 +359,7 @@ def _gpu_runtime_provenance() -> dict:
     import torch
 
     driver = None
+    topology = None
     try:
         done = subprocess.run(
             [
@@ -372,6 +373,14 @@ def _gpu_runtime_provenance() -> dict:
         )
         if done.returncode == 0:
             driver = [line.strip() for line in done.stdout.splitlines() if line.strip()]
+        topo = subprocess.run(
+            ["nvidia-smi", "topo", "-m"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if topo.returncode == 0:
+            topology = topo.stdout.strip().splitlines()
     except OSError:
         pass
 
@@ -406,6 +415,7 @@ def _gpu_runtime_provenance() -> dict:
             for index in range(torch.cuda.device_count())
         ],
         "nvidia_smi": driver,
+        "nvidia_smi_topology": topology,
         "environment": environment,
     }
 

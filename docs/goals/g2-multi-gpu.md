@@ -34,8 +34,12 @@ results are ever reported (goal acceptance criteria, carried from G1).
 - **M6**: two such nodes, ≥400 Gb/s InfiniBand or RoCE. Record the actual fabric, link
   rate, and a raw fabric microbenchmark in `bench/results/env-<date>.json` (extends
   gpu-runbook §0).
-- **Models**: Llama-3.3-70B FP8 W8A8 (primary); Llama-3.1-8B (correctness stepping
-  stone — the only model that fits TP=1).
+- **Models**: `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` at immutable
+  revision `f50dbad2c84590ca17dc51e207c34321b65ff14b` is the primary dense
+  anchor: compressed-tensors FP8 E4M3 per-output-channel weights, dynamic
+  per-token FP8 activations, and BF16 model/KV dtype. Llama-3.1-8B is the
+  correctness stepping stone and the only model that fits TP=1 on the original
+  80 GB profile.
 - **Memory arithmetic (fixes the baseline)**: 70B FP8 weights ≈ 70 GB. A single 80 GB
   H100 cannot hold them with usable KV headroom, so **TP=1 is not a valid 70B config;
   TP=2 is the minimal viable config and the base for all scaling-efficiency ratios.**
@@ -265,6 +269,22 @@ teacher-forced: once one token differs, every later token is compared against a
 prefix the other side never produced, so a single moved near-tie is
 indistinguishable from a broken shard. `bench/parity_tp.py` still reports
 free-running match rates for orientation; only the teacher-forced numbers gate.
+
+**A2 closure (2026-07-27).** The dense anchor is
+`RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic@f50dbad2c84590ca17dc51e207c34321b65ff14b`
+(compressed-tensors per-channel FP8 weights, dynamic per-token FP8
+activations, BF16 model/KV dtype). On the fixed 64×16 BOS-free prefixes, HF
+agrees with its own greedy reference on 1005/1024 positions (0.981445) and
+sets the measured tie gap at 0.5 nats. Kairyu achieves TP2 1006/1024, TP4
+1005/1024, and TP8 1006/1024; every TP degree has zero substantive
+disagreements and no missing raw positions/logprobs. Direct TP4/8-vs-TP2 each
+agree on 1004/1024 with zero substantive differences. The self-contained
+`bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json` embeds all
+four source envelopes, 15 full safetensors SHA-256s, CUDA 13.0/NCCL 2.29.7
+and physical PCIe topology, and passes all ten `bench/gate_a2.py` checks.
+The result retains agreeing-position maximum logprob deltas
+0.56900/0.54147/0.25563 as diagnostics; they are not a third A2 criterion
+beyond the two binding amended criteria above.
 
 ## 8. Evidence and reporting rules
 

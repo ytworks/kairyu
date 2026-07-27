@@ -23,8 +23,17 @@ the Llama shape, four weight SHA-256s, identical BOS-free prompt tokens,
 CUDA 13.0/NCCL 2.29.7, and one clean commit
 (`bench/results/g2-a1-llama31-8b-rtxpro6000-2026-07-26.json`). A2's existing
 Qwen3-32B TP1/8 teacher-forced measurement remains diagnostic evidence for the
-70B gate, not its completion. The device-side half of m2 §2.2 remains a
-performance invariant, not an A1 blocker.
+70B gate. G2 A2 is complete on the pinned
+`RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic@f50dbad2c84590ca17dc51e207c34321b65ff14b`,
+using compressed FP8 W8A8 and BF16 model/KV dtype. HF self-agreement is
+1005/1024 (0.981445); Kairyu TP2/4/8 achieve 1006/1005/1006, each with zero
+substantive disagreements. Direct TP4/8-vs-TP2 are each 1004/1024 with zero
+substantive differences. The ten-check assembler pins all 15 weight digests,
+the 64×16 raw rows, clean measurement commit, CUDA 13.0/NCCL 2.29.7, and
+physical PCIe topology
+(`bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json`).
+The device-side half of m2 §2.2 remains a performance invariant, not an A1/A2
+blocker.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -159,6 +168,41 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [progress] G2 A2 closes on Llama-3.3-70B FP8 TP2/4/8
+- What: the formal 64-prompt × 16-position gate passes all ten checks. HF
+  self-agreement is 1005/1024 with a measured 0.5-nat tie gap; TP2, TP4, and
+  TP8 achieve 1006, 1005, and 1006 agreements respectively, all with zero
+  substantive disagreements and complete logprob evidence. Direct TP4/8
+  comparisons against TP2 are each 1004/1024 with zero substantive
+  differences. The self-contained result embeds the four raw envelopes,
+  fifteen full weight digests, pinned Hub revision, CUDA/NCCL runtime,
+  physical topology, and one clean measurement commit.
+- Why: rank-local dynamic activation scales in row-parallel FP8 made the
+  quantization contract depend on TP degree; TP4 missed the reference floor by
+  one position. A per-token MAX reduction restores the unsharded W8A8 scale
+  and brought TP4 to the binding reference floor without relaxing either
+  amended criterion.
+- Refs: issue #152; m16 D2/A10; G2 A2 and §7; GPU runbook §6;
+  `bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json`
+
+### 2026-07-27 — [progress] G2 A2 70B FP8 TP gate is executable
+- What: dense tensor parallel loading now accepts compressed-tensors FP8,
+  shards projection weights and output-channel scales with their column
+  projections, replicates row-parallel output scales, and value-preservingly
+  widens serialized BF16 scales to the fused scaled-MM FP32 ABI. Dynamic FP8
+  row-parallel projections MAX-reduce one amax per token so all ranks use the
+  unsharded activation's scale instead of a TP-degree-dependent local scale.
+  The shared HF
+  reference can use Accelerate multi-GPU placement and batching. Candidate
+  outputs retain all per-position tokens/logprobs, complete checkpoint and
+  topology provenance, and the new `gate_a2.py` independently recomputes the
+  amended HF-relative and TP4/8-vs-TP2 verdicts.
+- Why: A2 could not previously load its 70B FP8 anchor at any TP degree, nor
+  create a reference that exceeded one GPU's memory, and reported summary
+  verdicts alone could not fail closed on partial or fabricated evidence.
+- Refs: issue #152; m16 D2/A10; G2 A2 and §7; GPU runbook §6;
+  `kairyu/models/{loader,parallel}.py`; `bench/{parity_hf,gate_a2}.py`
 
 ### 2026-07-27 — [amendment] m14 D2/D4: quantized CUDA forward is fused and production-wired
 - What: CUDA `QuantizedLinear.forward` now dispatches every advertised scheme

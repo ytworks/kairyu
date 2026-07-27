@@ -31,6 +31,9 @@ class _FakeTensorComm:
     def tensor_all_reduce(self, tensor):
         return tensor
 
+    def tensor_all_reduce_max(self, tensor):
+        return tensor
+
 
 class TestShardMath:
     def test_shard_bounds(self):
@@ -94,6 +97,43 @@ class TestRowParallelLinear:
         out = wrapped(torch.ones(2, 8))
         assert torch.allclose(out, expected)
 
+    def test_dynamic_fp8_uses_global_per_token_scale(self):
+        from kairyu.quant.linear import Fp8Linear
+
+        class RecordingFp8(Fp8Linear):
+            def __init__(self):
+                super().__init__(4, 3, bias=False)
+                self.seen_scale = None
+
+            def activation_amax(self, x):
+                return torch.tensor([[2.0], [6.0]])
+
+            def forward_with_activation_scale(self, x, activation_scale):
+                self.seen_scale = activation_scale.clone()
+                return x.new_zeros((x.shape[0], self.out_features))
+
+        class GlobalMaxComm:
+            def __init__(self):
+                self.local_amax = None
+
+            def tensor_all_reduce_max(self, tensor):
+                self.local_amax = tensor.clone()
+                return torch.tensor([[4.0], [8.0]])
+
+            def tensor_all_reduce(self, tensor):
+                return tensor
+
+        local = RecordingFp8()
+        comm = GlobalMaxComm()
+        wrapped = RowParallelLinear(local, comm)
+        wrapped(torch.ones(2, 4))
+
+        assert torch.equal(comm.local_amax, torch.tensor([[2.0], [6.0]]))
+        torch.testing.assert_close(
+            local.seen_scale,
+            torch.tensor([[4.0 / 448.0], [8.0 / 448.0]]),
+        )
+
 
 class TestTp1Equivalence:
     """build_tp_model(tp=1) with an identity comm == plain load_model."""
@@ -134,7 +174,7 @@ class TestTp1Equivalence:
 
         assert torch.equal(logits(plain, config), logits(sharded, local_config))
 
-    def test_quantized_checkpoint_rejected(self, tmp_path):
+    def test_non_fp8_quantized_checkpoint_rejected(self, tmp_path):
         import json
 
         (tmp_path / "config.json").write_text(json.dumps({
@@ -143,5 +183,63 @@ class TestTp1Equivalence:
         }))
         from kairyu.models.parallel import build_tp_model
 
-        with pytest.raises(ValueError, match="tensor parallelism"):
+        with pytest.raises(ValueError, match="supports dense and FP8"):
             build_tp_model(str(tmp_path), tp=2, rank=0, comm=_FakeTensorComm())
+
+    def test_fp8_checkpoint_shards_weights_and_output_scales(self, tmp_path):
+        transformers = pytest.importorskip("transformers")
+        from kairyu.engine.core.weights import CheckpointReader
+        from kairyu.models.parallel import build_tp_model
+        from kairyu.quant.linear import Fp8Linear
+        from tests.quant_checkpoint_fixtures import write_quantized_checkpoint
+
+        torch.manual_seed(17)
+        hf = transformers.LlamaForCausalLM(transformers.LlamaConfig(**TINY))
+        source = tmp_path / "source"
+        target = tmp_path / "fp8"
+        source.mkdir()
+        target.mkdir()
+        hf.to(torch.float32).eval().save_pretrained(
+            source, safe_serialization=True
+        )
+        write_quantized_checkpoint("fp8", source, hf, target)
+        from safetensors.torch import load_file, save_file
+
+        checkpoint = target / "model.safetensors"
+        state = load_file(checkpoint)
+        for name, tensor in tuple(state.items()):
+            if name.endswith(".weight_scale"):
+                state[name] = tensor.to(torch.bfloat16)
+        save_file(state, checkpoint)
+
+        rank0, _, _ = build_tp_model(
+            str(target), tp=2, rank=0, comm=_FakeTensorComm()
+        )
+        rank1, _, _ = build_tp_model(
+            str(target), tp=2, rank=1, comm=_FakeTensorComm()
+        )
+        q0 = rank0.model.layers[0].self_attn.q_proj
+        q1 = rank1.model.layers[0].self_attn.q_proj
+        o0 = rank0.model.layers[0].self_attn.o_proj.local
+        o1 = rank1.model.layers[0].self_attn.o_proj.local
+        assert all(isinstance(layer, Fp8Linear) for layer in (q0, q1, o0, o1))
+
+        reader = CheckpointReader(target)
+        q_name = "model.layers.0.self_attn.q_proj"
+        o_name = "model.layers.0.self_attn.o_proj"
+        assert torch.equal(
+            torch.cat((q0.weight, q1.weight), dim=0),
+            reader.tensor(f"{q_name}.weight"),
+        )
+        assert torch.equal(
+            torch.cat((q0.weight_scale, q1.weight_scale), dim=0),
+            reader.tensor(f"{q_name}.weight_scale"),
+        )
+        assert torch.equal(
+            torch.cat((o0.weight, o1.weight), dim=1),
+            reader.tensor(f"{o_name}.weight"),
+        )
+        assert torch.equal(o0.weight_scale, reader.tensor(f"{o_name}.weight_scale"))
+        assert torch.equal(o1.weight_scale, reader.tensor(f"{o_name}.weight_scale"))
+        assert q0.weight.dtype is torch.float8_e4m3fn
+        assert q0.weight_scale.dtype is torch.float32
