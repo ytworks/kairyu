@@ -149,12 +149,60 @@ def _logprob_content(
     return tuple(entries)
 
 
+class _IncrementalStopMatcher:
+    """Per-request bounded-overlap matcher for cumulative stable text."""
+
+    __slots__ = (
+        "_match",
+        "_overlap",
+        "_searched_length",
+        "_stops",
+    )
+
+    def __init__(self, stops: tuple[str, ...]) -> None:
+        self._stops = stops
+        self._overlap = max(
+            0, max((len(stop) for stop in stops), default=1) - 1
+        )
+        self._searched_length = -1
+        self._match: int | None = None
+
+    @property
+    def overlap(self) -> int:
+        return self._overlap
+
+    def find(self, text: str) -> int | None:
+        if self._match is not None:
+            return self._match
+        if len(text) < self._searched_length:
+            raise ValueError("stop matcher text must never retract")
+        if len(text) == self._searched_length:
+            return None
+
+        # A newly completed stop can begin at most max_stop_length - 1
+        # characters before the previous tail. Everything earlier was already
+        # proven match-free.
+        start = (
+            0
+            if self._searched_length < 0
+            else max(0, self._searched_length - self._overlap)
+        )
+        match: int | None = None
+        for stop in self._stops:
+            index = text.find(stop, start)
+            if index != -1 and (match is None or index < match):
+                match = index
+        self._searched_length = len(text)
+        self._match = match
+        return self._match
+
+
 class _RequestTrack:
     """Step-side streaming state for one request."""
 
     __slots__ = (
         "detok",
-        "stops",
+        "stop_matcher",
         "holdback",
         "consumed",
         "stable",
@@ -168,8 +216,8 @@ class _RequestTrack:
         self, detok: IncrementalDetokenizer, stops: tuple[str, ...], num_prompt_tokens: int
     ) -> None:
         self.detok = detok
-        self.stops = stops
-        self.holdback = max((len(stop) for stop in stops), default=1) - 1
+        self.stop_matcher = _IncrementalStopMatcher(stops)
+        self.holdback = self.stop_matcher.overlap
         self.consumed = 0
         self.stable = ""
         self.meta: list[SampledToken] = []  # committed tokens' logprob metadata
@@ -178,8 +226,7 @@ class _RequestTrack:
         self.num_cached_tokens = 0
 
     def find_stop(self, text: str) -> int | None:
-        indices = [index for stop in self.stops if (index := text.find(stop)) != -1]
-        return min(indices) if indices else None
+        return self.stop_matcher.find(text)
 
 
 class EngineLoop:

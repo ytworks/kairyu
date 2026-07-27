@@ -77,6 +77,12 @@ already forwards as kwargs; verified builder.py → registry.py).
   the backend withholds up to `max(len(stop)) - 1` trailing characters from the
   stream queue — a stop string spanning two deltas must never leak its prefix to
   an SSE client (deltas cannot be retracted).
+- **Incremental scan (2026-07-27, issue #217)**: each request remembers the
+  previously searched stable-text length and rescans only the newly exposed
+  suffix plus `max_stop_length - 1` characters of overlap. The first observed
+  minimum absolute match is cached. Finalization feeds any last UTF-8 tail
+  through the same overlap, preserving cross-token, overlapping-pattern, and
+  earliest-match behavior without rescanning the cumulative prefix.
 - Scan/truncate happens **inside the step loop, before `queue.put_nowait`**; the
   queue payload becomes a small frozen `_StreamUpdate(outputs, text, finish_reason,
   error)` so `finish_reason="stop" | "length"` flows explicitly to
@@ -94,8 +100,9 @@ already forwards as kwargs; verified builder.py → registry.py).
 
 Tests: tiny BPE built programmatically (no committed blobs); Japanese multi-byte
 boundaries; WordPiece and Metaspace decoder parity; linear operation count;
-custom-tokenizer fallback; EOS/stop end-to-end; stop-string-across-deltas
-holdback pinned.
+custom-tokenizer fallback; EOS/stop end-to-end; randomized incremental/full
+stop-match equivalence; long-output/many-stop bounded work; stop-string-across-
+deltas holdback pinned.
 Deps: `tokenizers` (dev group + new `[project.optional-dependencies] hf` extra —
 the section is created in this milestone).
 
