@@ -97,12 +97,22 @@ already forwards as kwargs; verified builder.py → registry.py).
   in both the in-process backend and the D6 service. The existing
   `asyncio.to_thread(_step)` pump plus loop-thread `add_request` already violates
   this in spirit; M8 fixes it (submit enqueues an op; the step loop drains ops).
+- **Operation batching (2026-07-27, issue #218)**: a producer lock makes
+  duplicate-ID reservation and queue mutation atomic. Consecutive adds share
+  request/track arrays; lifecycle-duplicate aborts collapse to one ID. The step
+  thread swaps out one frozen batch snapshot, uses Scheduler's atomic bulk-add
+  contract where available, and restores untouched suffixes ahead of concurrent
+  producer work on a partial failure. Purge filters batches under the same lock,
+  and close seals the queue before reclaiming active requests. Reproduce the
+  burst throughput measurements with
+  `uv run python bench/op_queue_bench.py --operations 100000 --repeats 5`.
 
 Tests: tiny BPE built programmatically (no committed blobs); Japanese multi-byte
 boundaries; WordPiece and Metaspace decoder parity; linear operation count;
 custom-tokenizer fallback; EOS/stop end-to-end; randomized incremental/full
-stop-match equivalence; long-output/many-stop bounded work; stop-string-across-
-deltas holdback pinned.
+stop-match equivalence; long-output/many-stop bounded work; concurrent
+add/abort producer stress and partial-failure recovery; stop-string-across-deltas
+holdback pinned.
 Deps: `tokenizers` (dev group + new `[project.optional-dependencies] hf` extra —
 the section is created in this milestone).
 

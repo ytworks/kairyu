@@ -229,6 +229,20 @@ class _RequestTrack:
         return self.stop_matcher.find(text)
 
 
+@dataclass
+class _AddBatch:
+    requests: list[EngineRequest]
+    tracks: list[_RequestTrack]
+
+
+@dataclass
+class _AbortBatch:
+    request_ids: list[str]
+
+
+_OpBatch = _AddBatch | _AbortBatch
+
+
 class EngineLoop:
     """Owns tokenizer + scheduler + runner; drains ops and produces updates."""
 
@@ -268,8 +282,13 @@ class EngineLoop:
             else tokenizer.eos_token_id
         )
         self._default_stop_ids = default_stop_token_ids
-        # deque appends are atomic: producers may enqueue from another thread
-        self._ops: deque[tuple[str, object]] = deque()
+        # Producers can submit/abort from arbitrary threads while the step
+        # thread drains a frozen batch snapshot. The lock also makes duplicate
+        # request reservation atomic instead of relying on individual GIL ops.
+        self._ops_lock = Lock()
+        self._ops: deque[_OpBatch] = deque()
+        self._abort_requested: set[str] = set()
+        self._closed = False
         self._tracked: dict[str, _RequestTrack] = {}  # step-side only
         self._active_request_ids: set[str] = set()
 
@@ -280,6 +299,11 @@ class EngineLoop:
         return prompt_token_ids
 
     def submit(self, request_id: str, prompt: str, params: SamplingParams) -> None:
+        # Advisory fast rejection avoids tokenization and lock traffic for the
+        # common duplicate case. The lock-protected check below remains the
+        # authority when producers race.
+        if request_id in self._active_request_ids:
+            raise ValueError(f"duplicate request_id {request_id!r}")
         engine_request = EngineRequest(
             request_id=request_id,
             prompt_token_ids=self.tokenize_prompt(prompt),
@@ -295,14 +319,40 @@ class EngineLoop:
             stops=tuple(params.stop or ()),
             num_prompt_tokens=len(engine_request.prompt_token_ids),
         )
-        if request_id in self._active_request_ids:
-            raise ValueError(f"duplicate request_id {request_id!r}")
-        self._active_request_ids.add(request_id)
-        self._ops.append(("add", (engine_request, track)))
+        with self._ops_lock:
+            if self._closed:
+                raise RuntimeError("engine loop is closed")
+            if request_id in self._active_request_ids:
+                raise ValueError(f"duplicate request_id {request_id!r}")
+            self._active_request_ids.add(request_id)
+            if self._ops and isinstance(self._ops[-1], _AddBatch):
+                batch = self._ops[-1]
+                batch.requests.append(engine_request)
+                batch.tracks.append(track)
+            else:
+                self._ops.append(_AddBatch([engine_request], [track]))
 
     def abort(self, request_id: str) -> None:
-        if request_id in self._active_request_ids:
-            self._ops.append(("abort", request_id))
+        # Read-only optimistic checks are safe under CPython's GIL and only
+        # reject operations that already have a definitive lifecycle result.
+        # A possible false negative enters the lock and is checked again.
+        if (
+            request_id not in self._active_request_ids
+            or request_id in self._abort_requested
+        ):
+            return
+        with self._ops_lock:
+            if (
+                self._closed
+                or request_id not in self._active_request_ids
+                or request_id in self._abort_requested
+            ):
+                return
+            self._abort_requested.add(request_id)
+            if self._ops and isinstance(self._ops[-1], _AbortBatch):
+                self._ops[-1].request_ids.append(request_id)
+            else:
+                self._ops.append(_AbortBatch([request_id]))
 
     def purge(self, request_ids: tuple[str, ...]) -> None:
         """Abort and forget requests after a fatal runner step.
@@ -321,22 +371,49 @@ class EngineLoop:
         # pending result without aborting its request would strand in_flight
         # reservations forever.
         ids = set(request_ids) | pending_ids
-        # Rotate only the snapshot that existed when purge began. Producers may
-        # append concurrently; keeping the same deque prevents those ops from
-        # being lost behind a replacement assignment.
-        for _ in range(len(self._ops)):
-            op, payload = self._ops.popleft()
-            op_request_id = payload[0].request_id if op == "add" else payload
-            if op_request_id not in ids:
-                self._ops.append((op, payload))
-        for request_id in ids & self._active_request_ids:
+        # Filter queued batches under the producer lock. Concurrent producers
+        # append only after this snapshot is restored, so purge cannot lose an
+        # unrelated add/abort.
+        with self._ops_lock:
+            retained: deque[_OpBatch] = deque()
+            for batch in self._ops:
+                if isinstance(batch, _AddBatch):
+                    kept = [
+                        (request, track)
+                        for request, track in zip(
+                            batch.requests, batch.tracks, strict=True
+                        )
+                        if request.request_id not in ids
+                    ]
+                    if kept:
+                        retained.append(
+                            _AddBatch(
+                                [request for request, _track in kept],
+                                [track for _request, track in kept],
+                            )
+                        )
+                else:
+                    request_ids = [
+                        request_id
+                        for request_id in batch.request_ids
+                        if request_id not in ids
+                    ]
+                    if request_ids:
+                        retained.append(_AbortBatch(request_ids))
+            self._ops.clear()
+            self._ops.extend(retained)
+            self._abort_requested.difference_update(ids)
+            active = tuple(ids & self._active_request_ids)
+        for request_id in active:
             self._scheduler.abort(request_id)
             self._tracked.pop(request_id, None)
             self._forget(request_id)
 
     def has_work(self) -> bool:
+        with self._ops_lock:
+            has_ops = bool(self._ops)
         return (
-            bool(self._ops)
+            has_ops
             or bool(self._pending_steps)
             or self._scheduler.has_unfinished()
         )
@@ -345,21 +422,81 @@ class EngineLoop:
     def pipeline_depth(self) -> int:
         return self._pipeline_depth
 
+    def _take_ops(self) -> tuple[_OpBatch, ...]:
+        """Freeze one step-boundary snapshot; later producers target a new queue."""
+        with self._ops_lock:
+            batches = tuple(self._ops)
+            self._ops.clear()
+        return batches
+
+    def _restore_ops(self, batches: list[_OpBatch]) -> None:
+        """Put unprocessed older work ahead of concurrent producer batches."""
+        if not batches:
+            return
+        with self._ops_lock:
+            for batch in reversed(batches):
+                self._ops.appendleft(batch)
+
     def _drain_ops(self) -> None:
-        while self._ops:
-            op, payload = self._ops.popleft()
-            if op == "add":
-                engine_request, track = payload
+        batches = self._take_ops()
+        for batch_index, batch in enumerate(batches):
+            if isinstance(batch, _AddBatch):
+                bulk_add = getattr(self._scheduler, "add_requests_atomic", None)
+                if len(batch.requests) > 1 and callable(bulk_add):
+                    try:
+                        bulk_add(batch.requests)
+                    except Exception:
+                        # The explicit contract is no mutation on failure. Fall
+                        # through one-by-one to preserve the historical failing
+                        # request and partial-progress semantics.
+                        pass
+                    else:
+                        for request, track in zip(
+                            batch.requests, batch.tracks, strict=True
+                        ):
+                            self._tracked[request.request_id] = track
+                        continue
+
+                for request_index, (engine_request, track) in enumerate(
+                    zip(batch.requests, batch.tracks, strict=True)
+                ):
+                    try:
+                        self._scheduler.add_request(engine_request)
+                    except Exception:
+                        with self._ops_lock:
+                            self._active_request_ids.discard(
+                                engine_request.request_id
+                            )
+                            self._abort_requested.discard(engine_request.request_id)
+                        remaining: list[_OpBatch] = []
+                        if request_index + 1 < len(batch.requests):
+                            remaining.append(
+                                _AddBatch(
+                                    batch.requests[request_index + 1 :],
+                                    batch.tracks[request_index + 1 :],
+                                )
+                            )
+                        remaining.extend(batches[batch_index + 1 :])
+                        self._restore_ops(remaining)
+                        raise
+                    self._tracked[engine_request.request_id] = track
+                continue
+
+            for abort_index, request_id in enumerate(batch.request_ids):
                 try:
-                    self._scheduler.add_request(engine_request)
+                    if request_id in self._tracked:
+                        self._scheduler.abort(request_id)
                 except Exception:
-                    self._active_request_ids.discard(engine_request.request_id)
+                    with self._ops_lock:
+                        self._abort_requested.discard(request_id)
+                    remaining = []
+                    if abort_index + 1 < len(batch.request_ids):
+                        remaining.append(
+                            _AbortBatch(batch.request_ids[abort_index + 1 :])
+                        )
+                    remaining.extend(batches[batch_index + 1 :])
+                    self._restore_ops(remaining)
                     raise
-                self._tracked[engine_request.request_id] = track
-            elif op == "abort":
-                request_id = payload
-                if request_id in self._tracked:
-                    self._scheduler.abort(request_id)
 
     def step(self) -> list[tuple[str, StreamUpdate]]:
         """Serialize public step calls around the unified pipeline state."""
@@ -541,11 +678,15 @@ class EngineLoop:
             # Reclaim live requests too: shutdown may interrupt a long stream
             # after its current device call. Pending adds have no scheduler
             # state yet, but _forget still releases any runner-local residue.
-            for request_id in tuple(self._active_request_ids):
+            with self._ops_lock:
+                self._closed = True
+                active = tuple(self._active_request_ids)
+                self._ops.clear()
+                self._abort_requested.clear()
+            for request_id in active:
                 self._scheduler.abort(request_id)
                 self._tracked.pop(request_id, None)
                 self._forget(request_id)
-            self._ops.clear()
             self._deferred_forget.clear()
             if self._device_executor is not None:
                 self._device_executor.shutdown(wait=True, cancel_futures=True)
@@ -570,7 +711,9 @@ class EngineLoop:
             if release is not None:
                 release(request_id)
         finally:
-            self._active_request_ids.discard(request_id)
+            with self._ops_lock:
+                self._active_request_ids.discard(request_id)
+                self._abort_requested.discard(request_id)
 
     def _track_update(self, request_id: str, track: _RequestTrack) -> StreamUpdate | None:
         state = self._scheduler.states.get(request_id)
