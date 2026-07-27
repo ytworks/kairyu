@@ -66,6 +66,12 @@ add where supported; partial failures restore untouched work ahead of
 concurrent arrivals. In the committed 100,000-operation A/B harness, add
 containers fell from 100,000 to one while throughput rose 1.05×; duplicate
 abort containers fell from 100,000 to one while throughput rose 1.64×.
+Scheduler waiting admission now uses an ID-indexed FIFO or stable priority
+heap instead of list head shifts, linear cancellation scans, and repeated full
+sorts. Randomized reference-model tests preserve FIFO, priority aging, stable
+ties, preemption-front, and head-of-line KV behavior. At 100,000 queued
+requests, full FIFO drain measured 13.81× faster, 10,000 distributed removals
+94.88× faster, and full priority drain 4.79× faster.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -131,7 +137,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03). 610 tests. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
-| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, `docs/design/m11-product.md`). 627 tests. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D6 amended 2026-07-27, `docs/design/m11-product.md`): indexed FIFO/priority Scheduler waiting queue preserves aging and HoL contracts without linear list operations. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A (usage truth, HF chat templates, logprobs, structured outputs) is CPU work, start now. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
@@ -201,6 +207,27 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] scheduler waiting admission uses indexed queues
+- What: the Scheduler waiting list is replaced by an ID-indexed queue. FIFO
+  mode uses `OrderedDict` for O(1) append, head removal, and cancellation.
+  Priority mode uses a stable sequence-numbered heap, an ID index, and
+  amortized tombstone compaction. Algebraically factoring the common
+  `now/age` term makes the priority key immutable; recompute-preempted requests
+  retain front-of-tie placement.
+- Why: `pop(0)`, `remove(request_id)`, and a full stable sort on each admission
+  made queue churn scale linearly or worse with waiting depth. Indexed
+  ownership removes those host-path costs without allowing skip-ahead around a
+  KV-blocked head or changing priority-aging and starvation contracts.
+- Verification: 1,921 CPU tests pass (12 skipped, 115 deselected). Five seeded
+  randomized traces for FIFO, priority-only, and aging modes match the legacy
+  list model; stable ties, preemption-front, 100,000-ID stress, rejection, and
+  head-of-line blocking are pinned. A reproducible 100,000-request/3-repeat A/B
+  run measured 13.81× faster full FIFO drain, 94.88× faster distributed removal
+  of 10,000 IDs, and 4.79× faster full priority drain.
+- Refs: issue #219; m11 D6; `kairyu/engine/core/scheduler.py`;
+  `tests/unit/test_scheduler_waiting_queue.py`;
+  `bench/scheduler_queue_bench.py`.
 
 ### 2026-07-27 — [amendment] engine producer operations drain as safe batches
 - What: `EngineLoop` now protects request reservation and producer queue
