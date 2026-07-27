@@ -13,6 +13,7 @@ Structure follows SGLang's RadixAttention adapted to page alignment:
 from __future__ import annotations
 
 import hashlib
+import heapq
 from dataclasses import dataclass, field
 
 from kairyu.engine.core.pages import PagePool
@@ -64,6 +65,7 @@ class _Node:
         "prefix_hasher",
         "prefix_token_count",
         "block_hashes",
+        "eviction_version",
     )
 
     def __init__(
@@ -91,6 +93,8 @@ class _Node:
         self.prefix_hasher = None
         self.prefix_token_count = 0
         self.block_hashes: tuple[str, ...] = ()
+        # Every eligibility/LRU transition invalidates older heap entries.
+        self.eviction_version = 0
 
 
 @dataclass(frozen=True)
@@ -138,11 +142,14 @@ class RadixKVCache:
         self._pool = PagePool(num_pages)
         self._num_pages = num_pages
         self._page_size = page_size
+        self._clock = 0
+        self._eviction_sequence = 0
+        self._eviction_heap: list[tuple[int, int, int, _Node]] = []
+        self._evictable_index: dict[_Node, tuple[int, int]] = {}
         self._root = _Node(key=(), pages=(), parent=None)
         self._initialize_hash_chain(self._root)
         self._root.ref_count = 1  # never evictable
         self._root.computed = True
-        self._clock = 0
         self._alloc_tick = 0
         self._pins: dict[str, tuple[_Node, int | None]] = {}  # node, expiry tick
         self._hit_tokens = 0
@@ -160,6 +167,67 @@ class RadixKVCache:
     def _touch(self, node: _Node) -> None:
         self._clock += 1
         node.last_access = self._clock
+        if node in self._evictable_index or self._is_evictable(node):
+            self._refresh_evictable(node)
+
+    def _is_evictable(self, node: _Node) -> bool:
+        return (
+            node is not self._root
+            and not node.children
+            and node.ref_count == 0
+        )
+
+    def _maybe_compact_eviction_heap(self) -> None:
+        if len(self._eviction_heap) <= 64 or len(
+            self._eviction_heap
+        ) <= 2 * len(self._evictable_index):
+            return
+        self._eviction_heap = [
+            (node.last_access, sequence, version, node)
+            for node, (version, sequence) in self._evictable_index.items()
+        ]
+        heapq.heapify(self._eviction_heap)
+
+    def _refresh_evictable(self, node: _Node) -> None:
+        """Invalidate stale heap state and index the node if eligible now."""
+        node.eviction_version += 1
+        self._evictable_index.pop(node, None)
+        if self._is_evictable(node):
+            self._eviction_sequence += 1
+            sequence = self._eviction_sequence
+            self._evictable_index[node] = (
+                node.eviction_version,
+                sequence,
+            )
+            heapq.heappush(
+                self._eviction_heap,
+                (
+                    node.last_access,
+                    sequence,
+                    node.eviction_version,
+                    node,
+                ),
+            )
+        self._maybe_compact_eviction_heap()
+
+    def _invalidate_evictable(self, node: _Node) -> None:
+        node.eviction_version += 1
+        self._evictable_index.pop(node, None)
+        self._maybe_compact_eviction_heap()
+
+    def _pop_oldest_evictable(self) -> _Node | None:
+        while self._eviction_heap:
+            last_access, sequence, version, node = heapq.heappop(
+                self._eviction_heap
+            )
+            if self._evictable_index.get(node) != (version, sequence):
+                continue
+            if node.last_access != last_access or not self._is_evictable(node):
+                self._invalidate_evictable(node)
+                continue
+            del self._evictable_index[node]
+            return node
+        return None
 
     def _initialize_hash_chain(self, node: _Node) -> None:
         """Derive one node's compatible block hashes from its parent once."""
@@ -215,6 +283,9 @@ class RadixKVCache:
         node.block_hashes = node.block_hashes[keep_pages:]
         node.parent = upper
         upper.children[node.key[: self._page_size]] = node
+        self._refresh_evictable(parent)
+        self._refresh_evictable(upper)
+        self._refresh_evictable(node)
         return upper
 
     def _match_and_lock(self, tokens: tuple[int, ...]) -> tuple[int, tuple[int, ...], _Node]:
@@ -253,28 +324,27 @@ class RadixKVCache:
         current: _Node | None = node
         while current is not None and current is not self._root:
             current.ref_count -= 1
+            self._refresh_evictable(current)
             current = current.parent
-
-    def _evictable_leaves(self) -> list[_Node]:
-        leaves: list[_Node] = []
-        stack = [self._root]
-        while stack:
-            node = stack.pop()
-            stack.extend(node.children.values())
-            if node is not self._root and not node.children and node.ref_count == 0:
-                leaves.append(node)
-        return leaves
 
     def _ensure_free(self, needed: int) -> bool:
         while self._pool.num_free < needed:
-            leaves = self._evictable_leaves()
-            if not leaves:
+            victim = self._pop_oldest_evictable()
+            if victim is None:
                 return False
-            victim = min(leaves, key=lambda leaf: leaf.last_access)
-            self._emit_removed(victim)  # the ONLY BlockRemoved source (A13)
+            try:
+                self._emit_removed(victim)  # the ONLY BlockRemoved source (A13)
+            except Exception:
+                # The old scan found the same leaf again on retry. Restore that
+                # ownership when an event sink refuses the removal.
+                self._refresh_evictable(victim)
+                raise
             self._pool.free(victim.pages)
             assert victim.parent is not None
-            del victim.parent.children[victim.key[: self._page_size]]
+            parent = victim.parent
+            self._invalidate_evictable(victim)
+            del parent.children[victim.key[: self._page_size]]
+            self._refresh_evictable(parent)
         return True
 
     def _expire_pins(self) -> None:
@@ -316,6 +386,7 @@ class RadixKVCache:
                 child.ref_count = 1
                 self._touch(child)
                 node.children[key[: self._page_size]] = child
+                self._refresh_evictable(node)
                 node = child
         self._hit_tokens += matched_tokens
         self._total_tokens += len(tokens)
@@ -450,6 +521,7 @@ class RadixKVCache:
                     child.publishing = True
                     self._touch(child)
                     node.children[first_page] = child
+                    self._refresh_evictable(node)
                     try:
                         self._emit_stored(child)  # decode-extension store (A13)
                         child.computed = True
@@ -462,6 +534,10 @@ class RadixKVCache:
                             and node.children.get(first_page) is child
                         ):
                             del node.children[first_page]
+                            self._invalidate_evictable(child)
+                            self._refresh_evictable(node)
+                        else:
+                            self._refresh_evictable(child)
                 elif existing.key == key and existing.pages == candidate_pages:
                     # A prior attempt delivered this transition but failed later.
                     kept = candidate_pages
