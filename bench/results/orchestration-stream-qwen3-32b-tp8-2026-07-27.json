@@ -1,0 +1,612 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-07-27T12:16:05.636071+00:00",
+  "hardware_model": "Qwen/Qwen3-32B TP8",
+  "transport_ab": {
+    "scope": "Python async event transport only; no model inference",
+    "chunks_per_round": 100000,
+    "rounds": 7,
+    "median_ns_per_event": {
+      "pull_through": 161.14,
+      "queue_bridge": 7045.2
+    },
+    "queue_over_pull_through": 43.721,
+    "selected": "pull_through",
+    "samples_ns_per_event": {
+      "pull_through": [
+        207.6,
+        162.31,
+        161.14,
+        161.6,
+        161.01,
+        161.01,
+        160.97
+      ],
+      "queue_bridge": [
+        9383.48,
+        7342.4,
+        7059.85,
+        7045.2,
+        7010.77,
+        7041.58,
+        7029.05
+      ]
+    }
+  },
+  "endpoint_ab": {
+    "config": {
+      "base_url": "http://127.0.0.1:8002",
+      "direct_model": "qwen3-32b",
+      "auto_model": "kairyu-auto",
+      "pairs": 24,
+      "warmup": 2,
+      "max_tokens": 64,
+      "pair_order": "alternating",
+      "ttft_definition": "first non-empty assistant content delta",
+      "max_ttft_ratio": 1.5
+    },
+    "direct": {
+      "requests": 24,
+      "ttft_p50_ms": 121.526,
+      "ttft_p95_ms": 153.041,
+      "ttft_p99_ms": 153.505,
+      "total_p50_ms": 1628.583,
+      "completion_tokens_min": 64,
+      "completion_tokens_max": 64,
+      "status_comments": 0,
+      "trace_comments": 0
+    },
+    "auto": {
+      "requests": 24,
+      "ttft_p50_ms": 122.698,
+      "ttft_p95_ms": 152.389,
+      "ttft_p99_ms": 155.385,
+      "total_p50_ms": 9801.563,
+      "completion_tokens_min": 168,
+      "completion_tokens_max": 993,
+      "status_comments": 0,
+      "trace_comments": 24
+    },
+    "ratios": {
+      "ttft_p50_auto_over_direct": 1.0096,
+      "ttft_p99_auto_over_direct": 1.0122
+    },
+    "passed": true,
+    "total_latency_comparable": false,
+    "interpretation": "P-B1 gates TTFT only. Total latency is not comparable because the direct and AUTO paths returned different output-token counts; AUTO request sampling propagation is tracked by issue #208.",
+    "samples": {
+      "qwen3-32b": [
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "561045039021177cd9c0272222dae1a55ec07a8b225c1b93c055dc2b9d287697",
+          "ttft_ms": 127.09447182714939,
+          "total_ms": 1606.9134129211307,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "ac02b6c0c58162d4db14bdd252eb2112176559a0980f8c1335df45e4d0efab2a",
+          "ttft_ms": 124.8241038993001,
+          "total_ms": 1634.1669999528676,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "a6c4cdf55cdd38928e0b4e87edcee2692f66f7eb1be27c857e85403356eaa267",
+          "ttft_ms": 126.41734816133976,
+          "total_ms": 1639.794377144426,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "e36c249a28c3c037cd45e9fe8ed9dac67c20c02b5c680217aa6281c8b0718891",
+          "ttft_ms": 121.50039221160114,
+          "total_ms": 1628.860788187012,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "1a8d00761e836d40cde62b57e61710c04c0d73803064a4825f9de54a10fa741d",
+          "ttft_ms": 121.17269705049694,
+          "total_ms": 1628.3057569526136,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "463c34ba887650c91f2e82152b3c565af2fa03d9683d41829671229249f12130",
+          "ttft_ms": 117.79040400870144,
+          "total_ms": 1624.571590917185,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "a51ad4c12760b49c5e37054ffc3070e205f7742fc76395f6197833261eb0855e",
+          "ttft_ms": 119.50074788182974,
+          "total_ms": 1630.2851410582662,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "f151d0384928e5074be5bbc481e62d674851dba2e31c8960010773cc27b4ba1d",
+          "ttft_ms": 153.0412919819355,
+          "total_ms": 1746.628805063665,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "7daae4d8a974bfc1fee8ab7cc628df1acc1c3f550cb72cf7e77be6658ddb8ef3",
+          "ttft_ms": 152.76296599768102,
+          "total_ms": 1730.2428700495511,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "129a44789e6152b87fe58168aa59a7af97f7b8da2bbce5e2d1afb55a20c32d63",
+          "ttft_ms": 148.01697712391615,
+          "total_ms": 1718.6676189303398,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "b628df41fe1f32a96c8510992a2b57a9fd597fcd9514966fd7ccb3a4615327a3",
+          "ttft_ms": 148.3017299324274,
+          "total_ms": 1734.2293160036206,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "24144a08cd1212f8baba5aa1969a1136cce16f6905fae49bc13a0f662133c783",
+          "ttft_ms": 116.86586192809045,
+          "total_ms": 1591.0732171032578,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "c0ba68c3d943173fadc8f0aa66081660493a8fe48ba37181bfd02a46565f7858",
+          "ttft_ms": 121.45433900877833,
+          "total_ms": 1595.4309131484479,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "3341988c06b1d2f5adcdbf65f43edf59dcc9a99f754842b1c0cd570c1cec849f",
+          "ttft_ms": 119.57479314878583,
+          "total_ms": 1626.9669129978865,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "4f7c36b857bd13d652ed02e5be4466658f596afc6c10c6c184c664943a4328b6",
+          "ttft_ms": 117.2637059353292,
+          "total_ms": 1621.0741091053933,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "2b7dd1cddd956e114b20a27b883a1af28462adeca7b335f21010354e80602ba0",
+          "ttft_ms": 120.89076591655612,
+          "total_ms": 1626.3233190402389,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "815366ac80d1d32cef69571949325cf5b3685c7bd0022adcc7b9f9ae584eb8ff",
+          "ttft_ms": 120.42510719038546,
+          "total_ms": 1624.3362161330879,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "f858bbed682f5daf794a20c129a8777ecd21db5e5b7508a52a9b47205f18df95",
+          "ttft_ms": 123.2533638831228,
+          "total_ms": 1632.2679549921304,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "9ebc1488bdb607c605f0fbb4ff1f4b9b5d4e18bd82f24e948a78574c5ef494df",
+          "ttft_ms": 115.30147702433169,
+          "total_ms": 1615.2943789493293,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "4aabdc1c4d1169f91768c2e789493014f71b98c0f208dc64f4ca9cbecab900f2",
+          "ttft_ms": 118.14563907682896,
+          "total_ms": 1625.3817279357463,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "937a8118d11d1a61d3b35b8d351c71338f5f0493fbecbc20d03296aef87121b2",
+          "ttft_ms": 121.55148317106068,
+          "total_ms": 1626.3749010395259,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "39434917ec61f774ddb24fed467f421a7817a69b966c6699c8d3ab006d6a67f4",
+          "ttft_ms": 153.50485919043422,
+          "total_ms": 1747.4693330004811,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 0,
+          "prompt_sha256": "498b8dcadc4ce32f624e8b508d199b062ac91e3b4bf89359b13334cdb4063de6",
+          "ttft_ms": 151.32716088555753,
+          "total_ms": 1719.5507718715817,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        },
+        {
+          "model": "qwen3-32b",
+          "order": 1,
+          "prompt_sha256": "1c8492108b552ff7aa1e01a59f6a862a67c25e431ddfd76dbc6f80dc5255e01f",
+          "ttft_ms": 148.0581669602543,
+          "total_ms": 1748.4366078861058,
+          "content_chunks": 64,
+          "completion_tokens": 64,
+          "status_comments": 0,
+          "trace_comments": 0
+        }
+      ],
+      "kairyu-auto": [
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "561045039021177cd9c0272222dae1a55ec07a8b225c1b93c055dc2b9d287697",
+          "ttft_ms": 126.63566786795855,
+          "total_ms": 7716.636977856979,
+          "content_chunks": 320,
+          "completion_tokens": 321,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "ac02b6c0c58162d4db14bdd252eb2112176559a0980f8c1335df45e4d0efab2a",
+          "ttft_ms": 123.07960307225585,
+          "total_ms": 12383.721623104066,
+          "content_chunks": 507,
+          "completion_tokens": 508,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "a6c4cdf55cdd38928e0b4e87edcee2692f66f7eb1be27c857e85403356eaa267",
+          "ttft_ms": 125.00738399103284,
+          "total_ms": 8676.054928917438,
+          "content_chunks": 353,
+          "completion_tokens": 354,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "e36c249a28c3c037cd45e9fe8ed9dac67c20c02b5c680217aa6281c8b0718891",
+          "ttft_ms": 120.7970860414207,
+          "total_ms": 11610.316663980484,
+          "content_chunks": 475,
+          "completion_tokens": 476,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "1a8d00761e836d40cde62b57e61710c04c0d73803064a4825f9de54a10fa741d",
+          "ttft_ms": 123.67400294169784,
+          "total_ms": 6273.598738946021,
+          "content_chunks": 254,
+          "completion_tokens": 255,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "463c34ba887650c91f2e82152b3c565af2fa03d9683d41829671229249f12130",
+          "ttft_ms": 117.33008804731071,
+          "total_ms": 10266.876759938896,
+          "content_chunks": 419,
+          "completion_tokens": 420,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "a51ad4c12760b49c5e37054ffc3070e205f7742fc76395f6197833261eb0855e",
+          "ttft_ms": 121.32769683375955,
+          "total_ms": 11308.270493987948,
+          "content_chunks": 460,
+          "completion_tokens": 461,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "f151d0384928e5074be5bbc481e62d674851dba2e31c8960010773cc27b4ba1d",
+          "ttft_ms": 121.41844700090587,
+          "total_ms": 11626.539695076644,
+          "content_chunks": 455,
+          "completion_tokens": 456,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "7daae4d8a974bfc1fee8ab7cc628df1acc1c3f550cb72cf7e77be6658ddb8ef3",
+          "ttft_ms": 148.27600005082786,
+          "total_ms": 5320.57261117734,
+          "content_chunks": 203,
+          "completion_tokens": 204,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "129a44789e6152b87fe58168aa59a7af97f7b8da2bbce5e2d1afb55a20c32d63",
+          "ttft_ms": 155.38532799109817,
+          "total_ms": 7384.69324586913,
+          "content_chunks": 284,
+          "completion_tokens": 285,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "b628df41fe1f32a96c8510992a2b57a9fd597fcd9514966fd7ccb3a4615327a3",
+          "ttft_ms": 149.62882595136762,
+          "total_ms": 14188.226616941392,
+          "content_chunks": 554,
+          "completion_tokens": 555,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "24144a08cd1212f8baba5aa1969a1136cce16f6905fae49bc13a0f662133c783",
+          "ttft_ms": 123.65046516060829,
+          "total_ms": 16657.87710202858,
+          "content_chunks": 696,
+          "completion_tokens": 697,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "c0ba68c3d943173fadc8f0aa66081660493a8fe48ba37181bfd02a46565f7858",
+          "ttft_ms": 115.69051700644195,
+          "total_ms": 10763.595700031146,
+          "content_chunks": 449,
+          "completion_tokens": 450,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "3341988c06b1d2f5adcdbf65f43edf59dcc9a99f754842b1c0cd570c1cec849f",
+          "ttft_ms": 116.56454997137189,
+          "total_ms": 8761.21640112251,
+          "content_chunks": 359,
+          "completion_tokens": 360,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "4f7c36b857bd13d652ed02e5be4466658f596afc6c10c6c184c664943a4328b6",
+          "ttft_ms": 119.06593991443515,
+          "total_ms": 9053.717092843726,
+          "content_chunks": 370,
+          "completion_tokens": 371,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "2b7dd1cddd956e114b20a27b883a1af28462adeca7b335f21010354e80602ba0",
+          "ttft_ms": 120.52774289622903,
+          "total_ms": 9336.249248823151,
+          "content_chunks": 381,
+          "completion_tokens": 382,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "815366ac80d1d32cef69571949325cf5b3685c7bd0022adcc7b9f9ae584eb8ff",
+          "ttft_ms": 119.81775797903538,
+          "total_ms": 12858.468823833391,
+          "content_chunks": 511,
+          "completion_tokens": 512,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "f858bbed682f5daf794a20c129a8777ecd21db5e5b7508a52a9b47205f18df95",
+          "ttft_ms": 152.3893978446722,
+          "total_ms": 25325.296124909073,
+          "content_chunks": 992,
+          "completion_tokens": 993,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "9ebc1488bdb607c605f0fbb4ff1f4b9b5d4e18bd82f24e948a78574c5ef494df",
+          "ttft_ms": 118.22423595003784,
+          "total_ms": 14893.017183989286,
+          "content_chunks": 613,
+          "completion_tokens": 614,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "4aabdc1c4d1169f91768c2e789493014f71b98c0f208dc64f4ca9cbecab900f2",
+          "ttft_ms": 122.31720192357898,
+          "total_ms": 7190.2989419177175,
+          "content_chunks": 293,
+          "completion_tokens": 294,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "937a8118d11d1a61d3b35b8d351c71338f5f0493fbecbc20d03296aef87121b2",
+          "ttft_ms": 116.03626003488898,
+          "total_ms": 6533.365593058988,
+          "content_chunks": 265,
+          "completion_tokens": 266,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "39434917ec61f774ddb24fed467f421a7817a69b966c6699c8d3ab006d6a67f4",
+          "ttft_ms": 124.17195411399007,
+          "total_ms": 4335.074024973437,
+          "content_chunks": 167,
+          "completion_tokens": 168,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 1,
+          "prompt_sha256": "498b8dcadc4ce32f624e8b508d199b062ac91e3b4bf89359b13334cdb4063de6",
+          "ttft_ms": 151.13874012604356,
+          "total_ms": 6432.668303139508,
+          "content_chunks": 246,
+          "completion_tokens": 247,
+          "status_comments": 0,
+          "trace_comments": 1
+        },
+        {
+          "model": "kairyu-auto",
+          "order": 0,
+          "prompt_sha256": "1c8492108b552ff7aa1e01a59f6a862a67c25e431ddfd76dbc6f80dc5255e01f",
+          "ttft_ms": 151.1648278683424,
+          "total_ms": 11535.97705787979,
+          "content_chunks": 444,
+          "completion_tokens": 445,
+          "status_comments": 0,
+          "trace_comments": 1
+        }
+      ]
+    }
+  }
+}

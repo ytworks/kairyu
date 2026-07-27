@@ -3,7 +3,7 @@ from dataclasses import replace
 
 from kairyu.engine.backend import GenerationUsage
 from kairyu.engine.mock import MockBackend
-from kairyu.orchestration.moa import run_moa
+from kairyu.orchestration.moa import run_moa, stream_moa
 
 
 async def test_moa_collects_n_proposals_and_synthesizes():
@@ -59,3 +59,37 @@ async def test_moa_sums_cached_tokens_across_proposals_and_synthesis():
 
     assert result.usage == (40, 8)
     assert result.cached_tokens == 16
+
+
+async def test_moa_stream_pulls_synthesizer_deltas_and_preserves_usage():
+    class CachedBackend(MockBackend):
+        async def generate(self, request):
+            result = await super().generate(request)
+            return replace(
+                result,
+                usage=GenerationUsage(
+                    prompt_tokens=10,
+                    completion_tokens=2,
+                    cached_tokens=4,
+                ),
+            )
+
+    events = [
+        event
+        async for event in stream_moa(
+            CachedBackend(
+                responses={
+                    "Synthesize": "a final answer long enough for multiple chunks"
+                }
+            ),
+            "q",
+            n_samples=2,
+        )
+    ]
+
+    assert [event.kind for event in events[:-1]] == ["delta"] * (len(events) - 1)
+    result = events[-1].result
+    assert result is not None
+    assert "".join(event.text for event in events[:-1]) == result.final_text
+    assert result.usage == (30, 6)
+    assert result.cached_tokens == 12

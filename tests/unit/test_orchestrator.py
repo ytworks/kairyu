@@ -4,7 +4,7 @@ import pytest
 
 from kairyu.engine.mock import MockBackend
 from kairyu.orchestration.budget import Budget, BudgetState
-from kairyu.orchestration.moa import MoAResult
+from kairyu.orchestration.moa import MoAEvent, MoAResult
 from kairyu.orchestration.orchestrator import (
     EngineDescriptor,
     Orchestrator,
@@ -394,6 +394,97 @@ async def test_multistage_stream_emits_periodic_keepalives(monkeypatch):
     assert kinds.count("status") >= 2  # routing + at least one "working" keepalive
     assert kinds[-1] == "result"
     assert any(e.kind == "delta" for e in events)
+
+
+async def test_conductor_verifier_failure_precedes_streamed_final_boundary():
+    backend = MockBackend(
+        responses={
+            "[verifier]": "FAIL: revise the draft",
+            "[synthesizer]": "final answer streamed in several chunks",
+        }
+    )
+    orchestrator = _orchestrator(
+        engines={"tier1": backend, "tier2": backend},
+        budget=Budget(max_refine_depth=0),
+    )
+
+    events = [
+        event
+        async for event in await orchestrator.run_chat(COMPLEX, stream=True)
+    ]
+
+    result = events[-1].result
+    assert result is not None
+    assert "".join(event.text for event in events if event.kind == "delta") == result.text
+    assert result.structured_trace is not None
+    trace = result.structured_trace.as_dict()["events"]
+    verifier = next(event for event in trace if event["role"] == "verifier")
+    final = next(event for event in trace if event["role"] == "synthesizer")
+    assert verifier["detail"]["pass"] is False
+    assert final["detail"]["streamed"] is True
+
+
+async def test_moa_final_synthesis_streams_and_reports_trace():
+    backend = MockBackend(
+        responses={"Synthesize": "MoA final answer streamed across several chunks"}
+    )
+    orchestrator = _orchestrator(
+        engines={"tier1": backend, "tier2": backend},
+        moa_samples=2,
+    )
+
+    events = [
+        event
+        async for event in await orchestrator.run_chat(COMPLEX, stream=True)
+    ]
+
+    deltas = [event.text for event in events if event.kind == "delta"]
+    result = events[-1].result
+    assert len(deltas) > 1
+    assert result is not None
+    assert "".join(deltas) == result.text
+    assert result.structured_trace is not None
+    moa = result.structured_trace.as_dict()["events"][-1]
+    assert moa["role"] == "moa"
+    assert moa["detail"]["streamed"] is True
+
+
+async def test_moa_stream_cancellation_closes_stream_and_releases_reservation(
+    monkeypatch,
+):
+    import kairyu.orchestration.moa as moa_module
+
+    closed = asyncio.Event()
+
+    async def blocked_stream_moa(*args, **kwargs):
+        try:
+            yield MoAEvent(kind="delta", text="first")
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    releases = _track_budget_releases(monkeypatch)
+    monkeypatch.setattr(moa_module, "stream_moa", blocked_stream_moa)
+    orchestrator = _orchestrator(
+        moa_samples=2,
+        budget=Budget(max_steps=3, max_cost_usd=1.0),
+    )
+    stream = await orchestrator.run_chat(COMPLEX, stream=True)
+
+    assert (await anext(stream)).kind == "status"
+    assert (await anext(stream)).text == "first"
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert closed.is_set()
+    assert len(releases) == 1
+    reserved, steps, unknown_cost, released = releases[0]
+    assert (steps, unknown_cost) == (3, True)
+    assert (reserved.steps_reserved, reserved.unknown_cost_reserved) == (3, True)
+    assert (released.steps_reserved, released.unknown_cost_reserved) == (0, False)
 
 
 async def test_missing_tier_falls_back_with_trace_note():

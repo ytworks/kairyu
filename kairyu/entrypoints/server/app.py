@@ -326,6 +326,7 @@ async def _stream_orchestrator(
                             reported_usage = GenerationUsage(
                                 prompt_tokens=final_result.prompt_tokens,
                                 completion_tokens=final_result.completion_tokens,
+                                cached_tokens=final_result.cached_tokens,
                             )
                         owner.observe(reported_usage, completions)
         except Exception as error:  # surface as an SSE error event, then close

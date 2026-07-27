@@ -1,0 +1,39 @@
+# Both tiers intentionally resolve to the same real backend for a controlled
+# direct-route latency comparison. Complex prompts still exercise the complete
+# Conductor path, including a verifier-before-final streaming boundary.
+workers:
+  - name: tier1
+    backend: openai
+    base_url: http://127.0.0.1:8001/v1
+    model: qwen3-32b
+    api_key_env: null
+  - name: tier2
+    backend: openai
+    base_url: http://127.0.0.1:8001/v1
+    model: qwen3-32b
+    api_key_env: null
+
+roles:
+  - name: planner
+    worker: tier2
+    role_type: planner
+    prompt: "[planner] Make a concise plan.\nTask: {query}"
+  - name: worker
+    worker: tier1
+    prompt: "[worker] Execute the plan.\nPlan: {planner}\nTask: {query}"
+    depends_on: [planner]
+  - name: verifier
+    worker: tier2
+    role_type: verifier
+    verifies: worker
+    prompt: "[verifier] Reply PASS or FAIL.\nTask: {query}\nDraft: {worker}"
+    depends_on: [worker]
+  - name: synthesizer
+    worker: tier2
+    role_type: synthesizer
+    prompt: "[synthesizer] Return the final answer.\nDraft: {worker}\nNotes: {verifier}"
+    depends_on: [worker, verifier]
+
+budget:
+  max_steps: 8
+  max_refine_depth: 1

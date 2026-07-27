@@ -9,9 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest
+from kairyu.engine.backend import (
+    CacheHint,
+    EngineBackend,
+    GenerationRequest,
+    GenerationResult,
+)
 from kairyu.sampling_params import SamplingParams
 
 _DEFAULT_N_SAMPLES = 3
@@ -32,14 +38,23 @@ class MoAResult:
     cached_tokens: int = 0
 
 
-async def run_moa(
+@dataclass(frozen=True)
+class MoAEvent:
+    """A final synthesis delta or the complete MoA result."""
+
+    kind: str  # "delta" | "result"
+    text: str = ""
+    result: MoAResult | None = None
+
+
+async def _prepare_moa(
     backend: EngineBackend,
     query: str,
-    n_samples: int = _DEFAULT_N_SAMPLES,
-    synthesizer: EngineBackend | None = None,
-    sampling_params: SamplingParams | None = None,
-    shared_prefix: str = "",
-) -> MoAResult:
+    *,
+    n_samples: int,
+    sampling_params: SamplingParams | None,
+    shared_prefix: str,
+) -> tuple[tuple[str, ...], list[int], GenerationRequest]:
     if n_samples < 1:
         raise ValueError(f"n_samples must be >= 1, got {n_samples}")
     params = sampling_params or SamplingParams(temperature=_PROPOSAL_TEMPERATURE, max_tokens=1024)
@@ -74,11 +89,90 @@ async def run_moa(
         sampling_params=params.clone(temperature=0.3, seed=None),
         cache_hint=hint,
     )
+    return proposals, usage_totals, synthesis_request
+
+
+async def run_moa(
+    backend: EngineBackend,
+    query: str,
+    n_samples: int = _DEFAULT_N_SAMPLES,
+    synthesizer: EngineBackend | None = None,
+    sampling_params: SamplingParams | None = None,
+    shared_prefix: str = "",
+) -> MoAResult:
+    proposals, usage_totals, synthesis_request = await _prepare_moa(
+        backend,
+        query,
+        n_samples=n_samples,
+        sampling_params=sampling_params,
+        shared_prefix=shared_prefix,
+    )
     synthesis_backend = synthesizer or backend
-    final = _account(await synthesis_backend.generate(synthesis_request))
+    final_result = await synthesis_backend.generate(synthesis_request)
+    if final_result.usage is not None:
+        usage_totals[0] += final_result.usage.prompt_tokens
+        usage_totals[1] += final_result.usage.completion_tokens
+        usage_totals[2] += final_result.usage.cached_tokens
     return MoAResult(
-        final_text=final,
+        final_text=final_result.text,
         proposals=proposals,
         usage=(usage_totals[0], usage_totals[1]),
         cached_tokens=usage_totals[2],
+    )
+
+
+async def stream_moa(
+    backend: EngineBackend,
+    query: str,
+    n_samples: int = _DEFAULT_N_SAMPLES,
+    synthesizer: EngineBackend | None = None,
+    sampling_params: SamplingParams | None = None,
+    shared_prefix: str = "",
+) -> AsyncIterator[MoAEvent]:
+    """Generate proposals concurrently and pull synthesis deltas through.
+
+    The synthesis backend iterator is consumed in the caller's task, avoiding
+    an intermediate asyncio queue and making cancellation close the real
+    backend stream directly.
+    """
+
+    proposals, usage_totals, synthesis_request = await _prepare_moa(
+        backend,
+        query,
+        n_samples=n_samples,
+        sampling_params=sampling_params,
+        shared_prefix=shared_prefix,
+    )
+    synthesis_backend = synthesizer or backend
+    emitted = 0
+    last_result: GenerationResult | None = None
+    latest_usage = None
+    previous_text = ""
+    async for partial in synthesis_backend.stream(synthesis_request):
+        last_result = partial
+        if partial.usage is not None:
+            latest_usage = partial.usage
+        text = partial.text
+        if not text.startswith(previous_text):
+            raise RuntimeError(
+                "MoA synthesis stream must emit cumulative, prefix-stable text"
+            )
+        previous_text = text
+        if len(text) > emitted:
+            yield MoAEvent(kind="delta", text=text[emitted:])
+            emitted = len(text)
+    if last_result is None:
+        raise RuntimeError("MoA synthesis stream produced no result")
+    if latest_usage is not None:
+        usage_totals[0] += latest_usage.prompt_tokens
+        usage_totals[1] += latest_usage.completion_tokens
+        usage_totals[2] += latest_usage.cached_tokens
+    yield MoAEvent(
+        kind="result",
+        result=MoAResult(
+            final_text=last_result.text,
+            proposals=proposals,
+            usage=(usage_totals[0], usage_totals[1]),
+            cached_tokens=usage_totals[2],
+        ),
     )
