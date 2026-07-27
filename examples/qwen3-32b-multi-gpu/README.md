@@ -63,6 +63,51 @@ NUM_REQUESTS=256 CONCURRENCY=64 MAX_TOKENS=256 \
 Available variables are `NUM_REQUESTS`, `CONCURRENCY`, `MAX_TOKENS`,
 `TTFT_SLO_S`, and `TIMEOUT_S`.
 
+## AUTO direct-route TTFT gate
+
+Issue P-B1 compares `kairyu-auto` with its exact underlying Qwen3-32B backend
+through one gateway. Start the Qwen service above, then run the gateway and the
+paired benchmark in separate shells:
+
+```console
+uv run kairyu serve examples/qwen3-32b-multi-gpu/auto-gateway.yaml
+```
+
+```console
+uv run python bench/orchestration_stream_bench.py \
+  --base-url http://127.0.0.1:8002 \
+  --direct-model qwen3-32b \
+  --auto-model kairyu-auto
+```
+
+During local development an existing CUDA dependency image can validate the
+current checkout without rebuilding multi-gigabyte framework layers:
+
+```console
+docker compose \
+  -f examples/qwen3-32b-multi-gpu/compose.yaml \
+  -f examples/qwen3-32b-multi-gpu/compose.source-override.yaml \
+  up -d --no-build kairyu auto-gateway
+```
+
+The override's gateway uses host networking so its checked-in
+`127.0.0.1:8001` backend address still names the Qwen service. This also lets a
+sandboxed development client run the benchmark inside that container:
+
+```console
+docker compose \
+  -f examples/qwen3-32b-multi-gpu/compose.yaml \
+  -f examples/qwen3-32b-multi-gpu/compose.source-override.yaml \
+  exec auto-gateway python bench/orchestration_stream_bench.py
+```
+
+The workload alternates direct/AUTO order within each prompt pair. TTFT starts
+at the first non-empty assistant content delta, so AUTO keep-alive comments do
+not make the result look faster. The command exits nonzero unless both p50 and
+p99 AUTO/direct TTFT ratios are at most 1.5, and writes the raw paired samples
+plus the pull-through-versus-queue responsibility-boundary A/B under
+`bench/results/`.
+
 ## Answer quality: the Fugu suite
 
 The commands above measure throughput. To measure *answers* — all eleven

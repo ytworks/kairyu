@@ -66,6 +66,67 @@ class GateBackend:
         return None
 
 
+class PullThroughBackend:
+    """Holds a final stream open after its first cumulative chunk."""
+
+    def __init__(self, *, fail_after_first: bool = False) -> None:
+        self.stream_started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.stream_closed = False
+        self.fail_after_first = fail_after_first
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(index=0, text="draft", token_ids=(1,)),
+            ),
+            usage=GenerationUsage(
+                prompt_tokens=5,
+                completion_tokens=1,
+                cached_tokens=2,
+            ),
+        )
+
+    async def stream(self, request):
+        self.stream_started.set()
+        try:
+            yield GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(index=0, text="first ", token_ids=(1,)),
+                ),
+                finished=False,
+            )
+            await self.release.wait()
+            if self.fail_after_first:
+                raise RuntimeError("final stream failed")
+            yield GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0,
+                        text="first second",
+                        token_ids=(1, 2),
+                        finish_reason="stop",
+                    ),
+                ),
+                usage=GenerationUsage(
+                    prompt_tokens=7,
+                    completion_tokens=2,
+                    cached_tokens=4,
+                ),
+            )
+        finally:
+            self.stream_closed = True
+
+    async def shutdown(self) -> None:
+        return None
+
+
 def _linear_roles() -> tuple[RoleSpec, ...]:
     return (
         RoleSpec(name="planner", worker="w", prompt="[planner] plan for: {query}"),
@@ -110,6 +171,94 @@ async def test_conductor_sums_cached_tokens_across_units():
 
     assert result.usage == (20, 4)
     assert result.cached_tokens == 8
+
+
+async def test_final_synthesizer_deltas_pull_through_before_completion():
+    backend = PullThroughBackend()
+    roles = (
+        RoleSpec(name="draft", worker="w", prompt="draft: {query}"),
+        RoleSpec(
+            name="final",
+            worker="w",
+            prompt="final: {draft}",
+            role_type="synthesizer",
+            depends_on=("draft",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+    stream = conductor.stream("q")
+
+    first = await anext(stream)
+
+    assert first.kind == "delta"
+    assert first.text == "first "
+    assert not backend.release.is_set()
+
+    backend.release.set()
+    remaining = [event async for event in stream]
+    assert [event.kind for event in remaining] == ["delta", "result"]
+    assert remaining[0].text == "second"
+    result = remaining[-1].result
+    assert result is not None
+    assert result.final_text == "first second"
+    assert result.usage == (12, 3)
+    assert result.cached_tokens == 6
+    final_trace = result.trace[-1]
+    assert final_trace.node == "final"
+    assert final_trace.metadata["streamed"] is True
+
+
+async def test_final_stream_cancellation_closes_backend_and_releases_budget():
+    backend = PullThroughBackend()
+    spec = RoleSpec(name="final", worker="w", prompt="{query}")
+    conductor = Conductor(roles=(spec,), workers={"w": backend})
+    run = conductor_module._RunState(
+        budget=BudgetState(Budget(max_steps=1, max_cost_usd=1.0))
+    )
+    stream = conductor._stream_unit(run, "session", "q", spec)
+
+    assert (await anext(stream)).text == "first "
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert backend.stream_closed is True
+    assert run.budget.steps_used == 0
+    assert run.budget.steps_reserved == 0
+    assert run.budget.unknown_cost_reserved is False
+
+
+async def test_final_stream_failure_is_not_converted_to_false_success():
+    backend = PullThroughBackend(fail_after_first=True)
+    roles = (RoleSpec(name="final", worker="w", prompt="{query}"),)
+    conductor = Conductor(roles=roles, workers={"w": backend})
+    stream = conductor.stream("q")
+
+    assert (await anext(stream)).text == "first "
+    backend.release.set()
+    with pytest.raises(RuntimeError, match="final stream failed"):
+        await anext(stream)
+
+
+async def test_stream_rejects_provisional_final_with_post_verifier():
+    backend = MockBackend()
+    roles = (
+        RoleSpec(name="final", worker="w", prompt="{query}"),
+        RoleSpec(
+            name="check",
+            worker="w",
+            prompt="{final}",
+            role_type="verifier",
+            verifies="final",
+            depends_on=("final",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+
+    with pytest.raises(ValueError, match="cannot have a post-generation verifier"):
+        await anext(conductor.stream("q"))
 
 
 async def test_unit_backend_failure_does_not_destroy_the_run():
@@ -259,6 +408,23 @@ async def test_budget_exhaustion_returns_best_so_far():
     assert "worker" not in result.outputs
     assert result.final_text == result.outputs["planner"]
     assert any(event.kind == "skipped:budget" for event in result.trace)
+
+
+async def test_stream_budget_exhaustion_emits_best_so_far_fallback():
+    backend = MockBackend()
+    conductor = Conductor(roles=_linear_roles(), workers={"w": backend})
+
+    events = [
+        event
+        async for event in conductor.stream("q", budget=Budget(max_steps=1))
+    ]
+
+    result = events[-1].result
+    assert result is not None
+    assert result.final_text == result.outputs["planner"]
+    assert "".join(event.text for event in events if event.kind == "delta") == (
+        result.final_text
+    )
 
 
 async def test_all_prompts_share_prefix_for_kv_affinity():

@@ -130,6 +130,17 @@ dequantization and full-engine checkpoint generation; unsupported combinations
 fail loudly. RTX PRO 6000 evidence records correctness, latency, temporary
 memory, BF16 baselines, and pinned vLLM 0.26.0 comparisons
 (`bench/results/quant-{gemm,vllm}-rtxpro6000-2026-07-27.json`).
+G6 P-B1 streaming orchestration is now closed. Direct routes already streamed;
+Conductor and MoA now keep pre-final work private and pull their final
+worker/synthesizer backend iterator through Orchestrator to OpenAI SSE.
+Long pre-final work retains comment keep-alives, and cancellation/failure closes
+the real backend iterator while releasing budget reservations and finalizing
+usage once. Final-role post-verification is rejected because emitted SSE cannot
+be retracted; supported DAGs verify a draft before an unverified final boundary.
+On Qwen3-32B TP8, 24 alternating direct/AUTO pairs measured AUTO/direct TTFT
+1.0096x p50 and 1.0122x p99. An isolated seven-round A/B measured a bounded
+task/queue bridge 43.721x slower per event than the selected pull-through path
+(`bench/results/orchestration-stream-qwen3-32b-tp8-2026-07-27.json`).
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-27_
@@ -162,8 +173,8 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
-| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D6 amended 2026-07-27, `docs/design/m11-product.md`): indexed FIFO/priority Scheduler waiting queue preserves aging and HoL contracts without linear list operations. |
-| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A and P-B5 tenancy reconciliation are CPU-green; remaining P-B latency/quality and P-C gates continue. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D6 amended 2026-07-27, `docs/design/m11-product.md`): Conductor/MoA final-stage pull-through streaming and indexed FIFO/priority admission are production-wired. |
+| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, and P-B5 are green; remaining P-B latency/quality and P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -256,6 +267,28 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [design] P-B1 final-stage pull-through streaming closes issue #195
+- What: Conductor and MoA now own their final backend iterators and expose typed
+  deltas/results to Orchestrator; Orchestrator emits pre-final SSE-comment
+  keep-alives and assembles route/trace/accounting, while the HTTP layer only
+  serializes OpenAI chunks. Direct, Conductor, and MoA finals stream live;
+  cancellation/failure closes the backend iterator, releases budget
+  reservations, and finalizes usage once. A final role with its own
+  post-generation verifier is rejected explicitly; supported DAGs verify the
+  draft before an unverified final boundary. Production Qwen3-32B TP8 configs,
+  a paired TTFT gate, raw samples, and cancellation/failure/usage/trace tests
+  are committed.
+- Why: Matching another framework's component names is not a performance
+  requirement. A controlled transport A/B measured pull-through at 161.14
+  ns/event versus 7,045.2 ns/event for a task plus bounded queue (43.721x), so
+  Kairyu keeps the execution-owned iterator. The 24-pair real-model gate
+  measured AUTO/direct TTFT at 1.0096x p50 and 1.0122x p99, below P-B1's 1.5x
+  ceiling.
+- Refs: m11 D1/A5, G6 P-B1, issue #195;
+  `kairyu/orchestration/{conductor,moa,orchestrator}.py`,
+  `bench/orchestration_stream_bench.py`,
+  `bench/results/orchestration-stream-qwen3-32b-tp8-2026-07-27.json`
 
 ### 2026-07-27 — [amendment] P-C5 emits versioned cached-token invoices
 - What: usage rows and Prometheus totals now expose explicit uncached input in

@@ -27,6 +27,10 @@ pools:
 """
 
 GATEWAY_GPU_YAML = Path(__file__).parents[2] / "deploy/compose/gateway-gpu.yaml"
+QWEN_AUTO_GATEWAY_YAML = (
+    Path(__file__).parents[2]
+    / "examples/qwen3-32b-multi-gpu/auto-gateway.yaml"
+)
 
 
 class _ShutdownBackend(MockBackend):
@@ -90,6 +94,15 @@ async def test_gpu_gateway_exposes_canonical_default_model():
 
     assert "default" in ids
     assert "llama" not in ids
+
+
+async def test_qwen_auto_gate_resolves_relative_orchestrator_spec():
+    app = build_app_from_config(QWEN_AUTO_GATEWAY_YAML)
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        ids = {model["id"] for model in models.json()["data"]}
+
+    assert ids == {"qwen3-32b", "kairyu-auto"}
 
 
 async def test_builder_wires_named_embedding_models():

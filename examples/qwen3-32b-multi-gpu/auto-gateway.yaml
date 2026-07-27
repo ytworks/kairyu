@@ -1,0 +1,18 @@
+# P-B1 acceptance gateway: direct and AUTO share the exact same Qwen3-32B
+# backend so their paired TTFT difference is orchestration overhead.
+server:
+  host: 127.0.0.1
+  port: 8002
+  api_keys_env: null
+
+engines:
+  qwen3-32b:
+    backend: openai
+    options:
+      base_url: http://127.0.0.1:8001/v1
+      model: qwen3-32b
+      api_key_env: null
+
+orchestrators:
+  kairyu-auto:
+    spec: auto-orchestrator.yaml

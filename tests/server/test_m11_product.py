@@ -161,12 +161,14 @@ class TestOrchestratorSurface:
         with TestClient(_auto_app(tmp_path)) as client:
             with client.stream(
                 "POST", "/v1/chat/completions",
+                headers={"X-Kairyu-Trace": "1"},
                 json={"model": "kairyu-auto", "stream": True,
                       "stream_options": {"include_usage": True},
                       "messages": [{"role": "user", "content": "hello"}]},
             ) as response:
                 body = "".join(response.iter_text())
         assert "data: [DONE]" in body
+        assert ": trace route:" in body
         import json as _json
 
         data_lines = [
@@ -178,6 +180,62 @@ class TestOrchestratorSurface:
         assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
         usage_chunks = [c for c in chunks if c.get("usage")]
         assert usage_chunks and usage_chunks[-1]["usage"]["completion_tokens"] > 0
+
+    def test_auto_partial_stream_failure_finalizes_usage_once(self, tmp_path):
+        class PartialFailureBackend(MockBackend):
+            def __init__(self):
+                super().__init__()
+                self.closed = False
+
+            async def stream(self, request):
+                try:
+                    yield GenerationResult(
+                        request_id=request.request_id,
+                        prompt=request.prompt,
+                        completions=(
+                            CompletionOutput(
+                                index=0,
+                                text="partial answer",
+                                token_ids=(1, 2),
+                            ),
+                        ),
+                        finished=False,
+                    )
+                    raise RuntimeError("backend failed after first delta")
+                finally:
+                    self.closed = True
+
+        backend = PartialFailureBackend()
+        ledger_path = tmp_path / "usage.jsonl"
+        app = create_app(
+            {},
+            orchestrators={
+                "kairyu-auto": Orchestrator(
+                    {"tier1": backend, "tier2": backend}
+                )
+            },
+            settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+        )
+
+        with TestClient(app) as client:
+            with client.stream(
+                "POST",
+                "/v1/chat/completions",
+                json={
+                    "model": "kairyu-auto",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            ) as response:
+                body = "".join(response.iter_text())
+
+        assert "partial answer" in body
+        assert '"error"' in body
+        assert "data: [DONE]" in body
+        assert backend.closed is True
+        totals = UsageLedger(ledger_path).totals()["default"]
+        assert totals["requests"] == 1
+        assert totals["completion_tokens"] > 0
 
     def test_moa_tier_synthesizes(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 
 from kairyu.engine.backend import CacheHint, EngineBackend, GenerationRequest, GenerationResult
@@ -67,6 +67,21 @@ class ConductorResult:
     trace: tuple[TraceEvent, ...]
     usage: tuple[int, int] = (0, 0)  # (prompt, completion) summed over units (m11 A1)
     cached_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class ConductorEvent:
+    """A pull-through final-stage stream event.
+
+    The Conductor owns the final worker iterator so no task/queue bridge sits
+    between the backend and the Orchestrator.  Pre-final DAG work remains an
+    implementation detail; callers receive only committed final-answer deltas
+    followed by the complete accounting result.
+    """
+
+    kind: str  # "delta" | "result"
+    text: str = ""
+    result: ConductorResult | None = None
 
 
 class _SafeDict(dict):
@@ -455,10 +470,7 @@ class Conductor:
             )
 
     def _final_text(self, run: _RunState) -> str:
-        dependents: set[str] = set()
-        for deps in self._unit_deps.values():
-            dependents.update(deps)
-        terminal = [unit for unit in self._units if unit.name not in dependents]
+        terminal = self._terminal_units()
         synthesizers = [unit for unit in terminal if unit.role_type == "synthesizer"]
         for unit in synthesizers + terminal:
             if unit.name in run.outputs:
@@ -467,10 +479,38 @@ class Conductor:
             return run.outputs[run.completion_order[-1]]
         return ""
 
-    async def run(self, query: str, budget: Budget | None = None) -> ConductorResult:
-        run = _RunState(budget=BudgetState(budget=budget or Budget()))
-        session = uuid.uuid4().hex[:12]
-        pending = {name: set(deps) for name, deps in self._unit_deps.items()}
+    def _terminal_units(self) -> list[RoleSpec]:
+        dependents: set[str] = set()
+        for deps in self._unit_deps.values():
+            dependents.update(deps)
+        return [unit for unit in self._units if unit.name not in dependents]
+
+    def _stream_final_unit(self) -> RoleSpec:
+        terminal = self._terminal_units()
+        if not terminal:
+            raise ValueError("streaming requires at least one generation role")
+        synthesizers = [unit for unit in terminal if unit.role_type == "synthesizer"]
+        final = (synthesizers + terminal)[0]
+        if final.name in self._verifier_for:
+            raise ValueError(
+                "the final streamed role cannot have a post-generation verifier; "
+                "verify a draft before an unverified final synthesizer"
+            )
+        return final
+
+    async def _run_pending(
+        self,
+        run: _RunState,
+        session: str,
+        query: str,
+        *,
+        exclude: frozenset[str] = frozenset(),
+    ) -> None:
+        pending = {
+            name: set(deps)
+            for name, deps in self._unit_deps.items()
+            if name not in exclude
+        }
         while pending:
             ready = [name for name, deps in pending.items() if not deps]
             await asyncio.gather(
@@ -483,6 +523,144 @@ class Conductor:
                 del pending[name]
             for deps in pending.values():
                 deps.difference_update(ready)
+
+    async def _stream_unit(
+        self,
+        run: _RunState,
+        session: str,
+        query: str,
+        spec: RoleSpec,
+    ) -> AsyncIterator[ConductorEvent]:
+        if run.budget.is_exhausted:
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "skipped:budget",
+                    operation="generation",
+                    status="skipped",
+                    attempt=0,
+                    budget=TraceBudget.between(run.budget, run.budget),
+                    metadata={"reason": "budget"},
+                )
+            )
+            return
+
+        prompt = self._render(spec.prompt, query, run.outputs)
+        backend = self._workers[spec.worker]
+        request = GenerationRequest(
+            request_id=f"{session}-{spec.name}-0",
+            prompt=prompt,
+            sampling_params=self._sampling_params,
+            cache_hint=self._cache_hint(session),
+        )
+        queued_at = utc_now_iso()
+        budget_before = run.budget
+        unknown_cost = run.budget.budget.max_cost_usd is not None
+        reserved = run.budget.try_reserve(unknown_cost=unknown_cost)
+        if reserved is None:
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "skipped:budget",
+                    operation="generation",
+                    status="skipped",
+                    attempt=0,
+                    budget=TraceBudget.between(run.budget, run.budget),
+                    metadata={"reason": "budget"},
+                )
+            )
+            return
+        run.budget = reserved
+
+        started_at = utc_now_iso()
+        emitted = 0
+        last_result: GenerationResult | None = None
+        latest_usage = None
+        try:
+            async for partial in backend.stream(request):
+                last_result = partial
+                if partial.usage is not None:
+                    latest_usage = partial.usage
+                text = partial.text
+                if not text.startswith(run.outputs.get(spec.name, "")):
+                    raise RuntimeError(
+                        "final worker stream must emit cumulative, prefix-stable text"
+                    )
+                run.outputs[spec.name] = text
+                if len(text) > emitted:
+                    yield ConductorEvent(kind="delta", text=text[emitted:])
+                    emitted = len(text)
+            if last_result is None:
+                raise RuntimeError("final worker stream produced no result")
+            actual_cost = self._cost_model(request, last_result)
+            reconciled = run.budget.reconcile_success(
+                cost=actual_cost,
+                unknown_cost=unknown_cost,
+            )
+        except Exception as error:
+            run.budget = run.budget.release(unknown_cost=unknown_cost)
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "failed",
+                    operation="generation",
+                    status="failed",
+                    attempt=0,
+                    detail=type(error).__name__,
+                    timing=TraceTiming(
+                        queued_at=queued_at,
+                        started_at=started_at,
+                        completed_at=utc_now_iso(),
+                    ),
+                    budget=TraceBudget.between(budget_before, run.budget),
+                    error=TraceError(type=type(error).__name__),
+                )
+            )
+            raise
+        except BaseException:
+            run.budget = run.budget.release(unknown_cost=unknown_cost)
+            raise
+
+        run.budget = reconciled
+        trace_usage = None
+        if latest_usage is not None:
+            run.usage[0] += latest_usage.prompt_tokens
+            run.usage[1] += latest_usage.completion_tokens
+            run.cached_tokens += latest_usage.cached_tokens
+            trace_usage = TraceUsage(
+                prompt_tokens=latest_usage.prompt_tokens,
+                completion_tokens=latest_usage.completion_tokens,
+                cached_tokens=latest_usage.cached_tokens,
+            )
+        run.trace.append(
+            self._trace_event(
+                spec,
+                "generated",
+                operation="generation",
+                status="success",
+                attempt=0,
+                detail="attempt=0 streamed=true",
+                timing=TraceTiming(
+                    queued_at=queued_at,
+                    started_at=started_at,
+                    completed_at=utc_now_iso(),
+                ),
+                usage=trace_usage,
+                budget=TraceBudget.between(
+                    budget_before,
+                    run.budget,
+                    steps_consumed=1,
+                    cost_consumed_usd=actual_cost,
+                ),
+                metadata={"streamed": True},
+            )
+        )
+        run.completion_order.append(spec.name)
+
+    async def run(self, query: str, budget: Budget | None = None) -> ConductorResult:
+        run = _RunState(budget=BudgetState(budget=budget or Budget()))
+        session = uuid.uuid4().hex[:12]
+        await self._run_pending(run, session, query)
         return ConductorResult(
             final_text=self._final_text(run),
             outputs=dict(run.outputs),
@@ -490,4 +668,51 @@ class Conductor:
             trace=tuple(run.trace),
             usage=tuple(run.usage),
             cached_tokens=run.cached_tokens,
+        )
+
+    async def stream(
+        self, query: str, budget: Budget | None = None
+    ) -> AsyncIterator[ConductorEvent]:
+        """Run pre-final DAG waves, then pull final backend deltas directly.
+
+        A verifier attached to the final role would make early deltas
+        provisional and therefore impossible to retract in OpenAI SSE.  Such a
+        DAG is rejected explicitly; the supported shape verifies drafts before
+        an unverified final worker/synthesizer.
+        """
+
+        run = _RunState(budget=BudgetState(budget=budget or Budget()))
+        session = uuid.uuid4().hex[:12]
+        final = self._stream_final_unit()
+        await self._run_pending(
+            run,
+            session,
+            query,
+            exclude=frozenset({final.name}),
+        )
+        emitted_text = ""
+        async for event in self._stream_unit(run, session, query, final):
+            if event.kind == "delta":
+                emitted_text += event.text
+            yield event
+        final_text = self._final_text(run)
+        if final_text != emitted_text:
+            if not final_text.startswith(emitted_text):
+                raise RuntimeError(
+                    "final Conductor result does not extend its streamed deltas"
+                )
+            yield ConductorEvent(
+                kind="delta",
+                text=final_text[len(emitted_text):],
+            )
+        yield ConductorEvent(
+            kind="result",
+            result=ConductorResult(
+                final_text=final_text,
+                outputs=dict(run.outputs),
+                budget_state=run.budget,
+                trace=tuple(run.trace),
+                usage=tuple(run.usage),
+                cached_tokens=run.cached_tokens,
+            ),
         )

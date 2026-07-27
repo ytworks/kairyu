@@ -32,6 +32,19 @@ status|delta|result`). `X-Kairyu-Trace: 1` request header opts into a
 trace block (stage timings + decisions) in the final event. app.py's AUTO
 path switches to `run_chat` for both stream and non-stream.
 
+**Pull-through amendment (2026-07-27, issue #195).** The execution component
+that knows the final prompt and budget owns the backend iterator:
+`Conductor.stream` runs pre-final DAG waves then consumes its final worker
+stream, while `stream_moa` runs proposals then consumes its synthesizer stream.
+Orchestrator owns route/trace assembly and multiplexes keep-alive timers only
+until the first final event; after that, deltas are pulled in the caller task
+without a task/queue bridge. The HTTP layer only converts typed events to
+OpenAI SSE. A post-generation verifier on the final role is rejected because
+SSE cannot retract provisional deltas; supported DAGs verify a draft before an
+unverified final worker/synthesizer. This boundary was selected by measurement,
+not implementation parity: a seven-round 100,000-event A/B measured 161.14
+ns/event pull-through versus 7,045.2 ns/event through a bounded queue (43.721x).
+
 ### D2 — Tiered auto models
 
 `create_app(orchestrators: dict[str, Orchestrator])` (back-compat shim for
@@ -152,6 +165,10 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 
 - Streaming orchestrator: SSE event sequence (status* delta+ result) with
   usage totals == sum of stage usages; trace opt-in only with the header.
+- Real direct-route gate: 24 alternating-order Qwen3-32B TP8 pairs measured
+  AUTO/direct TTFT ratios of 1.0096x p50 and 1.0122x p99 (both <= 1.5);
+  raw samples and method are committed in
+  `bench/results/orchestration-stream-qwen3-32b-tp8-2026-07-27.json`.
 - Tenancy isolation + ledger reconciliation gates (D3).
 - OpenAI SDK round-trips: responses.create (+previous_response_id chain),
   embeddings.create.
@@ -176,8 +193,12 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   wire a ``moa`` route (tier option); run_chat receives the PRE-RENDERED
   prompt string (app.py renders; orchestrator engines have no template
   knowledge) plus messages only for future vision routing.
-- **A5 (D1)**: Conductor final unit streams only when verifier-free (refine
-  regeneration would invalidate streamed deltas); else buffered.
+- **A5 (D1, amended by Issue #195)**: every supported direct, Conductor, and
+  MoA route streams the final backend iterator live. A final role with its own
+  post-generation verifier is not a supported streaming shape and fails
+  explicitly; buffering or streaming a provisional answer would violate the
+  product contract. Put verification on the draft before an unverified final
+  worker/synthesizer. Pre-final verifier failures/refinement remain supported.
 - **A6 (D3)**: AuthMiddleware stores the matched key hash in scope state;
   TenantLimitMiddleware runs INSIDE auth (added before it) so 401 wins over
   429 and unauthenticated requests never drain buckets; keyless mode →
