@@ -6,17 +6,13 @@ in-flight token accounting in Scheduler: decode chunks carry an explicit
 committed (``PagedModelRunner._future_tokens``), so a snapshot one step behind
 still resolves both the decode input and the sampler's penalty history.
 
-The last-token SLOT is a persistent device tensor patched in place
-(``PagedModelRunner._decode_input_slots``, batched and single-request alike), so
-no decode step allocates a device tensor. What fills it is still a host value:
-the sampling DECISION runs on CPU because the reproducibility pins (m8 D2,
-spec == greedy) are defined by the CPU RNG stream, so the chosen id exists only
-as a Python int and crosses H2D once per step.
-
-Still OPEN (m2 §2.2), and NOT closed by anything here: the device-to-device fill,
-and the invariant that the step loop never blocks on ``.item()``/``.cpu()``. Both
-follow from moving the sampling decision onto the device, which changes what
-those pins mean — a separate decision.
+The last-token slot is a persistent device tensor
+(``PagedModelRunner._decode_input_slots``, batched and single-request alike).
+Grammar-free CUDA sampling produces a device scalar and patches that slot D2D;
+the worker feedback interval has no scalar extraction or event wait. A batched
+copy stream materializes public tokens only at this loop's one-step-late
+EOS/stop/streaming commit boundary. Structured requests retain the stateful CPU
+xgrammar compatibility path.
 
 Sampled tokens are committed via update() while the next step is already
 running, so the device never waits on host bookkeeping.

@@ -2,12 +2,8 @@
 
 What this gate asserts is what the code actually does: the slots are CUDA
 tensors allocated once and patched in place, both decode paths write into them,
-generation is unchanged, and a capacity growth waits for the outstanding H2D
-before it retires the buffers that transfer is reading. It deliberately does NOT
-assert that the token
-never crosses H2D — it does, because the sampling decision is host-side (m8 D2),
-and a gate that injected an already-on-device tensor would assert nothing about
-where the runner's own tokens come from. That was review [P1] on #143.
+generation is unchanged, and in-flight pinned staging rows are never reused or
+waited on. Device-sampled token IDs bypass H2D and patch the same slots D2D.
 """
 
 import pytest
@@ -101,52 +97,26 @@ class _EventProbe(torch.cuda.Event):
         super().synchronize()
 
 
-def test_growing_the_slots_waits_for_the_in_flight_staging_dma(llama_dir, monkeypatch):
-    """A capacity growth must not retire buffers a DMA is still reading.
-
-    `_decode_input_slots` grows before it synchronizes, so the event it waits on
-    used to be the freshly recorded (empty) one belonging to the NEW buffers —
-    the event representing the outstanding transfer had already been dropped
-    together with the pinned rows it was protecting. Ordinary generation only
-    survived that because the host sampler pulls logits to CPU every step; the
-    ordering contract the code states did not hold across a growth.
-
-    The stream is deliberately kept busy so the transfer really is unfinished at
-    the moment the growth happens.
-    """
+def test_in_flight_staging_grows_the_pool_without_waiting(llama_dir):
+    """An unfinished H2D gets another staging row, never Event.synchronize()."""
     _require_cuda()
     runner, _cache = _runner(llama_dir)
 
     runner._decode_input_slots([5], [3])  # first allocation: capacity 8
-    probe = _EventProbe()
-    runner._slot_copy_done = probe
-
-    torch.cuda._sleep(300_000_000)  # ~0.1s of stream work the H2D queues behind
-    runner._decode_input_slots([6], [4])  # stages, copies, records `probe`
-    probe.sync_calls = 0
     old_staging = runner._slot_staging
     assert old_staging is not None
+    probe = _EventProbe()
+    torch.cuda._sleep(300_000_000)  # ~0.1s of stream work the H2D queues behind
+    probe.record()
+    runner._slot_staging_pool = [(old_staging, probe)]
     assert not probe.query(), "the staging DMA should still be in flight here"
 
-    allocated_while_in_flight = []
-    real_zeros = torch.zeros
-
-    def recording_zeros(*args, **kwargs):
-        allocated_while_in_flight.append(probe.query())
-        return real_zeros(*args, **kwargs)
-
-    monkeypatch.setattr(torch, "zeros", recording_zeros)
-    wide = list(range(9))  # 9 > 8: this is the growth
+    wide = list(range(9))
     grown_tokens, grown_positions = runner._decode_input_slots(wide, wide)
-    monkeypatch.undo()
 
-    assert allocated_while_in_flight, "the growth did not reallocate at all"
-    assert all(allocated_while_in_flight), (
-        "replacement buffers were allocated while the old DMA was still reading "
-        "the pinned staging rows"
-    )
-    assert probe.sync_calls == 1, "the OLD completion event was never waited on"
+    assert probe.sync_calls == 0
     assert runner._slot_staging is not old_staging
+    assert len(runner._slot_staging_pool) == 2
     assert grown_tokens.tolist() == wide
     assert grown_positions.tolist() == wide
 

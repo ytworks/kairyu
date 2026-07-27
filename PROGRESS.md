@@ -32,8 +32,12 @@ substantive differences. The ten-check assembler pins all 15 weight digests,
 the 64×16 raw rows, clean measurement commit, CUDA 13.0/NCCL 2.29.7, and
 physical PCIe topology
 (`bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json`).
-The device-side half of m2 §2.2 remains a performance invariant, not an A1/A2
-blocker.
+The device-side half of m2 §2.2 is now closed for grammar-free CUDA sampling:
+greedy, filtered stochastic sampling, penalties, and logprobs keep the selected
+token on-device, patch the next decode slot D2D, and defer one batched public
+D2H copy to the late EOS/streaming boundary. The isolated steady-decode
+profiler records zero host-sync events. Structured xgrammar remains an explicit
+stateful CPU compatibility path.
 The intermittent Qwen3-32B TP=8 serving deadlock is closed in code: the object
 control protocol uses an effectively process-lifetime gloo group while model
 tensors use a separate 120 s fail-fast NCCL group. A #150 rerun exposed why the
@@ -57,9 +61,10 @@ Supported eager and captured batched decode now share tensor-only attention
 metadata and a device `write_from` mask. Profiler gates show zero per-row scalar
 reads at B=1 and B=8 while preserving ragged and cached/shared KV parity.
 Against the old list eager path, tensor eager cut Qwen3-32B TP8 wall time 47.1%
-and TPOT 56.5%. The remaining m2 §2.2 host sync is sampling/future-token fill
-(#206), not attention
-(`bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json`).
+and TPOT 56.5%. Sampling/future-token fill (#206) is now device-side too:
+Qwen3-32B TP8 retained an identical output digest, removed the feedback event
+wait, and improved median throughput 0.77%
+(`bench/results/future-token-qwen3-32b-tp8-2026-07-27.json`).
 M14 quantized CUDA execution is now production-wired for FP8, INT8, AWQ, GPTQ,
 and native W4A4 NVFP4. All five formats pass GPU oracles without full-weight
 dequantization and full-engine checkpoint generation; unsupported combinations
@@ -79,7 +84,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | Milestone | Status |
 |-----------|--------|
 | M1 — Orchestration (L2) + Interface (L3) | Complete and merged. Router / Conductor / MoA, vLLM-compatible `LLM` + `AsyncLLMEngine`, OpenAI-compatible server, YAML/decorator DSL. Atomic pre-dispatch reservations enforce strict step admission and serialize result-priced work under configured cost caps without hiding a single admitted generation's actual-cost overrun. |
-| M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done: scheduler, KV manager, EngineCore step loop, overlap pipeline, pre-GPU robustness (EOS, preemption, abort, pin TTL). Paged-KV attention validated with real tensors on CPU (greedy-equivalence). **Blocked on GPU hardware** for the GPU phase. |
+| M2 — Core engine (overlap scheduler + Radix-Paged KV) | CPU half done and the device future-token phase GPU-validated on 8× RTX PRO 6000: scheduler/KV lifecycle, overlap, tensor attention metadata, device sampling, D2D decode-slot feedback, late EOS/streaming commit. Formal NVLink-HBM performance gates still require H100/A100-class hardware. |
 | M3 — Spec decode / CUDA graphs / P-D separation | n-gram draft spec-decode policy and xgrammar structured output implemented CPU-side. CUDA graphs and the rest gated on M2 GPU phase. |
 | M4 — Router learning pipeline | Implemented CPU-only (logs → distilled classifier → contextual bandit). Design reviewed. |
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
@@ -168,6 +173,33 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] m2 §2.2 future-token feedback is device-side
+- What: grammar-free CUDA sampling now covers greedy, seeded stateless
+  Gumbel-max with min-p/top-k/top-p, presence/frequency/repetition penalties,
+  and raw logprobs. Uncommitted tokens remain device scalars, patch persistent
+  decode slots D2D, and materialize as one batched asynchronous D2H only at the
+  one-step-late EOS/stop/streaming boundary. The profiler GPU gate records zero
+  `.item()`/`aten::_local_scalar_dense`/event waits in the isolated feedback
+  interval; EOS, stop, min_tokens, penalties, logprobs, seeded replay, and
+  overlap equivalence pass on CUDA. Stateful xgrammar keeps its reviewed CPU
+  fallback. Qwen3-32B TP8 produced the same output digest as pre-fix main,
+  removed the future-token event wait, and measured 68.161 → 68.686 token/s
+  (+0.77%, wall −0.76%) over 8×32-token requests.
+- Why: host sampling created a Python token ID, forced a per-step D2H/H2D
+  round trip, and synchronized the pinned staging event before the next decode
+  input could be reused. A stateless device RNG makes replay and TP rank
+  agreement independent of host generator state, while late public
+  materialization preserves stop semantics without putting the host back on
+  the next-token dependency.
+- Verification: 1,866 CPU tests pass; the production CUDA image passes all 93
+  then-existing runnable 1-GPU tests (16 topology/environment skips), and the
+  expanded #206 target passes 15/15; CUDA graph/tensor decode passes 9/9;
+  TP2/NCCL passes 3/3 runnable gates (2 conditional skips).
+- Refs: issue #206; m2 §2.2; m8 D2; `kairyu/engine/core/sampler.py`;
+  `kairyu/engine/core/model_runner.py`; `kairyu/engine/core/overlap.py`;
+  `kairyu/kernels/sampling_gpu.py`; the overlap/decode-slot GPU tests;
+  `bench/results/future-token-qwen3-32b-tp8-2026-07-27.json`
 
 ### 2026-07-27 — [progress] G2 A2 closes on Llama-3.3-70B FP8 TP2/4/8
 - What: the formal 64-prompt × 16-position gate passes all ten checks. HF

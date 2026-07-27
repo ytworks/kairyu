@@ -8,8 +8,8 @@ token comes from the PASSED state (`outputs[p-1]`) at execute time — that is
 what keeps SpeculativeRunner's overlay mechanism working unchanged. KV is
 written before it is read at every decode position; positions below
 ``num_cached_tokens`` are never rewritten (shared radix slots).
-Requests are processed sequentially within a step (CPU correctness first;
-cross-request batching arrives with M13/GPU).
+Requests use tensor batching when the model/attention backend supports it and
+retain the sequential compatibility path otherwise.
 
 m2 §2.2 status (the "future token" technique), so the scope is stated where the
 code is rather than only in the design doc:
@@ -19,11 +19,14 @@ code is rather than only in the design doc:
   no decode step allocates a device tensor and neither path is a fallback.
 - DONE (#136) — the runner keeps its uncommitted tokens, so overlap can resolve
   a decode input one step before the scheduler commits it.
-- OPEN — filling those slots DEVICE-to-device, and §2.2's invariant that the
-  step loop never blocks on ``.item()``/``.cpu()``. Both require the sampling
-  DECISION to move onto the device; today it is host-side by design (m8 D2 pins
-  reproducibility to the CPU RNG stream), so the sampled id exists only as a
-  Python int and reaches the device by one batched H2D copy per step.
+- DONE (#206) — grammar-free CUDA sampling (greedy, filtered stochastic,
+  penalties, and logprobs) produces a device scalar. The next decode input is
+  patched D2D and the measured runner feedback interval contains no
+  ``.item()``, ``.cpu()``, or event synchronization. Public token/logprob
+  materialization is batched onto a copy stream and resolved one step late at
+  the host EOS/streaming boundary.
+- COMPATIBILITY — xgrammar's stateful matcher remains on the CPU, so structured
+  requests use the reviewed mask/accept path rather than a stale device mask.
 - DONE (#207) — supported eager and captured batched-decode attention share
   the tensor metadata path; KV-write masking and ragged page tables never read
   a per-row device scalar into Python.
@@ -31,16 +34,205 @@ code is rather than only in the design doc:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 
 import torch
 
 from kairyu.engine.core.attention import graph_capture_gap
 from kairyu.engine.core.kv_pool import PagedKVPool
-from kairyu.engine.core.sampler import Sampler
+from kairyu.engine.core.sampler import DeviceSample, Sampler
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.models.llama import DenseDecoder
+
+
+@dataclass
+class _PendingDeviceToken:
+    sample: DeviceSample
+    on_resolve: Callable[[SampledToken], None]
+    host_token: torch.Tensor | None = None
+    host_logprob: torch.Tensor | None = None
+    host_top_indices: torch.Tensor | None = None
+    host_top_logprobs: torch.Tensor | None = None
+
+
+class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
+    """Step output whose small D2H copies resolve at the late commit boundary.
+
+    ``PagedModelRunner.execute`` only enqueues these copies.  Under
+    ``OverlapEngineCore`` the next model step is submitted before
+    ``token_ids()`` indexes this mapping, so the future-token device slot is
+    already in use while EOS/stop/streaming state resolves one step late.
+    """
+
+    def __init__(
+        self,
+        records: Mapping[
+            str, tuple[SampledToken | _PendingDeviceToken, ...]
+        ],
+        copy_stream: torch.cuda.Stream | None = None,
+    ) -> None:
+        self._records = dict(records)
+        self._resolved: dict[str, tuple[SampledToken, ...]] | None = None
+        self._event: torch.cuda.Event | None = None
+        pending = [
+            record
+            for values in self._records.values()
+            for record in values
+            if isinstance(record, _PendingDeviceToken)
+        ]
+        has_cuda = bool(
+            pending and pending[0].sample.token_id.device.type == "cuda"
+        )
+
+        # One token vector per step, not B scalar D2H operations.  The vector is
+        # immutable and retained by this output, so a dedicated copy stream can
+        # run independently of the next model step without an overwrite race.
+        device_tokens = (
+            torch.stack([record.sample.token_id for record in pending])
+            if pending
+            else None
+        )
+        host_tokens = (
+            torch.empty(
+                len(pending),
+                dtype=torch.long,
+                device="cpu",
+                pin_memory=has_cuda,
+            )
+            if pending
+            else None
+        )
+        for index, record in enumerate(pending):
+            assert host_tokens is not None
+            record.host_token = host_tokens[index]
+
+        device_logprobs = [
+            record.sample.logprob
+            for record in pending
+            if record.sample.logprob is not None
+        ]
+        host_logprobs = (
+            torch.empty(
+                len(device_logprobs),
+                dtype=torch.float32,
+                device="cpu",
+                pin_memory=has_cuda,
+            )
+            if device_logprobs
+            else None
+        )
+        logprob_index = 0
+        for record in pending:
+            if record.sample.logprob is not None:
+                assert host_logprobs is not None
+                record.host_logprob = host_logprobs[logprob_index]
+                logprob_index += 1
+
+        def enqueue_copies() -> None:
+            if device_tokens is not None and host_tokens is not None:
+                host_tokens.copy_(device_tokens, non_blocking=has_cuda)
+            if device_logprobs and host_logprobs is not None:
+                host_logprobs.copy_(
+                    torch.stack(device_logprobs), non_blocking=has_cuda
+                )
+            for record in pending:
+                sample = record.sample
+                if sample.top_indices is not None:
+                    record.host_top_indices = torch.empty_like(
+                        sample.top_indices, device="cpu", pin_memory=has_cuda
+                    )
+                    record.host_top_indices.copy_(
+                        sample.top_indices, non_blocking=has_cuda
+                    )
+                if sample.top_logprobs is not None:
+                    record.host_top_logprobs = torch.empty_like(
+                        sample.top_logprobs, device="cpu", pin_memory=has_cuda
+                    )
+                    record.host_top_logprobs.copy_(
+                        sample.top_logprobs, non_blocking=has_cuda
+                    )
+
+        for values in self._records.values():
+            for record in values:
+                if isinstance(record, _PendingDeviceToken):
+                    # Keep all source tensors alive through the async transfer.
+                    _ = record.sample
+        if has_cuda:
+            if copy_stream is None:
+                raise ValueError("CUDA deferred output requires a copy stream")
+            producer = torch.cuda.current_stream(device_tokens.device)
+            copy_stream.wait_stream(producer)
+            with torch.cuda.stream(copy_stream):
+                enqueue_copies()
+                self._event = torch.cuda.Event()
+                self._event.record(copy_stream)
+        else:
+            enqueue_copies()
+            self._resolve()
+
+    def ready(self) -> bool:
+        return self._resolved is not None or self._event is None or self._event.query()
+
+    def _resolve(self) -> dict[str, tuple[SampledToken, ...]]:
+        if self._resolved is not None:
+            return self._resolved
+        if self._event is not None:
+            self._event.synchronize()
+        resolved: dict[str, tuple[SampledToken, ...]] = {}
+        for request_id, values in self._records.items():
+            host_values: list[SampledToken] = []
+            for record in values:
+                if isinstance(record, SampledToken):
+                    host_values.append(record)
+                    continue
+                assert record.host_token is not None
+                token_id = int(record.host_token.item())
+                logprob = (
+                    None
+                    if record.host_logprob is None
+                    else float(record.host_logprob.item())
+                )
+                top = None
+                if (
+                    record.host_top_indices is not None
+                    and record.host_top_logprobs is not None
+                ):
+                    top = tuple(
+                        (int(index), float(value))
+                        for index, value in zip(
+                            record.host_top_indices.tolist(),
+                            record.host_top_logprobs.tolist(),
+                            strict=True,
+                        )
+                    )
+                token = SampledToken(token_id, logprob, top)
+                record.on_resolve(token)
+                host_values.append(token)
+            resolved[request_id] = tuple(host_values)
+        self._resolved = resolved
+        self._records.clear()
+        self._event = None
+        return resolved
+
+    def __getitem__(self, key: str) -> tuple[SampledToken, ...]:
+        return self._resolve()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        source = self._resolved if self._resolved is not None else self._records
+        return iter(source)
+
+    def __len__(self) -> int:
+        source = self._resolved if self._resolved is not None else self._records
+        return len(source)
+
+    def items(self):
+        return self._resolve().items()
+
+    def values(self):
+        return self._resolve().values()
 
 
 def _tensor_decode_gap(model: DenseDecoder) -> str | None:
@@ -115,16 +307,31 @@ class PagedModelRunner:
         # and reading `outputs[position - 1]` raised IndexError. The runner
         # already produced those tokens; it just never kept them.
         #
-        # This is the HOST-SIDE half of m2 §2.2 (see the module docstring for what
-        # of that section is implemented and what cannot be while the sampling
-        # decision is host-side).
+        # Host copies remain the compatibility history for CPU/structured
+        # sampling and for late public output materialization.
         self._future_tokens: dict[str, dict[int, int]] = {}
+        # CUDA sampling owns the same history as device scalars.  Decode consumes
+        # position N directly when building input N+1; host materialization is
+        # deliberately not on that dependency chain.
+        self._future_device_tokens: dict[str, dict[int, torch.Tensor]] = {}
+        # Worker ranks may discard their StepOutput, while its pinned D2H copy is
+        # still in flight.  Retain such outputs until a non-blocking event query
+        # says the transfer completed; rank 0's normal commit resolves them.
+        self._deferred_outputs: deque[_DeferredStepOutput] = deque()
+        self._output_copy_stream = (
+            torch.cuda.Stream(device=self._device)
+            if self._device.type == "cuda"
+            else None
+        )
         # The decode input slots themselves: allocated once on the device and
         # written IN PLACE every step (`_decode_input_slots`).
         self._decode_slots: torch.Tensor | None = None
         self._decode_positions: torch.Tensor | None = None
         self._slot_staging: torch.Tensor | None = None
         self._slot_copy_done: torch.cuda.Event | None = None
+        self._slot_staging_pool: list[
+            tuple[torch.Tensor, torch.cuda.Event]
+        ] = []
         # The same tensor-only decode contract serves both graph capture and
         # eager batching. Unsupported model/attention combinations retain the
         # list-based compatibility path.
@@ -225,6 +432,7 @@ class PagedModelRunner:
         if self._sampler is not None:
             self._sampler.release(request_id)
         self._future_tokens.pop(request_id, None)
+        self._future_device_tokens.pop(request_id, None)
 
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
         if self._sampler is None:
@@ -243,19 +451,114 @@ class PagedModelRunner:
             eos_token_id=state.request.eos_token_id,
         )
 
+    def _pending_device_outputs(
+        self, state: object, position: int
+    ) -> tuple[torch.Tensor, ...]:
+        """Uncommitted completion history as device scalars, in position order."""
+        committed = len(state.outputs)
+        if position <= committed:
+            return ()
+        pending = self._future_device_tokens.get(state.request.request_id, {})
+        values: list[torch.Tensor] = []
+        for index in range(committed, position):
+            token = pending.get(index)
+            if token is None:
+                raise RuntimeError(
+                    f"no device token for {state.request.request_id} at position "
+                    f"{index} while sampling position {position}"
+                )
+            values.append(token)
+        return tuple(values)
+
+    def _sample_device(
+        self, state: object, logits: torch.Tensor, position: int
+    ) -> _PendingDeviceToken:
+        if self._sampler is None:
+            sample = DeviceSample(torch.argmax(logits).to(dtype=torch.int64))
+        else:
+            sample = self._sampler.sample_device(
+                state.request.sampling_identity,
+                state.request.sampling,
+                position,
+                logits,
+                prompt=state.request.prompt_token_ids,
+                outputs=state.outputs,
+                pending_outputs=self._pending_device_outputs(state, position),
+                eos_token_id=state.request.eos_token_id,
+            )
+        request_id = state.request.request_id
+        self._remember_device(request_id, position, sample.token_id)
+        return _PendingDeviceToken(
+            sample=sample,
+            on_resolve=lambda token: self._remember(request_id, position, token),
+        )
+
+    def _can_sample_device(self, state: object, logits: torch.Tensor) -> bool:
+        if logits.device.type != "cuda":
+            return False
+        sampling = getattr(state.request, "sampling", None)
+        return sampling is None or not sampling.needs_grammar
+
+    def _sample_record(
+        self, state: object, logits: torch.Tensor, position: int
+    ) -> SampledToken | _PendingDeviceToken:
+        if self._can_sample_device(state, logits):
+            return self._sample_device(state, logits, position)
+        return self._sample(state, logits, position)
+
     def _sample_rows(
         self,
         chunks: list[ScheduledChunk],
         states: Mapping[str, object],
         logits: torch.Tensor,
-    ) -> tuple[SampledToken, ...]:
+    ) -> tuple[SampledToken | _PendingDeviceToken, ...]:
         """Select a decode batch without copying every vocab row to the host.
 
         The common serving request is pure greedy with no logprob report. All
-        rows can then argmax on-device and cross to the host as one ``[B]``
-        vector, rather than B transfers of ``[vocab]`` float32 rows. Non-greedy,
-        penalized, grammar, and logprob requests retain the reviewed CPU sampler.
+        rows can then argmax on-device.  Their ids patch the next decode inputs
+        device-to-device; one deferred D2H carries the public StepOutput later.
         """
+        if logits.device.type == "cuda" and all(
+            self._can_sample_device(states[chunk.request_id], logits[index])
+            for index, chunk in enumerate(chunks)
+        ):
+            direct = self._sampler is None
+            if self._sampler is not None:
+                direct = all(
+                    self._sampler.can_argmax_logits(
+                        states[chunk.request_id].request.sampling_identity,
+                        states[chunk.request_id].request.sampling,
+                        states[chunk.request_id].request.eos_token_id,
+                    )
+                    for chunk in chunks
+                )
+            if direct:
+                token_ids = torch.argmax(logits, dim=-1).to(dtype=torch.int64)
+                records: list[_PendingDeviceToken] = []
+                for index, chunk in enumerate(chunks):
+                    sample = DeviceSample(token_ids[index])
+                    self._remember_device(
+                        chunk.request_id, chunk.position, sample.token_id
+                    )
+                    records.append(
+                        _PendingDeviceToken(
+                            sample=sample,
+                            on_resolve=lambda token, request_id=chunk.request_id,
+                            position=chunk.position: self._remember(
+                                request_id, position, token
+                            ),
+                        )
+                    )
+                return tuple(records)
+            return tuple(
+                self._sample_device(
+                    states[chunk.request_id],
+                    logits[index],
+                    position=chunk.position,
+                )
+                for index, chunk in enumerate(chunks)
+            )
+
         direct = self._sampler is None
         if self._sampler is not None:
             direct = all(
@@ -270,7 +573,7 @@ class PagedModelRunner:
             token_ids = torch.argmax(logits, dim=-1).to(device="cpu").tolist()
             return tuple(SampledToken(int(token_id)) for token_id in token_ids)
         return tuple(
-            self._sample(
+            self._sample_record(
                 states[chunk.request_id],
                 logits[index],
                 position=chunk.position,
@@ -304,8 +607,11 @@ class PagedModelRunner:
 
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
-    ) -> dict[str, tuple[SampledToken, ...]]:
-        sampled: dict[str, tuple[SampledToken, ...]] = {}
+    ) -> Mapping[str, tuple[SampledToken, ...]]:
+        self._reap_deferred_outputs()
+        sampled: dict[
+            str, tuple[SampledToken | _PendingDeviceToken, ...]
+        ] = {}
         decodes = [chunk for chunk in scheduled if not chunk.is_prefill]
         for chunk in scheduled:
             if chunk.is_prefill:
@@ -315,12 +621,33 @@ class PagedModelRunner:
         # Eager execution keeps the cheaper per-sequence path for B=1, but graph
         # mode must use its tensor/static-buffer path at every supported bucket:
         # single-stream launch overhead is one of CUDA graph's primary targets.
-        if decodes and (self._graph is not None or len(decodes) >= 2):
+        if decodes and (
+            self._graph is not None
+            or len(decodes) >= 2
+            or (self._device.type == "cuda" and self._tensor_decode_supported)
+        ):
             self._execute_decode_batch(decodes, states, sampled)
         else:
             for chunk in decodes:
                 self._execute_decode(chunk, states[chunk.request_id], sampled)
-        return sampled
+        if any(
+            isinstance(token, _PendingDeviceToken)
+            for tokens in sampled.values()
+            for token in tokens
+        ):
+            output = _DeferredStepOutput(sampled, self._output_copy_stream)
+            self._deferred_outputs.append(output)
+            return output
+        return {
+            request_id: tuple(
+                token for token in tokens if isinstance(token, SampledToken)
+            )
+            for request_id, tokens in sampled.items()
+        }
+
+    def _reap_deferred_outputs(self) -> None:
+        while self._deferred_outputs and self._deferred_outputs[0].ready():
+            self._deferred_outputs.popleft()
 
     def _execute_prefill(self, chunk: ScheduledChunk, state, sampled: dict) -> None:
         prompt = state.request.prompt_token_ids
@@ -335,8 +662,9 @@ class PagedModelRunner:
         )
         if state.prefill_done and end == len(prompt):
             logits = self._model.logits(hidden[-1])
-            token = self._sample(state, logits, position=0)
-            self._remember(chunk.request_id, 0, token)
+            token = self._sample_record(state, logits, position=0)
+            if isinstance(token, SampledToken):
+                self._remember(chunk.request_id, 0, token)
             sampled[chunk.request_id] = (token,)
 
     def _remember(self, request_id: str, position: int, token: SampledToken) -> None:
@@ -356,15 +684,24 @@ class PagedModelRunner:
         pending = self._future_tokens.setdefault(request_id, {})
         pending[position] = token.token_id
 
+    def _remember_device(
+        self, request_id: str, position: int, token: torch.Tensor
+    ) -> None:
+        pending = self._future_device_tokens.setdefault(request_id, {})
+        pending[position] = token
+
     def _forget_committed(self, request_id: str, committed: int) -> None:
         """Drop in-flight tokens the scheduler has since committed."""
         pending = self._future_tokens.get(request_id)
-        if not pending:
-            return
-        for position in [key for key in pending if key < committed]:
-            del pending[position]
+        if pending:
+            for position in [key for key in pending if key < committed]:
+                del pending[position]
+        device_pending = self._future_device_tokens.get(request_id)
+        if device_pending:
+            for position in [key for key in device_pending if key < committed - 1]:
+                del device_pending[position]
 
-    def _previous_token(self, state, position: int) -> int:
+    def _previous_token(self, state, position: int) -> int | torch.Tensor:
         """The token at ``position - 1``, committed or still in flight.
 
         Committed outputs win: after `update()` they are the authority, and a
@@ -372,6 +709,11 @@ class PagedModelRunner:
         would otherwise still hold.
         """
         index = position - 1
+        device_pending = self._future_device_tokens.get(
+            state.request.request_id, {}
+        )
+        if index in device_pending:
+            return device_pending[index]
         outputs = state.outputs
         if index < len(outputs):
             return outputs[index]
@@ -388,49 +730,52 @@ class PagedModelRunner:
         position = chunk.position
         # whatever the scheduler has committed is authoritative from here on, so
         # the in-flight copies of it are dead weight
-        self._forget_committed(state.request.request_id, len(state.outputs))
         input_token = self._previous_token(state, position) if position > 0 else prompt[-1]
+        self._forget_committed(state.request.request_id, len(state.outputs))
         absolute = len(prompt) + position - 1
         cached = state.allocation.num_cached_tokens if state.allocation else 0
         page_table = list(state.allocation.pages) + list(state.decode_pages)
         return input_token, absolute, page_table, cached
 
-    def _retire_decode_slots(self) -> None:
-        """Drain the in-flight staging DMA before its buffers can be dropped.
-
-        A growth replaces `_slot_staging` and the device slots wholesale, and the
-        event recorded by the last `_decode_input_slots` is the ONLY handle on the
-        transfer that may still be reading them. Overwriting `_slot_copy_done`
-        first destroys that handle: what remains is a freshly recorded event that
-        says nothing about the old DMA. Freeing pinned host memory is not
-        stream-ordered, so the source rows could go back to the allocator while
-        the copy engine is still reading them. Wait here, BEFORE anything is
-        released. Growth doubles, so this blocking wait is amortized away.
-        """
-        if self._slot_copy_done is not None:
-            self._slot_copy_done.synchronize()
-        self._slot_staging = None
-        self._slot_copy_done = None
-
     def _allocate_decode_slots(self, size: int) -> None:
         """(Re)allocate the persistent slots, doubling so growth is amortized."""
-        self._retire_decode_slots()
         current = 0 if self._decode_slots is None else self._decode_slots.numel()
         capacity = max(8, size, 2 * current)
         self._decode_slots = torch.zeros(capacity, dtype=torch.long, device=self._device)
         self._decode_positions = torch.zeros(capacity, dtype=torch.long, device=self._device)
-        if self._device.type == "cuda":
-            # pinned, so the H2D below is a real async DMA rather than a staged
-            # pageable copy that blocks the calling thread
-            self._slot_staging = torch.zeros(2, capacity, dtype=torch.long).pin_memory()
-            self._slot_copy_done = torch.cuda.Event()
-            self._slot_copy_done.record()
-        else:
-            self._slot_staging = None
-            self._slot_copy_done = None
+
+    def _acquire_slot_staging(
+        self, size: int
+    ) -> tuple[torch.Tensor, torch.cuda.Event]:
+        """Return an idle pinned buffer without waiting for the device.
+
+        Overlap may enqueue several steps before the oldest output commits.  A
+        single staging row therefore needs an event wait before reuse, which was
+        the last explicit synchronization in the decode feedback path.  This
+        small pool grows only to the number of genuinely in-flight H2D copies
+        and reuses completed rows through non-blocking ``query()``.
+        """
+        for index, (staging, event) in enumerate(self._slot_staging_pool):
+            if not event.query():
+                continue
+            if staging.shape[1] < size:
+                capacity = max(size, 2 * staging.shape[1])
+                staging = torch.zeros(2, capacity, dtype=torch.long).pin_memory()
+                event = torch.cuda.Event()
+                self._slot_staging_pool[index] = (staging, event)
+            self._slot_staging = staging
+            self._slot_copy_done = event
+            return staging, event
+        capacity = max(8, size)
+        staging = torch.zeros(2, capacity, dtype=torch.long).pin_memory()
+        event = torch.cuda.Event()
+        self._slot_staging_pool.append((staging, event))
+        self._slot_staging = staging
+        self._slot_copy_done = event
+        return staging, event
 
     def _decode_input_slots(
-        self, tokens: list[int], positions: list[int]
+        self, tokens: list[int | torch.Tensor], positions: list[int]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Write this step's decode inputs INTO the persistent device slots.
 
@@ -441,39 +786,44 @@ class PagedModelRunner:
         returned, so a caller that kept last step's view sees this step's values;
         that aliasing is the property, and `test_decode_input_slots.py` pins it.
 
-        What this does NOT do, and what m2 §2.2 asks for, is fill the slots
-        device-to-device. The sampler decides on the host by design (m8 D2 pins
-        reproducibility to the CPU RNG stream), so the chosen id exists only as a
-        Python int and one H2D copy per step is unavoidable — see the note in
-        `sampler.py`. Removing it means moving the sampling decision itself onto
-        the device. Per-row scalar copies would be the same round trip B times
-        over, so the ids are copied as one batched transfer.
+        CUDA samples arrive as device scalar tensors and are copied directly
+        into their row. Host integers remain supported for CPU/structured
+        compatibility; only those rows use the pinned batched H2D staging pool.
         """
         size = len(tokens)
         if self._decode_slots is None or self._decode_slots.numel() < size:
             self._allocate_decode_slots(size)
         assert self._decode_slots is not None and self._decode_positions is not None
-        host_tokens = torch.tensor(tokens, dtype=torch.long)
-        host_positions = torch.tensor(positions, dtype=torch.long)
-        if self._slot_staging is None:
-            self._decode_slots[:size].copy_(host_tokens)
-            self._decode_positions[:size].copy_(host_positions)
-        else:
-            assert self._slot_copy_done is not None
-            # the previous step's DMA must have drained before its source rows are
-            # overwritten; in practice it long since has (the sampler syncs once
-            # per step), so this is a completed-event check, not a stall — but it
-            # does not DEPEND on the sampler still syncing. The other way the
-            # source rows stop being valid is a capacity growth, and that path
-            # waits on THIS event in `_retire_decode_slots` before replacing it.
-            self._slot_copy_done.synchronize()
-            self._slot_staging[0, :size].copy_(host_tokens)
-            self._slot_staging[1, :size].copy_(host_positions)
-            self._decode_slots[:size].copy_(self._slot_staging[0, :size], non_blocking=True)
+        host_tokens = [
+            0 if isinstance(token, torch.Tensor) else token for token in tokens
+        ]
+        if self._device.type == "cuda":
+            staging, copy_done = self._acquire_slot_staging(size)
+            staging[1, :size].copy_(torch.as_tensor(positions, dtype=torch.long))
             self._decode_positions[:size].copy_(
-                self._slot_staging[1, :size], non_blocking=True
+                staging[1, :size], non_blocking=True
             )
-            self._slot_copy_done.record()
+            if any(not isinstance(token, torch.Tensor) for token in tokens):
+                staging[0, :size].copy_(
+                    torch.as_tensor(host_tokens, dtype=torch.long)
+                )
+                self._decode_slots[:size].copy_(
+                    staging[0, :size], non_blocking=True
+                )
+        else:
+            self._decode_slots[:size].copy_(
+                torch.as_tensor(host_tokens, dtype=torch.long)
+            )
+            self._decode_positions[:size].copy_(
+                torch.as_tensor(positions, dtype=torch.long)
+            )
+        for index, token in enumerate(tokens):
+            if isinstance(token, torch.Tensor):
+                self._decode_slots[index].copy_(
+                    token.to(device=self._device, dtype=torch.long)
+                )
+        if self._device.type == "cuda":
+            copy_done.record()
         return self._decode_slots[:size], self._decode_positions[:size]
 
     def _execute_decode(self, chunk: ScheduledChunk, state, sampled: dict) -> None:
@@ -487,8 +837,9 @@ class PagedModelRunner:
             self._pool, page_table, seq_len=absolute + 1, write_from=cached,
         )
         logits = self._model.logits(hidden[-1])
-        token = self._sample(state, logits, position=chunk.position)
-        self._remember(chunk.request_id, chunk.position, token)
+        token = self._sample_record(state, logits, position=chunk.position)
+        if isinstance(token, SampledToken):
+            self._remember(chunk.request_id, chunk.position, token)
         sampled[chunk.request_id] = (token,)
 
     def _graph_logits(
@@ -601,5 +952,6 @@ class PagedModelRunner:
             logits = self._model.logits(hidden)  # [B, vocab]
         tokens = self._sample_rows(chunks, states, logits)
         for chunk, token in zip(chunks, tokens, strict=True):
-            self._remember(chunk.request_id, chunk.position, token)
+            if isinstance(token, SampledToken):
+                self._remember(chunk.request_id, chunk.position, token)
             sampled[chunk.request_id] = (token,)
