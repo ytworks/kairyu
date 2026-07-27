@@ -1,0 +1,3 @@
+{"cached_tokens":32,"completion_tokens":3,"model":"qwen","prompt_tokens":60,"tenant":"tenant-a","ts":1785110404}
+{"cached_tokens":0,"completion_tokens":0,"model":"embed","prompt_tokens":12,"tenant":"tenant-b","ts":1785110405}
+{"cached_tokens":128,"completion_tokens":40,"model":"qwen","prompt_tokens":200,"tenant":"tenant-b","ts":1785110406}

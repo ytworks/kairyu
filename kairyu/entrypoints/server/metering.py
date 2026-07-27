@@ -17,6 +17,7 @@ class UsageLedgerSink(Protocol):
         model: str,
         prompt_tokens: int,
         completion_tokens: int,
+        cached_tokens: int = 0,
     ) -> None: ...
 
 
@@ -30,6 +31,7 @@ class UsageMetricsSink(Protocol):
         tenant: str,
         prompt_tokens: int,
         completion_tokens: int,
+        cached_tokens: int,
     ) -> None: ...
 
 
@@ -56,12 +58,22 @@ def resolve_usage_counts(
     return prompt_tokens, completion_tokens
 
 
+def resolve_cached_tokens(usage: GenerationUsage | Usage | None) -> int:
+    """Return the cached subset of prompt tokens from either usage shape."""
+    if isinstance(usage, GenerationUsage):
+        return usage.cached_tokens
+    if usage is not None and usage.prompt_tokens_details is not None:
+        return usage.prompt_tokens_details.cached_tokens
+    return 0
+
+
 def record_tenant_usage(
     *,
     tenant: str,
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
+    cached_tokens: int = 0,
     ledger: UsageLedgerSink | None = None,
     metrics: UsageMetricsSink | None = None,
     limiter: TokenLimiterSink | None = None,
@@ -70,17 +82,30 @@ def record_tenant_usage(
     if (
         type(prompt_tokens) is not int
         or type(completion_tokens) is not int
+        or type(cached_tokens) is not int
         or prompt_tokens < 0
         or completion_tokens < 0
+        or cached_tokens < 0
+        or cached_tokens > prompt_tokens
     ):
-        raise ValueError("usage token counts must be non-negative integers")
+        raise ValueError(
+            "usage token counts must be non-negative integers and "
+            "cached_tokens must not exceed prompt_tokens"
+        )
     if ledger is not None:
-        ledger.record(tenant, model, prompt_tokens, completion_tokens)
+        ledger.record(
+            tenant,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+        )
     if metrics is not None:
         metrics.record_usage(
             tenant,
             prompt_tokens,
             completion_tokens,
+            cached_tokens,
         )
     if limiter is not None:
         limiter.charge_tokens(tenant, prompt_tokens + completion_tokens)
@@ -145,6 +170,7 @@ class StreamUsageOwner:
             model=self._model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_tokens=resolve_cached_tokens(self._usage),
             ledger=self._ledger,
             metrics=self._metrics,
             limiter=self._limiter,
@@ -176,6 +202,7 @@ def record_state_usage(
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
+    cached_tokens: int = 0,
 ) -> None:
     """Resolve optional HTTP app-state sinks and record one tenant event."""
     record_tenant_usage(
@@ -183,6 +210,7 @@ def record_state_usage(
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
         ledger=getattr(state, "usage_ledger", None),
         metrics=getattr(state, "metrics", None),
         limiter=getattr(state, "tenant_limiter", None),

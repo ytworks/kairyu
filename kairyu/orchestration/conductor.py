@@ -66,6 +66,7 @@ class ConductorResult:
     budget_state: BudgetState
     trace: tuple[TraceEvent, ...]
     usage: tuple[int, int] = (0, 0)  # (prompt, completion) summed over units (m11 A1)
+    cached_tokens: int = 0
 
 
 class _SafeDict(dict):
@@ -82,6 +83,7 @@ class _RunState:
     trace: list[TraceEvent] = field(default_factory=list)
     completion_order: list[str] = field(default_factory=list)
     usage: list[int] = field(default_factory=lambda: [0, 0])
+    cached_tokens: int = 0
 
 
 class _BudgetRefused(Exception):
@@ -294,6 +296,7 @@ class Conductor:
         if result.usage is not None:  # m11 A1: usage was dropped here
             run.usage[0] += result.usage.prompt_tokens
             run.usage[1] += result.usage.completion_tokens
+            run.cached_tokens += result.usage.cached_tokens
             trace_usage = TraceUsage(
                 prompt_tokens=result.usage.prompt_tokens,
                 completion_tokens=result.usage.completion_tokens,
@@ -486,4 +489,5 @@ class Conductor:
             budget_state=run.budget,
             trace=tuple(run.trace),
             usage=tuple(run.usage),
+            cached_tokens=run.cached_tokens,
         )

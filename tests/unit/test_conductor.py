@@ -1,10 +1,15 @@
 import asyncio
 import time
+from dataclasses import replace
 
 import pytest
 
 import kairyu.orchestration.conductor as conductor_module
-from kairyu.engine.backend import GenerationRequest, GenerationResult
+from kairyu.engine.backend import (
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+)
 from kairyu.engine.mock import MockBackend
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, RoleSpec
@@ -81,6 +86,30 @@ async def test_linear_dag_passes_upstream_output_downstream():
     assert "build a cli" in backend.prompts_seen[0]
     assert planner_output[-20:] in backend.prompts_seen[1]
     assert result.final_text == result.outputs["worker"]
+
+
+async def test_conductor_sums_cached_tokens_across_units():
+    class CachedBackend(MockBackend):
+        async def generate(self, request):
+            result = await super().generate(request)
+            return replace(
+                result,
+                usage=GenerationUsage(
+                    prompt_tokens=10,
+                    completion_tokens=2,
+                    cached_tokens=4,
+                ),
+            )
+
+    conductor = Conductor(
+        roles=_linear_roles(),
+        workers={"w": CachedBackend()},
+    )
+
+    result = await conductor.run("build a cli")
+
+    assert result.usage == (20, 4)
+    assert result.cached_tokens == 8
 
 
 async def test_unit_backend_failure_does_not_destroy_the_run():

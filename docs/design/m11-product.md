@@ -44,7 +44,7 @@ configured Orchestrator instances listed in /v1/models.
 `tenancy.py`: `TenantConfig` (key→tenant map, per-tenant rate + token
 budgets), `TenantLimitMiddleware` (pure-ASGI, token-bucket per tenant on
 /v1/*; 429 with retry-after), usage ledger — persistent O_APPEND JSONL,
-one record per execution (tenant, model, prompt/completion tokens, ts),
+one record per execution (tenant, model, prompt/completion/cached tokens, ts),
 and row-isolated aggregation that preserves valid totals around malformed
 records — plus `GET /admin/usage?tenant=`. A bounded lifecycle-owned writer
 moves append/flush calls to one background thread, batches up to 128 records,
@@ -57,11 +57,21 @@ is claimed.
 Isolation gate: tenant A at its limit 429s while tenant B proceeds; ledger
 totals reconcile with returned usage to <0.1%. Dedicated Prometheus counters
 mirror only accepted usage rows (not generic HTTP requests): executions and
-prompt/completion tokens are labeled by the bounded tenant identity. On
+prompt/completion/cached tokens are labeled by the bounded tenant identity. On
 single-gateway restart those counters are restored from ledger totals before
 serving, so ledger-versus-Prometheus reconciliation remains exact across a
 clean process restart. A truncated crash tail is preserved for diagnostics and
 terminated before the next complete row is appended.
+
+Fleet reconciliation does not move shared state into the request path. Each
+gateway remains the sole writer of its local append-only ledger; an offline
+reconciler independently aggregates request audit logs and immutable gateway
+ledgers by tenant. The fixed F5e replay covers all public endpoint families,
+post-dispatch disconnect/failure, pre-result failure, batch-output rollback,
+three gateways, and cached-token export. A same-host shared SQLite candidate
+with no network latency and durability disabled still measured worse than the
+selected local asynchronous boundary: median-of-five producer p99
+27.970 → 19.062 us and throughput 72,272 → 99,474 rows/s over 30,000 rows.
 
 ### D4 — `/v1/responses` (subset) + `/v1/embeddings`
 
@@ -189,6 +199,14 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   their tenant totals from the app-owned ledger; model is deliberately not a
   label because the aggregate ledger API has no model dimension and tenant
   reconciliation must survive restart without inventing attribution.
+- **A14 (D3, Issue #194)**: gateway ledgers remain independently owned and
+  fleet aggregation is an offline boundary. Cached prompt tokens flow from
+  every generation path (including Conductor/MoA and batch) into ledger,
+  `/admin/usage`, and `kairyu_usage_tokens_total{type="cached"}`. The committed
+  fixed replay reconciles independent request logs and three gateway ledgers
+  with 0.0% maximum error; the committed A/B selects local async writes by
+  measured request-path p99 and throughput against a favorable same-host
+  synchronous shared-store candidate.
 - **A8 (D4)**: Responses usage names are input_tokens/output_tokens/
   total_tokens; output item = {type: message, role: assistant, status,
   content: [{type: output_text, text, annotations: []}]}; instructions

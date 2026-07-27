@@ -87,6 +87,7 @@ def test_mixed_tool_choice_rejection_is_metered_once(tmp_path):
         "requests": 1,
         "prompt_tokens": 19,
         "completion_tokens": 7,
+        "cached_tokens": 0,
     }
 
 
@@ -323,6 +324,7 @@ class TestTenancy:
             "requests": 1,
             "prompt_tokens": 7,
             "completion_tokens": 5,
+            "cached_tokens": 0,
         }
 
     def test_stream_usage_owner_skips_undispatched_stream(self, tmp_path):
@@ -374,6 +376,7 @@ class TestTenancy:
                 "requests": 1,
                 "prompt_tokens": 7,
                 "completion_tokens": 5,
+                "cached_tokens": 0,
             }
         else:
             assert not ledger_path.exists()
@@ -661,6 +664,7 @@ class TestTenancy:
                 "requests": 1,
                 "prompt_tokens": 7,
                 "completion_tokens": 3,
+                "cached_tokens": 0,
             }
         }
         assert ledger.malformed_lines == 1
@@ -722,6 +726,7 @@ class TestTenancy:
                 "requests": 2,
                 "prompt_tokens": 13,
                 "completion_tokens": 16,
+                "cached_tokens": 0,
             }
         }
         assert ledger.malformed_lines == 4
@@ -774,6 +779,7 @@ class TestTenancy:
                     "requests": 1,
                     "prompt_tokens": 5,
                     "completion_tokens": 8,
+                    "cached_tokens": 0,
                 }
             }
         }
@@ -883,7 +889,11 @@ class TestResponsesApi:
                 result = await super().generate(request)
                 return replace(
                     result,
-                    usage=GenerationUsage(prompt_tokens=17, completion_tokens=9),
+                    usage=GenerationUsage(
+                        prompt_tokens=17,
+                        completion_tokens=9,
+                        cached_tokens=11,
+                    ),
                 )
 
         class DerivedUsageBackend(MockBackend):
@@ -929,6 +939,7 @@ class TestResponsesApi:
         assert reported.status_code == 200
         assert reported.json()["usage"] == {
             "input_tokens": 17,
+            "input_tokens_details": {"cached_tokens": 11},
             "output_tokens": 9,
             "total_tokens": 26,
         }
@@ -945,6 +956,7 @@ class TestResponsesApi:
             "requests": 3,
             "prompt_tokens": 17 + derived_usage["input_tokens"] + 3,
             "completion_tokens": 9 + derived_usage["output_tokens"],
+            "cached_tokens": 11,
         }
 
     def test_extra_route_failures_before_usable_results_are_unmetered(

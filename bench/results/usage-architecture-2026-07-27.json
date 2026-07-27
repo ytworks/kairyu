@@ -1,0 +1,148 @@
+{
+  "aggregation": "median of independent runs",
+  "batch_size": 128,
+  "gateway_local_async": {
+    "drain_complete_seconds": 0.3137170320842415,
+    "drain_records_per_second": 95627.57814164259,
+    "max_us": 46085.86,
+    "p50_us": 6.858,
+    "p95_us": 13.209,
+    "p99_us": 19.062,
+    "producer_records_per_second": 99473.67347501608,
+    "producer_seconds": 0.3015873341355473
+  },
+  "gateways": 3,
+  "producer_p99_speedup": 1.4673171755324728,
+  "producer_throughput_speedup": 1.3763883624513549,
+  "records": 30000,
+  "repeats": 5,
+  "runs": [
+    {
+      "gateway_local_async": {
+        "drain_complete_seconds": 0.34449228388257325,
+        "drain_records_per_second": 87084.67911643,
+        "max_us": 46739.165,
+        "p50_us": 7.013,
+        "p95_us": 16.537,
+        "p99_us": 22.855,
+        "producer_records_per_second": 90416.87898392144,
+        "producer_seconds": 0.3317964558955282
+      },
+      "shared_sync_commit": {
+        "drain_complete_seconds": 0.41510129696689546,
+        "drain_records_per_second": 72271.51593889747,
+        "max_us": 178877.602,
+        "p50_us": 11.04,
+        "p95_us": 15.416,
+        "p99_us": 28.899,
+        "producer_records_per_second": 72271.51593889747,
+        "producer_seconds": 0.41510129696689546
+      }
+    },
+    {
+      "gateway_local_async": {
+        "drain_complete_seconds": 0.31352126807905734,
+        "drain_records_per_second": 95687.28840569507,
+        "max_us": 47986.521,
+        "p50_us": 6.828,
+        "p95_us": 13.209,
+        "p99_us": 19.16,
+        "producer_records_per_second": 99473.67347501608,
+        "producer_seconds": 0.3015873341355473
+      },
+      "shared_sync_commit": {
+        "drain_complete_seconds": 0.4734103358350694,
+        "drain_records_per_second": 63369.972577978624,
+        "max_us": 329068.534,
+        "p50_us": 11.029,
+        "p95_us": 12.873,
+        "p99_us": 21.176,
+        "producer_records_per_second": 63369.972577978624,
+        "producer_seconds": 0.4734103358350694
+      }
+    },
+    {
+      "gateway_local_async": {
+        "drain_complete_seconds": 0.32790213311091065,
+        "drain_records_per_second": 91490.71314474403,
+        "max_us": 36382.72,
+        "p50_us": 6.858,
+        "p95_us": 17.379,
+        "p99_us": 19.062,
+        "producer_records_per_second": 98504.76267464737,
+        "producer_seconds": 0.3045538021251559
+      },
+      "shared_sync_commit": {
+        "drain_complete_seconds": 0.39188214810565114,
+        "drain_records_per_second": 76553.6275255693,
+        "max_us": 179030.046,
+        "p50_us": 10.989,
+        "p95_us": 16.292,
+        "p99_us": 28.935,
+        "producer_records_per_second": 76553.6275255693,
+        "producer_seconds": 0.39188214810565114
+      }
+    },
+    {
+      "gateway_local_async": {
+        "drain_complete_seconds": 0.3137170320842415,
+        "drain_records_per_second": 95627.57814164259,
+        "max_us": 46085.86,
+        "p50_us": 6.887,
+        "p95_us": 11.448,
+        "p99_us": 18.723,
+        "producer_records_per_second": 100525.69211317216,
+        "producer_seconds": 0.2984311708714813
+      },
+      "shared_sync_commit": {
+        "drain_complete_seconds": 0.38850231491960585,
+        "drain_records_per_second": 77219.61709856994,
+        "max_us": 229197.668,
+        "p50_us": 10.979,
+        "p95_us": 12.582,
+        "p99_us": 27.97,
+        "producer_records_per_second": 77219.61709856994,
+        "producer_seconds": 0.38850231491960585
+      }
+    },
+    {
+      "gateway_local_async": {
+        "drain_complete_seconds": 0.3114812469575554,
+        "drain_records_per_second": 96313.98452725472,
+        "max_us": 32783.123,
+        "p50_us": 6.807,
+        "p95_us": 10.649,
+        "p99_us": 18.495,
+        "producer_records_per_second": 100622.81772016689,
+        "producer_seconds": 0.29814311186783016
+      },
+      "shared_sync_commit": {
+        "drain_complete_seconds": 0.4538387379143387,
+        "drain_records_per_second": 66102.77504707509,
+        "max_us": 328981.246,
+        "p50_us": 10.91,
+        "p95_us": 12.986,
+        "p99_us": 24.564,
+        "producer_records_per_second": 66102.77504707509,
+        "producer_seconds": 0.4538387379143387
+      }
+    }
+  ],
+  "schema_version": 1,
+  "selected": "gateway_local_async",
+  "selection_rule": "lowest request-path p99 among candidates that preserve raw rows and exact fleet totals",
+  "shared_store": {
+    "implementation": "same-host SQLite WAL, synchronous=OFF",
+    "network_latency_included": false
+  },
+  "shared_sync_commit": {
+    "drain_complete_seconds": 0.41510129696689546,
+    "drain_records_per_second": 72271.51593889747,
+    "max_us": 229197.668,
+    "p50_us": 10.989,
+    "p95_us": 12.986,
+    "p99_us": 27.97,
+    "producer_records_per_second": 72271.51593889747,
+    "producer_seconds": 0.41510129696689546
+  }
+}

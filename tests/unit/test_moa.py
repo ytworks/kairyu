@@ -1,5 +1,7 @@
 import time
+from dataclasses import replace
 
+from kairyu.engine.backend import GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.orchestration.moa import run_moa
 
@@ -38,3 +40,22 @@ async def test_moa_prompts_share_prefix():
     prefix = "SYS\n"
     await run_moa(backend, "q", n_samples=2, shared_prefix=prefix)
     assert all(p.startswith(prefix) for p in backend.prompts_seen)
+
+
+async def test_moa_sums_cached_tokens_across_proposals_and_synthesis():
+    class CachedBackend(MockBackend):
+        async def generate(self, request):
+            result = await super().generate(request)
+            return replace(
+                result,
+                usage=GenerationUsage(
+                    prompt_tokens=10,
+                    completion_tokens=2,
+                    cached_tokens=4,
+                ),
+            )
+
+    result = await run_moa(CachedBackend(), "q", n_samples=3)
+
+    assert result.usage == (40, 8)
+    assert result.cached_tokens == 16

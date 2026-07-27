@@ -13,7 +13,7 @@ from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
 from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
-from kairyu.engine.backend import GenerationResult
+from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.errors import sanitize_backend_error
 from kairyu.entrypoints.server.tenancy import UsageLedger
@@ -285,6 +285,21 @@ async def test_streaming_parse_error_fails_after_admitted_lines(tmp_path):
 async def test_batch_metering_uses_explicit_owner_wire_counts_and_skips_line_errors(
     tmp_path,
 ):
+    class CachedUsageBackend(MockBackend):
+        async def generate(self, request):
+            result = await super().generate(request)
+            assert result.usage is not None
+            return GenerationResult(
+                request_id=result.request_id,
+                prompt=result.prompt,
+                completions=result.completions,
+                usage=GenerationUsage(
+                    prompt_tokens=result.usage.prompt_tokens,
+                    completion_tokens=result.usage.completion_tokens,
+                    cached_tokens=min(2, result.usage.prompt_tokens),
+                ),
+            )
+
     class MissingUsageBackend(MockBackend):
         async def generate(self, request):
             result = await super().generate(request)
@@ -307,7 +322,7 @@ async def test_batch_metering_uses_explicit_owner_wire_counts_and_skips_line_err
     limiter = RecordingLimiter()
     worker = BatchWorker(
         store,
-        {"reported": MockBackend(), "derived": MissingUsageBackend()},
+        {"reported": CachedUsageBackend(), "derived": MissingUsageBackend()},
         max_concurrency=1,
         usage_ledger=ledger,
         tenant_limiter=limiter,
@@ -355,17 +370,20 @@ async def test_batch_metering_uses_explicit_owner_wire_counts_and_skips_line_err
     )
     wire_a = output_a["response"]["body"]["usage"]
     wire_b = output_b["response"]["body"]["usage"]
+    cached_a = wire_a["prompt_tokens_details"]["cached_tokens"]
     totals = ledger.totals()
     assert totals == {
         "tenant-a": {
             "requests": 1,
             "prompt_tokens": wire_a["prompt_tokens"],
             "completion_tokens": wire_a["completion_tokens"],
+            "cached_tokens": cached_a,
         },
         "tenant-b": {
             "requests": 1,
             "prompt_tokens": wire_b["prompt_tokens"],
             "completion_tokens": wire_b["completion_tokens"],
+            "cached_tokens": 0,
         },
     }
     assert limiter.charges == [

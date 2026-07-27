@@ -230,21 +230,33 @@ class UsageLedger:
         return self._malformed_lines
 
     def record(
-        self, tenant: str, model: str, prompt_tokens: int, completion_tokens: int
+        self,
+        tenant: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cached_tokens: int = 0,
     ) -> None:
         if (
             type(prompt_tokens) is not int
             or type(completion_tokens) is not int
+            or type(cached_tokens) is not int
             or prompt_tokens < 0
             or completion_tokens < 0
+            or cached_tokens < 0
+            or cached_tokens > prompt_tokens
         ):
-            raise ValueError("usage token counts must be non-negative integers")
+            raise ValueError(
+                "usage token counts must be non-negative integers and "
+                "cached_tokens must not exceed prompt_tokens"
+            )
         line = json.dumps(
             {
                 "tenant": tenant,
                 "model": model,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
+                "cached_tokens": cached_tokens,
                 "ts": time.time(),
             }
         )
@@ -273,12 +285,16 @@ class UsageLedger:
                     record_tenant = record["tenant"]
                     prompt_tokens = record["prompt_tokens"]
                     completion_tokens = record["completion_tokens"]
+                    cached_tokens = record.get("cached_tokens", 0)
                     if (
                         not isinstance(record_tenant, str)
                         or type(prompt_tokens) is not int
                         or type(completion_tokens) is not int
+                        or type(cached_tokens) is not int
                         or prompt_tokens < 0
                         or completion_tokens < 0
+                        or cached_tokens < 0
+                        or cached_tokens > prompt_tokens
                     ):
                         raise TypeError("usage ledger record has invalid field types")
                 except (json.JSONDecodeError, KeyError, TypeError) as error:
@@ -302,9 +318,15 @@ class UsageLedger:
                     continue
                 bucket = totals.setdefault(
                     record_tenant,
-                    {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0},
+                    {
+                        "requests": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "cached_tokens": 0,
+                    },
                 )
                 bucket["requests"] += 1
                 bucket["prompt_tokens"] += prompt_tokens
                 bucket["completion_tokens"] += completion_tokens
+                bucket["cached_tokens"] += cached_tokens
         return totals
