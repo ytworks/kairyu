@@ -84,7 +84,7 @@ SLO vocabulary used by every gate below:
 | F5b | Tenant isolation: a tenant at 10× its quota cannot degrade another tenant's p99 (token-bucket + admission, not just 429s) | CPU-mock test |
 | F5c | SLO-based early rejection: at saturation, predicted-violation requests are shed/deferred-to-batch; goodput@SLO ≥ queue-and-hope baseline | CPU-mock bench |
 | F5d | Autoscaler: 0→50 replicas of the 14B model in ≤5 min (weight pre-staging measured separately); scale decisions logged with their goodput/queue/KV-utilization inputs | GPU drill |
-| F5e | Usage metering reconciles with request logs to <0.1% on a replayed trace; per-tenant cached-token counts exported (feeds G6 pricing signals) | CPU test |
+| F5e | Usage metering reconciles with request logs to <0.1% on a replayed trace; per-tenant cached-token counts exported (feeds G6 pricing signals) | CPU test + `bench/fleet_usage_replay.py` |
 
 ## 4. Non-goals
 

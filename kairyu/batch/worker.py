@@ -49,6 +49,7 @@ class BatchLineUsage:
     model: str
     prompt_tokens: int
     completion_tokens: int
+    cached_tokens: int
 
 
 class BatchWorker:
@@ -156,10 +157,12 @@ class BatchWorker:
 
     @staticmethod
     def _line_usage(executed: ExecutedChat) -> BatchLineUsage:
+        details = executed.response.usage.prompt_tokens_details
         return BatchLineUsage(
             model=executed.response.model,
             prompt_tokens=executed.response.usage.prompt_tokens,
             completion_tokens=executed.response.usage.completion_tokens,
+            cached_tokens=details.cached_tokens if details is not None else 0,
         )
 
     @staticmethod
@@ -263,6 +266,7 @@ class BatchWorker:
                                 model=usage.model,
                                 prompt_tokens=usage.prompt_tokens,
                                 completion_tokens=usage.completion_tokens,
+                                cached_tokens=usage.cached_tokens,
                                 ledger=self._usage_ledger,
                                 metrics=self._metrics,
                                 limiter=self._tenant_limiter,

@@ -212,6 +212,7 @@ async def test_moa_success_reconciles_full_reservation_once(monkeypatch):
             final_text="synthesized",
             proposals=("proposal one", "proposal two"),
             usage=(7, 3),
+            cached_tokens=5,
         )
 
     monkeypatch.setattr(BudgetState, "try_reserve", tracked_try_reserve)
@@ -242,6 +243,7 @@ async def test_moa_success_reconciles_full_reservation_once(monkeypatch):
     assert result.text == "synthesized"
     assert result.prompt_tokens == 7
     assert result.completion_tokens == 3
+    assert result.cached_tokens == 5
     assert "moa: 2 proposals synthesized (cost=0.2500)" in result.trace
     assert "moa: budget exceeded" not in result.trace
     assert result.structured_trace is not None

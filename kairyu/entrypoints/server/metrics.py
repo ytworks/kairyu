@@ -105,6 +105,7 @@ class ServerMetrics:
         tenant: str,
         prompt_tokens: int,
         completion_tokens: int,
+        cached_tokens: int,
     ) -> None:
         """Mirror one accepted ledger row at the tenant aggregation boundary."""
         self.usage_requests_total.labels(tenant=tenant).inc()
@@ -113,6 +114,9 @@ class ServerMetrics:
         )
         self.usage_tokens_total.labels(tenant=tenant, type="completion").inc(
             completion_tokens
+        )
+        self.usage_tokens_total.labels(tenant=tenant, type="cached").inc(
+            cached_tokens
         )
 
     def restore_usage_totals(
@@ -131,6 +135,9 @@ class ServerMetrics:
                 tenant=tenant,
                 type="completion",
             ).inc(usage["completion_tokens"])
+            self.usage_tokens_total.labels(tenant=tenant, type="cached").inc(
+                usage["cached_tokens"]
+            )
 
     def render(self) -> tuple[bytes, str]:
         return generate_latest(self.registry), CONTENT_TYPE_LATEST

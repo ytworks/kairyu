@@ -47,6 +47,7 @@ from kairyu.entrypoints.server.health import add_health_routes
 from kairyu.entrypoints.server.metering import (
     StreamUsageOwner,
     record_state_usage,
+    resolve_cached_tokens,
     resolve_usage_counts,
     stream_usage_owner_from_state,
 )
@@ -505,6 +506,7 @@ def _record_usage(
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cached_tokens=resolve_cached_tokens(usage),
     )
 
 
@@ -781,6 +783,7 @@ def create_app(
                 GenerationUsage(
                     prompt_tokens=result.prompt_tokens,
                     completion_tokens=result.completion_tokens,
+                    cached_tokens=result.cached_tokens,
                 )
                 if result.prompt_tokens or result.completion_tokens
                 else None

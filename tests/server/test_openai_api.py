@@ -1013,7 +1013,50 @@ async def test_malformed_auto_tool_output_records_actual_backend_usage(tmp_path)
         "requests": 1,
         "prompt_tokens": 7,
         "completion_tokens": 3,
+        "cached_tokens": 0,
     }
+
+
+async def test_cached_usage_is_exported_to_wire_ledger_and_metrics(tmp_path):
+    ledger_path = tmp_path / "usage.jsonl"
+    engine = StubBackend(
+        text="cached answer",
+        finish_reason="stop",
+        usage=GenerationUsage(
+            prompt_tokens=17,
+            completion_tokens=3,
+            cached_tokens=12,
+        ),
+    )
+    app = create_app(
+        engines={"stub": engine},
+        settings=ServerSettings(usage_ledger_path=str(ledger_path)),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "stub",
+                "messages": [{"role": "user", "content": "reused prefix"}],
+            },
+        )
+        metrics = (await client.get("/metrics")).text
+
+    assert response.status_code == 200
+    assert response.json()["usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 12
+    }
+    assert (await _usage_totals(app))["default"] == {
+        "requests": 1,
+        "prompt_tokens": 17,
+        "completion_tokens": 3,
+        "cached_tokens": 12,
+    }
+    assert (
+        'kairyu_usage_tokens_total{tenant="default",type="cached"} 12.0'
+        in metrics
+    )
 
 
 async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
@@ -1039,6 +1082,7 @@ async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
         "requests": 1,
         "prompt_tokens": wire_usage["prompt_tokens"],
         "completion_tokens": wire_usage["completion_tokens"],
+        "cached_tokens": 0,
     }
 
 
@@ -1079,6 +1123,7 @@ async def test_sync_orchestrator_zero_usage_derives_wire_and_ledger(tmp_path):
         "requests": 1,
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
+        "cached_tokens": 0,
     }
 
 
@@ -1129,6 +1174,7 @@ async def test_sync_completions_derives_each_missing_usage(
         "requests": 1,
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
+        "cached_tokens": 0,
     }
 
 
@@ -1176,6 +1222,7 @@ async def test_every_dispatched_stream_is_metered_exactly_once(
         "requests": 1,
         "prompt_tokens": expected[0],
         "completion_tokens": expected[1],
+        "cached_tokens": 0,
     }
 
     if case in {"reported", "usage-none"}:
@@ -1224,6 +1271,7 @@ async def test_stream_retains_reported_usage_when_final_partial_has_none(
         "requests": 1,
         "prompt_tokens": 17,
         "completion_tokens": 9,
+        "cached_tokens": 0,
     }
 
 
@@ -1323,6 +1371,7 @@ async def test_generate_fully_tool_stream_keeps_single_sync_metering_owner(tmp_p
         "requests": 1,
         "prompt_tokens": 13,
         "completion_tokens": 8,
+        "cached_tokens": 0,
     }
 
 
@@ -1368,6 +1417,7 @@ async def test_unsatisfied_tool_choice_is_metered_once(
         "requests": 1,
         "prompt_tokens": 11,
         "completion_tokens": 5,
+        "cached_tokens": 0,
     }
 
 

@@ -23,7 +23,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from kairyu.entrypoints.server.errors import invalid_request, model_not_found
-from kairyu.entrypoints.server.metering import record_state_usage, resolve_usage_counts
+from kairyu.entrypoints.server.metering import (
+    record_state_usage,
+    resolve_cached_tokens,
+    resolve_usage_counts,
+)
 
 _MAX_EMBEDDING_INPUTS = 2048  # cap the embeddings batch (M6)
 
@@ -266,6 +270,16 @@ def add_extra_routes(
             prompt=prompt,
             completions=result.completions,
         )
+        cached_tokens = resolve_cached_tokens(result.usage)
+        response_usage = {
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+        if cached_tokens:
+            response_usage["input_tokens_details"] = {
+                "cached_tokens": cached_tokens
+            }
         response = {
             "id": response_id,
             "object": "response",
@@ -276,11 +290,7 @@ def add_extra_routes(
             "previous_response_id": request.previous_response_id,
             "metadata": request.metadata,
             # A8: Responses usage names differ from chat completions
-            "usage": {
-                "input_tokens": prompt_tokens,
-                "output_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
+            "usage": response_usage,
         }
         record_state_usage(
             http_request.app.state,
@@ -288,5 +298,6 @@ def add_extra_routes(
             model=request.model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
         )
         return response

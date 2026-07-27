@@ -29,6 +29,7 @@ class MoAResult:
     final_text: str
     proposals: tuple[str, ...]
     usage: tuple[int, int] = (0, 0)  # (prompt_tokens, completion_tokens) summed
+    cached_tokens: int = 0
 
 
 async def run_moa(
@@ -45,12 +46,13 @@ async def run_moa(
     session = uuid.uuid4().hex[:12]
     hint = CacheHint(session_id=session)
 
-    usage_totals = [0, 0]
+    usage_totals = [0, 0, 0]
 
     def _account(result) -> str:
         if result.usage is not None:
             usage_totals[0] += result.usage.prompt_tokens
             usage_totals[1] += result.usage.completion_tokens
+            usage_totals[2] += result.usage.cached_tokens
         return result.text
 
     async def propose(index: int) -> str:
@@ -75,5 +77,8 @@ async def run_moa(
     synthesis_backend = synthesizer or backend
     final = _account(await synthesis_backend.generate(synthesis_request))
     return MoAResult(
-        final_text=final, proposals=proposals, usage=tuple(usage_totals)
+        final_text=final,
+        proposals=proposals,
+        usage=(usage_totals[0], usage_totals[1]),
+        cached_tokens=usage_totals[2],
     )

@@ -203,9 +203,16 @@ wire-count parity; each dispatched execution records exactly once even when a st
 early or a completed batch line is later rolled back by cancellation or spool failure.
 Dedicated tenant usage counters mirror that same metering seam and restore from the
 single-gateway ledger at startup. The complete execution-mode matrix reconciles
-Prometheus execution/prompt/completion totals with the ledger exactly; the supported
+Prometheus execution/prompt/completion/cached totals with the ledger exactly; the supported
 DeploymentSpec path also proves isolated two-key 429s, restart recovery, malformed-tail
 separation, and shutdown drain.
+Fleet usage keeps those gateway ledgers independently owned and aggregates immutable
+inputs offline. The committed nine-event replay covers every public endpoint family,
+disconnects, upstream failures, batch rollback, three gateways, and tenant cached-token
+exports; independently aggregated request logs reconcile with ledger totals at 0.0%
+maximum error. A five-run 30,000-row A/B selected gateway-local async writes over a
+same-host/no-network synchronous shared store: producer p99 19.062 vs 27.970 us and
+throughput 99,474 vs 72,272 rows/s.
 Usage-ledger and router JSONL records now enter a bounded non-blocking queue; a
 lifecycle-owned thread batches append+flush work outside request/stream execution.
 Normal shutdown drains every accepted row, queue saturation fails immediately without
@@ -243,6 +250,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-27 — [amendment] F5e fleet usage stays gateway-local and reconciles offline
+- What: cached prompt-token counts now flow through chat, completions,
+  Responses, batch, direct orchestration, Conductor, and MoA into tenant
+  ledgers, `/admin/usage`, and dedicated Prometheus usage counters. A strict
+  offline reconciler aggregates independently owned gateway ledgers against
+  request audit logs. The committed fixed replay covers nine cross-endpoint
+  outcomes across three gateways, including disconnect, upstream failure, and
+  batch rollback, and records the raw logs plus report.
+- Why: a shared ledger in the request path adds a fleet-wide serialization and
+  availability dependency. Among candidates preserving raw rows and exact
+  totals, five 30,000-row runs measured gateway-local async at 19.062 us
+  producer p99 and 99,474 rows/s versus 27.970 us and 72,272 rows/s for a
+  favorable same-host/no-network synchronous shared store. The local boundary
+  is both faster and failure-isolated.
+- Verification: maximum request-log/ledger error is 0.0% against the strict
+  `<0.1%` F5e gate; focused usage/server/orchestration tests pass.
+- Refs: m11 D3/A14; G5 F5e; Issue #194;
+  `kairyu/usage_reconciliation.py`; `bench/fleet_usage_replay.py`;
+  `bench/results/{fleet-usage-reconciliation,usage-architecture}-2026-07-27.json`.
 
 ### 2026-07-27 — [amendment] P-B5 usage counters reconcile from the ledger
 - What: successful metering events now increment tenant-bounded Prometheus

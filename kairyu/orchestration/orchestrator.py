@@ -75,6 +75,7 @@ class OrchestratorResult:
     trace: tuple[str, ...]
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0
     structured_trace: StructuredTrace | None = None
 
 
@@ -257,7 +258,7 @@ class Orchestrator:
 
     async def _run_direct(
         self, query: str, tier: str, notes: list[str]
-    ) -> tuple[str, tuple[int, int], TraceEvent]:
+    ) -> tuple[str, tuple[int, int, int], TraceEvent]:
         queued_at = utc_now_iso()
         engine_name = self._resolve_engine_name(tier, notes)
         engine = self._engines[engine_name]
@@ -274,9 +275,13 @@ class Orchestrator:
         started_at = utc_now_iso()
         result = await engine.generate(request)
         usage = (
-            (result.usage.prompt_tokens, result.usage.completion_tokens)
+            (
+                result.usage.prompt_tokens,
+                result.usage.completion_tokens,
+                result.usage.cached_tokens,
+            )
             if result.usage is not None
-            else (0, 0)
+            else (0, 0, 0)
         )
         trace_usage = (
             TraceUsage(
@@ -328,6 +333,7 @@ class Orchestrator:
             text: str,
             prompt_tokens: int = 0,
             completion_tokens: int = 0,
+            cached_tokens: int = 0,
         ) -> OrchestratorResult:
             return OrchestratorResult(
                 text=text,
@@ -335,6 +341,7 @@ class Orchestrator:
                 trace=tuple(notes),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                cached_tokens=cached_tokens,
                 structured_trace=StructuredTrace(
                     request_id=request_id,
                     started_at=trace_started_at,
@@ -404,6 +411,7 @@ class Orchestrator:
                             usage=GenerationUsage(
                                 prompt_tokens=moa.usage[0],
                                 completion_tokens=moa.usage[1],
+                                cached_tokens=moa.cached_tokens,
                             ),
                         ),
                     )
@@ -454,6 +462,7 @@ class Orchestrator:
                         usage=TraceUsage(
                             prompt_tokens=moa.usage[0],
                             completion_tokens=moa.usage[1],
+                            cached_tokens=moa.cached_tokens,
                         ),
                         budget=TraceBudget.between(
                             budget_before,
@@ -476,6 +485,7 @@ class Orchestrator:
                     text=moa.final_text,
                     prompt_tokens=moa.usage[0],
                     completion_tokens=moa.usage[1],
+                    cached_tokens=moa.cached_tokens,
                 )
             conductor = Conductor(
                 roles=self._roles,
@@ -492,6 +502,7 @@ class Orchestrator:
                 text=result.final_text,
                 prompt_tokens=result.usage[0],
                 completion_tokens=result.usage[1],
+                cached_tokens=result.cached_tokens,
             )
         text, usage, direct_event = await self._run_direct(
             query,
@@ -503,6 +514,7 @@ class Orchestrator:
             text=text,
             prompt_tokens=usage[0],
             completion_tokens=usage[1],
+            cached_tokens=usage[2],
         )
 
     async def run_chat(self, prompt: str, stream: bool = False):
@@ -541,9 +553,13 @@ class Orchestrator:
                     yield OrchestratorEvent(kind="delta", text=text[emitted:])
                     emitted = len(text)
             usage = (
-                (latest_usage.prompt_tokens, latest_usage.completion_tokens)
+                (
+                    latest_usage.prompt_tokens,
+                    latest_usage.completion_tokens,
+                    latest_usage.cached_tokens,
+                )
                 if latest_usage is not None
-                else (0, 0)
+                else (0, 0, 0)
             )
             yield OrchestratorEvent(
                 kind="result",
@@ -553,6 +569,7 @@ class Orchestrator:
                     trace=tuple(notes),
                     prompt_tokens=usage[0],
                     completion_tokens=usage[1],
+                    cached_tokens=usage[2],
                 ),
             )
             return

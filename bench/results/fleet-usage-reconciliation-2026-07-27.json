@@ -1,0 +1,86 @@
+{
+  "gate": "G5 F5e",
+  "gateway_count": 3,
+  "max_relative_error_percent": 0.0,
+  "passed": true,
+  "replay": {
+    "coverage": [
+      "batch_rollback",
+      "cached_tokens",
+      "client_disconnect",
+      "cross_endpoint",
+      "multi_gateway",
+      "upstream_failure"
+    ],
+    "date": "2026-07-27",
+    "events": 9,
+    "metered_events": 7
+  },
+  "schema_version": 1,
+  "tenants": {
+    "tenant-a": {
+      "ledger": {
+        "cached_tokens": 96,
+        "completion_tokens": 28,
+        "prompt_tokens": 240,
+        "requests": 3
+      },
+      "max_relative_error_percent": 0.0,
+      "relative_error_percent": {
+        "cached_tokens": 0.0,
+        "completion_tokens": 0.0,
+        "prompt_tokens": 0.0,
+        "requests": 0.0
+      },
+      "request_log": {
+        "cached_tokens": 96,
+        "completion_tokens": 28,
+        "prompt_tokens": 240,
+        "requests": 3
+      }
+    },
+    "tenant-b": {
+      "ledger": {
+        "cached_tokens": 176,
+        "completion_tokens": 50,
+        "prompt_tokens": 302,
+        "requests": 3
+      },
+      "max_relative_error_percent": 0.0,
+      "relative_error_percent": {
+        "cached_tokens": 0.0,
+        "completion_tokens": 0.0,
+        "prompt_tokens": 0.0,
+        "requests": 0.0
+      },
+      "request_log": {
+        "cached_tokens": 176,
+        "completion_tokens": 50,
+        "prompt_tokens": 302,
+        "requests": 3
+      }
+    },
+    "tenant-c": {
+      "ledger": {
+        "cached_tokens": 192,
+        "completion_tokens": 50,
+        "prompt_tokens": 300,
+        "requests": 1
+      },
+      "max_relative_error_percent": 0.0,
+      "relative_error_percent": {
+        "cached_tokens": 0.0,
+        "completion_tokens": 0.0,
+        "prompt_tokens": 0.0,
+        "requests": 0.0
+      },
+      "request_log": {
+        "cached_tokens": 192,
+        "completion_tokens": 50,
+        "prompt_tokens": 300,
+        "requests": 1
+      }
+    }
+  },
+  "threshold_percent": 0.1
+}
