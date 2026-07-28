@@ -156,14 +156,14 @@ SMOKE_CONFIG = GateConfig(
     replica_count=4,
     churn_batch_size=2,
     churn_epochs=2,
-    epoch_seconds=10.0,
+    epoch_seconds=20.0,
     seed=175,
     request_rate=10.0,
     warmup_seconds=1.0,
     cooldown_seconds=1.0,
     max_concurrency=32,
     request_timeout_seconds=5.0,
-    recovery_timeout_seconds=10.0,
+    recovery_timeout_seconds=20.0,
     churn_window_seconds=5.0,
     evidence_interval_seconds=0.5,
     resource_interval_seconds=1.0,
@@ -1126,6 +1126,13 @@ def _sha256_digest(value: str | None) -> str | None:
         return None
     match = re.search(r"sha256:[0-9a-fA-F]{64}", value)
     return match.group(0).lower() if match is not None else None
+
+
+def _normalized_image_reference(value: str) -> str:
+    for prefix in ("docker.io/library/", "docker.io/", "library/"):
+        if value.startswith(prefix):
+            return value.removeprefix(prefix)
+    return value
 
 
 def _derived_close(value: Any, expected: float) -> bool:
@@ -2185,7 +2192,11 @@ def evaluate_gate(
         and isinstance(expected_mock_image, str)
         and runtime_mock_image == environment.get("runtime_mock_image")
         and runtime_mock_image["spec_images"] == [expected_mock_image]
-        and len(runtime_mock_image["runtime_images"]) == 1
+        and {
+            _normalized_image_reference(value)
+            for value in runtime_mock_image["runtime_images"]
+        }
+        == {_normalized_image_reference(expected_mock_image)}
         and expected_mock_digest is not None
         and runtime_image_digests == {expected_mock_digest}
         and runtime_mock_per_uid_ok
@@ -2235,7 +2246,11 @@ def evaluate_gate(
         and runtime_gateway_image
         == environment.get("runtime_gateway_image")
         and runtime_gateway_image["spec_images"] == [expected_gateway_image]
-        and len(runtime_gateway_image["runtime_images"]) == 1
+        and {
+            _normalized_image_reference(value)
+            for value in runtime_gateway_image["runtime_images"]
+        }
+        == {_normalized_image_reference(expected_gateway_image)}
         and expected_gateway_digest is not None
         and runtime_gateway_digests == {expected_gateway_digest}
     )

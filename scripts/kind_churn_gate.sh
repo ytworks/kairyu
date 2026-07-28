@@ -260,9 +260,11 @@ fi
 # Docker 29 starts build containers with nofile=1024 on the target host.  uv's
 # bytecode compilation can exceed that, so both builds pin a sufficient limit.
 "$DOCKER" build --ulimit nofile=65536:65536 \
+  --provenance=false \
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"
 "$DOCKER" build --ulimit nofile=65536:65536 \
+  --provenance=false \
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$MOCK_IMAGE" "${ARCHIVE_MANIFEST_DIR}/mock"
 assert_clean_source
@@ -414,7 +416,7 @@ done
 mapfile -t kind_nodes < <("$KIND" get nodes --name "$CLUSTER_NAME")
 CONTROL_PLANE=${kind_nodes[0]}
 KIND_NODE_IMAGE=$(
-  "$DOCKER" inspect --format '{{.Config.Image}}@{{.Image}}' "$CONTROL_PLANE"
+  "$DOCKER" inspect --format '{{.Config.Image}}' "$CONTROL_PLANE"
 )
 KIND_VERSION=$("$KIND" version)
 KUBECTL_VERSION=$("$KUBECTL" version --client=true --output=yaml)

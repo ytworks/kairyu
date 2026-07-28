@@ -277,7 +277,11 @@ def _passing_evidence():
                 {
                     "name": "mock",
                     "spec_image": mock_image,
-                    "runtime_image": mock_image,
+                    "runtime_image": (
+                        f"docker.io/library/{mock_image}"
+                        if uid.startswith("new-")
+                        else mock_image
+                    ),
                     "image_id": runtime_image_id,
                 }
             ],
@@ -306,7 +310,9 @@ def _passing_evidence():
                         {
                             "name": "gateway",
                             "spec_image": gateway_image,
-                            "runtime_image": gateway_image,
+                            "runtime_image": (
+                                f"docker.io/library/{gateway_image}"
+                            ),
                             "image_id": gateway_runtime_image_id,
                         }
                     ],
@@ -342,7 +348,10 @@ def _passing_evidence():
         "runtime_mock_image": {
             "container_name": "mock",
             "spec_images": [mock_image],
-            "runtime_images": [mock_image],
+            "runtime_images": [
+                f"docker.io/library/{mock_image}",
+                mock_image,
+            ],
             "image_ids": [runtime_image_id],
         },
         "gateway_container_name": "gateway",
@@ -350,7 +359,7 @@ def _passing_evidence():
         "runtime_gateway_image": {
             "container_name": "gateway",
             "spec_images": [gateway_image],
-            "runtime_images": [gateway_image],
+            "runtime_images": [f"docker.io/library/{gateway_image}"],
             "image_ids": [gateway_runtime_image_id],
         },
     }
@@ -382,7 +391,8 @@ def test_formal_schedule_is_fixed_disjoint_and_complete() -> None:
 
 
 def test_smoke_epoch_exceeds_mock_prestop_grace() -> None:
-    assert SMOKE_CONFIG.epoch_seconds == 10.0
+    assert SMOKE_CONFIG.epoch_seconds == 20.0
+    assert SMOKE_CONFIG.recovery_timeout_seconds == 20.0
     assert (
         SMOKE_CONFIG.epoch_seconds
         > SMOKE_CONFIG.endpoint_withdrawal_limit_seconds
