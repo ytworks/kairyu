@@ -79,6 +79,8 @@ class ZmqEngineBackend:
         num_pages: int = 4096,
         page_size: int = 16,
         max_num_batched_tokens: int = 2048,
+        max_num_seqs: int = 256,
+        priority_age_s: float | None = 60.0,
         tokenizer: str | None = None,
         speculative: str | None = None,
         speculative_tokens: int = 4,
@@ -96,6 +98,8 @@ class ZmqEngineBackend:
             "num_pages": num_pages,
             "page_size": page_size,
             "max_num_batched_tokens": max_num_batched_tokens,
+            "max_num_seqs": max_num_seqs,
+            "priority_age_s": priority_age_s,
             "tokenizer": tokenizer,
             "speculative": speculative,
             "speculative_tokens": speculative_tokens,
@@ -267,6 +271,8 @@ class ZmqEngineBackend:
                         "request_id": request.request_id,
                         "prompt": prompt_with_tool_intent(request),
                         "sampling": sampling_params_to_wire(request.sampling_params),
+                        "priority": request.priority,
+                        "scheduling_class": request.scheduling_class,
                     }
                 )
             )

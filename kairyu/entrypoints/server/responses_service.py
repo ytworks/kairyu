@@ -79,6 +79,7 @@ class ResponsesRequest(BaseModel):
     prompt: dict | None = None
     max_tool_calls: int | None = None
     moderation: dict | None = None
+    priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
 
 
 class ResponseStore:
@@ -612,6 +613,7 @@ def _to_chat_request(
         tool_choice=_chat_tool_choice(request.tool_choice, request.tools),
         response_format=_response_format(request.text),
         user=request.user,
+        priority=request.priority,
     )
 
 
@@ -1185,15 +1187,35 @@ def add_responses_route(
             _validate_function_outputs(all_items)
             chat_request = _to_chat_request(request, all_items)
             cache_key = request.prompt_cache_key or request.previous_response_id
+            scheduling_class = getattr(
+                http_request.state, "scheduling_class", None
+            )
+            if scheduling_class not in {"interactive", "batch"}:
+                transported = http_request.headers.get(
+                    "x-kairyu-scheduling-class"
+                )
+                scheduling_class = (
+                    transported
+                    if transported in {"interactive", "batch"}
+                    else "interactive"
+                )
             validated = validate_chat_request(
                 chat_request,
                 engines,
                 chat_templates,
                 request_id=f"resp-{uuid.uuid4().hex[:12]}",
                 cache_hint=CacheHint(session_id=cache_key) if cache_key else None,
+                priority=getattr(http_request.state, "priority", None),
+                scheduling_class=scheduling_class,
             )
         except ChatRequestError as error:
             return _chat_error(error)
+        metrics = getattr(http_request.app.state, "metrics", None)
+        if metrics is not None:
+            metrics.record_priority(
+                validated.generation_request.scheduling_class,
+                source="http",
+            )
 
         response_id = f"resp_{uuid.uuid4().hex}"
         created_at = int(time.time())

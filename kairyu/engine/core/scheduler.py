@@ -13,7 +13,8 @@ the token being generated).
 from __future__ import annotations
 
 import heapq
-from collections import OrderedDict
+import math
+from collections import Counter, OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from enum import Enum
@@ -37,7 +38,9 @@ class EngineRequest:
     stop_token_ids: tuple[int, ...] = ()
     min_tokens: int = 0
     ignore_eos: bool = False
-    priority: int = 0  # admission ordering lands in M11; field reserved here
+    # vLLM-compatible ordering: smaller integers are admitted first.
+    priority: int = 0
+    scheduling_class: str = "interactive"
     sampling: EngineSampling = field(default_factory=EngineSampling)
     # Who this request IS as far as sampling is concerned. Normally itself; the
     # P-D prefill clone sets it to the PUBLIC id, because ``request_id`` there is
@@ -124,17 +127,29 @@ class SchedulerOutput:
 class _IndexedWaitingQueue:
     """ID-indexed FIFO or stable priority queue for waiting requests.
 
-    With aging enabled, every effective priority contains the same ``now/age``
-    term. Ordering can therefore use the immutable ``priority - arrival/age``
-    component without repeatedly sorting the whole waiting set. Heap removals
+    With aging enabled, every effective priority contains the same ``-now/age``
+    term. Ordering can therefore use the immutable ``priority + arrival/age``
+    component without repeatedly sorting the whole waiting set. Smaller values
+    win, matching vLLM request-priority semantics. Heap removals
     are lazy and periodically compacted, making ID cancellation amortized O(1).
     """
 
     def __init__(self, priority_age_s: float | None) -> None:
+        if priority_age_s is not None and (
+            not math.isfinite(priority_age_s) or priority_age_s < 0
+        ):
+            raise ValueError("priority_age_s must be finite and >= 0 or null")
         self._priority_age_s = priority_age_s
+        self._priority_age_ns = (
+            None
+            if priority_age_s is None
+            else 0
+            if priority_age_s == 0
+            else max(1, round(priority_age_s * 1_000_000_000))
+        )
         self._fifo: OrderedDict[str, None] = OrderedDict()
-        self._heap: list[tuple[float, int, str]] = []
-        self._priority_entries: dict[str, tuple[float, int]] = {}
+        self._heap: list[tuple[int, int, str]] = []
+        self._priority_entries: dict[str, tuple[int, int]] = {}
         self._next_back_sequence = 0
         self._next_front_sequence = -1
 
@@ -162,11 +177,26 @@ class _IndexedWaitingQueue:
         )
         yield from (request_id for _key, _sequence, request_id in ordered)
 
-    def _priority_key(self, priority: int, arrival: float) -> float:
-        score = float(priority)
-        if self._priority_age_s:
-            score -= arrival / self._priority_age_s
-        return -score
+    def _priority_key(self, priority: int, arrival: float) -> int:
+        """Exact signed-integer rank with nanosecond-resolution aging.
+
+        Multiplying the priority by the aging interval avoids converting public
+        signed-int64 values to float, which would collapse adjacent priorities
+        outside the 53-bit mantissa. The common denominator does not affect
+        ordering.
+        """
+
+        if not self._priority_age_ns:
+            return priority
+        return priority * self._priority_age_ns + round(arrival * 1_000_000_000)
+
+    def priority_key(self, priority: int, arrival: float) -> int:
+        """Immutable rank used to compare waiting and running prefills."""
+        if not self.priority_enabled:
+            raise RuntimeError(
+                "priority key requested while priority scheduling is disabled"
+            )
+        return self._priority_key(priority, arrival)
 
     def append(
         self,
@@ -299,14 +329,27 @@ class Scheduler:
         self._page_size = getattr(kv_cache, "page_size", page_size)
         self._states: dict[str, _RequestState] = {}
         self._waiting = _IndexedWaitingQueue(priority_age_s)
-        # m11 D6: priority admission — effective priority ages up so low
-        # priorities cannot starve; EngineRequest is frozen, so aging is
+        # m11 D6: priority admission — an old larger-number priority improves so
+        # lower tiers cannot starve; EngineRequest is frozen, so aging is
         # factored into an immutable heap key from the arrival timestamp
         import time as _time
 
         self._clock = clock or _time.monotonic
         self._arrivals: dict[str, float] = {}
         self._running: list[str] = []
+        self._priority_events: Counter[tuple[str, str]] = Counter(
+            {
+                (request_class, event): 0
+                for request_class in ("interactive", "batch")
+                for event in ("enqueue", "admit", "preempt", "complete")
+            }
+        )
+        self._priority_queue_depth: Counter[str] = Counter(
+            {"interactive": 0, "batch": 0}
+        )
+        self._priority_queue_high_watermark: Counter[str] = Counter(
+            {"interactive": 0, "batch": 0}
+        )
         # requests rejected at admission (C2), drained by the engine core/loop
         # so they surface as finished-with-empty-output like any terminal request
         self._rejected: list[str] = []
@@ -314,6 +357,7 @@ class Scheduler:
     def add_request(self, request: EngineRequest) -> None:
         if request.request_id in self._states:
             raise ValueError(f"duplicate request_id {request.request_id!r}")
+        self._validate_scheduling_class(request.scheduling_class)
         self._states[request.request_id] = _RequestState(request)
         arrival = self._clock()
         self._arrivals[request.request_id] = arrival
@@ -322,6 +366,7 @@ class Scheduler:
             priority=request.priority,
             arrival=arrival,
         )
+        self._record_enqueue(request.scheduling_class)
 
     def add_requests_atomic(self, requests: Sequence[EngineRequest]) -> None:
         """Admit one producer batch, or mutate nothing if any ID is invalid.
@@ -337,6 +382,7 @@ class Scheduler:
             request_id = request.request_id
             if request_id in self._states or request_id in states:
                 raise ValueError(f"duplicate request_id {request_id!r}")
+            self._validate_scheduling_class(request.scheduling_class)
             request_ids.append(request_id)
             states[request_id] = _RequestState(request)
             arrivals[request_id] = self._clock()
@@ -353,6 +399,42 @@ class Scheduler:
                 for request_id in request_ids
             ]
         )
+        for request in requests:
+            self._record_enqueue(request.scheduling_class)
+
+    @staticmethod
+    def _validate_scheduling_class(request_class: str) -> None:
+        if request_class not in {"interactive", "batch"}:
+            raise ValueError(
+                "scheduling_class must be 'interactive' or 'batch', "
+                f"got {request_class!r}"
+            )
+
+    def _record_enqueue(self, request_class: str) -> None:
+        self._priority_events[(request_class, "enqueue")] += 1
+        self._priority_queue_depth[request_class] += 1
+        self._priority_queue_high_watermark[request_class] = max(
+            self._priority_queue_high_watermark[request_class],
+            self._priority_queue_depth[request_class],
+        )
+
+    def _record_waiting_exit(self, state: _RequestState) -> None:
+        self._priority_queue_depth[state.request.scheduling_class] -= 1
+
+    def priority_metrics_snapshot(self) -> dict[str, dict]:
+        """Bounded queue/admission evidence for scrape-time collectors."""
+
+        return {
+            "events": dict(self._priority_events),
+            "queue_depth": {
+                request_class: self._priority_queue_depth[request_class]
+                for request_class in ("interactive", "batch")
+            },
+            "queue_high_watermark": {
+                request_class: self._priority_queue_high_watermark[request_class]
+                for request_class in ("interactive", "batch")
+            },
+        }
 
     def has_unfinished(self) -> bool:
         return bool(self._waiting or self._running)
@@ -394,6 +476,7 @@ class Scheduler:
             return
         if state.status is _Status.WAITING:
             self._waiting.remove(request_id)
+            self._record_waiting_exit(state)
         else:
             self._running.remove(request_id)
             self._release_without_commit(state)
@@ -414,6 +497,7 @@ class Scheduler:
             return
         if state.status is _Status.WAITING:
             self._waiting.remove(request_id)
+            self._record_waiting_exit(state)
             state.status = _Status.FINISHED
             state.finish_reason = "stop"
             return
@@ -431,6 +515,7 @@ class Scheduler:
         prompt degrades to a graceful empty completion instead of a stall.
         """
         self._waiting.remove(request_id)
+        self._record_waiting_exit(state)
         state.status = _Status.FINISHED
         state.finish_reason = "length"
         self._rejected.append(request_id)
@@ -490,18 +575,67 @@ class Scheduler:
             state = self._states[victim_id]
             if victim_id == needy_id or state.outputs:
                 continue
-            self._running.remove(victim_id)
-            self._release_without_commit(state)
-            state.computed_prompt = 0
-            state.status = _Status.WAITING
-            self._waiting.append(
-                victim_id,
-                priority=state.request.priority,
-                arrival=self._arrivals[victim_id],
-                front=True,
-            )
+            self._requeue_preempted(victim_id, state)
             return True
         return False
+
+    def _requeue_preempted(self, request_id: str, state: _RequestState) -> None:
+        """Release output-free running work and restore its original queue rank."""
+        self._running.remove(request_id)
+        self._release_without_commit(state)
+        state.computed_prompt = 0
+        state.status = _Status.WAITING
+        self._waiting.append(
+            request_id,
+            priority=state.request.priority,
+            arrival=self._arrivals[request_id],
+            front=True,
+        )
+        request_class = state.request.scheduling_class
+        self._priority_events[(request_class, "preempt")] += 1
+        self._priority_queue_depth[request_class] += 1
+        self._priority_queue_high_watermark[request_class] = max(
+            self._priority_queue_high_watermark[request_class],
+            self._priority_queue_depth[request_class],
+        )
+
+    def _priority_key_for(self, request_id: str) -> int:
+        state = self._states[request_id]
+        return self._waiting.priority_key(
+            state.request.priority,
+            self._arrivals[request_id],
+        )
+
+    def _lower_priority_prefill_victim(self, waiting_id: str) -> str | None:
+        """Lowest-priority output-free running prefill outranked by ``waiting_id``.
+
+        A waiting interactive request may need both a sequence slot and KV pages
+        held by batch prefill work. Recompute-preempting an output-free prefill is
+        safe; output-bearing decode requests remain protected by the existing
+        decode-priority invariant.
+        """
+        if not self._waiting.priority_enabled:
+            return None
+        waiting_key = self._priority_key_for(waiting_id)
+        candidates: list[tuple[int, float, int, str]] = []
+        for position, request_id in enumerate(self._running):
+            state = self._states[request_id]
+            if (
+                state.status is not _Status.RUNNING
+                or state.prefill_done
+                or state.outputs
+            ):
+                continue
+            key = self._priority_key_for(request_id)
+            if waiting_key < key:
+                candidates.append(
+                    (key, self._arrivals[request_id], position, request_id)
+                )
+        if not candidates:
+            return None
+        # Larger key is lower priority. For equal rank, preempt the younger/later
+        # running request, matching the existing youngest-victim discipline.
+        return max(candidates)[-1]
 
     def output_tokens(self, request_id: str) -> tuple[int, ...]:
         return tuple(self._states[request_id].outputs)
@@ -592,10 +726,27 @@ class Scheduler:
         return budget
 
     def _schedule_prefills(self, budget: int, plan: list[ScheduledChunk]) -> int:
-        for request_id in list(self._running):
+        request_ids = [
+            request_id
+            for request_id in self._running
+            if self._states[request_id].status is _Status.RUNNING
+            and not self._states[request_id].prefill_done
+        ]
+        if self._waiting.priority_enabled:
+            stable_position = {
+                request_id: position
+                for position, request_id in enumerate(request_ids)
+            }
+            request_ids.sort(
+                key=lambda request_id: (
+                    self._priority_key_for(request_id),
+                    stable_position[request_id],
+                )
+            )
+        for request_id in request_ids:
             state = self._states[request_id]
-            if state.status is not _Status.RUNNING or state.prefill_done or budget < 1:
-                continue
+            if budget < 1:
+                break
             chunk = min(state.prompt_len - state.computed_prompt, budget)
             state.computed_prompt += chunk
             if state.prefill_done:
@@ -606,8 +757,79 @@ class Scheduler:
             budget -= chunk
         return budget
 
-    def _admit_waiting(self, budget: int, plan: list[ScheduledChunk]) -> int:
-        while self._waiting and budget > 0 and len(self._running) < self._max_seqs:
+    def _admit_priority_ahead_of_prefills(
+        self, budget: int, plan: list[ScheduledChunk]
+    ) -> int:
+        """Run an outranking waiter before lower-priority running prefill work.
+
+        Existing decode work has already consumed its budget when this runs.
+        If a lower-priority, output-free prefill owns the last sequence slot or
+        needed KV pages, recompute-preempt it and retry the higher-priority head.
+        """
+        if not self._waiting.priority_enabled:
+            return budget
+        while self._waiting and budget > 0:
+            request_id = self._waiting.peek()
+            victim_id = self._lower_priority_prefill_victim(request_id)
+            if victim_id is None:
+                break
+
+            state = self._states[request_id]
+            required_pages = -(-state.prompt_len // self._page_size)
+            if state.prompt_len == 0 or required_pages > self._kv.num_pages:
+                # Let the ordinary rejection path remove an impossible head;
+                # never preempt valid work on behalf of an invalid request.
+                budget = self._admit_waiting(
+                    budget,
+                    plan,
+                    max_admissions=1,
+                )
+                continue
+            if len(self._running) >= self._max_seqs:
+                self._requeue_preempted(victim_id, self._states[victim_id])
+
+            budget_after = self._admit_waiting(
+                budget,
+                plan,
+                max_admissions=1,
+            )
+            budget = budget_after
+            if state.status is _Status.RUNNING:
+                continue
+            if request_id not in self._states or state.status is _Status.FINISHED:
+                # Empty/oversized head was rejected; reevaluate the new head.
+                continue
+
+            # Allocation can still fail despite the page-count estimate (for
+            # example, pinned radix pages). Release another outranked prefill.
+            victim_id = self._lower_priority_prefill_victim(request_id)
+            if victim_id is None:
+                break
+            self._requeue_preempted(victim_id, self._states[victim_id])
+            # Retry immediately after releasing pages.  Waiting until the next
+            # loop iteration would first require another eligible victim and
+            # could therefore skip the only useful post-release allocation.
+            budget = self._admit_waiting(
+                budget,
+                plan,
+                max_admissions=1,
+            )
+        return budget
+
+    def _admit_waiting(
+        self,
+        budget: int,
+        plan: list[ScheduledChunk],
+        *,
+        max_admissions: int | None = None,
+    ) -> int:
+        admitted = 0
+        while (
+            self._waiting
+            and budget > 0
+            and len(self._running) < self._max_seqs
+            and (max_admissions is None or admitted < max_admissions)
+        ):
             # The indexed queue already exposes the highest effective priority,
             # with stable FIFO ties. The head still BLOCKS on KVCacheFull — no
             # skip-ahead (m11 A11).
@@ -645,6 +867,7 @@ class Scheduler:
             popped_id = self._waiting.popleft()
             if popped_id != request_id:
                 raise AssertionError("waiting queue head changed during admission")
+            self._record_waiting_exit(state)
             state.status = _Status.RUNNING
             self._running.append(request_id)
             # cached prefix skips prefill compute; the last prompt token is
@@ -656,7 +879,9 @@ class Scheduler:
                 state.in_flight += 1  # prompt-completing chunk samples token 0
                 self._kv.mark_computed(state.allocation)
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
+            self._priority_events[(state.request.scheduling_class, "admit")] += 1
             budget -= chunk
+            admitted += 1
         return budget
 
     def schedule(self) -> SchedulerOutput:
@@ -670,6 +895,9 @@ class Scheduler:
             prefill_budget = self._budget
         else:
             prefill_budget = self._schedule_decodes(self._budget, plan)
+        prefill_budget = self._admit_priority_ahead_of_prefills(
+            prefill_budget, plan
+        )
         prefill_budget = self._schedule_prefills(prefill_budget, plan)
         self._admit_waiting(prefill_budget, plan)
         return SchedulerOutput(scheduled=tuple(plan))
@@ -677,6 +905,7 @@ class Scheduler:
     def _finish(self, state: _RequestState) -> None:
         state.status = _Status.FINISHED
         self._running.remove(state.request.request_id)
+        self._priority_events[(state.request.scheduling_class, "complete")] += 1
         if state.allocation is not None:
             # fold fully-generated pages into the radix tree so the next
             # conversation turn's prompt (prompt + this completion) hits cache

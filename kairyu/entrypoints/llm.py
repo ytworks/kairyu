@@ -82,14 +82,22 @@ class LLM:
         return prompt_list, params_list
 
     async def _generate_async(
-        self, prompt_list: tuple[str, ...], params_list: tuple[SamplingParams, ...]
+        self,
+        prompt_list: tuple[str, ...],
+        params_list: tuple[SamplingParams, ...],
+        priorities: tuple[int, ...],
     ) -> list[RequestOutput]:
         batch = uuid.uuid4().hex[:12]
         requests = [
             GenerationRequest(
-                request_id=f"{batch}-{i}", prompt=prompt, sampling_params=params
+                request_id=f"{batch}-{i}",
+                prompt=prompt,
+                sampling_params=params,
+                priority=priority,
             )
-            for i, (prompt, params) in enumerate(zip(prompt_list, params_list, strict=True))
+            for i, (prompt, params, priority) in enumerate(
+                zip(prompt_list, params_list, priorities, strict=True)
+            )
         ]
         results = await asyncio.gather(*(self.backend.generate(r) for r in requests))
         return [
@@ -117,15 +125,23 @@ class LLM:
         prompts: str | Sequence[str],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         use_tqdm: bool = True,
+        priority: Sequence[int] | None = None,
     ) -> list[RequestOutput]:
         prompt_list, params_list = self._normalize(prompts, sampling_params)
-        return self._run(self._generate_async(prompt_list, params_list))
+        priorities = tuple(priority) if priority is not None else (0,) * len(prompt_list)
+        if len(priorities) != len(prompt_list):
+            raise ValueError(
+                f"priority length {len(priorities)} does not match prompts length "
+                f"{len(prompt_list)}"
+            )
+        return self._run(self._generate_async(prompt_list, params_list, priorities))
 
     def chat(
         self,
         messages: Sequence[dict] | Sequence[Sequence[dict]],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         use_tqdm: bool = True,
+        priority: Sequence[int] | None = None,
     ) -> list[RequestOutput]:
         conversations: Sequence[Sequence[dict]]
         if messages and isinstance(messages[0], dict):
@@ -133,4 +149,9 @@ class LLM:
         else:
             conversations = messages  # type: ignore[assignment]
         prompts = [render_chat(conversation) for conversation in conversations]
-        return self.generate(prompts, sampling_params, use_tqdm=use_tqdm)
+        return self.generate(
+            prompts,
+            sampling_params,
+            use_tqdm=use_tqdm,
+            priority=priority,
+        )

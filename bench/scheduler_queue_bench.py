@@ -61,7 +61,10 @@ def _legacy_priority_drain(
     requests: list[tuple[str, int, float]],
 ) -> None:
     waiting = list(requests)
-    waiting.sort(key=lambda item: -(item[1] - item[2] / 10.0))
+    waiting.sort(
+        key=lambda item: item[1] * 10_000_000_000
+        + round(item[2] * 1_000_000_000)
+    )
     while waiting:
         waiting.pop(0)
 

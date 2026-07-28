@@ -599,8 +599,10 @@ tenants:                       # optional authenticated API-key -> tenant mappin
     key-a: team-a
     key-b: team-b
   limits:                      # optional independent buckets per known tenant
-    team-a: {requests_per_minute: 60, tokens_per_minute: 10000}
-    team-b: {requests_per_minute: 120, tokens_per_minute: 20000}
+    team-a: {requests_per_minute: 60, tokens_per_minute: 10000,
+             interactive_priority: 0, batch_priority: 1}
+    team-b: {requests_per_minute: 120, tokens_per_minute: 20000,
+             interactive_priority: 0, batch_priority: 1}
 
 pricing:                       # optional; requires server.usage_ledger_path
   version: "2026-07-27"        # immutable identifier included in every CSV row
@@ -731,7 +733,14 @@ preflight, before owned backends are constructed. The mapping keys are actual AP
 values rather than environment-variable names, so protect the deployment file as
 secret-bearing configuration.
 
-Each tenant gets independent request-per-minute and token-per-minute buckets; a tenant
+Each tenant gets independent request-per-minute and token-per-minute buckets plus trusted
+interactive/batch scheduling classes. Smaller priority integers run first. HTTP clients
+cannot self-promote through a configured gateway: interactive requests receive
+`interactive_priority` (default 0), and Batch API lines receive `batch_priority`
+(default 1); every profile must keep interactive priority strictly smaller than
+batch priority. The trusted value and bounded class are preserved through Kairyu
+replica transport, while local vLLM execution forces its priority scheduling
+policy so the integer cannot be silently ignored. A tenant
 without an explicit profile uses the defaults (600 requests and 200,000 tokens per
 minute). Authentication runs before tenant limiting, so a rejected credential does not
 consume a bucket. When `server.usage_ledger_path` is configured, successful request usage

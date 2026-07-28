@@ -770,6 +770,16 @@ def _session_id(request: ChatCompletionRequest, http_request: Request) -> str | 
     return http_request.headers.get("x-session-id") or request.user
 
 
+def _scheduling_class(http_request: Request) -> str:
+    """Resolve trusted gateway state, then the Kairyu replica transport hint."""
+
+    request_class = getattr(http_request.state, "scheduling_class", None)
+    if request_class in {"interactive", "batch"}:
+        return request_class
+    transported = http_request.headers.get("x-kairyu-scheduling-class")
+    return transported if transported in {"interactive", "batch"} else "interactive"
+
+
 def create_app(
     engines: Mapping[str, EngineBackend],
     orchestrator: Orchestrator | None = None,
@@ -826,6 +836,7 @@ def create_app(
         for name, engine in served_engines.items():
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
+            metrics.track_scheduler(name, engine)
     api_keys = settings.resolve_api_keys() if resolved_api_keys is None else resolved_api_keys
     admin_keys = (
         settings.resolve_admin_keys() if resolved_admin_keys is None else resolved_admin_keys
@@ -1205,9 +1216,16 @@ def create_app(
                 # Affinity glue (m7 D6): keeps a session's turns on the replica
                 # holding its warm radix-KV prefix.
                 cache_hint=CacheHint(session_id=session_id) if session_id else None,
+                priority=getattr(http_request.state, "priority", None),
+                scheduling_class=_scheduling_class(http_request),
             )
         except ChatRequestError as error:
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
+        if metrics is not None:
+            metrics.record_priority(
+                validated.generation_request.scheduling_class,
+                source="http",
+            )
         if request.stream and not request.tools:
             return StreamingResponse(
                 _stream_engine(
@@ -1293,6 +1311,8 @@ def create_app(
                 request_id=f"http-{uuid.uuid4().hex[:12]}",
                 prompt=prompt,
                 sampling_params=sampling,
+                priority=getattr(http_request.state, "priority", request.priority),
+                scheduling_class=_scheduling_class(http_request),
             )
 
         generation_requests = [_generation_request(prompt) for prompt in prompts]
@@ -1300,6 +1320,12 @@ def create_app(
             validation_error = _validate_generation_request(engine, generation_request)
             if validation_error is not None:
                 return validation_error
+        if metrics is not None:
+            for generation_request in generation_requests:
+                metrics.record_priority(
+                    generation_request.scheduling_class,
+                    source="http",
+                )
         if request.stream:
             return StreamingResponse(
                 _stream_completions(

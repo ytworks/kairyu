@@ -75,6 +75,13 @@ def test_tensor_parallel_size_reaches_vllm_engine_args(monkeypatch):
     VLLMBackend(model="m", tensor_parallel_size=4)
     assert captured["model"] == "m"
     assert captured["tensor_parallel_size"] == 4
+    assert captured["scheduling_policy"] == "priority"
+
+
+def test_vllm_backend_rejects_fcfs_that_would_ignore_priority(monkeypatch):
+    _install_fake_vllm(monkeypatch)
+    with pytest.raises(ValueError, match="requires scheduling_policy='priority'"):
+        VLLMBackend(model="m", scheduling_policy="fcfs")
 
 
 def test_llm_default_backend_forwards_tensor_parallel_size_to_vllm(monkeypatch):

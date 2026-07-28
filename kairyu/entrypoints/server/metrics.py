@@ -59,6 +59,59 @@ class _PoolCollector:
         yield decisions
 
 
+class _SchedulerCollector:
+    """Scrape-time native scheduler view with bounded class/event labels."""
+
+    _CLASSES = ("interactive", "batch")
+    _EVENTS = ("enqueue", "admit", "preempt", "complete")
+
+    def __init__(self) -> None:
+        self._engines: dict[str, object] = {}
+
+    def add(self, name: str, engine: object) -> None:
+        if callable(getattr(engine, "scheduler_priority_metrics", None)):
+            self._engines[name] = engine
+
+    def collect(self) -> Iterator[Metric]:
+        events = CounterMetricFamily(
+            "kairyu_scheduler_priority_events",
+            "Native scheduler events by bounded request class",
+            labels=["model", "request_class", "event"],
+        )
+        depth = GaugeMetricFamily(
+            "kairyu_scheduler_queue_depth",
+            "Current native scheduler waiting depth by bounded request class",
+            labels=["model", "request_class"],
+        )
+        high_watermark = GaugeMetricFamily(
+            "kairyu_scheduler_queue_high_watermark",
+            "Maximum native scheduler waiting depth by bounded request class",
+            labels=["model", "request_class"],
+        )
+        for model, engine in self._engines.items():
+            snapshot = engine.scheduler_priority_metrics()
+            if not snapshot:
+                continue
+            event_counts = snapshot["events"]
+            for request_class in self._CLASSES:
+                for event in self._EVENTS:
+                    events.add_metric(
+                        [model, request_class, event],
+                        event_counts.get((request_class, event), 0),
+                    )
+                depth.add_metric(
+                    [model, request_class],
+                    snapshot["queue_depth"].get(request_class, 0),
+                )
+                high_watermark.add_metric(
+                    [model, request_class],
+                    snapshot["queue_high_watermark"].get(request_class, 0),
+                )
+        yield events
+        yield depth
+        yield high_watermark
+
+
 class ServerMetrics:
     """Registry + the request-level metrics recorded by the middleware."""
 
@@ -82,6 +135,12 @@ class ServerMetrics:
             ["state"],
             registry=self.registry,
         )
+        self.priority_requests_total = Counter(
+            "kairyu_priority_requests",
+            "Requests dispatched by bounded scheduling class and ingress source",
+            ["request_class", "source"],
+            registry=self.registry,
+        )
         self.usage_requests_total = Counter(
             "kairyu_usage_requests",
             "Successful metered executions by tenant",
@@ -95,10 +154,25 @@ class ServerMetrics:
             registry=self.registry,
         )
         self._pool_collector = _PoolCollector()
+        self._scheduler_collector = _SchedulerCollector()
         self.registry.register(self._pool_collector)
+        self.registry.register(self._scheduler_collector)
 
     def track_pool(self, name: str, pool: ReplicaPool) -> None:
         self._pool_collector.add(name, pool)
+
+    def track_scheduler(self, name: str, engine: object) -> None:
+        self._scheduler_collector.add(name, engine)
+
+    def record_priority(self, request_class: str, *, source: str) -> None:
+        """Record an explicit bounded class without labeling priority integers."""
+
+        if request_class not in {"interactive", "batch"}:
+            raise ValueError(f"invalid scheduling class {request_class!r}")
+        self.priority_requests_total.labels(
+            request_class=request_class,
+            source=source,
+        ).inc()
 
     def record_usage(
         self,

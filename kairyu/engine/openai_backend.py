@@ -272,7 +272,15 @@ def _validated_request_payload(
     capabilities: OpenAIRequestCapabilities,
 ) -> dict[str, object]:
     _validate_tools(request, capabilities)
-    return _sampling_payload(request.sampling_params, capabilities)
+    if request.priority != 0 and not capabilities.priority:
+        raise _client_error(
+            capabilities.upstream,
+            "does not support request field: priority",
+        )
+    payload = _sampling_payload(request.sampling_params, capabilities)
+    if capabilities.priority:
+        payload["priority"] = request.priority
+    return payload
 
 
 class OpenAICompatBackend:
@@ -347,10 +355,19 @@ class OpenAICompatBackend:
             )
         return key
 
-    def _headers(self) -> dict[str, str]:
-        if self._api_key_env is None:
-            return {}
-        return {"Authorization": f"Bearer {self._api_key()}"}
+    def _headers(self, request: GenerationRequest | None = None) -> dict[str, str]:
+        headers = (
+            {}
+            if self._api_key_env is None
+            else {"Authorization": f"Bearer {self._api_key()}"}
+        )
+        if request is not None and self._capabilities.upstream == "kairyu":
+            if request.scheduling_class not in {"interactive", "batch"}:
+                raise ValueError(
+                    f"invalid scheduling class {request.scheduling_class!r}"
+                )
+            headers["X-Kairyu-Scheduling-Class"] = request.scheduling_class
+        return headers
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -377,7 +394,7 @@ class OpenAICompatBackend:
         response = await self._get_client().post(
             f"{self._base_url}/chat/completions",
             json=payload,
-            headers=self._headers(),
+            headers=self._headers(request),
         )
         if response.status_code != 200:
             _raise_for_status(self._base_url, response.status_code, response.text)
@@ -459,7 +476,7 @@ class OpenAICompatBackend:
             "POST",
             f"{self._base_url}/chat/completions",
             json=payload,
-            headers=self._headers(),
+            headers=self._headers(request),
         ) as response:
             if response.status_code != 200:
                 body = (await response.aread()).decode(errors="replace")

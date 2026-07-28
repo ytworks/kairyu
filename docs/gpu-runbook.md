@@ -192,6 +192,16 @@ image, and drill are unchanged.
 - 9.4 Rolling-update drill on real weights (`docs/deployment.md` §5), one
   replica at a time, gateway `/metrics` watched throughout — gate C7 on
   hardware.
-- 9.5 Batch under load: submit a `/v1/batches` job while an interactive
-  trace runs; verify interactive p99 is unaffected with the batch cap at its
-  configured value (gate C4 on hardware).
+- 9.5 F5a priority overload: use the Qwen3-32B example's one-replica gateway,
+  tenant class mapping, and Batch API, then run
+  `uv run python bench/priority_overload_gpu_bench.py --assert-gate
+  --model-revision <40-hex-revision> --replica-image-digest <sha256:...>
+  --gateway-image-digest <sha256:...>`.
+  The harness performs an untimed warmup, calibrates steady-state capacity,
+  offers interactive at 0.5x plus batch at 1.5x, checks the fixed 2 s
+  interactive TTFT p99 SLO, proves batch completion plus residual backlog, and
+  reconciles bounded gateway/replica class counters with native scheduler
+  enqueue/admit/complete counters and queue gauges. The formal gate also
+  requires a clean source tree and records the source/config/benchmark hashes,
+  model revision, image digests, `/backends` topology, and GPU inventory. Save
+  the raw JSON under `bench/results/`.

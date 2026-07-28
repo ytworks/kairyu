@@ -235,6 +235,8 @@ def validate_chat_request(
     *,
     request_id: str,
     cache_hint: CacheHint | None = None,
+    priority: int | None = None,
+    scheduling_class: str = "interactive",
 ) -> ValidatedChatRequest:
     validated_input = validate_chat_input(request, chat_templates)
     engine = engines.get(request.model)
@@ -254,6 +256,8 @@ def validate_chat_request(
         request_id=request_id,
         prompt=validated_input.prompt,
         sampling_params=sampling,
+        priority=request.priority if priority is None else priority,
+        scheduling_class=scheduling_class,
         cache_hint=cache_hint,
         tools=tuple(request.tools or ()),
         tool_choice=request.tool_choice,

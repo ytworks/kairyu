@@ -68,6 +68,8 @@ def _preflight_server(
             tenant: TenantLimits(
                 requests_per_minute=limits.requests_per_minute,
                 tokens_per_minute=limits.tokens_per_minute,
+                interactive_priority=limits.interactive_priority,
+                batch_priority=limits.batch_priority,
             )
             for tenant, limits in section.limits.items()
         },
@@ -186,6 +188,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             chat_templates=chat_templates,  # batch and HTTP must render identically
             usage_ledger=getattr(app.state, "usage_ledger", None),
             tenant_limiter=getattr(app.state, "tenant_limiter", None),
+            tenant_config=tenant_config,
         )
         workers.append(worker)
         add_batch_routes(app, store, worker)

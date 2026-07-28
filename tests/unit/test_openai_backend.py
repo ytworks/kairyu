@@ -456,6 +456,7 @@ async def test_generate_rejects_unsupported_intent_before_client_or_transport(fi
                 "min_tokens": 2,
                 "ignore_eos": True,
                 "skip_special_tokens": False,
+                "priority": 0,
             },
         ),
         (
@@ -477,6 +478,7 @@ async def test_generate_rejects_unsupported_intent_before_client_or_transport(fi
                 "stop_token_ids": [8],
                 "min_tokens": 4,
                 "ignore_eos": True,
+                "priority": 0,
             },
         ),
         (

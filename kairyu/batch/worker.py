@@ -38,6 +38,7 @@ from kairyu.entrypoints.server.metering import (
     record_tenant_usage,
 )
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.entrypoints.server.tenancy import TenantConfig
 
 logger = logging.getLogger("kairyu.batch")
 _INPUT_QUEUE_FACTOR = 2
@@ -62,6 +63,7 @@ class BatchWorker:
         chat_templates: Mapping[str, ChatTemplate] | None = None,
         usage_ledger: UsageLedgerSink | None = None,
         tenant_limiter: TokenLimiterSink | None = None,
+        tenant_config: TenantConfig | None = None,
     ) -> None:
         self._store = store
         self._engines = engines
@@ -70,6 +72,7 @@ class BatchWorker:
         self._chat_templates = chat_templates
         self._usage_ledger = usage_ledger
         self._tenant_limiter = tenant_limiter
+        self._tenant_config = tenant_config or TenantConfig()
         self._queue: asyncio.Queue[str] = asyncio.Queue()
 
     def submit(self, batch_id: str) -> None:
@@ -99,6 +102,7 @@ class BatchWorker:
         line: object,
         endpoint: str,
         seen_custom_ids: set[str],
+        tenant: str = "default",
     ) -> tuple[dict | None, dict | None, BatchLineUsage | None]:
         """Execute one input line; return output, error, and successful usage."""
         # a line that is valid JSON but not an object (e.g. a bare `5`) must
@@ -130,7 +134,14 @@ class BatchWorker:
                 self._engines,
                 self._chat_templates,
                 request_id=f"batch-{uuid.uuid4().hex[:12]}",
+                priority=self._tenant_config.limits_for(tenant).batch_priority,
+                scheduling_class="batch",
             )
+            if self._metrics is not None:
+                self._metrics.record_priority(
+                    validated.generation_request.scheduling_class,
+                    source="batch",
+                )
             executed = await execute_chat(validated)
             response = executed.response
             return (
@@ -258,7 +269,7 @@ class BatchWorker:
                         if input_error is not None or self._cancelled(batch_id):
                             continue
                         output, error, usage = await self._run_line(
-                            line, job.endpoint, seen_custom_ids
+                            line, job.endpoint, seen_custom_ids, job.owner
                         )
                         if usage is not None:
                             record_tenant_usage(

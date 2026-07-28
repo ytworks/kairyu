@@ -169,6 +169,14 @@ capability intersection before placement or private-stage work. Kairyu replicas
 now type and preserve their supported vLLM-style sampling controls at the HTTP
 boundary. A live Qwen3-32B TP8 gateway-to-replica smoke preserved all six Kairyu
 extension controls, and the full CPU suite remains green (2,161 passed).
+F5a priority admission is now production-wired from authenticated gateway
+classification through replica transport into the native scheduler. The
+deterministic CPU gate preserves interactive TTFT p99 at 1 tick versus 400 for
+FCFS under exact 2x load while batch consumes residual capacity and drains.
+The production-shaped Qwen3-32B TP8 gate calibrated 7.6304 requests/s; under
+planned 0.5x interactive plus 1.5x batch load, interactive TTFT p99 was
+1.3025 s with 100% attainment of the fixed 2 s SLO, while batch progressed in
+the mixed window and drained 192/192 afterward.
 G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
 specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
 production gateway exposes direct, standard AUTO (Conductor), and max AUTO
@@ -213,7 +221,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
-| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4 amended 2026-07-28, D3/D6 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission are production-wired. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
@@ -314,6 +322,44 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F5a holds interactive TTFT under exact 2x overload
+- What: Added signed-int64 priority to Chat Completions, legacy Completions,
+  Responses, offline APIs, replica transports, vLLM, native, and process-split
+  engines. Authenticated gateways assign interactive and batch priorities from
+  trusted tenant/source context and carry an explicit bounded class through
+  Kairyu HTTP transport. Native schedulers use exact signed-int64 indexed
+  priority admission with nanosecond-resolution aging and may
+  recompute-preempt only strictly lower-priority, output-free incomplete
+  prefills; decode remains protected. Local vLLM construction forces its
+  priority policy rather than silently retaining FCFS. Replica metrics publish
+  class queue depth/high-watermark and enqueue/admit/preempt/complete counters.
+  The deterministic
+  CPU gate records interactive TTFT p99 of 1 tick versus 400 under FCFS at
+  exact 2x load. A production-shaped Qwen3-32B TP8 gateway gate calibrated
+  7.6304 requests/s and, under planned 0.5x interactive plus 1.5x batch load,
+  measured interactive TTFT p99 of 1.3025 s with 100% attainment of the fixed
+  2 s SLO. During the mixed window, batch recorded 54 HTTP dispatches, 53
+  scheduler admissions, 46 scheduler completions, and one queued request; it
+  drained 192/192 with zero failures afterward. The full CPU suite reports
+  2,213 passed. The production
+  artifact is generated only after an untimed
+  warmup from a clean implementation commit and pins benchmark/config hashes,
+  image digest, model revision, `/backends` topology, and GPU inventory.
+  The gate requires a positive batch queue at the measurement boundary and a
+  batch high-watermark at least as large as that depth; merely publishing
+  zero-valued gauge series cannot satisfy the queue-evidence assertion.
+- Why: FIFO admission lets queued batch prefills occupy every active slot and
+  makes a feasible interactive SLO fail during overload. Gateway-owned
+  classification prevents clients from self-promoting, while work-conserving
+  priority plus bounded aging lets batch consume residual capacity without a
+  static reservation. Protecting decode and restricting victims bounds
+  recomputation and is stronger for TTFT than vLLM current main's
+  allocation-failure-only priority victim selection.
+- Refs: issue #190; m11 D6/A11; G5 F5a;
+  `kairyu/engine/core/scheduler.py`;
+  `bench/priority_overload_{bench,gpu_bench}.py`;
+  `bench/results/f5a-priority-overload-{cpu,qwen3-32b-tp8}-2026-07-28.json`
 
 ### 2026-07-28 — [amendment] Responses API closes typed streaming and Codex tool loops
 - What: Replaced the unary-only Responses subset with canonical gapless text/function SSE, completed/incomplete/failed terminals, flat and namespace function tools, linked `function_call_output` history, structured text formats, explicit unsupported-field rejection, and bounded tenant-scoped successful-response continuation. The adapter now reuses Chat Completions validation/execution, model templates, tool-choice enforcement, upstream capability preflight, and usage ownership. Official OpenAI SDK unary/sync-stream/async-stream and failure/state/tool tests are green; the full CPU suite reports 2,186 passed. An unmodified Codex CLI 0.145.0 completed a text turn and a real `pwd` namespace command/result loop against Qwen3-32B TP8 on 8x RTX PRO 6000, with every latest-code Responses POST returning 200.
