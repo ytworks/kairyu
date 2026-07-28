@@ -12,6 +12,10 @@ from fastapi import FastAPI
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
 from kairyu.deploy.prober import HealthProber
+from kairyu.deploy.registry import (
+    KubernetesEndpointSliceDiscovery,
+    PoolReconciler,
+)
 from kairyu.deploy.spec import DeploymentSpec, load_deployment_spec
 from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.engine.backend import EngineBackend, shutdown_all
@@ -26,10 +30,14 @@ from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
+from kairyu.orchestration.router import JsonlRouterLog
 
 _EMBEDDING_BACKEND_FACTORIES: dict[str, Callable[..., EmbeddingBackend]] = {
     "mock": MockEmbeddingBackend
 }
+_SERVICE_ACCOUNT_NAMESPACE_PATH = Path(
+    "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+)
 
 
 def _create_embedding_backend(backend: str, *, dimensions: int) -> EmbeddingBackend:
@@ -40,6 +48,24 @@ def _create_embedding_backend(backend: str, *, dimensions: int) -> EmbeddingBack
             f"unknown embedding backend {backend!r}; known backends: {known}"
         )
     return factory(dimensions=dimensions)
+
+
+def _resolve_path(path: str, base_dir: Path | None) -> Path:
+    resolved = Path(path)
+    if base_dir is not None and not resolved.is_absolute():
+        resolved = base_dir / resolved
+    return resolved
+
+
+def _resolve_kubernetes_namespace(configured: str | None) -> str:
+    if configured is not None:
+        return configured
+    namespace = _SERVICE_ACCOUNT_NAMESPACE_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+    if not namespace:
+        raise ValueError("mounted Kubernetes service-account namespace is empty")
+    return namespace
 
 
 def _server_settings(spec: DeploymentSpec) -> ServerSettings:
@@ -97,21 +123,139 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     }
 
     probers: list[HealthProber] = []
+    reconcilers: list[tuple[PoolReconciler, float]] = []
+    placement_log_paths: dict[str, Path] = {}
+    claimed_log_paths: dict[Path, str] = {}
     for name, pool_spec in spec.pools.items():
+        if pool_spec.placement_log_path is None:
+            continue
+        path = _resolve_path(pool_spec.placement_log_path, base_dir)
+        canonical = path.resolve()
+        claimed_by = claimed_log_paths.get(canonical)
+        if claimed_by is not None:
+            raise ValueError(
+                "pool placement_log_path values must be unique; "
+                f"{name!r} and {claimed_by!r} both resolve to {canonical}"
+            )
+        claimed_log_paths[canonical] = name
+        placement_log_paths[name] = path
+
+    for name, pool_spec in spec.pools.items():
+        pool_log = (
+            JsonlRouterLog(placement_log_paths[name])
+            if name in placement_log_paths
+            else None
+        )
         replicas = [
-            create_backend(entry.backend, **entry.options) for entry in pool_spec.replicas
+            create_backend(entry.backend, **entry.options)
+            for entry in pool_spec.replicas
         ]
+        dynamic = pool_spec.discovery is not None
         pool = ReplicaPool(
             replicas,
+            log=pool_log,
             unhealthy_after=pool_spec.unhealthy_after,
             queue_depth_threshold=pool_spec.queue_depth_threshold,
+            allow_empty=dynamic,
         )
         engines[name] = pool
-        health_urls = [entry.resolved_health_url() for entry in pool_spec.replicas]
-        if any(url is not None for url in health_urls):
-            probers.append(
-                HealthProber(name, pool, health_urls, pool_spec.probe_interval_s)
+        if not dynamic:
+            health_urls = [
+                entry.resolved_health_url() for entry in pool_spec.replicas
+            ]
+            if any(url is not None for url in health_urls):
+                probers.append(
+                    HealthProber(
+                        name,
+                        pool,
+                        health_urls,
+                        pool_spec.probe_interval_s,
+                    )
+                )
+            continue
+
+        discovery = pool_spec.discovery
+        assert discovery is not None
+        source = KubernetesEndpointSliceDiscovery(
+            discovery.service,
+            _resolve_kubernetes_namespace(discovery.namespace),
+            discovery.port,
+            model=discovery.model,
+            api_key_env=discovery.api_key_env,
+            scheme=discovery.scheme,
+            address_family_preference=discovery.address_family_preference,
+        )
+
+        event_sink = None
+        if pool_log is not None:
+
+            def event_sink(
+                actions: dict[str, object],
+                *,
+                _pool: ReplicaPool = pool,
+                _log: JsonlRouterLog = pool_log,
+            ) -> None:
+                replica_ids = tuple(
+                    str(replica_id)
+                    for replica_id in actions.get(
+                        "replica_ids",
+                        _pool.replica_ids,
+                    )
+                )
+                healthy_ids = tuple(
+                    str(replica_id)
+                    for replica_id in actions.get(
+                        "healthy_ids",
+                        tuple(
+                            current_id
+                            for current_id, healthy in (
+                                _pool.healthy_by_id().items()
+                            )
+                            if healthy
+                        ),
+                    )
+                )
+                eligible_ids = tuple(
+                    str(replica_id)
+                    for replica_id in actions.get(
+                        "eligible_ids",
+                        _pool.eligible_ids,
+                    )
+                )
+                raw_generations = actions.get("generation_by_id", {})
+                generation_by_id = (
+                    {
+                        str(replica_id): str(generation)
+                        for replica_id, generation in raw_generations.items()
+                    }
+                    if isinstance(raw_generations, dict)
+                    else {}
+                )
+                _log.record_membership(
+                    actions,
+                    replica_ids=replica_ids,
+                    healthy_ids=healthy_ids,
+                    eligible_ids=eligible_ids,
+                    generation_by_id=generation_by_id,
+                )
+
+        reconciler = PoolReconciler(
+            pool,
+            source,
+            default_model=discovery.model or name,
+            event_sink=event_sink,
+        )
+        reconcilers.append((reconciler, discovery.poll_interval_s))
+        # Dynamic candidates carry their readiness URL on the pool entry.
+        # An empty mapping deliberately avoids any bootstrap replica.
+        probers.append(
+            HealthProber(
+                name,
+                pool,
+                {},
+                pool_spec.probe_interval_s,
             )
+        )
 
     chat_templates: dict[str, ChatTemplate] = {}
     for model_name, source in spec.chat_templates.items():
@@ -140,7 +284,11 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        tasks = [asyncio.create_task(prober.run()) for prober in probers]
+        tasks = [
+            asyncio.create_task(reconciler.run(interval_s))
+            for reconciler, interval_s in reconcilers
+        ]
+        tasks += [asyncio.create_task(prober.run()) for prober in probers]
         tasks += [asyncio.create_task(worker.run()) for worker in workers]
         try:
             yield
@@ -177,6 +325,9 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)
+    app.state.reconcilers = tuple(
+        reconciler for reconciler, _interval_s in reconcilers
+    )
 
     if spec.batch is not None:
         from kairyu.entrypoints.server.batch_routes import add_batch_routes

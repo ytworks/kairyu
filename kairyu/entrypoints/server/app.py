@@ -61,6 +61,7 @@ from kairyu.entrypoints.server.middleware import (
     AuthMiddleware,
     ConcurrencyLimitMiddleware,
     MetricsMiddleware,
+    RequestIngressMiddleware,
 )
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionChunk,
@@ -1072,6 +1073,9 @@ def create_app(
         app.add_middleware(TracingMiddleware)
     if settings.access_log:
         app.add_middleware(AccessLogMiddleware)
+    # Always outermost: placement p99 is defined from process request receipt,
+    # independent of access-log/metrics feature flags (G5 F1a).
+    app.add_middleware(RequestIngressMiddleware)
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
@@ -1297,12 +1301,18 @@ def create_app(
                 request,
                 served_engines,
                 chat_templates,
-                request_id=f"http-{uuid.uuid4().hex[:12]}",
+                request_id=(
+                    getattr(http_request.state, "request_id", None)
+                    or f"http-{uuid.uuid4().hex[:12]}"
+                ),
                 # Affinity glue (m7 D6): keeps a session's turns on the replica
                 # holding its warm radix-KV prefix.
                 cache_hint=CacheHint(session_id=session_id) if session_id else None,
                 priority=getattr(http_request.state, "priority", None),
                 scheduling_class=_scheduling_class(http_request),
+                placement_started_ns=getattr(
+                    http_request.state, "placement_started_ns", None
+                ),
             )
         except ChatRequestError as error:
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
@@ -1405,16 +1415,34 @@ def create_app(
         except ValueError as error:
             return invalid_request(str(error))
 
-        def _generation_request(prompt: str) -> GenerationRequest:
+        base_request_id = (
+            getattr(http_request.state, "request_id", None)
+            or f"http-{uuid.uuid4().hex[:12]}"
+        )
+
+        def _generation_request(
+            prompt: str,
+            prompt_index: int,
+        ) -> GenerationRequest:
             return GenerationRequest(
-                request_id=f"http-{uuid.uuid4().hex[:12]}",
+                request_id=(
+                    base_request_id
+                    if len(prompts) == 1
+                    else f"{base_request_id}-prompt-{prompt_index}"
+                ),
                 prompt=prompt,
                 sampling_params=sampling,
+                placement_started_ns=getattr(
+                    http_request.state, "placement_started_ns", None
+                ),
                 priority=getattr(http_request.state, "priority", request.priority),
                 scheduling_class=_scheduling_class(http_request),
             )
 
-        generation_requests = [_generation_request(prompt) for prompt in prompts]
+        generation_requests = [
+            _generation_request(prompt, prompt_index)
+            for prompt_index, prompt in enumerate(prompts)
+        ]
         for generation_request in generation_requests:
             validation_error = _validate_generation_request(engine, generation_request)
             if validation_error is not None:

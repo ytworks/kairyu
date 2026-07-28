@@ -40,7 +40,10 @@ class _PoolCollector:
         )
         healthy = GaugeMetricFamily(
             "kairyu_replica_healthy",
-            "Replica health (1 = in the hash ring)",
+            (
+                "Replica health (1 = readiness-validated and below the "
+                "failure threshold; draining is reported separately)"
+            ),
             labels=["pool", "replica"],
         )
         decisions = CounterMetricFamily(
@@ -48,16 +51,36 @@ class _PoolCollector:
             "Placement decisions by reason (session_affinity is the cache-affinity signal)",
             labels=["pool", "reason"],
         )
+        membership = GaugeMetricFamily(
+            "kairyu_pool_replicas",
+            "Replica membership by bounded state",
+            labels=["pool", "state"],
+        )
         for name, pool in self._pools.items():
-            for index, count in enumerate(pool.outstanding):
-                outstanding.add_metric([name, str(index)], count)
-            for index, is_healthy in enumerate(pool.healthy):
-                healthy.add_metric([name, str(index)], 1.0 if is_healthy else 0.0)
+            outstanding_by_id = pool.outstanding_by_id()
+            healthy_by_id = pool.healthy_by_id()
+            draining_by_id = pool.draining_by_id()
+            for replica_id, count in outstanding_by_id.items():
+                outstanding.add_metric([name, replica_id], count)
+            for replica_id, is_healthy in healthy_by_id.items():
+                healthy.add_metric(
+                    [name, replica_id], 1.0 if is_healthy else 0.0
+                )
             for reason, count in pool.decision_counts.items():
                 decisions.add_metric([name, reason], count)
+            membership.add_metric([name, "configured"], len(healthy_by_id))
+            membership.add_metric(
+                [name, "healthy"],
+                sum(healthy_by_id.values()),
+            )
+            membership.add_metric(
+                [name, "draining"],
+                sum(draining_by_id.values()),
+            )
         yield outstanding
         yield healthy
         yield decisions
+        yield membership
 
 
 class _SchedulerCollector:

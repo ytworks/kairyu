@@ -242,6 +242,7 @@ def validate_chat_request(
     cache_hint: CacheHint | None = None,
     priority: int | None = None,
     scheduling_class: str = "interactive",
+    placement_started_ns: int | None = None,
 ) -> ValidatedChatRequest:
     validated_input = validate_chat_input(request, chat_templates)
     engine = engines.get(request.model)
@@ -261,6 +262,7 @@ def validate_chat_request(
         request_id=request_id,
         prompt=validated_input.prompt,
         sampling_params=sampling,
+        placement_started_ns=placement_started_ns,
         priority=request.priority if priority is None else priority,
         scheduling_class=scheduling_class,
         cache_hint=cache_hint,

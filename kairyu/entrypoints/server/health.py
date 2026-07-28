@@ -127,16 +127,20 @@ def add_health_routes(
         # Declared remote readiness URLs therefore remain false here until the
         # startup prober succeeds; backend traffic is never implicit validation.
         degraded = {
-            name: engine.healthy
+            name: {
+                "healthy": list(engine.healthy),
+                "draining": list(engine.draining_by_id().values()),
+                "eligible_ids": list(engine.eligible_ids),
+            }
             for name, engine in engines.items()
-            if isinstance(engine, ReplicaPool) and not any(engine.healthy)
+            if isinstance(engine, ReplicaPool) and not engine.eligible_ids
         }
         if degraded:
             return JSONResponse(
                 status_code=503,
                 content={
                     "status": "unready",
-                    "pools": {name: list(health) for name, health in degraded.items()},
+                    "pools": degraded,
                 },
             )
         # Local engines get a say too. "Constructed" is not "able to serve": a

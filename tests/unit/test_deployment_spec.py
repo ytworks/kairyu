@@ -45,6 +45,87 @@ def test_gateway_spec_parses():
     assert pool.replicas[0].options["api_key_env"] is None  # keyless node-to-node
 
 
+def test_kubernetes_endpoint_slice_pool_parses() -> None:
+    spec = load_deployment_spec(
+        """
+pools:
+  fleet:
+    discovery:
+      type: kubernetes_endpoints
+      service: mock-replicas
+      namespace: model-serving
+      port: 9000
+      scheme: http
+      model: mock-model
+      api_key_env: null
+      poll_interval_s: 0.1
+    placement_log_path: /var/log/kairyu/placements.jsonl
+"""
+    )
+
+    pool = spec.pools["fleet"]
+    assert pool.replicas == ()
+    assert pool.discovery is not None
+    assert pool.discovery.service == "mock-replicas"
+    assert pool.discovery.namespace == "model-serving"
+    assert pool.discovery.port == 9000
+    assert pool.discovery.model == "mock-model"
+    assert pool.discovery.poll_interval_s == 0.1
+    assert pool.placement_log_path == "/var/log/kairyu/placements.jsonl"
+
+
+@pytest.mark.parametrize(
+    "pool_body",
+    [
+        pytest.param("    replicas: []\n", id="neither"),
+        pytest.param(
+            """
+    replicas: [{backend: mock}]
+    discovery:
+      type: kubernetes_endpoints
+      service: replicas
+""",
+            id="both",
+        ),
+    ],
+)
+def test_pool_requires_exactly_one_membership_source(pool_body: str) -> None:
+    with pytest.raises(ValidationError, match="exactly one of replicas or discovery"):
+        load_deployment_spec(f"pools:\n  fleet:\n{pool_body}")
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("service", "Invalid_Name"),
+        ("namespace", "bad.namespace"),
+        ("port", '""'),
+        ("port", "true"),
+        ("port", "0"),
+        ("port", "65536"),
+    ],
+)
+def test_kubernetes_endpoint_slice_discovery_rejects_invalid_identity(
+    field: str,
+    value: str,
+) -> None:
+    fields = {
+        "service": "replicas",
+        "namespace": "default",
+        "port": "http",
+    }
+    fields[field] = value
+    body = "\n".join(f"      {key}: {item}" for key, item in fields.items())
+    with pytest.raises(ValidationError):
+        load_deployment_spec(
+            "pools:\n"
+            "  fleet:\n"
+            "    discovery:\n"
+            "      type: kubernetes_endpoints\n"
+            f"{body}\n"
+        )
+
+
 @pytest.mark.parametrize("upstream", ["openai", "anthropic", "gemini", "kairyu", "vllm"])
 def test_openai_capability_profile_is_validated_while_loading(upstream):
     spec = load_deployment_spec(

@@ -55,6 +55,60 @@ class FlakyBackend:
             raise RuntimeError("shutdown failed")
 
 
+class BlockingShutdownBackend(FlakyBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_started = asyncio.Event()
+        self.shutdown_release = asyncio.Event()
+        self.shutdown_cancelled = False
+        self.closed = False
+
+    async def shutdown(self) -> None:
+        self.shutdown_count += 1
+        self.shutdown_started.set()
+        try:
+            await self.shutdown_release.wait()
+        except asyncio.CancelledError:
+            self.shutdown_cancelled = True
+            raise
+        self.closed = True
+
+
+class SelfCancellingShutdownBackend(FlakyBackend):
+    async def shutdown(self) -> None:
+        self.shutdown_count += 1
+        raise asyncio.CancelledError
+
+
+class OrderedOutcomeBackend:
+    """Let a successful in-flight call finish after a sibling ejects the pool."""
+
+    def __init__(self) -> None:
+        self._inner = MockBackend()
+        self.success_started = asyncio.Event()
+        self.release_success = asyncio.Event()
+
+    async def _outcome(self, request: GenerationRequest) -> GenerationResult:
+        if request.prompt == "late-success":
+            self.success_started.set()
+            await self.release_success.wait()
+            return await self._inner.generate(request)
+        await self.success_started.wait()
+        raise RuntimeError("ordered failure")
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        return await self._outcome(request)
+
+    async def stream(
+        self,
+        request: GenerationRequest,
+    ) -> AsyncIterator[GenerationResult]:
+        yield await self._outcome(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
 def make_request(prompt: str, session_id: str | None = None) -> GenerationRequest:
     hint = CacheHint(session_id=session_id) if session_id is not None else None
     return GenerationRequest(
@@ -95,6 +149,65 @@ async def test_generate_delegates_and_returns_result():
     result = await pool.generate(make_request("hello"))
     assert result.text == "world"
     assert backend.prompts_seen == ("hello",)
+
+
+async def test_cancelled_remove_finishes_detached_backend_shutdown() -> None:
+    backend = BlockingShutdownBackend()
+    pool = ReplicaPool({"detached": backend})
+    task = asyncio.create_task(pool.remove_replica("detached"))
+    await asyncio.wait_for(backend.shutdown_started.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert pool.replica_ids == ()
+    assert not task.done()
+    backend.shutdown_release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert backend.closed is True
+    assert backend.shutdown_cancelled is False
+    assert backend.shutdown_count == 1
+
+
+async def test_membership_observer_failure_cannot_break_backend_ownership() -> None:
+    def broken_observer(_event) -> None:
+        raise RuntimeError("observer failed")
+
+    pool = ReplicaPool(
+        {},
+        allow_empty=True,
+        membership_event_sink=broken_observer,
+    )
+    backend = FlakyBackend()
+
+    pool.add_replica("replica", backend)
+    assert pool.replica_ids == ("replica",)
+
+    await pool.remove_replica("replica")
+    assert pool.replica_ids == ()
+    assert backend.shutdown_count == 1
+
+
+async def test_self_cancelled_detached_backend_shutdown_is_not_silent() -> None:
+    backend = SelfCancellingShutdownBackend()
+    pool = ReplicaPool({"detached": backend})
+
+    with pytest.raises(
+        ExceptionGroup,
+        match="replica 'detached' shutdown failed",
+    ) as raised:
+        await pool.remove_replica("detached")
+
+    assert pool.replica_ids == ()
+    assert backend.shutdown_count == 1
+    assert len(raised.value.exceptions) == 1
+    error = raised.value.exceptions[0]
+    assert isinstance(error, RuntimeError)
+    assert "SelfCancellingShutdownBackend.shutdown raised CancelledError" in str(
+        error
+    )
+    assert isinstance(error.__cause__, asyncio.CancelledError)
 
 
 async def test_session_affinity_sticks_across_calls():
@@ -275,7 +388,7 @@ async def test_same_id_remote_readd_does_not_inherit_validation():
     await pool.remove_replica("remote")
     pool.add_replica("remote", MockBackend(), health_url="http://new/readyz")
 
-    assert pool.entry_generation("remote") is not old_generation
+    assert pool.entry_generation("remote") != old_generation
     assert pool.validated_by_id()["remote"] is False
     assert pool.healthy_by_id()["remote"] is False
 
@@ -297,6 +410,46 @@ async def test_failure_count_resets_on_any_success():
     # Still healthy (2 failures < 3 after the reset), so it serves again.
     result = await pool.generate(make_request("still-alive"))
     assert result.finished
+
+
+@pytest.mark.parametrize("surface", ["generate", "stream"])
+async def test_late_inflight_success_cannot_silently_restore_ejected_replica(
+    surface: str,
+) -> None:
+    backend = OrderedOutcomeBackend()
+    events: list[dict[str, object]] = []
+    pool = ReplicaPool(
+        {"replica": backend},
+        unhealthy_after=1,
+        membership_event_sink=events.append,
+    )
+
+    async def invoke(prompt: str) -> None:
+        request = make_request(prompt)
+        if surface == "generate":
+            await pool.generate(request)
+        else:
+            async for _chunk in pool.stream(request):
+                pass
+
+    successful = asyncio.create_task(invoke("late-success"))
+    await asyncio.wait_for(backend.success_started.wait(), timeout=1)
+    with pytest.raises(RuntimeError, match="ordered failure"):
+        await invoke("failure")
+    assert pool.eligible_ids == ()
+    assert [event["reason"] for event in events] == ["health_ejected"]
+
+    backend.release_success.set()
+    await successful
+    assert pool.eligible_ids == ()
+    assert [event["reason"] for event in events] == ["health_ejected"]
+
+    await pool.probe("replica")
+    assert pool.eligible_ids == ("replica",)
+    assert [event["reason"] for event in events] == [
+        "health_ejected",
+        "probe_succeeded",
+    ]
 
 
 async def test_all_unhealthy_raises_clear_runtime_error():

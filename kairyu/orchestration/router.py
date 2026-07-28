@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import IO, Literal, Protocol
@@ -167,6 +168,13 @@ class JsonlRouterLog:
         replica_index: int,
         reason: str,
         replica_id: str | None = None,
+        replica_generation: str | None = None,
+        placement_latency_ns: int | None = None,
+        request_id: str | None = None,
+        placement_started_ns: int | None = None,
+        selected_at_ns: int | None = None,
+        pool_size: int | None = None,
+        eligible_size: int | None = None,
     ) -> None:
         """Log a ``ReplicaPool`` placement decision (design doc m5 D4).
 
@@ -188,6 +196,71 @@ class JsonlRouterLog:
         }
         if replica_id is not None:  # m10a A1: id alongside the legacy ordinal
             record["replica_id"] = replica_id
+        if replica_generation is not None:
+            record["replica_generation"] = replica_generation
+        if placement_latency_ns is not None:
+            record["placement_latency_ns"] = placement_latency_ns
+        if request_id is not None:
+            record["request_id"] = request_id
+        if placement_started_ns is not None:
+            record["placement_started_ns"] = placement_started_ns
+        if selected_at_ns is not None:
+            record["selected_at_ns"] = selected_at_ns
+        if pool_size is not None:
+            record["pool_size"] = pool_size
+        if eligible_size is not None:
+            record["eligible_size"] = eligible_size
+        self._append(record)
+
+    def record_membership(
+        self,
+        actions: Mapping[str, object],
+        *,
+        replica_ids: tuple[str, ...],
+        healthy_ids: tuple[str, ...],
+        eligible_ids: tuple[str, ...],
+        generation_by_id: Mapping[str, str] | None = None,
+    ) -> None:
+        """Record one non-empty discovery/reconciliation transition."""
+
+        action_keys = (
+            "added",
+            "draining",
+            "undraining",
+            "removed",
+            "eligible",
+            "ineligible",
+        )
+        if "event_id" not in actions and not any(
+            actions.get(key) for key in action_keys
+        ):
+            return
+        transition_ns = actions.get("observed_ns")
+        if not isinstance(transition_ns, int):
+            transition_ns = time.perf_counter_ns()
+        record: dict[str, object] = {
+            "kind": "membership",
+            "observed_ns": transition_ns,
+            **{
+                key: list(actions.get(key, ()))
+                for key in action_keys
+            },
+            "replica_ids": list(replica_ids),
+            "healthy_ids": list(healthy_ids),
+            "eligible_ids": list(eligible_ids),
+        }
+        for key in (
+            "event_id",
+            "event_source_id",
+            "sequence",
+            "reason",
+            "replica_id",
+            "replica_generation",
+        ):
+            if key in actions:
+                record[key] = actions[key]
+        if generation_by_id is not None:
+            record["generation_by_id"] = dict(generation_by_id)
         self._append(record)
 
     def record_outcome(

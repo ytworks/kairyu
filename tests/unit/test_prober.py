@@ -265,7 +265,7 @@ async def test_removed_probe_result_cannot_validate_a_later_same_id_generation()
     release_old.set()
 
     assert await check == ("stable",)
-    assert pool.entry_generation("same") is not old_generation
+    assert pool.entry_generation("same") != old_generation
     assert pool.validated_by_id() == {
         "trusted": True,
         "stable": True,
@@ -297,7 +297,7 @@ async def test_initial_url_fallback_does_not_cross_same_id_generation():
 
     await pool.remove_replica("same")
     pool.add_replica("same", _FailingBackend(), health_url=None)
-    assert pool.entry_generation("same") is not old_generation
+    assert pool.entry_generation("same") != old_generation
     assert pool.validated_by_id()["same"] is True
     await _eject_first_replica(pool)
     assert pool.healthy_by_id()["same"] is False

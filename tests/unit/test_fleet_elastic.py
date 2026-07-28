@@ -637,7 +637,7 @@ class TestRegistryAndReconciler:
         }
         assert pool._entries["replica"].backend is candidate
         assert pool.health_url("replica") == "http://new/readyz"
-        assert pool.entry_generation("replica") is not old_generation
+        assert pool.entry_generation("replica") != old_generation
         assert pool.validated_by_id() == {"replica": False}
         assert pool.healthy_by_id() == {"replica": False}
         assert old.shutdown_calls == 1

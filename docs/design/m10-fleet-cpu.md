@@ -1,8 +1,8 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27). Reviewed (1-reviewer panel with repo-line evidence; §6 binding;
-covers M10a+M10b).
+2026-07-27; D2/D5/A16 amended 2026-07-28). Reviewed (1-reviewer panel with
+repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
 Depends on: m7 ReplicaPool/JsonlRouterLog, m7 deploy (spec/builder/prober),
@@ -53,7 +53,13 @@ the reconciler resolves each one to a complete frozen
 `alive()` — monotonic-clock injected for tests). `DiscoverySource` protocol:
 `poll() -> dict[id, ReplicaConfig]`; `StaticDiscovery` snapshots either string
 addresses or typed configs and `RegistryDiscovery` exposes registry snapshots.
-The k8s-endpoints source remains a THIN deploy-day adapter behind that protocol.
+The Kubernetes source is a lifecycle-owned in-cluster EndpointSlice REST
+adapter behind that protocol. It reads the projected service-account token on
+every poll, verifies the API server with the mounted CA, selects one named or
+numeric TCP port, and admits only `ready=true`, non-terminating IPv4/IPv6
+endpoints. Pod UID is the stable identity when present, with name/address
+fallback; dual-stack rows for the same UID are aggregated once using an
+explicit address-family preference and deterministic address selection.
 
 `PoolReconciler(pool, source, factory, default_model?)` passes only complete
 identities to `Callable[[ReplicaIdentity], (EngineBackend, health_url)]`.
@@ -80,6 +86,14 @@ An absent desired ID then receives a fresh lease on the new entry; a present des
 ID baselines the externally installed entry at the current desired identity without
 factory, replacement, or shutdown side effects. A fresh entry's manual owner is
 never changed by generation reconciliation.
+Each entry generation is a serializable random token. Effective membership
+transitions (add/remove, drain/undrain, first successful probe, health ejection,
+and restore) enter a reconciler-owned ordered outbox with a source ID,
+monotonic sequence, and stable event ID. A sink failure retains the head event
+for identical retry before further discovery; already-applied partial
+mutations are therefore not lost. Placement rows carry the same generation,
+the server-assigned request ID, pool/eligible sizes, and process-ingress to
+selection latency.
 Server: `POST /admin/drain` marks the pool replica draining and flips `/readyz`
 to 503 (existing prober contract).
 
@@ -102,7 +116,7 @@ pool placement (replica_id, reason) → backend generate; Conductor stages.
 Tests use OTel's InMemorySpanExporter (dev dependency) and assert the span
 tree + attributes.
 
-### D5 — Helm chart + kind smoke
+### D5 — Helm chart + kind gates
 
 `deploy/helm/kairyu/`: Deployment (readiness=/readyz, liveness=/healthz),
 Service, ConfigMap (DeploymentSpec JSON), values.yaml (replicas, image,
@@ -111,6 +125,18 @@ kind create → build image → load → helm install → wait ready → curl
 /v1/models + a completion → teardown. CI job (`kind-smoke`) runs it on
 ubuntu-latest; locally optional. A CPU test pins that the chart renders
 (`helm template` golden) so drift fails fast without kind.
+
+G5 F1a adds a separate resource-bounded kind topology: one dynamic gateway,
+one headless Service, and a 200-member parallel StatefulSet using a static
+standard-library-only mock. Its fixed-seed driver applies ten disjoint
+20-pod churn batches at absolute one-minute boundaries under retry-free
+open-loop traffic. It joins the echoed server request ID to the raw gateway
+placement row, joins the selected replica UID to the mock response, and records
+pod/EndpointSlice/resource snapshots plus the exact kill/join schedule.
+The verifier rehashes and replays every JSONL sidecar. Pull requests run the
+same protocol at smoke scale; the frozen 200-replica profile is scheduled and
+manually dispatchable. Images and manifests are built from a clean Git archive,
+carry the source revision, and run on digest-pinned kind/Kubernetes inputs.
 
 ## 3. M10b decisions (implemented after M10a in the same doc's scope)
 
@@ -148,7 +174,6 @@ over (α, β) (pure function over the dataset; no online learning).
 
 ## 4. Non-goals
 
-- Real k8s API client (fake-source contract; the adapter is deploy-day).
 - Cross-cluster federation; autoscaler execution (M11 F5 logic only).
 - KV-event compression/batching tuning (deploy-day).
 
@@ -160,6 +185,13 @@ over (α, β) (pure function over the dataset; no online learning).
   503 while draining.
 - Reconciler diff: add/remove/no-op paths with a fake source; TTL expiry
   drops replicas.
+- EndpointSlice discovery: readiness/termination filtering, named and numeric
+  ports, token rotation, deterministic dual-stack UID aggregation, lifecycle
+  close, and failure-resilient polling.
+- F1a: one gateway plus 200 mock replicas, ten minutes of 10%-per-minute churn,
+  zero failed requests, and placement p99 below 10 ms. Raw request,
+  membership, pod, EndpointSlice, resource, and kill/join sidecars must pass
+  the independent artifact replay.
 - Tracing: span tree with InMemorySpanExporter; disabled → zero overhead
   (no otel import).
 - Helm: `helm template` golden test; kind smoke in CI.
@@ -234,3 +266,12 @@ over (α, β) (pure function over the dataset; no online learning).
   failures, and applies a 200 response only to the same generation. `/readyz`
   and placement use the same validated-and-not-ejected predicate, while
   `probe()` resets failures without clearing any drain owner.
+- **A16**: the deploy-day Kubernetes adapter is now production code rather than
+  a non-goal. EndpointSlice `targetRef.uid` is the replica identity and the
+  source rejects not-ready or terminating endpoints before reconciliation.
+  Reconciliation and health changes publish post-transition snapshots through an
+  ordered retryable outbox; placement and membership rows share serializable
+  entry generations. F1a evidence is fail-closed: no request retry, 429/5xx,
+  transport errors, unsent arrivals, missing request-to-placement joins,
+  incomplete final gateway membership, missing raw sidecars, or any placement
+  p99 window at or above 10 ms may pass.

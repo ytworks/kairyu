@@ -1207,10 +1207,16 @@ def add_responses_route(
                 chat_request,
                 engines,
                 chat_templates,
-                request_id=f"resp-{uuid.uuid4().hex[:12]}",
+                request_id=(
+                    getattr(http_request.state, "request_id", None)
+                    or f"resp-{uuid.uuid4().hex[:12]}"
+                ),
                 cache_hint=CacheHint(session_id=cache_key) if cache_key else None,
                 priority=getattr(http_request.state, "priority", None),
                 scheduling_class=scheduling_class,
+                placement_started_ns=getattr(
+                    http_request.state, "placement_started_ns", None
+                ),
             )
         except ChatRequestError as error:
             return _chat_error(error)
