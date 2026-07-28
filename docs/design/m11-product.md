@@ -169,6 +169,15 @@ the shared queue high-watermark grows from 2 to 301. Raw admission, request,
 queue, scheduling, and latency evidence is published by
 `bench/noisy_neighbor_bench.py`.
 
+The real Qwen3-32B TP8 gate uses good-only latency as a secondary lower-bound
+reference, not the primary isolation comparator. Its bracketed controls carry
+the same good load plus a compliant noisy neighbor at 0.9x quota; the
+treatment changes only the noisy offered rate to 10x quota. A full
+request-bucket wash-in precedes every arm, and treatment accepted noisy work
+must remain within 10% of the controls before p99 can pass the unchanged 50 ms
+non-inferiority margin. This separates the cost of rejecting excess 9x traffic
+from the legitimate shared compute consumed by the admitted quota.
+
 The earlier isolation gate established that tenant A at its limit 429s while
 tenant B proceeds; ledger
 totals reconcile with returned usage to <0.1%. Dedicated Prometheus counters

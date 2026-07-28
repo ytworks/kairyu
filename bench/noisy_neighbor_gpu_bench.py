@@ -185,12 +185,13 @@ async def _paced_streams(
     )
 
 
-async def _mixed_window(
+async def _two_tenant_window(
     client: httpx.AsyncClient,
     good_headers: dict[str, str],
     noisy_headers: dict[str, str],
     model: str,
     *,
+    phase: str,
     good_count: int,
     good_rate: float,
     noisy_rate: float,
@@ -204,7 +205,7 @@ async def _mixed_window(
                 client,
                 good_headers,
                 model,
-                "mixed-good",
+                f"{phase}-good",
                 index,
                 origin + index / good_rate,
                 origin,
@@ -218,7 +219,7 @@ async def _mixed_window(
                 client,
                 noisy_headers,
                 model,
-                "mixed-noisy",
+                f"{phase}-noisy",
                 index,
                 origin + index / noisy_rate,
                 origin,
@@ -445,11 +446,24 @@ async def run(args) -> dict:
         calibration_wall = time.perf_counter() - calibration_started
         capacity = args.calibration_requests / calibration_wall
         good_rate = capacity * args.good_rate_fraction
-        control_before = await _paced_streams(
+        quota_per_second = args.noisy_quota_per_minute / 60.0
+        control_noisy_rate = (
+            quota_per_second * args.control_noisy_rate_fraction
+        )
+        arm_cooldown_s = (
+            max(
+                limits["request_burst"]
+                / (limits["requests_per_minute"] / 60.0)
+                for limits in contract["limits"].values()
+            )
+            + 0.25
+        )
+        await asyncio.sleep(arm_cooldown_s)
+        good_only_control = await _paced_streams(
             gateway,
             good_headers,
             args.model,
-            "control-good",
+            "good-only-control",
             count=args.good_requests,
             rate=good_rate,
         )
@@ -463,32 +477,60 @@ async def run(args) -> dict:
             oversize_error_code = oversize.json()["error"]["code"]
         except (KeyError, TypeError, ValueError):
             oversize_error_code = "invalid_error_body"
-        gateway_metrics_before = await _text(observer, f"{args.gateway_url}/metrics")
-        replica_metrics_before = await _text(observer, f"{args.replica_url}/metrics")
-        mixed_good, mixed_noisy, mixed_duration = await _mixed_window(
+        # Every arm starts with full request buckets and no in-flight work.
+        # The controls include the noisy tenant just within its legitimate
+        # quota; the treatment changes only offered excess (0.9x -> 10x).
+        await asyncio.sleep(arm_cooldown_s)
+        control_before, control_before_noisy, _ = await _two_tenant_window(
             gateway,
             good_headers,
             noisy_headers,
             args.model,
+            phase="control-before",
+            good_count=args.good_requests,
+            good_rate=good_rate,
+            noisy_rate=control_noisy_rate,
+        )
+        await asyncio.sleep(arm_cooldown_s)
+        gateway_metrics_before = await _text(observer, f"{args.gateway_url}/metrics")
+        replica_metrics_before = await _text(observer, f"{args.replica_url}/metrics")
+        mixed_good, mixed_noisy, mixed_duration = await _two_tenant_window(
+            gateway,
+            good_headers,
+            noisy_headers,
+            args.model,
+            phase="mixed",
             good_count=args.good_requests,
             good_rate=good_rate,
             noisy_rate=args.noisy_rate,
         )
         gateway_metrics_after = await _text(observer, f"{args.gateway_url}/metrics")
         replica_metrics_after = await _text(observer, f"{args.replica_url}/metrics")
-        control_after = await _paced_streams(
+        await asyncio.sleep(arm_cooldown_s)
+        control_after, control_after_noisy, _ = await _two_tenant_window(
             gateway,
             good_headers,
+            noisy_headers,
             args.model,
-            "control-after-good",
-            count=args.good_requests,
-            rate=good_rate,
+            phase="control-after",
+            good_count=args.good_requests,
+            good_rate=good_rate,
+            noisy_rate=control_noisy_rate,
         )
         gateway_backends = await _json(observer, f"{args.gateway_url}/backends")
         replica_backends = await _json(observer, f"{args.replica_url}/backends")
 
+    good_only_summary = stream_summary(good_only_control, rate=good_rate)
     control_before_summary = stream_summary(control_before, rate=good_rate)
     control_after_summary = stream_summary(control_after, rate=good_rate)
+    control_before_noisy_summary = stream_summary(
+        control_before_noisy,
+        rate=control_noisy_rate,
+    )
+    control_after_noisy_summary = stream_summary(
+        control_after_noisy,
+        rate=control_noisy_rate,
+    )
     mixed_summary = stream_summary(mixed_good, rate=good_rate)
     noisy_2xx = sum(sample["status_code"] == 200 for sample in mixed_noisy)
     noisy_429 = sum(sample["status_code"] == 429 for sample in mixed_noisy)
@@ -530,7 +572,6 @@ async def run(args) -> dict:
         "kairyu_scheduler_priority_events_total",
     )
     expected_dispatches = args.good_requests + noisy_2xx
-    quota_per_second = args.noisy_quota_per_minute / 60.0
     noisy_send_offsets = [sample["send_offset_s"] for sample in mixed_noisy]
     noisy_send_span = max(noisy_send_offsets) - min(noisy_send_offsets)
     noisy_burst = contract["limits"]["noisy"]["request_burst"]
@@ -540,6 +581,15 @@ async def run(args) -> dict:
     noisy_admit_floor = max(
         1,
         math.floor(0.5 * noisy_admit_bound),
+    )
+    baseline_noisy_accepted = (
+        control_before_noisy_summary["http_2xx"]
+        + control_after_noisy_summary["http_2xx"]
+    ) / 2
+    accepted_work_ratio = (
+        noisy_2xx / baseline_noisy_accepted
+        if baseline_noisy_accepted
+        else None
     )
     source_environment = _source_environment(args)
     bracket_p99 = max(
@@ -586,6 +636,15 @@ async def run(args) -> dict:
         == args.warmup_requests,
         "calibration_completed": sum(sample["terminal"] for sample in calibration)
         == args.calibration_requests,
+        "good_only_control_http_2xx": (
+            good_only_summary["http_2xx"] == args.good_requests
+        ),
+        "good_only_control_terminal": (
+            good_only_summary["terminal"] == args.good_requests
+        ),
+        "good_only_control_arrival_pacing": (
+            good_only_summary["pacing_within_one_interval"] == 1.0
+        ),
         "control_before_http_2xx": (
             control_before_summary["http_2xx"] == args.good_requests
         ),
@@ -595,6 +654,17 @@ async def run(args) -> dict:
         "control_before_arrival_pacing": (
             control_before_summary["pacing_within_one_interval"] == 1.0
         ),
+        "control_before_noisy_http_2xx": (
+            control_before_noisy_summary["http_2xx"]
+            == control_before_noisy_summary["requests"]
+        ),
+        "control_before_noisy_terminal": (
+            control_before_noisy_summary["terminal"]
+            == control_before_noisy_summary["requests"]
+        ),
+        "control_before_noisy_arrival_pacing": (
+            control_before_noisy_summary["pacing_within_one_interval"] == 1.0
+        ),
         "control_after_http_2xx": (
             control_after_summary["http_2xx"] == args.good_requests
         ),
@@ -603,6 +673,24 @@ async def run(args) -> dict:
         ),
         "control_after_arrival_pacing": (
             control_after_summary["pacing_within_one_interval"] == 1.0
+        ),
+        "control_after_noisy_http_2xx": (
+            control_after_noisy_summary["http_2xx"]
+            == control_after_noisy_summary["requests"]
+        ),
+        "control_after_noisy_terminal": (
+            control_after_noisy_summary["terminal"]
+            == control_after_noisy_summary["requests"]
+        ),
+        "control_after_noisy_arrival_pacing": (
+            control_after_noisy_summary["pacing_within_one_interval"] == 1.0
+        ),
+        "control_noisy_offer_is_compliant": (
+            0.9 <= args.control_noisy_rate_fraction <= 1.0
+        ),
+        "mixed_accepted_work_matches_compliant_control": (
+            accepted_work_ratio is not None
+            and 0.9 <= accepted_work_ratio <= 1.1
         ),
         "oversize_token_work_rejected_predispatch": (
             oversize.status_code == 429
@@ -616,7 +704,7 @@ async def run(args) -> dict:
         "good_terminal": mixed_summary["terminal"] == args.good_requests,
         "good_arrival_pacing": mixed_summary["pacing_within_one_interval"] == 1.0,
         "good_fixed_ttft_slo": mixed_summary["ttft_p99_s"] <= args.ttft_slo_s,
-        "good_p99_noninferior": (
+        "good_p99_noninferior_to_compliant_control": (
             mixed_summary["ttft_p99_s"]
             <= bracket_p99 + noninferiority_margin
         ),
@@ -740,13 +828,20 @@ async def run(args) -> dict:
         "load": {
             "good_rate_fraction": args.good_rate_fraction,
             "good_rate_requests_per_s": good_rate,
+            "control_noisy_rate_fraction": args.control_noisy_rate_fraction,
+            "control_noisy_rate_requests_per_s": control_noisy_rate,
             "noisy_rate_requests_per_s": args.noisy_rate,
             "noisy_quota_requests_per_s": quota_per_second,
             "noisy_offered_to_quota_ratio": args.noisy_rate / quota_per_second,
             "mixed_duration_s": mixed_duration,
+            "arm_cooldown_s": arm_cooldown_s,
+            "mixed_to_control_noisy_accepted_work_ratio": accepted_work_ratio,
         },
+        "good_only_control": good_only_summary,
         "control_before": control_before_summary,
+        "control_before_noisy": control_before_noisy_summary,
         "control_after": control_after_summary,
+        "control_after_noisy": control_after_noisy_summary,
         "mixed_good": mixed_summary,
         "mixed_noisy": {
             "requests": len(mixed_noisy),
@@ -791,6 +886,15 @@ def main() -> None:
     parser.add_argument("--calibration-concurrency", type=int, default=8)
     parser.add_argument("--good-requests", type=int, default=256)
     parser.add_argument("--good-rate-fraction", type=float, default=0.5)
+    parser.add_argument(
+        "--control-noisy-rate-fraction",
+        type=float,
+        default=0.9,
+        help=(
+            "compliant-control noisy offer as a fraction of quota; 0.9 "
+            "avoids token-boundary jitter while matching admitted treatment work"
+        ),
+    )
     parser.add_argument("--noisy-rate", type=float, default=10.0)
     parser.add_argument("--noisy-quota-per-minute", type=int, default=60)
     parser.add_argument("--ttft-slo-s", type=float, default=2.0)

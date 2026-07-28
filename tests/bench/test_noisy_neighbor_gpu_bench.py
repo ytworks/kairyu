@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import bench.noisy_neighbor_gpu_bench as gpu_bench
 from bench.noisy_neighbor_gpu_bench import (
     _contains_tensor_parallel_size,
     _gateway_contract,
@@ -8,6 +9,49 @@ from bench.noisy_neighbor_gpu_bench import (
     metric_delta,
     percentile,
 )
+
+
+async def test_two_tenant_window_uses_one_origin_and_distinct_phase_labels(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    async def fake_one_stream(
+        client,
+        headers,
+        model,
+        phase,
+        index,
+        target_s,
+        origin_s,
+    ):
+        calls.append((headers["tenant"], phase, index, target_s - origin_s))
+        return {"phase": phase, "index": index}
+
+    monkeypatch.setattr(gpu_bench, "_one_stream", fake_one_stream)
+
+    good, noisy, duration = await gpu_bench._two_tenant_window(
+        object(),
+        {"tenant": "good"},
+        {"tenant": "noisy"},
+        "model",
+        phase="control",
+        good_count=4,
+        good_rate=2.0,
+        noisy_rate=1.0,
+    )
+
+    assert duration == 2.0
+    assert [item["phase"] for item in good] == ["control-good"] * 4
+    assert [item["phase"] for item in noisy] == ["control-noisy"] * 2
+    assert calls == [
+        ("good", "control-good", 0, 0.0),
+        ("good", "control-good", 1, 0.5),
+        ("good", "control-good", 2, 1.0),
+        ("good", "control-good", 3, 1.5),
+        ("noisy", "control-noisy", 0, 0.0),
+        ("noisy", "control-noisy", 1, 1.0),
+    ]
 
 
 def test_gpu_bench_percentile_uses_raw_nearest_rank_samples() -> None:

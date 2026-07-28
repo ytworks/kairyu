@@ -190,7 +190,12 @@ consume the full reservation. In the corrected deterministic 10x trace, the
 protected path admits exactly 120/1,200 noisy requests, completes all 300 good
 requests, bounds good TTFT p99 to one additional service quantum (1 → 2
 seconds), and holds queue high-watermark to 2 versus 301 and p99 298 seconds
-without admission. The Qwen3-32B TP8 bracketed real-server gate is pending.
+without admission. An initial Qwen3-32B TP8 run passed every admission,
+dispatch, topology, drain, and fixed-SLO check, but exposed a confounded
+good-only latency comparator: treatment also contained the noisy tenant's
+legitimate admitted quota. The formal rerun is pending with bracketed
+compliant-neighbor controls, identical bucket wash-in, and an accepted-work
+matching check; good-only remains a secondary reference.
 G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
 specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
 production gateway exposes direct, standard AUTO (Conductor), and max AUTO
@@ -336,6 +341,23 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F5b uses a causal compliant-neighbor comparator
+- What: Strengthened the real Qwen3-32B TP8 gate from good-only controls to
+  bracketed controls that run the same good load plus a noisy tenant offering
+  0.9x quota. The 10x treatment must match control accepted noisy work within
+  10%, keep good p99 within the unchanged 50 ms non-inferiority margin, and
+  retain the fixed 2 s SLO. Every arm begins after a full request-bucket
+  wash-in; the oversize pre-dispatch probe now runs before that wash-in.
+  Good-only latency remains a secondary reference.
+- Why: The initial clean TP8 run passed 35/36 checks, including all admission,
+  dispatch, usage, topology, and drain checks, but compared good-only 0.5x
+  capacity against treatment containing another 0.92 requests/s of legitimate
+  GPU work. Its 0.177 -> 0.564 s p99 therefore mixed allowed 1x work with the
+  effect of rejecting excess 9x traffic. A matched accepted-work comparator
+  isolates that causal excess-load effect without relaxing the latency margin.
+- Refs: issue #191; G5 F5b; `bench/noisy_neighbor_gpu_bench.py`;
+  `tests/bench/test_noisy_neighbor_gpu_bench.py`.
 
 ### 2026-07-28 — [amendment] F5b closes every compute-ingress lease boundary
 - What: Extended pre-dispatch reservation to Embeddings using a conservative
