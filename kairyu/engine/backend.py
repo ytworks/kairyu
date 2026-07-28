@@ -87,8 +87,10 @@ class UpstreamClientError(Exception):
 class CacheHint:
     """KV-affinity hint plumbed through now, consumed by the M2 Radix KV manager.
 
-    ``session_id`` groups requests of one orchestration; ``prefix_fingerprint``
-    identifies the shared prompt prefix so multi-step calls can hit cache.
+    ``session_id`` groups requests of one orchestration. ``prefix_fingerprint``
+    is an optional trusted ``xxh3-64-v1`` key for the first complete
+    256-character shared-prompt chunk; an empty value makes placement hash the
+    actual prompt locally.
     """
 
     session_id: str

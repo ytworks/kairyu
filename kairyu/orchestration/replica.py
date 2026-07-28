@@ -65,7 +65,9 @@ def _supports_native_prepared_prefix(index: object) -> bool:
             "observe",
             "observe_keys",
             "observe_prepared",
+            "observe_root",
             "prepare",
+            "register_replica",
         )
     )
 
@@ -187,6 +189,15 @@ class ReplicaPool:
         self._prefix_observe_prepared = (
             prefix_index.observe_prepared if native_prepared else None
         )
+        self._prefix_observe_root = (
+            prefix_index.observe_root if native_prepared else None
+        )
+        self._prefix_register_replica = (
+            prefix_index.register_replica if native_prepared else None
+        )
+        if self._prefix_register_replica is not None:
+            for replica_id in self._entries:
+                self._prefix_register_replica(replica_id)
         self._membership_event_sink = membership_event_sink
         self._decision_counts: dict[str, int] = {
             "session_affinity": 0,
@@ -223,6 +234,8 @@ class ReplicaPool:
         )
         self._encoded_replica_ids[replica_id] = replica_id.encode()
         self._ordinal_by_id[replica_id] = len(self._entries) - 1
+        if self._prefix_register_replica is not None:
+            self._prefix_register_replica(replica_id)
         self._refresh_eligible_snapshot()
         entry = self._entries[replica_id]
         self._emit_membership_event(
@@ -740,7 +753,16 @@ class ReplicaPool:
             else time.perf_counter_ns()
         )
         prepare = self._prefix_prepare
-        prefix_keys = prepare(request.prompt) if prepare is not None else None
+        prefix_fingerprint = (
+            request.cache_hint.prefix_fingerprint
+            if request.cache_hint is not None
+            else ""
+        )
+        prefix_keys = (
+            prepare(request.prompt, prefix_fingerprint or None)
+            if prepare is not None
+            else None
+        )
         replica_id, reason, session_id = self._select(
             request,
             prefix_keys=prefix_keys,
@@ -819,12 +841,20 @@ class ReplicaPool:
             self._record_backend_success(entry)
             if (
                 self._prefix_index is not None
-                and not entry.removed
                 and self._entries.get(replica_id) is entry
             ):
-                observe_prepared = self._prefix_observe_prepared
-                if prefix_keys is not None and observe_prepared is not None:
-                    observe_prepared(
+                observe_root = self._prefix_observe_root
+                if (
+                    isinstance(prefix_keys, str)
+                    and prefix_keys
+                    and observe_root is not None
+                ):
+                    observe_root(replica_id, prefix_keys)
+                elif (
+                    prefix_keys is not None
+                    and self._prefix_observe_prepared is not None
+                ):
+                    self._prefix_observe_prepared(
                         replica_id,
                         prefix_keys,
                         reason == "prefix_match",
@@ -851,12 +881,20 @@ class ReplicaPool:
             self._record_backend_success(entry)
             if (
                 self._prefix_index is not None
-                and not entry.removed
                 and self._entries.get(replica_id) is entry
             ):
-                observe_prepared = self._prefix_observe_prepared
-                if prefix_keys is not None and observe_prepared is not None:
-                    observe_prepared(
+                observe_root = self._prefix_observe_root
+                if (
+                    isinstance(prefix_keys, str)
+                    and prefix_keys
+                    and observe_root is not None
+                ):
+                    observe_root(replica_id, prefix_keys)
+                elif (
+                    prefix_keys is not None
+                    and self._prefix_observe_prepared is not None
+                ):
+                    self._prefix_observe_prepared(
                         replica_id,
                         prefix_keys,
                         reason == "prefix_match",

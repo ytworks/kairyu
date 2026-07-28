@@ -15,7 +15,12 @@ from kairyu.engine.backend import (
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.orchestration.kv_index import KvEventIndex, ZmqKvEventSubscriber
 from kairyu.orchestration.learning.dataset import PlacementRecord, tune_prefix_weights
-from kairyu.orchestration.prefix_index import PrefixIndex, prompt_chunks
+from kairyu.orchestration.prefix_index import (
+    PREFIX_HASH_VERSION,
+    PrefixIndex,
+    prefix_root_fingerprint,
+    prompt_chunks,
+)
 from kairyu.orchestration.replica import ReplicaPool
 
 
@@ -30,12 +35,24 @@ class MockBackend:
         return None
 
 
-def _request(prompt: str, *, session_id: str | None = None) -> GenerationRequest:
+def _request(
+    prompt: str,
+    *,
+    session_id: str | None = None,
+    prefix_fingerprint: str = "",
+) -> GenerationRequest:
     return GenerationRequest(
         request_id="req",
         prompt=prompt,
         sampling_params=SamplingParams(),
-        cache_hint=CacheHint(session_id=session_id) if session_id is not None else None,
+        cache_hint=(
+            CacheHint(
+                session_id=session_id,
+                prefix_fingerprint=prefix_fingerprint,
+            )
+            if session_id is not None
+            else None
+        ),
     )
 
 
@@ -47,17 +64,29 @@ class TestPrefixIndex:
         assert keys_long[:2] == keys_short  # shared prefix -> shared keys
 
     def test_incremental_hashing_matches_whole_prefix_hash(self):
-        # P5: the streaming sha256 chain must be byte-identical to hashing each
+        # P5: the streaming XXH3 chain must be byte-identical to hashing each
         # whole prefix (incl. multibyte chars split across chunk boundaries).
-        import hashlib
+        import xxhash
 
         prompt = "こんにちは world 日本語" * 40
+        assert PREFIX_HASH_VERSION == "xxh3-64-v1"
         for cc in (1, 3, 256):
             expected = tuple(
-                hashlib.sha256(prompt[:end].encode()).hexdigest()[:16]
+                xxhash.xxh3_64(prompt[:end].encode()).hexdigest()
                 for end in range(cc, len(prompt) + 1, cc)
             )
             assert prompt_chunks(prompt, chunk_chars=cc) == expected
+
+    def test_carried_root_requires_the_exact_default_chunk_contract(self):
+        prompt = "a" * 256 + "b" * 256
+        exact_root = prefix_root_fingerprint(prompt)
+
+        assert prefix_root_fingerprint("a" * 255) == ""
+        assert exact_root == prompt_chunks(prompt)[0]
+        assert PrefixIndex().prepare(prompt, "not-a-root") == exact_root
+        assert PrefixIndex(chunk_chars=4).prepare(prompt, exact_root) == (
+            prompt_chunks(prompt, chunk_chars=4)[0]
+        )
 
     def test_overlap_stops_at_first_miss(self):
         index = PrefixIndex(chunk_chars=4)
@@ -135,6 +164,21 @@ class TestPrefixIndex:
 
 
 class TestPrefixRouting:
+    def test_native_index_preallocates_dynamic_replica_stores(self):
+        index = PrefixIndex(chunk_chars=4)
+        pool = ReplicaPool(
+            {"r0": MockBackend(), "r1": MockBackend()},
+            prefix_index=index,
+        )
+
+        assert set(index._chunks) == {"r0", "r1"}
+        assert all(not store for store in index._chunks.values())
+
+        pool.add_replica("r2", MockBackend())
+
+        assert set(index._chunks) == {"r0", "r1", "r2"}
+        assert index._chunks["r2"] == {}
+
     def test_cold_selection_skips_500_overlap_scans_and_runs_one_hrw(
         self, monkeypatch
     ):
@@ -183,13 +227,13 @@ class TestPrefixRouting:
 
         import kairyu.orchestration.prefix_index as prefix_module
 
-        real_sha256 = prefix_module.hashlib.sha256
+        real_xxh3 = prefix_module.xxhash.xxh3_64
         hash_instances = 0
         hashed_parts: list[bytes] = []
 
         class CountingHash:
             def __init__(self, payload=b""):
-                self._inner = real_sha256(payload)
+                self._inner = real_xxh3(payload)
                 if payload:
                     hashed_parts.append(payload)
 
@@ -200,15 +244,15 @@ class TestPrefixRouting:
             def hexdigest(self):
                 return self._inner.hexdigest()
 
-        def counted_sha256(payload=b""):
+        def counted_xxh3(payload=b""):
             nonlocal hash_instances
             hash_instances += 1
             return CountingHash(payload)
 
         monkeypatch.setattr(
             prefix_module,
-            "hashlib",
-            SimpleNamespace(sha256=counted_sha256),
+            "xxhash",
+            SimpleNamespace(xxh3_64=counted_xxh3),
         )
 
         index = PrefixIndex(chunk_chars=4)
@@ -218,11 +262,11 @@ class TestPrefixRouting:
             prefix_index=index,
         )
         prompt = "aaaabbbbccccddddeeee"
-        root_key = real_sha256(b"aaaa").hexdigest()[:16]
+        root_key = real_xxh3(b"aaaa").hexdigest()
 
         await pool.generate(_request(prompt, session_id="cold-session"))
 
-        # Cold placement and success publish only the reusable root: one SHA
+        # Cold placement and success publish only the reusable root: one XXH3
         # object and one chunk update, not two full five-chunk passes.
         assert hash_instances == 1
         assert hashed_parts == [b"aaaa"]
@@ -241,6 +285,37 @@ class TestPrefixRouting:
         assert hash_instances == 1
         assert hashed_parts == [b"aaaa", b"bbbb", b"cccc", b"dddd", b"eeee"]
         assert len(index._chunks[selected[0]]) == 5
+
+    @pytest.mark.asyncio
+    async def test_trusted_prefix_fingerprint_interoperates_with_local_fallback(self):
+        index = PrefixIndex()
+        pool = ReplicaPool(
+            {"r0": MockBackend(), "r1": MockBackend()},
+            prefix_index=index,
+        )
+        prompt = "a" * 256 + "b" * 256
+        fingerprint = prefix_root_fingerprint(prompt)
+
+        await pool.generate(
+            _request(
+                prompt,
+                session_id="cold-session",
+                prefix_fingerprint=fingerprint,
+            )
+        )
+
+        selected = index.candidate_ids((fingerprint,))
+        assert len(selected) == 1
+        assert tuple(index._chunks[selected[0]]) == (fingerprint,)
+
+        await pool.generate(
+            _request(
+                "a" * 256 + "c" * 256,
+                session_id="warm-session",
+            )
+        )
+
+        assert pool.decision_counts["prefix_match"] == 1
 
     @pytest.mark.asyncio
     async def test_prefix_index_subclass_keeps_chunk_and_observe_overrides(self):

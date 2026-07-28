@@ -155,9 +155,18 @@ a zero warm/cold tie prefers reuse, and a negative warm maximum falls through
 to the existing session-HRW plus queue-depth valve (or least-outstanding for a
 request without a session). Equal-score warm candidates use session HRW as the
 deterministic tiebreak. `enabled=False` is the default. Only a successful unary
-generation or normally completed stream advertises the selected prefix. Each
-request owns one bounded, lazy cumulative-hash chain shared by selection and
-successful publication. A cold success initially advertises only its root key,
+generation or normally completed stream advertises the selected prefix. The
+approximate, process-local index uses versioned XXH3-64 cumulative keys
+(`xxh3-64-v1`), matching vLLM Router's non-cryptographic routing-key approach;
+the 64-bit key width is unchanged and a collision can only cause a cache miss,
+never alter generated output. Conductor carries a trusted
+`CacheHint.prefix_fingerprint` only when its shared prefix covers the complete
+default 256-character root chunk; the carried value is the exact same XXH3 key
+as local hashing. Empty or shorter shared prefixes, callers without a hint,
+malformed hints, and custom chunk sizes retain the exact local fallback. Each
+request owns one bounded, lazy hash chain shared by selection and successful
+publication. A cold success initially advertises only its root key through a
+dedicated root-publication fast path,
 which is sufficient to make the next related request discoverable; a successful
 warm `prefix_match` extends that same request-local chain and promotes the entry
 to full usable depth. Thus a complete prompt chunk is hashed at most once per
@@ -712,8 +721,9 @@ over (α, β) (pure function over the dataset; no online learning).
   keys are unusable after an ancestor is evicted, one over-cap prompt retains
   the root-side bounded prefix rather than unreachable tail keys. Selection and
   successful publication consume one request-local lazy key chain. A cold
-  success publishes only its already-computed root; a successful warm route
-  extends that chain once and promotes it to full usable depth.
+  success publishes only its already-computed XXH3-64 root through the native
+  cold fast path; a successful warm route extends that chain once and promotes
+  it to full usable depth.
 
   F2a's distinct claim is selector quality and cost at 500 logical
   `ReplicaPool` entries. Retained F1a run `30374404150` already proves the kind
@@ -727,8 +737,16 @@ over (α, β) (pure function over the dataset; no online learning).
   Shared-prefix hit rate is cached prompt-work chunks divided by total prompt
   chunks, derived from raw backend observations, and must beat the non-zero
   session-HRW baseline by at least 2×. Uniform traffic uses 21 matched rounds
-  with alternating A/B order. Immediately before each binding arm's clock, that
-  same pool and policy execute a declared 512-request uniform run-in over
+  with alternating A/B order. Before them, one full non-binding uniform
+  calibration pair exercises both fresh policy pools; its raw selections,
+  cache outcomes, summaries, order, and `binding=false` marker are replayed but
+  enter no metric. This keeps CPython's first arena allocation out of a
+  steady-state goodput claim without discarding any binding sample after seeing
+  its value. Uniform calibration, run-in, and binding requests deliberately
+  carry no root hint, so the no-loss claim exercises exact local XXH3 fallback
+  rather than a trace-only family oracle. Immediately before every calibration
+  and binding arm's clock, that same pool and policy also execute a declared
+  512-request uniform run-in over
   disjoint prompts. Its deterministic trace digest, completed count, and
   positive time interval remain in the arm summary and are independently bound
   before the measured interval, but none of its requests enter a gate. Per-arm

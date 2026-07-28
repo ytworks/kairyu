@@ -6,6 +6,7 @@ on:
       - ".github/workflows/f2a-prefix-routing.yml"
       - "bench/prefix_routing_f2a_bench.py"
       - "kairyu/engine/backend.py"
+      - "kairyu/orchestration/conductor.py"
       - "kairyu/orchestration/prefix_index.py"
       - "kairyu/orchestration/replica.py"
       - "kairyu/orchestration/router.py"
@@ -61,6 +62,7 @@ jobs:
             .github/workflows/f2a-prefix-routing.yml \
             bench/prefix_routing_f2a_bench.py \
             kairyu/engine/backend.py \
+            kairyu/orchestration/conductor.py \
             kairyu/orchestration/prefix_index.py \
             kairyu/orchestration/replica.py \
             kairyu/orchestration/router.py \

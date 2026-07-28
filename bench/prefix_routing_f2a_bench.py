@@ -30,16 +30,22 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import xxhash
+
 from kairyu.engine.backend import (
     CacheHint,
     GenerationRequest,
     GenerationResult,
 )
-from kairyu.orchestration.prefix_index import PrefixIndex
+from kairyu.orchestration.prefix_index import (
+    PREFIX_HASH_VERSION,
+    PrefixIndex,
+    prefix_root_fingerprint,
+)
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.sampling_params import SamplingParams
 
-SCHEMA_VERSION = "kairyu.f2a.prefix-routing.v1"
+SCHEMA_VERSION = "kairyu.f2a.prefix-routing.v2"
 REPLICA_COUNT = 500
 DEFAULT_SEED = 0xF2A_2026
 PREFIX_POLICY = "prefix_aware"
@@ -54,6 +60,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SOURCE_PATHS = (
     "kairyu/orchestration/replica.py",
     "kairyu/orchestration/prefix_index.py",
+    "kairyu/orchestration/conductor.py",
     "bench/prefix_routing_f2a_bench.py",
     ".github/workflows/f2a-prefix-routing.yml",
     "kairyu/engine/backend.py",
@@ -78,11 +85,13 @@ class WorkloadConfig:
     shared_families: int
     shared_requests_per_family: int
     uniform_warmup_requests_per_arm: int
+    uniform_calibration_rounds: int
     uniform_rounds: int
     uniform_requests_per_round: int
     uniform_sign_min_rounds: int
     chunk_chars: int = _CHUNK_CHARS
     prefix_chunks: int = _PREFIX_CHUNKS
+    prefix_hash_version: str = PREFIX_HASH_VERSION
     hit_rate_ratio_threshold: float = 2.0
     placement_p99_limit_ms: float = 10.0
     uniform_equivalence_margin: float = 0.01
@@ -93,6 +102,7 @@ _PROFILE_COUNTS = {
         "shared_families": 16,
         "shared_requests_per_family": 8,
         "uniform_warmup_requests_per_arm": 64,
+        "uniform_calibration_rounds": 1,
         "uniform_rounds": 3,
         "uniform_requests_per_round": 64,
         "uniform_sign_min_rounds": 2,
@@ -101,6 +111,7 @@ _PROFILE_COUNTS = {
         "shared_families": 64,
         "shared_requests_per_family": 16,
         "uniform_warmup_requests_per_arm": 512,
+        "uniform_calibration_rounds": 1,
         "uniform_rounds": 21,
         "uniform_requests_per_round": 512,
         "uniform_sign_min_rounds": 15,
@@ -114,6 +125,7 @@ class TraceItem:
     family_id: str
     prompt: str
     session_id: str
+    prefix_fingerprint: str
 
     @property
     def prompt_sha256(self) -> str:
@@ -355,6 +367,10 @@ def _session_id(config: WorkloadConfig, request_id: str) -> str:
     return f"f2a-session:{config.seed}:{request_id}"
 
 
+def _prefix_fingerprint(prompt: str) -> str:
+    return prefix_root_fingerprint(prompt)
+
+
 def cache_seed_rows(config: WorkloadConfig) -> list[dict[str, object]]:
     rng = random.Random(config.seed ^ 0xCACE)
     replicas = _replica_ids(config)
@@ -368,6 +384,7 @@ def cache_seed_rows(config: WorkloadConfig) -> list[dict[str, object]]:
                 "family_id": family_id,
                 "replica_id": replicas[rng.randrange(len(replicas))],
                 "prompt_sha256": _sha256_text(prompt),
+                "prefix_fingerprint": _prefix_fingerprint(prompt),
             }
         )
     return rows
@@ -379,12 +396,14 @@ def shared_trace(config: WorkloadConfig) -> tuple[TraceItem, ...]:
         family_id = f"shared-{family_index:03d}"
         for request_number in range(config.shared_requests_per_family):
             request_id = f"shared-{family_index:03d}-{request_number:03d}"
+            prompt = _shared_prompt(config, family_id, request_number)
             items.append(
                 TraceItem(
                     request_id=request_id,
                     family_id=family_id,
-                    prompt=_shared_prompt(config, family_id, request_number),
+                    prompt=prompt,
                     session_id=_session_id(config, request_id),
+                    prefix_fingerprint=_prefix_fingerprint(prompt),
                 )
             )
     random.Random(config.seed ^ 0x51A2ED).shuffle(items)
@@ -404,6 +423,9 @@ def uniform_trace(
                 family_id=family_id,
                 prompt=_uniform_prompt(config, family_id),
                 session_id=_session_id(config, request_id),
+                # Preserve the conservative production fallback path for the
+                # no-loss trace rather than supplying a family oracle.
+                prefix_fingerprint="",
             )
         )
     random.Random(config.seed ^ (0xA110 + round_index)).shuffle(items)
@@ -420,6 +442,7 @@ def _trace_digest(trace: tuple[TraceItem, ...]) -> str:
                     item.family_id,
                     item.prompt_sha256,
                     item.session_sha256,
+                    _sha256_text(item.prefix_fingerprint),
                 )
                 for item in trace
             ]
@@ -538,9 +561,12 @@ def _build_pool(
     prefix_index = PrefixIndex(chunk_chars=config.chunk_chars)
     if policy == PREFIX_POLICY:
         for seed in seeds:
-            prefix_index.observe(
+            prefix_index.observe_keys(
                 str(seed["replica_id"]),
-                _cache_seed_prompt(config, str(seed["family_id"])),
+                prefix_index.chunk_keys(
+                    _cache_seed_prompt(config, str(seed["family_id"])),
+                    str(seed["prefix_fingerprint"]),
+                ),
             )
     pool = ReplicaPool(
         backends,
@@ -577,7 +603,10 @@ async def _dispatch_trace(
                 request_id=item.request_id,
                 prompt=item.prompt,
                 sampling_params=SamplingParams(max_tokens=1),
-                cache_hint=CacheHint(session_id=item.session_id),
+                cache_hint=CacheHint(
+                    session_id=item.session_id,
+                    prefix_fingerprint=item.prefix_fingerprint,
+                ),
                 placement_started_ns=time.perf_counter_ns(),
             )
             await pool.generate(request)
@@ -595,7 +624,10 @@ async def _dispatch_trace(
                 sampling_params=SamplingParams(max_tokens=1),
                 # Both arms carry the identical production request contract.
                 # The treatment differs only by enabling the pool prefix index.
-                cache_hint=CacheHint(session_id=item.session_id),
+                cache_hint=CacheHint(
+                    session_id=item.session_id,
+                    prefix_fingerprint=item.prefix_fingerprint,
+                ),
                 placement_started_ns=time.perf_counter_ns(),
             )
             await pool.generate(request)
@@ -623,6 +655,9 @@ async def _dispatch_trace(
                     "family_id": item.family_id,
                     "prompt_sha256": item.prompt_sha256,
                     "session_sha256": item.session_sha256,
+                    "prefix_fingerprint_sha256": _sha256_text(
+                        item.prefix_fingerprint
+                    ),
                     "selected_replica_id": selected,
                     "backend_replica_id": observed["backend_replica_id"],
                     "replica_ordinal": logged["replica_ordinal"],
@@ -715,6 +750,31 @@ async def _collect_raw_rows(
     warmup = uniform_trace(config, -1)[
         : config.uniform_warmup_requests_per_arm
     ]
+    for calibration_index in range(config.uniform_calibration_rounds):
+        trace = uniform_trace(config, -(calibration_index + 2))
+        rows.append(
+            {
+                "type": "calibration_round",
+                "trace": "uniform_calibration",
+                "calibration_index": calibration_index,
+                "policy_order": list(POLICIES),
+                "binding": False,
+            }
+        )
+        for order_index, policy in enumerate(POLICIES):
+            placements, summary = await _dispatch_trace(
+                config,
+                trace_kind="uniform_calibration",
+                round_index=calibration_index,
+                policy=policy,
+                policy_order_index=order_index,
+                seeds=seeds,
+                trace=trace,
+                warmup_trace=warmup,
+            )
+            rows.extend(placements)
+            rows.append(summary)
+
     for round_index in range(config.uniform_rounds):
         order = (
             POLICIES if round_index % 2 == 0 else tuple(reversed(POLICIES))
@@ -1041,14 +1101,20 @@ def _expected_hrw(
     )
 
 
-def _chunk_keys(prompt: str, chunk_chars: int) -> tuple[str, ...]:
+def _chunk_keys(
+    prompt: str,
+    chunk_chars: int,
+    first_key: str | None = None,
+) -> tuple[str, ...]:
     keys = []
-    hasher = hashlib.sha256()
+    hasher = xxhash.xxh3_64()
     position = 0
     for end in range(chunk_chars, len(prompt) + 1, chunk_chars):
         hasher.update(prompt[position:end].encode())
         keys.append(hasher.hexdigest()[:16])
         position = end
+    if first_key and keys:
+        keys[0] = first_key
     return tuple(keys)
 
 
@@ -1077,6 +1143,7 @@ def _replay_rows(
         in {
             "run",
             "cache_seed",
+            "calibration_round",
             "placement",
             "paired_round",
             "round_summary",
@@ -1086,7 +1153,16 @@ def _replay_rows(
 
     expected_seeds = cache_seed_rows(config)
     actual_seeds = [
-        {key: row.get(key) for key in ("type", "family_id", "replica_id", "prompt_sha256")}
+        {
+            key: row.get(key)
+            for key in (
+                "type",
+                "family_id",
+                "replica_id",
+                "prompt_sha256",
+                "prefix_fingerprint",
+            )
+        }
         for row in rows
         if row.get("type") == "cache_seed"
     ]
@@ -1099,6 +1175,11 @@ def _replay_rows(
         for round_index in range(config.uniform_rounds)
         for item in uniform_trace(config, round_index)
     }
+    expected_calibration = {
+        (calibration_index, item.request_id): item
+        for calibration_index in range(config.uniform_calibration_rounds)
+        for item in uniform_trace(config, -(calibration_index + 2))
+    }
 
     placement_rows = [row for row in rows if row.get("type") == "placement"]
     expected_shared_count = (
@@ -1107,9 +1188,31 @@ def _replay_rows(
     expected_uniform_count = (
         config.uniform_rounds * config.uniform_requests_per_round * 2
     )
-    checks["placement_row_count_matches_profile"] = len(placement_rows) == (
-        expected_shared_count + expected_uniform_count
+    expected_calibration_count = (
+        config.uniform_calibration_rounds
+        * config.uniform_requests_per_round
+        * 2
     )
+    checks["placement_row_count_matches_profile"] = len(placement_rows) == (
+        expected_shared_count
+        + expected_calibration_count
+        + expected_uniform_count
+    )
+
+    calibration_rows = [
+        row for row in rows if row.get("type") == "calibration_round"
+    ]
+    checks["nonbinding_calibration_rounds_are_frozen"] = (
+        len(calibration_rows) == config.uniform_calibration_rounds
+    )
+    for calibration_index, row in enumerate(calibration_rows):
+        if (
+            row.get("trace") != "uniform_calibration"
+            or row.get("calibration_index") != calibration_index
+            or row.get("policy_order") != list(POLICIES)
+            or row.get("binding") is not False
+        ):
+            checks["nonbinding_calibration_rounds_are_frozen"] = False
 
     round_rows = [row for row in rows if row.get("type") == "paired_round"]
     checks["paired_round_order_alternates"] = len(round_rows) == config.uniform_rounds
@@ -1154,6 +1257,7 @@ def _replay_rows(
                 _chunk_keys(
                     _cache_seed_prompt(config, family_id),
                     config.chunk_chars,
+                    str(seed["prefix_fingerprint"]),
                 )
             )
 
@@ -1163,11 +1267,23 @@ def _replay_rows(
             item = (
                 expected_shared.get(str(request_id))
                 if trace_kind == "shared"
-                else expected_uniform.get((int(round_index), str(request_id)))
+                else (
+                    expected_calibration.get(
+                        (int(round_index), str(request_id))
+                    )
+                    if trace_kind == "uniform_calibration"
+                    else expected_uniform.get(
+                        (int(round_index), str(request_id))
+                    )
+                )
             )
             if item is None or row.get("sequence") != sequence:
                 return False
-            prompt_keys = _chunk_keys(item.prompt, config.chunk_chars)
+            prompt_keys = _chunk_keys(
+                item.prompt,
+                config.chunk_chars,
+                item.prefix_fingerprint,
+            )
             if policy == HRW_POLICY:
                 expected_replica = _expected_hrw(item.session_id, replicas)
                 expected_reason = "session_affinity"
@@ -1199,6 +1315,8 @@ def _replay_rows(
                 row.get("family_id") == item.family_id
                 and row.get("prompt_sha256") == item.prompt_sha256
                 and row.get("session_sha256") == expected_session_hash
+                and row.get("prefix_fingerprint_sha256")
+                == _sha256_text(item.prefix_fingerprint)
                 and row.get("selected_replica_id") == expected_replica
                 and row.get("backend_replica_id") == expected_replica
                 and row.get("replica_ordinal") == replicas.index(expected_replica)
@@ -1237,12 +1355,25 @@ def _replay_rows(
                 return False
             previous_dispatch_finished_ns = int(row["dispatch_finished_ns"])
             families_by_replica[expected_replica].add(item.family_id)
-            keys_by_replica[expected_replica].update(prompt_keys)
+            if policy == PREFIX_POLICY:
+                keys_by_replica[expected_replica].update(
+                    prompt_keys
+                    if expected_reason == "prefix_match"
+                    else prompt_keys[:1]
+                )
         return True
 
     replay_results = []
     for policy in POLICIES:
         replay_results.append(replay(policy, "shared", None))
+        for calibration_index in range(config.uniform_calibration_rounds):
+            replay_results.append(
+                replay(
+                    policy,
+                    "uniform_calibration",
+                    calibration_index,
+                )
+            )
         for round_index in range(config.uniform_rounds):
             replay_results.append(replay(policy, "uniform", round_index))
     checks["every_actual_selection_and_cache_hit_replays"] = all(replay_results)
@@ -1258,6 +1389,7 @@ def _replay_rows(
                 row.get("family_id"),
                 row.get("prompt_sha256"),
                 row.get("session_sha256"),
+                row.get("prefix_fingerprint_sha256"),
             )
             for row in sorted(
                 (
@@ -1283,6 +1415,7 @@ def _replay_rows(
                     row.get("family_id"),
                     row.get("prompt_sha256"),
                     row.get("session_sha256"),
+                    row.get("prefix_fingerprint_sha256"),
                 )
                 for row in sorted(
                     (
@@ -1302,6 +1435,38 @@ def _replay_rows(
     checks["uniform_traces_and_sessions_match_between_policies"] = (
         uniform_trace_pairs_match
     )
+    calibration_trace_pairs_match = True
+    for calibration_index in range(config.uniform_calibration_rounds):
+        by_policy = {
+            policy: [
+                (
+                    row.get("sequence"),
+                    row.get("request_id"),
+                    row.get("family_id"),
+                    row.get("prompt_sha256"),
+                    row.get("session_sha256"),
+                    row.get("prefix_fingerprint_sha256"),
+                )
+                for row in sorted(
+                    (
+                        candidate
+                        for candidate in placement_rows
+                        if candidate.get("trace")
+                        == "uniform_calibration"
+                        and candidate.get("round_index")
+                        == calibration_index
+                        and candidate.get("policy") == policy
+                    ),
+                    key=lambda candidate: int(candidate["sequence"]),
+                )
+            ]
+            for policy in POLICIES
+        }
+        if by_policy[PREFIX_POLICY] != by_policy[HRW_POLICY]:
+            calibration_trace_pairs_match = False
+    checks["calibration_traces_match_between_policies"] = (
+        calibration_trace_pairs_match
+    )
     checks["all_prompt_hashes_are_sha256"] = all(
         _valid_sha256(row.get("prompt_sha256"))
         for row in placement_rows
@@ -1319,6 +1484,10 @@ def _replay_rows(
     expected_summary_keys = {
         ("shared", None, policy) for policy in POLICIES
     } | {
+        ("uniform_calibration", calibration_index, policy)
+        for calibration_index in range(config.uniform_calibration_rounds)
+        for policy in POLICIES
+    } | {
         ("uniform", round_index, policy)
         for round_index in range(config.uniform_rounds)
         for policy in POLICIES
@@ -1329,6 +1498,11 @@ def _replay_rows(
     expected_summary_order = [
         ("shared", None, policy) for policy in POLICIES
     ]
+    for calibration_index in range(config.uniform_calibration_rounds):
+        expected_summary_order.extend(
+            ("uniform_calibration", calibration_index, policy)
+            for policy in POLICIES
+        )
     for round_index in range(config.uniform_rounds):
         policy_order = (
             POLICIES
@@ -1363,7 +1537,8 @@ def _replay_rows(
         ]
         expected_order_index = (
             POLICIES.index(str(row.get("policy")))
-            if row.get("trace") == "shared"
+            if row.get("trace")
+            in {"shared", "uniform_calibration"}
             and row.get("policy") in POLICIES
             else (
                 (
@@ -1381,7 +1556,8 @@ def _replay_rows(
             uniform_trace(config, -1)[
                 : config.uniform_warmup_requests_per_arm
             ]
-            if row.get("trace") == "uniform"
+            if row.get("trace")
+            in {"uniform", "uniform_calibration"}
             else ()
         )
         expected_warmup_count = len(expected_warmup)
@@ -1464,6 +1640,12 @@ def _replay_rows(
     intervals_are_ordered = checks["round_summary_key_set_is_exact_and_unique"]
     interval_groups = [
         ("shared", None, POLICIES),
+        *[
+            ("uniform_calibration", calibration_index, POLICIES)
+            for calibration_index in range(
+                config.uniform_calibration_rounds
+            )
+        ],
         *[
             (
                 "uniform",

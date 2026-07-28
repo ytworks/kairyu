@@ -23,13 +23,13 @@ def test_large_fleet_cold_decision_hashes_only_one_root_chunk(monkeypatch):
     pool = ReplicaPool(
         {replica_id: object() for replica_id in replica_ids}, prefix_index=index
     )
-    real_sha256 = prefix_module.hashlib.sha256
+    real_xxh3 = prefix_module.xxhash.xxh3_64
     hash_instances = 0
     chunk_updates = 0
 
     class CountingHash:
         def __init__(self, payload=b""):
-            self._inner = real_sha256(payload)
+            self._inner = real_xxh3(payload)
             if payload:
                 self._record_update()
 
@@ -44,15 +44,15 @@ def test_large_fleet_cold_decision_hashes_only_one_root_chunk(monkeypatch):
         def hexdigest(self):
             return self._inner.hexdigest()
 
-    def counted_sha256(payload=b""):
+    def counted_xxh3(payload=b""):
         nonlocal hash_instances
         hash_instances += 1
         return CountingHash(payload)
 
     monkeypatch.setattr(
         prefix_module,
-        "hashlib",
-        SimpleNamespace(sha256=counted_sha256),
+        "xxhash",
+        SimpleNamespace(xxh3_64=counted_xxh3),
     )
 
     assert pool._prefix_select(replica_ids, prompt) is None

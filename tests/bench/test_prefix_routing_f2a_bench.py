@@ -71,25 +71,57 @@ def test_trace_and_initial_cache_are_deterministic() -> None:
 
     assert first == second
     assert first.replicas == 500
+    assert first.prefix_hash_version == "xxh3-64-v1"
     assert f2a.profile_config("formal").uniform_rounds == 21
+    assert f2a.profile_config("formal").uniform_calibration_rounds == 1
     assert (
         f2a.profile_config("formal").uniform_warmup_requests_per_arm
         == 512
     )
     assert f2a.profile_config("formal").uniform_sign_min_rounds == 15
     assert f2a.cache_seed_rows(first) == f2a.cache_seed_rows(second)
+    assert all(
+        item.prefix_fingerprint == f2a._prefix_fingerprint(item.prompt)
+        for item in f2a.shared_trace(first)
+    )
+    assert all(
+        item.prefix_fingerprint == ""
+        for item in f2a.uniform_trace(first, 1)
+    )
     assert [
-        (item.request_id, item.family_id, item.prompt_sha256, item.session_sha256)
+        (
+            item.request_id,
+            item.family_id,
+            item.prompt_sha256,
+            item.session_sha256,
+            item.prefix_fingerprint,
+        )
         for item in f2a.shared_trace(first)
     ] == [
-        (item.request_id, item.family_id, item.prompt_sha256, item.session_sha256)
+        (
+            item.request_id,
+            item.family_id,
+            item.prompt_sha256,
+            item.session_sha256,
+            item.prefix_fingerprint,
+        )
         for item in f2a.shared_trace(second)
     ]
     assert [
-        (item.request_id, item.family_id, item.prompt_sha256)
+        (
+            item.request_id,
+            item.family_id,
+            item.prompt_sha256,
+            item.prefix_fingerprint,
+        )
         for item in f2a.uniform_trace(first, 1)
     ] == [
-        (item.request_id, item.family_id, item.prompt_sha256)
+        (
+            item.request_id,
+            item.family_id,
+            item.prompt_sha256,
+            item.prefix_fingerprint,
+        )
         for item in f2a.uniform_trace(second, 1)
     ]
 
@@ -141,6 +173,8 @@ def test_independent_replay_accepts_the_frozen_smoke_artifact(
     assert result["checks"]["shared_trace_is_identical_between_policies"]
     assert result["checks"]["uniform_traces_and_sessions_match_between_policies"]
     assert result["checks"]["paired_round_order_alternates"]
+    assert result["checks"]["nonbinding_calibration_rounds_are_frozen"]
+    assert result["checks"]["calibration_traces_match_between_policies"]
     assert result["checks"]["round_summaries_follow_emitted_arm_and_round_order"]
     assert result["checks"]["prompt_bodies_are_absent"]
     shared = result["metrics"]["shared"]
@@ -215,6 +249,7 @@ def test_replay_rejects_manifest_metric_tampering(
         "warmup_completed_count",
         "warmup_digest",
         "warmup_interval",
+        "calibration_binding",
         "summary_emitted_order",
         "global_summary_overlap",
         "arm_order",
@@ -269,6 +304,13 @@ def test_replay_rejects_summary_order_and_source_drift_tampering(
         current["warmup_started_ns"] = (
             int(previous["wall_finished_ns"]) - 1
         )
+    elif tamper_kind == "calibration_binding":
+        calibration = next(
+            row
+            for row in rows
+            if row.get("type") == "calibration_round"
+        )
+        calibration["binding"] = True
     elif tamper_kind == "summary_emitted_order":
         summary_indices = [
             index

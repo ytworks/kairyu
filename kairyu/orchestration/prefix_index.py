@@ -15,12 +15,38 @@ bounded by those same stores and avoids scanning cold replicas.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Sequence
 from itertools import islice
 
+import xxhash
+
 _DEFAULT_CHUNK_CHARS = 256
 _DEFAULT_MAX_CHUNKS_PER_REPLICA = 4096
+PREFIX_HASH_VERSION = "xxh3-64-v1"
+_HEX_64 = frozenset("0123456789abcdef")
+
+
+def prefix_root_fingerprint(shared_prefix: str) -> str:
+    """Return the carried root only when a complete default chunk is known.
+
+    A producer may safely compute the first prompt key ahead of placement only
+    when its shared prefix covers the index's complete default text chunk.
+    Empty or shorter prefixes deliberately return no hint so the index hashes
+    the actual request prompt locally.
+    """
+    if len(shared_prefix) < _DEFAULT_CHUNK_CHARS:
+        return ""
+    return xxhash.xxh3_64(
+        shared_prefix[:_DEFAULT_CHUNK_CHARS].encode()
+    ).hexdigest()
+
+
+def _valid_carried_root(first_key: str | None) -> bool:
+    return (
+        isinstance(first_key, str)
+        and len(first_key) == 16
+        and set(first_key) <= _HEX_64
+    )
 
 
 class PreparedPrefixKeys(Sequence[str]):
@@ -102,13 +128,14 @@ class PreparedPrefixKeys(Sequence[str]):
 def prompt_chunks(prompt: str, chunk_chars: int = _DEFAULT_CHUNK_CHARS) -> tuple[str, ...]:
     """Prefix-chained chunk keys: chunk i hashes chars [0 : (i+1)*chunk).
 
-    Fed incrementally into ONE streaming sha256 (P5): key i is the digest after
-    feeding chunks 0..i. This is byte-identical to ``sha256(prompt[:end])`` —
-    sha256 is a streaming hash and str slicing never splits a character — but
-    O(L) total instead of re-hashing the whole prefix per chunk (O(L²)).
+    Fed incrementally into ONE streaming XXH3-64 (P5): key i is the digest
+    after feeding chunks 0..i. This is byte-identical to
+    ``xxh3_64(prompt[:end])`` — XXH3 is a streaming hash and str slicing never
+    splits a character — but O(L) total instead of re-hashing the whole prefix
+    per chunk (O(L²)).
     """
     keys: list[str] = []
-    hasher = hashlib.sha256()
+    hasher = xxhash.xxh3_64()
     pos = 0
     for end in range(chunk_chars, len(prompt) + 1, chunk_chars):
         hasher.update(prompt[pos:end].encode())
@@ -141,6 +168,10 @@ class PrefixIndex:
             str,
             str | dict[str, None],
         ] = {}
+
+    def register_replica(self, replica_id: str) -> None:
+        """Preallocate the native per-replica store at membership time."""
+        self._chunks.setdefault(replica_id, {})
 
     def observe(self, replica_id: str, prompt: str) -> None:
         """Publish every usable prefix key after a successful generation."""
@@ -188,12 +219,26 @@ class PrefixIndex:
             store.pop(evicted)
             self._discard_candidate(evicted, replica_id)
 
-    def prepare(self, prompt: str) -> str | PreparedPrefixKeys:
-        """Prepare one request's root lookup and lazy deeper hash chain."""
+    def prepare(
+        self,
+        prompt: str,
+        first_key: str | None = None,
+    ) -> str | PreparedPrefixKeys:
+        """Prepare one request's hinted or locally hashed lazy key chain."""
         if len(prompt) < self.chunk_chars:
             return ""
-        hasher = hashlib.sha256(prompt[: self.chunk_chars].encode())
-        first_key = hasher.hexdigest()[:16]
+        # CacheHint's carried-root contract is deliberately fixed to the
+        # production 256-character index. Custom chunk sizes use the exact
+        # local fallback because the hint carries no chunk-size metadata.
+        if (
+            self.chunk_chars != _DEFAULT_CHUNK_CHARS
+            or not _valid_carried_root(first_key)
+        ):
+            first_key = None
+        hasher = None
+        if first_key is None:
+            hasher = xxhash.xxh3_64(prompt[: self.chunk_chars].encode())
+            first_key = hasher.hexdigest()
         candidates = self._replicas_by_first_key.get(first_key)
         if candidates is None:
             # The common cold path needs only its root at successful completion.
@@ -207,7 +252,11 @@ class PrefixIndex:
             prompt,
             self.chunk_chars,
             self._max_chunks,
-            hasher,
+            (
+                hasher
+                if hasher is not None
+                else xxhash.xxh3_64(prompt[: self.chunk_chars].encode())
+            ),
             first_key,
             candidate_ids,
         )
@@ -230,36 +279,45 @@ class PrefixIndex:
             # Preserve refresh/eviction behavior when the root already exists.
             self.observe_keys(replica_id, keys, 1)
             return
-        store = self._chunks.get(replica_id)
-        if store is None:
+        self.observe_root(replica_id, key)
+
+    def observe_root(self, replica_id: str, key: str) -> None:
+        """Publish one successful cold root through the allocation-light path."""
+        try:
+            store = self._chunks[replica_id]
+        except KeyError:
+            # Standalone PrefixIndex users need not register membership first.
             store = {}
             self._chunks[replica_id] = store
         candidates = self._replicas_by_first_key.get(key)
         if candidates is None:
             self._replicas_by_first_key[key] = replica_id
             store[key] = None
-        elif isinstance(candidates, str):
-            if candidates != replica_id:
-                self._replicas_by_first_key[key] = {
-                    candidates: None,
-                    replica_id: None,
-                }
-            store.pop(key, None)
-            store[key] = None
+            if len(store) <= self._max_chunks:
+                return
         else:
-            # Another same-prefix request may have completed while this request
-            # awaited its backend. Merge instead of overwriting that candidate.
-            candidates[replica_id] = None
-            store.pop(key, None)
-            store[key] = None
-        if len(store) > self._max_chunks:
-            evicted = next(iter(store))
-            store.pop(evicted)
-            self._discard_candidate(evicted, replica_id)
+            self._merge_root_candidate(
+                replica_id,
+                key,
+                store,
+                candidates,
+            )
+        self._evict_oldest_if_needed(replica_id, store)
 
-    def chunk_keys(self, prompt: str) -> tuple[str, ...]:
-        """Return the immutable prefix keys for this index's chunk size."""
-        return prompt_chunks(prompt, self.chunk_chars)
+    def chunk_keys(
+        self,
+        prompt: str,
+        first_key: str | None = None,
+    ) -> tuple[str, ...]:
+        """Return immutable keys, optionally carrying a trusted upstream root."""
+        keys = prompt_chunks(prompt, self.chunk_chars)
+        if (
+            self.chunk_chars == _DEFAULT_CHUNK_CHARS
+            and _valid_carried_root(first_key)
+            and keys
+        ):
+            return (first_key, *keys[1:])
+        return keys
 
     def overlap(self, replica_id: str, prompt: str) -> int:
         """Longest known prefix, in chunks (prefix-chained: stop at first miss)."""
@@ -306,3 +364,34 @@ class PrefixIndex:
             del self._replicas_by_first_key[key]
         elif len(candidates) == 1:
             self._replicas_by_first_key[key] = next(iter(candidates))
+
+    def _merge_root_candidate(
+        self,
+        replica_id: str,
+        key: str,
+        store: dict[str, None],
+        candidates: str | dict[str, None],
+    ) -> None:
+        """Handle the uncommon repeated/concurrent cold-root publication."""
+        if isinstance(candidates, str):
+            if candidates != replica_id:
+                self._replicas_by_first_key[key] = {
+                    candidates: None,
+                    replica_id: None,
+                }
+        else:
+            # Another same-prefix request may have completed while this request
+            # awaited its backend. Merge instead of overwriting that candidate.
+            candidates[replica_id] = None
+        store.pop(key, None)
+        store[key] = None
+
+    def _evict_oldest_if_needed(
+        self,
+        replica_id: str,
+        store: dict[str, None],
+    ) -> None:
+        if len(store) > self._max_chunks:
+            evicted = next(iter(store))
+            store.pop(evicted)
+            self._discard_candidate(evicted, replica_id)
