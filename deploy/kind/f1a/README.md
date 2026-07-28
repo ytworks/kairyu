@@ -56,3 +56,11 @@ with `--wait=false`. The StatefulSet replaces them with new pod UIDs. Pre-stop
 first changes `/readyz` to 503, causing the EndpointSlice controller and gateway
 reconciler to remove the old UID, while the old process remains able to finish
 already-selected requests for five seconds.
+
+Each deletion arms an endpoint-only observer before waiting for the Kubernetes
+delete command. It records raw EndpointSlice payloads on absolute 250 ms
+deadlines until every old UID is absent; slower multi-pod readiness polling
+starts afterward and cannot dilute this causal sampling cadence. Artifact
+replay verifies the observer sequence, scheduled/fetch/observation timestamps,
+the exact disjoint claim, and the unchanged one-second last-old-to-disjoint
+bracket.

@@ -46,6 +46,7 @@ import httpx
 SCHEMA_VERSION = 1
 GATE = "G5-F1a"
 _COMMAND_TERMINATE_GRACE_SECONDS = 2.0
+_ENDPOINT_WITHDRAWAL_POLL_SECONDS = 0.25
 
 
 @dataclass(frozen=True)
@@ -863,6 +864,133 @@ async def _initial_inventory(args: argparse.Namespace, config: GateConfig) -> li
     return inventory
 
 
+async def _observe_endpoint_withdrawal(
+    args: argparse.Namespace,
+    config: GateConfig,
+    *,
+    epoch: int,
+    old_uids: set[str],
+    api_started_ns: int,
+    endpoint_sink: JsonlSink,
+) -> tuple[int | None, set[str]]:
+    """Capture the causal EndpointSlice transition independently of pod recovery.
+
+    A 20-pod ``kubectl delete`` can take more than two seconds to return, and a
+    multi-pod readiness fetch can take similarly long. Neither may leave the
+    fixed one-second raw-evidence bracket dependent on the phase of the global
+    sampler, so this observer starts with the delete and polls only the much
+    cheaper EndpointSlice surface at an absolute 250 ms cadence.
+    """
+
+    deadline_ns = api_started_ns + int(
+        config.endpoint_withdrawal_limit_seconds * 1_000_000_000
+    )
+    interval_ns = int(
+        _ENDPOINT_WITHDRAWAL_POLL_SECONDS * 1_000_000_000
+    )
+    endpoint_uids: set[str] = set()
+    index = 0
+    while time.monotonic_ns() <= deadline_ns:
+        scheduled_ns = api_started_ns + index * interval_ns
+        fetch_started_ns = time.monotonic_ns()
+        try:
+            endpoints = await _kubectl_json(
+                args.kubectl,
+                args.namespace,
+                "get",
+                "endpointslices",
+                "-l",
+                f"kubernetes.io/service-name={args.endpoint_service}",
+            )
+        except Exception as endpoint_error:
+            observed_ns = time.monotonic_ns()
+            endpoint_sink.write(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "kind": "endpointslices",
+                    "capture": "churn_withdrawal",
+                    "epoch": epoch,
+                    "observer_sequence": index,
+                    "scheduled_ns": scheduled_ns,
+                    "fetch_started_ns": fetch_started_ns,
+                    "observed_ns": observed_ns,
+                    "error": type(endpoint_error).__name__,
+                    "payload": None,
+                }
+            )
+        else:
+            endpoint_uids = _endpoint_uids(endpoints)
+            observed_ns = time.monotonic_ns()
+            endpoint_sink.write(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "kind": "endpointslices",
+                    "capture": "churn_withdrawal",
+                    "epoch": epoch,
+                    "observer_sequence": index,
+                    "scheduled_ns": scheduled_ns,
+                    "fetch_started_ns": fetch_started_ns,
+                    "observed_ns": observed_ns,
+                    "error": None,
+                    "payload": endpoints,
+                }
+            )
+            if old_uids.isdisjoint(endpoint_uids):
+                return observed_ns, endpoint_uids
+        index += 1
+        target_ns = api_started_ns + index * interval_ns
+        remaining = (target_ns - time.monotonic_ns()) / 1_000_000_000
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+    return None, endpoint_uids
+
+
+async def _delete_with_endpoint_observation(
+    args: argparse.Namespace,
+    config: GateConfig,
+    *,
+    epoch: int,
+    names: list[str],
+    old_uids: set[str],
+    api_started_ns: int,
+    endpoint_sink: JsonlSink,
+) -> tuple[int, str, int, int | None, set[str]]:
+    observer = asyncio.create_task(
+        _observe_endpoint_withdrawal(
+            args,
+            config,
+            epoch=epoch,
+            old_uids=old_uids,
+            api_started_ns=api_started_ns,
+            endpoint_sink=endpoint_sink,
+        )
+    )
+    try:
+        returncode, _, stderr = await _run_command(
+            args.kubectl,
+            "-n",
+            args.namespace,
+            "delete",
+            "pods",
+            *names,
+            "--wait=false",
+            check=False,
+        )
+        api_completed_ns = time.monotonic_ns()
+        old_withdrawn_ns, endpoint_uids = await observer
+        return (
+            returncode,
+            stderr,
+            api_completed_ns,
+            old_withdrawn_ns,
+            endpoint_uids,
+        )
+    finally:
+        if not observer.done():
+            observer.cancel()
+        await asyncio.gather(observer, return_exceptions=True)
+
+
 async def _recover_epoch(
     args: argparse.Namespace,
     config: GateConfig,
@@ -874,6 +1002,8 @@ async def _recover_epoch(
     api_completed_ns: int,
     delete_returncode: int,
     delete_stderr: str,
+    initial_old_withdrawn_ns: int | None,
+    initial_endpoint_uids: set[str],
     endpoint_sink: JsonlSink,
     sink: JsonlSink,
 ) -> dict[str, Any]:
@@ -881,11 +1011,12 @@ async def _recover_epoch(
     names = [item["name"] for item in old]
     old_uids = {str(item["uid"]) for item in old}
     new: list[dict[str, Any]] = []
-    endpoint_uids: set[str] = set()
-    old_withdrawn_ns: int | None = None
+    endpoint_uids = set(initial_endpoint_uids)
+    old_withdrawn_ns = initial_old_withdrawn_ns
     new_ready_ns: int | None = None
     error: str | None = None
     while time.monotonic() < deadline:
+        endpoint_fetch_started_ns = time.monotonic_ns()
         try:
             endpoints = await _kubectl_json(
                 args.kubectl,
@@ -902,6 +1033,7 @@ async def _recover_epoch(
                     "kind": "endpointslices",
                     "capture": "churn_recovery",
                     "epoch": plan_entry["epoch"],
+                    "fetch_started_ns": endpoint_fetch_started_ns,
                     "observed_ns": time.monotonic_ns(),
                     "error": type(endpoint_error).__name__,
                     "payload": None,
@@ -916,6 +1048,7 @@ async def _recover_epoch(
                     "kind": "endpointslices",
                     "capture": "churn_recovery",
                     "epoch": plan_entry["epoch"],
+                    "fetch_started_ns": endpoint_fetch_started_ns,
                     "observed_ns": observed_ns,
                     "error": None,
                     "payload": endpoints,
@@ -1026,6 +1159,7 @@ async def _churn_loop(
                 for ordinal in entry["ordinals"]
             ]
             old = [dict(initial_by_name[name]) for name in names]
+            predelete_fetch_started_ns = time.monotonic_ns()
             predelete_endpoints = await _kubectl_json(
                 args.kubectl,
                 args.namespace,
@@ -1040,23 +1174,29 @@ async def _churn_loop(
                     "kind": "endpointslices",
                     "capture": "churn_predelete",
                     "epoch": entry["epoch"],
+                    "fetch_started_ns": predelete_fetch_started_ns,
                     "observed_ns": time.monotonic_ns(),
                     "error": None,
                     "payload": predelete_endpoints,
                 }
             )
             api_started_ns = time.monotonic_ns()
-            returncode, _, stderr = await _run_command(
-                args.kubectl,
-                "-n",
-                args.namespace,
-                "delete",
-                "pods",
-                *names,
-                "--wait=false",
-                check=False,
+            old_uids = {str(item["uid"]) for item in old}
+            (
+                returncode,
+                stderr,
+                api_completed_ns,
+                old_withdrawn_ns,
+                endpoint_uids,
+            ) = await _delete_with_endpoint_observation(
+                args,
+                config,
+                epoch=entry["epoch"],
+                names=names,
+                old_uids=old_uids,
+                api_started_ns=api_started_ns,
+                endpoint_sink=endpoint_sink,
             )
-            api_completed_ns = time.monotonic_ns()
             recoveries.append(
                 asyncio.create_task(
                     _recover_epoch(
@@ -1069,6 +1209,8 @@ async def _churn_loop(
                         api_completed_ns=api_completed_ns,
                         delete_returncode=returncode,
                         delete_stderr=stderr,
+                        initial_old_withdrawn_ns=old_withdrawn_ns,
+                        initial_endpoint_uids=endpoint_uids,
                         endpoint_sink=endpoint_sink,
                         sink=sink,
                     )
@@ -1477,9 +1619,14 @@ def evaluate_gate(
                         if type(record.get("fetch_started_ns")) is int
                         else record["observed_ns"]
                     ),
+                    "fetch_started_recorded": (
+                        type(record.get("fetch_started_ns")) is int
+                    ),
                     "uids": snapshot_uids,
                     "capture": record.get("capture"),
                     "epoch": record.get("epoch"),
+                    "observer_sequence": record.get("observer_sequence"),
+                    "scheduled_ns": record.get("scheduled_ns"),
                 }
             )
         endpoint_uids.update(snapshot_uids)
@@ -1808,8 +1955,12 @@ def evaluate_gate(
         and all(record["exact"] for record in endpoint_epoch_recoveries)
     )
     endpoint_epoch_causality = []
+    endpoint_withdrawal_observers = []
     endpoint_interval_ns = int(
         config.evidence_interval_seconds * 1_000_000_000
+    )
+    withdrawal_poll_interval_ns = int(
+        _ENDPOINT_WITHDRAWAL_POLL_SECONDS * 1_000_000_000
     )
     for epoch, record in enumerate(ordered_churn):
         expected_before = (
@@ -1824,6 +1975,63 @@ def evaluate_gate(
         }
         api_started_ns = record.get("api_started_ns")
         old_withdrawn_ns = record.get("old_withdrawn_ns")
+        observer_snapshots = [
+            snapshot
+            for snapshot in endpoint_timed_snapshots
+            if snapshot["capture"] == "churn_withdrawal"
+            and snapshot["epoch"] == epoch
+        ]
+        observer_sequences = [
+            snapshot["observer_sequence"]
+            for snapshot in observer_snapshots
+        ]
+        observer_first_disjoint = next(
+            (
+                snapshot
+                for snapshot in observer_snapshots
+                if old_epoch_uids.isdisjoint(snapshot["uids"])
+            ),
+            None,
+        )
+        observer_consistent = (
+            type(api_started_ns) is int
+            and bool(observer_snapshots)
+            and observer_sequences == list(range(len(observer_snapshots)))
+            and all(
+                type(snapshot["observer_sequence"]) is int
+                and type(snapshot["scheduled_ns"]) is int
+                and snapshot["fetch_started_recorded"]
+                and snapshot["scheduled_ns"]
+                == api_started_ns
+                + snapshot["observer_sequence"]
+                * withdrawal_poll_interval_ns
+                and snapshot["scheduled_ns"]
+                <= snapshot["fetch_started_ns"]
+                <= snapshot["observed_ns"]
+                for snapshot in observer_snapshots
+            )
+            and observer_first_disjoint is observer_snapshots[-1]
+            and type(old_withdrawn_ns) is int
+            and observer_first_disjoint["observed_ns"] == old_withdrawn_ns
+        )
+        endpoint_withdrawal_observers.append(
+            {
+                "epoch": record.get("epoch"),
+                "samples": len(observer_snapshots),
+                "first_sequence": (
+                    observer_sequences[0] if observer_sequences else None
+                ),
+                "last_sequence": (
+                    observer_sequences[-1] if observer_sequences else None
+                ),
+                "first_disjoint_ns": (
+                    observer_first_disjoint["observed_ns"]
+                    if observer_first_disjoint is not None
+                    else None
+                ),
+                "consistent": observer_consistent,
+            }
+        )
         predelete_snapshots = []
         postdelete_snapshots = []
         if type(api_started_ns) is int:
@@ -1879,12 +2087,14 @@ def evaluate_gate(
             first_disjoint is not None
             and last_with_old is not None
             and raw_claim_snapshot is not None
+            and first_disjoint["fetch_started_recorded"]
+            and last_with_old["fetch_started_recorded"]
             and type(old_withdrawn_ns) is int
             and first_disjoint["observed_ns"]
             <= old_withdrawn_ns
             <= first_disjoint["observed_ns"] + endpoint_interval_ns
             and first_disjoint["observed_ns"]
-            - last_with_old["observed_ns"]
+            - last_with_old["fetch_started_ns"]
             <= endpoint_interval_ns
         )
         no_reappearance = (
@@ -1923,6 +2133,13 @@ def evaluate_gate(
         and all(
             record["withdrawal_bracketed"] and record["no_reappearance"]
             for record in endpoint_epoch_causality
+        )
+    )
+    endpoint_withdrawal_observer_consistent = (
+        len(endpoint_withdrawal_observers) == config.churn_epochs
+        and all(
+            record["consistent"]
+            for record in endpoint_withdrawal_observers
         )
     )
     endpoint_withdrawal_ok = all(
@@ -2556,6 +2773,9 @@ def evaluate_gate(
         "churn_raw_timeline_consistent": churn_timeline_ok,
         "old_endpoints_withdrawn_before_grace": endpoint_withdrawal_ok,
         "endpoint_predelete_snapshots_exact": endpoint_predelete_exact,
+        "endpoint_withdrawal_observer_consistent": (
+            endpoint_withdrawal_observer_consistent
+        ),
         "endpoint_raw_withdrawal_causal": endpoint_raw_withdrawal_causal,
         "new_endpoints_ready_with_exact_fleet_size": endpoint_recovery_exact,
         "pod_uid_replaced_exactly_once": (
@@ -2652,6 +2872,9 @@ def evaluate_gate(
             "lifecycle_exact": lifecycle_valid,
             "endpoint_epoch_recoveries": endpoint_epoch_recoveries,
             "endpoint_epoch_causality": endpoint_epoch_causality,
+            "endpoint_withdrawal_observers": (
+                endpoint_withdrawal_observers
+            ),
             "max_old_withdrawal_seconds": max(
                 (
                     float(record["old_withdrawal_seconds"])
@@ -3102,6 +3325,11 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             "endpoint_readiness": (
                 "only ready=true and terminating!=true endpoints count; "
                 "old withdrawal must precede the five-second preStop grace"
+            ),
+            "endpoint_withdrawal_observation": (
+                "an endpoint-only absolute-250ms observer starts with each "
+                "delete; raw sequence/schedule/fetch/observation timestamps "
+                "must replay before slower pod readiness recovery"
             ),
             "membership": (
                 "gateway audit snapshots must begin with the full old fleet "

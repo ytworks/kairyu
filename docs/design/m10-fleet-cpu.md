@@ -1,7 +1,7 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D2/D5/A16–A19 amended 2026-07-28). Reviewed (1-reviewer panel
+2026-07-27; D2/D5/A16–A20 amended 2026-07-28). Reviewed (1-reviewer panel
 with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
@@ -326,3 +326,16 @@ over (α, β) (pure function over the dataset; no online learning).
   rows. Encoding and filesystem failures remain sticky and surface through
   append, flush, or close; no generic executor task or second unordered outbox
   is introduced.
+- **A20**: raw EndpointSlice withdrawal evidence is collected by a dedicated
+  endpoint-only observer armed concurrently with each pod-delete command. It
+  polls on absolute 250 ms deadlines until the old UID set is disjoint, before
+  the slower multi-pod readiness recovery begins. Every attempt records its
+  epoch, contiguous observer sequence, scheduled time, fetch-start time,
+  observation time, error, and raw API payload. Artifact replay requires the
+  sequence and absolute schedule to be exact, requires
+  `scheduled <= fetch_started <= observed`, and requires the final observer
+  row to be the disjoint snapshot named by `old_withdrawn_ns`. The existing
+  one-second causal bracket is not relaxed: it conservatively spans the last
+  old snapshot's fetch start through the first disjoint snapshot's observation
+  time. This separates withdrawal proof from pod readiness polling, whose
+  multi-name Kubernetes request can take seconds.

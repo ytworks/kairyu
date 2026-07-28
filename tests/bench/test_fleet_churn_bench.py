@@ -209,6 +209,7 @@ def _passing_evidence():
     ):
         record = {
             "error": None,
+            "fetch_started_ns": observed_ns,
             "observed_ns": observed_ns,
             "payload": {
                 "items": [
@@ -243,6 +244,36 @@ def _passing_evidence():
         endpoint_transitions
     ):
         churn_record = churn[epoch]
+        observer_before = endpoint_record(
+            endpoint_before,
+            churn_record["api_started_ns"] + 100_000_000,
+            capture="churn_withdrawal",
+            epoch=epoch,
+        )
+        observer_before.update(
+            {
+                "observer_sequence": 0,
+                "scheduled_ns": churn_record["api_started_ns"],
+                "fetch_started_ns": (
+                    churn_record["api_started_ns"] + 50_000_000
+                ),
+            }
+        )
+        observer_after = endpoint_record(
+            endpoint_after,
+            churn_record["old_withdrawn_ns"],
+            capture="churn_withdrawal",
+            epoch=epoch,
+        )
+        observer_after.update(
+            {
+                "observer_sequence": 1,
+                "scheduled_ns": (
+                    churn_record["api_started_ns"] + 250_000_000
+                ),
+                "fetch_started_ns": churn_record["old_withdrawn_ns"],
+            }
+        )
         endpoints.extend(
             [
                 endpoint_record(
@@ -251,18 +282,8 @@ def _passing_evidence():
                     capture="churn_predelete",
                     epoch=epoch,
                 ),
-                endpoint_record(
-                    endpoint_before,
-                    churn_record["api_started_ns"] + 100_000_000,
-                    capture="churn_recovery",
-                    epoch=epoch,
-                ),
-                endpoint_record(
-                    endpoint_after,
-                    churn_record["old_withdrawn_ns"],
-                    capture="churn_recovery",
-                    epoch=epoch,
-                ),
+                observer_before,
+                observer_after,
                 endpoint_record(
                     endpoint_after,
                     churn_record["recovered_ns"],
@@ -749,6 +770,66 @@ def test_gate_rejects_inexact_predelete_endpoint_snapshot() -> None:
 
     assert not result["passed"]
     assert not result["checks"]["endpoint_predelete_snapshots_exact"]
+
+
+def test_endpoint_raw_bracket_keeps_exact_one_interval_boundary() -> None:
+    evidence = _passing_evidence()
+    churn = evidence["churn"][0]
+    observer = [
+        row
+        for row in evidence["endpoints"]
+        if row.get("capture") == "churn_withdrawal"
+        and row.get("epoch") == 0
+    ]
+    for row in observer:
+        row["capture"] = "boundary-fixture"
+    last_with_old, first_disjoint = observer
+    interval_ns = int(
+        SMOKE_CONFIG.evidence_interval_seconds * 1_000_000_000
+    )
+    last_with_old["fetch_started_ns"] = (
+        first_disjoint["observed_ns"] - interval_ns
+    )
+
+    exact = evaluate_gate(**evidence)
+
+    assert exact["checks"]["endpoint_raw_withdrawal_causal"]
+    assert not exact["checks"]["endpoint_withdrawal_observer_consistent"]
+    last_with_old["fetch_started_ns"] -= 1
+
+    over = evaluate_gate(**evidence)
+
+    assert not over["checks"]["endpoint_raw_withdrawal_causal"]
+    assert churn["old_withdrawn_ns"] == first_disjoint["observed_ns"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda rows: rows[0].update(observer_sequence=1),
+        lambda rows: rows[0].update(
+            scheduled_ns=rows[0]["scheduled_ns"] + 1
+        ),
+        lambda rows: rows[0].pop("fetch_started_ns"),
+        lambda rows: rows[-1].update(
+            payload=json.loads(json.dumps(rows[0]["payload"]))
+        ),
+    ],
+)
+def test_gate_rejects_invalid_withdrawal_observer_provenance(mutation) -> None:
+    evidence = _passing_evidence()
+    observer = [
+        row
+        for row in evidence["endpoints"]
+        if row.get("capture") == "churn_withdrawal"
+        and row.get("epoch") == 0
+    ]
+    mutation(observer)
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["endpoint_withdrawal_observer_consistent"]
 
 
 def test_gate_rejects_old_endpoint_reappearance_after_withdrawal() -> None:
@@ -1354,6 +1435,161 @@ async def test_cancelled_command_kills_term_ignoring_child(
         await asyncio.wait_for(task, timeout=1)
     assert process.terminated is True
     assert process.kill_called is True
+
+
+async def test_delete_observes_endpoint_withdrawal_before_command_returns(
+    monkeypatch,
+) -> None:
+    old_uid = "old-uid"
+    new_uid = "new-uid"
+    records: list[dict] = []
+    release_delete = asyncio.Event()
+    delete_finished = False
+    endpoint_calls = 0
+
+    class Sink:
+        def write(self, value):
+            records.append(value)
+
+    def endpoint_payload(uid: str) -> dict:
+        return {
+            "items": [
+                {
+                    "endpoints": [
+                        {
+                            "conditions": {
+                                "ready": True,
+                                "terminating": False,
+                            },
+                            "targetRef": {"uid": uid},
+                        }
+                    ]
+                }
+            ]
+        }
+
+    async def fake_command(*_args, **_kwargs):
+        nonlocal delete_finished
+        await release_delete.wait()
+        delete_finished = True
+        return 0, "", ""
+
+    async def fake_kubectl(*_args, **_kwargs):
+        nonlocal endpoint_calls
+        endpoint_calls += 1
+        assert not delete_finished
+        if endpoint_calls == 1:
+            return endpoint_payload(old_uid)
+        release_delete.set()
+        return endpoint_payload(new_uid)
+
+    monkeypatch.setattr(fleet_bench, "_run_command", fake_command)
+    monkeypatch.setattr(fleet_bench, "_kubectl_json", fake_kubectl)
+    monkeypatch.setattr(
+        fleet_bench,
+        "_ENDPOINT_WITHDRAWAL_POLL_SECONDS",
+        0.001,
+    )
+    args = SimpleNamespace(
+        kubectl="kubectl",
+        namespace="kairyu-f1a",
+        endpoint_service="f1a-replicas",
+    )
+    api_started_ns = time.monotonic_ns()
+
+    (
+        returncode,
+        stderr,
+        api_completed_ns,
+        old_withdrawn_ns,
+        endpoint_uids,
+    ) = await fleet_bench._delete_with_endpoint_observation(
+        args,
+        SMOKE_CONFIG,
+        epoch=0,
+        names=["f1a-replica-0"],
+        old_uids={old_uid},
+        api_started_ns=api_started_ns,
+        endpoint_sink=Sink(),
+    )
+
+    assert returncode == 0
+    assert stderr == ""
+    assert delete_finished
+    assert api_completed_ns >= api_started_ns
+    assert endpoint_uids == {new_uid}
+    assert old_withdrawn_ns == records[-1]["observed_ns"]
+    assert [record["error"] for record in records] == [None, None]
+    assert all(record["capture"] == "churn_withdrawal" for record in records)
+    assert [record["observer_sequence"] for record in records] == [0, 1]
+    assert records[0]["scheduled_ns"] == api_started_ns
+    assert records[1]["scheduled_ns"] > records[0]["scheduled_ns"]
+    assert all(
+        record["scheduled_ns"]
+        <= record["fetch_started_ns"]
+        <= record["observed_ns"]
+        for record in records
+    )
+    assert records[-1]["observed_ns"] - records[-2]["observed_ns"] <= int(
+        SMOKE_CONFIG.evidence_interval_seconds * 1_000_000_000
+    )
+
+
+async def test_delete_cancellation_reaps_endpoint_observer(monkeypatch) -> None:
+    delete_started = asyncio.Event()
+    observer_started = asyncio.Event()
+    delete_cancelled = False
+    observer_cancelled = False
+
+    class Sink:
+        def write(self, value):
+            raise AssertionError(f"unexpected evidence record: {value}")
+
+    async def fake_command(*_args, **_kwargs):
+        nonlocal delete_cancelled
+        delete_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            delete_cancelled = True
+            raise
+
+    async def fake_kubectl(*_args, **_kwargs):
+        nonlocal observer_cancelled
+        observer_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observer_cancelled = True
+            raise
+
+    monkeypatch.setattr(fleet_bench, "_run_command", fake_command)
+    monkeypatch.setattr(fleet_bench, "_kubectl_json", fake_kubectl)
+    args = SimpleNamespace(
+        kubectl="kubectl",
+        namespace="kairyu-f1a",
+        endpoint_service="f1a-replicas",
+    )
+    task = asyncio.create_task(
+        fleet_bench._delete_with_endpoint_observation(
+            args,
+            SMOKE_CONFIG,
+            epoch=0,
+            names=["f1a-replica-0"],
+            old_uids={"old-uid"},
+            api_started_ns=time.monotonic_ns(),
+            endpoint_sink=Sink(),
+        )
+    )
+    await asyncio.wait_for(delete_started.wait(), timeout=1)
+    await asyncio.wait_for(observer_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert delete_cancelled
+    assert observer_cancelled
 
 
 async def test_run_cancels_owned_tasks_before_closing_sinks(
