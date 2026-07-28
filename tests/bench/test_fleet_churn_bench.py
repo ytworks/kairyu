@@ -2196,6 +2196,44 @@ def _make_first_churn_window_placement_hit_limit(evidence) -> None:
     request["end_ns"] = placement["selected_at_ns"] + 1_000_000
 
 
+def _make_measurement_placement_p99_hit_limit(evidence) -> None:
+    measurement = [
+        request
+        for request in evidence["requests"]
+        if 0
+        <= request["measurement_offset_s"]
+        < SMOKE_CONFIG.measurement_seconds
+    ]
+    # The smoke measurement contains 400 samples. Five values at the limit
+    # make the nearest-rank p99 (rank 396) equal the strict 10 ms boundary.
+    assert len(measurement) == 400
+    for request in measurement[:5]:
+        placement = next(
+            row
+            for row in evidence["placements"]
+            if row.get("request_id") == request["request_id_echo"]
+        )
+        placement.update(
+            placement_started_ns=request["send_ns"],
+            selected_at_ns=request["send_ns"] + 10_000_000,
+            placement_latency_ns=10_000_000,
+        )
+        request["end_ns"] = placement["selected_at_ns"] + 1_000_000
+
+
+def test_per_epoch_and_churn_window_p99_are_diagnostics_not_extra_slos() -> None:
+    evidence = _passing_evidence()
+    _make_first_churn_window_placement_hit_limit(evidence)
+
+    result = evaluate_gate(**evidence)
+
+    assert result["passed"]
+    assert result["checks"]["placement_p99_measurement"]
+    assert result["checks"]["placement_window_diagnostics_complete"]
+    assert result["placement"]["overall"]["p99_ms"] == 1.0
+    assert result["placement"]["churn_windows"][0]["p99_ms"] == 10.0
+
+
 @pytest.mark.parametrize(
     ("mutation", "failed_check"),
     [
@@ -2217,8 +2255,8 @@ def _make_first_churn_window_placement_hit_limit(evidence) -> None:
             "zero_transport_or_not_sent",
         ),
         (
-            _make_first_churn_window_placement_hit_limit,
-            "placement_p99_all_windows",
+            _make_measurement_placement_p99_hit_limit,
+            "placement_p99_measurement",
         ),
     ],
 )

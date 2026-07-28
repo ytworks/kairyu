@@ -105,3 +105,9 @@ margin against the historical 3.618-second withdrawal maximum and the
 unchanged five-second limit. Its exact-compatible EndpointSlice parser reduced
 the recorded 200-endpoint payload from 1.150 ms to 0.308 ms (3.74x) with an
 identical member map.
+
+The placement SLO is nearest-rank p99 across all requests in the frozen
+ten-minute measurement. Per-epoch and ten-second post-delete p99 values remain
+mandatory hashed, published, and independently replayed diagnostics; they are
+not ten additional small-sample SLOs. All windows must still contain complete
+request-to-placement evidence.

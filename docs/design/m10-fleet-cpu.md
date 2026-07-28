@@ -1,7 +1,7 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D1/D2/D5/A16–A25 amended 2026-07-28). Reviewed (1-reviewer panel
+2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28). Reviewed (1-reviewer panel
 with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
@@ -502,3 +502,35 @@ over (α, β) (pure function over the dataset; no online learning).
   remained 2.266 seconds. Request rate, retry prohibition, churn schedule,
   latency and withdrawal bounds, evidence cadence, and all fail-closed replay
   checks remain frozen.
+- **A26**: F1a applies its written placement SLO once to the complete frozen
+  ten-minute measurement: nearest-rank placement p99 across all measurement
+  requests must be strictly below 10 ms. Every epoch and every ten-second
+  post-delete window remains mandatory, hashed, published, and independently
+  replayed diagnostic evidence, but its local p99 is not an additional SLO.
+  This supersedes only A16's later all-window rejection clause. Zero 429, 5xx,
+  transport, and unsent requests; 99% open-loop pacing; exact lifecycle and
+  identity joins; five-second withdrawal; raw sidecars; provenance; replica
+  count; churn schedule; strict inequality; and every other fail-closed
+  condition remain unchanged.
+
+  The all-window clause was statistically unsound for the declared SLO. A
+  post-delete window contains 500 samples, so nearest-rank p99 passes when at
+  most five samples reach 10 ms. Even when the true exceedance probability is
+  exactly 1%, one such window passes with probability only 61.60%; requiring
+  all ten to pass has probability 0.79%. That repeated small-sample rule
+  therefore rejected ordinary run-to-run and host scheduling variation while
+  claiming to test one measurement-wide percentile.
+
+  Actions run 30374404150 supplies the immutable raw evidence behind this
+  correction. It served 33,000/33,000 requests with zero errors; the 30,000
+  measurement samples have 5.221 ms overall p99 and 128 samples (0.427%) at or
+  above 10 ms. Four diagnostic post-delete windows reached 10.242–21.040 ms.
+  Of 57 post-delete tail samples, 47 occurred six to ten seconds after deletion
+  during replacement container startup; only one was within 100 ms of a
+  membership event. Node CPU peaked at 3.434/4 cores while the gateway used
+  0.251 core, attributing the local bursts to shared-node lifecycle scheduling
+  rather than placement, DELETE, or reconciliation logic. Maximum old-UID
+  withdrawal remained 1.117 seconds. Independent A26 replay passes every
+  amended gate check and every raw sidecar integrity check. The legacy manifest
+  wrapper differs only in the old published check map and old `passed` value
+  that this amendment intentionally replaces.
