@@ -213,8 +213,8 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1/F2 are CPU-mock-testable now. |
-| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2 amended 2026-07-28, D3/D6 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission are production-wired. |
-| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, and P-B5 are green; P-B3 and P-C gates continue. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4 amended 2026-07-28, D3/D6 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission are production-wired. |
+| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -245,6 +245,13 @@ Embedding backends are configured and discovered as explicit, non-colliding mode
 requests resolve that bounded registry before work, unknown IDs return `model_not_found`,
 response, metric, and ledger identities use the resolved key, and limiter charging occurs
 only after resolution.
+The Responses developer surface now emits canonical, gapless typed text/function SSE,
+round-trips flat and Codex namespace tools plus linked outputs, and keeps successful
+continuation state bounded and tenant scoped. It shares Chat Completions validation,
+templates, tool policy, capability preflight, and metering instead of maintaining a
+second execution contract. Official OpenAI sync/async SDK tests cover completed,
+incomplete, and failed terminals. An unmodified Codex CLI completed both a text turn
+and a real namespace command/result loop against Qwen3-32B TP8 on all eight GPUs.
 Required and named tool choice is enforced independently for every returned choice after
 filtering; mixed or empty results are rejected before response or buffered stream emission,
 without regeneration, and the consumed generation remains metered exactly once.
@@ -307,6 +314,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] Responses API closes typed streaming and Codex tool loops
+- What: Replaced the unary-only Responses subset with canonical gapless text/function SSE, completed/incomplete/failed terminals, flat and namespace function tools, linked `function_call_output` history, structured text formats, explicit unsupported-field rejection, and bounded tenant-scoped successful-response continuation. The adapter now reuses Chat Completions validation/execution, model templates, tool-choice enforcement, upstream capability preflight, and usage ownership. Official OpenAI SDK unary/sync-stream/async-stream and failure/state/tool tests are green; the full CPU suite reports 2,186 passed. An unmodified Codex CLI 0.145.0 completed a text turn and a real `pwd` namespace command/result loop against Qwen3-32B TP8 on 8x RTX PRO 6000, with every latest-code Responses POST returning 200.
+- Why: A second Responses-specific generation stack would drift from the already hardened chat contract. Normalizing wire items at L3 preserves one truthful execution boundary, while direct pull-through for irrevocable text and buffering only retractable tool decisions matches the measured responsibility split used by orchestration streaming. Tenant-scoped protocol-item storage supports SDK continuation without making stateless Codex turns depend on gateway-local history.
+- Refs: issue #201; m11 D4/A16; `kairyu/entrypoints/server/responses_service.py`; `kairyu/entrypoints/chat_template.py`; `tests/server/test_responses_api.py`; `bench/results/responses-codex-qwen3-32b-tp8-2026-07-28.json`
 
 ### 2026-07-28 — [amendment] OpenAI-compatible forwarding becomes capability-aware
 - What: Added immutable `generic`/`openai`/`vllm`/`anthropic`/`gemini`/`kairyu` request profiles, canonical max-token wire names, configurable sampling capabilities and vendor-extension allowlists, load-time configuration validation, and direct/ReplicaPool/AUTO pre-dispatch 400s for unsupported or unsafe intent. The Kairyu HTTP boundary now types and preserves `top_k`, `min_p`, `repetition_penalty`, `stop_token_ids`, `min_tokens`, and `ignore_eos`, while explicitly rejecting unimplemented `best_of`, prompt-logprob, skip-special-token, vendor, and strict-tool intent; dynamic and documented Kairyu replica configurations select that profile explicitly. Exact request-body, negative mismatch, configuration, HTTP-boundary, and live Qwen3-32B TP8 gateway-to-replica checks are green; the full CPU suite reports 2,161 passed.

@@ -1,6 +1,6 @@
 # Goal G6: Product Surface — Truthful API, Fugu-Class Orchestrated Product, Competitive Proof (Roadmap Track P)
 
-Status: Goal defined (2026-07-03). P-A and most of P-B are CPU-verifiable now;
+Status: Goal defined (2026-07-03). P-A, most of P-B, and P-C2 are green;
 P-C's scoreboard needs real engines for the Kairyu column but runs against
 frontier APIs immediately.
 Depends on: M1/M7 server stack; real token accounting quality gates depend on
@@ -87,10 +87,22 @@ malformed-tail recovery and shutdown drain.
 | Gate | Target | Where proven |
 |---|---|---|
 | P-C1 (MUST — the headline artifact) | `bench/frontier_compare.py`: multi-target (Kairyu, Anthropic, OpenAI, DeepSeek), identical prompt sets, TTFT/TPOT/goodput/$-per-Mtok + small quality eval; nightly unattended run publishing a dated scoreboard + methodology (prompts, sampling, region, time-of-day, provider cache state) to `bench/results/` | scheduled run |
-| P-C2 (Responses API) | `/v1/responses` subset (`input`, streaming events, tool calls, `previous_response_id` server-side state): OpenAI SDK `responses.create` and a Codex-class agent work unmodified (vLLM gap, Fugu parity) | `tests/server/` |
+| P-C2 (Responses API — COMPLETE) | `/v1/responses` developer surface (`input`, canonical streaming events, flat/namespace tool calls, `previous_response_id` server-side state): OpenAI SDK sync/async clients and a Codex-class agent work unmodified (Fugu parity) | `tests/server/test_responses_api.py`, Qwen3-32B TP8 Codex smoke |
 | P-C3 (embeddings) | `/v1/embeddings` (+optional rerank) as a new engine-backend kind; Open WebUI RAG works end-to-end against Kairyu alone | compose smoke |
 | P-C4 (vision) | Content-parts (`[{type:"text"|"image_url"}]`) through template + engine; image chat works in Open WebUI against a VLM replica | manual + tests |
 | P-C5 (pricing signals) | Per-tenant cached-token discount fields in the ledger + price-sheet config; invoice-grade CSV export distinguishes cached vs uncached input | `tests/server/test_pricing_invoice.py` |
+
+P-C2 is CPU- and GPU-green as of 2026-07-28 (issue #201). The official OpenAI
+Python SDK parses unary, sync stream, and async stream responses, including
+gapless text/function events and completed/incomplete/failed terminals.
+Function calls and outputs round-trip across `previous_response_id`; stored
+state is bounded and tenant scoped. Codex namespace tools retain stable public
+IDs while using the shared chat template/tool enforcement internally. An
+unmodified Codex CLI completed a Responses-wire turn and namespace tool-result
+loop against Qwen3-32B TP8 on all eight RTX PRO 6000 GPUs. The exact Codex
+version, HTTP attempts, usage, command result, and unsupported hosted-search
+negative gate are recorded in
+`bench/results/responses-codex-qwen3-32b-tp8-2026-07-28.json`.
 
 ## 3. Non-goals
 

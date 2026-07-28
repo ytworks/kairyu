@@ -201,6 +201,42 @@ Additive sampling overrides are limited to the `generic` custom-provider
 profile. Named provider presets may be narrowed but not broadened, preventing
 configuration from re-enabling fields that the provider documents as ignored.
 
+### Responses API and Codex
+
+`POST /v1/responses` supports unary and canonical typed SSE responses for text
+and function calls. Flat OpenAI function definitions and Codex namespace
+definitions are accepted; `function_call_output` and tenant-scoped
+`previous_response_id` continue the tool loop without resending earlier items.
+Only successful responses are stored. `store: false` disables continuation.
+The in-process store is bounded and intentionally not shared across gateways,
+so route a continued response to the same gateway or omit
+`previous_response_id` and send the full input history in an HA deployment.
+
+Codex can use Kairyu as a custom Responses provider without source changes:
+
+```bash
+KAIRYU_BASE_URL=http://127.0.0.1:8000/v1 \
+KAIRYU_MODEL=qwen3-32b \
+KAIRYU_API_KEY=local \
+scripts/codex_responses_smoke.sh
+```
+
+The script creates an ephemeral Codex run with `wire_api="responses"` and a
+read-only sandbox. Its default `KAIRYU_SMOKE_MODE=tool` requires a real `pwd`
+command event, its tool result, and a final message containing `PASS`;
+`KAIRYU_SMOKE_MODE=text` selects a text-only wire smoke. Kairyu accepts Codex
+function namespaces and its disabled web-search declaration; enabled hosted
+web search remains unsupported.
+`background`, Conversations API objects, hosted prompt templates, moderation,
+automatic truncation, context management, `max_tool_calls`, and response
+top-logprobs fail before model dispatch. This explicit rejection boundary keeps
+the accepted compatibility surface truthful. `service_tier` supports only the
+neutral `auto` selection; explicit paid/priority tiers fail rather than being
+echoed as executed. Codex reasoning/include metadata is accepted for wire
+compatibility but Kairyu emits no reasoning or encrypted-reasoning output item.
+`text.verbosity` is applied as a model instruction, not claimed as a provider
+quality-of-service tier.
+
 Operational notes:
 
 - **Session affinity is the cache layer.** Clients that send the OpenAI

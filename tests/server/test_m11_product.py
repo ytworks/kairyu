@@ -987,6 +987,7 @@ class TestResponsesApi:
             "input_tokens": 17,
             "input_tokens_details": {"cached_tokens": 11},
             "output_tokens": 9,
+            "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 26,
         }
         assert derived.status_code == 200
@@ -1006,7 +1007,7 @@ class TestResponsesApi:
             "uncached_tokens": derived_usage["input_tokens"] + 9,
         }
 
-    def test_extra_route_failures_before_usable_results_are_unmetered(self, tmp_path, monkeypatch):
+    def test_extra_route_failures_have_truthful_dispatch_metering(self, tmp_path, monkeypatch):
         class FailingBackend(MockBackend):
             async def generate(self, request):
                 raise RuntimeError("backend unavailable")
@@ -1029,7 +1030,7 @@ class TestResponsesApi:
         headers = {"Authorization": "Bearer key-a"}
 
         with TestClient(app, raise_server_exceptions=False) as client:
-            invalid_response = client.post(
+            streamed_failure = client.post(
                 "/v1/responses",
                 headers=headers,
                 json={"model": "m", "input": "x", "stream": True},
@@ -1050,11 +1051,17 @@ class TestResponsesApi:
                 json={"model": "embedding-model", "input": "x"},
             )
 
-        assert invalid_response.status_code == 400
+        assert streamed_failure.status_code == 200
+        assert "event: response.failed" in streamed_failure.text
         assert failed_response.status_code == 502
         assert invalid_embedding.status_code == 400
         assert failed_embedding.status_code == 500
-        assert not ledger_path.exists()
+        totals = UsageLedger(ledger_path).totals()["tenant-a"]
+        # The streaming request crossed the dispatch boundary, so it is counted
+        # exactly once even though the backend failed before its first chunk.
+        # Unary/embedding failures before usable results remain unmetered.
+        assert totals["requests"] == 1
+        assert totals["completion_tokens"] == 0
 
     def test_sdk_round_trip_with_previous_response_id(self, tmp_path):
         import openai
@@ -1087,12 +1094,16 @@ class TestResponsesApi:
             )
             assert response.status_code == 404
 
-    def test_stream_descoped_cleanly(self, tmp_path):
+    def test_stream_is_typed_responses_sse(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:
             response = client.post(
                 "/v1/responses", json={"model": "m", "input": "x", "stream": True}
             )
-            assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.created" in response.text
+        assert "event: response.output_text.delta" in response.text
+        assert "event: response.completed" in response.text
 
 
 class TestEmbeddings:

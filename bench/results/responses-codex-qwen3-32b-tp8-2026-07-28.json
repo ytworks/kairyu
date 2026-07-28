@@ -1,0 +1,57 @@
+{
+  "base_url": "http://127.0.0.1:8002/v1",
+  "codex_cli_version": "0.145.0",
+  "created_at": "2026-07-28T00:20:16+00:00",
+  "gpu": {
+    "count": 8,
+    "model": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "tensor_parallel_size": 8
+  },
+  "model": "qwen3-32b",
+  "namespace_tool_loop": {
+    "codex_exit_code": 0,
+    "command": "/bin/bash -lc pwd",
+    "command_exit_code": 0,
+    "command_output": "/workspace\n",
+    "final_message_contains": "PASS",
+    "passed": true,
+    "responses_posts": [
+      {
+        "duration_ms": 4779.81,
+        "status": 200
+      },
+      {
+        "duration_ms": 35556.1,
+        "status": 200
+      }
+    ],
+    "usage": {
+      "cached_input_tokens": 14336,
+      "input_tokens": 17792,
+      "output_tokens": 434
+    }
+  },
+  "passed": true,
+  "schema_version": 1,
+  "source_base_commit": "982ad522cf10cfa2183dae9104fb57c6c93d586a",
+  "text_stream": {
+    "codex_exit_code": 0,
+    "duration_ms": 3009.48,
+    "final_message_contains": "PASS",
+    "http_status": 200,
+    "passed": true,
+    "usage": {
+      "cached_input_tokens": 0,
+      "input_tokens": 8868,
+      "output_tokens": 17
+    }
+  },
+  "unsupported_hosted_web_search": {
+    "codex_sandbox": "danger-full-access",
+    "external_web_access": true,
+    "http_status": 400,
+    "passed": true,
+    "reason": "Kairyu has no server-side hosted web-search executor; the request failed before model dispatch instead of silently ignoring the tool."
+  },
+  "wire_api": "responses"
+}
