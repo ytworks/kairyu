@@ -127,13 +127,26 @@ def _container_image_matches(
         if isinstance(image, dict) and image.get("name") == container_name
     ]
     observed_image = matches[0].get("image") if len(matches) == 1 else None
-    if (
-        not isinstance(observed_image, str)
-        or _normalized_image_reference(observed_image)
-        != _normalized_image_reference(spec_image)
-    ):
+    if not isinstance(observed_image, str):
         return False
     observed = _runtime_digest(matches[0].get("image_id"))
+    pinned_name, separator, pinned_digest = spec_image.rpartition("@")
+    if separator and _RUNTIME_DIGEST.fullmatch(pinned_digest) is not None:
+        # Kubernetes may report only the display tag in status.image even when
+        # the Pod spec was digest-pinned. status.imageID remains the runtime
+        # identity, so require it to equal the source pin exactly.
+        allowed_images = {
+            _normalized_image_reference(spec_image),
+            _normalized_image_reference(pinned_name),
+        }
+        return (
+            _normalized_image_reference(observed_image) in allowed_images
+            and observed == pinned_digest
+        )
+    if _normalized_image_reference(observed_image) != _normalized_image_reference(
+        spec_image
+    ):
+        return False
     return observed is not None and observed in runtime_digests
 
 
@@ -2135,7 +2148,10 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         and last_owner_lease["at_unix_ns"] < killed["at_unix_ns"]
         and type(new_audit.get("at_unix_ns")) is int
         and previous_lease_ns <= new_audit["at_unix_ns"]
-        and killed["at_unix_ns"] <= new_audit["at_unix_ns"]
+        # owner_killed is the time a polling observer noticed Pod absence, not
+        # the actual stop time; scheduler/API jitter may place that observation
+        # after a valid post-expiry reclaim.
+        and kill_requested_ns < new_audit["at_unix_ns"]
         and terminal_audit.get("worker_id") == new_claim.get("worker_id")
         and terminal_audit.get("fencing_token") == new_claim.get("fencing_token")
         and type(terminal_audit.get("at_unix_ns")) is int

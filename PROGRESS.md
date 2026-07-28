@@ -242,7 +242,10 @@ gateway identities behind an explicit-session HRW load balancer, a PostgreSQL
 BatchStore with DB-clock leases and fenced atomic terminal output publication,
 and independently replayed cross-gateway affinity/batch/owner-Pod failover
 evidence. It reuses the retained F1a/F1b results; one distinct exact-head F1c
-kind drill remains before #177 can close.
+kind drill remains before #177 can close. Run `30397522862` completed the full
+live behavior and its raw artifact passes all 26 checks under the corrected
+offline replay; a fresh exact-head run is still required because that run's
+pre-correction verifier reported two false negatives.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
@@ -376,6 +379,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F1c separates causal lease proof from asynchronous observations
+- What: Corrected A29 replay without weakening its fencing proof. Digest-pinned Pods accept Kubernetes' tag-only display image only when the runtime `imageID` equals the source pin exactly. Owner-Pod absence remains required, but its polling observation is no longer treated as the actual stop timestamp; replay instead binds the kill request to the active old lease, forbids later old-fence renewals, requires expiry of that exact lease before the higher-fence reclaim, and requires one new-fence terminal commit. The immutable raw artifact from run `30397522862` passes all 26 corrected offline checks.
+- Why: The live drill exposed two invalid cross-domain assumptions: kind's local CRI config ID is not an OCI registry manifest digest, and a 250 ms Kubernetes polling observation can occur after a valid PostgreSQL-clock reclaim. The source-pinned Pod `imageID` matched exactly, and the observed sequence was kill request under fence 1, exact lease expiry, fence-2 reclaim 71.306 ms later, Pod-absence observation 45.868 ms after reclaim, renewals, and one in-lease terminal commit.
+- Refs: m10 A29; G5 F1c; issue #177; PR #268; Actions run `30397522862`; `bench/fleet_gateway_bench.py`; `tests/bench/test_fleet_gateway_bench.py`
 
 ### 2026-07-28 — [amendment] F1c separates gateway affinity from fenced batch ownership
 - What: Added A29 and an F1c implementation candidate. Three independently restartable gateways sit behind an explicit `X-Session-ID` SHA-256 HRW load balancer while retaining ReplicaPool's existing HRW placement. A PostgreSQL BatchStore stores ordered file chunks and jobs, claims work with `FOR UPDATE SKIP LOCKED`, renews DB-clock leases on a separate connection, keeps claim-produced outputs pending, and atomically publishes only the active fencing token's referenced terminal files. The one F1c kind driver hashes and independently replays raw LB, placement, membership, Pod, HTTP, file, job, claim, runtime-image, and rendered-manifest evidence.

@@ -653,9 +653,17 @@ over (α, β) (pure function over the dataset; no online learning).
   different gateways. The driver kills the immutable active claim-owner Pod,
   then requires a different gateway UID and larger fencing token to reclaim
   the job after lease expiry, one terminal commit, and byte-identical output
-  through all three gateways including the restarted one. Raw traffic, LB,
-  placement, membership, Pod, batch HTTP and claim-audit sidecars are hashed
-  and independently replayed. F1a run `30374404150` and F1b run `30387260062`
-  retain their capacity, discovery, provenance and raw-evidence precedents;
-  neither is rerun. F1c adds no latency percentile SLO: elapsed times are
-  diagnostic and only a generous stuck-run cap is binding.
+  through all three gateways including the restarted one. Pod absence is an
+  eventually consistent Kubernetes polling observation, not the actual stop
+  timestamp in the PostgreSQL clock domain: replay therefore requires the kill
+  request under the old lease, no later old-fence renewal, exact prior-lease
+  expiry before the higher-fence reclaim, and eventual old-UID absence, but
+  does not order the absence-observation timestamp before reclaim. Likewise,
+  Kubernetes may omit a source pin from the display `status.image`; for a
+  digest-pinned image, the runtime `status.imageID` must equal that source pin
+  exactly. Raw traffic, LB, placement, membership, Pod, batch HTTP and
+  claim-audit sidecars are hashed and independently replayed. F1a run
+  `30374404150` and F1b run `30387260062` retain their capacity, discovery,
+  provenance and raw-evidence precedents; neither is rerun. F1c adds no latency
+  percentile SLO: elapsed times are diagnostic and only a generous stuck-run
+  cap is binding.

@@ -242,9 +242,11 @@ def _passing_evidence(tmp_path: Path) -> Path:
                 "images": [
                     {
                         "name": "postgres",
-                        "image": postgres_image,
+                        # Kubernetes status.image keeps the display tag while
+                        # status.imageID carries the digest-pinned identity.
+                        "image": postgres_image.rpartition("@")[0],
                         "image_id": "docker-pullable://postgres@sha256:"
-                        + "4" * 64,
+                        + "3" * 64,
                     }
                 ],
             }
@@ -776,6 +778,43 @@ def test_offline_verifier_reconstructs_the_complete_gate(tmp_path: Path) -> None
     assert all(result["checks"].values())
     assert result["summary"]["affinity_requests"] == 14
     assert result["summary"]["batch_lines"] == gateway_bench.DEFAULT_BATCH_LINES
+
+
+def test_verifier_accepts_delayed_owner_absence_observation(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _passing_evidence(tmp_path)
+    lifecycle = gateway_bench._read_jsonl(tmp_path / "batch-lifecycle.jsonl")
+    owner_killed = next(row for row in lifecycle if row["kind"] == "owner_killed")
+    reclaimed = next(row for row in lifecycle if row["kind"] == "reclaimed")
+    owner_killed["at_unix_ns"] = reclaimed["at_unix_ns"] + 1
+    _write_jsonl(tmp_path / "batch-lifecycle.jsonl", lifecycle)
+    _refresh_artifact(manifest_path, "batch-lifecycle.jsonl")
+
+    result = gateway_bench.verify_evidence(tmp_path)
+
+    assert result["passed"]
+    assert result["checks"][
+        "durable_claim_audit_has_one_new-fence_terminal_commit"
+    ]
+
+
+def test_verifier_rejects_a_postgres_runtime_digest_different_from_the_pin(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _passing_evidence(tmp_path)
+    rows = gateway_bench._read_jsonl(tmp_path / "postgres-pods.jsonl")
+    for row in rows:
+        row["images"][0]["image_id"] = "docker-pullable://postgres@sha256:" + "9" * 64
+    _write_jsonl(tmp_path / "postgres-pods.jsonl", rows)
+    _refresh_artifact(manifest_path, "postgres-pods.jsonl")
+
+    result = gateway_bench.verify_evidence(tmp_path)
+
+    assert not result["passed"]
+    assert not result["checks"][
+        "runtime_gateway_mock_and_postgres_images_match_sources"
+    ]
 
 
 def test_verifier_rejects_a_tampered_sidecar_digest(tmp_path: Path) -> None:
