@@ -261,6 +261,23 @@ def _scheduler_event_count(
     )
 
 
+def _has_scheduler_queue_evidence(
+    queue_depth: dict[str, float],
+    queue_high_watermark: dict[str, float],
+) -> bool:
+    batch_depth = sum(
+        value
+        for series, value in queue_depth.items()
+        if 'request_class="batch"' in series
+    )
+    batch_high_watermark = sum(
+        value
+        for series, value in queue_high_watermark.items()
+        if 'request_class="batch"' in series
+    )
+    return batch_depth > 0 and batch_high_watermark >= batch_depth
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -522,8 +539,9 @@ async def run(args) -> dict:
             and _scheduler_event_count(scheduler_delta, "batch", "complete")
             == batch_count
         ),
-        "scheduler_queue_evidence_published": bool(
-            scheduler_queue_at_window and scheduler_queue_high_watermark
+        "scheduler_queue_evidence_published": _has_scheduler_queue_evidence(
+            scheduler_queue_at_window,
+            scheduler_queue_high_watermark,
         ),
         "clean_source": not source_environment["tracked_dirty"],
         "provenance_pinned": (

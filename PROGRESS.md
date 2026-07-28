@@ -346,6 +346,9 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   artifact is generated only after an untimed
   warmup from a clean implementation commit and pins benchmark/config hashes,
   image digest, model revision, `/backends` topology, and GPU inventory.
+  The gate requires a positive batch queue at the measurement boundary and a
+  batch high-watermark at least as large as that depth; merely publishing
+  zero-valued gauge series cannot satisfy the queue-evidence assertion.
 - Why: FIFO admission lets queued batch prefills occupy every active slot and
   makes a feasible interactive SLO fail during overload. Gateway-owned
   classification prevents clients from self-promoting, while work-conserving
