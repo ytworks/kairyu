@@ -1560,6 +1560,114 @@ class TestF5Logic:
             controller.started()
         assert controller.decide().action == "shed"
 
+    def test_admission_controller_atomic_lease_lifecycle(self):
+        from kairyu.entrypoints.server.slo import AdmissionController
+
+        clock = {"t": 0.0}
+        controller = AdmissionController(
+            ttft_slo_s=1.0,
+            defer_threshold_s=2.0,
+            now=lambda: clock["t"],
+        )
+        lease = controller.begin()
+
+        assert lease.decision.action == "admit"
+        assert lease.started_at == 0.0
+        assert lease.concurrency_at_start == 1
+        assert controller.snapshot().in_flight == 1
+
+        clock["t"] = 0.5
+        lease.finished_first_token()
+        lease.completed()
+        assert controller.in_flight == 0
+
+        with pytest.raises(RuntimeError, match="already completed"):
+            lease.completed()
+        with pytest.raises(RuntimeError, match="after completion"):
+            lease.finished_first_token()
+
+    def test_admission_lease_freezes_concurrency_and_shed_does_not_reserve(self):
+        from kairyu.entrypoints.server.slo import AdmissionController
+
+        clock = {"t": 0.0}
+        controller = AdmissionController(
+            ttft_slo_s=0.25,
+            defer_threshold_s=0.5,
+            now=lambda: clock["t"],
+        )
+        first = controller.begin()
+        second = controller.begin()
+        assert first.concurrency_at_start == 1
+        assert second.concurrency_at_start == 2
+
+        clock["t"] = 1.0
+        first.finished_first_token()
+        # 0.8 * optimistic 0.01 + 0.2 * (1 second / frozen concurrency 1)
+        assert controller.snapshot().ttft_per_unit_ema_s == pytest.approx(0.208)
+        shed = controller.begin()
+        assert shed.decision.action == "shed"
+        assert not shed.active
+        assert controller.in_flight == 2
+
+        second.finished_first_token()
+        first.completed()
+        second.completed()
+        assert controller.in_flight == 0
+
+    def test_deferred_work_is_bounded_but_does_not_poison_interactive_ema(self):
+        from kairyu.entrypoints.server.slo import AdmissionController
+
+        clock = {"t": 0.0}
+        controller = AdmissionController(
+            ttft_slo_s=0.25,
+            defer_threshold_s=1.0,
+            now=lambda: clock["t"],
+        )
+        first = controller.begin()
+        second = controller.begin()
+        clock["t"] = 1.0
+        first.finished_first_token()
+        ema = controller.snapshot().ttft_per_unit_ema_s
+
+        deferred = controller.begin()
+        assert deferred.decision.action == "defer"
+        assert controller.snapshot().deferred_in_flight == 1
+        clock["t"] = 10.0
+        deferred.finished_first_token()
+        assert controller.snapshot().ttft_per_unit_ema_s == ema
+
+        another_deferred = controller.begin()
+        assert another_deferred.decision.action == "defer"
+        shed = controller.begin()
+        assert shed.decision.action == "shed"
+        assert controller.snapshot().in_flight == 4
+
+        second.finished_first_token()
+        for lease in (first, second, deferred, another_deferred):
+            lease.completed()
+        assert controller.snapshot().in_flight == 0
+        assert controller.snapshot().interactive_in_flight == 0
+        assert controller.snapshot().deferred_in_flight == 0
+
+    @pytest.mark.parametrize(
+        ("slo", "threshold"),
+        [
+            (float("nan"), None),
+            (float("inf"), None),
+            (1.0, 1.0),
+            (1.0, 0.5),
+            (1.0, float("nan")),
+            (1.0, float("inf")),
+        ],
+    )
+    def test_admission_controller_rejects_invalid_thresholds(
+        self, slo, threshold
+    ):
+        from kairyu.entrypoints.server.slo import AdmissionController
+
+        with pytest.raises(ValueError):
+            AdmissionController(slo, threshold)
+
     def test_autoscale_hysteresis_table(self):
         from kairyu.entrypoints.server.slo import autoscale_decision
 

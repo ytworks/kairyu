@@ -267,8 +267,9 @@ inference locally.
 orders by (priority, arrival); smaller integers win (the vLLM wire contract)
 and the starvation guard improves a waiting request after `age_s`. (b) SLO
 early rejection: `slo.py` `AdmissionController` — a TTFT
-predictor from queue depth + running EMA of step time; over-SLO requests
-are shed (429 `slo_shed`) or deferred to batch (`defer` decision recorded).
+predictor from gateway-visible in-flight work and a running EMA of observed
+TTFT per admission-time concurrency unit; over-SLO requests are shed or
+deferred to lower-priority batch scheduling by the caller.
 (c) `autoscale.py`: pure decision function `(metrics window) →
 scale_up/down/hold + reason` with hysteresis; logged, not executed (the
 executor is a deploy-day k8s HPA/keda adapter).
@@ -335,6 +336,30 @@ environment, arrivals, TTFT samples, Batch API states, counters, and assertions
 are in
 `bench/results/f5a-priority-overload-qwen3-32b-tp8-2026-07-28.json`; reproduce
 them with `uv run python bench/priority_overload_gpu_bench.py --assert-gate`.
+
+**SLO-admission validation amendment (2026-07-28, issue #192).**
+`AdmissionController.begin()` now makes the prediction and reserves the
+accepted work under one lock, returning a lease with exactly-once first-token
+feedback and completion. The EMA freezes interactive concurrency at admission
+instead of dividing by an unrelated later count. Interactive TTFT prediction
+excludes already-deferred batch work because the priority scheduler prevents
+that work from advancing ahead of a new interactive request; total active work
+still caps the deferred backlog before `shed`, and deferred TTFT does not train
+the interactive EMA. Non-finite or inverted thresholds, lifecycle underflow,
+and duplicate feedback/closure fail loudly.
+
+The F5c harness uses fresh production `Scheduler` instances for matched
+queue-and-hope and policy arms over predeclared underload, smooth exact-2x, and
+bursty exact-2x traces. `admit` enters interactive priority, `defer` enters
+lower-priority batch, and `shed` never reaches the scheduler. Goodput is the
+number of admitted interactive requests with measured TTFT within the fixed
+two-tick SLO divided by the fixed 400-tick arrival window; deferred work and
+drain time cannot inflate it. FP/FN truth comes from a separate production
+Scheduler replay that freezes prior policy decisions and force-admits only the
+target request, so neither predictor output nor the baseline arm labels itself.
+Per-request decisions/outcomes and per-tick queue/schedule deltas make the raw
+queue reconstructible. The homogeneous one-token workload isolates admission
+behavior and is not evidence for a variable-prompt cost model.
 
 ### D7 — Open WebUI + frontier bench
 
