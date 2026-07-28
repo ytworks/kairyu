@@ -58,6 +58,11 @@ REPLICA_COUNT=12
 GATEWAY_IMAGE=kairyu:dev
 MOCK_IMAGE=kairyu-f1a-mock:dev
 POSTGRES_IMAGE=postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
+# Classic Docker cannot hand a tag@digest reference directly to
+# ``kind load docker-image`` even though the pinned pull succeeded. Load and
+# inspect the same manifest through its local tag; the Pod spec and verifier
+# still bind the immutable digest above.
+POSTGRES_LOAD_IMAGE=postgres:17.6-bookworm
 GATEWAY_CRI_IMAGE_METADATA="${RESULTS_DIR}/gateway-cri-image.json"
 MOCK_CRI_IMAGE_METADATA="${RESULTS_DIR}/mock-cri-image.json"
 POSTGRES_CRI_IMAGE_METADATA="${RESULTS_DIR}/postgres-cri-image.json"
@@ -244,6 +249,7 @@ fi
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$MOCK_IMAGE" "$ARCHIVE_MOCK_DIR"
 "$DOCKER" pull "$POSTGRES_IMAGE"
+"$DOCKER" image tag "$POSTGRES_IMAGE" "$POSTGRES_LOAD_IMAGE"
 assert_clean_source
 
 GATEWAY_IMAGE_DIGEST=$(
@@ -287,7 +293,7 @@ CLUSTER_MAY_EXIST=1
   --wait 180s
 CLUSTER_CREATED=1
 "$KIND" load docker-image \
-  "$GATEWAY_IMAGE" "$MOCK_IMAGE" "$POSTGRES_IMAGE" \
+  "$GATEWAY_IMAGE" "$MOCK_IMAGE" "$POSTGRES_LOAD_IMAGE" \
   --name "$CLUSTER_NAME"
 mapfile -t kind_nodes < <("$KIND" get nodes --name "$CLUSTER_NAME")
 if ((${#kind_nodes[@]} != 1)); then
@@ -302,7 +308,7 @@ run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
   crictl inspecti --output json "$MOCK_IMAGE" \
   >"$MOCK_CRI_IMAGE_METADATA"
 run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
-  crictl inspecti --output json "$POSTGRES_IMAGE" \
+  crictl inspecti --output json "$POSTGRES_LOAD_IMAGE" \
   >"$POSTGRES_CRI_IMAGE_METADATA"
 cri_status_digest() {
   local image_reference=$1
