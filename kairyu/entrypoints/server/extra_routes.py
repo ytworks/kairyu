@@ -110,6 +110,45 @@ def add_extra_routes(
                         "message": "encoding_format must be 'float' or 'base64'",
                         "type": "invalid_request_error", "code": None}},
                 )
+            owner = getattr(http_request.state, "tenant", None) or "default"
+            admission = getattr(http_request.state, "tenant_admission", None)
+            if admission is not None:
+                # Embedding backends do not expose authoritative scheduled-token
+                # usage, so reserve and retain a conservative UTF-8 work bound.
+                # The per-item envelope covers tokenizer/template metadata.
+                work_bound = sum(
+                    max(1, len(text.encode()) + 32)
+                    for text in texts
+                )
+                admitted = admission.reserve_tokens(
+                    work_bound,
+                    refundable_on_exact_usage=False,
+                )
+                metrics = getattr(http_request.app.state, "metrics", None)
+                if metrics is not None:
+                    metrics.record_tenant_admission(
+                        owner,
+                        source="http",
+                        admitted=admitted,
+                        reason=admission.reason,
+                    )
+                if not admitted:
+                    return JSONResponse(
+                        status_code=429,
+                        headers={"Retry-After": "1"},
+                        content={
+                            "error": {
+                                "message": (
+                                    f"tenant {owner!r} admission limit exceeded "
+                                    f"({admission.reason})"
+                                ),
+                                "type": "rate_limit_error",
+                                "code": "tenant_rate_limited",
+                            }
+                        },
+                    )
+                http_request.state.tenant_metric_admitted = True
+                admission.mark_dispatched()
             vectors = await backend.embed(texts)
             data = []
             for index, vector in enumerate(vectors):
@@ -126,12 +165,13 @@ def add_extra_routes(
                 "model": resolved_model,
                 "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
             }
-            owner = getattr(http_request.state, "tenant", None) or "default"
             record_state_usage(
                 http_request.app.state,
                 tenant=owner,
                 model=resolved_model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=0,
+                reservation=admission,
+                usage_exact=False,
             )
             return response

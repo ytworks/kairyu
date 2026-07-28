@@ -68,6 +68,9 @@ def _preflight_server(
             tenant: TenantLimits(
                 requests_per_minute=limits.requests_per_minute,
                 tokens_per_minute=limits.tokens_per_minute,
+                request_burst=limits.request_burst,
+                token_burst=limits.token_burst,
+                max_in_flight=limits.max_in_flight,
                 interactive_priority=limits.interactive_priority,
                 batch_priority=limits.batch_priority,
             )

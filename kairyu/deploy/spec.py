@@ -113,6 +113,9 @@ class TenantLimitsSection(BaseModel):
 
     requests_per_minute: int = Field(default=600, ge=1)
     tokens_per_minute: int = Field(default=200_000, ge=1)
+    request_burst: int | None = Field(default=None, ge=1)
+    token_burst: int | None = Field(default=None, ge=1)
+    max_in_flight: int | None = Field(default=None, ge=1)
     interactive_priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
     batch_priority: int = Field(default=1, ge=-(2**63), le=2**63 - 1)
 
@@ -216,6 +219,9 @@ class DeploymentSpec(BaseModel):
                     tenant: TenantLimits(
                         requests_per_minute=section.requests_per_minute,
                         tokens_per_minute=section.tokens_per_minute,
+                        request_burst=section.request_burst,
+                        token_burst=section.token_burst,
+                        max_in_flight=section.max_in_flight,
                         interactive_priority=section.interactive_priority,
                         batch_priority=section.batch_priority,
                     )

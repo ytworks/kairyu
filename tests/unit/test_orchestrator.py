@@ -10,6 +10,8 @@ from kairyu.orchestration.orchestrator import (
     Orchestrator,
     PreviewNotSupportedError,
 )
+from kairyu.orchestration.request import OrchestrationRequest
+from kairyu.sampling_params import SamplingParams
 
 SIMPLE = "What is 2?"
 COMPLEX = (
@@ -69,6 +71,29 @@ def test_preview_route_rejects_router_without_preview():
     orchestrator = _orchestrator(router=RouteOnly())
     with pytest.raises(PreviewNotSupportedError, match="does not support preview"):
         orchestrator.preview_route(SIMPLE)
+
+
+def test_auto_admission_bound_accounts_for_internal_fanout() -> None:
+    orchestrator = _orchestrator(budget=Budget(max_steps=4))
+    call = OrchestrationRequest(
+        prompt=COMPLEX,
+        sampling_params=SamplingParams(max_tokens=32),
+    )
+
+    bound = orchestrator.admission_upper_bound(call)
+
+    assert bound.tokens > len(COMPLEX.encode()) + 32
+    assert not bound.refundable_on_exact_usage
+
+    direct_preview_call = OrchestrationRequest(
+        prompt=SIMPLE,
+        sampling_params=SamplingParams(max_tokens=32),
+    )
+    assert orchestrator.preview_route(SIMPLE).target == "tier1"
+    assert (
+        orchestrator.admission_upper_bound(direct_preview_call).tokens
+        > len(SIMPLE.encode()) + 32
+    )
 
 
 def _track_budget_releases(monkeypatch):

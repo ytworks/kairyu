@@ -358,7 +358,12 @@ tenants:
     key-a: tenant-a
     key-b: tenant-b
   limits:
-    tenant-a: {{ requests_per_minute: 1, tokens_per_minute: 1000 }}
+    tenant-a:
+      requests_per_minute: 1
+      tokens_per_minute: 1000
+      request_burst: 1
+      token_burst: 128
+      max_in_flight: 2
     tenant-b: {{ requests_per_minute: 3, tokens_per_minute: 2000 }}
 """
     )
@@ -408,6 +413,9 @@ tenants:
     assert config.limits_for("tenant-a") == TenantLimits(
         requests_per_minute=1,
         tokens_per_minute=1000,
+        request_burst=1,
+        token_burst=128,
+        max_in_flight=2,
     )
     assert config.limits_for("tenant-b") == TenantLimits(
         requests_per_minute=3,

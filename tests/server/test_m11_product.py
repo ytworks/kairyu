@@ -444,6 +444,33 @@ class TestTenancy:
         if limiter is not None:
             assert limiter.charges == [("tenant-a", 12)]
 
+    def test_quota_charge_survives_ledger_admission_failure(self):
+        from kairyu.entrypoints.server.metering import record_tenant_usage
+
+        class FailingLedger:
+            def record(self, *args, **kwargs):
+                raise RuntimeError("ledger full")
+
+        class RecordingLimiter:
+            def __init__(self):
+                self.charges = []
+
+            def charge_tokens(self, tenant, tokens):
+                self.charges.append((tenant, tokens))
+
+        limiter = RecordingLimiter()
+        with pytest.raises(RuntimeError, match="ledger full"):
+            record_tenant_usage(
+                tenant="tenant-a",
+                model="model-a",
+                prompt_tokens=7,
+                completion_tokens=5,
+                ledger=FailingLedger(),
+                limiter=limiter,
+            )
+
+        assert limiter.charges == [("tenant-a", 12)]
+
     def test_usage_counts_prefer_backend_and_openai_usage(self):
         from kairyu.engine.backend import GenerationUsage
         from kairyu.entrypoints.server.metering import resolve_usage_counts
@@ -892,6 +919,78 @@ class TestTenancy:
         assert limiter.admit("t")
         assert not limiter.admit("t")
 
+    def test_fractional_refill_admits_at_exact_boundary(self):
+        clock = {"t": 0.0}
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={
+                    "t": TenantLimits(
+                        requests_per_minute=6,
+                        request_burst=1,
+                    )
+                }
+            ),
+            now=lambda: clock["t"],
+        )
+
+        assert limiter.admit("t")
+        clock["t"] = 10.0
+        assert limiter.admit("t")
+
+    def test_legacy_positional_tenant_limit_priorities_remain_compatible(self):
+        limits = TenantLimits(10, 20, -1, 1)
+
+        assert limits.interactive_priority == -1
+        assert limits.batch_priority == 1
+        assert limits.request_burst is None
+
+    def test_tenant_in_flight_lease_bounds_concurrent_burst(self):
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={
+                    "t": TenantLimits(
+                        requests_per_minute=600,
+                        request_burst=10,
+                        max_in_flight=1,
+                    )
+                }
+            ),
+            now=lambda: 0.0,
+        )
+
+        first = limiter.acquire("t")
+        blocked = limiter.acquire("t")
+        assert first.admitted
+        assert blocked.reason == "in_flight"
+        assert limiter.in_flight("t") == 1
+
+        first.release()
+        first.release()
+        assert limiter.in_flight("t") == 0
+        replacement = limiter.acquire("t")
+        assert replacement.admitted
+        replacement.release()
+
+    def test_explicit_request_burst_is_independent_of_refill_rate(self):
+        clock = {"t": 0.0}
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={
+                    "t": TenantLimits(
+                        requests_per_minute=60,
+                        request_burst=2,
+                    )
+                }
+            ),
+            now=lambda: clock["t"],
+        )
+
+        assert limiter.admit("t")
+        assert limiter.admit("t")
+        assert not limiter.admit("t")
+        clock["t"] = 1.0
+        assert limiter.admit("t")
+
     def test_token_budget_is_enforced(self):
         # S4: a tenant that burns its per-minute token budget is refused the next
         # request, even while its request-rate bucket still has room.
@@ -907,6 +1006,107 @@ class TestTenancy:
         assert not limiter.admit("t")  # refused despite request-rate room
         clock["t"] = 60.0  # a full minute refills the token bucket
         assert limiter.admit("t")
+
+    def test_token_reservation_rejects_before_dispatch_and_refunds_preflight(self):
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={
+                    "t": TenantLimits(
+                        requests_per_minute=600,
+                        tokens_per_minute=100,
+                        token_burst=100,
+                    )
+                }
+            ),
+            now=lambda: 0.0,
+        )
+
+        rejected = limiter.acquire("t")
+        assert not rejected.reserve_tokens(101)
+        rejected.release()
+        assert limiter.token_balance("t") == 100
+        assert limiter.reservation_snapshot()["t"] == 0
+
+        refunded = limiter.acquire("t")
+        assert refunded.reserve_tokens(40)
+        refunded.release()
+        assert limiter.token_balance("t") == 100
+        assert limiter.reservation_snapshot()["t"] == 0
+
+    def test_token_reservation_settles_exact_or_consumes_unknown_work(self):
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={
+                    "t": TenantLimits(
+                        requests_per_minute=600,
+                        tokens_per_minute=100,
+                        token_burst=100,
+                    )
+                }
+            ),
+            now=lambda: 0.0,
+        )
+
+        exact = limiter.acquire("t")
+        assert exact.reserve_tokens(40)
+        exact.mark_dispatched()
+        exact.settle_tokens(10, exact=True)
+        exact.release()
+        assert limiter.token_balance("t") == 90
+
+        unknown = limiter.acquire("t")
+        assert unknown.reserve_tokens(40)
+        unknown.mark_dispatched()
+        unknown.settle_tokens(1, exact=False)
+        unknown.release()
+        assert limiter.token_balance("t") == 50
+        assert limiter.reservation_snapshot()["t"] == 0
+
+    def test_dispatched_failure_consumes_full_reservation_without_leak(self):
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={
+                    "t": TenantLimits(
+                        requests_per_minute=600,
+                        tokens_per_minute=100,
+                        token_burst=100,
+                    )
+                }
+            ),
+            now=lambda: 0.0,
+        )
+        admission = limiter.acquire("t")
+        assert admission.reserve_tokens(40)
+        admission.mark_dispatched()
+
+        admission.release()
+
+        assert limiter.token_balance("t") == 60
+        assert limiter.in_flight("t") == 0
+        assert limiter.reservation_snapshot()["t"] == 0
+
+    def test_actual_work_over_reservation_is_debited_and_reported(self):
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={
+                    "t": TenantLimits(
+                        requests_per_minute=600,
+                        tokens_per_minute=100,
+                        token_burst=100,
+                    )
+                }
+            ),
+            now=lambda: 0.0,
+        )
+        admission = limiter.acquire("t")
+        assert admission.reserve_tokens(20)
+        admission.mark_dispatched()
+
+        admission.settle_tokens(30, exact=True)
+        admission.release()
+
+        assert limiter.token_balance("t") == 70
+        assert limiter.bound_violation_snapshot()["t"] == 1
 
 
 class TestResponseStore:
@@ -1107,6 +1307,78 @@ class TestResponsesApi:
 
 
 class TestEmbeddings:
+    def test_embedding_work_reserves_before_backend_dispatch(self):
+        class RecordingEmbeddings(MockEmbeddingBackend):
+            def __init__(self):
+                super().__init__(dimensions=8)
+                self.calls = 0
+
+            async def embed(self, texts):
+                self.calls += 1
+                return await super().embed(texts)
+
+        backend = RecordingEmbeddings()
+        config = TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=1,
+                    token_burst=1,
+                    max_in_flight=1,
+                )
+            }
+        )
+        app = create_app(
+            {"m": MockBackend()},
+            tenant_config=config,
+            embedding_backends={"embedding-model": backend},
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/embeddings",
+                json={"model": "embedding-model", "input": "hello"},
+            )
+            metrics = client.get("/metrics").text
+
+        assert response.status_code == 429
+        assert backend.calls == 0
+        assert (
+            'kairyu_tenant_in_flight_requests{source="http",tenant="default"} 0.0'
+        ) in metrics
+        assert 'kairyu_tenant_reserved_tokens{tenant="default"} 0.0' in metrics
+
+    def test_embedding_unknown_usage_consumes_full_reservation(self):
+        config = TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=100,
+                    token_burst=100,
+                )
+            }
+        )
+        app = create_app(
+            {"m": MockBackend()},
+            tenant_config=config,
+            embedding_backends={
+                "embedding-model": MockEmbeddingBackend(dimensions=8)
+            },
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/embeddings",
+                json={"model": "embedding-model", "input": "hello"},
+            )
+
+        assert response.status_code == 200
+        assert app.state.tenant_limiter.token_balance("default") == pytest.approx(
+            63,
+            abs=0.1,
+        )
+        assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
+
     def test_sdk_round_trip_base64_default(self, tmp_path):
         import openai
 

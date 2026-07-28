@@ -204,6 +204,16 @@ def add_health_routes(
                 "engine_backend": label,
                 "attention_backend": attention if label in _LOCAL_ATTENTION_BACKENDS else None,
             }
+            tensor_parallel_size = getattr(
+                engine,
+                "tensor_parallel_size",
+                None,
+            )
+            if (
+                type(tensor_parallel_size) is int
+                and tensor_parallel_size >= 1
+            ):
+                entry["tensor_parallel_size"] = tensor_parallel_size
             if isinstance(engine, ReplicaPool):
                 replica = await engine.probe_backends()
                 if replica:  # adopt the replica's (real) attention backend
@@ -213,6 +223,18 @@ def add_health_routes(
                         "kernel_tier": replica.get("kernel_tier"),
                         "versions": replica.get("versions"),
                     }
+                    replica_sizes = {
+                        item.get("tensor_parallel_size")
+                        for item in replica.get("engines", ())
+                        if isinstance(item, dict)
+                        and type(item.get("tensor_parallel_size")) is int
+                    }
+                    if len(replica_sizes) == 1:
+                        replica_size = replica_sizes.pop()
+                        entry["tensor_parallel_size"] = replica_size
+                        entry["via_replica"][
+                            "tensor_parallel_size"
+                        ] = replica_size
             engine_list.append(entry)
 
         role = (

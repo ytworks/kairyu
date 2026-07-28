@@ -18,3 +18,17 @@ services:
       - ../../kairyu:/app/kairyu:ro
       - ../..:/workspace:ro
       - ../../bench/results:/workspace/bench/results
+
+  isolation-gateway:
+    image: kairyu-qwen3-32b-kairyu:latest
+    network_mode: host
+    working_dir: /workspace
+    entrypoint: ["kairyu", "serve"]
+    command: ["examples/qwen3-32b-multi-gpu/noisy-neighbor-gateway.yaml"]
+    environment:
+      KAIRYU_F5B_KEYS: good-key,noisy-key
+    depends_on:
+      - kairyu
+    volumes:
+      - ../../kairyu:/app/kairyu:ro
+      - ../..:/workspace:ro

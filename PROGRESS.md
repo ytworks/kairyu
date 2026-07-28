@@ -177,6 +177,18 @@ The production-shaped Qwen3-32B TP8 gate calibrated 7.6304 requests/s; under
 planned 0.5x interactive plus 1.5x batch load, interactive TTFT p99 was
 1.3025 s with 100% attainment of the fixed 2 s SLO, while batch progressed in
 the mixed window and drained 192/192 afterward.
+F5b single-gateway noisy-neighbor isolation now uses two-stage, constant-time
+admission outside the shared concurrency guard: a request/in-flight lease,
+then a worst-case compute-token reservation after validation but before
+ReplicaPool/scheduler dispatch. Chat, Responses, Completions arrays, Batch, and
+AUTO all share the boundary; `n`/`best_of` prefill fan-out and AUTO's bounded
+internal DAG are included. Exact terminal usage may refund surplus, while
+failure, disconnect, approximate/missing usage, and multi-candidate accounting
+consume the full reservation. In the corrected deterministic 10x trace, the
+protected path admits exactly 120/1,200 noisy requests, completes all 300 good
+requests, bounds good TTFT p99 to one additional service quantum (1 → 2
+seconds), and holds queue high-watermark to 2 versus 301 and p99 298 seconds
+without admission. The Qwen3-32B TP8 bracketed real-server gate is pending.
 G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
 specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
 production gateway exposes direct, standard AUTO (Conductor), and max AUTO
@@ -322,6 +334,47 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F5b reserves worst-case work before shared dispatch
+- What: Corrected the initial #191 design from post-execution token debt plus
+  request-count leases to two-stage admission. Every execution surface now
+  atomically reserves a finite worst-case compute ceiling after validation and
+  before shared engine placement. Candidate prefill fan-out, prompt arrays,
+  tools/response metadata, and AUTO's maximum internal DAG are included.
+  Exact single-candidate terminal usage can refund surplus; missing or
+  approximate usage, failure/disconnect, and multi-candidate work consume the
+  full reservation. Outstanding reservation and in-flight gauges must drain
+  to zero. The refill comparison also tolerates floating-point ulps, correcting
+  the deterministic 6 RPM result from 110 to the exact 120 admissions.
+- Why: Request counts alone allow one long prompt, large output allowance,
+  hidden `best_of`, or AUTO fan-out to occupy scheduler/KV capacity before
+  post-completion charging. Gateway reservation keeps this portable across
+  Kairyu, vLLM, and SGLang without adding tenant logic to the per-token
+  scheduler hot path.
+- Refs: corrects the earlier 2026-07-28 F5b amendment; issue #191; m11 D3/A7;
+  `kairyu/engine/backend.py`; `kairyu/entrypoints/server/tenancy.py`;
+  `kairyu/orchestration/orchestrator.py`; `bench/noisy_neighbor_bench.py`.
+
+### 2026-07-28 — [amendment] F5b bounds 10x noisy-neighbor admission
+- What: Added independent request/token burst capacities and optional
+  per-tenant in-flight leases acquired before global concurrency and held
+  through the final unary/SSE byte. Batch lines now acquire the same lease
+  before shared replica dispatch. Bounded admission/in-flight metrics expose
+  tenant, source, decision, and reason; token debt is charged even if optional
+  ledger admission fails. The deterministic production-component gate drives
+  a noisy tenant at exactly 10x its 6 RPM quota on the same native scheduler
+  as a 15 RPM good tenant. It rejects 1,090/1,200 noisy requests before
+  enqueue, completes all 300 good requests, bounds good TTFT p99 to 2 seconds
+  versus control 1, and holds queue high-watermark to 2. The unprotected
+  matched trace reaches good p99 298 seconds and queue high-watermark 301.
+- Why: A one-minute-capacity request bucket plus post-completion token charging
+  allowed cold concurrent bursts to enter ReplicaPool/GPU capacity before any
+  429. Gateway leases provide constant-time isolation without adding
+  tenant-WFQ work to every scheduler token; `max_in_flight` bounds the
+  remaining post-settlement token exposure.
+- Refs: issue #191; m11 D3; G5 F5b;
+  `kairyu/entrypoints/server/tenancy.py`; `kairyu/batch/worker.py`;
+  `bench/noisy_neighbor_bench.py`.
 
 ### 2026-07-28 — [amendment] F5a holds interactive TTFT under exact 2x overload
 - What: Added signed-int64 priority to Chat Completions, legacy Completions,

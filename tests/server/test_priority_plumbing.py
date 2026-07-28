@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from kairyu import SamplingParams
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
-from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.backend import GenerationRequest, admission_upper_bound
 from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
@@ -41,6 +41,118 @@ def test_tenant_priority_classes_must_preserve_interactive_precedence() -> None:
         match="interactive_priority must be smaller than batch_priority",
     ):
         TenantLimits(interactive_priority=1, batch_priority=1)
+
+
+def test_tenant_quota_rejects_before_shared_replica_dispatch() -> None:
+    replica = _RecordingBackend()
+    app = create_app(
+        {"m": ReplicaPool([replica])},
+        tenant_config=TenantConfig(
+            key_tenants={
+                "good-key": "good",
+                "noisy-key": "noisy",
+            },
+            limits={
+                "good": TenantLimits(requests_per_minute=60),
+                "noisy": TenantLimits(requests_per_minute=1),
+            },
+        ),
+        resolved_api_keys=frozenset({"good-key", "noisy-key"}),
+    )
+
+    with TestClient(app) as client:
+        noisy = [
+            client.post(
+                "/v1/chat/completions",
+                json=_chat_body(),
+                headers={"Authorization": "Bearer noisy-key"},
+            )
+            for _ in range(10)
+        ]
+        good = client.post(
+            "/v1/chat/completions",
+            json=_chat_body(),
+            headers={"Authorization": "Bearer good-key"},
+        )
+        metrics = client.get("/metrics").text
+
+    assert [response.status_code for response in noisy].count(200) == 1
+    assert [response.status_code for response in noisy].count(429) == 9
+    assert all(
+        response.json()["error"]["code"] == "tenant_rate_limited"
+        for response in noisy
+        if response.status_code == 429
+    )
+    assert good.status_code == 200
+    assert len(replica.requests) == 2
+    assert (
+        'kairyu_tenant_admission_total{decision="admitted",'
+        'reason="quota_available",source="http",tenant="noisy"} 1.0'
+    ) in metrics
+    assert (
+        'kairyu_tenant_admission_total{decision="rejected",'
+        'reason="request_quota",source="http",tenant="noisy"} 9.0'
+    ) in metrics
+    assert (
+        'kairyu_tenant_admission_total{decision="admitted",'
+        'reason="quota_available",source="http",tenant="good"} 1.0'
+    ) in metrics
+    assert (
+        'kairyu_tenant_in_flight_requests{source="http",tenant="noisy"} 0.0'
+    ) in metrics
+
+
+def test_token_reservation_rejects_before_replica_and_leaves_zero_gauges() -> None:
+    replica = _RecordingBackend()
+    app = create_app(
+        {"m": ReplicaPool([replica])},
+        tenant_config=TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=1,
+                    token_burst=1,
+                    max_in_flight=1,
+                )
+            }
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", json=_chat_body())
+        metrics = client.get("/metrics").text
+
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "tenant_rate_limited"
+    assert replica.requests == []
+    assert (
+        'kairyu_tenant_admission_total{decision="rejected",'
+        'reason="token_quota",source="http",tenant="default"} 1.0'
+    ) in metrics
+    assert (
+        'kairyu_tenant_in_flight_requests{source="http",tenant="default"} 0.0'
+    ) in metrics
+    assert 'kairyu_tenant_reserved_tokens{tenant="default"} 0.0' in metrics
+
+
+def test_generation_bound_multiplies_prefill_and_decode_candidate_work() -> None:
+    single = GenerationRequest(
+        request_id="single",
+        prompt="hello",
+        sampling_params=SamplingParams(n=1, max_tokens=8),
+    )
+    candidates = GenerationRequest(
+        request_id="candidates",
+        prompt="hello",
+        sampling_params=SamplingParams(n=2, best_of=3, max_tokens=8),
+    )
+
+    one = admission_upper_bound(single)
+    three = admission_upper_bound(candidates)
+
+    assert three.tokens == one.tokens * 3
+    assert one.refundable_on_exact_usage
+    assert not three.refundable_on_exact_usage
 
 
 def test_direct_chat_accepts_vllm_priority_without_gateway_policy() -> None:

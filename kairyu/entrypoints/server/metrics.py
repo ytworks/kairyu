@@ -14,6 +14,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -112,6 +113,38 @@ class _SchedulerCollector:
         yield high_watermark
 
 
+class _TenantLimiterCollector:
+    """Scrape-time view of reservations not yet settled or consumed."""
+
+    def __init__(self) -> None:
+        self._limiter = None
+
+    def set(self, limiter: object) -> None:
+        self._limiter = limiter
+
+    def collect(self) -> Iterator[Metric]:
+        reserved = GaugeMetricFamily(
+            "kairyu_tenant_reserved_tokens",
+            "Worst-case tenant compute tokens reserved before shared dispatch",
+            labels=["tenant"],
+        )
+        violations = CounterMetricFamily(
+            "kairyu_tenant_reservation_bound_violations",
+            "Actual tenant work exceeding its pre-dispatch reservation",
+            labels=["tenant"],
+        )
+        if self._limiter is not None:
+            snapshot = self._limiter.reservation_snapshot()
+            for tenant, tokens in sorted(snapshot.items()):
+                reserved.add_metric([tenant], tokens)
+            for tenant, count in sorted(
+                self._limiter.bound_violation_snapshot().items()
+            ):
+                violations.add_metric([tenant], count)
+        yield reserved
+        yield violations
+
+
 class ServerMetrics:
     """Registry + the request-level metrics recorded by the middleware."""
 
@@ -141,6 +174,18 @@ class ServerMetrics:
             ["request_class", "source"],
             registry=self.registry,
         )
+        self.tenant_admission_total = Counter(
+            "kairyu_tenant_admission",
+            "Tenant admission decisions before shared downstream capacity",
+            ["tenant", "source", "decision", "reason"],
+            registry=self.registry,
+        )
+        self.tenant_in_flight_requests = Gauge(
+            "kairyu_tenant_in_flight_requests",
+            "Admitted tenant requests currently holding downstream capacity",
+            ["tenant", "source"],
+            registry=self.registry,
+        )
         self.usage_requests_total = Counter(
             "kairyu_usage_requests",
             "Successful metered executions by tenant",
@@ -155,14 +200,19 @@ class ServerMetrics:
         )
         self._pool_collector = _PoolCollector()
         self._scheduler_collector = _SchedulerCollector()
+        self._tenant_limiter_collector = _TenantLimiterCollector()
         self.registry.register(self._pool_collector)
         self.registry.register(self._scheduler_collector)
+        self.registry.register(self._tenant_limiter_collector)
 
     def track_pool(self, name: str, pool: ReplicaPool) -> None:
         self._pool_collector.add(name, pool)
 
     def track_scheduler(self, name: str, engine: object) -> None:
         self._scheduler_collector.add(name, engine)
+
+    def track_tenant_limiter(self, limiter: object) -> None:
+        self._tenant_limiter_collector.set(limiter)
 
     def record_priority(self, request_class: str, *, source: str) -> None:
         """Record an explicit bounded class without labeling priority integers."""
@@ -173,6 +223,34 @@ class ServerMetrics:
             request_class=request_class,
             source=source,
         ).inc()
+
+    def record_tenant_admission(
+        self,
+        tenant: str,
+        *,
+        source: str,
+        admitted: bool,
+        reason: str,
+    ) -> None:
+        decision = "admitted" if admitted else "rejected"
+        self.tenant_admission_total.labels(
+            tenant=tenant,
+            source=source,
+            decision=decision,
+            reason=reason,
+        ).inc()
+        in_flight = self.tenant_in_flight_requests.labels(
+            tenant=tenant,
+            source=source,
+        )
+        if admitted:
+            in_flight.inc()
+
+    def record_tenant_release(self, tenant: str, *, source: str) -> None:
+        self.tenant_in_flight_requests.labels(
+            tenant=tenant,
+            source=source,
+        ).dec()
 
     def record_usage(
         self,

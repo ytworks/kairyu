@@ -138,11 +138,24 @@ tenants:
   default_tenant: default
   limits:
     default:
+      request_burst: 8        # initial/refill request burst, not one full minute
+      token_burst: 20000      # token-bucket capacity
+      max_in_flight: 8        # lease held through final streamed body byte
       interactive_priority: 0  # smaller values run first
       batch_priority: 1        # Batch API overrides client-supplied priority
 ```
 
 Every tenant profile must keep `interactive_priority < batch_priority`.
+For noisy-neighbor isolation, configure `request_burst`, `token_burst`, and
+`max_in_flight` explicitly. The tenant lease is acquired outside the global
+concurrency guard, released exactly once after unary/SSE completion or failure,
+and also enforced per Batch API line. After validation, every generation
+surface reserves a worst-case compute ceiling before shared replica placement;
+`n`/`best_of`, prompt arrays, and bounded AUTO fan-out are included. Only exact
+single-candidate terminal usage refunds unused capacity. Failure, disconnect,
+missing usage, and multi-candidate work consume the full reservation.
+`kairyu_tenant_in_flight_requests` and `kairyu_tenant_reserved_tokens` must both
+return to zero after work drains.
 
 ### OpenAI-compatible upstream capabilities
 
@@ -291,7 +304,9 @@ runs exactly this sequence against mock replicas.
   `kairyu_scheduler_priority_events_total`,
   `kairyu_scheduler_queue_depth`, and
   `kairyu_scheduler_queue_high_watermark` series by model and
-  interactive/batch class. Scrape every gateway and replica.
+  interactive/batch class. Tenant-enabled gateways additionally expose
+  `kairyu_tenant_admission_total` by bounded tenant/source/decision/reason and
+  `kairyu_tenant_in_flight_requests`. Scrape every gateway and replica.
 - With a versioned `pricing:` section, `/admin/usage.csv` snapshots the local
   immutable ledger and exports tenant charges for a `[start_ts,end_ts)` period.
   The CSV carries source SHA-256, price-sheet version, Decimal unit rates,

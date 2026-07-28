@@ -144,7 +144,33 @@ flush barrier and performs the subsequent file scan through
 loop. A barrier flushes language/runtime buffers to the OS for reader
 visibility; it deliberately does not call `fsync`, so no power-loss durability
 is claimed.
-Isolation gate: tenant A at its limit 429s while tenant B proceeds; ledger
+Request and token refill rates now have independently configurable burst
+capacities. An optional tenant in-flight lease is acquired before the shared
+global concurrency guard and held until the final unary/SSE body byte; failure
+and disconnect release it exactly once. The same lease is acquired per Batch
+API line before replica dispatch, closing the previous batch quota bypass.
+After validation, a second atomic admission reserves the request's worst-case
+compute ceiling before ReplicaPool/scheduler placement. The backend seam owns
+the direct-request bound, including tools/response metadata and
+`n`/`best_of` prefill fan-out; Orchestrator owns the maximum AUTO DAG bound.
+Prompt arrays reserve their sum before any member dispatches. Exact
+single-candidate terminal usage may refund surplus. Failure, disconnect,
+approximate/missing usage, and multi-candidate billing consume the full
+reservation, so optional ledger failure cannot make GPU work free. Bounded
+admission counters and in-flight/reserved-token gauges expose the boundary.
+
+The deterministic F5b isolation gate drives one tenant at 60 requests/minute
+against a 6 requests/minute quota while a good tenant remains within quota.
+The protected trace admits 120/1,200 noisy requests, rejects 1,080 before the
+shared scheduler, and completes all 300 good requests with TTFT p99 of two
+service seconds versus one in the control. This is the minimum one-service
+quantum interference bound; without admission, good p99 is 298 seconds and
+the shared queue high-watermark grows from 2 to 301. Raw admission, request,
+queue, scheduling, and latency evidence is published by
+`bench/noisy_neighbor_bench.py`.
+
+The earlier isolation gate established that tenant A at its limit 429s while
+tenant B proceeds; ledger
 totals reconcile with returned usage to <0.1%. Dedicated Prometheus counters
 mirror only accepted usage rows (not generic HTTP requests): executions and
 prompt/completion/cached tokens are labeled by the bounded tenant identity. On
@@ -366,7 +392,7 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   TenantLimitMiddleware runs INSIDE auth (added before it) so 401 wins over
   429 and unauthenticated requests never drain buckets; keyless mode →
   tenant "default".
-- **A7 (D3, amended by Issues #90 and #213)**: ledger = O_APPEND single-writer JSONL
+- **A7 (D3, amended by Issues #90, #191, and #213)**: ledger = O_APPEND single-writer JSONL
   (atomic-rename doesn't fit appends); writes happen in handlers, stream
   generators, and successful batch consumers (middleware can't see usage).
   `record` performs only bounded `put_nowait` admission (4,096 records by
@@ -375,6 +401,10 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   rather than blocking a request thread or silently dropping billing data.
   Append/flush/close failures become sticky `AuditWriteError`s and surface on
   the next admission or ordered barrier; no failed write is reported durable.
+  Tenant work is reserved before dispatch and settled before ledger admission,
+  so this failure path cannot bypass quota accounting. Only authoritative
+  terminal usage can refund a single-candidate reservation; unknown work
+  retains the conservative debit.
   `create_app` closes the writer in an outer lifespan after caller/builder
   cleanup finishes or raises, and normal close drains all accepted records
   before closing the handle. `/admin/usage` waits for the ordered flush barrier

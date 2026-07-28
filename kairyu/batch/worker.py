@@ -20,7 +20,7 @@ from pydantic import ValidationError
 
 from kairyu.batch.envelope import BatchLineEnvelope
 from kairyu.batch.store import BatchJob, BatchStore, JsonlFileWriter
-from kairyu.engine.backend import EngineBackend
+from kairyu.engine.backend import EngineBackend, admission_upper_bound
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
@@ -51,6 +51,7 @@ class BatchLineUsage:
     prompt_tokens: int
     completion_tokens: int
     cached_tokens: int
+    quota_accounted: bool = False
 
 
 class BatchWorker:
@@ -128,6 +129,8 @@ class BatchWorker:
         except ValidationError as error:
             return self._line_error(custom_id, invalid_request_payload(str(error)))
 
+        quota_accounted = False
+        metric_admitted = False
         try:
             validated = validate_chat_request(
                 request,
@@ -137,12 +140,107 @@ class BatchWorker:
                 priority=self._tenant_config.limits_for(tenant).batch_priority,
                 scheduling_class="batch",
             )
-            if self._metrics is not None:
-                self._metrics.record_priority(
-                    validated.generation_request.scheduling_class,
-                    source="batch",
+            admission = None
+            acquire = getattr(self._tenant_limiter, "acquire", None)
+            if callable(acquire):
+                admission = acquire(tenant)
+            try:
+                record_admission = getattr(
+                    self._metrics,
+                    "record_tenant_admission",
+                    None,
                 )
-            executed = await execute_chat(validated)
+                if (
+                    admission is not None
+                    and not admission.admitted
+                    and callable(record_admission)
+                ):
+                    record_admission(
+                        tenant,
+                        source="batch",
+                        admitted=False,
+                        reason=admission.reason,
+                    )
+                if admission is not None and not admission.admitted:
+                    return self._line_error(
+                        custom_id,
+                        {
+                            "message": (
+                                f"tenant {tenant!r} admission limit exceeded "
+                                f"({admission.reason})"
+                            ),
+                            "type": "rate_limit_error",
+                            "code": "tenant_rate_limited",
+                        },
+                    )
+                reserve = (
+                    getattr(admission, "reserve_tokens", None)
+                    if admission is not None
+                    else None
+                )
+                if callable(reserve):
+                    bound = admission_upper_bound(validated.generation_request)
+                    quota_accounted = reserve(
+                        bound.tokens,
+                        refundable_on_exact_usage=(
+                            bound.refundable_on_exact_usage
+                        ),
+                    )
+                    if callable(record_admission):
+                        record_admission(
+                            tenant,
+                            source="batch",
+                            admitted=quota_accounted,
+                            reason=admission.reason,
+                        )
+                        metric_admitted = quota_accounted
+                    if not quota_accounted:
+                        return self._line_error(
+                            custom_id,
+                            {
+                                "message": (
+                                    f"tenant {tenant!r} admission limit exceeded "
+                                    f"({admission.reason})"
+                                ),
+                                "type": "rate_limit_error",
+                                "code": "tenant_rate_limited",
+                            },
+                        )
+                elif admission is not None and callable(record_admission):
+                    record_admission(
+                        tenant,
+                        source="batch",
+                        admitted=True,
+                        reason=admission.reason,
+                    )
+                    metric_admitted = True
+                if self._metrics is not None:
+                    self._metrics.record_priority(
+                        validated.generation_request.scheduling_class,
+                        source="batch",
+                    )
+                if quota_accounted:
+                    admission.mark_dispatched()
+                executed = await execute_chat(validated)
+                usage = self._line_usage(
+                    executed,
+                    quota_accounted=quota_accounted,
+                )
+                if quota_accounted:
+                    admission.settle_tokens(
+                        usage.prompt_tokens + usage.completion_tokens,
+                        exact=executed.result.usage is not None,
+                    )
+            finally:
+                if admission is not None and admission.admitted:
+                    admission.release()
+                    record_release = getattr(
+                        self._metrics,
+                        "record_tenant_release",
+                        None,
+                    )
+                    if callable(record_release) and metric_admitted:
+                        record_release(tenant, source="batch")
             response = executed.response
             return (
                 {
@@ -152,11 +250,14 @@ class BatchWorker:
                     "error": None,
                 },
                 None,
-                self._line_usage(executed),
+                usage,
             )
         except ChatRequestError as error:
             usage = (
-                self._line_usage(error.execution)
+                self._line_usage(
+                    error.execution,
+                    quota_accounted=quota_accounted,
+                )
                 if error.execution is not None
                 else None
             )
@@ -167,13 +268,18 @@ class BatchWorker:
             return self._line_error(custom_id, sanitize_backend_error(error))
 
     @staticmethod
-    def _line_usage(executed: ExecutedChat) -> BatchLineUsage:
+    def _line_usage(
+        executed: ExecutedChat,
+        *,
+        quota_accounted: bool = False,
+    ) -> BatchLineUsage:
         details = executed.response.usage.prompt_tokens_details
         return BatchLineUsage(
             model=executed.response.model,
             prompt_tokens=executed.response.usage.prompt_tokens,
             completion_tokens=executed.response.usage.completion_tokens,
             cached_tokens=details.cached_tokens if details is not None else 0,
+            quota_accounted=quota_accounted,
         )
 
     @staticmethod
@@ -280,7 +386,11 @@ class BatchWorker:
                                 cached_tokens=usage.cached_tokens,
                                 ledger=self._usage_ledger,
                                 metrics=self._metrics,
-                                limiter=self._tenant_limiter,
+                                limiter=(
+                                    None
+                                    if usage.quota_accounted
+                                    else self._tenant_limiter
+                                ),
                             )
                         if output is not None:
                             output_writer.append(output)

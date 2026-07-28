@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import asdict, dataclass
 
 from kairyu.engine.backend import (
+    AdmissionUpperBound,
     EngineBackend,
     GenerationRequest,
     GenerationResult,
@@ -390,6 +391,53 @@ class Orchestrator:
         self._validate_call(call, decision)
         self._validate_final_intent(call, decision)
         self._validate_internal_intent(call, decision)
+
+    def admission_upper_bound(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> AdmissionUpperBound:
+        """Worst-route compute ceiling for one public AUTO request.
+
+        The bound belongs here rather than in the HTTP adapter because this
+        object owns route fan-out, refine depth, MoA samples, and internal
+        generation limits.  It includes every possible step plus triangular
+        re-ingestion of preceding generated output into later prompts.
+        """
+
+        call = self._request(request)
+        internal = self._internal_sampling_params(call)
+        if internal.max_tokens is None or call.sampling_params.max_tokens is None:
+            raise ValueError("AUTO tenant admission requires finite token limits")
+        steps = max(1, self._budget.max_steps, self._moa_samples + 1)
+        candidates = max(
+            call.sampling_params.n,
+            call.sampling_params.best_of or call.sampling_params.n,
+        )
+        role_bytes = max(
+            (
+                len(role.prompt.encode("utf-8"))
+                for role in self._roles
+            ),
+            default=0,
+        )
+        supplied_bytes = len(
+            f"{self._shared_prefix}{call.prompt}".encode()
+        )
+        stage_prompt = max(1, supplied_bytes + role_bytes + 256)
+        internal_output = internal.max_tokens
+        final_output = candidates * call.sampling_params.max_tokens
+        preceding_output_reingestion = (
+            internal_output * steps * (steps - 1) // 2
+        )
+        return AdmissionUpperBound(
+            tokens=(
+                steps * stage_prompt
+                + max(0, steps - 1) * internal_output
+                + final_output
+                + preceding_output_reingestion
+            ),
+            refundable_on_exact_usage=False,
+        )
 
     def _conductor_workers(self, notes: list[str]) -> dict[str, EngineBackend]:
         needed = {role.worker for role in self._roles}

@@ -106,6 +106,11 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
     max_tokens = (
         request.max_tokens if request.max_tokens is not None else request.max_completion_tokens
     )
+    # Tenant compute admission needs a finite bound before dispatch.  Sixteen
+    # is already SamplingParams/Kairyu's historical default; materialize it so
+    # remote OpenAI-compatible backends cannot substitute an unbounded default.
+    if max_tokens is None:
+        max_tokens = 16
     return SamplingParams(
         temperature=request.temperature,
         top_p=request.top_p,
