@@ -132,7 +132,7 @@ class JsonlRouterLog:
         )
 
     def _append(self, entry: dict) -> None:
-        self._writer.append(json.dumps(entry))
+        self._writer.append_deferred(lambda entry=entry: json.dumps(entry))
 
     def flush(self) -> None:
         self._writer.flush()

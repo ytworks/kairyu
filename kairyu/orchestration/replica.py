@@ -441,14 +441,31 @@ class ReplicaPool:
         Placement may select any eligible member after preflight, so accepting
         a request that only some members can execute would make behavior depend
         on load or affinity. Backends without a validator retain the historical
-        assumption that they accept the canonical request.
+        assumption that they accept the canonical request. A backend may
+        explicitly publish an immutable ``request_validation_key``; equal keys
+        on the same backend type promise identical validation semantics, so one
+        representative is sufficient. Unknown or unhashable keys retain
+        per-replica validation.
         """
 
         failures: list[str] = []
+        validated_keys: set[tuple[type, object]] = set()
         for replica_id in self._eligible_ids():
-            validate = getattr(self._entries[replica_id].backend, "validate_request", None)
+            backend = self._entries[replica_id].backend
+            validate = getattr(backend, "validate_request", None)
             if validate is None:
                 continue
+            validation_key = getattr(backend, "request_validation_key", None)
+            if validation_key is not None:
+                typed_key = (type(backend), validation_key)
+                try:
+                    if typed_key in validated_keys:
+                        continue
+                    validated_keys.add(typed_key)
+                except TypeError:
+                    # A malformed optional key must not weaken validation.
+                    # Validate this backend independently instead.
+                    pass
             try:
                 validate(request)
             except ValueError as error:

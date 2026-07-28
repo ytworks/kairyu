@@ -260,31 +260,39 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 _pool: ReplicaPool = pool,
                 _log: JsonlRouterLog = pool_log,
             ) -> None:
+                raw_replica_ids = actions.get("replica_ids")
                 replica_ids = tuple(
                     str(replica_id)
-                    for replica_id in actions.get(
-                        "replica_ids",
-                        _pool.replica_ids,
+                    for replica_id in (
+                        raw_replica_ids
+                        if raw_replica_ids is not None
+                        else _pool.replica_ids
                     )
                 )
+                raw_healthy_ids = actions.get("healthy_ids")
                 healthy_ids = tuple(
                     str(replica_id)
-                    for replica_id in actions.get(
-                        "healthy_ids",
-                        tuple(
-                            current_id
-                            for current_id, healthy in (
-                                _pool.healthy_by_id().items()
+                    for replica_id in (
+                        raw_healthy_ids
+                        if raw_healthy_ids is not None
+                        else (
+                            tuple(
+                                current_id
+                                for current_id, healthy in (
+                                    _pool.healthy_by_id().items()
+                                )
+                                if healthy
                             )
-                            if healthy
-                        ),
+                        )
                     )
                 )
+                raw_eligible_ids = actions.get("eligible_ids")
                 eligible_ids = tuple(
                     str(replica_id)
-                    for replica_id in actions.get(
-                        "eligible_ids",
-                        _pool.eligible_ids,
+                    for replica_id in (
+                        raw_eligible_ids
+                        if raw_eligible_ids is not None
+                        else _pool.eligible_ids
                     )
                 )
                 raw_generations = actions.get("generation_by_id", {})

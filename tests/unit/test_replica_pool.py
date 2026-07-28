@@ -55,6 +55,37 @@ class FlakyBackend:
             raise RuntimeError("shutdown failed")
 
 
+class KeyedValidationBackend(FlakyBackend):
+    def __init__(
+        self,
+        validation_key: object,
+        *,
+        rejection: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._validation_key = validation_key
+        self.rejection = rejection
+        self.validation_calls = 0
+
+    @property
+    def request_validation_key(self) -> object:
+        return self._validation_key
+
+    def validate_request(self, request: GenerationRequest) -> None:
+        self.validation_calls += 1
+        if self.rejection is not None:
+            raise ValueError(self.rejection)
+
+
+class UnkeyedValidationBackend(FlakyBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.validation_calls = 0
+
+    def validate_request(self, request: GenerationRequest) -> None:
+        self.validation_calls += 1
+
+
 class BlockingShutdownBackend(FlakyBackend):
     def __init__(self) -> None:
         super().__init__()
@@ -141,6 +172,49 @@ def test_constructor_rejects_invalid_thresholds():
         ReplicaPool([MockBackend()], unhealthy_after=0)
     with pytest.raises(ValueError, match="queue_depth_threshold"):
         ReplicaPool([MockBackend()], queue_depth_threshold=-1)
+
+
+def test_validation_deduplicates_only_explicit_equivalent_backend_contracts():
+    first = KeyedValidationBackend(("openai", "same"))
+    equivalent = KeyedValidationBackend(("openai", "same"))
+    distinct = KeyedValidationBackend(("openai", "different"))
+    unhashable = KeyedValidationBackend(["malformed"])
+    unkeyed_first = UnkeyedValidationBackend()
+    unkeyed_second = UnkeyedValidationBackend()
+    pool = ReplicaPool(
+        {
+            "first": first,
+            "equivalent": equivalent,
+            "distinct": distinct,
+            "unhashable": unhashable,
+            "unkeyed-first": unkeyed_first,
+            "unkeyed-second": unkeyed_second,
+        }
+    )
+
+    pool.validate_request(make_request("validate"))
+
+    assert first.validation_calls == 1
+    assert equivalent.validation_calls == 0
+    assert distinct.validation_calls == 1
+    assert unhashable.validation_calls == 1
+    assert unkeyed_first.validation_calls == 1
+    assert unkeyed_second.validation_calls == 1
+
+
+def test_equivalent_validation_failure_rejects_before_dispatch():
+    rejecting = KeyedValidationBackend("same", rejection="unsupported")
+    equivalent = KeyedValidationBackend("same", rejection="unsupported")
+    pool = ReplicaPool({"rejecting": rejecting, "equivalent": equivalent})
+
+    with pytest.raises(
+        ValueError,
+        match="rejecting: unsupported",
+    ):
+        pool.validate_request(make_request("invalid"))
+
+    assert rejecting.validation_calls == 1
+    assert equivalent.validation_calls == 0
 
 
 async def test_generate_delegates_and_returns_result():

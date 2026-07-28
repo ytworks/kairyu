@@ -11,6 +11,7 @@ from typing import IO
 
 _DEFAULT_MAX_PENDING = 4_096
 _DEFAULT_BATCH_SIZE = 128
+_DEFAULT_MAX_BATCH_BYTES = 64 * 1_024
 
 
 class AuditQueueFull(RuntimeError):
@@ -26,6 +27,14 @@ class _Barrier:
     stop: bool = False
     event: threading.Event = field(default_factory=threading.Event)
     error: AuditWriteError | None = None
+
+
+@dataclass(frozen=True)
+class _DeferredLine:
+    render: Callable[[], str]
+
+
+_WorkItem = str | _DeferredLine | _Barrier
 
 
 class BoundedJsonlWriter:
@@ -46,19 +55,23 @@ class BoundedJsonlWriter:
         *,
         max_pending: int = _DEFAULT_MAX_PENDING,
         batch_size: int = _DEFAULT_BATCH_SIZE,
+        max_batch_bytes: int = _DEFAULT_MAX_BATCH_BYTES,
         open_file: Callable[..., IO[str]] = open,
     ) -> None:
         if max_pending < 1:
             raise ValueError("max_pending must be positive")
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
+        if max_batch_bytes < 1:
+            raise ValueError("max_batch_bytes must be positive")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_pending = max_pending
         self.batch_size = batch_size
+        self.max_batch_bytes = max_batch_bytes
         self._open_file = open_file
         self._lock = threading.Lock()
-        self._queue: queue.Queue[str | _Barrier] | None = None
+        self._queue: queue.Queue[_WorkItem] | None = None
         self._thread: threading.Thread | None = None
         self._closing = False
         self._error: AuditWriteError | None = None
@@ -69,13 +82,13 @@ class BoundedJsonlWriter:
         """Current or most recently closed append handle (diagnostics/tests)."""
         return self._handle
 
-    def _start_locked(self) -> queue.Queue[str | _Barrier]:
+    def _start_locked(self) -> queue.Queue[_WorkItem]:
         thread = self._thread
         if thread is not None and thread.is_alive():
             assert self._queue is not None
             return self._queue
         self._error = None
-        work: queue.Queue[str | _Barrier] = queue.Queue(
+        work: queue.Queue[_WorkItem] = queue.Queue(
             maxsize=self.max_pending
         )
         thread = threading.Thread(
@@ -93,21 +106,36 @@ class BoundedJsonlWriter:
         if self._error is not None:
             raise self._error
 
-    def append(self, line: str) -> None:
-        """Accept one newline-free JSON record without waiting for disk I/O."""
-        if "\n" in line or "\r" in line:
-            raise ValueError("JSONL record must not contain a newline")
+    def _admit(self, item: str | _DeferredLine) -> None:
         with self._lock:
             if self._closing:
                 raise RuntimeError("audit writer is closing")
             self._raise_error_locked()
             work = self._start_locked()
             try:
-                work.put_nowait(line)
+                work.put_nowait(item)
             except queue.Full as error:
                 raise AuditQueueFull(
                     f"audit writer queue is full for {self.path}"
                 ) from error
+
+    def append(self, line: str) -> None:
+        """Accept one newline-free JSON record without waiting for disk I/O."""
+        if "\n" in line or "\r" in line:
+            raise ValueError("JSONL record must not contain a newline")
+        self._admit(line)
+
+    def append_deferred(self, render: Callable[[], str]) -> None:
+        """Queue CPU-side record encoding on the writer thread.
+
+        The callable must return one complete newline-free record. Encoding
+        failures become sticky ``AuditWriteError`` values surfaced by the next
+        append, flush, or close, just like filesystem failures.
+        """
+
+        if not callable(render):
+            raise TypeError("render must be callable")
+        self._admit(_DeferredLine(render))
 
     def _barrier(self, *, stop: bool) -> _Barrier | None:
         with self._lock:
@@ -216,11 +244,29 @@ class BoundedJsonlWriter:
         barrier.event.set()
         return barrier.stop
 
-    def _run(self, work: queue.Queue[str | _Barrier]) -> None:
+    def _render_line(self, item: str | _DeferredLine) -> str | None:
+        if isinstance(item, str):
+            return item
+        try:
+            line = item.render()
+            if not isinstance(line, str):
+                raise TypeError("deferred audit renderer must return str")
+            if "\n" in line or "\r" in line:
+                raise ValueError("JSONL record must not contain a newline")
+        except BaseException as error:
+            self._set_error("encode", error)
+            return None
+        return line
+
+    @staticmethod
+    def _encoded_size(line: str) -> int:
+        return len(line.encode("utf-8")) + 1
+
+    def _run(self, work: queue.Queue[_WorkItem]) -> None:
         handle: IO[str] | None = None
         deferred: _Barrier | None = None
         while True:
-            item: str | _Barrier
+            item: _WorkItem
             if deferred is not None:
                 item = deferred
                 deferred = None
@@ -231,8 +277,13 @@ class BoundedJsonlWriter:
                     return
                 continue
 
-            records = [item]
-            while len(records) < self.batch_size:
+            first = self._render_line(item)
+            records = [] if first is None else [first]
+            batch_bytes = 0 if first is None else self._encoded_size(first)
+            while (
+                len(records) < self.batch_size
+                and batch_bytes < self.max_batch_bytes
+            ):
                 try:
                     following = work.get_nowait()
                 except queue.Empty:
@@ -240,5 +291,9 @@ class BoundedJsonlWriter:
                 if isinstance(following, _Barrier):
                     deferred = following
                     break
-                records.append(following)
-            handle = self._write_batch(handle, records)
+                rendered = self._render_line(following)
+                if rendered is not None:
+                    records.append(rendered)
+                    batch_bytes += self._encoded_size(rendered)
+            if records:
+                handle = self._write_batch(handle, records)

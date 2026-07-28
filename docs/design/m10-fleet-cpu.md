@@ -1,7 +1,7 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D2/D5/A16/A17 amended 2026-07-28). Reviewed (1-reviewer panel
+2026-07-27; D2/D5/A16–A19 amended 2026-07-28). Reviewed (1-reviewer panel
 with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
@@ -305,3 +305,24 @@ over (α, β) (pure function over the dataset; no online learning).
   httpcore 1.0 scans one cross-origin list and performs quadratic idle cleanup.
   A18 therefore supersedes A17's shared-httpx-transport choice while retaining
   its pool-scope TLS setup objective and per-operation timeout contract.
+- **A19**: request validation preserves the intersection of all eligible
+  replica contracts without repeating an identical immutable contract for
+  every replica. A backend may explicitly publish a hashable
+  `request_validation_key`; `ReplicaPool` validates one representative only
+  when both the concrete backend type and key match. Missing, `None`, or
+  unhashable keys remain per-replica, and every distinct type/key remains in
+  the intersection. `OpenAICompatBackend` uses its frozen resolved capability
+  contract as that key because its validator depends on no address, client, or
+  model-instance state; subclasses fall back to per-replica validation unless
+  they explicitly publish their complete contract. At 200 equivalent replicas
+  this reduces measured validation from 1.785 ms to 0.143 ms median without
+  changing placement or rejection semantics. Router and membership records
+  still snapshot and enter the bounded queue synchronously, preserving
+  event-loop/outbox order and immediate overflow behavior, but JSON encoding
+  now executes on the existing lifecycle-owned writer thread. Writer batches
+  are bounded by both 128 records and 64 KiB of encoded JSON, preventing a
+  burst of large membership rows from retaining the Python GIL across an
+  event-loop scheduling quantum while preserving batching for small placement
+  rows. Encoding and filesystem failures remain sticky and surface through
+  append, flush, or close; no generic executor task or second unordered outbox
+  is introduced.

@@ -1,6 +1,8 @@
 import json
+import threading
 import time
 
+import kairyu.orchestration.router as router_module
 from kairyu.orchestration.features import extract_features
 from kairyu.orchestration.router import JsonlRouterLog, RuleRouter
 
@@ -78,6 +80,24 @@ def test_jsonl_router_log_records_decision(tmp_path):
     assert "query_sha256" in line
     assert SIMPLE_QUERY not in json.dumps(line)  # raw text is not logged
     log.close()
+
+
+def test_jsonl_router_log_defers_encoding_to_writer_thread(tmp_path, monkeypatch):
+    producer_thread = threading.get_ident()
+    encoder_threads: list[int] = []
+    original_dumps = router_module.json.dumps
+
+    def tracked_dumps(value):
+        encoder_threads.append(threading.get_ident())
+        return original_dumps(value)
+
+    monkeypatch.setattr(router_module.json, "dumps", tracked_dumps)
+    log = JsonlRouterLog(tmp_path / "router.jsonl")
+    log.record(SIMPLE_QUERY, RuleRouter().route(SIMPLE_QUERY))
+    log.close()
+
+    assert encoder_threads
+    assert all(thread_id != producer_thread for thread_id in encoder_threads)
 
 
 def test_record_replica_hashes_session_id(tmp_path):

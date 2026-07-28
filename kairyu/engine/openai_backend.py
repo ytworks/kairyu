@@ -352,6 +352,22 @@ class OpenAICompatBackend:
 
         return self._capabilities
 
+    @property
+    def request_validation_key(self) -> OpenAIRequestCapabilities | None:
+        """Identity for replicas with exactly equivalent request validation.
+
+        ``ReplicaPool`` may validate one representative for backends that
+        explicitly publish the same immutable key.  The OpenAI compatibility
+        validator depends only on this resolved capability contract, never on
+        the replica address, model instance, or HTTP client. A subclass must
+        explicitly opt back in because an overridden validator may depend on
+        additional per-instance state.
+        """
+
+        if type(self) is not OpenAICompatBackend:
+            return None
+        return self._capabilities
+
     def validate_request(self, request: GenerationRequest) -> None:
         """Fail unsupported intent before dispatch, metering, or client creation."""
 

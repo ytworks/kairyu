@@ -171,6 +171,24 @@ def test_close_drains_batches_and_writer_can_restart(tmp_path):
     ]
 
 
+def test_deferred_encoding_batches_are_bounded_by_utf8_bytes(tmp_path):
+    open_file = _OpenFile()
+    writer = BoundedJsonlWriter(
+        tmp_path / "audit.jsonl",
+        batch_size=128,
+        max_batch_bytes=16,
+        open_file=open_file,
+    )
+
+    for index in range(3):
+        writer.append_deferred(
+            lambda index=index: f'{{"record":{index},"padding":"xxxxxxxx"}}'
+        )
+    writer.close()
+
+    assert open_file.handles[0].write_calls == 3
+
+
 def test_flush_surfaces_sticky_disk_error(tmp_path):
     writer = BoundedJsonlWriter(
         tmp_path / "audit.jsonl",
@@ -219,3 +237,41 @@ def test_concurrent_producers_preserve_complete_jsonl_records(tmp_path):
         for producer in range(4)
         for index in range(100)
     }
+
+
+def test_deferred_renderer_runs_on_writer_thread(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    writer = BoundedJsonlWriter(path)
+    producer_thread = threading.get_ident()
+    renderer_threads: list[int] = []
+
+    def render() -> str:
+        renderer_threads.append(threading.get_ident())
+        return '{"record":0}'
+
+    writer.append_deferred(render)
+    writer.close()
+
+    assert renderer_threads
+    assert renderer_threads[0] != producer_thread
+    assert path.read_text().splitlines() == ['{"record":0}']
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        lambda: 1,
+        lambda: '{"record":0}\n',
+        lambda: (_ for _ in ()).throw(ValueError("encode failed")),
+    ],
+)
+def test_deferred_renderer_failure_is_sticky(tmp_path, render):
+    writer = BoundedJsonlWriter(tmp_path / "audit.jsonl")
+    writer.append_deferred(render)
+
+    with pytest.raises(AuditWriteError, match="encode failed"):
+        writer.flush()
+    with pytest.raises(AuditWriteError, match="encode failed"):
+        writer.append('{"record":1}')
+    with pytest.raises(AuditWriteError, match="encode failed"):
+        writer.close()

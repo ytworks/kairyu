@@ -1045,6 +1045,47 @@ async def test_owned_client_factory_creates_once_and_closes_with_backend():
     assert backend._client is None
 
 
+def test_validation_key_is_exactly_the_immutable_capability_contract():
+    first = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="kairyu",
+    )
+    second = OpenAICompatBackend(
+        base_url="http://replica-b:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="kairyu",
+    )
+    different = OpenAICompatBackend(
+        base_url="http://replica-c:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="generic",
+    )
+
+    assert first.request_validation_key == first.capabilities
+    assert first.request_validation_key == second.request_validation_key
+    assert first.request_validation_key != different.request_validation_key
+    assert isinstance(hash(first.request_validation_key), int)
+
+
+def test_validation_key_requires_subclasses_to_explicitly_opt_in():
+    class StatefulValidationBackend(OpenAICompatBackend):
+        def validate_request(self, request):
+            return None
+
+    backend = StatefulValidationBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="kairyu",
+    )
+
+    assert backend.request_validation_key is None
+
+
 async def test_client_factory_rejects_a_closed_client():
     client = httpx.AsyncClient(transport=_ok_transport({}))
     await client.aclose()
