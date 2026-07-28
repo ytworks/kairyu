@@ -72,6 +72,10 @@ def test_trace_and_initial_cache_are_deterministic() -> None:
     assert first == second
     assert first.replicas == 500
     assert f2a.profile_config("formal").uniform_rounds == 21
+    assert (
+        f2a.profile_config("formal").uniform_warmup_requests_per_arm
+        == 512
+    )
     assert f2a.profile_config("formal").uniform_sign_min_rounds == 15
     assert f2a.cache_seed_rows(first) == f2a.cache_seed_rows(second)
     assert [
@@ -208,6 +212,9 @@ def test_replay_rejects_manifest_metric_tampering(
         "summary_request_count",
         "summary_wall",
         "summary_dispatch_sum",
+        "warmup_completed_count",
+        "warmup_digest",
+        "warmup_interval",
         "summary_emitted_order",
         "global_summary_overlap",
         "arm_order",
@@ -236,6 +243,32 @@ def test_replay_rejects_summary_order_and_source_drift_tampering(
     elif tamper_kind == "summary_dispatch_sum":
         summary = next(row for row in rows if row.get("type") == "round_summary")
         summary["dispatch_sum_ns"] = int(summary["dispatch_sum_ns"]) + 1
+    elif tamper_kind == "warmup_completed_count":
+        summary = next(
+            row
+            for row in rows
+            if row.get("type") == "round_summary"
+            and row.get("trace") == "uniform"
+        )
+        summary["warmup_completed_count"] = (
+            int(summary["warmup_completed_count"]) - 1
+        )
+    elif tamper_kind == "warmup_digest":
+        summary = next(
+            row
+            for row in rows
+            if row.get("type") == "round_summary"
+            and row.get("trace") == "uniform"
+        )
+        summary["warmup_trace_sha256"] = "f" * 64
+    elif tamper_kind == "warmup_interval":
+        summaries = [
+            row for row in rows if row.get("type") == "round_summary"
+        ]
+        previous, current = summaries[1:3]
+        current["warmup_started_ns"] = (
+            int(previous["wall_finished_ns"]) - 1
+        )
     elif tamper_kind == "summary_emitted_order":
         summary_indices = [
             index
@@ -260,6 +293,7 @@ def test_replay_rejects_summary_order_and_source_drift_tampering(
         paired = next(row for row in rows if row.get("type") == "paired_round")
         paired["policy_order"] = list(reversed(paired["policy_order"]))
     else:
+        assert tamper_kind == "source_drift"
         run = next(row for row in rows if row.get("type") == "run")
         run["source_end"]["files"][0]["sha256"] = "f" * 64
         manifest["source_end"] = run["source_end"]

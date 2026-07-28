@@ -121,12 +121,23 @@ class TestPrefixIndex:
         assert index.candidate_ids(replacement_keys) == ()
         assert index._replicas_by_first_key == {}
 
+    def test_concurrent_cold_preparations_merge_completed_candidates(self):
+        index = PrefixIndex(chunk_chars=4)
+        first = index.prepare("aaaabbbb")
+        second = index.prepare("aaaabbbb")
+        assert isinstance(first, str)
+        assert first == second
+
+        index.observe_prepared("r0", first, False)
+        index.observe_prepared("r1", second, False)
+
+        assert index.candidate_ids((first,)) == ("r0", "r1")
+
 
 class TestPrefixRouting:
-    def test_cold_selection_hashes_once_skips_overlap_scan_and_runs_one_hrw(
+    def test_cold_selection_skips_500_overlap_scans_and_runs_one_hrw(
         self, monkeypatch
     ):
-        import kairyu.orchestration.prefix_index as prefix_module
         import kairyu.orchestration.replica as replica_module
 
         class SpyIndex(PrefixIndex):
@@ -144,14 +155,6 @@ class TestPrefixRouting:
             {replica_id: MockBackend() for replica_id in replica_ids},
             prefix_index=index,
         )
-        real_prompt_chunks = prefix_module.prompt_chunks
-        hash_passes = 0
-
-        def counted_prompt_chunks(prompt, chunk_chars=256):
-            nonlocal hash_passes
-            hash_passes += 1
-            return real_prompt_chunks(prompt, chunk_chars)
-
         real_hrw = replica_module._rendezvous_winner
         hrw_calls = 0
 
@@ -160,7 +163,6 @@ class TestPrefixRouting:
             hrw_calls += 1
             return real_hrw(session_id, candidates, encoded)
 
-        monkeypatch.setattr(prefix_module, "prompt_chunks", counted_prompt_chunks)
         monkeypatch.setattr(replica_module, "_rendezvous_winner", counted_hrw)
 
         selected, reason, session_id = pool._select(
@@ -170,9 +172,106 @@ class TestPrefixRouting:
         assert selected in replica_ids
         assert reason == "session_affinity"
         assert session_id == "cold-session"
-        assert hash_passes == 1
         assert index.overlap_key_calls == []
         assert hrw_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_successful_cold_then_warm_hashes_each_chunk_at_most_once(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        import kairyu.orchestration.prefix_index as prefix_module
+
+        real_sha256 = prefix_module.hashlib.sha256
+        hash_instances = 0
+        hashed_parts: list[bytes] = []
+
+        class CountingHash:
+            def __init__(self, payload=b""):
+                self._inner = real_sha256(payload)
+                if payload:
+                    hashed_parts.append(payload)
+
+            def update(self, payload):
+                hashed_parts.append(payload)
+                return self._inner.update(payload)
+
+            def hexdigest(self):
+                return self._inner.hexdigest()
+
+        def counted_sha256(payload=b""):
+            nonlocal hash_instances
+            hash_instances += 1
+            return CountingHash(payload)
+
+        monkeypatch.setattr(
+            prefix_module,
+            "hashlib",
+            SimpleNamespace(sha256=counted_sha256),
+        )
+
+        index = PrefixIndex(chunk_chars=4)
+        replica_ids = ("r0", "r1")
+        pool = ReplicaPool(
+            {replica_id: MockBackend() for replica_id in replica_ids},
+            prefix_index=index,
+        )
+        prompt = "aaaabbbbccccddddeeee"
+        root_key = real_sha256(b"aaaa").hexdigest()[:16]
+
+        await pool.generate(_request(prompt, session_id="cold-session"))
+
+        # Cold placement and success publish only the reusable root: one SHA
+        # object and one chunk update, not two full five-chunk passes.
+        assert hash_instances == 1
+        assert hashed_parts == [b"aaaa"]
+        selected = index.candidate_ids((root_key,))
+        assert len(selected) == 1
+        assert tuple(index._chunks[selected[0]]) == (root_key,)
+
+        hash_instances = 0
+        hashed_parts.clear()
+        await pool.generate(_request(prompt, session_id="warm-session"))
+
+        # The root candidate makes this a warm route. Selection lazily extends
+        # the same request-local hash chain; successful promotion consumes it,
+        # so every prompt chunk is hashed exactly once overall.
+        assert pool.decision_counts["prefix_match"] == 1
+        assert hash_instances == 1
+        assert hashed_parts == [b"aaaa", b"bbbb", b"cccc", b"dddd", b"eeee"]
+        assert len(index._chunks[selected[0]]) == 5
+
+    @pytest.mark.asyncio
+    async def test_prefix_index_subclass_keeps_chunk_and_observe_overrides(self):
+        class CustomIndex(PrefixIndex):
+            def __init__(self):
+                super().__init__(chunk_chars=4)
+                self.chunk_calls: list[str] = []
+                self.observe_calls: list[tuple[str, str]] = []
+
+            def chunk_keys(self, prompt):
+                self.chunk_calls.append(prompt)
+                return (f"custom:{prompt[:4]}",)
+
+            def observe(self, replica_id, prompt):
+                self.observe_calls.append((replica_id, prompt))
+                self.observe_keys(replica_id, self.chunk_keys(prompt))
+
+        index = CustomIndex()
+        index.observe("r0", "shared-seed")
+        index.chunk_calls.clear()
+        index.observe_calls.clear()
+        pool = ReplicaPool(
+            {"r0": MockBackend(), "r1": MockBackend()},
+            prefix_index=index,
+        )
+
+        await pool.generate(_request("shared-request", session_id="new-session"))
+
+        assert pool.decision_counts["prefix_match"] == 1
+        assert index.chunk_calls == ["shared-request", "shared-request"]
+        assert index.observe_calls == [("r0", "shared-request")]
 
     def test_warm_selection_scores_only_first_key_candidates(self):
         class SpyIndex(PrefixIndex):

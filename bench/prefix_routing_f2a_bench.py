@@ -77,6 +77,7 @@ class WorkloadConfig:
     replicas: int
     shared_families: int
     shared_requests_per_family: int
+    uniform_warmup_requests_per_arm: int
     uniform_rounds: int
     uniform_requests_per_round: int
     uniform_sign_min_rounds: int
@@ -91,6 +92,7 @@ _PROFILE_COUNTS = {
     "smoke": {
         "shared_families": 16,
         "shared_requests_per_family": 8,
+        "uniform_warmup_requests_per_arm": 64,
         "uniform_rounds": 3,
         "uniform_requests_per_round": 64,
         "uniform_sign_min_rounds": 2,
@@ -98,6 +100,7 @@ _PROFILE_COUNTS = {
     "formal": {
         "shared_families": 64,
         "shared_requests_per_family": 16,
+        "uniform_warmup_requests_per_arm": 512,
         "uniform_rounds": 21,
         "uniform_requests_per_round": 512,
         "uniform_sign_min_rounds": 15,
@@ -407,6 +410,23 @@ def uniform_trace(
     return tuple(items)
 
 
+def _trace_digest(trace: tuple[TraceItem, ...]) -> str:
+    """Bind a prompt-free trace identity into retained benchmark evidence."""
+    return _sha256_text(
+        _canonical_json(
+            [
+                (
+                    item.request_id,
+                    item.family_id,
+                    item.prompt_sha256,
+                    item.session_sha256,
+                )
+                for item in trace
+            ]
+        )
+    )
+
+
 class _PlacementLog:
     def __init__(self) -> None:
         self.records: dict[str, dict[str, object]] = {}
@@ -488,6 +508,7 @@ def _build_pool(
     policy: str,
     seeds: list[dict[str, object]],
     trace: tuple[TraceItem, ...],
+    warmup_trace: tuple[TraceItem, ...] = (),
 ) -> tuple[
     ReplicaPool,
     _PlacementLog,
@@ -498,7 +519,10 @@ def _build_pool(
     cached_by_replica = {replica_id: set() for replica_id in _replica_ids(config)}
     for seed in seeds:
         cached_by_replica[str(seed["replica_id"])].add(str(seed["family_id"]))
-    catalog = {item.prompt_sha256: item.family_id for item in trace}
+    catalog = {
+        item.prompt_sha256: item.family_id
+        for item in (*warmup_trace, *trace)
+    }
     observations: dict[str, dict[str, object]] = {}
     backends = {
         replica_id: _MockReplica(
@@ -535,15 +559,34 @@ async def _dispatch_trace(
     policy_order_index: int,
     seeds: list[dict[str, object]],
     trace: tuple[TraceItem, ...],
+    warmup_trace: tuple[TraceItem, ...] = (),
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     pool, placement_log, observations = _build_pool(
         config,
         policy=policy,
         seeds=seeds,
         trace=trace,
+        warmup_trace=warmup_trace,
     )
     try:
         placement_rows: list[dict[str, object]] = []
+        warmup_completed_count = 0
+        warmup_started_ns = time.perf_counter_ns()
+        for item in warmup_trace:
+            request = GenerationRequest(
+                request_id=item.request_id,
+                prompt=item.prompt,
+                sampling_params=SamplingParams(max_tokens=1),
+                cache_hint=CacheHint(session_id=item.session_id),
+                placement_started_ns=time.perf_counter_ns(),
+            )
+            await pool.generate(request)
+            warmup_completed_count += 1
+            placement_log.records.pop(item.request_id)
+            observations.pop(item.request_id)
+        warmup_finished_ns = time.perf_counter_ns()
+        if placement_log.records or observations:
+            raise RuntimeError("undrained warmup observations")
         wall_started_ns = time.perf_counter_ns()
         for sequence, item in enumerate(trace):
             request = GenerationRequest(
@@ -611,6 +654,11 @@ async def _dispatch_trace(
             "policy": policy,
             "policy_order_index": policy_order_index,
             "request_count": len(trace),
+            "warmup_request_count": len(warmup_trace),
+            "warmup_completed_count": warmup_completed_count,
+            "warmup_trace_sha256": _trace_digest(warmup_trace),
+            "warmup_started_ns": warmup_started_ns,
+            "warmup_finished_ns": warmup_finished_ns,
             "wall_started_ns": wall_started_ns,
             "wall_finished_ns": wall_finished_ns,
             "wall_ns": wall_finished_ns - wall_started_ns,
@@ -664,6 +712,9 @@ async def _collect_raw_rows(
         rows.extend(placements)
         rows.append(summary)
 
+    warmup = uniform_trace(config, -1)[
+        : config.uniform_warmup_requests_per_arm
+    ]
     for round_index in range(config.uniform_rounds):
         order = (
             POLICIES if round_index % 2 == 0 else tuple(reversed(POLICIES))
@@ -686,6 +737,7 @@ async def _collect_raw_rows(
                 policy_order_index=order_index,
                 seeds=seeds,
                 trace=trace,
+                warmup_trace=warmup,
             )
             rows.extend(placements)
             rows.append(summary)
@@ -1325,6 +1377,14 @@ def _replay_rows(
                 else -1
             )
         )
+        expected_warmup = (
+            uniform_trace(config, -1)[
+                : config.uniform_warmup_requests_per_arm
+            ]
+            if row.get("trace") == "uniform"
+            else ()
+        )
+        expected_warmup_count = len(expected_warmup)
         placement_started = [
             int(placement["placement_started_ns"])
             for placement in matching
@@ -1344,6 +1404,12 @@ def _replay_rows(
             summary_key not in summary_keys
             and row.get("policy") in POLICIES
             and isinstance(row.get("request_count"), int)
+            and row.get("warmup_request_count") == expected_warmup_count
+            and row.get("warmup_completed_count") == expected_warmup_count
+            and row.get("warmup_trace_sha256")
+            == _trace_digest(expected_warmup)
+            and isinstance(row.get("warmup_started_ns"), int)
+            and isinstance(row.get("warmup_finished_ns"), int)
             and isinstance(row.get("wall_started_ns"), int)
             and isinstance(row.get("wall_finished_ns"), int)
             and isinstance(row.get("wall_ns"), int)
@@ -1354,6 +1420,14 @@ def _replay_rows(
             and isinstance(row.get("placement_slo_success_count"), int)
             and row.get("wall_ns")
             == int(row["wall_finished_ns"]) - int(row["wall_started_ns"])
+            and int(row["warmup_started_ns"])
+            <= int(row["warmup_finished_ns"])
+            <= int(row["wall_started_ns"])
+            and (
+                expected_warmup_count == 0
+                or int(row["warmup_started_ns"])
+                < int(row["warmup_finished_ns"])
+            )
             and int(row["wall_ns"]) > 0
             and int(row["placement_sum_ns"]) > 0
             and int(row["dispatch_sum_ns"]) > 0
@@ -1411,7 +1485,7 @@ def _replay_rows(
                 first.get("policy_order_index") == 0
                 and second.get("policy_order_index") == 1
                 and int(first["wall_finished_ns"])
-                <= int(second["wall_started_ns"])
+                <= int(second["warmup_started_ns"])
             ):
                 intervals_are_ordered = False
     checks["paired_arm_intervals_follow_order_without_overlap"] = (
@@ -1425,14 +1499,17 @@ def _replay_rows(
     if global_intervals_are_ordered:
         for summary_key in expected_summary_order:
             summary = summary_by_key[summary_key]
+            warmup_started_ns = summary.get("warmup_started_ns")
             wall_started_ns = summary.get("wall_started_ns")
             wall_finished_ns = summary.get("wall_finished_ns")
             if (
-                not isinstance(wall_started_ns, int)
+                not isinstance(warmup_started_ns, int)
+                or warmup_started_ns <= 0
+                or not isinstance(wall_started_ns, int)
                 or not isinstance(wall_finished_ns, int)
                 or (
                     previous_wall_finished_ns is not None
-                    and previous_wall_finished_ns > wall_started_ns
+                    and previous_wall_finished_ns > warmup_started_ns
                 )
             ):
                 global_intervals_are_ordered = False

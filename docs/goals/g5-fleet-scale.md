@@ -86,10 +86,19 @@ generation path, retains raw cache/placement/performance JSONL, and independentl
 replays both policies under the same per-request session IDs and initial cache
 state. The 21 paired rounds, alternating execution order, confidence lower bound,
 and sign-count guard make the declared 1% equivalence tolerance robust to host
-scheduling jitter. SLO-goodput divides qualifying completions by the summed
-public-generation dispatch time of every offered request, so a slow
+scheduling jitter. Immediately before each binding arm's clock, that same pool
+and policy execute a declared 512-request run-in over disjoint prompts. Its
+deterministic trace digest, completed count, and positive interval remain in
+the arm summary and are independently bound before measurement, but its
+samples enter no metric; this prevents fresh-pool code and CPU-frequency ramp
+from favoring the second arm. SLO-goodput divides qualifying completions by the
+summed public-generation dispatch time of every offered request, so a slow
 non-qualifying request cannot disappear from the cost; round wall time is
-audit-only. It does not claim a 500-Pod deployment.
+audit-only. The implementation
+carries one lazy cumulative-hash chain from placement through successful
+publication: cold success admits only the root needed for later discovery,
+while a successful warm route promotes the same chain to full depth. It does
+not claim a 500-Pod deployment.
 
 ### Stage F3 — NIC KV transfer + P/D pools (needs RDMA hardware)
 

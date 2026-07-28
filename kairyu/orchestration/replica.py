@@ -44,11 +44,30 @@ from kairyu.engine.backend import (
     shutdown_all,
     shutdown_all_cancellation_safe,
 )
+from kairyu.orchestration.prefix_index import PrefixIndex, PreparedPrefixKeys
 from kairyu.orchestration.router import JsonlRouterLog
 
 _DEFAULT_UNHEALTHY_AFTER = 3
 _DEFAULT_QUEUE_DEPTH_THRESHOLD = 8
 logger = logging.getLogger(__name__)
+
+
+def _supports_native_prepared_prefix(index: object) -> bool:
+    """Keep inherited legacy overrides on their original observe/hash path."""
+    if not isinstance(index, PrefixIndex):
+        return False
+    return all(
+        getattr(getattr(index, name, None), "__func__", None)
+        is getattr(PrefixIndex, name)
+        for name in (
+            "candidate_ids",
+            "chunk_keys",
+            "observe",
+            "observe_keys",
+            "observe_prepared",
+            "prepare",
+        )
+    )
 
 
 def _rendezvous_score(session_id: str, replica_id: str) -> bytes:
@@ -160,6 +179,14 @@ class ReplicaPool:
         self._prefix_index = prefix_index
         self._prefix_alpha = prefix_alpha
         self._prefix_beta = prefix_beta
+        native_prepared = _supports_native_prepared_prefix(prefix_index)
+        self._prefix_prepare = prefix_index.prepare if native_prepared else None
+        self._prefix_overlap_keys = (
+            prefix_index.overlap_keys if native_prepared else None
+        )
+        self._prefix_observe_prepared = (
+            prefix_index.observe_prepared if native_prepared else None
+        )
         self._membership_event_sink = membership_event_sink
         self._decision_counts: dict[str, int] = {
             "session_affinity": 0,
@@ -565,7 +592,12 @@ class ReplicaPool:
         # first equal key, preserving the historical stable tie break.
         return min(candidates, key=lambda rid: self._entries[rid].outstanding)
 
-    def _select(self, request: GenerationRequest) -> tuple[str, str, str | None]:
+    def _select(
+        self,
+        request: GenerationRequest,
+        *,
+        prefix_keys: str | Sequence[str] | None = None,
+    ) -> tuple[str, str, str | None]:
         """Pick a replica; returns (replica_id, reason, session_id). Pure hashing."""
         eligible = self._eligible_ids()
         if not eligible:
@@ -576,10 +608,19 @@ class ReplicaPool:
             )
         session_id = request.cache_hint.session_id if request.cache_hint else None
         if self._prefix_index is not None:
-            best = self._prefix_select(
-                eligible,
-                request.prompt,
-                session_id=session_id or None,
+            best = (
+                None
+                if isinstance(prefix_keys, str)
+                or (
+                    isinstance(prefix_keys, PreparedPrefixKeys)
+                    and not prefix_keys.candidate_ids
+                )
+                else self._prefix_select(
+                    eligible,
+                    request.prompt,
+                    session_id=session_id or None,
+                    prepared_keys=prefix_keys,
+                )
             )
             if best is not None:
                 return best, "prefix_match", session_id
@@ -600,6 +641,7 @@ class ReplicaPool:
         prompt: str,
         *,
         session_id: str | None = None,
+        prepared_keys: str | Sequence[str] | None = None,
     ) -> str | None:
         """alpha*overlap - beta*outstanding; None when no candidate has overlap
         (fall through to the existing cold-placement policy).
@@ -608,14 +650,30 @@ class ReplicaPool:
         A session chooses its HRW winner among equal-score candidates, so
         affinity remains deterministic without bypassing prefix-aware scoring.
         """
-        chunk_keys = getattr(self._prefix_index, "chunk_keys", None)
-        overlap_keys = getattr(self._prefix_index, "overlap_keys", None)
-        candidate_ids = getattr(self._prefix_index, "candidate_ids", None)
-        use_precomputed = callable(chunk_keys) and callable(overlap_keys)
-        keys = chunk_keys(prompt) if use_precomputed else None
+        if prepared_keys is None and self._prefix_prepare is not None:
+            prepared_keys = self._prefix_prepare(prompt)
+        if isinstance(prepared_keys, str):
+            return None
+        native_precomputed = (
+            isinstance(prepared_keys, PreparedPrefixKeys)
+            and self._prefix_overlap_keys is not None
+        )
+        advertised: tuple[str, ...] | None = None
+        if native_precomputed:
+            keys = prepared_keys
+            overlap_keys = self._prefix_overlap_keys
+            use_precomputed = True
+            advertised = prepared_keys.candidate_ids
+        else:
+            chunk_keys = getattr(self._prefix_index, "chunk_keys", None)
+            overlap_keys = getattr(self._prefix_index, "overlap_keys", None)
+            candidate_ids = getattr(self._prefix_index, "candidate_ids", None)
+            use_precomputed = callable(chunk_keys) and callable(overlap_keys)
+            keys = chunk_keys(prompt) if use_precomputed else None
+            if use_precomputed and callable(candidate_ids):
+                advertised = candidate_ids(keys)
         score_candidates = eligible
-        if use_precomputed and callable(candidate_ids):
-            advertised = candidate_ids(keys)
+        if advertised is not None:
             if not advertised:
                 return None
             if eligible is self._eligible_snapshot:
@@ -669,8 +727,11 @@ class ReplicaPool:
         )
         return selected
 
-    def _place(self, request: GenerationRequest) -> str:
-        """Select a replica and log the decision before dispatch (m5 D4)."""
+    def _place_prepared(
+        self,
+        request: GenerationRequest,
+    ) -> tuple[str, str, str | Sequence[str] | None]:
+        """Select/log once and retain request-local prefix work for completion."""
         from kairyu.telemetry import traced_span
 
         started_ns = (
@@ -678,7 +739,12 @@ class ReplicaPool:
             if request.placement_started_ns is not None
             else time.perf_counter_ns()
         )
-        replica_id, reason, session_id = self._select(request)
+        prepare = self._prefix_prepare
+        prefix_keys = prepare(request.prompt) if prepare is not None else None
+        replica_id, reason, session_id = self._select(
+            request,
+            prefix_keys=prefix_keys,
+        )
         selected_at_ns = time.perf_counter_ns()
         placement_latency_ns = max(0, selected_at_ns - started_ns)
         self._decision_counts[reason] += 1
@@ -701,6 +767,11 @@ class ReplicaPool:
                 pool_size=len(self._entries),
                 eligible_size=len(self._eligible_snapshot),
             )
+        return replica_id, reason, prefix_keys
+
+    def _place(self, request: GenerationRequest) -> str:
+        """Select a replica and log the decision before dispatch (m5 D4)."""
+        replica_id, _reason, _prefix_keys = self._place_prepared(request)
         return replica_id
 
     def _finish(self, entry: _ReplicaEntry) -> None:
@@ -732,7 +803,7 @@ class ReplicaPool:
             entry.consecutive_failures = 0
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
-        replica_id = self._place(request)
+        replica_id, reason, prefix_keys = self._place_prepared(request)
         entry = self._entries[replica_id]
         entry.outstanding += 1
         try:
@@ -751,13 +822,21 @@ class ReplicaPool:
                 and not entry.removed
                 and self._entries.get(replica_id) is entry
             ):
-                self._prefix_index.observe(replica_id, request.prompt)
+                observe_prepared = self._prefix_observe_prepared
+                if prefix_keys is not None and observe_prepared is not None:
+                    observe_prepared(
+                        replica_id,
+                        prefix_keys,
+                        reason == "prefix_match",
+                    )
+                else:
+                    self._prefix_index.observe(replica_id, request.prompt)
             return result
         finally:
             self._finish(entry)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
-        replica_id = self._place(request)
+        replica_id, reason, prefix_keys = self._place_prepared(request)
         entry = self._entries[replica_id]
         entry.outstanding += 1  # streams stay in-flight until generator close (A2)
         try:
@@ -775,7 +854,15 @@ class ReplicaPool:
                 and not entry.removed
                 and self._entries.get(replica_id) is entry
             ):
-                self._prefix_index.observe(replica_id, request.prompt)
+                observe_prepared = self._prefix_observe_prepared
+                if prefix_keys is not None and observe_prepared is not None:
+                    observe_prepared(
+                        replica_id,
+                        prefix_keys,
+                        reason == "prefix_match",
+                    )
+                else:
+                    self._prefix_index.observe(replica_id, request.prompt)
         finally:
             self._finish(entry)
 

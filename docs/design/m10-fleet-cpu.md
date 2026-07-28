@@ -155,8 +155,15 @@ a zero warm/cold tie prefers reuse, and a negative warm maximum falls through
 to the existing session-HRW plus queue-depth valve (or least-outstanding for a
 request without a session). Equal-score warm candidates use session HRW as the
 deterministic tiebreak. `enabled=False` is the default. Only a successful unary
-generation or normally completed stream advertises the selected prefix.
-Decision reason `prefix_match` enters the router log.
+generation or normally completed stream advertises the selected prefix. Each
+request owns one bounded, lazy cumulative-hash chain shared by selection and
+successful publication. A cold success initially advertises only its root key,
+which is sufficient to make the next related request discoverable; a successful
+warm `prefix_match` extends that same request-local chain and promotes the entry
+to full usable depth. Thus a complete prompt chunk is hashed at most once per
+request, one-off cold prompts do not populate unneeded deep index entries, and
+no process-global prompt cache needs invalidation. Decision reason
+`prefix_match` enters the router log.
 
 ### D7 — RadixKV events → gateway index (`radix_kv.py` event_sink + `kv_index.py`)
 
@@ -703,7 +710,10 @@ over (α, β) (pure function over the dataset; no online learning).
   unary completion or normal stream exhaustion; upstream error, client error,
   and cancellation cannot create a false warm entry. Because cumulative chunk
   keys are unusable after an ancestor is evicted, one over-cap prompt retains
-  the root-side bounded prefix rather than unreachable tail keys.
+  the root-side bounded prefix rather than unreachable tail keys. Selection and
+  successful publication consume one request-local lazy key chain. A cold
+  success publishes only its already-computed root; a successful warm route
+  extends that chain once and promotes it to full usable depth.
 
   F2a's distinct claim is selector quality and cost at 500 logical
   `ReplicaPool` entries. Retained F1a run `30374404150` already proves the kind
@@ -717,18 +727,25 @@ over (α, β) (pure function over the dataset; no online learning).
   Shared-prefix hit rate is cached prompt-work chunks divided by total prompt
   chunks, derived from raw backend observations, and must beat the non-zero
   session-HRW baseline by at least 2×. Uniform traffic uses 21 matched rounds
-  with alternating A/B order. SLO goodput is the number of successful requests
-  whose production placement latency is below 10 ms divided by the summed
-  end-to-end `ReplicaPool.generate` dispatch intervals for every offered request
-  in that arm; a request missing the SLO remains in the denominator. Round wall
-  time is retained only for ordering and audit. The one-sided 95% lower
-  confidence bound of paired log ratios must be at least 0.99, and at least 15
-  of 21 individual paired ratios must also be at least 0.99. The predeclared 1%
-  non-inferiority margin absorbs bounded host scheduling jitter; the confidence
-  and sign gates prevent a single favorable outlier from hiding a systematic
-  regression. Nearest-rank treatment placement p99 is computed over each
-  complete shared and uniform raw population, and the worse value must be
-  strictly below 10 ms.
+  with alternating A/B order. Immediately before each binding arm's clock, that
+  same pool and policy execute a declared 512-request uniform run-in over
+  disjoint prompts. Its deterministic trace digest, completed count, and
+  positive time interval remain in the arm summary and are independently bound
+  before the measured interval, but none of its requests enter a gate. Per-arm
+  run-in prevents pool construction, cold code, CPU-frequency ramp, or scheduler
+  migration from systematically favoring whichever arm happens to run second.
+  SLO goodput is the number of successful requests whose production placement
+  latency is below 10 ms divided by the summed end-to-end
+  `ReplicaPool.generate` dispatch intervals for every offered request in that
+  arm; a request missing the SLO remains in the denominator. Round wall time is
+  retained only for ordering and audit. The
+  one-sided 95% lower confidence bound of paired log ratios must be at least
+  0.99, and at least 15 of 21 individual paired ratios must also be at least
+  0.99. The predeclared 1% non-inferiority margin absorbs bounded host
+  scheduling jitter; the confidence and sign gates prevent a single favorable
+  outlier from hiding a systematic regression. Nearest-rank treatment placement
+  p99 is computed over each complete shared and uniform raw population, and the
+  worse value must be strictly below 10 ms.
 
   Raw cache seeds, prompt/session hashes, selections, cache hits, receipt and
   selection timestamps, round order, and wall times are JSONL. Prompt bodies
