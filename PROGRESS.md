@@ -374,6 +374,11 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-28 — [amendment] F1b attests pre-status Pods by immutable UID
+- What: F1b now retains the frozen Pod spec image when Kubernetes has created a replacement UID but has not yet emitted its first ContainerStatus. Replay also accepts that single Pending, not-Ready pre-status form only when the exact same immutable UID is later observed with the expected runtime reference and pinned CRI digest; missing eventual attestation or any visible mismatch still fails.
+- Why: Exact-head PR smoke run `30384219955` served 458/458 retry-free requests and passed every rollout, identity, readiness, placement, and provenance check except one normal pre-ContainerStatus snapshot. Replaying its immutable sidecars with the UID-completion rule passes every check while preserving fail-closed image provenance.
+- Refs: issue #176; PR #267; Actions run `30384219955`; m10 D5/A27; `bench/fleet_rollout_bench.py`; `tests/bench/test_fleet_rollout_bench.py`
+
 ### 2026-07-28 — [amendment] F1b replays server IDs and eventual image attestation
 - What: F1b now joins each offered request to the gateway placement by the non-empty server-assigned response ID while separately retaining the unique client schedule ID. Lifecycle provenance permits only a Pending, not-Ready observation with a temporarily empty image ID, rejects every visible mismatch immediately, and still requires every observed Pod UID to later match the pinned CRI digest.
 - Why: PR smoke run `30383243344` completed 412/412 retry-free requests and all four replacements, but exposed two verifier false negatives: the gateway intentionally assigns its own request ID, and Kubernetes can publish a replacement Pod before CRI materializes `status.containerStatuses[].imageID`. Replaying that immutable artifact under the corrected rules yields no failed checks without weakening ID or image provenance.

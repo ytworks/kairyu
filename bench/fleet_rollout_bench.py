@@ -354,6 +354,24 @@ def _rollout_pod_identity(item: dict[str, Any]) -> dict[str, Any]:
     identity = _pod_identity(item)
     metadata = item.get("metadata") or {}
     labels = metadata.get("labels") or {}
+    observed_container_names = {
+        container.get("name")
+        for container in identity.get("containers", ())
+        if isinstance(container, dict)
+    }
+    for container in item.get("spec", {}).get("containers", ()):
+        name = container.get("name") if isinstance(container, dict) else None
+        image = container.get("image") if isinstance(container, dict) else None
+        if isinstance(name, str) and name not in observed_container_names:
+            identity["containers"].append(
+                {
+                    "name": name,
+                    "spec_image": image,
+                    "runtime_image": image,
+                    "image_id": "",
+                }
+            )
+    identity["containers"].sort(key=lambda container: str(container.get("name")))
     identity.update(
         {
             "creation_timestamp": metadata.get("creationTimestamp"),
@@ -1229,6 +1247,16 @@ def _all_replica_runtime_images_valid(
                 for container in containers
                 if isinstance(container, dict) and container.get("name") == container_name
             ]
+            if (
+                not matches
+                and not containers
+                and identity.get("phase") == "Pending"
+                and identity.get("ready") is False
+            ):
+                # Kubernetes may publish a new immutable Pod UID before its
+                # first ContainerStatus. The same UID must still become
+                # digest-attested below; otherwise seen_uids != pinned_uids.
+                continue
             if len(matches) != 1:
                 return False
             container = matches[0]

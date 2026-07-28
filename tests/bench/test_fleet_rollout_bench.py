@@ -688,7 +688,15 @@ def test_lifecycle_image_allows_only_eventually_pinned_pending_uid(
         expected_image=_MOCK_IMAGE,
     )
 
-    pending["containers"][0]["image_id"] = "sha256:" + "f" * 64
+    pending["containers"] = []
+    assert _LIFECYCLE_IMAGES_VALID(
+        pods,
+        environment=environment,
+        container_name="mock",
+        expected_image=_MOCK_IMAGE,
+    )
+
+    pending["containers"] = [_container("mock", _MOCK_IMAGE, "sha256:" + "f" * 64)]
     assert not _LIFECYCLE_IMAGES_VALID(
         pods,
         environment=environment,
