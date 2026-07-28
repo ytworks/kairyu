@@ -115,10 +115,19 @@ def _call(prompt: str, *, n: int = 3, temperature: float = 0.25):
 
 def test_internal_sampling_removes_only_final_output_intent():
     call = _call("hello")
+    public = call.sampling_params.clone(best_of=5)
+    call = OrchestrationRequest(
+        prompt=call.prompt,
+        sampling_params=public,
+        tools=call.tools,
+        tool_choice=call.tool_choice,
+        response_format=call.response_format,
+    )
 
     internal = call.internal_sampling_params()
 
     assert internal.n == 1
+    assert internal.best_of is None
     assert internal.logprobs is None
     assert internal.extra_args == {}
     assert internal.temperature == 0.25
@@ -129,6 +138,7 @@ def test_internal_sampling_removes_only_final_output_intent():
     assert internal.stop == ("END",)
     assert internal.seed == 41
     assert call.sampling_params.n == 3
+    assert call.sampling_params.best_of == 5
     assert call.sampling_params.extra_args["response_format"] == SCHEMA
 
 

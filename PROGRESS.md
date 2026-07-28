@@ -180,9 +180,11 @@ the mixed window and drained 192/192 afterward.
 F5b single-gateway noisy-neighbor isolation now uses two-stage, constant-time
 admission outside the shared concurrency guard: a request/in-flight lease,
 then a worst-case compute-token reservation after validation but before
-ReplicaPool/scheduler dispatch. Chat, Responses, Completions arrays, Batch, and
-AUTO all share the boundary; `n`/`best_of` prefill fan-out and AUTO's bounded
-internal DAG are included. Exact terminal usage may refund surplus, while
+ReplicaPool/scheduler dispatch. Chat, Responses, Completions arrays, Embeddings,
+Batch, and AUTO all share the boundary; `n`/`best_of` prefill fan-out and AUTO's
+bounded internal DAG are included. Completion-array failure now cancels and
+joins every sibling before releasing the tenant lease. Exact terminal usage
+may refund surplus, while
 failure, disconnect, approximate/missing usage, and multi-candidate accounting
 consume the full reservation. In the corrected deterministic 10x trace, the
 protected path admits exactly 120/1,200 noisy requests, completes all 300 good
@@ -334,6 +336,25 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F5b closes every compute-ingress lease boundary
+- What: Extended pre-dispatch reservation to Embeddings using a conservative
+  non-refundable input-work ceiling. AUTO now reserves the maximum configured
+  route rather than relying on a preview whose stateful route choice could
+  diverge at execution; its final candidate fan-out now includes tools and
+  response-schema bytes, while private stages normalize both `n` and `best_of`
+  to one candidate. Every settlement debits and reports observed work
+  above the reservation even when usage is non-refundable, while surplus is
+  still returned only from exact single-candidate usage. Empty Completion
+  prompt arrays are rejected before admission, and a failing array element
+  cancels and joins every sibling before the HTTP request can release its
+  tenant lease.
+- Why: Any compute ingress that bypasses reservation can become a
+  noisy-neighbor path. Releasing a lease while sibling generation is still
+  running likewise understates in-flight work and defeats the isolation bound.
+- Refs: issue #191; m11 D3/A7; `kairyu/entrypoints/server/app.py`;
+  `kairyu/entrypoints/server/extra_routes.py`;
+  `kairyu/orchestration/orchestrator.py`.
 
 ### 2026-07-28 — [amendment] F5b reserves worst-case work before shared dispatch
 - What: Corrected the initial #191 design from post-execution token debt plus

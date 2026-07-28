@@ -1384,6 +1384,8 @@ def create_app(
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
             return invalid_request(f"model {request.model!r} does not support n > 1")
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
+        if not prompts:
+            return invalid_request("prompt array must not be empty")
         try:
             sampling = SamplingParams(  # invalid params are a client error, not a 502
                 temperature=request.temperature,
@@ -1457,7 +1459,17 @@ def create_app(
             # run the prompt array concurrently (latency = max, not sum); order is
             # restored by prompt_index below so the response is unchanged (P-perf)
             _mark_tenant_dispatched(http_request)
-            results = await asyncio.gather(*(engine.generate(item) for item in generation_requests))
+            tasks = [
+                asyncio.create_task(engine.generate(item))
+                for item in generation_requests
+            ]
+            try:
+                results = await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
         except Exception as error:
             return upstream_error(error)
         for prompt_index, (prompt, result) in enumerate(zip(prompts, results, strict=True)):

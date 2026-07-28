@@ -15,6 +15,9 @@ from kairyu.engine.backend import (
     GenerationUsage,
     shutdown_all,
 )
+from kairyu.engine.backend import (
+    admission_upper_bound as generation_admission_upper_bound,
+)
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import (
     Conductor,
@@ -413,29 +416,39 @@ class Orchestrator:
             call.sampling_params.n,
             call.sampling_params.best_of or call.sampling_params.n,
         )
-        role_bytes = max(
-            (
-                len(role.prompt.encode("utf-8"))
-                for role in self._roles
-            ),
-            default=0,
+        largest_role_prompt = max(
+            self._roles,
+            key=lambda role: len(role.prompt.encode("utf-8")),
+            default=None,
         )
+        role_prompt = largest_role_prompt.prompt if largest_role_prompt else ""
+        role_bytes = len(role_prompt.encode("utf-8"))
         supplied_bytes = len(
             f"{self._shared_prefix}{call.prompt}".encode()
         )
         stage_prompt = max(1, supplied_bytes + role_bytes + 256)
         internal_output = internal.max_tokens
-        final_output = candidates * call.sampling_params.max_tokens
-        preceding_output_reingestion = (
-            internal_output * steps * (steps - 1) // 2
+        private_steps = max(0, steps - 1)
+        private_work = (
+            private_steps * (stage_prompt + internal_output)
+            + internal_output * private_steps * (private_steps - 1) // 2
         )
+        final_request_bound = generation_admission_upper_bound(
+            GenerationRequest(
+                request_id="auto-admission",
+                prompt=f"{self._shared_prefix}{call.prompt}{role_prompt}",
+                sampling_params=call.sampling_params,
+                tools=call.tools,
+                tool_choice=call.tool_choice,
+                tools_in_prompt=call.tools_in_prompt,
+            )
+        )
+        # The last stage can ingest every preceding private output. Candidate
+        # fan-out duplicates that prefill just as it duplicates the supplied
+        # prompt, tools, response schema, and decode ceiling.
+        final_reingestion = candidates * internal_output * private_steps
         return AdmissionUpperBound(
-            tokens=(
-                steps * stage_prompt
-                + max(0, steps - 1) * internal_output
-                + final_output
-                + preceding_output_reingestion
-            ),
+            tokens=private_work + final_request_bound.tokens + final_reingestion,
             refundable_on_exact_usage=False,
         )
 

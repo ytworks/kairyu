@@ -262,7 +262,14 @@ class TenantLimiter:
         else:
             self._reserved_tokens.pop(tenant, None)
 
-    def _settle_tokens(self, tenant: str, reserved: int, actual: int) -> None:
+    def _settle_tokens(
+        self,
+        tenant: str,
+        reserved: int,
+        actual: int,
+        *,
+        refund_surplus: bool,
+    ) -> None:
         bucket = self._token_bucket(tenant)
         difference = actual - reserved
         if difference > 0:
@@ -278,7 +285,7 @@ class TenantLimiter:
                 },
             )
             bucket.debit(float(difference), self._now())
-        elif difference < 0:
+        elif difference < 0 and refund_surplus:
             bucket.refund(float(-difference), self._now())
         self._finish_reservation(tenant, reserved)
 
@@ -415,17 +422,15 @@ class TenantAdmission:
             raise RuntimeError("tenant admission has no token reservation")
         if self._settled:
             return
-        if exact and self._refundable_on_exact_usage:
-            self._limiter._settle_tokens(
-                self.tenant,
-                self._reserved_tokens,
-                actual_tokens,
-            )
-        else:
-            self._limiter._consume_reserved_tokens(
-                self.tenant,
-                self._reserved_tokens,
-            )
+        # Every observed count is a lower bound on work, even when it is not
+        # authoritative enough to refund.  Always debit and report a positive
+        # overage; only exact, single-candidate usage may return surplus.
+        self._limiter._settle_tokens(
+            self.tenant,
+            self._reserved_tokens,
+            actual_tokens,
+            refund_surplus=exact and self._refundable_on_exact_usage,
+        )
         self._settled = True
 
     def release(self) -> None:

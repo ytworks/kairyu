@@ -1108,6 +1108,41 @@ class TestTenancy:
         assert limiter.token_balance("t") == 70
         assert limiter.bound_violation_snapshot()["t"] == 1
 
+    @pytest.mark.parametrize(
+        ("exact", "refundable"),
+        [(False, True), (True, False), (False, False)],
+    )
+    def test_non_refundable_settlement_still_debits_and_reports_overage(
+        self,
+        exact,
+        refundable,
+    ):
+        limiter = TenantLimiter(
+            TenantConfig(
+                limits={
+                    "t": TenantLimits(
+                        requests_per_minute=600,
+                        tokens_per_minute=100,
+                        token_burst=100,
+                    )
+                }
+            ),
+            now=lambda: 0.0,
+        )
+        admission = limiter.acquire("t")
+        assert admission.reserve_tokens(
+            20,
+            refundable_on_exact_usage=refundable,
+        )
+        admission.mark_dispatched()
+
+        admission.settle_tokens(30, exact=exact)
+        admission.release()
+
+        assert limiter.token_balance("t") == 70
+        assert limiter.bound_violation_snapshot()["t"] == 1
+        assert limiter.reservation_snapshot()["t"] == 0
+
 
 class TestResponseStore:
     def test_lru_cap_and_tenant_scope(self):

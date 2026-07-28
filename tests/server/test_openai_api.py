@@ -12,6 +12,7 @@ from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
@@ -1589,6 +1590,80 @@ async def test_zero_token_prompt_array_is_validated_before_any_generation_starts
     assert engine.started == []
 
 
+async def test_empty_completion_prompt_array_is_rejected_before_reservation():
+    backend = MockBackend()
+    app = create_app(
+        engines={"m": backend},
+        tenant_config=TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=1_000,
+                )
+            }
+        ),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "m", "prompt": []},
+        )
+
+    assert response.status_code == 400
+    assert "must not be empty" in response.json()["error"]["message"]
+    assert backend.prompts_seen == ()
+    assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
+
+
+async def test_completion_array_failure_waits_for_sibling_cleanup_before_lease_release():
+    class ArrayFailureBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.sibling_started = asyncio.Event()
+            self.sibling_cleaned = asyncio.Event()
+
+        async def generate(self, request):
+            if request.prompt == "slow":
+                self.sibling_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.sibling_cleaned.set()
+            await self.sibling_started.wait()
+            raise RuntimeError("array element failed")
+
+    backend = ArrayFailureBackend()
+    app = create_app(
+        engines={"m": backend},
+        tenant_config=TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=10_000,
+                    token_burst=10_000,
+                    max_in_flight=1,
+                )
+            }
+        ),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "m", "prompt": ["slow", "fail"]},
+        )
+        metrics = (await client.get("/metrics")).text
+
+    assert response.status_code == 502
+    assert backend.sibling_cleaned.is_set()
+    assert app.state.tenant_limiter.in_flight("default") == 0
+    assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
+    assert (
+        'kairyu_tenant_in_flight_requests{source="http",tenant="default"} 0.0'
+    ) in metrics
+
+
 async def test_runtime_value_error_remains_an_upstream_error():
     app = create_app(engines={"stub": StubBackend(error=ValueError("runtime failure"))})
     async with _client(app) as client:
@@ -1825,21 +1900,33 @@ async def test_wrapped_upstream_capability_mismatch_is_predispatch_400(wrapper):
 
 
 @pytest.mark.parametrize("moa_samples", [0, 2])
-async def test_auto_internal_engine_capability_mismatch_is_predispatch_400(
+async def test_auto_best_of_is_forwarded_only_to_the_final_engine(
     moa_samples,
 ):
-    transport_calls = []
+    transport_payloads = []
 
     def handler(request):
-        transport_calls.append(request)
-        return httpx.Response(200, json={"choices": []})
+        transport_payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
 
     proposal = OpenAICompatBackend(
-        base_url="https://api.anthropic.example/v1",
-        model="claude",
+        base_url="https://proposal.example/v1",
+        model="proposal",
         api_key_env=None,
         transport=httpx.MockTransport(handler),
-        upstream="anthropic",
+        upstream="generic",
     )
     final = OpenAICompatBackend(
         base_url="https://verified.example/v1",
@@ -1867,9 +1954,7 @@ async def test_auto_internal_engine_capability_mismatch_is_predispatch_400(
     async with _client(app) as client:
         response = await client.post("/v1/chat/completions", json=body)
 
-    assert response.status_code == 400
-    assert "internal orchestration intent" in response.json()["error"]["message"]
-    assert "best_of" in response.json()["error"]["message"]
-    assert transport_calls == []
-    assert proposal._client is None
-    assert final._client is None
+    assert response.status_code == 200
+    assert len(transport_payloads) > 1
+    assert all("best_of" not in payload for payload in transport_payloads[:-1])
+    assert transport_payloads[-1]["best_of"] == 2

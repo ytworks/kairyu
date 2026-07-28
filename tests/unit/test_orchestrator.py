@@ -96,6 +96,50 @@ def test_auto_admission_bound_accounts_for_internal_fanout() -> None:
     )
 
 
+def test_auto_admission_bound_accounts_for_final_tool_and_response_schemas() -> None:
+    orchestrator = _orchestrator(budget=Budget(max_steps=4))
+
+    def bound_for(schema_size: int) -> int:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "description": "r" * schema_size,
+                },
+            },
+        }
+        return orchestrator.admission_upper_bound(
+            OrchestrationRequest(
+                prompt=COMPLEX,
+                sampling_params=SamplingParams(
+                    n=3,
+                    max_tokens=32,
+                    extra_args={"response_format": response_format},
+                ),
+                tools=(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "description": "t" * schema_size,
+                        },
+                    },
+                ),
+                tool_choice="required",
+                response_format=response_format,
+            )
+        ).tokens
+
+    small = bound_for(1)
+    large = bound_for(4_097)
+
+    # Both final schemas are serialized into each of the three candidate
+    # prefills, so their 8,192-byte growth must be charged three times.
+    assert large - small >= 3 * 8_192
+
+
 def _track_budget_releases(monkeypatch):
     releases = []
     original_release = BudgetState.release
