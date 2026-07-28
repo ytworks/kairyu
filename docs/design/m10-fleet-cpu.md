@@ -148,9 +148,15 @@ and tunnel lifecycle are not part of the gateway-under-test.
 
 Block-granular approximate trie: `observe(replica_id, token_blocks)`,
 `overlap(replica_id, token_blocks) -> int`. `ReplicaPool` gains optional
-`prefix_index=` + score `α·overlap − β·outstanding` over power-of-two
-random candidates; session affinity remains the tiebreak; `enabled=False`
-default. Decision reason `prefix_match` in the router log.
+`prefix_index=` + score `α·overlap − β·outstanding` over reverse-indexed warm
+members of the immutable eligible snapshot. Cold placement has a conservative
+score baseline of zero: the warm maximum wins when its score is non-negative,
+a zero warm/cold tie prefers reuse, and a negative warm maximum falls through
+to the existing session-HRW plus queue-depth valve (or least-outstanding for a
+request without a session). Equal-score warm candidates use session HRW as the
+deterministic tiebreak. `enabled=False` is the default. Only a successful unary
+generation or normally completed stream advertises the selected prefix.
+Decision reason `prefix_match` enters the router log.
 
 ### D7 — RadixKV events → gateway index (`radix_kv.py` event_sink + `kv_index.py`)
 
@@ -209,8 +215,10 @@ over (α, β) (pure function over the dataset; no online learning).
 - Tracing: span tree with InMemorySpanExporter; disabled → zero overhead
   (no otel import).
 - Helm: `helm template` golden test; kind smoke in CI.
-- M10b: prefix routing beats least-outstanding on a synthetic
-  shared-prefix workload (decision counts); staleness fallback chaos test.
+- M10b: prefix routing beats the same-request session-HRW baseline on the
+  replayable F2a 500-entry shared-prefix trace, remains non-inferior on the
+  paired uniform trace, and keeps placement p99 below 10 ms; staleness fallback
+  chaos test.
 
 ## 6. Review record (binding amendments)
 
@@ -672,3 +680,64 @@ over (α, β) (pure function over the dataset; no online learning).
   cap is binding. Exact-head source run `30399229234` at `be40b97` passed all
   26 replay checks; its complete artifact is retained under
   `bench/results/f1c-three-gateway/`.
+- **A30**: F2a compares prefix-aware routing with session hashing without
+  changing the request contract. Both arms receive the same ordered prompts,
+  the same per-request unique session IDs, 500 immutable eligible replica IDs,
+  and independently cloned initial simulated cache placement. The shared trace
+  is deliberately cross-session: it measures reuse that session affinity cannot
+  express, while keeping the complete request stream identical between arms.
+  The treatment differs only by enabling `PrefixIndex`. A warm maximum-score
+  candidate with a non-negative score is selected before ordinary session
+  placement; a zero warm/cold tie prefers reuse and session HRW breaks equal
+  warm scores. If no candidate has usable overlap, or the best warm score is
+  negative, the pre-F2 session-HRW and queue-depth behavior is retained without
+  scanning every cold replica. A bounded first-chunk reverse map limits warm
+  scoring to eligible candidates that can have non-zero overlap. This
+  supersedes D6's unimplemented power-of-two wording and the implementation's
+  former session-first bypass.
+
+  Cache truth belongs to the selected mock backend, not to `prefix_match` or
+  `PrefixIndex.overlap`. The backend reports whether the family was resident
+  before dispatch and updates its cache only after successful generation.
+  `ReplicaPool` likewise advertises an approximate prefix only after successful
+  unary completion or normal stream exhaustion; upstream error, client error,
+  and cancellation cannot create a false warm entry. Because cumulative chunk
+  keys are unusable after an ancestor is evicted, one over-cap prompt retains
+  the root-side bounded prefix rather than unreachable tail keys.
+
+  F2a's distinct claim is selector quality and cost at 500 logical
+  `ReplicaPool` entries. Retained F1a run `30374404150` already proves the kind
+  deployment, NodePort ingress-to-selection clock, discovery, membership,
+  provenance, and hosted-runner capacity; it is not rerun and contributes none
+  of F2a's hit-rate, goodput, or 500-entry measurements. The F2a CPU bench
+  drives the public `ReplicaPool.generate` path and its production placement
+  logger against 500 concrete mock backends. It does not claim a 500-Pod
+  Kubernetes deployment.
+
+  Shared-prefix hit rate is cached prompt-work chunks divided by total prompt
+  chunks, derived from raw backend observations, and must beat the non-zero
+  session-HRW baseline by at least 2×. Uniform traffic uses 21 matched rounds
+  with alternating A/B order. SLO goodput is the number of successful requests
+  whose production placement latency is below 10 ms divided by the summed
+  end-to-end `ReplicaPool.generate` dispatch intervals for every offered request
+  in that arm; a request missing the SLO remains in the denominator. Round wall
+  time is retained only for ordering and audit. The one-sided 95% lower
+  confidence bound of paired log ratios must be at least 0.99, and at least 15
+  of 21 individual paired ratios must also be at least 0.99. The predeclared 1%
+  non-inferiority margin absorbs bounded host scheduling jitter; the confidence
+  and sign gates prevent a single favorable outlier from hiding a systematic
+  regression. Nearest-rank treatment placement p99 is computed over each
+  complete shared and uniform raw population, and the worse value must be
+  strictly below 10 ms.
+
+  Raw cache seeds, prompt/session hashes, selections, cache hits, receipt and
+  selection timestamps, round order, and wall times are JSONL. Prompt bodies
+  are excluded. An adjacent manifest binds row count and SHA-256, the clean
+  source commit, workflow and relevant source hashes at both ends of the
+  measurement, non-empty GitHub run identity tied to the expected head, runner
+  environment, all derived metrics, and every gate check. The independent
+  verifier reconstructs both policies, cache evolution, SLO-goodput numerator,
+  round intervals, and statistics rather than trusting the manifest. One clean
+  exact-source formal run is binding. A later evidence-only commit may retain
+  those immutable bytes without rerunning when the source commit is an ancestor
+  and every frozen gate-input hash is unchanged.

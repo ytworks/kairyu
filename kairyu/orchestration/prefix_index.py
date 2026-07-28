@@ -4,11 +4,13 @@ The gateway has NO token ids (prompts are strings; tokenizers live in the
 optional hf extra), so the trie keys on fixed-size TEXT chunks of the prompt
 — an approximation of the engine-side token pages. Key unification via
 gateway tokenization is a deploy-time option (install tokenizers in the
-gateway image). ``observe`` is called after placement (the replica now holds
-that prefix); ``overlap`` scores candidates at placement time.
+gateway image). ``observe`` is called only after successful generation (the
+replica now holds that prefix); ``overlap`` scores candidates at placement
+time.
 
 Bounded: per-replica chunk sets are LRU-capped so a long-running gateway
-cannot grow without bound.
+cannot grow without bound. A reverse map for the first cumulative key is
+bounded by those same stores and avoids scanning cold replicas.
 """
 
 from __future__ import annotations
@@ -49,17 +51,32 @@ class PrefixIndex:
     ) -> None:
         if chunk_chars < 1:
             raise ValueError(f"chunk_chars must be >= 1, got {chunk_chars}")
+        if max_chunks_per_replica < 1:
+            raise ValueError(
+                "max_chunks_per_replica must be >= 1, "
+                f"got {max_chunks_per_replica}"
+            )
         self.chunk_chars = chunk_chars
         self._max_chunks = max_chunks_per_replica
         self._chunks: dict[str, OrderedDict[str, None]] = {}
+        self._replicas_by_first_key: dict[str, dict[str, None]] = {}
 
     def observe(self, replica_id: str, prompt: str) -> None:
         store = self._chunks.setdefault(replica_id, OrderedDict())
-        for key in self.chunk_keys(prompt):
+        # Prefix keys are cumulative: a retained child is unusable when an
+        # earlier key in the same chain was evicted because overlap stops at
+        # the first miss.  Admit at most one store's worth from the root side
+        # so a single long prompt leaves a reachable prefix, not unreachable
+        # tail keys.
+        keys = self.chunk_keys(prompt)[: self._max_chunks]
+        if keys:
+            self._replicas_by_first_key.setdefault(keys[0], {})[replica_id] = None
+        for key in keys:
             store.pop(key, None)  # refresh recency
             store[key] = None
         while len(store) > self._max_chunks:
-            store.popitem(last=False)
+            evicted, _value = store.popitem(last=False)
+            self._discard_candidate(evicted, replica_id)
 
     def chunk_keys(self, prompt: str) -> tuple[str, ...]:
         """Return the immutable prefix keys for this index's chunk size."""
@@ -81,5 +98,24 @@ class PrefixIndex:
             count += 1
         return count
 
+    def candidate_ids(self, keys: Sequence[str]) -> tuple[str, ...]:
+        """Replica IDs retaining the first cumulative key, without a fleet scan."""
+        if not keys:
+            return ()
+        candidates = self._replicas_by_first_key.get(keys[0])
+        return tuple(candidates) if candidates is not None else ()
+
     def forget_replica(self, replica_id: str) -> None:
-        self._chunks.pop(replica_id, None)
+        store = self._chunks.pop(replica_id, None)
+        if store is None:
+            return
+        for key in store:
+            self._discard_candidate(key, replica_id)
+
+    def _discard_candidate(self, key: str, replica_id: str) -> None:
+        candidates = self._replicas_by_first_key.get(key)
+        if candidates is None:
+            return
+        candidates.pop(replica_id, None)
+        if not candidates:
+            del self._replicas_by_first_key[key]

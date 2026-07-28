@@ -36,8 +36,11 @@ SLO vocabulary used by every gate below:
 - `DeploymentSpec` pools gain `discovery: static | k8s-endpoints | register`;
   **static remains the default** so every existing test, example, and compose file
   keeps working unchanged.
-- CPU-first discipline: F1/F2 gates run against CPU-mock fleets in CI (kind cluster);
-  GPU validation slots in per `docs/gpu-runbook.md`.
+- CPU-first discipline: F1 deployment/lifecycle gates run against CPU-mock
+  fleets in kind. F2a isolates selector quality and cost in a 500-logical-entry
+  CPU bench while reusing F1a's deployment precedent; later F2 gates use the
+  fixture named in their table row. GPU validation slots in per
+  `docs/gpu-runbook.md`.
 
 ## 3. Acceptance gates
 
@@ -70,10 +73,23 @@ repeat the binding drill.
 
 | Gate | Target | Where proven |
 |---|---|---|
-| F2a | Prefix-trie scorer: on a shared-prefix trace against mock replicas with simulated cache state, prefix-hit-rate ≥2× the session-hashing baseline, no goodput loss on a uniform trace, placement p99 <10 ms at 500 replicas | CPU bench |
+| F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform rounds, the one-sided 95% lower bound of the <10 ms SLO-goodput ratio is ≥0.99 and ≥15/21 paired ratios are ≥0.99; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
 | F2b | RadixKV KV-event index: staleness <500 ms under churn; router degrades gracefully to the approximate trie when the event stream dies | CPU test + chaos fixture |
 | F2c | Real-engine validation: TTFT p95 reduction ≥30% on a multi-turn+RAG trace vs session-hashing, 4–8 GPUs | GPU testbed |
 | F2d | Placement decisions land in the JSONL decision log (`prefix_match` reason) and feed `learning/dataset.py`; bandit-tuned α/β beats hand-tuned on a replayed trace | CPU bench |
+
+F2a reuses F1a run `30374404150` only for its kind deployment, ingress clock,
+discovery, placement-log, provenance, and hosted-runner precedents. It does not
+reuse F1a's measurements and does not repeat the kind drill. The one distinct
+binding run uses 500 logical eligible `ReplicaPool` entries through the public
+generation path, retains raw cache/placement/performance JSONL, and independently
+replays both policies under the same per-request session IDs and initial cache
+state. The 21 paired rounds, alternating execution order, confidence lower bound,
+and sign-count guard make the declared 1% equivalence tolerance robust to host
+scheduling jitter. SLO-goodput divides qualifying completions by the summed
+public-generation dispatch time of every offered request, so a slow
+non-qualifying request cannot disappear from the cost; round wall time is
+audit-only. It does not claim a 500-Pod deployment.
 
 ### Stage F3 — NIC KV transfer + P/D pools (needs RDMA hardware)
 

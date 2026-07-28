@@ -5,7 +5,13 @@ import asyncio
 
 import pytest
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult, SamplingParams
+from kairyu.engine.backend import (
+    CacheHint,
+    GenerationRequest,
+    GenerationResult,
+    SamplingParams,
+    UpstreamClientError,
+)
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.orchestration.kv_index import KvEventIndex, ZmqKvEventSubscriber
 from kairyu.orchestration.learning.dataset import PlacementRecord, tune_prefix_weights
@@ -24,9 +30,12 @@ class MockBackend:
         return None
 
 
-def _request(prompt: str) -> GenerationRequest:
+def _request(prompt: str, *, session_id: str | None = None) -> GenerationRequest:
     return GenerationRequest(
-        request_id="req", prompt=prompt, sampling_params=SamplingParams()
+        request_id="req",
+        prompt=prompt,
+        sampling_params=SamplingParams(),
+        cache_hint=CacheHint(session_id=session_id) if session_id is not None else None,
     )
 
 
@@ -81,14 +90,91 @@ class TestPrefixIndex:
         index = PrefixIndex(chunk_chars=1, max_chunks_per_replica=4)
         index.observe("r1", "abcdef")  # 6 chunks -> capped to 4
         assert len(index._chunks["r1"]) == 4
+        assert tuple(index._chunks["r1"]) == prompt_chunks("abcdef", chunk_chars=1)[:4]
+        assert index.overlap("r1", "abcdef") == 4
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_chunk_cap_must_be_positive(self, limit):
+        with pytest.raises(ValueError, match="max_chunks_per_replica must be >= 1"):
+            PrefixIndex(max_chunks_per_replica=limit)
+
+    def test_candidate_reverse_map_tracks_eviction_and_forget(self):
+        index = PrefixIndex(chunk_chars=1, max_chunks_per_replica=2)
+        first_keys = index.chunk_keys("ab")
+        replacement_keys = index.chunk_keys("cd")
+        assert index.candidate_ids(()) == ()
+
+        index.observe("r1", "ab")
+        index.observe("r2", "ab")
+        assert index.candidate_ids(first_keys) == ("r1", "r2")
+
+        index.observe("r1", "cd")
+        assert index.candidate_ids(first_keys) == ("r2",)
+        assert index.candidate_ids(replacement_keys) == ("r1",)
+
+        index.forget_replica("r2")
+        index.forget_replica("unknown")
+        assert index.candidate_ids(first_keys) == ()
+        assert index.candidate_ids(replacement_keys) == ("r1",)
+
+        index.forget_replica("r1")
+        assert index.candidate_ids(replacement_keys) == ()
+        assert index._replicas_by_first_key == {}
 
 
 class TestPrefixRouting:
-    def test_prefix_selection_hashes_once_and_reuses_keys_for_every_candidate(
+    def test_cold_selection_hashes_once_skips_overlap_scan_and_runs_one_hrw(
         self, monkeypatch
     ):
         import kairyu.orchestration.prefix_index as prefix_module
+        import kairyu.orchestration.replica as replica_module
 
+        class SpyIndex(PrefixIndex):
+            def __init__(self):
+                super().__init__(chunk_chars=32)
+                self.overlap_key_calls: list[str] = []
+
+            def overlap_keys(self, replica_id, keys):
+                self.overlap_key_calls.append(replica_id)
+                return super().overlap_keys(replica_id, keys)
+
+        index = SpyIndex()
+        replica_ids = tuple(f"r{i}" for i in range(500))
+        pool = ReplicaPool(
+            {replica_id: MockBackend() for replica_id in replica_ids},
+            prefix_index=index,
+        )
+        real_prompt_chunks = prefix_module.prompt_chunks
+        hash_passes = 0
+
+        def counted_prompt_chunks(prompt, chunk_chars=256):
+            nonlocal hash_passes
+            hash_passes += 1
+            return real_prompt_chunks(prompt, chunk_chars)
+
+        real_hrw = replica_module._rendezvous_winner
+        hrw_calls = 0
+
+        def counted_hrw(session_id, candidates, encoded):
+            nonlocal hrw_calls
+            hrw_calls += 1
+            return real_hrw(session_id, candidates, encoded)
+
+        monkeypatch.setattr(prefix_module, "prompt_chunks", counted_prompt_chunks)
+        monkeypatch.setattr(replica_module, "_rendezvous_winner", counted_hrw)
+
+        selected, reason, session_id = pool._select(
+            _request("long prompt " * 512, session_id="cold-session")
+        )
+
+        assert selected in replica_ids
+        assert reason == "session_affinity"
+        assert session_id == "cold-session"
+        assert hash_passes == 1
+        assert index.overlap_key_calls == []
+        assert hrw_calls == 1
+
+    def test_warm_selection_scores_only_first_key_candidates(self):
         class SpyIndex(PrefixIndex):
             def __init__(self):
                 super().__init__(chunk_chars=4)
@@ -104,19 +190,12 @@ class TestPrefixRouting:
             {replica_id: MockBackend() for replica_id in replica_ids},
             prefix_index=index,
         )
-        real_prompt_chunks = prefix_module.prompt_chunks
-        hash_passes = 0
+        prompt = "shared-prefix"
+        index.observe("r19", prompt)
+        index.observe("r7", prompt)
 
-        def counted_prompt_chunks(prompt, chunk_chars=256):
-            nonlocal hash_passes
-            hash_passes += 1
-            return real_prompt_chunks(prompt, chunk_chars)
-
-        monkeypatch.setattr(prefix_module, "prompt_chunks", counted_prompt_chunks)
-
-        assert pool._prefix_select(replica_ids, "long prompt " * 512) is None
-        assert hash_passes == 1
-        assert index.overlap_key_calls == list(replica_ids)
+        assert pool._prefix_select(replica_ids, prompt) == "r7"
+        assert index.overlap_key_calls == ["r7", "r19"]
 
     def test_prefix_selection_preserves_legacy_overlap_only_index(self):
         class LegacyIndex:
@@ -162,6 +241,116 @@ class TestPrefixRouting:
 
         assert pool._prefix_select(("a", "b"), "prompt") == "a"
 
+    def test_prefix_selection_score_tie_uses_session_hrw(self):
+        index = PrefixIndex(chunk_chars=4)
+        replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
+        pool = ReplicaPool(replicas, prefix_index=index)
+        baseline = ReplicaPool(replicas)
+        prompt = "shared-prefix"
+        for replica_id in replicas:
+            index.observe(replica_id, prompt)
+        session_id = next(
+            f"session-{candidate}"
+            for candidate in range(100)
+            if baseline._select(
+                _request(prompt, session_id=f"session-{candidate}")
+            )[0]
+            != "a"
+        )
+        expected = baseline._select(_request(prompt, session_id=session_id))[0]
+
+        selected, reason, observed_session = pool._select(
+            _request(prompt, session_id=session_id)
+        )
+
+        assert selected == expected
+        assert reason == "prefix_match"
+        assert observed_session == session_id
+
+    def test_warm_candidate_wins_zero_score_tie_with_cold_baseline(self):
+        index = PrefixIndex(chunk_chars=4)
+        replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
+        pool = ReplicaPool(replicas, prefix_index=index, prefix_beta=0.25)
+        baseline = ReplicaPool(replicas)
+        prompt = "shared-prefix"
+        index.observe("a", prompt)
+        pool._entries["a"].outstanding = index.overlap("a", prompt) * 4
+        session_id = next(
+            f"session-{candidate}"
+            for candidate in range(100)
+            if baseline._select(
+                _request(prompt, session_id=f"session-{candidate}")
+            )[0]
+            != "a"
+        )
+
+        selected, reason, _observed_session = pool._select(
+            _request(prompt, session_id=session_id)
+        )
+
+        assert selected == "a"
+        assert reason == "prefix_match"
+
+    def test_negative_warm_score_uses_cold_session_fallback(self):
+        index = PrefixIndex(chunk_chars=4)
+        replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
+        pool = ReplicaPool(replicas, prefix_index=index, prefix_beta=0.25)
+        baseline = ReplicaPool(replicas)
+        prompt = "shared-prefix"
+        index.observe("a", prompt)
+        pool._entries["a"].outstanding = index.overlap("a", prompt) * 4 + 1
+        session_id = next(
+            f"session-{candidate}"
+            for candidate in range(100)
+            if baseline._select(
+                _request(prompt, session_id=f"session-{candidate}")
+            )[0]
+            != "a"
+        )
+        request = _request(prompt, session_id=session_id)
+
+        assert pool._select(request) == baseline._select(request)
+
+    def test_hinted_request_prefers_warm_prefix_over_session_affinity(self):
+        index = PrefixIndex(chunk_chars=4)
+        replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
+        pool = ReplicaPool(replicas, prefix_index=index)
+        request = _request("shared-prefix-user", session_id="sticky-session")
+        affine, reason, _session_id = pool._select(request)
+        assert reason == "session_affinity"
+        warm = next(replica_id for replica_id in replicas if replica_id != affine)
+        index.observe(warm, request.prompt)
+
+        selected, reason, observed_session = pool._select(request)
+
+        assert selected == warm
+        assert reason == "prefix_match"
+        assert observed_session == "sticky-session"
+
+    def test_hinted_request_without_overlap_preserves_session_affinity(self):
+        replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
+        request = _request("cold-prompt", session_id="sticky-session")
+        baseline = ReplicaPool(replicas)
+        pool = ReplicaPool(replicas, prefix_index=PrefixIndex(chunk_chars=4))
+
+        assert pool._select(request) == baseline._select(request)
+
+    def test_hinted_cold_request_preserves_queue_depth_fallback(self):
+        replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
+        request = _request("cold-prompt", session_id="sticky-session")
+        baseline = ReplicaPool(replicas, queue_depth_threshold=0)
+        pool = ReplicaPool(
+            replicas,
+            prefix_index=PrefixIndex(chunk_chars=4),
+            queue_depth_threshold=0,
+        )
+        affine = baseline._select(request)[0]
+        baseline._entries[affine].outstanding = 1
+        pool._entries[affine].outstanding = 1
+
+        assert pool._select(request) == baseline._select(request)
+        assert pool._select(request)[1] == "queue_depth_fallback"
+
     def test_prefix_selection_keeps_queue_depth_penalty_semantics(self):
         class ScoredIndex:
             def chunk_keys(self, _prompt):
@@ -195,6 +384,125 @@ class TestPrefixRouting:
         counts = pool.decision_counts
         assert counts["prefix_match"] == 5  # every follow-up hit the warm replica
         assert index.overlap(first_target, shared) > 0
+
+    @pytest.mark.asyncio
+    async def test_only_successful_generate_advertises_the_prefix(self):
+        class FailingBackend(MockBackend):
+            async def generate(self, request):
+                raise RuntimeError("backend failed")
+
+        class ClientErrorBackend(MockBackend):
+            async def generate(self, request):
+                raise UpstreamClientError("bad request", status_code=400)
+
+        prompt = "successful-prefix"
+        failed_index = PrefixIndex(chunk_chars=4)
+        failed_pool = ReplicaPool(
+            {"failed": FailingBackend()},
+            prefix_index=failed_index,
+        )
+        with pytest.raises(RuntimeError, match="backend failed"):
+            await failed_pool.generate(_request(prompt))
+        assert failed_index.overlap("failed", prompt) == 0
+
+        client_error_index = PrefixIndex(chunk_chars=4)
+        client_error_pool = ReplicaPool(
+            {"client-error": ClientErrorBackend()},
+            prefix_index=client_error_index,
+        )
+        with pytest.raises(UpstreamClientError, match="bad request"):
+            await client_error_pool.generate(_request(prompt))
+        assert client_error_index.overlap("client-error", prompt) == 0
+
+        successful_index = PrefixIndex(chunk_chars=4)
+        successful_pool = ReplicaPool(
+            {"successful": MockBackend()},
+            prefix_index=successful_index,
+        )
+        await successful_pool.generate(_request(prompt))
+        assert successful_index.overlap("successful", prompt) > 0
+
+    @pytest.mark.asyncio
+    async def test_force_removed_generation_cannot_republish_prefix_after_readd(self):
+        class DelayedBackend(MockBackend):
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def generate(self, request):
+                self.started.set()
+                await self.release.wait()
+                return GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(),
+                    finished=True,
+                )
+
+        backend = DelayedBackend()
+        index = PrefixIndex(chunk_chars=4)
+        pool = ReplicaPool({"same-id": backend}, prefix_index=index)
+        prompt = "old-generation-prefix"
+        task = asyncio.create_task(pool.generate(_request(prompt)))
+        await backend.started.wait()
+
+        await pool.remove_replica("same-id", force=True)
+        pool.add_replica("same-id", MockBackend())
+        backend.release.set()
+        await task
+
+        keys = index.chunk_keys(prompt)
+        assert index.candidate_ids(keys) == ()
+        assert index.overlap("same-id", prompt) == 0
+
+        await pool.generate(_request(prompt))
+        assert index.candidate_ids(keys) == ("same-id",)
+        assert index.overlap("same-id", prompt) > 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_stream_does_not_advertise_the_prefix(self):
+        class BlockingStreamBackend(MockBackend):
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.never = asyncio.Event()
+
+            async def stream(self, request):
+                self.started.set()
+                await self.never.wait()
+                yield GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(),
+                    finished=True,
+                )
+
+        backend = BlockingStreamBackend()
+        index = PrefixIndex(chunk_chars=4)
+        pool = ReplicaPool({"stream": backend}, prefix_index=index)
+        request = _request("cancelled-prefix")
+
+        async def consume() -> None:
+            async for _chunk in pool.stream(request):
+                pass
+
+        task = asyncio.create_task(consume())
+        await backend.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert index.overlap("stream", request.prompt) == 0
+
+    @pytest.mark.asyncio
+    async def test_completed_stream_advertises_the_prefix(self):
+        index = PrefixIndex(chunk_chars=4)
+        pool = ReplicaPool({"stream": MockBackend()}, prefix_index=index)
+        request = _request("completed-prefix")
+
+        chunks = [chunk async for chunk in pool.stream(request)]
+
+        assert len(chunks) == 1
+        assert index.overlap("stream", request.prompt) > 0
 
     @pytest.mark.asyncio
     async def test_no_overlap_falls_back_to_least_outstanding(self):

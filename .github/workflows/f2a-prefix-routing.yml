@@ -1,0 +1,101 @@
+name: F2a prefix routing
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/f2a-prefix-routing.yml"
+      - "bench/prefix_routing_f2a_bench.py"
+      - "kairyu/engine/backend.py"
+      - "kairyu/orchestration/prefix_index.py"
+      - "kairyu/orchestration/replica.py"
+      - "kairyu/orchestration/router.py"
+      - "kairyu/sampling_params.py"
+      - "kairyu/telemetry.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "bench/results/f2a-prefix-routing-500-2026-07-28/**"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Evidence profile
+        required: true
+        default: formal
+        type: choice
+        options:
+          - formal
+          - smoke
+
+concurrency:
+  group: f2a-prefix-routing-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'manual' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      F2A_RESULTS_DIR: bench/results/f2a-prefix-routing-live
+      F2A_RETAINED_DIR: bench/results/f2a-prefix-routing-500-2026-07-28
+      PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'formal' }}
+      F2A_EXPECTED_COMMIT: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+      - name: Sync development dependencies
+        run: uv sync --dev
+      - name: Select live measurement or retained replay
+        id: mode
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "mode=measure" >> "${GITHUB_OUTPUT}"
+          elif git diff --quiet HEAD^ HEAD -- \
+            .github/workflows/f2a-prefix-routing.yml \
+            bench/prefix_routing_f2a_bench.py \
+            kairyu/engine/backend.py \
+            kairyu/orchestration/prefix_index.py \
+            kairyu/orchestration/replica.py \
+            kairyu/orchestration/router.py \
+            kairyu/sampling_params.py \
+            kairyu/telemetry.py \
+            pyproject.toml \
+            uv.lock; then
+            echo "mode=replay" >> "${GITHUB_OUTPUT}"
+          else
+            echo "mode=measure" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Run the 500-replica F2a evidence gate
+        if: steps.mode.outputs.mode == 'measure'
+        run: >-
+          uv run python bench/prefix_routing_f2a_bench.py
+          --profile "${PROFILE}"
+          --output-dir "${F2A_RESULTS_DIR}"
+      - name: Replay retained evidence without remeasurement
+        if: steps.mode.outputs.mode == 'replay'
+        run: >-
+          uv run python bench/prefix_routing_f2a_bench.py
+          --verify-artifact "${F2A_RETAINED_DIR}"
+      - name: Upload live raw and replayed evidence
+        if: always() && steps.mode.outputs.mode == 'measure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: f2a-prefix-routing-${{ env.PROFILE }}-${{ github.run_id }}
+          path: ${{ env.F2A_RESULTS_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload retained replay
+        if: always() && steps.mode.outputs.mode == 'replay'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: f2a-prefix-routing-retained-${{ github.run_id }}
+          path: ${{ env.F2A_RETAINED_DIR }}
+          if-no-files-found: error
+          retention-days: 30

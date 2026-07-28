@@ -3,14 +3,17 @@
 ``ReplicaPool`` is an L2 orchestration component — a sibling of the ``Router``
 per the m5 D4 seam amendment. Placement policy, in order:
 
-1. **Session affinity** — requests carrying ``cache_hint.session_id`` map to a
-   replica by rendezvous (HRW) hashing over the ELIGIBLE replicas (healthy ∧
-   not draining), so removing or draining one replica only remaps the sessions
-   that lived on it (G2 A8; m10a property test).
-2. **Load-skew valve** — if the affine replica's outstanding-request count
+1. **Prefix-aware score** when enabled — maximize
+   ``alpha * overlap - beta * outstanding`` over warm eligible replicas.
+   Equal-score warm candidates use session HRW, or insertion order without a
+   session. A warm/cold score tie prefers the reusable prefix.
+2. **Cold session affinity** — requests carrying ``cache_hint.session_id`` map
+   by rendezvous (HRW) hashing over the ELIGIBLE replicas (healthy ∧ not
+   draining), so removing or draining one replica only remaps its sessions.
+3. **Load-skew valve** — if the affine replica's outstanding-request count
    exceeds ``queue_depth_threshold``, fall back to least-outstanding.
-3. **Least outstanding** for session-less traffic (ties break to insertion
-   order).
+4. **Least outstanding** for cold session-less traffic (ties break to
+   insertion order).
 
 m10a dynamic membership: entries are id-keyed; legacy sequence construction
 auto-ids "0".."N-1" — HRW strings and Prometheus labels are IDENTICAL to the
@@ -572,6 +575,14 @@ class ReplicaPool:
                 "failures, or draining); call probe() once a replica recovers"
             )
         session_id = request.cache_hint.session_id if request.cache_hint else None
+        if self._prefix_index is not None:
+            best = self._prefix_select(
+                eligible,
+                request.prompt,
+                session_id=session_id or None,
+            )
+            if best is not None:
+                return best, "prefix_match", session_id
         if session_id:
             affine = _rendezvous_winner(
                 session_id,
@@ -581,21 +592,54 @@ class ReplicaPool:
             if self._entries[affine].outstanding > self._queue_depth_threshold:
                 return self._least_outstanding(eligible), "queue_depth_fallback", session_id
             return affine, "session_affinity", session_id
-        if self._prefix_index is not None:
-            best = self._prefix_select(eligible, request.prompt)
-            if best is not None:
-                return best, "prefix_match", None
         return self._least_outstanding(eligible), "least_outstanding", None
 
-    def _prefix_select(self, eligible: tuple[str, ...], prompt: str) -> str | None:
+    def _prefix_select(
+        self,
+        eligible: tuple[str, ...],
+        prompt: str,
+        *,
+        session_id: str | None = None,
+    ) -> str | None:
         """alpha*overlap - beta*outstanding; None when no candidate has overlap
-        (fall through to least-outstanding rather than pay a random placement)."""
+        (fall through to the existing cold-placement policy).
+
+        Candidate order remains the tie break for requests without a session.
+        A session chooses its HRW winner among equal-score candidates, so
+        affinity remains deterministic without bypassing prefix-aware scoring.
+        """
         chunk_keys = getattr(self._prefix_index, "chunk_keys", None)
         overlap_keys = getattr(self._prefix_index, "overlap_keys", None)
+        candidate_ids = getattr(self._prefix_index, "candidate_ids", None)
         use_precomputed = callable(chunk_keys) and callable(overlap_keys)
         keys = chunk_keys(prompt) if use_precomputed else None
-        scored = []
-        for rid in eligible:
+        score_candidates = eligible
+        if use_precomputed and callable(candidate_ids):
+            advertised = candidate_ids(keys)
+            if not advertised:
+                return None
+            if eligible is self._eligible_snapshot:
+                score_candidates = tuple(
+                    sorted(
+                        (
+                            rid
+                            for rid in advertised
+                            if rid in self._entries
+                            and self._is_eligible(self._entries[rid])
+                        ),
+                        key=self._ordinal_by_id.__getitem__,
+                    )
+                )
+            else:
+                advertised_set = set(advertised)
+                score_candidates = tuple(
+                    rid for rid in eligible if rid in advertised_set
+                )
+            if not score_candidates:
+                return None
+        best_score: float | None = None
+        tied: list[tuple[str, int]] = []
+        for rid in score_candidates:
             if use_precomputed:
                 overlap = overlap_keys(rid, keys)
             else:
@@ -604,11 +648,26 @@ class ReplicaPool:
                 self._prefix_alpha * overlap
                 - self._prefix_beta * self._entries[rid].outstanding
             )
-            scored.append((score, overlap, rid))
-        best_score, best_overlap, best_rid = max(scored, key=lambda item: item[0])
-        if best_overlap == 0:
+            if best_score is None or score > best_score:
+                best_score = score
+                tied = [(rid, overlap)]
+            elif score == best_score:
+                tied.append((rid, overlap))
+        if best_score is None or best_score < 0:
             return None
-        return best_rid
+        warm_tied = [rid for rid, overlap in tied if overlap > 0]
+        if not warm_tied:
+            return None
+        selected = (
+            warm_tied[0]
+            if session_id is None or len(warm_tied) == 1
+            else _rendezvous_winner(
+                session_id,
+                warm_tied,
+                self._encoded_replica_ids,
+            )
+        )
+        return selected
 
     def _place(self, request: GenerationRequest) -> str:
         """Select a replica and log the decision before dispatch (m5 D4)."""
@@ -627,8 +686,6 @@ class ReplicaPool:
             "kairyu.pool.place", {"replica_id": replica_id, "reason": reason}
         ):
             pass
-        if self._prefix_index is not None:
-            self._prefix_index.observe(replica_id, request.prompt)
         if self._log is not None:
             # legacy field stays the ordinal; replica_id added alongside (A1)
             self._log.record_replica(
@@ -689,6 +746,12 @@ class ReplicaPool:
             raise
         else:
             self._record_backend_success(entry)
+            if (
+                self._prefix_index is not None
+                and not entry.removed
+                and self._entries.get(replica_id) is entry
+            ):
+                self._prefix_index.observe(replica_id, request.prompt)
             return result
         finally:
             self._finish(entry)
@@ -707,6 +770,12 @@ class ReplicaPool:
             raise
         else:
             self._record_backend_success(entry)
+            if (
+                self._prefix_index is not None
+                and not entry.removed
+                and self._entries.get(replica_id) is entry
+            ):
+                self._prefix_index.observe(replica_id, request.prompt)
         finally:
             self._finish(entry)
 
