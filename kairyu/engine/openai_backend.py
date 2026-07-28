@@ -4,11 +4,13 @@ Used by the Conductor for frontier-tier roles (design m1 D1) and as the remote
 DP-replica member behind ReplicaPool (design m6 D2). Errors surface explicitly:
 missing API key and non-2xx statuses raise RuntimeError with context.
 
-m6 D2 fixes: one persistent pooled AsyncClient per backend (no per-request
-handshake), real SSE streaming (cumulative partials, MockBackend semantics),
-optional auth (``api_key_env=None`` for keyless node-to-node replicas), and
-token-count passthrough (synthetic ids carrying ``usage.completion_tokens`` /
-the streamed-delta count, mirroring MockBackend's count-only ids).
+m6 D2 fixes: one persistent pooled AsyncClient per standalone backend, or one
+externally-owned client shared by a dynamic ReplicaPool (no per-request or
+per-replica handshake), real SSE streaming (cumulative partials, MockBackend
+semantics), optional auth (``api_key_env=None`` for keyless node-to-node
+replicas), and token-count passthrough (synthetic ids carrying
+``usage.completion_tokens`` / the streamed-delta count, mirroring
+MockBackend's count-only ids).
 """
 
 from __future__ import annotations
@@ -294,7 +296,10 @@ class OpenAICompatBackend:
         request_stream_usage: bool = True,
         upstream: str = "generic",
         capabilities: Mapping[str, object] | OpenAIRequestCapabilities | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
+        if client is not None and transport is not None:
+            raise ValueError("client and transport are mutually exclusive")
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key_env = api_key_env
@@ -304,7 +309,10 @@ class OpenAICompatBackend:
         # upstreams that reject unknown stream_options
         self._request_stream_usage = request_stream_usage
         self._capabilities = resolve_openai_capabilities(upstream, capabilities)
-        self._client: httpx.AsyncClient | None = None
+        self._client = client
+        # An injected client is owned by the dynamic pool lifecycle. Removing
+        # one replica must not tear down every other replica's connection pool.
+        self._owns_client = client is None
 
     @property
     def base_url(self) -> str:
@@ -370,7 +378,11 @@ class OpenAICompatBackend:
         return headers
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
+        if self._client is not None and self._client.is_closed:
+            if not self._owns_client:
+                raise RuntimeError("externally owned HTTP client is closed")
+            self._client = None
+        if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout_s, transport=self._transport)
         return self._client
 
@@ -395,6 +407,7 @@ class OpenAICompatBackend:
             f"{self._base_url}/chat/completions",
             json=payload,
             headers=self._headers(request),
+            timeout=self._timeout_s,
         )
         if response.status_code != 200:
             _raise_for_status(self._base_url, response.status_code, response.text)
@@ -477,6 +490,7 @@ class OpenAICompatBackend:
             f"{self._base_url}/chat/completions",
             json=payload,
             headers=self._headers(request),
+            timeout=self._timeout_s,
         ) as response:
             if response.status_code != 200:
                 body = (await response.aread()).decode(errors="replace")
@@ -534,6 +548,8 @@ class OpenAICompatBackend:
         )
 
     async def shutdown(self) -> None:
+        if not self._owns_client:
+            return
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
         self._client = None

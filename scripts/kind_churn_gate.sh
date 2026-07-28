@@ -7,7 +7,7 @@ usage() {
 usage: scripts/kind_churn_gate.sh [--formal|--smoke] [--keep-cluster]
 
 Environment overrides:
-  KIND, KUBECTL, DOCKER, CURL, UV, GIT, TAR, TIMEOUT
+  KIND, KUBECTL, DOCKER, CURL, UV, GIT, TAR, TIMEOUT, GREP, SED
   F1A_CLUSTER_NAME, F1A_KIND_CONFIG, F1A_MANIFEST_DIR
   F1A_RESULTS_DIR, F1A_GATEWAY_PORT
 
@@ -54,6 +54,8 @@ UV=${UV:-uv}
 GIT=${GIT:-git}
 TAR=${TAR:-tar}
 TIMEOUT=${TIMEOUT:-timeout}
+GREP=${GREP:-grep}
+SED=${SED:-sed}
 
 run_bounded() {
   local duration=$1
@@ -70,12 +72,11 @@ KIND_CONFIG=${F1A_KIND_CONFIG:-deploy/kind/f1a/kind-config.yaml}
 MANIFEST_DIR=${F1A_MANIFEST_DIR:-deploy/kind/f1a}
 RESULTS_DIR=${F1A_RESULTS_DIR:-bench/results/f1a-fleet-churn}
 GATEWAY_PORT=${F1A_GATEWAY_PORT:-18080}
-GATEWAY_URL="http://127.0.0.1:${GATEWAY_PORT}"
 GATEWAY_CRI_IMAGE_METADATA="${RESULTS_DIR}/gateway-cri-image.json"
 MOCK_CRI_IMAGE_METADATA="${RESULTS_DIR}/mock-cri-image.json"
+RENDERED_KIND_CONFIG="${RESULTS_DIR}/rendered-kind-config.yaml"
 OUTPUT="${RESULTS_DIR}/manifest.json"
 VERIFIER_OUTPUT="${RESULTS_DIR}/verifier.json"
-PORT_FORWARD_LOG="${RESULTS_DIR}/port-forward.log"
 REPLICAS=200
 APPLY_DIR=$MANIFEST_DIR
 if [[ "$PROFILE" == "smoke" ]]; then
@@ -93,6 +94,7 @@ known_results=(
   endpointslices.jsonl
   pods.jsonl
   resources.jsonl
+  # Remove evidence left by pre-NodePort gate runs.
   port-forward.log
   kubernetes-final.txt
   events.txt
@@ -100,6 +102,7 @@ known_results=(
   gateway-placements.jsonl
   gateway-placements-copy-error.txt
   rendered-manifest.yaml
+  rendered-kind-config.yaml
   live-applied.yaml
   pods-final.json
   nodes-describe.txt
@@ -112,7 +115,6 @@ for result_name in "${known_results[@]}"; do
   rm -f -- "${RESULTS_DIR}/${result_name}"
 done
 
-PORT_FORWARD_PID=
 CLUSTER_CREATED=0
 CLUSTER_MAY_EXIST=0
 SOURCE_ARCHIVE_DIR=
@@ -161,30 +163,6 @@ cleanup() {
   local status=$?
   local cleanup_failed=0
   set +e
-  if [[ -n "$PORT_FORWARD_PID" ]]; then
-    kill "$PORT_FORWARD_PID" 2>/dev/null
-    for _ in $(seq 1 50); do
-      if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-        break
-      fi
-      sleep 0.1
-    done
-    if kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-      kill -KILL "$PORT_FORWARD_PID" 2>/dev/null
-    fi
-    for _ in $(seq 1 50); do
-      if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-        break
-      fi
-      sleep 0.1
-    done
-    if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-      wait "$PORT_FORWARD_PID" 2>/dev/null
-    else
-      echo "port-forward did not exit after SIGKILL; skipping wait" >&2
-      cleanup_failed=1
-    fi
-  fi
   collect_evidence
   if ((CLUSTER_MAY_EXIST == 1 && (CLUSTER_CREATED == 0 || KEEP_CLUSTER == 0))); then
     if ! run_bounded 120s "$KIND" delete cluster --name "$CLUSTER_NAME"; then
@@ -206,7 +184,8 @@ cleanup() {
 trap cleanup EXIT
 
 for tool in \
-  "$KIND" "$KUBECTL" "$DOCKER" "$CURL" "$UV" "$GIT" "$TAR" "$TIMEOUT"; do
+  "$KIND" "$KUBECTL" "$DOCKER" "$CURL" "$UV" "$GIT" "$TAR" "$TIMEOUT" \
+  "$GREP" "$SED"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "required tool is unavailable: $tool" >&2
     exit 1
@@ -216,6 +195,17 @@ if [[ ! -f "$KIND_CONFIG" || ! -f "${APPLY_DIR}/kustomization.yaml" ]]; then
   echo "F1a kind config or kustomization is missing" >&2
   exit 1
 fi
+if [[ ! "$GATEWAY_PORT" =~ ^[0-9]+$ ||
+      ${#GATEWAY_PORT} -gt 5 ]]; then
+  echo "F1A_GATEWAY_PORT must be an integer from 1 through 65535" >&2
+  exit 1
+fi
+GATEWAY_PORT=$((10#$GATEWAY_PORT))
+if ((GATEWAY_PORT < 1 || GATEWAY_PORT > 65535)); then
+  echo "F1A_GATEWAY_PORT must be an integer from 1 through 65535" >&2
+  exit 1
+fi
+GATEWAY_URL="http://127.0.0.1:${GATEWAY_PORT}"
 
 SOURCE_COMMIT=$("$GIT" rev-parse HEAD)
 source_inputs=(
@@ -260,6 +250,30 @@ if [[ ! -f "$ARCHIVE_KIND_CONFIG" ||
   echo "committed F1a kind config or kustomization is missing" >&2
   exit 1
 fi
+host_port_count=$(
+  "$GREP" -cE '^[[:space:]]+hostPort:[[:space:]]+' \
+    "$ARCHIVE_KIND_CONFIG" || true
+)
+pinned_host_port_count=$(
+  "$GREP" -cE '^[[:space:]]+hostPort:[[:space:]]+18080[[:space:]]*$' \
+    "$ARCHIVE_KIND_CONFIG" || true
+)
+if [[ "$host_port_count" != "1" || "$pinned_host_port_count" != "1" ]]; then
+  echo "committed F1a kind config must contain exactly one pinned hostPort 18080" >&2
+  exit 1
+fi
+"$SED" -E \
+  "s/^([[:space:]]+)hostPort:[[:space:]]+18080[[:space:]]*$/\\1hostPort: ${GATEWAY_PORT}/" \
+  "$ARCHIVE_KIND_CONFIG" >"$RENDERED_KIND_CONFIG"
+rendered_host_port_count=$(
+  "$GREP" -cE \
+    "^[[:space:]]+hostPort:[[:space:]]+${GATEWAY_PORT}[[:space:]]*$" \
+    "$RENDERED_KIND_CONFIG" || true
+)
+if [[ "$rendered_host_port_count" != "1" ]]; then
+  echo "failed to render the F1a kind gateway host port exactly once" >&2
+  exit 1
+fi
 "$KUBECTL" kustomize "$ARCHIVE_APPLY_DIR" \
   >"${RESULTS_DIR}/rendered-manifest.yaml"
 
@@ -302,7 +316,7 @@ done
 
 CLUSTER_MAY_EXIST=1
 "$KIND" create cluster --name "$CLUSTER_NAME" \
-  --config "$ARCHIVE_KIND_CONFIG" --wait 180s
+  --config "$RENDERED_KIND_CONFIG" --wait 180s
 CLUSTER_CREATED=1
 mapfile -t kind_nodes < <("$KIND" get nodes --name "$CLUSTER_NAME")
 CONTROL_PLANE=${kind_nodes[0]}
@@ -384,22 +398,16 @@ fi
 "$KUBECTL" -n kairyu-f1a rollout status deployment/f1a-gateway \
   --timeout=5m
 
-"$KUBECTL" -n kairyu-f1a port-forward service/f1a-gateway \
-  "${GATEWAY_PORT}:8000" >"$PORT_FORWARD_LOG" 2>&1 &
-PORT_FORWARD_PID=$!
 ready=0
 for _ in $(seq 1 120); do
   if "$CURL" -sf "${GATEWAY_URL}/readyz" >/dev/null; then
     ready=1
     break
   fi
-  if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-    break
-  fi
   sleep 1
 done
 if ((ready == 0)); then
-  echo "gateway port-forward did not become ready" >&2
+  echo "gateway NodePort did not become ready at ${GATEWAY_URL}" >&2
   exit 1
 fi
 
@@ -441,9 +449,6 @@ for _ in $(seq 1 300); do
       membership_ready=1
       break
     fi
-  fi
-  if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-    break
   fi
   sleep 1
 done
@@ -489,6 +494,7 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1a-uv-cache}
   --expected-git-commit "$SOURCE_COMMIT" \
   --driver-path scripts/kind_churn_gate.sh \
   "${frozen_args[@]}" \
+  --frozen-sidecar "$RENDERED_KIND_CONFIG" \
   --output "$OUTPUT" \
   --assert-gate
 

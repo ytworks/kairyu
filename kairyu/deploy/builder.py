@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 
 from kairyu.batch.store import BatchStore
@@ -15,10 +17,15 @@ from kairyu.deploy.prober import HealthProber
 from kairyu.deploy.registry import (
     KubernetesEndpointSliceDiscovery,
     PoolReconciler,
+    openai_replica_factory,
 )
 from kairyu.deploy.spec import DeploymentSpec, load_deployment_spec
 from kairyu.dsl.loader import build_orchestrator, load_spec
-from kairyu.engine.backend import EngineBackend, shutdown_all
+from kairyu.engine.backend import (
+    EngineBackend,
+    shutdown_all,
+    shutdown_all_cancellation_safe,
+)
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
@@ -38,6 +45,57 @@ _EMBEDDING_BACKEND_FACTORIES: dict[str, Callable[..., EmbeddingBackend]] = {
 _SERVICE_ACCOUNT_NAMESPACE_PATH = Path(
     "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
+
+
+class _DynamicPoolHTTPClientOwner:
+    """Exactly-once, cancellation-safe owner of one dynamic pool's client."""
+
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self.client = client
+        self._close_task: asyncio.Task[None] | None = None
+
+    async def shutdown(self) -> None:
+        task = self._close_task
+        if task is None:
+            if self.client.is_closed:
+                return
+            task = asyncio.create_task(self.client.aclose())
+            self._close_task = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as cancelled:
+            # The client is not discoverable after application teardown. Finish
+            # its close before propagating cancellation so sockets cannot leak.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            try:
+                task.result()
+            except BaseException as cleanup_error:
+                raise cancelled from cleanup_error
+            raise
+
+
+def _create_dynamic_pool_http_client() -> httpx.AsyncClient:
+    """Build the fleet-wide data/probe connection pool for one ReplicaPool.
+
+    Dynamic discovery has no declared maximum fleet size. Keep both aggregate
+    limits open so they cannot fall below the server concurrency cap or evict a
+    ready replica's warmed connection. EndpointSlice membership is a trusted
+    control-plane input; inbound request concurrency and the prober's own
+    semaphore bound active connections, while finite idle expiry bounds sockets
+    retained for churned-out pod IPs.
+    """
+
+    return httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_connections=None,
+            max_keepalive_connections=None,
+            keepalive_expiry=30.0,
+        )
+    )
 
 
 def _create_embedding_backend(backend: str, *, dimensions: int) -> EmbeddingBackend:
@@ -124,6 +182,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
 
     probers: list[HealthProber] = []
     reconcilers: list[tuple[PoolReconciler, float]] = []
+    dynamic_http_client_owners: list[_DynamicPoolHTTPClientOwner] = []
     placement_log_paths: dict[str, Path] = {}
     claimed_log_paths: dict[Path, str] = {}
     for name, pool_spec in spec.pools.items():
@@ -176,6 +235,10 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
 
         discovery = pool_spec.discovery
         assert discovery is not None
+        http_client_owner = _DynamicPoolHTTPClientOwner(
+            _create_dynamic_pool_http_client()
+        )
+        dynamic_http_client_owners.append(http_client_owner)
         source = KubernetesEndpointSliceDiscovery(
             discovery.service,
             _resolve_kubernetes_namespace(discovery.namespace),
@@ -242,6 +305,10 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         reconciler = PoolReconciler(
             pool,
             source,
+            factory=partial(
+                openai_replica_factory,
+                client=http_client_owner.client,
+            ),
             default_model=discovery.model or name,
             event_sink=event_sink,
         )
@@ -254,6 +321,8 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 pool,
                 {},
                 pool_spec.probe_interval_s,
+                client=http_client_owner.client,
+                close_client=False,
             )
         )
 
@@ -308,7 +377,16 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             # create_app owns the usage ledger in an outer lifespan wrapper,
             # so it closes only after workers stop and this shutdown completes
             # or raises an ExceptionGroup.
-            await shutdown_all(resources, "application")
+            try:
+                await shutdown_all(resources, "application")
+            finally:
+                # Individual dynamic backends and probers are non-owners. Close
+                # their common pool only after all of them and the reconciler
+                # loops have stopped, even if another resource shutdown fails.
+                await shutdown_all_cancellation_safe(
+                    dynamic_http_client_owners,
+                    "dynamic pool HTTP clients",
+                )
 
     app = create_app(
         engines=engines,
@@ -327,6 +405,9 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     app.state.probers = tuple(probers)
     app.state.reconcilers = tuple(
         reconciler for reconciler, _interval_s in reconcilers
+    )
+    app.state.dynamic_pool_http_clients = tuple(
+        owner.client for owner in dynamic_http_client_owners
     )
 
     if spec.batch is not None:

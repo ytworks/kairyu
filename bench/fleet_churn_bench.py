@@ -342,6 +342,24 @@ def source_environment(args: argparse.Namespace) -> dict[str, Any]:
         frozen_inputs.append(
             {"path": str(path), "sha256": _sha256_file(path)}
         )
+    frozen_sidecars = []
+    for raw in getattr(args, "frozen_sidecar", ()):
+        path = Path(raw).resolve()
+        try:
+            relative = path.relative_to(artifact_dir)
+        except ValueError as error:
+            raise ValueError(
+                f"frozen sidecar must be inside {artifact_dir}: {path}"
+            ) from error
+        relative_path = relative.as_posix()
+        if _safe_sidecar(Path(args.output).resolve(), relative_path) != path:
+            raise ValueError(
+                "frozen sidecar must be a direct child of the artifact "
+                f"directory: {path}"
+            )
+        frozen_sidecars.append(
+            {"path": relative_path, "sha256": _sha256_file(path)}
+        )
     return {
         "git_commit": git_commit,
         "expected_git_commit": args.expected_git_commit,
@@ -359,6 +377,7 @@ def source_environment(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark_sha256": _sha256_file(Path(__file__).resolve()),
         "driver_sha256": _sha256_file(Path(args.driver_path).resolve()),
         "frozen_inputs": frozen_inputs,
+        "frozen_sidecars": frozen_sidecars,
         "gateway_image_digest": args.gateway_image_digest,
         "mock_image_digest": args.mock_image_digest,
         "gateway_containerd_image_digest": (
@@ -1275,6 +1294,17 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
         )
 
     frozen_inputs = environment.get("frozen_inputs")
+    frozen_sidecars = environment.get("frozen_sidecars")
+    frozen_sidecar_paths = (
+        [item.get("path") for item in frozen_sidecars]
+        if isinstance(frozen_sidecars, list)
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            for item in frozen_sidecars
+        )
+        else []
+    )
     tool_versions = environment.get("tool_versions")
     expected_git_commit = environment.get("expected_git_commit")
     gateway_image_digest = environment.get("gateway_image_digest")
@@ -1314,6 +1344,18 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
             and bool(item["path"])
             and digest(item.get("sha256"))
             for item in frozen_inputs
+        )
+        and isinstance(frozen_sidecars, list)
+        and bool(frozen_sidecars)
+        and len(frozen_sidecar_paths) == len(set(frozen_sidecar_paths))
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and bool(item["path"])
+            and not Path(item["path"]).is_absolute()
+            and ".." not in Path(item["path"]).parts
+            and digest(item.get("sha256"))
+            for item in frozen_sidecars
         )
     )
 
@@ -2714,6 +2756,29 @@ def verify_artifact(manifest_path: Path) -> dict[str, Any]:
         "gate": manifest.get("gate") == GATE,
     }
     environment = manifest.get("environment") or {}
+    frozen_sidecars = environment.get("frozen_sidecars")
+    frozen_sidecar_descriptors_valid = (
+        isinstance(frozen_sidecars, list)
+        and bool(frozen_sidecars)
+        and all(isinstance(item, dict) for item in frozen_sidecars)
+    )
+    checks["frozen_sidecars:descriptor"] = frozen_sidecar_descriptors_valid
+    if frozen_sidecar_descriptors_valid:
+        for index, descriptor in enumerate(frozen_sidecars):
+            try:
+                path = _safe_sidecar(
+                    manifest_path,
+                    str(descriptor.get("path", "")),
+                )
+            except (OSError, TypeError, ValueError):
+                checks[f"frozen_sidecar:{index}:safe"] = False
+                continue
+            checks[f"frozen_sidecar:{index}:safe"] = True
+            exists = path.is_file()
+            checks[f"frozen_sidecar:{index}:exists"] = exists
+            checks[f"frozen_sidecar:{index}:hash"] = (
+                exists and _sha256_file(path) == descriptor.get("sha256")
+            )
     for role in ("gateway", "mock"):
         try:
             checks[f"{role}_cri_image_metadata_raw"] = (
@@ -3111,6 +3176,15 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="manifest/config input whose content hash is pinned (repeatable)",
+    )
+    parser.add_argument(
+        "--frozen-sidecar",
+        action="append",
+        default=[],
+        help=(
+            "artifact-local runtime input whose safe relative path and content "
+            "hash are independently verified"
+        ),
     )
     parser.add_argument("--gateway-image-digest")
     parser.add_argument("--mock-image-digest")

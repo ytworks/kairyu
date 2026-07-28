@@ -253,7 +253,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
-| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1a now has production EndpointSlice discovery plus a replayable kind churn gate; the formal 200-replica run is pending. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). F1a now has production EndpointSlice discovery, one shared outbound transport per dynamic pool, and a replayable direct-NodePort kind churn gate. A 200-replica cold and 10%-replacement diagnostic is zero-error; the formal ten-epoch run is pending. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
@@ -355,6 +355,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F1a shares transport at pool scope and measures through NodePort
+- What: Replaced per-replica lazy HTTP clients with one lifecycle-owned data/probe connection pool per dynamic ReplicaPool, preserving per-operation timeouts and cancellation-safe exactly-once close. Replaced `kubectl port-forward` in the kind gate with a provenance-pinned localhost-to-NodePort mapping. A 200-replica diagnostic completed 1,000/1,000 cold requests and another 1,000/1,000 after replacing 20 Pods, with zero 5xx, transport errors, or gateway restarts.
+- Why: The first formal attempt exposed two independent measurement blockers before epoch zero: synchronously constructing 181 per-replica clients stalled the event loop for roughly 4.7 seconds and caused 124 real upstream 502s, while the 1,024-FD `kubectl port-forward` process later lost its tunnel after 258 connections. Pool-scoped reuse matches current vLLM router practice and removes O(replicas) TLS/client setup; direct NodePort keeps the transport harness outside the measured gateway path.
+- Refs: m10 D5/A17; G5 F1a; issue #175; `kairyu/deploy/builder.py`; `kairyu/engine/openai_backend.py`; `scripts/kind_churn_gate.sh`; vLLM Production Stack PR #767
 
 ### 2026-07-28 — [amendment] F1a makes Kubernetes churn evidence production-owned and replayable
 - What: Added in-cluster EndpointSlice discovery with UID-stable generations, readiness and termination filtering, dynamic gateway lifecycle wiring, bounded-state metrics, ingress-to-placement timing, and ordered membership transition evidence. Added a fixed-seed kind protocol for one gateway and 200 mock replicas whose independent verifier rehashes and replays raw requests, placements, EndpointSlices, pod identities, resources, and all ten churn epochs.

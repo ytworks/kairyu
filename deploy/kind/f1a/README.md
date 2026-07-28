@@ -36,11 +36,14 @@ Both profiles build the fixed `kairyu:dev` and `kairyu-f1a-mock:dev` tags, load
 those exact tags into a fresh kind cluster, wait for an exact Ready replica
 count, and require the gateway metrics to report configured and healthy counts
 equal to the profile size with zero draining replicas before traffic begins.
+The gateway Service uses NodePort 30080. The kind node maps that port directly
+to `127.0.0.1:18080` on the runner, avoiding a `kubectl port-forward` process in
+the traffic path. `F1A_GATEWAY_PORT` changes the localhost port by rendering the
+pinned kind config into the evidence directory before cluster creation.
 
 ## Inspect
 
 ```bash
-kubectl -n kairyu-f1a port-forward service/f1a-gateway 18080:8000
 curl -sf http://127.0.0.1:18080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"f1a","messages":[{"role":"user","content":"hello"}],"max_tokens":1}'

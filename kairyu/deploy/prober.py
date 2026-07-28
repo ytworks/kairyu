@@ -38,6 +38,7 @@ class HealthProber:
         client: httpx.AsyncClient | None = None,
         *,
         max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
+        close_client: bool = True,
     ) -> None:
         if (
             isinstance(max_concurrency, bool)
@@ -70,6 +71,9 @@ class HealthProber:
         self._pool = pool
         self._interval_s = interval_s
         self._client = client
+        # Injected clients retain the historical prober-owned behavior unless
+        # the dynamic-pool builder explicitly supplies its external owner.
+        self._owns_client = client is None or close_client
         self._max_concurrency = max_concurrency
         for replica_id in pool.replica_ids:
             generation = pool.entry_generation(replica_id)
@@ -77,7 +81,11 @@ class HealthProber:
                 pool.require_probe(replica_id)
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
+        if self._client is not None and self._client.is_closed:
+            if not self._owns_client:
+                raise RuntimeError("externally owned HTTP client is closed")
+            self._client = None
+        if self._client is None:
             self._client = httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S)
         return self._client
 
@@ -113,7 +121,10 @@ class HealthProber:
     ) -> str | None:
         async with semaphore:
             try:
-                response = await self._get_client().get(url)
+                response = await self._get_client().get(
+                    url,
+                    timeout=_PROBE_TIMEOUT_S,
+                )
             except httpx.HTTPError:
                 return None
             except Exception:
@@ -165,5 +176,9 @@ class HealthProber:
                     )
                 await asyncio.sleep(self._interval_s)
         finally:
-            if self._client is not None and not self._client.is_closed:
+            if (
+                self._owns_client
+                and self._client is not None
+                and not self._client.is_closed
+            ):
                 await self._client.aclose()

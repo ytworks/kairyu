@@ -346,6 +346,36 @@ async def test_run_checks_immediately_and_closes_client_when_cancelled():
     assert client.is_closed is True
 
 
+async def test_run_does_not_close_externally_owned_shared_client():
+    pool = ReplicaPool({"trusted": MockBackend()})
+    client = _mock_client({})
+    prober = HealthProber(
+        "p",
+        pool,
+        {},
+        interval_s=3600.0,
+        client=client,
+        close_client=False,
+    )
+    checked = asyncio.Event()
+
+    async def record_tick() -> tuple[str, ...]:
+        checked.set()
+        return ()
+
+    prober.check_once = record_tick  # type: ignore[method-assign]
+    task = asyncio.create_task(prober.run())
+    try:
+        await asyncio.wait_for(checked.wait(), timeout=0.2)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert client.is_closed is False
+    await client.aclose()
+
+
 @pytest.mark.parametrize("max_concurrency", [0, -1])
 def test_max_concurrency_must_be_positive(max_concurrency):
     pool = ReplicaPool({"trusted": MockBackend()})

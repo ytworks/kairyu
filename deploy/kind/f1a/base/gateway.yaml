@@ -105,10 +105,12 @@ metadata:
     app.kubernetes.io/name: f1a-gateway
     app.kubernetes.io/part-of: kairyu-f1a
 spec:
+  type: NodePort
   selector:
     app.kubernetes.io/name: f1a-gateway
   ports:
     - name: http
       port: 8000
+      nodePort: 30080
       protocol: TCP
       targetPort: http

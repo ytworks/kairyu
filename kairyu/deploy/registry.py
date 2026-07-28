@@ -409,6 +409,8 @@ MembershipEventSink = Callable[
 
 def openai_replica_factory(
     identity: ReplicaIdentity,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> tuple[EngineBackend, str | None]:
     """Default factory for a fully identified OpenAI-protocol replica."""
     from kairyu.engine.registry import create_backend
@@ -419,6 +421,7 @@ def openai_replica_factory(
         model=identity.model,
         api_key_env=identity.api_key_env,
         upstream="kairyu",
+        client=client,
     )
     base = identity.address.removesuffix("/v1")
     # readiness, not liveness: a drained/wedged replica must stay ejected (O3)

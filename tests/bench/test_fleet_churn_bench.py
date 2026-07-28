@@ -371,6 +371,12 @@ def _passing_evidence():
             "docker": "29.6.1",
         },
         "frozen_inputs": [{"path": "manifest.yaml", "sha256": "d" * 64}],
+        "frozen_sidecars": [
+            {
+                "path": "rendered-kind-config.yaml",
+                "sha256": "7" * 64,
+            }
+        ],
         "statefulset": "f1a-replica",
         "mock_container_name": "mock",
         "expected_mock_image": mock_image,
@@ -1264,6 +1270,7 @@ def test_source_environment_rejects_untracked_gate_input(
     args = SimpleNamespace(
         driver_path=str(driver),
         frozen_input=[str(frozen)],
+        frozen_sidecar=[str(frozen)],
         expected_git_commit="a" * 40,
         gateway_image_digest="sha256:" + "1" * 64,
         mock_image_digest="sha256:" + "2" * 64,
@@ -1285,6 +1292,12 @@ def test_source_environment_rejects_untracked_gate_input(
     assert environment["source_dirty"]
     assert environment["untracked_gate_inputs"] == [
         "kairyu/untracked_kernel.py"
+    ]
+    assert environment["frozen_sidecars"] == [
+        {
+            "path": "manifest.yaml",
+            "sha256": fleet_bench._sha256_file(frozen),
+        }
     ]
 
     evidence = _passing_evidence()
@@ -1424,6 +1437,17 @@ async def test_run_cancels_owned_tasks_before_closing_sinks(
 
 def test_artifact_verifier_rehashes_and_replays_sidecars(tmp_path) -> None:
     evidence = _passing_evidence()
+    rendered_kind_config = tmp_path / "rendered-kind-config.yaml"
+    rendered_kind_config.write_text(
+        "kind: Cluster\nnodes:\n  - role: control-plane\n",
+        encoding="utf-8",
+    )
+    evidence["environment"]["frozen_sidecars"] = [
+        {
+            "path": rendered_kind_config.name,
+            "sha256": fleet_bench._sha256_file(rendered_kind_config),
+        }
+    ]
     for role in ("gateway", "mock"):
         key = f"{role}_cri_image_metadata"
         metadata = evidence["environment"][key]
@@ -1520,6 +1544,19 @@ def test_artifact_verifier_rehashes_and_replays_sidecars(tmp_path) -> None:
     assert not cri_result["verified"]
     assert not cri_result["checks"]["gateway_cri_image_metadata_raw"]
     gateway_cri_path.write_text(gateway_cri_raw)
+
+    rendered_kind_config_raw = rendered_kind_config.read_text(encoding="utf-8")
+    rendered_kind_config.write_text(
+        rendered_kind_config_raw + "  # tampered\n",
+        encoding="utf-8",
+    )
+    frozen_sidecar_result = verify_artifact(manifest_path)
+    assert not frozen_sidecar_result["verified"]
+    assert not frozen_sidecar_result["checks"]["frozen_sidecar:0:hash"]
+    rendered_kind_config.write_text(
+        rendered_kind_config_raw,
+        encoding="utf-8",
+    )
 
     with (tmp_path / "requests.jsonl").open("a") as handle:
         handle.write("{}\n")

@@ -1,8 +1,8 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D2/D5/A16 amended 2026-07-28). Reviewed (1-reviewer panel with
-repo-line evidence; §6 binding; covers M10a+M10b).
+2026-07-27; D2/D5/A16/A17 amended 2026-07-28). Reviewed (1-reviewer panel
+with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
 Depends on: m7 ReplicaPool/JsonlRouterLog, m7 deploy (spec/builder/prober),
@@ -137,6 +137,9 @@ The verifier rehashes and replays every JSONL sidecar. Pull requests run the
 same protocol at smoke scale; the frozen 200-replica profile is scheduled and
 manually dispatchable. Images and manifests are built from a clean Git archive,
 carry the source revision, and run on digest-pinned kind/Kubernetes inputs.
+Gate traffic reaches a fixed NodePort through kind's localhost port mapping;
+`kubectl port-forward` is excluded because its process-local file-descriptor
+and tunnel lifecycle are not part of the gateway-under-test.
 
 ## 3. M10b decisions (implemented after M10a in the same doc's scope)
 
@@ -275,3 +278,14 @@ over (α, β) (pure function over the dataset; no online learning).
   transport errors, unsent arrivals, missing request-to-placement joins,
   incomplete final gateway membership, missing raw sidecars, or any placement
   p99 window at or above 10 ms may pass.
+- **A17**: one dynamic `ReplicaPool` owns one outbound `AsyncClient`, shared by
+  every discovered OpenAI backend and its readiness prober. Replica removal and
+  replacement never close that transport; application teardown stops
+  reconcilers/probers/backends first and then closes the sole owner exactly once,
+  cancellation-safely. Data calls retain their backend timeout and probes retain
+  their shorter timeout per request. Active and idle connection-count limits are
+  open because trusted EndpointSlice membership has no declared fleet ceiling;
+  gateway admission and the probe semaphore bound active use, while a 30-second
+  idle expiry bounds sockets for churned-out Pod IPs. This reduces client and TLS
+  setup from O(replicas) to O(dynamic pools), matching the shared-client design
+  used by current vLLM routers.
