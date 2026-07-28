@@ -1028,6 +1028,12 @@ def test_gate_accepts_complete_smoke_evidence() -> None:
     assert all(result["checks"].values())
     assert len(result["placement"]["epochs"]) == SMOKE_CONFIG.churn_epochs
     assert len(result["placement"]["churn_windows"]) == SMOKE_CONFIG.churn_epochs
+    observation_transport = (
+        fleet_bench._KUBERNETES_OBSERVATION_TRANSPORT
+    )
+    assert "Pod DELETE requests" in observation_transport
+    assert "background propagation" in observation_transport
+    assert "subprocesses" not in observation_transport
 
 
 def test_gate_canonicalizes_out_of_order_request_completion_rows() -> None:

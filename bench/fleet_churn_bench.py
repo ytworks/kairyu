@@ -54,6 +54,12 @@ _KUBERNETES_READ_TIMEOUT_SECONDS = 10.0
 _KUBERNETES_DELETE_MAX_CONCURRENCY = 8
 _ENDPOINT_WITHDRAWAL_POLL_SECONDS = 0.25
 _RECOVERY_POLL_SECONDS = 1.0
+_KUBERNETES_OBSERVATION_TRANSPORT = (
+    "one lifecycle-owned kubectl proxy and persistent HTTP client carry all "
+    "EndpointSlice, Pod, resource, and Pod DELETE requests; DELETE uses "
+    "bounded concurrency, background propagation, and the Pod's declared "
+    "grace period"
+)
 _KUBECTL_PROXY_ADDRESS = re.compile(
     r"Starting to serve on 127\.0\.0\.1:(?P<port>[0-9]+)"
 )
@@ -4625,10 +4631,7 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
                 "must replay before slower pod readiness recovery"
             ),
             "kubernetes_observation_transport": (
-                "one lifecycle-owned kubectl proxy and persistent HTTP client "
-                "carry all EndpointSlice, Pod, and resource reads; only the "
-                "ten Pod DELETE operations use kubectl subprocesses during "
-                "traffic"
+                _KUBERNETES_OBSERVATION_TRANSPORT
             ),
             "membership": (
                 "gateway audit snapshots must begin with the full old fleet "
