@@ -43,7 +43,7 @@ from typing import Any
 
 import httpx
 
-from kairyu.audit_io import BoundedJsonlWriter
+from kairyu.audit_io import AuditQueueFull, BoundedJsonlWriter
 
 SCHEMA_VERSION = 1
 GATE = "G5-F1a"
@@ -602,6 +602,40 @@ def _endpoint_uids(snapshot: dict[str, Any]) -> set[str]:
     return values
 
 
+def _ready_endpoint_targets(
+    snapshot: dict[str, Any],
+    *,
+    namespace: str,
+) -> dict[str, str]:
+    """Return ready, non-terminating EndpointSlice pod names and UIDs."""
+
+    values: dict[str, str] = {}
+    names_by_uid: dict[str, str] = {}
+    for item in snapshot.get("items", ()):
+        for endpoint in item.get("endpoints", ()):
+            conditions = endpoint.get("conditions") or {}
+            if (
+                conditions.get("ready") is not True
+                or conditions.get("terminating") is True
+            ):
+                continue
+            target = endpoint.get("targetRef") or {}
+            name = target.get("name")
+            uid = target.get("uid")
+            if (
+                target.get("kind") != "Pod"
+                or target.get("namespace") != namespace
+                or not isinstance(name, str)
+                or not isinstance(uid, str)
+                or (name in values and values[name] != uid)
+                or (uid in names_by_uid and names_by_uid[uid] != name)
+            ):
+                return {}
+            values[name] = uid
+            names_by_uid[uid] = name
+    return values
+
+
 class JsonlSink:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -620,6 +654,23 @@ class JsonlSink:
                 separators=(",", ":"),
             )
         )
+
+    def write_many(self, values: list[dict[str, Any]]) -> None:
+        """Write a bulk capture without weakening bounded admission.
+
+        A post-measurement gateway audit can contain tens of thousands of
+        records. When its bounded queue fills, drain the already accepted
+        prefix and retry the current row instead of dropping evidence or
+        failing the completed measurement.
+        """
+
+        for value in values:
+            while True:
+                try:
+                    self.write(value)
+                    break
+                except AuditQueueFull:
+                    self._writer.flush()
 
     def close(self) -> None:
         self._writer.close()
@@ -880,8 +931,10 @@ async def _fetch_gateway_placements(
         except (json.JSONDecodeError, RuntimeError):
             pass
         await asyncio.sleep(0.1)
-    for record in records:
-        sink.write(record)
+    # This is a post-traffic bulk copy. Keep JSON encoding and bounded-writer
+    # backpressure off the asyncio loop so the remaining evidence samplers stay
+    # responsive while all gateway-owned placement rows are preserved.
+    await asyncio.to_thread(sink.write_many, records)
     return records
 
 
@@ -896,6 +949,7 @@ async def _snapshot_loop(
     records: list[dict[str, Any]] = []
     origin_ns = time.monotonic_ns()
     index = 0
+    skipped_intervals_before = 0
     while not stop.is_set():
         target_ns = origin_ns + int(index * interval_s * 1_000_000_000)
         remaining = (target_ns - time.monotonic_ns()) / 1_000_000_000
@@ -911,6 +965,8 @@ async def _snapshot_loop(
             record = {
                 "schema_version": SCHEMA_VERSION,
                 "kind": kind,
+                "scheduled_ns": target_ns,
+                "skipped_intervals_before": skipped_intervals_before,
                 "fetch_started_ns": fetch_started_ns,
                 "observed_ns": time.monotonic_ns(),
                 "error": None,
@@ -920,6 +976,8 @@ async def _snapshot_loop(
             record = {
                 "schema_version": SCHEMA_VERSION,
                 "kind": kind,
+                "scheduled_ns": target_ns,
+                "skipped_intervals_before": skipped_intervals_before,
                 "fetch_started_ns": fetch_started_ns,
                 "observed_ns": time.monotonic_ns(),
                 "error": type(error).__name__,
@@ -927,7 +985,17 @@ async def _snapshot_loop(
             }
         records.append(record)
         sink.write(record)
-        index += 1
+        completed_index = index
+        next_scheduled_index = completed_index + 1
+        first_future_index = (
+            math.floor(
+                (time.monotonic_ns() - origin_ns)
+                / (interval_s * 1_000_000_000)
+            )
+            + 1
+        )
+        index = max(next_scheduled_index, first_future_index)
+        skipped_intervals_before = index - next_scheduled_index
     return records
 
 
@@ -1101,6 +1169,7 @@ async def _recover_epoch(
     old_uids = {str(item["uid"]) for item in old}
     new: list[dict[str, Any]] = []
     endpoint_uids = set(initial_endpoint_uids)
+    endpoint_targets: dict[str, str] = {}
     old_withdrawn_ns = initial_old_withdrawn_ns
     new_ready_ns: int | None = None
     error: str | None = None
@@ -1130,6 +1199,10 @@ async def _recover_epoch(
             )
         else:
             endpoint_uids = _endpoint_uids(endpoints)
+            endpoint_targets = _ready_endpoint_targets(
+                endpoints,
+                namespace=args.namespace,
+            )
             observed_ns = time.monotonic_ns()
             endpoint_sink.write(
                 {
@@ -1145,46 +1218,63 @@ async def _recover_epoch(
             )
             if old_withdrawn_ns is None and old_uids.isdisjoint(endpoint_uids):
                 old_withdrawn_ns = observed_ns
-        try:
-            pods = await _kubectl_json(
-                args.kubectl,
-                args.namespace,
-                "get",
-                "pods",
-                "-l",
-                args.pod_selector,
+        replacement_uids = {
+            name: endpoint_targets.get(name)
+            for name in names
+        }
+        endpoints_recovered = (
+            old_withdrawn_ns is not None
+            and len(endpoint_uids) == config.replica_count
+            and len(endpoint_targets) == config.replica_count
+            and all(
+                isinstance(uid, str) and uid not in old_uids
+                for uid in replacement_uids.values()
             )
-            target_names = set(names)
-            identities_by_name = {}
-            for item in pods.get("items", ()):
-                identity = _pod_identity(item)
-                name = identity["name"]
-                if isinstance(name, str) and name in target_names:
-                    identities_by_name[name] = identity
-            new = [
-                identities_by_name[name]
-                for name in names
-                if name in identities_by_name
-            ]
-            ready_new = (
-                len(new) == len(old)
-                and all(
-                    item["ready"]
-                    and item["uid"] not in old_uids
-                    and item["uid"] in endpoint_uids
-                    for item in new
+        )
+        if endpoints_recovered:
+            try:
+                # EndpointSlice readiness is the serving contract. Fetch only
+                # the twenty replaced Pods, and only after that contract is
+                # satisfied, to publish full Pod/image identity without
+                # polling all 200 Pod objects on every recovery iteration.
+                pods = await _kubectl_json(
+                    args.kubectl,
+                    args.namespace,
+                    "get",
+                    "pods",
+                    "-l",
+                    (
+                        f"{args.pod_selector},"
+                        "statefulset.kubernetes.io/pod-name in "
+                        f"({','.join(names)})"
+                    ),
                 )
-            )
-            if ready_new and new_ready_ns is None:
-                new_ready_ns = time.monotonic_ns()
-            if (
-                old_withdrawn_ns is not None
-                and ready_new
-                and len(endpoint_uids) == config.replica_count
-            ):
-                break
-        except Exception:
-            pass
+                identities_by_name = {
+                    identity["name"]: identity
+                    for item in pods.get("items", ())
+                    if isinstance(
+                        (identity := _pod_identity(item)).get("name"),
+                        str,
+                    )
+                }
+                new = [
+                    identities_by_name[name]
+                    for name in names
+                    if name in identities_by_name
+                ]
+                ready_new = (
+                    len(new) == len(old)
+                    and all(
+                        item["ready"]
+                        and item["uid"] == replacement_uids[item["name"]]
+                        for item in new
+                    )
+                )
+                if ready_new:
+                    new_ready_ns = observed_ns
+                    break
+            except Exception:
+                pass
         await asyncio.sleep(_RECOVERY_POLL_SECONDS)
     else:
         error = "recovery_timeout"
@@ -3295,17 +3385,6 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
                 f"kubernetes.io/service-name={args.endpoint_service}",
             )
 
-        async def fetch_pods() -> list[dict[str, Any]]:
-            payload = await _kubectl_json(
-                args.kubectl,
-                args.namespace,
-                "get",
-                "pods",
-                "-l",
-                args.pod_selector,
-            )
-            return [_pod_identity(item) for item in payload.get("items", ())]
-
         node = str(initial[0]["node"])
 
         async def fetch_resources() -> dict[str, Any]:
@@ -3327,16 +3406,6 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             )
         )
         owned_tasks.append(endpoint_task)
-        pod_task = asyncio.create_task(
-            _snapshot_loop(
-                kind="pods",
-                interval_s=config.evidence_interval_seconds,
-                stop=stop,
-                sink=sinks["pods"],
-                fetch=fetch_pods,
-            )
-        )
-        owned_tasks.append(pod_task)
         resource_task = asyncio.create_task(
             _snapshot_loop(
                 kind="resources",
@@ -3393,12 +3462,49 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             sink=sinks["placements"],
         )
         stop.set()
-        endpoints, pod_samples, resources = await asyncio.gather(
+        endpoints, resources = await asyncio.gather(
             endpoint_task,
-            pod_task,
             resource_task,
         )
-        pods = [initial_pod_record, *pod_samples]
+        churn_pod_records = [
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "pods",
+                "capture": "churn_recovery",
+                "epoch": record["epoch"],
+                "observed_ns": record["new_ready_ns"],
+                "error": record.get("error"),
+                "payload": record.get("new", ()),
+            }
+            for record in churn
+        ]
+        for record in churn_pod_records:
+            sinks["pods"].write(record)
+        final_mock_snapshot = await _kubectl_json(
+            args.kubectl,
+            args.namespace,
+            "get",
+            "pods",
+            "-l",
+            args.pod_selector,
+        )
+        final_mock_pod_record = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "pods",
+            "capture": "final",
+            "observed_ns": time.monotonic_ns(),
+            "error": None,
+            "payload": [
+                _pod_identity(item)
+                for item in final_mock_snapshot.get("items", ())
+            ],
+        }
+        sinks["pods"].write(final_mock_pod_record)
+        pods = [
+            initial_pod_record,
+            *churn_pod_records,
+            final_mock_pod_record,
+        ]
         gateway_snapshot = await _kubectl_json(
             args.kubectl,
             args.namespace,

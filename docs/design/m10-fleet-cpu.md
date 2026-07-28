@@ -1,7 +1,7 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D2/D5/A16–A22 amended 2026-07-28). Reviewed (1-reviewer panel
+2026-07-27; D2/D5/A16–A23 amended 2026-07-28). Reviewed (1-reviewer panel
 with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
@@ -365,3 +365,24 @@ over (α, β) (pure function over the dataset; no online learning).
   200 mocks together request only 200m. The 10 ms placement bound, 99% open-loop
   pacing requirement, 50 requests/s, retry prohibition, churn batches, and all
   raw evidence remain unchanged.
+- **A23**: F1a periodic evidence and recovery are deadline-paced, not
+  backlog-paced. A periodic EndpointSlice or resource fetch that overruns its
+  interval records both the scheduled deadline and number of skipped intervals,
+  then resumes at the first future deadline; it never performs catch-up fetches.
+  Pod evidence no longer polls a 200-object LIST every second. It consists of
+  the exact initial 200 identities, one label-selected collection LIST of the
+  twenty replaced Pods after each epoch's EndpointSlice recovery, and the exact
+  final 200 identities. Recovery first requires 200 unique ready,
+  non-terminating, same-namespace Pod target references, new UIDs for all twenty
+  scheduled names, and complete old-UID withdrawal. The targeted Pod LIST then
+  corroborates UID, Ready state, container image, and runtime image identity;
+  ambiguous EndpointSlice names or UIDs fail closed. Gateway placement evidence
+  is copied after traffic on a worker thread: the bounded writer drains and
+  retries on backpressure rather than dropping rows, growing the queue, or
+  failing after a completed measurement. The formal backend probe interval is
+  one second, still inside the five-second withdrawal bound while reducing the
+  maximum unknown/ejected-replica probe burst by four. This supersedes A22's
+  per-second full-fleet Pod LIST. The 250 ms withdrawal observer, one-second raw
+  causality bracket, 10 ms placement bound, 99% pacing requirement, 50
+  requests/s, retry prohibition, churn schedule, exact-200 checks, and raw
+  artifact replay remain unchanged.

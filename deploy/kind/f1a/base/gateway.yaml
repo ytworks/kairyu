@@ -24,7 +24,11 @@ data:
           poll_interval_s: 0.25
         unhealthy_after: 1
         queue_depth_threshold: 8
-        probe_interval_s: 0.25
+        # EndpointSlice discovery already withdraws terminating replicas every
+        # 250 ms. A one-second backend probe still detects non-Kubernetes
+        # failures well inside the five-second gate while reducing the maximum
+        # unknown/ejected-replica probe burst by 4x.
+        probe_interval_s: 1.0
         placement_log_path: /evidence/placements.jsonl
 ---
 apiVersion: apps/v1

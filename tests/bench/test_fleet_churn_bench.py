@@ -70,6 +70,132 @@ def test_jsonl_sink_truncates_and_drains_deferred_rows_in_order(tmp_path) -> Non
     ] == values
 
 
+def test_jsonl_sink_bulk_capture_flushes_and_retries_backpressure(
+    tmp_path,
+) -> None:
+    class BackpressuredWriter:
+        def __init__(self) -> None:
+            self.block_once = True
+            self.flushes = 0
+            self.rows = []
+
+        def append_deferred(self, render) -> None:
+            if self.block_once:
+                self.block_once = False
+                raise fleet_bench.AuditQueueFull("full")
+            self.rows.append(json.loads(render()))
+
+        def flush(self) -> None:
+            self.flushes += 1
+
+        def close(self) -> None:
+            pass
+
+    sink = fleet_bench.JsonlSink(tmp_path / "bulk.jsonl")
+    writer = BackpressuredWriter()
+    sink._writer = writer
+    values = [{"sequence": index} for index in range(3)]
+
+    sink.write_many(values)
+
+    assert writer.flushes == 1
+    assert writer.rows == values
+
+
+def test_ready_endpoint_targets_rejects_ambiguous_or_foreign_refs() -> None:
+    def snapshot(*targets):
+        return {
+            "items": [
+                {
+                    "endpoints": [
+                        {
+                            "conditions": {
+                                "ready": True,
+                                "terminating": False,
+                            },
+                            "targetRef": target,
+                        }
+                        for target in targets
+                    ]
+                }
+            ]
+        }
+
+    first = {
+        "kind": "Pod",
+        "namespace": "kairyu-f1a",
+        "name": "replica-0",
+        "uid": "uid-0",
+    }
+    assert fleet_bench._ready_endpoint_targets(
+        snapshot(first),
+        namespace="kairyu-f1a",
+    ) == {"replica-0": "uid-0"}
+    assert (
+        fleet_bench._ready_endpoint_targets(
+            snapshot(first, {**first, "uid": "uid-other"}),
+            namespace="kairyu-f1a",
+        )
+        == {}
+    )
+    assert (
+        fleet_bench._ready_endpoint_targets(
+            snapshot(first, {**first, "name": "replica-other"}),
+            namespace="kairyu-f1a",
+        )
+        == {}
+    )
+    assert (
+        fleet_bench._ready_endpoint_targets(
+            snapshot({**first, "namespace": "other"}),
+            namespace="kairyu-f1a",
+        )
+        == {}
+    )
+
+
+async def test_snapshot_loop_skips_overdue_intervals_without_catchup() -> None:
+    stop = asyncio.Event()
+    captured = []
+    fetches = 0
+
+    class Sink:
+        def write(self, value):
+            captured.append(value)
+
+    async def slow_fetch():
+        nonlocal fetches
+        fetches += 1
+        await asyncio.sleep(0.02)
+        if fetches == 3:
+            stop.set()
+        return {"fetch": fetches}
+
+    records = await fleet_bench._snapshot_loop(
+        kind="slow",
+        interval_s=0.005,
+        stop=stop,
+        sink=Sink(),
+        fetch=slow_fetch,
+    )
+
+    assert fetches == 3
+    assert records == captured
+    assert records[0]["skipped_intervals_before"] == 0
+    assert all(
+        record["skipped_intervals_before"] >= 3
+        for record in records[1:]
+    )
+    assert all(
+        previous["scheduled_ns"] < current["scheduled_ns"]
+        for previous, current in zip(
+            records,
+            records[1:],
+            strict=False,
+        )
+    )
+
+
 def _passing_evidence():
     config = SMOKE_CONFIG
     plan = churn_plan(config)
@@ -1710,7 +1836,7 @@ async def test_delete_cancellation_reaps_endpoint_observer(monkeypatch) -> None:
     assert observer_cancelled
 
 
-async def test_recovery_uses_one_label_list_and_filters_target_pods(
+async def test_recovery_polls_endpoints_then_fetches_only_target_pods(
     monkeypatch,
 ) -> None:
     plan_entry = fleet_bench.churn_plan(SMOKE_CONFIG)[0]
@@ -1776,9 +1902,25 @@ async def test_recovery_uses_one_label_list_and_filters_target_pods(
                                     "ready": True,
                                     "terminating": False,
                                 },
-                                "targetRef": {"uid": uid},
+                                "targetRef": {
+                                    "kind": "Pod",
+                                    "namespace": "kairyu-f1a",
+                                    "name": name,
+                                    "uid": uid,
+                                },
                             }
-                            for uid in sorted(current_uids)
+                            for name, uid in sorted(
+                                [
+                                    *[
+                                        (name, f"new-{name}")
+                                        for name in names
+                                    ],
+                                    *[
+                                        (name, f"unchanged-{name}")
+                                        for name in unchanged
+                                    ],
+                                ]
+                            )
                         ]
                     }
                 ]
@@ -1787,18 +1929,16 @@ async def test_recovery_uses_one_label_list_and_filters_target_pods(
             "get",
             "pods",
             "-l",
-            "app.kubernetes.io/name=f1a-replica",
+            (
+                "app.kubernetes.io/name=f1a-replica,"
+                "statefulset.kubernetes.io/pod-name in "
+                f"({','.join(names)})"
+            ),
         )
         return {
             "items": [
-                *[
-                    pod_item(name, f"new-{name}")
-                    for name in names
-                ],
-                *[
-                    pod_item(name, f"unchanged-{name}")
-                    for name in unchanged
-                ],
+                pod_item(name, f"new-{name}")
+                for name in names
             ]
         }
 
@@ -1836,7 +1976,11 @@ async def test_recovery_uses_one_label_list_and_filters_target_pods(
             "get",
             "pods",
             "-l",
-            "app.kubernetes.io/name=f1a-replica",
+            (
+                "app.kubernetes.io/name=f1a-replica,"
+                "statefulset.kubernetes.io/pod-name in "
+                f"({','.join(names)})"
+            ),
         ),
     ]
     assert [item["name"] for item in result["new"]] == names
@@ -1923,7 +2067,6 @@ async def test_run_cancels_owned_tasks_before_closing_sinks(
 
     assert set(finalized) == {
         "endpointslices",
-        "pods",
         "resources",
         "churn",
     }

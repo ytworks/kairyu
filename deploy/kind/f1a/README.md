@@ -75,9 +75,18 @@ replay verifies the observer sequence, scheduled/fetch/observation timestamps,
 the exact disjoint claim, and the unchanged one-second last-old-to-disjoint
 bracket.
 
-Recovery readiness uses one label-selected Pod LIST per second and filters the
-twenty scheduled names locally. It does not turn a twenty-name `kubectl get`
-into twenty API GETs per cycle. All raw evidence JSON is admitted in event-loop
-order to a bounded lifecycle-owned writer; encoding and flushing happen off the
-traffic loop, and shutdown drains the queue before sidecars are hashed and
-replayed.
+Recovery readiness is EndpointSlice-first: the driver requires exactly 200
+unique Ready, non-terminating Pod targets and new UIDs for all twenty scheduled
+names. Only then does it issue one label-selected collection LIST for those
+twenty Pods to corroborate UID, Ready state, and runtime image. Pod evidence is
+the initial 200 identities, those ten targeted captures, and one final
+exact-200 capture; it does not poll and serialize all 200 Pod objects once per
+second.
+
+Periodic EndpointSlice and resource evidence remains absolute-deadline paced.
+If a fetch overruns its interval, the row records the skipped interval count and
+the sampler resumes at the first future deadline instead of hammering the
+control plane with catch-up requests. All raw evidence JSON is admitted in
+event-loop order to a bounded lifecycle-owned writer. The post-traffic gateway
+audit copy drains and retries bounded backpressure on a worker thread, and
+shutdown drains every accepted row before sidecars are hashed and replayed.
