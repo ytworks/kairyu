@@ -8,11 +8,15 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import asdict, dataclass
 
 from kairyu.engine.backend import (
+    AdmissionUpperBound,
     EngineBackend,
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
     shutdown_all,
+)
+from kairyu.engine.backend import (
+    admission_upper_bound as generation_admission_upper_bound,
 )
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import (
@@ -390,6 +394,63 @@ class Orchestrator:
         self._validate_call(call, decision)
         self._validate_final_intent(call, decision)
         self._validate_internal_intent(call, decision)
+
+    def admission_upper_bound(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> AdmissionUpperBound:
+        """Worst-route compute ceiling for one public AUTO request.
+
+        The bound belongs here rather than in the HTTP adapter because this
+        object owns route fan-out, refine depth, MoA samples, and internal
+        generation limits.  It includes every possible step plus triangular
+        re-ingestion of preceding generated output into later prompts.
+        """
+
+        call = self._request(request)
+        internal = self._internal_sampling_params(call)
+        if internal.max_tokens is None or call.sampling_params.max_tokens is None:
+            raise ValueError("AUTO tenant admission requires finite token limits")
+        steps = max(1, self._budget.max_steps, self._moa_samples + 1)
+        candidates = max(
+            call.sampling_params.n,
+            call.sampling_params.best_of or call.sampling_params.n,
+        )
+        largest_role_prompt = max(
+            self._roles,
+            key=lambda role: len(role.prompt.encode("utf-8")),
+            default=None,
+        )
+        role_prompt = largest_role_prompt.prompt if largest_role_prompt else ""
+        role_bytes = len(role_prompt.encode("utf-8"))
+        supplied_bytes = len(
+            f"{self._shared_prefix}{call.prompt}".encode()
+        )
+        stage_prompt = max(1, supplied_bytes + role_bytes + 256)
+        internal_output = internal.max_tokens
+        private_steps = max(0, steps - 1)
+        private_work = (
+            private_steps * (stage_prompt + internal_output)
+            + internal_output * private_steps * (private_steps - 1) // 2
+        )
+        final_request_bound = generation_admission_upper_bound(
+            GenerationRequest(
+                request_id="auto-admission",
+                prompt=f"{self._shared_prefix}{call.prompt}{role_prompt}",
+                sampling_params=call.sampling_params,
+                tools=call.tools,
+                tool_choice=call.tool_choice,
+                tools_in_prompt=call.tools_in_prompt,
+            )
+        )
+        # The last stage can ingest every preceding private output. Candidate
+        # fan-out duplicates that prefill just as it duplicates the supplied
+        # prompt, tools, response schema, and decode ceiling.
+        final_reingestion = candidates * internal_output * private_steps
+        return AdmissionUpperBound(
+            tokens=private_work + final_request_bound.tokens + final_reingestion,
+            refundable_on_exact_usage=False,
+        )
 
     def _conductor_workers(self, notes: list[str]) -> dict[str, EngineBackend]:
         needed = {role.worker for role in self._roles}

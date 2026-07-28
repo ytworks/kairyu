@@ -177,6 +177,30 @@ The production-shaped Qwen3-32B TP8 gate calibrated 7.6304 requests/s; under
 planned 0.5x interactive plus 1.5x batch load, interactive TTFT p99 was
 1.3025 s with 100% attainment of the fixed 2 s SLO, while batch progressed in
 the mixed window and drained 192/192 afterward.
+F5b single-gateway noisy-neighbor isolation now uses two-stage, constant-time
+admission outside the shared concurrency guard: a request/in-flight lease,
+then a worst-case compute-token reservation after validation but before
+ReplicaPool/scheduler dispatch. Chat, Responses, Completions arrays, Embeddings,
+Batch, and AUTO all share the boundary; `n`/`best_of` prefill fan-out and AUTO's
+bounded internal DAG are included. Completion-array failure now cancels and
+joins every sibling before releasing the tenant lease. Exact terminal usage
+may refund surplus, while
+failure, disconnect, approximate/missing usage, and multi-candidate accounting
+consume the full reservation. In the corrected deterministic 10x trace, the
+protected path admits exactly 120/1,200 noisy requests, completes all 300 good
+requests, bounds good TTFT p99 to one additional service quantum (1 → 2
+seconds), and holds queue high-watermark to 2 versus 301 and p99 298 seconds
+without admission. An initial Qwen3-32B TP8 run passed every admission,
+dispatch, topology, drain, and fixed-SLO check, but exposed a confounded
+good-only latency comparator: treatment also contained the noisy tenant's
+legitimate admitted quota. The corrected formal rerun passes all 47 checks at
+7.2697 requests/s calibrated capacity. Good-only p99 is 0.1741 s; bracketed
+compliant-neighbor controls are 0.2783/0.2792 s and the 10x treatment is
+0.2801 s under the unchanged 50 ms margin and 2 s SLO. Treatment admits
+66 noisy requests, rejects 639 before shared dispatch, matches control accepted
+work at 1.03125x, and drains in-flight/reserved work to zero with no bound
+violations
+(`bench/results/f5b-noisy-neighbor-qwen3-32b-tp8-2026-07-28.json`).
 G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
 specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
 production gateway exposes direct, standard AUTO (Conductor), and max AUTO
@@ -322,6 +346,98 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [progress] F5b closes on real Qwen3-32B TP8
+- What: Completed the matched-comparator GPU gate on 8x RTX PRO 6000
+  Blackwell. All 47 checks pass. At 7.2697 requests/s calibrated capacity,
+  good-only TTFT p99 is 0.1741 s, compliant-neighbor controls are
+  0.2783/0.2792 s, and 10x treatment is 0.2801 s. The treatment admits 66 and
+  rejects 639 noisy requests before shared dispatch, while all 256 good
+  requests complete. Its accepted noisy work is 1.03125x the control average.
+  Gateway/replica/scheduler/usage counts reconcile; TP8 is reported at runtime;
+  in-flight and reserved-token gauges drain to zero with no bound violations.
+  The deterministic CPU gate also passes all 11 checks at the same clean
+  source commit.
+- Refs: issue #191; G5 F5b; commit `0d8d091`;
+  `bench/results/f5b-noisy-neighbor-cpu-2026-07-28.json`;
+  `bench/results/f5b-noisy-neighbor-qwen3-32b-tp8-2026-07-28.json`.
+
+### 2026-07-28 — [amendment] F5b uses a causal compliant-neighbor comparator
+- What: Strengthened the real Qwen3-32B TP8 gate from good-only controls to
+  bracketed controls that run the same good load plus a noisy tenant offering
+  0.9x quota. The 10x treatment must match control accepted noisy work within
+  10%, keep good p99 within the unchanged 50 ms non-inferiority margin, and
+  retain the fixed 2 s SLO. Every arm begins after a full request-bucket
+  wash-in; the oversize pre-dispatch probe now runs before that wash-in.
+  Good-only latency remains a secondary reference.
+- Why: The initial clean TP8 run passed 35/36 checks, including all admission,
+  dispatch, usage, topology, and drain checks, but compared good-only 0.5x
+  capacity against treatment containing another 0.92 requests/s of legitimate
+  GPU work. Its 0.177 -> 0.564 s p99 therefore mixed allowed 1x work with the
+  effect of rejecting excess 9x traffic. A matched accepted-work comparator
+  isolates that causal excess-load effect without relaxing the latency margin.
+- Refs: issue #191; G5 F5b; `bench/noisy_neighbor_gpu_bench.py`;
+  `tests/bench/test_noisy_neighbor_gpu_bench.py`.
+
+### 2026-07-28 — [amendment] F5b closes every compute-ingress lease boundary
+- What: Extended pre-dispatch reservation to Embeddings using a conservative
+  non-refundable input-work ceiling. AUTO now reserves the maximum configured
+  route rather than relying on a preview whose stateful route choice could
+  diverge at execution; its final candidate fan-out now includes tools and
+  response-schema bytes, while private stages normalize both `n` and `best_of`
+  to one candidate. Every settlement debits and reports observed work
+  above the reservation even when usage is non-refundable, while surplus is
+  still returned only from exact single-candidate usage. Empty Completion
+  prompt arrays are rejected before admission, and a failing array element
+  cancels and joins every sibling before the HTTP request can release its
+  tenant lease.
+- Why: Any compute ingress that bypasses reservation can become a
+  noisy-neighbor path. Releasing a lease while sibling generation is still
+  running likewise understates in-flight work and defeats the isolation bound.
+- Refs: issue #191; m11 D3/A7; `kairyu/entrypoints/server/app.py`;
+  `kairyu/entrypoints/server/extra_routes.py`;
+  `kairyu/orchestration/orchestrator.py`.
+
+### 2026-07-28 — [amendment] F5b reserves worst-case work before shared dispatch
+- What: Corrected the initial #191 design from post-execution token debt plus
+  request-count leases to two-stage admission. Every execution surface now
+  atomically reserves a finite worst-case compute ceiling after validation and
+  before shared engine placement. Candidate prefill fan-out, prompt arrays,
+  tools/response metadata, and AUTO's maximum internal DAG are included.
+  Exact single-candidate terminal usage can refund surplus; missing or
+  approximate usage, failure/disconnect, and multi-candidate work consume the
+  full reservation. Outstanding reservation and in-flight gauges must drain
+  to zero. The refill comparison also tolerates floating-point ulps, correcting
+  the deterministic 6 RPM result from 110 to the exact 120 admissions.
+- Why: Request counts alone allow one long prompt, large output allowance,
+  hidden `best_of`, or AUTO fan-out to occupy scheduler/KV capacity before
+  post-completion charging. Gateway reservation keeps this portable across
+  Kairyu, vLLM, and SGLang without adding tenant logic to the per-token
+  scheduler hot path.
+- Refs: corrects the earlier 2026-07-28 F5b amendment; issue #191; m11 D3/A7;
+  `kairyu/engine/backend.py`; `kairyu/entrypoints/server/tenancy.py`;
+  `kairyu/orchestration/orchestrator.py`; `bench/noisy_neighbor_bench.py`.
+
+### 2026-07-28 — [amendment] F5b bounds 10x noisy-neighbor admission
+- What: Added independent request/token burst capacities and optional
+  per-tenant in-flight leases acquired before global concurrency and held
+  through the final unary/SSE byte. Batch lines now acquire the same lease
+  before shared replica dispatch. Bounded admission/in-flight metrics expose
+  tenant, source, decision, and reason; token debt is charged even if optional
+  ledger admission fails. The deterministic production-component gate drives
+  a noisy tenant at exactly 10x its 6 RPM quota on the same native scheduler
+  as a 15 RPM good tenant. It rejects 1,090/1,200 noisy requests before
+  enqueue, completes all 300 good requests, bounds good TTFT p99 to 2 seconds
+  versus control 1, and holds queue high-watermark to 2. The unprotected
+  matched trace reaches good p99 298 seconds and queue high-watermark 301.
+- Why: A one-minute-capacity request bucket plus post-completion token charging
+  allowed cold concurrent bursts to enter ReplicaPool/GPU capacity before any
+  429. Gateway leases provide constant-time isolation without adding
+  tenant-WFQ work to every scheduler token; `max_in_flight` bounds the
+  remaining post-settlement token exposure.
+- Refs: issue #191; m11 D3; G5 F5b;
+  `kairyu/entrypoints/server/tenancy.py`; `kairyu/batch/worker.py`;
+  `bench/noisy_neighbor_bench.py`.
 
 ### 2026-07-28 — [amendment] F5a holds interactive TTFT under exact 2x overload
 - What: Added signed-int64 priority to Chat Completions, legacy Completions,

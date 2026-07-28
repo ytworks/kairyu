@@ -20,7 +20,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from kairyu.engine.backend import CacheHint, GenerationResult
+from kairyu.engine.backend import CacheHint, GenerationResult, admission_upper_bound
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     ExecutedChat,
@@ -653,6 +653,8 @@ def _record_execution(
         prompt_tokens=usage["input_tokens"],
         completion_tokens=usage["output_tokens"],
         cached_tokens=usage["input_tokens_details"]["cached_tokens"],
+        reservation=getattr(http_request.state, "tenant_admission", None),
+        usage_exact=execution.result.usage is not None,
     )
 
 
@@ -969,6 +971,7 @@ async def _live_text_events(
         tenant=owner,
         model=request.model,
         prompt=validated.generation_request.prompt,
+        reservation=getattr(http_request.state, "tenant_admission", None),
     )
     try:
         yield _sse("response.created", sequence, response=in_progress)
@@ -1079,6 +1082,7 @@ async def _live_text_events(
             return
 
         completions = last.completions if last is not None else ()
+        usage_owner.mark_completed()
         completion = min(completions, key=lambda item: item.index, default=None)
         text = completion.text if completion is not None else ""
         status = (
@@ -1210,6 +1214,41 @@ def add_responses_route(
             )
         except ChatRequestError as error:
             return _chat_error(error)
+        try:
+            bound = admission_upper_bound(validated.generation_request)
+        except ValueError as error:
+            return _request_error(str(error))
+        admission = getattr(http_request.state, "tenant_admission", None)
+        if admission is not None:
+            admitted = admission.reserve_tokens(
+                bound.tokens,
+                refundable_on_exact_usage=bound.refundable_on_exact_usage,
+            )
+            metrics = getattr(http_request.app.state, "metrics", None)
+            if metrics is not None:
+                metrics.record_tenant_admission(
+                    owner,
+                    source="http",
+                    admitted=admitted,
+                    reason=admission.reason,
+                )
+            if admitted:
+                http_request.state.tenant_metric_admitted = True
+            if not admitted:
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "1"},
+                    content={
+                        "error": {
+                            "message": (
+                                f"tenant {owner!r} admission limit exceeded "
+                                f"({admission.reason})"
+                            ),
+                            "type": "rate_limit_error",
+                            "code": "tenant_rate_limited",
+                        }
+                    },
+                )
         metrics = getattr(http_request.app.state, "metrics", None)
         if metrics is not None:
             metrics.record_priority(
@@ -1234,6 +1273,8 @@ def add_responses_route(
                 media_type="text/event-stream",
             )
         try:
+            if admission is not None:
+                admission.mark_dispatched()
             execution = await execute_chat(validated)
         except ChatRequestError as error:
             if error.execution is not None:

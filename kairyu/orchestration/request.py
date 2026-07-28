@@ -54,6 +54,7 @@ class OrchestrationRequest:
             max_tokens = max_tokens_cap if max_tokens is None else min(max_tokens, max_tokens_cap)
         return self.sampling_params.clone(
             n=1,
+            best_of=None,
             logprobs=None,
             max_tokens=max_tokens,
             extra_args=extra_args,

@@ -600,8 +600,10 @@ tenants:                       # optional authenticated API-key -> tenant mappin
     key-b: team-b
   limits:                      # optional independent buckets per known tenant
     team-a: {requests_per_minute: 60, tokens_per_minute: 10000,
+             request_burst: 4, token_burst: 2000, max_in_flight: 4,
              interactive_priority: 0, batch_priority: 1}
     team-b: {requests_per_minute: 120, tokens_per_minute: 20000,
+             request_burst: 8, token_burst: 4000, max_in_flight: 8,
              interactive_priority: 0, batch_priority: 1}
 
 pricing:                       # optional; requires server.usage_ledger_path
@@ -733,8 +735,20 @@ preflight, before owned backends are constructed. The mapping keys are actual AP
 values rather than environment-variable names, so protect the deployment file as
 secret-bearing configuration.
 
-Each tenant gets independent request-per-minute and token-per-minute buckets plus trusted
-interactive/batch scheduling classes. Smaller priority integers run first. HTTP clients
+Each tenant gets independent request-per-minute and token-per-minute buckets,
+explicit request/token burst capacities, an optional in-flight cap, and trusted
+interactive/batch scheduling classes. A configured in-flight lease is acquired
+before the global concurrency guard and held through the final SSE/body byte;
+after request validation, Chat, Responses, Completions arrays, Batch lines, and
+AUTO atomically reserve worst-case compute tokens before replica dispatch.
+Candidate prefill (`n`/`best_of`) and AUTO internal fan-out are included.
+Exact single-candidate terminal usage refunds unused capacity; failure,
+disconnect, missing usage, and multi-candidate work retain the conservative
+reservation. This prevents a cold or resource-heavy burst from consuming every
+shared gateway/GPU slot. Omitted
+burst fields retain the historical one-minute bucket capacity, and omitted
+`max_in_flight` remains unlimited, so latency-isolated deployments should set
+all three explicitly. Smaller priority integers run first. HTTP clients
 cannot self-promote through a configured gateway: interactive requests receive
 `interactive_priority` (default 0), and Batch API lines receive `batch_priority`
 (default 1); every profile must keep interactive priority strictly smaller than
@@ -751,7 +765,8 @@ input as `prompt_tokens - cached_tokens`.
 Programmatic callers can still pass the existing runtime configuration directly:
 `create_app(..., tenant_config=TenantConfig(key_tenants={"key-a": "team-a"},
 limits={"team-a": TenantLimits(requests_per_minute=600,
-tokens_per_minute=200_000)}))`.
+tokens_per_minute=200_000, request_burst=8, token_burst=20_000,
+max_in_flight=8)}))`.
 
 ### Pricing and invoice export
 

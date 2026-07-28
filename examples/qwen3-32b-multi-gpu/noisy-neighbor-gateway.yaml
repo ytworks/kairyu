@@ -1,0 +1,42 @@
+# G5-F5b acceptance gateway: two authenticated tenants share one Qwen3-32B
+# replica. Both use the same interactive priority so quota admission, not
+# priority tiering, is responsible for noisy-neighbor isolation.
+server:
+  host: 127.0.0.1
+  port: 8003
+  api_keys_env: KAIRYU_F5B_KEYS
+  max_concurrency: 64
+
+pools:
+  qwen3-32b:
+    replicas:
+      - backend: openai
+        health_url: http://127.0.0.1:8001/readyz
+        options:
+          base_url: http://127.0.0.1:8001/v1
+          model: qwen3-32b
+          api_key_env: null
+          upstream: kairyu
+
+tenants:
+  default_tenant: good
+  key_tenants:
+    good-key: good
+    noisy-key: noisy
+  limits:
+    good:
+      requests_per_minute: 600
+      tokens_per_minute: 1000000
+      request_burst: 64
+      token_burst: 1000000
+      max_in_flight: 64
+      interactive_priority: 0
+      batch_priority: 1
+    noisy:
+      requests_per_minute: 60
+      tokens_per_minute: 1000000
+      request_burst: 1
+      token_burst: 1000000
+      max_in_flight: 1
+      interactive_priority: 0
+      batch_priority: 1

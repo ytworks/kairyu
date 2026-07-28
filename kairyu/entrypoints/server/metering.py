@@ -25,6 +25,12 @@ class TokenLimiterSink(Protocol):
     def charge_tokens(self, tenant: str, tokens: int) -> None: ...
 
 
+class TokenReservationSink(Protocol):
+    def mark_dispatched(self) -> None: ...
+
+    def settle_tokens(self, actual_tokens: int, *, exact: bool = True) -> None: ...
+
+
 class UsageMetricsSink(Protocol):
     def record_usage(
         self,
@@ -77,6 +83,8 @@ def record_tenant_usage(
     ledger: UsageLedgerSink | None = None,
     metrics: UsageMetricsSink | None = None,
     limiter: TokenLimiterSink | None = None,
+    reservation: TokenReservationSink | None = None,
+    usage_exact: bool = True,
 ) -> None:
     """Record one explicit tenant event to whichever sinks are configured."""
     if (
@@ -92,6 +100,15 @@ def record_tenant_usage(
             "usage token counts must be non-negative integers and "
             "cached_tokens must not exceed prompt_tokens"
         )
+    # Quota debt is a security boundary, independent of optional persistence.
+    # Charge it first so a full/broken ledger cannot make GPU work free.
+    if reservation is not None:
+        reservation.settle_tokens(
+            prompt_tokens + completion_tokens,
+            exact=usage_exact,
+        )
+    elif limiter is not None:
+        limiter.charge_tokens(tenant, prompt_tokens + completion_tokens)
     if ledger is not None:
         ledger.record(
             tenant,
@@ -107,8 +124,6 @@ def record_tenant_usage(
             completion_tokens,
             cached_tokens,
         )
-    if limiter is not None:
-        limiter.charge_tokens(tenant, prompt_tokens + completion_tokens)
 
 
 class StreamUsageOwner:
@@ -123,6 +138,8 @@ class StreamUsageOwner:
         ledger: UsageLedgerSink | None = None,
         metrics: UsageMetricsSink | None = None,
         limiter: TokenLimiterSink | None = None,
+        reservation: TokenReservationSink | None = None,
+        usage_exact: bool = True,
     ) -> None:
         self._tenant = tenant
         self._model = model
@@ -130,13 +147,21 @@ class StreamUsageOwner:
         self._ledger = ledger
         self._metrics = metrics
         self._limiter = limiter
+        self._reservation = reservation
+        self._usage_exact = usage_exact
         self._dispatched = False
+        self._completed = False
         self._finalized = False
         self._usage: GenerationUsage | Usage | None = None
         self._completions: dict[int, CompletionOutput] = {}
 
     def mark_dispatched(self) -> None:
         self._dispatched = True
+        if self._reservation is not None:
+            self._reservation.mark_dispatched()
+
+    def mark_completed(self) -> None:
+        self._completed = True
 
     @property
     def latest_usage(self) -> GenerationUsage | Usage | None:
@@ -174,6 +199,12 @@ class StreamUsageOwner:
             ledger=self._ledger,
             metrics=self._metrics,
             limiter=self._limiter,
+            reservation=self._reservation,
+            usage_exact=(
+                self._usage_exact
+                and self._completed
+                and self._usage is not None
+            ),
         )
 
 
@@ -183,6 +214,8 @@ def stream_usage_owner_from_state(
     tenant: str,
     model: str,
     prompt: str,
+    reservation: TokenReservationSink | None = None,
+    usage_exact: bool = True,
 ) -> StreamUsageOwner:
     """Build one stream owner from optional HTTP app-state sinks."""
     return StreamUsageOwner(
@@ -192,6 +225,8 @@ def stream_usage_owner_from_state(
         ledger=getattr(state, "usage_ledger", None),
         metrics=getattr(state, "metrics", None),
         limiter=getattr(state, "tenant_limiter", None),
+        reservation=reservation,
+        usage_exact=usage_exact,
     )
 
 
@@ -203,6 +238,8 @@ def record_state_usage(
     prompt_tokens: int,
     completion_tokens: int,
     cached_tokens: int = 0,
+    reservation: TokenReservationSink | None = None,
+    usage_exact: bool = True,
 ) -> None:
     """Resolve optional HTTP app-state sinks and record one tenant event."""
     record_tenant_usage(
@@ -214,4 +251,6 @@ def record_state_usage(
         ledger=getattr(state, "usage_ledger", None),
         metrics=getattr(state, "metrics", None),
         limiter=getattr(state, "tenant_limiter", None),
+        reservation=reservation,
+        usage_exact=usage_exact,
     )

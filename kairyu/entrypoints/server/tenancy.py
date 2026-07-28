@@ -30,10 +30,33 @@ logger = logging.getLogger(__name__)
 class TenantLimits:
     requests_per_minute: int = 600
     tokens_per_minute: int = 200_000
+    # Keep the original four positional parameters stable for Python callers.
     interactive_priority: int = 0
     batch_priority: int = 1
+    request_burst: int | None = None
+    token_burst: int | None = None
+    max_in_flight: int | None = None
 
     def __post_init__(self) -> None:
+        for name, value in (
+            ("requests_per_minute", self.requests_per_minute),
+            ("tokens_per_minute", self.tokens_per_minute),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < 1:
+                raise ValueError(f"{name} must be positive")
+        for name, value in (
+            ("request_burst", self.request_burst),
+            ("token_burst", self.token_burst),
+            ("max_in_flight", self.max_in_flight),
+        ):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer or None")
+            if value < 1:
+                raise ValueError(f"{name} must be positive when configured")
         minimum, maximum = -(2**63), 2**63 - 1
         for name, value in (
             ("interactive_priority", self.interactive_priority),
@@ -104,25 +127,41 @@ class TenantConfig:
 
 
 class _Bucket:
-    def __init__(self, per_minute: int, now: Callable[[], float]) -> None:
-        self.capacity = float(per_minute)
-        self.tokens = float(per_minute)
+    def __init__(
+        self,
+        per_minute: int,
+        now: Callable[[], float],
+        *,
+        capacity: int | None = None,
+    ) -> None:
+        self.capacity = float(per_minute if capacity is None else capacity)
+        self.tokens = self.capacity
         self.rate = per_minute / 60.0
         self.updated = now()
 
     def take(self, amount: float, now: float) -> bool:
-        self.tokens = min(self.capacity, self.tokens + (now - self.updated) * self.rate)
-        self.updated = now
-        if self.tokens < amount:
+        elapsed = max(0.0, now - self.updated)
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.updated = max(self.updated, now)
+        # Float clocks routinely represent an exact refill boundary (for
+        # example 6 RPM at t=10s) a few ulps below the requested amount.  Do
+        # not turn that into an extra second of throttling.
+        if self.tokens + 1e-9 < amount:
             return False
-        self.tokens -= amount
+        self.tokens = max(0.0, self.tokens - amount)
         return True
 
     def debit(self, amount: float, now: float) -> None:
         """Unconditionally subtract (may go negative — overage carries forward)."""
-        self.tokens = min(self.capacity, self.tokens + (now - self.updated) * self.rate)
-        self.updated = now
+        elapsed = max(0.0, now - self.updated)
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.updated = max(self.updated, now)
         self.tokens -= amount
+
+    def refund(self, amount: float, now: float) -> None:
+        elapsed = max(0.0, now - self.updated)
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate + amount)
+        self.updated = max(self.updated, now)
 
 
 class TenantLimiter:
@@ -134,42 +173,298 @@ class TenantLimiter:
         self._now = now
         self._buckets: dict[str, _Bucket] = {}
         self._token_buckets: dict[str, _Bucket] = {}
+        self._in_flight: dict[str, int] = {}
+        self._reserved_tokens: dict[str, int] = {}
+        self._bound_violations: dict[str, int] = {}
 
     def _request_bucket(self, tenant: str) -> _Bucket:
         bucket = self._buckets.get(tenant)
         if bucket is None:
-            bucket = _Bucket(self._config.limits_for(tenant).requests_per_minute, self._now)
+            limits = self._config.limits_for(tenant)
+            bucket = _Bucket(
+                limits.requests_per_minute,
+                self._now,
+                capacity=limits.request_burst,
+            )
             self._buckets[tenant] = bucket
         return bucket
 
     def _token_bucket(self, tenant: str) -> _Bucket:
         bucket = self._token_buckets.get(tenant)
         if bucket is None:
-            bucket = _Bucket(self._config.limits_for(tenant).tokens_per_minute, self._now)
+            limits = self._config.limits_for(tenant)
+            bucket = _Bucket(
+                limits.tokens_per_minute,
+                self._now,
+                capacity=limits.token_burst,
+            )
             self._token_buckets[tenant] = bucket
         return bucket
 
-    def admit(self, tenant: str) -> bool:
-        # a tenant that has already burned its token budget is refused before a
-        # new request runs; tokens are charged after each response completes (S4)
+    def acquire(self, tenant: str) -> TenantAdmission:
+        """Acquire one downstream execution lease before shared admission."""
+
+        # A tenant that has already burned its token budget is refused before a
+        # new request runs. Tokens are settled after execution; max_in_flight
+        # bounds that post-settlement exposure when configured.
+        now = self._now()
         token_bucket = self._token_bucket(tenant)
-        token_bucket.take(0.0, self._now())  # refill only
+        token_bucket.take(0.0, now)  # refill only
         if token_bucket.tokens < 1.0:
-            return False
-        return self._request_bucket(tenant).take(1.0, self._now())
+            return TenantAdmission.rejected(tenant, "token_quota")
+        limits = self._config.limits_for(tenant)
+        active = self._in_flight.get(tenant, 0)
+        if limits.max_in_flight is not None and active >= limits.max_in_flight:
+            return TenantAdmission.rejected(tenant, "in_flight")
+        if not self._request_bucket(tenant).take(1.0, now):
+            return TenantAdmission.rejected(tenant, "request_quota")
+        self._in_flight[tenant] = active + 1
+        return TenantAdmission.acquired(tenant, self)
+
+    def admit(self, tenant: str) -> bool:
+        """Compatibility one-shot admission without holding an in-flight lease."""
+
+        admission = self.acquire(tenant)
+        admission.release()
+        return admission.admitted
+
+    def _release(self, tenant: str) -> None:
+        active = self._in_flight.get(tenant, 0)
+        if active < 1:
+            raise RuntimeError(f"tenant {tenant!r} has no in-flight lease to release")
+        if active == 1:
+            self._in_flight.pop(tenant, None)
+        else:
+            self._in_flight[tenant] = active - 1
+
+    def in_flight(self, tenant: str) -> int:
+        return self._in_flight.get(tenant, 0)
 
     def charge_tokens(self, tenant: str, tokens: int) -> None:
         """Debit a completed request's tokens from the tenant's token bucket."""
         self._token_bucket(tenant).debit(float(tokens), self._now())  # may go negative
 
+    def _reserve_tokens(self, tenant: str, tokens: int) -> bool:
+        if not self._token_bucket(tenant).take(float(tokens), self._now()):
+            return False
+        self._reserved_tokens[tenant] = (
+            self._reserved_tokens.get(tenant, 0) + tokens
+        )
+        return True
+
+    def _finish_reservation(self, tenant: str, reserved: int) -> None:
+        outstanding = self._reserved_tokens.get(tenant, 0)
+        if reserved > outstanding:
+            raise RuntimeError("released tenant tokens exceed reservations")
+        remaining = outstanding - reserved
+        if remaining:
+            self._reserved_tokens[tenant] = remaining
+        else:
+            self._reserved_tokens.pop(tenant, None)
+
+    def _settle_tokens(
+        self,
+        tenant: str,
+        reserved: int,
+        actual: int,
+        *,
+        refund_surplus: bool,
+    ) -> None:
+        bucket = self._token_bucket(tenant)
+        difference = actual - reserved
+        if difference > 0:
+            self._bound_violations[tenant] = (
+                self._bound_violations.get(tenant, 0) + 1
+            )
+            logger.error(
+                "tenant reservation bound violated",
+                extra={
+                    "tenant": tenant,
+                    "reserved_tokens": reserved,
+                    "actual_tokens": actual,
+                },
+            )
+            bucket.debit(float(difference), self._now())
+        elif difference < 0 and refund_surplus:
+            bucket.refund(float(-difference), self._now())
+        self._finish_reservation(tenant, reserved)
+
+    def _refund_tokens(self, tenant: str, tokens: int) -> None:
+        self._token_bucket(tenant).refund(float(tokens), self._now())
+        self._finish_reservation(tenant, tokens)
+
+    def _consume_reserved_tokens(self, tenant: str, tokens: int) -> None:
+        self._finish_reservation(tenant, tokens)
+
+    def token_balance(self, tenant: str) -> float:
+        """Current balance after refill, exposed for deterministic gate tests."""
+
+        bucket = self._token_bucket(tenant)
+        bucket.take(0.0, self._now())
+        return bucket.tokens
+
+    def reservation_snapshot(self) -> dict[str, int]:
+        tenants = {
+            self._config.default_tenant,
+            *self._config.key_tenants.values(),
+            *self._config.limits,
+        }
+        return {
+            tenant: self._reserved_tokens.get(tenant, 0)
+            for tenant in tenants
+        }
+
+    def bound_violation_snapshot(self) -> dict[str, int]:
+        return {
+            tenant: self._bound_violations.get(tenant, 0)
+            for tenant in self.reservation_snapshot()
+        }
+
+
+class TenantAdmission:
+    """Idempotent lease returned by ``TenantLimiter.acquire``."""
+
+    __slots__ = (
+        "tenant",
+        "reason",
+        "_limiter",
+        "_released",
+        "_reserved_tokens",
+        "_dispatched",
+        "_settled",
+        "_refundable_on_exact_usage",
+    )
+
+    def __init__(
+        self,
+        tenant: str,
+        reason: str,
+        limiter: TenantLimiter | None,
+    ) -> None:
+        self.tenant = tenant
+        self.reason = reason
+        self._limiter = limiter
+        self._released = False
+        self._reserved_tokens = 0
+        self._dispatched = False
+        self._settled = False
+        self._refundable_on_exact_usage = True
+
+    @classmethod
+    def acquired(
+        cls,
+        tenant: str,
+        limiter: TenantLimiter,
+    ) -> TenantAdmission:
+        return cls(tenant, "quota_available", limiter)
+
+    @classmethod
+    def rejected(cls, tenant: str, reason: str) -> TenantAdmission:
+        return cls(tenant, reason, None)
+
+    @property
+    def admitted(self) -> bool:
+        return self._limiter is not None
+
+    @property
+    def reserved_tokens(self) -> int:
+        return self._reserved_tokens
+
+    @property
+    def dispatched(self) -> bool:
+        return self._dispatched
+
+    def reserve_tokens(
+        self,
+        tokens: int,
+        *,
+        refundable_on_exact_usage: bool = True,
+    ) -> bool:
+        """Atomically reserve worst-case compute before shared dispatch."""
+
+        if type(tokens) is not int or tokens < 1:
+            raise ValueError("token reservation must be a positive integer")
+        if self._released:
+            raise RuntimeError("cannot reserve tokens on a released admission")
+        if self._limiter is None:
+            return False
+        if self._reserved_tokens:
+            raise RuntimeError("tenant admission already has a token reservation")
+        if not self._limiter._reserve_tokens(self.tenant, tokens):
+            self.reason = "token_quota"
+            return False
+        self._reserved_tokens = tokens
+        self._refundable_on_exact_usage = refundable_on_exact_usage
+        self.reason = "quota_available"
+        return True
+
+    def mark_dispatched(self) -> None:
+        """Declare that the reservation crossed the shared compute boundary."""
+
+        if self._released:
+            raise RuntimeError("cannot dispatch a released admission")
+        if self._limiter is None:
+            return
+        if self._reserved_tokens < 1:
+            raise RuntimeError("tenant tokens must be reserved before dispatch")
+        self._dispatched = True
+
+    def settle_tokens(self, actual_tokens: int, *, exact: bool = True) -> None:
+        """Reconcile a reservation once authoritative usage is available."""
+
+        if type(actual_tokens) is not int or actual_tokens < 0:
+            raise ValueError("actual token count must be a non-negative integer")
+        if self._released:
+            raise RuntimeError("cannot settle a released admission")
+        if self._limiter is None:
+            return
+        if self._reserved_tokens < 1:
+            raise RuntimeError("tenant admission has no token reservation")
+        if self._settled:
+            return
+        # Every observed count is a lower bound on work, even when it is not
+        # authoritative enough to refund.  Always debit and report a positive
+        # overage; only exact, single-candidate usage may return surplus.
+        self._limiter._settle_tokens(
+            self.tenant,
+            self._reserved_tokens,
+            actual_tokens,
+            refund_surplus=exact and self._refundable_on_exact_usage,
+        )
+        self._settled = True
+
+    def release(self) -> None:
+        if self._released or self._limiter is None:
+            return
+        # Pre-dispatch validation/cancellation consumed no shared compute, so
+        # the reservation is refundable.  Once dispatched, missing usage
+        # (backend failure or disconnect) retains the worst-case debit.
+        if self._reserved_tokens and not self._dispatched and not self._settled:
+            self._limiter._refund_tokens(self.tenant, self._reserved_tokens)
+        elif self._reserved_tokens and self._dispatched and not self._settled:
+            self._limiter._consume_reserved_tokens(
+                self.tenant,
+                self._reserved_tokens,
+            )
+        self._released = True
+        self._limiter._release(self.tenant)
+
 
 class TenantLimitMiddleware:
     """Pure ASGI; requires auth to have stored the key in scope state (A6)."""
 
-    def __init__(self, app, *, config: TenantConfig, limiter: TenantLimiter) -> None:
+    def __init__(
+        self,
+        app,
+        *,
+        config: TenantConfig,
+        limiter: TenantLimiter,
+        metrics=None,
+    ) -> None:
         self.app = app
         self._config = config
         self._limiter = limiter
+        self._metrics = metrics
 
     async def __call__(self, scope, receive, send) -> None:
         path = scope.get("path", "")
@@ -189,11 +484,23 @@ class TenantLimitMiddleware:
         if not path.startswith("/v1/"):
             await self.app(scope, receive, send)  # identity only, no bucket
             return
-        if not self._limiter.admit(tenant):
+        admission = self._limiter.acquire(tenant)
+        state["tenant_admission"] = admission
+        if self._metrics is not None and not admission.admitted:
+            self._metrics.record_tenant_admission(
+                tenant,
+                source="http",
+                admitted=False,
+                reason=admission.reason,
+            )
+        if not admission.admitted:
             body = json.dumps(
                 {
                     "error": {
-                        "message": f"tenant {tenant!r} rate limit exceeded",
+                        "message": (
+                            f"tenant {tenant!r} admission limit exceeded "
+                            f"({admission.reason})"
+                        ),
                         "type": "rate_limit_error",
                         "code": "tenant_rate_limited",
                     }
@@ -211,7 +518,15 @@ class TenantLimitMiddleware:
             )
             await send({"type": "http.response.body", "body": body})
             return
-        await self.app(scope, receive, send)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            admission.release()
+            if self._metrics is not None and state.get(
+                "tenant_metric_admitted",
+                False,
+            ):
+                self._metrics.record_tenant_release(tenant, source="http")
 
 
 class UsageLedger:

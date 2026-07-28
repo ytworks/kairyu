@@ -35,6 +35,7 @@ async def test_backends_shape_and_mock_engines():
         assert entry["engine_backend"] == "mock"
         # mock is a remote/echo engine, not local attention
         assert entry["attention_backend"] is None
+        assert entry["tensor_parallel_size"] == 1
 
 
 async def test_backends_is_open_without_api_key():
@@ -80,6 +81,8 @@ async def test_backends_gateway_aggregates_replica_through_pool():
     assert pool["attention_backend"] in {"torch", "flashinfer"}
     assert pool["via_replica"]["attention_backend"] == pool["attention_backend"]
     assert "torch" in pool["via_replica"]["versions"]
+    assert pool["tensor_parallel_size"] == 1
+    assert pool["via_replica"]["tensor_parallel_size"] == 1
 
 
 async def test_backends_gateway_pool_without_backends_endpoint_degrades():

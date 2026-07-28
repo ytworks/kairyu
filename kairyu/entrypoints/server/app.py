@@ -19,10 +19,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from kairyu.engine.backend import (
+    AdmissionUpperBound,
     CacheHint,
     EngineBackend,
     GenerationRequest,
     GenerationUsage,
+    admission_upper_bound,
 )
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.chat_service import (
@@ -183,13 +185,73 @@ def _validate_generation_request(
     return None
 
 
-def _stream_usage_owner(http_request: Request, model: str, prompt: str) -> StreamUsageOwner:
+def _tenant_reservation(http_request: Request):
+    return getattr(http_request.state, "tenant_admission", None)
+
+
+def _tenant_limit_response(tenant: str, reason: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": "1"},
+        content={
+            "error": {
+                "message": (
+                    f"tenant {tenant!r} admission limit exceeded ({reason})"
+                ),
+                "type": "rate_limit_error",
+                "code": "tenant_rate_limited",
+            }
+        },
+    )
+
+
+def _reserve_tenant_work(
+    http_request: Request,
+    bound: AdmissionUpperBound,
+) -> JSONResponse | None:
+    admission = _tenant_reservation(http_request)
+    if admission is None:
+        return None
+    tenant = getattr(http_request.state, "tenant", None) or "default"
+    admitted = admission.reserve_tokens(
+        bound.tokens,
+        refundable_on_exact_usage=bound.refundable_on_exact_usage,
+    )
+    metrics = getattr(http_request.app.state, "metrics", None)
+    if metrics is not None:
+        metrics.record_tenant_admission(
+            tenant,
+            source="http",
+            admitted=admitted,
+            reason=admission.reason,
+        )
+    if admitted:
+        http_request.state.tenant_metric_admitted = True
+        return None
+    return _tenant_limit_response(tenant, admission.reason)
+
+
+def _mark_tenant_dispatched(http_request: Request) -> None:
+    admission = _tenant_reservation(http_request)
+    if admission is not None:
+        admission.mark_dispatched()
+
+
+def _stream_usage_owner(
+    http_request: Request,
+    model: str,
+    prompt: str,
+    *,
+    usage_exact: bool = True,
+) -> StreamUsageOwner:
     tenant = getattr(http_request.state, "tenant", None) or "default"
     return stream_usage_owner_from_state(
         http_request.app.state,
         tenant=tenant,
         model=model,
         prompt=prompt,
+        reservation=_tenant_reservation(http_request),
+        usage_exact=usage_exact,
     )
 
 
@@ -323,6 +385,7 @@ async def _stream_engine(
             yield f"data: {json.dumps(payload)}\n\n"
             yield "data: [DONE]\n\n"
             return
+        owner.mark_completed()
         for completion in last.completions if last else ():
             yield _sse_chunk(
                 response_id,
@@ -379,7 +442,12 @@ async def _stream_orchestrator(
     reported_usage: GenerationUsage | None = None
     terminal_error_type: str | None = None
     prompt = call.prompt
-    owner = _stream_usage_owner(http_request, request.model, prompt)
+    owner = _stream_usage_owner(
+        http_request,
+        request.model,
+        prompt,
+        usage_exact=False,
+    )
 
     def observe_internal_usage(usage: GenerationUsage) -> None:
         owner.observe(usage, completions)
@@ -571,6 +639,8 @@ async def _stream_orchestrator(
                 yield metadata
             if want_trace:
                 yield f": trace {' | '.join(final_result.trace)}\n\n"
+        if terminal_error_type is None:
+            owner.mark_completed()
         yield "data: [DONE]\n\n"
     finally:
         owner.finalize()
@@ -728,6 +798,7 @@ async def _stream_completions(
             yield f"data: {json.dumps(payload)}\n\n"
             yield "data: [DONE]\n\n"
             return
+        owner.mark_completed()
         if include_usage and last is not None:
             yield _chunk(
                 [],
@@ -749,6 +820,7 @@ def _record_usage(
     *,
     prompt: str,
     completions: Sequence[CompletionOutput],
+    usage_exact: bool | None = None,
 ) -> None:
     """m11 D3/A7: metering happens in handlers (middleware can't see tokens)."""
     prompt_tokens, completion_tokens = resolve_usage_counts(
@@ -762,6 +834,8 @@ def _record_usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         cached_tokens=resolve_cached_tokens(usage),
+        reservation=_tenant_reservation(http_request),
+        usage_exact=(usage is not None if usage_exact is None else usage_exact),
     )
 
 
@@ -866,11 +940,14 @@ def create_app(
         # added BEFORE auth => auth wraps it: 401 wins over 429 and
         # unauthenticated requests never drain buckets (m11 A6)
         limiter = TenantLimiter(tenant_config)
-        app.state.tenant_limiter = limiter  # handlers charge tokens post-response (S4)
+        app.state.tenant_limiter = limiter
+        if metrics is not None:
+            metrics.track_tenant_limiter(limiter)
         app.add_middleware(
             TenantLimitMiddleware,
             config=tenant_config,
             limiter=limiter,
+            metrics=metrics,
         )
     if api_keys or admin_keys:
         app.add_middleware(
@@ -1075,8 +1152,12 @@ def create_app(
             selected = auto_models[request.model]
             try:
                 selected.validate_request(orchestration_request)
+                bound = selected.admission_upper_bound(orchestration_request)
             except ValueError as error:
                 return invalid_request(str(error))
+            reservation_error = _reserve_tenant_work(http_request, bound)
+            if reservation_error is not None:
+                return reservation_error
             want_trace = http_request.headers.get("x-kairyu-trace") == "1"
             # Tool choices must be validated across every final choice before
             # any bytes become irrevocable SSE output. Indexed alternatives
@@ -1095,6 +1176,7 @@ def create_app(
                     media_type="text/event-stream",
                 )
             try:
+                _mark_tenant_dispatched(http_request)
                 result = await selected.run(orchestration_request)
             except OrchestratorExecutionError as error:
                 logger.exception("orchestrator backend error")
@@ -1120,6 +1202,7 @@ def create_app(
                     usage,
                     prompt=prompt,
                     completions=completions,
+                    usage_exact=False,
                 )
                 payload = {
                     "error": sanitize_backend_error(error.cause),
@@ -1166,6 +1249,7 @@ def create_app(
                     response.usage,
                     prompt=prompt,
                     completions=completions,
+                    usage_exact=False,
                 )
                 error = ChatRequestError(
                     "upstream model did not satisfy tool_choice",
@@ -1183,6 +1267,7 @@ def create_app(
                 response.usage,
                 prompt=prompt,
                 completions=completions,
+                usage_exact=False,
             )
             if request.stream:
                 return StreamingResponse(
@@ -1221,6 +1306,13 @@ def create_app(
             )
         except ChatRequestError as error:
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
+        try:
+            bound = admission_upper_bound(validated.generation_request)
+        except ValueError as error:
+            return invalid_request(str(error))
+        reservation_error = _reserve_tenant_work(http_request, bound)
+        if reservation_error is not None:
+            return reservation_error
         if metrics is not None:
             metrics.record_priority(
                 validated.generation_request.scheduling_class,
@@ -1238,6 +1330,7 @@ def create_app(
                 media_type="text/event-stream",
             )
         try:
+            _mark_tenant_dispatched(http_request)
             executed = await execute_chat(validated)
         except ChatRequestError as error:
             if error.execution is not None:
@@ -1291,12 +1384,18 @@ def create_app(
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
             return invalid_request(f"model {request.model!r} does not support n > 1")
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
+        if not prompts:
+            return invalid_request("prompt array must not be empty")
         try:
             sampling = SamplingParams(  # invalid params are a client error, not a 502
                 temperature=request.temperature,
                 top_p=request.top_p,
                 n=request.n,
-                max_tokens=request.max_tokens,
+                max_tokens=(
+                    request.max_tokens
+                    if request.max_tokens is not None
+                    else 16
+                ),
                 stop=request.stop,
                 seed=request.seed,
                 presence_penalty=request.presence_penalty,
@@ -1320,6 +1419,24 @@ def create_app(
             validation_error = _validate_generation_request(engine, generation_request)
             if validation_error is not None:
                 return validation_error
+        try:
+            bounds = [
+                admission_upper_bound(generation_request)
+                for generation_request in generation_requests
+            ]
+        except ValueError as error:
+            return invalid_request(str(error))
+        reservation_error = _reserve_tenant_work(
+            http_request,
+            AdmissionUpperBound(
+                tokens=sum(bound.tokens for bound in bounds),
+                refundable_on_exact_usage=all(
+                    bound.refundable_on_exact_usage for bound in bounds
+                ),
+            ),
+        )
+        if reservation_error is not None:
+            return reservation_error
         if metrics is not None:
             for generation_request in generation_requests:
                 metrics.record_priority(
@@ -1341,7 +1458,18 @@ def create_app(
         try:
             # run the prompt array concurrently (latency = max, not sum); order is
             # restored by prompt_index below so the response is unchanged (P-perf)
-            results = await asyncio.gather(*(engine.generate(item) for item in generation_requests))
+            _mark_tenant_dispatched(http_request)
+            tasks = [
+                asyncio.create_task(engine.generate(item))
+                for item in generation_requests
+            ]
+            try:
+                results = await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
         except Exception as error:
             return upstream_error(error)
         for prompt_index, (prompt, result) in enumerate(zip(prompts, results, strict=True)):
@@ -1369,6 +1497,7 @@ def create_app(
             ),
             prompt="",
             completions=(),
+            usage_exact=all(result.usage is not None for result in results),
         )
         return CompletionResponse(
             id=f"cmpl-{uuid.uuid4().hex[:16]}",

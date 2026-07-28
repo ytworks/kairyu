@@ -18,7 +18,12 @@ from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.errors import sanitize_backend_error
-from kairyu.entrypoints.server.tenancy import UsageLedger
+from kairyu.entrypoints.server.tenancy import (
+    TenantConfig,
+    TenantLimiter,
+    TenantLimits,
+    UsageLedger,
+)
 from kairyu.outputs import CompletionOutput
 from kairyu.pricing import (
     PriceRates,
@@ -112,6 +117,82 @@ async def test_batch_lifecycle_end_to_end(tmp_path):
 
             listing = (await client.get("/v1/batches")).json()
             assert listing["data"][0]["id"] == batch_id
+
+
+@pytest.mark.asyncio
+async def test_batch_lines_acquire_tenant_admission_before_dispatch(tmp_path):
+    backend = MockBackend()
+    tenant_config = TenantConfig(
+        limits={
+            "noisy": TenantLimits(
+                requests_per_minute=1,
+                request_burst=1,
+                max_in_flight=1,
+            )
+        }
+    )
+    limiter = TenantLimiter(tenant_config)
+    worker = BatchWorker(
+        BatchStore(tmp_path / "batch"),
+        {"m": backend},
+        max_concurrency=4,
+        tenant_limiter=limiter,
+        tenant_config=tenant_config,
+    )
+    seen: set[str] = set()
+
+    results = [
+        await worker._run_line(
+            json.loads(_batch_line(f"line-{index}", "hello")),
+            "/v1/chat/completions",
+            seen,
+            "noisy",
+        )
+        for index in range(10)
+    ]
+
+    assert sum(output is not None for output, _, _ in results) == 1
+    errors = [error for _, error, _ in results if error is not None]
+    assert len(errors) == 9
+    assert all(error["error"]["code"] == "tenant_rate_limited" for error in errors)
+    assert len(backend.prompts_seen) == 1
+    assert limiter.in_flight("noisy") == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_line_reserves_tokens_before_dispatch(tmp_path):
+    backend = MockBackend()
+    tenant_config = TenantConfig(
+        limits={
+            "noisy": TenantLimits(
+                requests_per_minute=60,
+                tokens_per_minute=1,
+                token_burst=1,
+                max_in_flight=1,
+            )
+        }
+    )
+    limiter = TenantLimiter(tenant_config)
+    worker = BatchWorker(
+        BatchStore(tmp_path / "batch"),
+        {"m": backend},
+        tenant_limiter=limiter,
+        tenant_config=tenant_config,
+    )
+
+    output, error, usage = await worker._run_line(
+        json.loads(_batch_line("line-1", "hello")),
+        "/v1/chat/completions",
+        set(),
+        "noisy",
+    )
+
+    assert output is None
+    assert usage is None
+    assert error["error"]["code"] == "tenant_rate_limited"
+    assert backend.prompts_seen == ()
+    assert limiter.in_flight("noisy") == 0
+    assert limiter.reservation_snapshot()["noisy"] == 0
 
 
 async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):

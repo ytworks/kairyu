@@ -71,6 +71,16 @@ class GenerationRequest:
     tools_in_prompt: bool = False
 
 
+@dataclass(frozen=True)
+class AdmissionUpperBound:
+    """Worst-case shared-engine work reserved before dispatch."""
+
+    tokens: int
+    # Standard usage counts prompt tokens once even when n/best_of duplicates
+    # prefill work.  Only single-candidate requests may refund to wire usage.
+    refundable_on_exact_usage: bool
+
+
 def prompt_with_tool_intent(request: GenerationRequest) -> str:
     """Render native-engine tool intent exactly once when no HF template did."""
 
@@ -94,6 +104,43 @@ def prompt_with_tool_intent(request: GenerationRequest) -> str:
         f"{request.prompt}\n\nAvailable functions:\n{schemas}\n"
         f"{policy} Emit each call exactly as "
         '<tool_call>{"name":"function_name","arguments":{}}</tool_call>.'
+    )
+
+
+def admission_upper_bound(request: GenerationRequest) -> AdmissionUpperBound:
+    """Transport-neutral, no-I/O upper bound for one generation.
+
+    The gateway intentionally does not own model tokenizers.  We count the
+    complete native prompt/tool intent, response-format metadata, and a fixed
+    chat-template envelope in UTF-8 work units, then multiply both prefill and
+    decode by the actual candidate fan-out.  This stays O(request bytes) and
+    avoids placing tenant bookkeeping in the scheduler token hot path.
+    """
+
+    params = request.sampling_params
+    if params.max_tokens is None:
+        raise ValueError("tenant-isolated generation requires a finite max_tokens")
+    candidates = max(params.n, params.best_of or params.n)
+    prompt = prompt_with_tool_intent(request)
+    metadata = json.dumps(
+        params.extra_args,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    # Covers the fixed role/control tokens inserted by common HF/OpenAI chat
+    # templates.  Supplied prompt, tool schemas, and response schema are counted
+    # explicitly above.
+    fixed_template_envelope = 256
+    prompt_upper = max(
+        1,
+        len(prompt.encode("utf-8"))
+        + len(metadata.encode("utf-8"))
+        + fixed_template_envelope,
+    )
+    return AdmissionUpperBound(
+        tokens=candidates * (prompt_upper + params.max_tokens),
+        refundable_on_exact_usage=candidates == 1,
     )
 
 
