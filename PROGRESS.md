@@ -248,7 +248,9 @@ fence-1 owner-Pod kill and post-expiry fence-2 reclaim by a different gateway,
 200/200 completed lines, and byte-identical output through all gateways. The
 complete independently replayable artifact is retained under
 `bench/results/f1c-three-gateway/`. F1a/F1b were not rerun; the evidence-only
-closure commit does not repeat F1c.
+closure commit does not repeat F1c. Disposable live runs now write to
+`bench/results/f1c-three-gateway-live/`, so they cannot mutate the retained
+artifact or dirty the clean-source attestation.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
@@ -382,6 +384,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [progress] F1c separates retained evidence from its live workspace
+- What: Moved F1c's disposable default and CI result directory to `bench/results/f1c-three-gateway-live/` while keeping the closed, independently replayable artifact under `bench/results/f1c-three-gateway/`. The artifact name and verifier contract are unchanged.
+- Why: The evidence-only closure commit made the former live output directory tracked. Diagnostic run `30399758298` then failed in 0.18 seconds before any build or measurement because startup cleanup correctly deleted the old result names and clean-source attestation correctly rejected those tracked deletions. Separate directories preserve both immutable evidence and fail-closed source provenance.
+- Refs: issue #177; PR #268; Actions run `30399758298`; `.github/workflows/f1c-gateway.yml`; `scripts/kind_gateway_gate.sh`; `bench/results/f1c-three-gateway/`
 
 ### 2026-07-28 — [progress] F1c closes three-gateway affinity and shared batch failover
 - What: Closed G5 F1c on exact-head source commit `be40b97` with Actions run `30399229234`. All 26 independent replay checks passed: six baseline sessions distributed as two per gateway and stayed sticky, all gateways reconstructed the same 12-replica affinity decisions and PostgreSQL identity, a fence-1 owner on gateway B was killed, gateway A reclaimed only after that exact lease expired with fence 2, 200/200 batch lines completed with no failures, and all three gateways returned byte-identical output. The complete raw/replay artifact is committed under `bench/results/f1c-three-gateway/`; the evidence-only commit intentionally does not rerun F1c.

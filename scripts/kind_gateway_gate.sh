@@ -48,7 +48,7 @@ TIMEOUT=${TIMEOUT:-timeout}
 CURL=${CURL:-curl}
 
 CLUSTER_NAME=${F1C_CLUSTER_NAME:-kairyu-f1c}
-RESULTS_DIR=${F1C_RESULTS_DIR:-bench/results/f1c-three-gateway}
+RESULTS_DIR=${F1C_RESULTS_DIR:-bench/results/f1c-three-gateway-live}
 KIND_CONFIG=deploy/kind/f1c/kind-config.yaml
 MANIFEST_DIR=deploy/kind/f1c
 GATEWAY_URL=http://127.0.0.1:18082
