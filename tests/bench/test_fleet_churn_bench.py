@@ -1,10 +1,12 @@
 import asyncio
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 
 import bench.fleet_churn_bench as fleet_bench
 from bench.fleet_churn_bench import (
@@ -865,6 +867,41 @@ def test_formal_profile_refuses_configuration_drift() -> None:
                 ["--profile", "formal", "--request-rate", "49"]
             )
         )
+
+
+def test_formal_gateway_manifest_freezes_guaranteed_qos() -> None:
+    manifest = (
+        Path(__file__).parents[2]
+        / "deploy"
+        / "kind"
+        / "f1a"
+        / "base"
+        / "gateway.yaml"
+    )
+    documents = [
+        document
+        for document in yaml.safe_load_all(
+            manifest.read_text(encoding="utf-8")
+        )
+        if document
+    ]
+    deployment = next(
+        document
+        for document in documents
+        if document.get("kind") == "Deployment"
+        and document["metadata"]["name"] == "f1a-gateway"
+    )
+    pod_spec = deployment["spec"]["template"]["spec"]
+
+    assert pod_spec.get("initContainers", []) == []
+    assert [container["name"] for container in pod_spec["containers"]] == [
+        "gateway"
+    ]
+    expected = {"cpu": "2", "memory": "256Mi"}
+    assert pod_spec["containers"][0]["resources"] == {
+        "requests": expected,
+        "limits": expected,
+    }
 
 
 def test_percentile_uses_raw_nearest_rank_samples() -> None:
@@ -2424,10 +2461,15 @@ async def test_kubernetes_proxy_reader_reuses_client_and_closes_process(
         def __init__(self, **options):
             self.options = options
             self.calls = []
+            self.requests = []
             self.closed = False
 
         async def get(self, path, *, params=None):
             self.calls.append((path, params))
+            return FakeResponse()
+
+        async def request(self, method, path, *, json):
+            self.requests.append((method, path, json))
             return FakeResponse()
 
         async def aclose(self):
@@ -2459,6 +2501,10 @@ async def test_kubernetes_proxy_reader_reuses_client_and_closes_process(
             "/apis/discovery.k8s.io/v1/endpointslices",
             params={"labelSelector": "service=test"},
         ) == {"items": []}
+        assert await reader.delete_json(
+            "/api/v1/namespaces/test/pods/pod-0",
+            body={"propagationPolicy": "Background"},
+        ) == {"items": []}
 
     assert len(process_calls) == 1
     command, options = process_calls[0]
@@ -2485,6 +2531,13 @@ async def test_kubernetes_proxy_reader_reuses_client_and_closes_process(
             "/apis/discovery.k8s.io/v1/endpointslices",
             {"labelSelector": "service=test"},
         ),
+    ]
+    assert clients[0].requests == [
+        (
+            "DELETE",
+            "/api/v1/namespaces/test/pods/pod-0",
+            {"propagationPolicy": "Background"},
+        )
     ]
     assert clients[0].closed
     assert process.terminated
@@ -2599,7 +2652,7 @@ async def test_kubernetes_reads_route_through_one_injected_proxy(
         ),
         (
             "/api/v1/nodes/node%2Fone/proxy/stats/summary",
-            None,
+            {"only_cpu_and_memory": "true"},
         ),
     ]
 
@@ -2660,7 +2713,225 @@ async def test_kubernetes_reads_keep_direct_helper_kubectl_fallback(
             "kubectl-test",
             "get",
             "--raw",
-            "/api/v1/nodes/node-a/proxy/stats/summary",
+            (
+                "/api/v1/nodes/node-a/proxy/stats/summary"
+                "?only_cpu_and_memory=true"
+            ),
+        )
+    ]
+
+
+def test_cpu_memory_only_resource_summary_keeps_nullable_network_schema() -> None:
+    summary = fleet_bench._resource_summary(
+        {
+            "node": {
+                "nodeName": "node-a",
+                "cpu": {"usageNanoCores": 101},
+                "memory": {"workingSetBytes": 202},
+            },
+            "pods": [
+                {
+                    "podRef": {
+                        "name": "pod-a",
+                        "namespace": "kairyu-f1a",
+                        "uid": "uid-a",
+                    },
+                    "cpu": {"usageNanoCores": 303},
+                    "memory": {"workingSetBytes": 404},
+                }
+            ],
+        },
+        "kairyu-f1a",
+    )
+
+    assert summary == {
+        "node": {
+            "name": "node-a",
+            "cpu_usage_nano_cores": 101,
+            "memory_working_set_bytes": 202,
+        },
+        "pods": [
+            {
+                "name": "pod-a",
+                "uid": "uid-a",
+                "cpu_usage_nano_cores": 303,
+                "memory_working_set_bytes": 404,
+                "network": None,
+            }
+        ],
+    }
+    assert fleet_bench._resource_payload_shape_valid(summary)
+
+
+async def test_proxy_pod_delete_bounds_concurrency_and_keeps_grace(
+    monkeypatch,
+) -> None:
+    class FakeReader:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+            self.calls = []
+            self.first_wave_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def delete_json(self, path, *, body):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.calls.append((path, body))
+            if len(self.calls) == 2:
+                self.first_wave_started.set()
+            try:
+                await self.release.wait()
+            finally:
+                self.active -= 1
+            return {"status": "Success"}
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("kubectl fallback must not run")
+
+    reader = FakeReader()
+    args = SimpleNamespace(
+        _kubernetes_proxy_reader=reader,
+        kubectl="kubectl",
+        namespace="kairyu-f1a",
+    )
+    monkeypatch.setattr(fleet_bench, "_run_command", unexpected)
+    monkeypatch.setattr(
+        fleet_bench,
+        "_KUBERNETES_DELETE_MAX_CONCURRENCY",
+        2,
+    )
+    names = ["pod-0", "pod-1", "pod-2", "pod/3", "pod-4"]
+    task = asyncio.create_task(fleet_bench._delete_pods(args, names))
+    await asyncio.wait_for(reader.first_wave_started.wait(), timeout=1)
+
+    assert reader.max_active == 2
+    assert len(reader.calls) == 2
+    reader.release.set()
+
+    assert await asyncio.wait_for(task, timeout=1) == (0, "")
+    assert reader.max_active == 2
+    assert {path for path, _body in reader.calls} == {
+        f"/api/v1/namespaces/kairyu-f1a/pods/{name}"
+        for name in ("pod-0", "pod-1", "pod-2", "pod%2F3", "pod-4")
+    }
+    assert all(
+        body == {"propagationPolicy": "Background"}
+        and "gracePeriodSeconds" not in body
+        for _path, body in reader.calls
+    )
+
+
+async def test_proxy_pod_delete_aggregates_failures_in_input_order() -> None:
+    calls = []
+
+    class FakeReader:
+        async def delete_json(self, path, *, body):
+            calls.append((path, body))
+            if path.endswith("/pod-b"):
+                raise RuntimeError("denied")
+            if path.endswith("/pod-d"):
+                raise ValueError("invalid")
+            return {"status": "Success"}
+
+    args = SimpleNamespace(
+        _kubernetes_proxy_reader=FakeReader(),
+        kubectl="kubectl",
+        namespace="kairyu-f1a",
+    )
+
+    assert await fleet_bench._delete_pods(
+        args,
+        ["pod-a", "pod-b", "pod-c", "pod-d"],
+    ) == (
+        1,
+        "pod-b: RuntimeError: denied\npod-d: ValueError: invalid",
+    )
+    assert len(calls) == 4
+
+
+async def test_proxy_pod_delete_cancellation_reaps_active_requests(
+    monkeypatch,
+) -> None:
+    active = 0
+    started = []
+    cancelled = []
+    first_wave_started = asyncio.Event()
+
+    class FakeReader:
+        async def delete_json(self, path, *, body):
+            nonlocal active
+            active += 1
+            started.append((path, body))
+            if len(started) == 2:
+                first_wave_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(path)
+                raise
+            finally:
+                active -= 1
+
+    args = SimpleNamespace(
+        _kubernetes_proxy_reader=FakeReader(),
+        kubectl="kubectl",
+        namespace="kairyu-f1a",
+    )
+    monkeypatch.setattr(
+        fleet_bench,
+        "_KUBERNETES_DELETE_MAX_CONCURRENCY",
+        2,
+    )
+    task = asyncio.create_task(
+        fleet_bench._delete_pods(
+            args,
+            ["pod-a", "pod-b", "pod-c", "pod-d"],
+        )
+    )
+    await asyncio.wait_for(first_wave_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert active == 0
+    assert len(started) == 2
+    assert sorted(cancelled) == sorted(path for path, _body in started)
+
+
+async def test_pod_delete_keeps_exact_direct_helper_kubectl_fallback(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    async def fake_command(*command, **options):
+        calls.append((command, options))
+        return 7, "ignored stdout", "delete denied"
+
+    monkeypatch.setattr(fleet_bench, "_run_command", fake_command)
+    args = SimpleNamespace(
+        kubectl="kubectl-test",
+        namespace="kairyu-f1a",
+    )
+
+    assert await fleet_bench._delete_pods(
+        args,
+        ["pod-a", "pod-b"],
+    ) == (7, "delete denied")
+    assert calls == [
+        (
+            (
+                "kubectl-test",
+                "-n",
+                "kairyu-f1a",
+                "delete",
+                "pods",
+                "pod-a",
+                "pod-b",
+                "--wait=false",
+            ),
+            {"check": False},
         )
     ]
 
@@ -2845,6 +3116,109 @@ async def test_delete_observes_endpoint_withdrawal_before_command_returns(
     assert records[-1]["observed_ns"] - records[-2]["observed_ns"] <= int(
         SMOKE_CONFIG.evidence_interval_seconds * 1_000_000_000
     )
+
+
+async def test_proxy_delete_and_endpoint_observer_share_live_client(
+    monkeypatch,
+) -> None:
+    old_uid = "old-uid"
+    new_uid = "new-uid"
+    records = []
+    delete_started = asyncio.Event()
+    release_delete = asyncio.Event()
+
+    class Sink:
+        def write(self, value):
+            records.append(value)
+
+    def endpoint_payload(uid):
+        return {
+            "items": [
+                {
+                    "endpoints": [
+                        {
+                            "conditions": {
+                                "ready": True,
+                                "terminating": False,
+                            },
+                            "targetRef": {"uid": uid},
+                        }
+                    ]
+                }
+            ]
+        }
+
+    class FakeReader:
+        def __init__(self):
+            self.endpoint_calls = 0
+            self.delete_calls = []
+
+        async def get_json(self, path, *, params=None):
+            await delete_started.wait()
+            assert path.endswith("/endpointslices")
+            assert params == {
+                "labelSelector": (
+                    "kubernetes.io/service-name=f1a-replicas"
+                )
+            }
+            self.endpoint_calls += 1
+            if self.endpoint_calls == 1:
+                return endpoint_payload(old_uid)
+            release_delete.set()
+            return endpoint_payload(new_uid)
+
+        async def delete_json(self, path, *, body):
+            self.delete_calls.append((path, body))
+            delete_started.set()
+            await release_delete.wait()
+            return {"status": "Success"}
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("kubectl fallback must not run")
+
+    reader = FakeReader()
+    args = SimpleNamespace(
+        _kubernetes_proxy_reader=reader,
+        kubectl="kubectl",
+        namespace="kairyu-f1a",
+        endpoint_service="f1a-replicas",
+    )
+    monkeypatch.setattr(fleet_bench, "_run_command", unexpected)
+    monkeypatch.setattr(
+        fleet_bench,
+        "_ENDPOINT_WITHDRAWAL_POLL_SECONDS",
+        0.001,
+    )
+    api_started_ns = time.monotonic_ns()
+
+    (
+        returncode,
+        stderr,
+        api_completed_ns,
+        old_withdrawn_ns,
+        endpoint_uids,
+    ) = await fleet_bench._delete_with_endpoint_observation(
+        args,
+        SMOKE_CONFIG,
+        epoch=0,
+        names=["f1a-replica-0"],
+        old_uids={old_uid},
+        api_started_ns=api_started_ns,
+        endpoint_sink=Sink(),
+    )
+
+    assert returncode == 0
+    assert stderr == ""
+    assert api_started_ns <= api_completed_ns
+    assert old_withdrawn_ns == records[-1]["observed_ns"]
+    assert endpoint_uids == {new_uid}
+    assert reader.endpoint_calls == 2
+    assert reader.delete_calls == [
+        (
+            "/api/v1/namespaces/kairyu-f1a/pods/f1a-replica-0",
+            {"propagationPolicy": "Background"},
+        )
+    ]
 
 
 async def test_delete_cancellation_reaps_endpoint_observer(monkeypatch) -> None:

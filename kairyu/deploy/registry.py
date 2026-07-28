@@ -16,6 +16,7 @@ import inspect
 import ipaddress
 import logging
 import os
+import socket
 import time
 import uuid
 from collections import deque
@@ -291,13 +292,28 @@ class KubernetesEndpointSliceDiscovery:
         ):
             raise ValueError("EndpointSlice response must contain an items list")
 
-        candidates: dict[str, list[tuple[int, int, int, str]]] = {}
+        # Network-order packed addresses compare in the same numeric order as
+        # ``int(ipaddress.ip_address(...))`` within one address family.  The
+        # family rank is the first tuple field, so unlike the historical
+        # implementation we can validate once without allocating an
+        # ``ipaddress`` object both here and again while rendering the winner.
+        candidates: dict[str, tuple[int, bytes, int, str, bool]] = {}
+        preferred_family = (
+            socket.AF_INET6
+            if self._address_family_preference == "ipv6"
+            else socket.AF_INET
+        )
         for item in payload["items"]:
             if not isinstance(item, dict):
                 raise ValueError("EndpointSlice items must be objects")
             address_type = item.get("addressType")
             if address_type not in {"IPv4", "IPv6"}:
                 continue
+            family = (
+                socket.AF_INET if address_type == "IPv4" else socket.AF_INET6
+            )
+            family_rank = 0 if family == preferred_family else 1
+            is_ipv6 = family == socket.AF_INET6
             port = self._select_port(item.get("ports"), self._port)
             endpoints = item.get("endpoints")
             if not isinstance(endpoints, list):
@@ -322,34 +338,38 @@ class KubernetesEndpointSliceDiscovery:
                         raise ValueError(
                             "EndpointSlice addresses must be strings"
                         )
-                    parsed = ipaddress.ip_address(address)
-                    expected = 4 if address_type == "IPv4" else 6
-                    if parsed.version != expected:
-                        raise ValueError(
-                            f"{address!r} does not match {address_type}"
-                        )
+                    try:
+                        packed = socket.inet_pton(family, address)
+                    except OSError:
+                        # Preserve the historical ipaddress acceptance and
+                        # failure contract on the exceptional path. This also
+                        # distinguishes a valid address of the wrong family
+                        # from a malformed address.
+                        parsed = ipaddress.ip_address(address)
+                        expected = 6 if is_ipv6 else 4
+                        if parsed.version != expected:
+                            raise ValueError(
+                                f"{address!r} does not match {address_type}"
+                            ) from None
+                        packed = parsed.packed
                     replica_id = self._replica_id(endpoint, address)
-                    preferred_version = (
-                        6
-                        if self._address_family_preference == "ipv6"
-                        else 4
+                    candidate = (
+                        family_rank,
+                        packed,
+                        port,
+                        address,
+                        is_ipv6,
                     )
-                    candidates.setdefault(replica_id, []).append(
-                        (
-                            0 if parsed.version == preferred_version else 1,
-                            int(parsed),
-                            port,
-                            address,
-                        )
-                    )
+                    current = candidates.get(replica_id)
+                    if current is None or candidate < current:
+                        candidates[replica_id] = candidate
 
         members: dict[str, ReplicaConfig] = {}
         for replica_id in sorted(candidates):
-            _family_rank, _address_int, port, address = min(
-                candidates[replica_id]
-            )
-            parsed = ipaddress.ip_address(address)
-            host = f"[{address}]" if parsed.version == 6 else address
+            _family_rank, _packed, port, address, is_ipv6 = candidates[
+                replica_id
+            ]
+            host = f"[{address}]" if is_ipv6 else address
             members[replica_id] = ReplicaConfig(
                 address=f"{self._scheme}://{host}:{port}{self._base_path}",
                 model=self._model,

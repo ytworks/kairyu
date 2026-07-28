@@ -51,6 +51,7 @@ GATE = "G5-F1a"
 _COMMAND_TERMINATE_GRACE_SECONDS = 2.0
 _KUBECTL_PROXY_START_TIMEOUT_SECONDS = 10.0
 _KUBERNETES_READ_TIMEOUT_SECONDS = 10.0
+_KUBERNETES_DELETE_MAX_CONCURRENCY = 8
 _ENDPOINT_WITHDRAWAL_POLL_SECONDS = 0.25
 _RECOVERY_POLL_SECONDS = 1.0
 _KUBECTL_PROXY_ADDRESS = re.compile(
@@ -631,6 +632,22 @@ class KubernetesProxyReader:
             raise RuntimeError("Kubernetes API JSON output must be an object")
         return payload
 
+    async def delete_json(
+        self,
+        path: str,
+        *,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        client = self._client
+        if client is None:
+            raise RuntimeError("kubectl proxy reader is not running")
+        response = await client.request("DELETE", path, json=body)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Kubernetes API JSON output must be an object")
+        return payload
+
     async def aclose(self) -> None:
         client, self._client = self._client, None
         try:
@@ -764,7 +781,11 @@ async def _read_node_summary(
     path = f"/api/v1/nodes/{quote(node, safe='')}/proxy/stats/summary"
     reader = _proxy_reader(args)
     if reader is not None:
-        return await reader.get_json(path)
+        return await reader.get_json(
+            path,
+            params={"only_cpu_and_memory": "true"},
+        )
+    path = f"{path}?only_cpu_and_memory=true"
     _, stdout, _ = await _run_command(
         args.kubectl,
         "get",
@@ -775,6 +796,57 @@ async def _read_node_summary(
     if not isinstance(payload, dict):
         raise RuntimeError("kubectl raw JSON output must be an object")
     return payload
+
+
+async def _delete_pods(
+    args: argparse.Namespace,
+    names: list[str],
+) -> tuple[int, str]:
+    reader = _proxy_reader(args)
+    if reader is None:
+        returncode, _, stderr = await _run_command(
+            args.kubectl,
+            "-n",
+            args.namespace,
+            "delete",
+            "pods",
+            *names,
+            "--wait=false",
+            check=False,
+        )
+        return returncode, stderr
+
+    namespace = quote(str(args.namespace), safe="")
+    semaphore = asyncio.Semaphore(_KUBERNETES_DELETE_MAX_CONCURRENCY)
+
+    async def delete_one(name: str) -> str | None:
+        try:
+            async with semaphore:
+                await reader.delete_json(
+                    (
+                        f"/api/v1/namespaces/{namespace}/pods/"
+                        f"{quote(name, safe='')}"
+                    ),
+                    # Match kubectl's default background cascading while
+                    # leaving gracePeriodSeconds unset. The Pod's declared
+                    # grace period and preStop lifecycle therefore remain in
+                    # force.
+                    body={"propagationPolicy": "Background"},
+                )
+        except Exception as error:
+            return f"{name}: {type(error).__name__}: {error}"
+        return None
+
+    errors = [
+        error
+        for error in await asyncio.gather(
+            *(delete_one(name) for name in names)
+        )
+        if error is not None
+    ]
+    if errors:
+        return 1, "\n".join(errors)
+    return 0, ""
 
 
 def _ready(item: dict[str, Any]) -> bool:
@@ -1487,16 +1559,7 @@ async def _delete_with_endpoint_observation(
         )
     )
     try:
-        returncode, _, stderr = await _run_command(
-            args.kubectl,
-            "-n",
-            args.namespace,
-            "delete",
-            "pods",
-            *names,
-            "--wait=false",
-            check=False,
-        )
+        returncode, stderr = await _delete_pods(args, names)
         api_completed_ns = time.monotonic_ns()
         old_withdrawn_ns, endpoint_uids = await observer
         return (

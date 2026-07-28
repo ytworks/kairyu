@@ -25,10 +25,12 @@ The kind v0.32.0 gate pins its Kubernetes v1.36.1 node image by digest and
 configures the kubelet for 350 pods. The mock StatefulSet requests only
 1 millicore and 4 MiB per replica; its 32 MiB memory limit protects the runner
 from a faulty process without reserving 6.4 GiB in the scheduler.
-The gateway requests 500 millicores (with a two-core limit): the public
-four-vCPU formal run measured a 233m gateway maximum, so this reserves more
-than 2x headroom and prevents a simultaneous 20-Pod replacement from starving
-the latency-bearing process without over-reserving a full core.
+The gateway's requests and limits both freeze 2 CPU and 256 MiB. Its sole
+container therefore receives Guaranteed QoS and a two-core CFS weight on the
+shared four-vCPU runner. Formal evidence measured less than 300m gateway CPU
+and 56 MiB while the node reached 3.459 cores during replacement, so unused
+requested CPU remains available to kubelet/containerd while contention gives
+the latency-bearing process the intended weight.
 
 The formal profile applies the base 200-replica manifest and is the
 authoritative test of the five-second graceful withdrawal window. The pull
@@ -61,11 +63,13 @@ kubectl -n kairyu-f1a exec deployment/f1a-gateway -- \
   sh -c 'cat /evidence/placements.jsonl'
 ```
 
-The formal churn driver should delete 20 distinct Ready replica pods per minute
-with `--wait=false`. The StatefulSet replaces them with new pod UIDs. Pre-stop
-first changes `/readyz` to 503, causing the EndpointSlice controller and gateway
-reconciler to remove the old UID, while the old process remains able to finish
-already-selected requests for five seconds.
+The formal churn driver deletes 20 distinct Ready replica pods per minute
+through its lifecycle-owned Kubernetes proxy/client. It issues at most eight
+REST DELETE requests concurrently, selects background propagation, and leaves
+`gracePeriodSeconds` unset. The StatefulSet replaces them with new pod UIDs.
+Pre-stop first changes `/readyz` to 503, causing the EndpointSlice controller
+and gateway reconciler to remove the old UID, while the old process remains
+able to finish already-selected requests for five seconds.
 
 Each deletion arms an endpoint-only observer before waiting for the Kubernetes
 delete command. It records raw EndpointSlice payloads on absolute 250 ms
@@ -84,16 +88,20 @@ exact-200 capture; it does not poll and serialize all 200 Pod objects once per
 second.
 
 Periodic EndpointSlice and resource evidence remains absolute-deadline paced.
-If a fetch overruns its interval, the row records the skipped interval count and
-the sampler resumes at the first future deadline instead of hammering the
-control plane with catch-up requests. All raw evidence JSON is admitted in
-event-loop order to a bounded lifecycle-owned writer. The post-traffic gateway
-audit copy drains and retries bounded backpressure on a worker thread, and
-shutdown drains every accepted row before sidecars are hashed and replayed.
-All Kubernetes sampling reads share one lifecycle-owned `kubectl proxy` and
-persistent HTTP client; the driver does not start a new `kubectl` process for
-each EndpointSlice, Pod, or resource sample. The gateway likewise polls
+The five-second resource sample uses kubelet's
+`/stats/summary?only_cpu_and_memory=true` representation, retaining node and
+Pod CPU, working-set memory, Pod UID, timestamps, and the existing nullable
+network field without collecting filesystem or volume statistics. If a fetch
+overruns its interval, the row records the skipped interval count and the
+sampler resumes at the first future deadline instead of hammering the control
+plane with catch-up requests. All raw evidence JSON is admitted in event-loop
+order to a bounded lifecycle-owned writer. The post-traffic gateway audit copy
+drains and retries bounded backpressure on a worker thread, and shutdown drains
+every accepted row before sidecars are hashed and replayed. All Kubernetes
+sampling reads and Pod DELETE requests share one lifecycle-owned
+`kubectl proxy` and persistent HTTP client. The gateway likewise polls
 EndpointSlices every 500 ms, retaining at least 1.13 seconds of worst-phase
 margin against the historical 3.618-second withdrawal maximum and the
-unchanged five-second limit while halving control-plane parsing during 20-Pod
-replacement.
+unchanged five-second limit. Its exact-compatible EndpointSlice parser reduced
+the recorded 200-endpoint payload from 1.150 ms to 0.308 ms (3.74x) with an
+identical member map.

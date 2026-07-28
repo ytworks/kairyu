@@ -1,7 +1,7 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D1/D2/D5/A16–A24 amended 2026-07-28). Reviewed (1-reviewer panel
+2026-07-27; D1/D2/D5/A16–A25 amended 2026-07-28). Reviewed (1-reviewer panel
 with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
@@ -459,3 +459,46 @@ over (α, β) (pure function over the dataset; no online learning).
   56 MiB. The request rate, retry prohibition, ten-minute schedule, 10 ms
   placement bound, evidence cadence, and every fail-closed replay condition
   remain frozen.
+- **A25**: F1a removes the remaining measurement-side process and kubelet
+  statistics amplification and gives the latency-bearing gateway an explicit
+  shared-node resource contract. This supersedes A24's remaining Pod DELETE
+  subprocess exception: each twenty-Pod batch now uses the existing persistent
+  proxy/client for at most eight concurrent Kubernetes REST DELETE requests.
+  Every request explicitly selects background propagation while omitting
+  `gracePeriodSeconds`, preserving the Pod's declared preStop and termination
+  grace. All names are attempted, failures are aggregated deterministically,
+  cancellation still propagates, and the existing delete-start,
+  delete-completion, withdrawal-observer, and replay boundaries remain
+  unchanged.
+
+  Formal resource evidence retains its frozen five-second absolute cadence and
+  node/Pod CPU and memory schema, but requests kubelet's
+  `/stats/summary?only_cpu_and_memory=true` representation. Network remains a
+  nullable field in the existing artifact schema. EndpointSlice parsing now
+  validates each address once with `socket.inet_pton` and retains only the
+  current minimum candidate per replica, preserving the historical
+  family-rank, numeric-address, port, and original-string ordering exactly. On
+  the recorded 200-endpoint payload this reduced one parse from 1.150 ms to
+  0.308 ms (3.74x) with an identical member map.
+
+  The checked-in one-container formal gateway now has matching requests and
+  limits of 2 CPU and 256 MiB, giving it Guaranteed QoS and a two-core CFS
+  weight on the shared four-core kind node. Measured gateway demand remained
+  below 300m CPU and 56 MiB while replacement activity drove the node to
+  3.459 cores, so idle requested CPU remains available to kubelet/containerd
+  while contention gives the latency-bearing process the intended weight.
+  A separate discovery/reconciliation execution context, as used by vLLM's
+  watcher designs, remains a possible later amendment rather than part of A25:
+  the exact evidence attributes the dominant tail to shared-node descheduling,
+  not membership-transition or HRW work.
+
+  Exact-head Actions run 30370270740 served 33,000/33,000 requests with zero
+  429, 5xx, transport, or unsent failures and 7.554 ms overall placement p99,
+  but nine of ten churn windows exceeded the unchanged 10 ms bound
+  (9.920–15.147 ms). Of 88 churn-window samples at or above 10 ms, 29 of the
+  30 early samples overlapped the Pod DELETE subprocess interval; all 58 later
+  samples occurred during replacement container/kubelet startup. The quiet
+  middle of recovery contributed almost none. Maximum old-UID withdrawal
+  remained 2.266 seconds. Request rate, retry prohibition, churn schedule,
+  latency and withdrawal bounds, evidence cadence, and all fail-closed replay
+  checks remain frozen.

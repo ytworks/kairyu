@@ -222,16 +222,18 @@ internal calls, 47,266 versus 50,504 internal tokens, and 1,499.274 versus
 failed the same gate with a 60 s upstream timeout; the selected 1024-token
 policy completed it while preserving the public final 8192-token allowance.
 The artifacts explicitly limit the quality claim to this subset.
-The exact-head public F1a rerun serves 33,000/33,000 requests with zero
-failures and 7.998 ms overall placement p99, but still fails all ten stricter
-post-delete windows at 10.761–26.315 ms. Raw evidence isolates the remaining
-tail to churn-time control-plane observation: simultaneous EndpointSlice and
-resource reads measure 36.025 ms p99 versus 4.188 ms with neither active, while
-gateway CPU/memory peak at only 279m/56 MiB. The implemented correction replaces
-per-read `kubectl` processes with one persistent proxy/client, reduces formal
-gateway discovery to a margin-preserving 500 ms cadence, and makes the exact
-SHA-256 HRW path 1.91x faster through mutation-boundary ring caches. Its
-unchanged exact-head 200-replica formal rerun remains the blocker for #175.
+The latest exact-head public F1a run serves 33,000/33,000 requests with zero
+429, 5xx, transport, or unsent failures and passes every lifecycle, provenance,
+and independent replay check. Overall placement p99 is 7.554 ms, but nine of
+ten post-delete windows still exceed the unchanged 10 ms bound at
+10.787–15.147 ms; the remaining window is 9.920 ms. Raw evidence places 29/30
+early tail samples inside the Pod DELETE subprocess interval and 58 later
+samples inside replacement container/kubelet startup while shared-node CPU
+reaches 3.459/4 cores and the gateway remains below 300m/56 MiB. A25 removes
+the remaining DELETE subprocesses, requests the CPU/memory-only kubelet
+Summary, preserves exact EndpointSlice selection with a 3.74x parser speedup,
+and freezes 2 CPU/256 MiB Guaranteed QoS for the formal gateway. Its unchanged
+exact-head 200-replica public formal rerun remains the blocker for #175.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
@@ -263,7 +265,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
-| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a implementation complete:** production EndpointSlice discovery, origin-local outbound transports, equivalent-contract validation grouping, deferred audit encoding, and the replayable direct-NodePort kind gate passed its clean-commit 200-replica/ten-epoch local formal run (33,000/33,000 2xx; zero failures; 2.966 ms overall placement p99; 2.680–4.082 ms churn-window p99; maximum old-UID withdrawal 2.510 s). A constrained public-runner repeatability run exposed control-plane catch-up amplification rather than a gateway CPU limit; A23 now makes periodic evidence deadline/skip-replayable, replaces periodic full-fleet Pod LISTs with causally bracketed initial/epoch/final Ready+identity+image captures, requires a strict EndpointSlice Pod-name-to-UID mapping, and drains bounded post-traffic placement copies without loss. Exact-head public formal remains the unchanged PR merge gate. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a implementation complete, public repeatability gate pending:** production EndpointSlice discovery, origin-local outbound transports, equivalent-contract validation grouping, deferred audit encoding, and the replayable direct-NodePort kind gate passed its clean-commit 200-replica/ten-epoch local formal run. Public run `30370270740` then passed all 33,000 retry-free requests, lifecycle joins, provenance, and replay checks but missed the unchanged 10 ms placement limit in nine churn windows. A25 removes the correlated measurement DELETE processes and heavy kubelet statistics path, preserves exact selection with a faster EndpointSlice parser, and freezes an evidence-backed Guaranteed QoS contract. Exact-head public formal remains the PR merge gate. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
@@ -365,6 +367,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F1a removes remaining shared-node lifecycle contention
+- What: Added A25. Formal Pod deletion now uses the lifecycle-owned persistent Kubernetes proxy/client with bounded eight-way REST DELETE instead of measurement-time kubectl subprocesses, preserving background propagation and the declared Pod grace period. Kubelet evidence requests the CPU-and-memory-only Summary API at the unchanged cadence and schema. EndpointSlice parsing preserves exact historical selection while validating once and retaining one best candidate per replica. The formal gateway's matching 2 CPU / 256 MiB requests and limits freeze Guaranteed QoS. All traffic, latency, withdrawal, pacing, evidence, and replay thresholds remain unchanged.
+- Why: Exact-head Actions run `30370270740` served 33,000/33,000 requests without errors and reached 7.554 ms overall placement p99, but nine of ten churn windows were 10.787–15.147 ms; the remaining window was 9.920 ms. Tail correlation placed 29/30 early samples inside Pod DELETE process execution and 58 later samples inside replacement container/kubelet startup, while exact membership transitions explained too few samples to justify a wider watcher execution-context refactor. Shared-node CPU reached 3.459/4 cores while the gateway remained below 300m CPU and 56 MiB.
+- Refs: m10 D2/D5/A24/A25; G5 F1a; issue #175; PR #266; Actions run `30370270740`; `bench/fleet_churn_bench.py`; `kairyu/deploy/registry.py`; `deploy/kind/f1a/base/gateway.yaml`; `tests/bench/test_fleet_churn_bench.py`; `tests/unit/test_k8s_discovery.py`
 
 ### 2026-07-28 — [amendment] F1a removes observer process churn and exact-HRW repetition
 - What: Added A24. All F1a Kubernetes sampling reads now use one lifecycle-owned `kubectl proxy` and persistent bounded-timeout HTTP client; Pod DELETE remains the only measurement-time kubectl subprocess. The formal gateway polls EndpointSlices every 500 ms instead of four times per second. ReplicaPool preserves every historical SHA-256 rendezvous winner while reusing the session-prefix hash state and mutation-boundary encoded-ID, ordinal, and eligible-ring caches; membership audit capture now builds one internally consistent state in one traversal. All frozen traffic, placement, withdrawal, evidence, and replay thresholds remain unchanged.

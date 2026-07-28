@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 from pathlib import Path
 
@@ -262,7 +263,7 @@ async def test_malformed_endpoint_slice_fails_closed(
     ("preference", "expected_address"),
     [
         ("ipv4", "http://10.0.0.1:8000/v1"),
-        ("ipv6", "http://[2001:db8::1]:8000/v1"),
+        ("ipv6", "http://[2001:0db8::1]:8000/v1"),
     ],
 )
 async def test_dual_stack_uid_is_one_deterministic_replica(
@@ -285,7 +286,14 @@ async def test_dual_stack_uid_is_one_deterministic_replica(
         "ports": [{"name": "http", "protocol": "TCP", "port": 8000}],
         "endpoints": [
             {
-                "addresses": ["2001:db8::2", "2001:db8::1"],
+                # The last two spellings have the same numeric address. The
+                # historical tuple then uses the original string as its final
+                # tie-break, after family, numeric address, and port.
+                "addresses": [
+                    "2001:db8::2",
+                    "2001:db8::1",
+                    "2001:0db8::1",
+                ],
                 "conditions": {"ready": True},
                 "targetRef": {"uid": "same-pod", "name": "replica-0"},
             }
@@ -307,8 +315,33 @@ async def test_dual_stack_uid_is_one_deterministic_replica(
     expected = {
         "same-pod": ReplicaConfig(address=expected_address),
     }
-    assert source._parse({"items": [ipv4, ipv6]}) == expected
-    assert source._parse({"items": [ipv6, ipv4]}) == expected
+
+    def legacy_expected(items: list[dict]) -> dict[str, ReplicaConfig]:
+        preferred_version = 6 if preference == "ipv6" else 4
+        candidates = []
+        for item in items:
+            port = item["ports"][0]["port"]
+            for endpoint in item["endpoints"]:
+                for address in endpoint["addresses"]:
+                    parsed = ipaddress.ip_address(address)
+                    candidates.append(
+                        (
+                            0 if parsed.version == preferred_version else 1,
+                            int(parsed),
+                            port,
+                            address,
+                        )
+                    )
+        _rank, _numeric, port, address = min(candidates)
+        parsed = ipaddress.ip_address(address)
+        host = f"[{address}]" if parsed.version == 6 else address
+        return {
+            "same-pod": ReplicaConfig(address=f"http://{host}:{port}/v1"),
+        }
+
+    for items in ([ipv4, ipv6], [ipv6, ipv4]):
+        assert legacy_expected(items) == expected
+        assert source._parse({"items": items}) == legacy_expected(items)
     await client.aclose()
 
 
