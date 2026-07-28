@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from kairyu.engine.backend import GenerationResult, GenerationUsage
@@ -166,6 +167,25 @@ def test_auto_stream_preserves_choice_indices_and_logprobs_once():
     usage = next(payload["usage"] for payload in payloads if payload.get("usage"))
     assert usage["orchestration_input_tokens"] == 5
     assert usage["orchestration_output_tokens"] == 2
+
+
+@pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_auto_output_limit_alias_reaches_final_backend(field, stream):
+    backend = ParityBackend()
+    body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": stream,
+        field: 7,
+    }
+
+    with TestClient(_app(backend)) as client:
+        response = client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert len(backend.requests) == 1
+    assert backend.requests[0].sampling_params.max_tokens == 7
 
 
 def _tool_body(*, stream=False, n=2):
