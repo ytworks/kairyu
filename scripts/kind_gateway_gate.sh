@@ -328,7 +328,8 @@ fi
 "$KUBECTL" apply -f "${RESULTS_DIR}/rendered-manifest.yaml"
 run_bounded 180s "$KUBECTL" -n "$NAMESPACE" rollout status \
   deployment/f1c-postgres --timeout=170s
-run_bounded 180s "$KUBECTL" -n "$NAMESPACE" rollout status \
+run_bounded 180s "$KUBECTL" -n "$NAMESPACE" wait \
+  --for=jsonpath='{.status.readyReplicas}'="$REPLICA_COUNT" \
   statefulset/f1c-replica --timeout=170s
 for deployment in f1c-gateway-a f1c-gateway-b f1c-gateway-c f1c-lb; do
   run_bounded 180s "$KUBECTL" -n "$NAMESPACE" rollout status \
