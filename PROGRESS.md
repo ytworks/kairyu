@@ -356,6 +356,11 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-28 — [amendment] F1a pins OCI config identity across Docker stores
+- What: Replaced the store-specific Docker-ID/containerd-target equality assumption with an explicit image chain. The gate now records Docker's image ID and canonical config digest, retains the raw containerd manifest and rehashes it to the target descriptor, reads that manifest's config, and reads the CRI status ID; all config identities must match, while Docker's image ID must name either the config or manifest target. Artifact replay enforces the same chain, alongside the existing source-revision, raw CRI hash, and per-pod runtime checks.
+- Why: PR smoke on GitHub exposed a cross-store semantic difference: classic Docker reports the OCI config as `.Id`, whereas the local containerd-backed Docker 29 reports the manifest descriptor. Both loaded the correct image, but comparing `.Id` directly with containerd's manifest target falsely rejected the classic runner before Kubernetes apply.
+- Refs: m10 D5/A21; G5 F1a; issue #175; PR #266; Actions run `30353624027`; `scripts/kind_churn_gate.sh`; `bench/fleet_churn_bench.py`
+
 ### 2026-07-28 — [progress] F1a closes the 200-replica churn gate
 - What: Completed the clean-commit formal gate with one gateway, 200 mock replicas, ten disjoint 20-replica churn epochs over ten minutes, and 33,000/33,000 successful requests. There were zero 5xx, 429, transport failures, or unsent arrivals; overall placement p99 was 2.966 ms and all churn-window p99 values were 2.680–4.082 ms. Every raw sidecar hash and request/placement/membership/pod/EndpointSlice join replayed, all ten withdrawal observers were provenance-consistent, and the maximum old-UID withdrawal was 2.510 s. Two fresh-cluster smoke runs and the independent artifact replay also passed.
 - Refs: issue #175; commit `9c83913`; m10 D5/A16–A20; `bench/results/f1a-replica-churn-kind-final3-2026-07-28/manifest.json`

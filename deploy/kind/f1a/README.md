@@ -36,6 +36,12 @@ Both profiles build the fixed `kairyu:dev` and `kairyu-f1a-mock:dev` tags, load
 those exact tags into a fresh kind cluster, wait for an exact Ready replica
 count, and require the gateway metrics to report configured and healthy counts
 equal to the profile size with zero draining replicas before traffic begins.
+Image provenance is joined through the OCI config digest: the Docker source
+config, the config referenced by containerd's loaded manifest, and the CRI
+status ID must be identical. The raw manifest is retained and rehashed to
+containerd's target descriptor. This works with both classic Docker stores,
+whose `.Id` is the config digest, and containerd-backed Docker stores, whose
+`.Id` is the manifest target, without weakening runtime image pinning.
 The gateway Service uses NodePort 30080. The kind node maps that port directly
 to `127.0.0.1:18080` on the runner, avoiding a `kubectl port-forward` process in
 the traffic path. `F1A_GATEWAY_PORT` changes the localhost port by rendering the

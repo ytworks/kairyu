@@ -74,6 +74,8 @@ RESULTS_DIR=${F1A_RESULTS_DIR:-bench/results/f1a-fleet-churn}
 GATEWAY_PORT=${F1A_GATEWAY_PORT:-18080}
 GATEWAY_CRI_IMAGE_METADATA="${RESULTS_DIR}/gateway-cri-image.json"
 MOCK_CRI_IMAGE_METADATA="${RESULTS_DIR}/mock-cri-image.json"
+GATEWAY_CONTAINERD_MANIFEST="${RESULTS_DIR}/gateway-containerd-manifest.json"
+MOCK_CONTAINERD_MANIFEST="${RESULTS_DIR}/mock-containerd-manifest.json"
 RENDERED_KIND_CONFIG="${RESULTS_DIR}/rendered-kind-config.yaml"
 OUTPUT="${RESULTS_DIR}/manifest.json"
 VERIFIER_OUTPUT="${RESULTS_DIR}/verifier.json"
@@ -110,6 +112,8 @@ known_results=(
   gateway-membership-before-traffic.prom
   gateway-cri-image.json
   mock-cri-image.json
+  gateway-containerd-manifest.json
+  mock-containerd-manifest.json
 )
 for result_name in "${known_results[@]}"; do
   rm -f -- "${RESULTS_DIR}/${result_name}"
@@ -294,6 +298,18 @@ GATEWAY_IMAGE_DIGEST=$(
 MOCK_IMAGE_DIGEST=$(
   "$DOCKER" image inspect --format '{{.Id}}' "$MOCK_IMAGE"
 )
+docker_image_config_digest() {
+  local image_reference=$1
+  "$DOCKER" image inspect \
+    --format '{{with .Descriptor}}{{with index . "annotations"}}{{index . "config.digest"}}{{end}}{{else}}{{.Id}}{{end}}' \
+    "$image_reference"
+}
+GATEWAY_IMAGE_CONFIG_DIGEST=$(
+  docker_image_config_digest "$GATEWAY_IMAGE"
+)
+MOCK_IMAGE_CONFIG_DIGEST=$(
+  docker_image_config_digest "$MOCK_IMAGE"
+)
 for image in "$GATEWAY_IMAGE" "$MOCK_IMAGE"; do
   image_revision=$(
     "$DOCKER" image inspect \
@@ -350,9 +366,63 @@ GATEWAY_CONTAINERD_IMAGE_DIGEST=$(
 MOCK_CONTAINERD_IMAGE_DIGEST=$(
   containerd_target_digest "$MOCK_CONTAINERD_IMAGE"
 )
-if [[ "$GATEWAY_CONTAINERD_IMAGE_DIGEST" != "$GATEWAY_IMAGE_DIGEST" ||
-      "$MOCK_CONTAINERD_IMAGE_DIGEST" != "$MOCK_IMAGE_DIGEST" ]]; then
-  echo "kind containerd image target does not match built Docker image" >&2
+run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
+  ctr -n k8s.io content get "$GATEWAY_CONTAINERD_IMAGE_DIGEST" \
+  >"$GATEWAY_CONTAINERD_MANIFEST"
+run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
+  ctr -n k8s.io content get "$MOCK_CONTAINERD_IMAGE_DIGEST" \
+  >"$MOCK_CONTAINERD_MANIFEST"
+containerd_config_digest() {
+  local target_digest=$1
+  run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" sh -ec \
+    'ctr -n k8s.io content get "$1" | jq -er ".config.digest"' \
+    sh "$target_digest"
+}
+GATEWAY_CONTAINERD_CONFIG_DIGEST=$(
+  containerd_config_digest "$GATEWAY_CONTAINERD_IMAGE_DIGEST"
+)
+MOCK_CONTAINERD_CONFIG_DIGEST=$(
+  containerd_config_digest "$MOCK_CONTAINERD_IMAGE_DIGEST"
+)
+cri_status_digest() {
+  local image_reference=$1
+  run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
+    crictl inspecti --output go-template --template '{{.status.id}}' \
+    "$image_reference"
+}
+GATEWAY_CRI_STATUS_DIGEST=$(
+  cri_status_digest "$GATEWAY_IMAGE"
+)
+MOCK_CRI_STATUS_DIGEST=$(
+  cri_status_digest "$MOCK_IMAGE"
+)
+is_sha256_digest() {
+  [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+for digest in \
+  "$GATEWAY_IMAGE_DIGEST" "$MOCK_IMAGE_DIGEST" \
+  "$GATEWAY_IMAGE_CONFIG_DIGEST" "$MOCK_IMAGE_CONFIG_DIGEST" \
+  "$GATEWAY_CONTAINERD_IMAGE_DIGEST" "$MOCK_CONTAINERD_IMAGE_DIGEST" \
+  "$GATEWAY_CONTAINERD_CONFIG_DIGEST" "$MOCK_CONTAINERD_CONFIG_DIGEST" \
+  "$GATEWAY_CRI_STATUS_DIGEST" "$MOCK_CRI_STATUS_DIGEST"; do
+  if ! is_sha256_digest "$digest"; then
+    echo "invalid image provenance digest: ${digest}" >&2
+    exit 1
+  fi
+done
+if [[ "$GATEWAY_IMAGE_CONFIG_DIGEST" != \
+        "$GATEWAY_CONTAINERD_CONFIG_DIGEST" ||
+      "$GATEWAY_IMAGE_CONFIG_DIGEST" != "$GATEWAY_CRI_STATUS_DIGEST" ||
+      "$MOCK_IMAGE_CONFIG_DIGEST" != "$MOCK_CONTAINERD_CONFIG_DIGEST" ||
+      "$MOCK_IMAGE_CONFIG_DIGEST" != "$MOCK_CRI_STATUS_DIGEST" ]]; then
+  echo "kind image config does not match built Docker image and CRI" >&2
+  exit 1
+fi
+if [[ "$GATEWAY_IMAGE_DIGEST" != "$GATEWAY_IMAGE_CONFIG_DIGEST" &&
+      "$GATEWAY_IMAGE_DIGEST" != "$GATEWAY_CONTAINERD_IMAGE_DIGEST" ]] ||
+   [[ "$MOCK_IMAGE_DIGEST" != "$MOCK_IMAGE_CONFIG_DIGEST" &&
+      "$MOCK_IMAGE_DIGEST" != "$MOCK_CONTAINERD_IMAGE_DIGEST" ]]; then
+  echo "Docker image ID is neither the config nor containerd target" >&2
   exit 1
 fi
 "$KUBECTL" apply -k "$ARCHIVE_APPLY_DIR"
@@ -485,6 +555,10 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1a-uv-cache}
   --mock-image-digest "$MOCK_IMAGE_DIGEST" \
   --gateway-containerd-image-digest "$GATEWAY_CONTAINERD_IMAGE_DIGEST" \
   --mock-containerd-image-digest "$MOCK_CONTAINERD_IMAGE_DIGEST" \
+  --gateway-containerd-config-digest "$GATEWAY_CONTAINERD_CONFIG_DIGEST" \
+  --mock-containerd-config-digest "$MOCK_CONTAINERD_CONFIG_DIGEST" \
+  --gateway-containerd-image-metadata "$GATEWAY_CONTAINERD_MANIFEST" \
+  --mock-containerd-image-metadata "$MOCK_CONTAINERD_MANIFEST" \
   --gateway-cri-image-metadata "$GATEWAY_CRI_IMAGE_METADATA" \
   --mock-cri-image-metadata "$MOCK_CRI_IMAGE_METADATA" \
   --kind-node-image "$KIND_NODE_IMAGE" \
@@ -495,6 +569,8 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1a-uv-cache}
   --driver-path scripts/kind_churn_gate.sh \
   "${frozen_args[@]}" \
   --frozen-sidecar "$RENDERED_KIND_CONFIG" \
+  --gateway-image-config-digest "$GATEWAY_IMAGE_CONFIG_DIGEST" \
+  --mock-image-config-digest "$MOCK_IMAGE_CONFIG_DIGEST" \
   --output "$OUTPUT" \
   --assert-gate
 

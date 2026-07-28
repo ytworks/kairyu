@@ -286,6 +286,66 @@ def _cri_image_metadata(path: Path, artifact_dir: Path) -> dict[str, Any]:
     }
 
 
+def _containerd_image_metadata(
+    path: Path,
+    artifact_dir: Path,
+    target_digest: str,
+) -> dict[str, Any]:
+    path = path.resolve()
+    artifact_dir = artifact_dir.resolve()
+    if path.parent != artifact_dir:
+        raise ValueError(
+            f"containerd manifest must be beside the artifact: {path}"
+        )
+    digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+    if digest_pattern.fullmatch(target_digest) is None:
+        raise ValueError(f"invalid containerd target digest: {target_digest}")
+    raw_sha256 = _sha256_file(path)
+    if f"sha256:{raw_sha256}" != target_digest:
+        raise ValueError(
+            f"containerd manifest hash does not match target: {path}"
+        )
+    payload = json.loads(path.read_bytes())
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != 2:
+        raise ValueError(f"invalid containerd image manifest: {path}")
+    allowed_media_types = {
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    }
+    media_type = payload.get("mediaType")
+    if media_type not in allowed_media_types:
+        raise ValueError(
+            f"unsupported containerd manifest media type: {media_type!r}"
+        )
+    config = payload.get("config")
+    layers = payload.get("layers")
+    if not isinstance(config, dict) or not isinstance(layers, list) or not layers:
+        raise ValueError(f"incomplete containerd image manifest: {path}")
+    config_digest = config.get("digest")
+    layer_digests = [
+        layer.get("digest") if isinstance(layer, dict) else None
+        for layer in layers
+    ]
+    if (
+        not isinstance(config_digest, str)
+        or digest_pattern.fullmatch(config_digest) is None
+        or not all(
+            isinstance(digest, str)
+            and digest_pattern.fullmatch(digest) is not None
+            for digest in layer_digests
+        )
+    ):
+        raise ValueError(f"invalid containerd content digest: {path}")
+    return {
+        "path": path.name,
+        "sha256": raw_sha256,
+        "target_digest": target_digest,
+        "media_type": media_type,
+        "config_digest": config_digest,
+        "layer_digests": layer_digests,
+    }
+
+
 def _git_output(*command: str, binary: bool = False) -> bytes | str:
     completed = subprocess.run(
         ["git", *command],
@@ -381,10 +441,28 @@ def source_environment(args: argparse.Namespace) -> dict[str, Any]:
         "frozen_sidecars": frozen_sidecars,
         "gateway_image_digest": args.gateway_image_digest,
         "mock_image_digest": args.mock_image_digest,
+        "gateway_image_config_digest": args.gateway_image_config_digest,
+        "mock_image_config_digest": args.mock_image_config_digest,
         "gateway_containerd_image_digest": (
             args.gateway_containerd_image_digest
         ),
         "mock_containerd_image_digest": args.mock_containerd_image_digest,
+        "gateway_containerd_config_digest": (
+            args.gateway_containerd_config_digest
+        ),
+        "mock_containerd_config_digest": (
+            args.mock_containerd_config_digest
+        ),
+        "gateway_containerd_image_metadata": _containerd_image_metadata(
+            Path(args.gateway_containerd_image_metadata),
+            artifact_dir,
+            args.gateway_containerd_image_digest,
+        ),
+        "mock_containerd_image_metadata": _containerd_image_metadata(
+            Path(args.mock_containerd_image_metadata),
+            artifact_dir,
+            args.mock_containerd_image_digest,
+        ),
         "gateway_cri_image_metadata": _cri_image_metadata(
             Path(args.gateway_cri_image_metadata),
             artifact_dir,
@@ -1435,6 +1513,64 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
             and runtime_digests == sorted(derived_digests)
         )
 
+    def image_chain(role: str) -> bool:
+        image_digest_value = environment.get(f"{role}_image_digest")
+        image_config_digest = environment.get(
+            f"{role}_image_config_digest"
+        )
+        containerd_image_digest = environment.get(
+            f"{role}_containerd_image_digest"
+        )
+        containerd_config_digest = environment.get(
+            f"{role}_containerd_config_digest"
+        )
+        containerd_metadata = environment.get(
+            f"{role}_containerd_image_metadata"
+        )
+        metadata = environment.get(f"{role}_cri_image_metadata")
+        containerd_metadata_valid = (
+            isinstance(containerd_metadata, dict)
+            and isinstance(containerd_metadata.get("path"), str)
+            and bool(containerd_metadata["path"])
+            and not Path(containerd_metadata["path"]).is_absolute()
+            and ".." not in Path(containerd_metadata["path"]).parts
+            and digest(containerd_metadata.get("sha256"))
+            and containerd_metadata.get("target_digest")
+            == containerd_image_digest
+            and containerd_metadata.get("media_type")
+            in {
+                "application/vnd.oci.image.manifest.v1+json",
+                "application/vnd.docker.distribution.manifest.v2+json",
+            }
+            and containerd_metadata.get("config_digest")
+            == containerd_config_digest
+            and isinstance(containerd_metadata.get("layer_digests"), list)
+            and bool(containerd_metadata["layer_digests"])
+            and all(
+                isinstance(item, str)
+                and exact_image_sha256.fullmatch(item) is not None
+                for item in containerd_metadata["layer_digests"]
+            )
+        )
+        return (
+            isinstance(image_digest_value, str)
+            and exact_image_sha256.fullmatch(image_digest_value) is not None
+            and isinstance(image_config_digest, str)
+            and exact_image_sha256.fullmatch(image_config_digest) is not None
+            and isinstance(containerd_image_digest, str)
+            and exact_image_sha256.fullmatch(containerd_image_digest)
+            is not None
+            and isinstance(containerd_config_digest, str)
+            and exact_image_sha256.fullmatch(containerd_config_digest)
+            is not None
+            and image_digest_value
+            in {image_config_digest, containerd_image_digest}
+            and image_config_digest == containerd_config_digest
+            and containerd_metadata_valid
+            and cri_metadata(metadata)
+            and metadata.get("status_id") == image_config_digest
+        )
+
     frozen_inputs = environment.get("frozen_inputs")
     frozen_sidecars = environment.get("frozen_sidecars")
     frozen_sidecar_paths = (
@@ -1449,8 +1585,6 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
     )
     tool_versions = environment.get("tool_versions")
     expected_git_commit = environment.get("expected_git_commit")
-    gateway_image_digest = environment.get("gateway_image_digest")
-    mock_image_digest = environment.get("mock_image_digest")
     return (
         isinstance(git_commit, str)
         and commit.fullmatch(git_commit) is not None
@@ -1461,16 +1595,8 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
         and digest(environment.get("tracked_diff_sha256"))
         and digest(environment.get("benchmark_sha256"))
         and digest(environment.get("driver_sha256"))
-        and isinstance(gateway_image_digest, str)
-        and exact_image_sha256.fullmatch(gateway_image_digest) is not None
-        and isinstance(mock_image_digest, str)
-        and exact_image_sha256.fullmatch(mock_image_digest) is not None
-        and environment.get("gateway_containerd_image_digest")
-        == gateway_image_digest
-        and environment.get("mock_containerd_image_digest")
-        == mock_image_digest
-        and cri_metadata(environment.get("gateway_cri_image_metadata"))
-        and cri_metadata(environment.get("mock_cri_image_metadata"))
+        and image_chain("gateway")
+        and image_chain("mock")
         and image_digest(environment.get("kind_node_image"))
         and isinstance(tool_versions, dict)
         and set(tool_versions) == {"kind", "kubectl", "docker"}
@@ -2970,6 +3096,20 @@ def _cri_metadata_file_matches(
     return path.is_file() and _cri_image_metadata(path, path.parent) == descriptor
 
 
+def _containerd_metadata_file_matches(
+    manifest_path: Path,
+    descriptor: Any,
+) -> bool:
+    if not isinstance(descriptor, dict):
+        return False
+    path = _safe_sidecar(manifest_path, str(descriptor.get("path", "")))
+    return path.is_file() and _containerd_image_metadata(
+        path,
+        path.parent,
+        str(descriptor.get("target_digest", "")),
+    ) == descriptor
+
+
 def verify_artifact(manifest_path: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text())
     if not isinstance(manifest, dict):
@@ -3003,6 +3143,15 @@ def verify_artifact(manifest_path: Path) -> dict[str, Any]:
                 exists and _sha256_file(path) == descriptor.get("sha256")
             )
     for role in ("gateway", "mock"):
+        try:
+            checks[f"{role}_containerd_image_metadata_raw"] = (
+                _containerd_metadata_file_matches(
+                    manifest_path,
+                    environment.get(f"{role}_containerd_image_metadata"),
+                )
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            checks[f"{role}_containerd_image_metadata_raw"] = False
         try:
             checks[f"{role}_cri_image_metadata_raw"] = (
                 _cri_metadata_file_matches(
@@ -3416,8 +3565,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gateway-image-digest")
     parser.add_argument("--mock-image-digest")
+    parser.add_argument("--gateway-image-config-digest")
+    parser.add_argument("--mock-image-config-digest")
     parser.add_argument("--gateway-containerd-image-digest")
     parser.add_argument("--mock-containerd-image-digest")
+    parser.add_argument("--gateway-containerd-config-digest")
+    parser.add_argument("--mock-containerd-config-digest")
+    parser.add_argument("--gateway-containerd-image-metadata")
+    parser.add_argument("--mock-containerd-image-metadata")
     parser.add_argument("--gateway-cri-image-metadata")
     parser.add_argument("--mock-cri-image-metadata")
     parser.add_argument("--kind-node-image")

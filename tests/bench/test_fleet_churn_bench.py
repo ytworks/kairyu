@@ -25,6 +25,35 @@ from bench.fleet_churn_bench import (
 )
 
 
+def _write_containerd_manifest(
+    path,
+    *,
+    config_digest: str,
+    layer_digest: str,
+) -> str:
+    payload = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": config_digest,
+            "size": 1,
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                "digest": layer_digest,
+                "size": 1,
+            }
+        ],
+    }
+    path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return "sha256:" + fleet_bench._sha256_file(path)
+
+
 def _passing_evidence():
     config = SMOKE_CONFIG
     plan = churn_plan(config)
@@ -359,8 +388,28 @@ def _passing_evidence():
         "driver_sha256": "c" * 64,
         "gateway_image_digest": gateway_digest,
         "mock_image_digest": mock_digest,
+        "gateway_image_config_digest": gateway_status_digest,
+        "mock_image_config_digest": mock_runtime_digest,
         "gateway_containerd_image_digest": gateway_digest,
         "mock_containerd_image_digest": mock_digest,
+        "gateway_containerd_config_digest": gateway_status_digest,
+        "mock_containerd_config_digest": mock_runtime_digest,
+        "gateway_containerd_image_metadata": {
+            "path": "gateway-containerd-manifest.json",
+            "sha256": "7" * 64,
+            "target_digest": gateway_digest,
+            "media_type": "application/vnd.oci.image.manifest.v1+json",
+            "config_digest": gateway_status_digest,
+            "layer_digests": ["sha256:" + "8" * 64],
+        },
+        "mock_containerd_image_metadata": {
+            "path": "mock-containerd-manifest.json",
+            "sha256": "9" * 64,
+            "target_digest": mock_digest,
+            "media_type": "application/vnd.oci.image.manifest.v1+json",
+            "config_digest": mock_runtime_digest,
+            "layer_digests": ["sha256:" + "a" * 64],
+        },
         "gateway_cri_image_metadata": {
             "path": "gateway-cri-image.json",
             "sha256": "5" * 64,
@@ -1097,6 +1146,39 @@ def test_gate_rejects_containerd_target_not_matching_built_image() -> None:
     assert not result["checks"]["provenance_pinned"]
 
 
+def test_gate_accepts_classic_docker_config_id_with_manifest_target() -> None:
+    evidence = _passing_evidence()
+    environment = evidence["environment"]
+    environment["gateway_image_digest"] = environment[
+        "gateway_image_config_digest"
+    ]
+    environment["mock_image_digest"] = environment[
+        "mock_image_config_digest"
+    ]
+
+    result = evaluate_gate(**evidence)
+
+    assert result["passed"]
+    assert result["checks"]["provenance_pinned"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "mock_image_config_digest",
+        "mock_containerd_config_digest",
+    ],
+)
+def test_gate_rejects_image_config_chain_drift(field: str) -> None:
+    evidence = _passing_evidence()
+    evidence["environment"][field] = "sha256:" + "a" * 64
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["provenance_pinned"]
+
+
 def test_gate_rejects_runtime_digest_not_allowed_by_cri_metadata() -> None:
     evidence = _passing_evidence()
     metadata = evidence["environment"]["mock_cri_image_metadata"]
@@ -1324,6 +1406,20 @@ def test_source_environment_rejects_untracked_gate_input(
             }
         )
     )
+    gateway_containerd = tmp_path / "gateway-containerd-manifest.json"
+    gateway_config_digest = "sha256:" + "4" * 64
+    gateway_target_digest = _write_containerd_manifest(
+        gateway_containerd,
+        config_digest=gateway_config_digest,
+        layer_digest="sha256:" + "7" * 64,
+    )
+    mock_containerd = tmp_path / "mock-containerd-manifest.json"
+    mock_config_digest = "sha256:" + "6" * 64
+    mock_target_digest = _write_containerd_manifest(
+        mock_containerd,
+        config_digest=mock_config_digest,
+        layer_digest="sha256:" + "8" * 64,
+    )
     repository = str(fleet_bench.Path.cwd())
 
     def fake_git_output(*command, binary=False):
@@ -1353,10 +1449,16 @@ def test_source_environment_rejects_untracked_gate_input(
         frozen_input=[str(frozen)],
         frozen_sidecar=[str(frozen)],
         expected_git_commit="a" * 40,
-        gateway_image_digest="sha256:" + "1" * 64,
-        mock_image_digest="sha256:" + "2" * 64,
-        gateway_containerd_image_digest="sha256:" + "1" * 64,
-        mock_containerd_image_digest="sha256:" + "2" * 64,
+        gateway_image_digest=gateway_config_digest,
+        mock_image_digest=mock_config_digest,
+        gateway_image_config_digest=gateway_config_digest,
+        mock_image_config_digest=mock_config_digest,
+        gateway_containerd_image_digest=gateway_target_digest,
+        mock_containerd_image_digest=mock_target_digest,
+        gateway_containerd_config_digest=gateway_config_digest,
+        mock_containerd_config_digest=mock_config_digest,
+        gateway_containerd_image_metadata=str(gateway_containerd),
+        mock_containerd_image_metadata=str(mock_containerd),
         gateway_cri_image_metadata=str(gateway_cri),
         mock_cri_image_metadata=str(mock_cri),
         kind_node_image="kindest/node@sha256:" + "3" * 64,
@@ -1714,6 +1816,24 @@ def test_artifact_verifier_rehashes_and_replays_sidecars(tmp_path) -> None:
             path,
             tmp_path,
         )
+    for index, role in enumerate(("gateway", "mock"), start=10):
+        environment = evidence["environment"]
+        config_digest = environment[f"{role}_containerd_config_digest"]
+        path = tmp_path / f"{role}-containerd-manifest.json"
+        target_digest = _write_containerd_manifest(
+            path,
+            config_digest=config_digest,
+            layer_digest="sha256:" + f"{index:x}" * 64,
+        )
+        environment[f"{role}_image_digest"] = config_digest
+        environment[f"{role}_containerd_image_digest"] = target_digest
+        environment[f"{role}_containerd_image_metadata"] = (
+            fleet_bench._containerd_image_metadata(
+                path,
+                tmp_path,
+                target_digest,
+            )
+        )
     replay = evaluate_gate(**evidence)
     sidecar_rows = {
         "requests": evidence["requests"],
@@ -1780,6 +1900,18 @@ def test_artifact_verifier_rehashes_and_replays_sidecars(tmp_path) -> None:
     assert not cri_result["verified"]
     assert not cri_result["checks"]["gateway_cri_image_metadata_raw"]
     gateway_cri_path.write_text(gateway_cri_raw)
+
+    gateway_containerd_path = (
+        tmp_path / "gateway-containerd-manifest.json"
+    )
+    gateway_containerd_raw = gateway_containerd_path.read_text()
+    gateway_containerd_path.write_text("{}")
+    containerd_result = verify_artifact(manifest_path)
+    assert not containerd_result["verified"]
+    assert not containerd_result["checks"][
+        "gateway_containerd_image_metadata_raw"
+    ]
+    gateway_containerd_path.write_text(gateway_containerd_raw)
 
     rendered_kind_config_raw = rendered_kind_config.read_text(encoding="utf-8")
     rendered_kind_config.write_text(

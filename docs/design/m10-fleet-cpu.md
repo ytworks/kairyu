@@ -1,7 +1,7 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D2/D5/A16–A20 amended 2026-07-28). Reviewed (1-reviewer panel
+2026-07-27; D2/D5/A16–A21 amended 2026-07-28). Reviewed (1-reviewer panel
 with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
@@ -339,3 +339,13 @@ over (α, β) (pure function over the dataset; no online learning).
   old snapshot's fetch start through the first disjoint snapshot's observation
   time. This separates withdrawal proof from pod readiness polling, whose
   multi-name Kubernetes request can take seconds.
+- **A21**: image provenance follows the OCI config identity across Docker
+  storage backends instead of assuming Docker's ``.Id`` always names the same
+  descriptor as containerd's tag target. The gate records Docker's
+  store-specific image ID and canonical config digest, reads the config digest
+  referenced by the loaded containerd manifest, and reads the CRI status ID.
+  The raw manifest blob is retained and its SHA-256 must equal containerd's
+  target descriptor. All three config digests must match; Docker's image ID
+  must name either that config or the containerd target. The existing
+  source-revision label, raw CRI metadata hash, and per-pod runtime image-ID
+  checks remain mandatory.
