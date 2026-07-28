@@ -660,9 +660,12 @@ over (α, β) (pure function over the dataset; no online learning).
   expiry before the higher-fence reclaim, and eventual old-UID absence, but
   does not order the absence-observation timestamp before reclaim. Likewise,
   Kubernetes may omit a source pin from the display `status.image`; for a
-  digest-pinned image, the runtime `status.imageID` must equal that source pin
-  exactly. Raw traffic, LB, placement, membership, Pod, batch HTTP and
-  claim-audit sidecars are hashed and independently replayed. F1a run
+  digest-pinned imported image, replay proves the complete identity chain:
+  the source registry pin is present in Docker `RepoDigests`, that image's
+  Docker config ID equals the kind CRI config ID, and the Pod runtime digest is
+  either the source pin or one of the CRI-reported import identities. A digest
+  outside that chain fails. Raw traffic, LB, placement, membership, Pod, batch
+  HTTP and claim-audit sidecars are hashed and independently replayed. F1a run
   `30374404150` and F1b run `30387260062` retain their capacity, discovery,
   provenance and raw-evidence precedents; neither is rerun. F1c adds no latency
   percentile SLO: elapsed times are diagnostic and only a generous stuck-run

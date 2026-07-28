@@ -46,6 +46,31 @@ def _write_cri_metadata(
     )
 
 
+def _write_docker_metadata(
+    path: Path,
+    *,
+    image: str,
+    config_id: str,
+) -> None:
+    display_image, separator, digest = image.rpartition("@")
+    assert separator
+    repository = display_image.rpartition(":")[0]
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "Id": config_id,
+                    "RepoDigests": [f"{repository}@{digest}"],
+                    "RepoTags": [display_image],
+                }
+            ],
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _affinity_row(
     *,
     phase: str,
@@ -701,6 +726,11 @@ def _passing_evidence(tmp_path: Path) -> Path:
         repo_digest="sha256:" + "7" * 64,
         revision=None,
     )
+    _write_docker_metadata(
+        tmp_path / "postgres-docker-image.json",
+        image=postgres_image,
+        config_id="sha256:" + "4" * 64,
+    )
     rendered_manifest_path = tmp_path / "rendered-manifest.yaml"
     rendered_manifest_path.write_text(
         "apiVersion: v1\nkind: List\nitems: []\n",
@@ -716,6 +746,9 @@ def _passing_evidence(tmp_path: Path) -> Path:
             ),
             "postgres_cri_image_metadata": gateway_bench._cri_image_metadata(
                 tmp_path / "postgres-cri-image.json", tmp_path
+            ),
+            "postgres_docker_image_metadata": gateway_bench._docker_image_metadata(
+                tmp_path / "postgres-docker-image.json", tmp_path
             ),
             "rendered_manifest": gateway_bench._adjacent_file_metadata(
                 rendered_manifest_path,
@@ -815,6 +848,50 @@ def test_verifier_rejects_a_postgres_runtime_digest_different_from_the_pin(
     assert not result["checks"][
         "runtime_gateway_mock_and_postgres_images_match_sources"
     ]
+
+
+def test_verifier_accepts_a_postgres_kind_import_digest_attested_by_cri(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _passing_evidence(tmp_path)
+    rows = gateway_bench._read_jsonl(tmp_path / "postgres-pods.jsonl")
+    for row in rows:
+        row["images"][0]["image_id"] = "docker-pullable://postgres@sha256:" + "7" * 64
+    _write_jsonl(tmp_path / "postgres-pods.jsonl", rows)
+    _refresh_artifact(manifest_path, "postgres-pods.jsonl")
+
+    result = gateway_bench.verify_evidence(tmp_path)
+
+    assert result["passed"]
+    assert result["checks"][
+        "runtime_gateway_mock_and_postgres_images_match_sources"
+    ]
+
+
+def test_verifier_rejects_docker_metadata_unlinked_from_the_postgres_pin(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _passing_evidence(tmp_path)
+    metadata_path = tmp_path / "postgres-docker-image.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload[0]["RepoDigests"] = ["postgres@sha256:" + "9" * 64]
+    metadata_path.write_text(
+        json.dumps(payload, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"][
+        "postgres_docker_image_metadata"
+    ] = gateway_bench._docker_image_metadata(metadata_path, tmp_path)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    result = gateway_bench.verify_evidence(tmp_path)
+
+    assert not result["passed"]
+    assert not result["checks"]["clean_source_and_image_references_attested"]
 
 
 def test_verifier_rejects_a_tampered_sidecar_digest(tmp_path: Path) -> None:

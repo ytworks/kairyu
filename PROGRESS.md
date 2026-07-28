@@ -245,7 +245,11 @@ evidence. It reuses the retained F1a/F1b results; one distinct exact-head F1c
 kind drill remains before #177 can close. Run `30397522862` completed the full
 live behavior and its raw artifact passes all 26 checks under the corrected
 offline replay; a fresh exact-head run is still required because that run's
-pre-correction verifier reported two false negatives.
+pre-correction verifier reported two false negatives. Run `30398220981` then
+exposed kind's second valid import form: the Pod reported a CRI-generated
+manifest digest rather than the registry pin while retaining the same pinned
+Docker/CRI config ID. The candidate now records and replays that full identity
+chain; one fresh exact-head drill remains.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
@@ -379,6 +383,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F1c attests the registry-to-kind image identity chain
+- What: F1c now retains the raw Docker inspection of the pinned PostgreSQL image and independently replays the registry manifest pin → Docker config ID → kind CRI config ID → Pod runtime digest chain. A Pod may report either the original registry pin or a CRI-reported import digest; any digest outside that attested set fails. The live script also fail-fast compares the Docker and CRI config IDs before deployment.
+- Why: Exact-head run `30398220981` loaded the same pinned `postgres@sha256:f3bd19…` content as run `30397522862`, but kind emitted a generated `import-2026-07-28@sha256:1b3460…` Pod/CRI repo digest instead of retaining the registry manifest digest. OCI manifest digests and image config IDs are different identities, and a local import may legitimately rewrite the former while preserving the latter. Requiring only the registry digest is therefore unstable; trusting every runtime digest would be too weak.
+- Refs: m10 A29; G5 F1c; issue #177; PR #268; Actions runs `30397522862` and `30398220981`; `scripts/kind_gateway_gate.sh`; `bench/fleet_gateway_bench.py`; `tests/bench/test_fleet_gateway_bench.py`
 
 ### 2026-07-28 — [amendment] F1c separates causal lease proof from asynchronous observations
 - What: Corrected A29 replay without weakening its fencing proof. Digest-pinned Pods accept Kubernetes' tag-only display image only when the runtime `imageID` equals the source pin exactly. Owner-Pod absence remains required, but its polling observation is no longer treated as the actual stop timestamp; replay instead binds the kill request to the active old lease, forbids later old-fence renewals, requires expiry of that exact lease before the higher-fence reclaim, and requires one new-fence terminal commit. The immutable raw artifact from run `30397522862` passes all 26 corrected offline checks.

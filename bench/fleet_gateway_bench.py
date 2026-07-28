@@ -111,6 +111,16 @@ def _normalized_image_reference(value: str) -> str:
     return value
 
 
+def _normalized_image_repository(value: str) -> str:
+    name, separator, _digest = value.rpartition("@")
+    if not separator:
+        name = value
+    normalized = _normalized_image_reference(name)
+    prefix, slash, leaf = normalized.rpartition("/")
+    repository = leaf.rpartition(":")[0] if ":" in leaf else leaf
+    return f"{prefix}/{repository}" if slash else repository
+
+
 def _container_image_matches(
     pod: Mapping[str, Any],
     *,
@@ -141,7 +151,8 @@ def _container_image_matches(
         }
         return (
             _normalized_image_reference(observed_image) in allowed_images
-            and observed == pinned_digest
+            and observed is not None
+            and observed in runtime_digests
         )
     if _normalized_image_reference(observed_image) != _normalized_image_reference(
         spec_image
@@ -193,6 +204,47 @@ def _cri_image_metadata(path: Path, artifact_dir: Path) -> dict[str, Any]:
         "repo_tags": sorted(repo_tags),
         "runtime_digests": sorted(runtime_digests),
         "revision": labels.get("org.opencontainers.image.revision"),
+    }
+
+
+def _docker_image_metadata(path: Path, artifact_dir: Path) -> dict[str, Any]:
+    path = path.resolve()
+    artifact_dir = artifact_dir.resolve()
+    if path.parent != artifact_dir:
+        raise ValueError(f"Docker metadata must be beside the manifest: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    image = payload[0] if isinstance(payload, list) and len(payload) == 1 else None
+    if not isinstance(image, dict):
+        raise ValueError(f"expected one Docker image record: {path}")
+
+    config_id = image.get("Id")
+    repo_digests = image.get("RepoDigests")
+    repo_tags = image.get("RepoTags")
+    if (
+        not isinstance(config_id, str)
+        or _RUNTIME_DIGEST.fullmatch(config_id) is None
+        or not isinstance(repo_digests, list)
+        or not repo_digests
+        or not all(isinstance(value, str) for value in repo_digests)
+        or not isinstance(repo_tags, list)
+        or not repo_tags
+        or not all(isinstance(value, str) and value for value in repo_tags)
+    ):
+        raise ValueError(f"invalid Docker image identity: {path}")
+    for value in repo_digests:
+        name, separator, digest = value.rpartition("@")
+        if (
+            not separator
+            or not name
+            or _RUNTIME_DIGEST.fullmatch(digest) is None
+        ):
+            raise ValueError(f"invalid Docker repo digest in {path}: {value!r}")
+    return {
+        "path": path.name,
+        "sha256": _sha256_file(path),
+        "config_id": config_id,
+        "repo_digests": sorted(repo_digests),
+        "repo_tags": sorted(repo_tags),
     }
 
 
@@ -1381,6 +1433,10 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
                 args.postgres_cri_image_metadata,
                 results,
             ),
+            "postgres_docker_image_metadata": _docker_image_metadata(
+                args.postgres_docker_image_metadata,
+                results,
+            ),
             "rendered_manifest": _adjacent_file_metadata(
                 args.rendered_manifest,
                 results,
@@ -2409,6 +2465,22 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
                 cri_metadata_valid = False
                 continue
             cri_metadata[role] = reconstructed
+    postgres_docker_metadata: dict[str, Any] = {}
+    postgres_docker_metadata_valid = False
+    if isinstance(source, dict):
+        embedded = source.get("postgres_docker_image_metadata")
+        try:
+            path = _safe_artifact_path(
+                results,
+                embedded.get("path") if isinstance(embedded, dict) else None,
+            )
+            reconstructed = _docker_image_metadata(path, results)
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        else:
+            postgres_docker_metadata_valid = reconstructed == embedded
+            if postgres_docker_metadata_valid:
+                postgres_docker_metadata = reconstructed
     rendered_manifest_valid = False
     if isinstance(source, dict):
         rendered_manifest = source.get("rendered_manifest")
@@ -2435,10 +2507,39 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
                 )
                 is not None
             )
+    postgres_spec_image = (
+        source.get("postgres_image") if isinstance(source, dict) else None
+    )
+    postgres_pin = _runtime_digest(postgres_spec_image)
+    postgres_display_image = (
+        postgres_spec_image.rpartition("@")[0]
+        if isinstance(postgres_spec_image, str)
+        else None
+    )
+    postgres_source_chain_valid = (
+        postgres_docker_metadata_valid
+        and isinstance(postgres_spec_image, str)
+        and isinstance(postgres_display_image, str)
+        and postgres_pin is not None
+        and any(
+            _normalized_image_repository(repo_digest)
+            == _normalized_image_repository(postgres_spec_image)
+            and _runtime_digest(repo_digest) == postgres_pin
+            for repo_digest in postgres_docker_metadata.get("repo_digests", ())
+        )
+        and any(
+            _normalized_image_reference(repo_tag)
+            == _normalized_image_reference(postgres_display_image)
+            for repo_tag in postgres_docker_metadata.get("repo_tags", ())
+        )
+        and postgres_docker_metadata.get("config_id")
+        == cri_metadata.get("postgres", {}).get("status_id")
+    )
     provenance_valid = (
         isinstance(source, dict)
         and cri_metadata_valid
         and rendered_manifest_valid
+        and postgres_source_chain_valid
         and set(cri_metadata) == {"gateway", "mock", "postgres"}
         and bool(_COMMIT.fullmatch(str(source.get("commit", ""))))
         and source.get("tracked_clean") is True
@@ -2454,9 +2555,6 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         and cri_metadata["gateway"].get("revision") == source.get("commit")
         and cri_metadata["mock"].get("revision") == source.get("commit")
     )
-    postgres_spec_image = (
-        source.get("postgres_image") if isinstance(source, dict) else None
-    )
     allowed_runtime_digests = {
         role: {
             digest
@@ -2466,6 +2564,8 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         }
         for role, metadata in cri_metadata.items()
     }
+    if postgres_source_chain_valid and postgres_pin is not None:
+        allowed_runtime_digests["postgres"].add(postgres_pin)
     runtime_images_valid = (
         provenance_valid
         and postgres_topology_valid
@@ -2583,6 +2683,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--gateway-cri-image-metadata", type=Path)
     parser.add_argument("--mock-cri-image-metadata", type=Path)
     parser.add_argument("--postgres-cri-image-metadata", type=Path)
+    parser.add_argument("--postgres-docker-image-metadata", type=Path)
     parser.add_argument("--rendered-manifest", type=Path)
     parser.add_argument("--verify-only", action="store_true")
     return parser
@@ -2628,9 +2729,13 @@ def main() -> None:
             args.gateway_cri_image_metadata,
             args.mock_cri_image_metadata,
             args.postgres_cri_image_metadata,
+            args.postgres_docker_image_metadata,
         )
     ):
-        parser.error("live runs require all three --*-cri-image-metadata files")
+        parser.error(
+            "live runs require all three --*-cri-image-metadata files and "
+            "--postgres-docker-image-metadata"
+        )
     run_gate(args)
     print(f"F1c three-gateway gate passed: {args.results_dir / 'manifest.json'}")
 

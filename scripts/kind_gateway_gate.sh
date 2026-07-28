@@ -66,6 +66,7 @@ POSTGRES_LOAD_IMAGE=postgres:17.6-bookworm
 GATEWAY_CRI_IMAGE_METADATA="${RESULTS_DIR}/gateway-cri-image.json"
 MOCK_CRI_IMAGE_METADATA="${RESULTS_DIR}/mock-cri-image.json"
 POSTGRES_CRI_IMAGE_METADATA="${RESULTS_DIR}/postgres-cri-image.json"
+POSTGRES_DOCKER_IMAGE_METADATA="${RESULTS_DIR}/postgres-docker-image.json"
 
 run_bounded() {
   local duration=$1
@@ -100,6 +101,7 @@ known_results=(
   gateway-cri-image.json
   mock-cri-image.json
   postgres-cri-image.json
+  postgres-docker-image.json
   store-identities.jsonl
   batch-http.jsonl
   batch-lifecycle.jsonl
@@ -250,6 +252,7 @@ fi
   -t "$MOCK_IMAGE" "$ARCHIVE_MOCK_DIR"
 "$DOCKER" pull "$POSTGRES_IMAGE"
 "$DOCKER" image tag "$POSTGRES_IMAGE" "$POSTGRES_LOAD_IMAGE"
+"$DOCKER" image inspect "$POSTGRES_IMAGE" >"$POSTGRES_DOCKER_IMAGE_METADATA"
 assert_clean_source
 
 GATEWAY_IMAGE_DIGEST=$(
@@ -257,6 +260,9 @@ GATEWAY_IMAGE_DIGEST=$(
 )
 MOCK_IMAGE_DIGEST=$(
   "$DOCKER" image inspect --format '{{.Id}}' "$MOCK_IMAGE"
+)
+POSTGRES_IMAGE_CONFIG_ID=$(
+  "$DOCKER" image inspect --format '{{.Id}}' "$POSTGRES_IMAGE"
 )
 for image in "$GATEWAY_IMAGE" "$MOCK_IMAGE"; do
   image_revision=$(
@@ -269,7 +275,8 @@ for image in "$GATEWAY_IMAGE" "$MOCK_IMAGE"; do
     exit 1
   fi
 done
-for digest in "$GATEWAY_IMAGE_DIGEST" "$MOCK_IMAGE_DIGEST"; do
+for digest in \
+  "$GATEWAY_IMAGE_DIGEST" "$MOCK_IMAGE_DIGEST" "$POSTGRES_IMAGE_CONFIG_ID"; do
   if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "invalid runtime image digest: ${digest}" >&2
     exit 1
@@ -318,8 +325,10 @@ cri_status_digest() {
 }
 GATEWAY_CRI_STATUS_DIGEST=$(cri_status_digest "$GATEWAY_IMAGE")
 MOCK_CRI_STATUS_DIGEST=$(cri_status_digest "$MOCK_IMAGE")
+POSTGRES_CRI_STATUS_DIGEST=$(cri_status_digest "$POSTGRES_LOAD_IMAGE")
 if [[ "$GATEWAY_CRI_STATUS_DIGEST" != "$GATEWAY_IMAGE_DIGEST" ||
-      "$MOCK_CRI_STATUS_DIGEST" != "$MOCK_IMAGE_DIGEST" ]]; then
+      "$MOCK_CRI_STATUS_DIGEST" != "$MOCK_IMAGE_DIGEST" ||
+      "$POSTGRES_CRI_STATUS_DIGEST" != "$POSTGRES_IMAGE_CONFIG_ID" ]]; then
   echo "kind CRI config ID does not match the clean-source Docker image" >&2
   exit 1
 fi
@@ -397,7 +406,8 @@ if ! run_bounded 600s "$UV" run --frozen python "$ARCHIVE_DRIVER" \
   --rendered-manifest "${RESULTS_DIR}/rendered-manifest.yaml" \
   --gateway-cri-image-metadata "$GATEWAY_CRI_IMAGE_METADATA" \
   --mock-cri-image-metadata "$MOCK_CRI_IMAGE_METADATA" \
-  --postgres-cri-image-metadata "$POSTGRES_CRI_IMAGE_METADATA"; then
+  --postgres-cri-image-metadata "$POSTGRES_CRI_IMAGE_METADATA" \
+  --postgres-docker-image-metadata "$POSTGRES_DOCKER_IMAGE_METADATA"; then
   printf '%s\n' "live F1c driver failed" >"${RESULTS_DIR}/failure.txt"
   exit 1
 fi
