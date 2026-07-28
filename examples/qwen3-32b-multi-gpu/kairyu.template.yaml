@@ -2,6 +2,7 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: null
+  max_concurrency: 64
 
 engines:
   qwen3-32b:
@@ -16,6 +17,11 @@ engines:
       # prompts and retained prefixes on the 96 GiB/GPU reference host.
       num_pages: 8192
       max_num_batched_tokens: 1024
+      # Priority is opt-in at the scheduler policy seam. Sixteen active slots
+      # leave headroom above the gateway's eight batch workers for interactive
+      # arrivals while the strict priority heap controls prefill order.
+      max_num_seqs: 16
+      priority_age_s: 60.0
       decode_mode: cuda_graph
       cuda_graph_max_batch: 8
       # Keep the declared 8,192-token quality workload inside graph replay.

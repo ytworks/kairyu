@@ -30,6 +30,23 @@ logger = logging.getLogger(__name__)
 class TenantLimits:
     requests_per_minute: int = 600
     tokens_per_minute: int = 200_000
+    interactive_priority: int = 0
+    batch_priority: int = 1
+
+    def __post_init__(self) -> None:
+        minimum, maximum = -(2**63), 2**63 - 1
+        for name, value in (
+            ("interactive_priority", self.interactive_priority),
+            ("batch_priority", self.batch_priority),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if not minimum <= value <= maximum:
+                raise ValueError(f"{name} must fit signed int64")
+        if self.interactive_priority >= self.batch_priority:
+            raise ValueError(
+                "interactive_priority must be smaller than batch_priority"
+            )
 
 
 @dataclass(frozen=True)
@@ -167,6 +184,8 @@ class TenantLimitMiddleware:
             return
         tenant = self._config.tenant_for_key(state.get("api_key"))
         state["tenant"] = tenant
+        state["priority"] = self._config.limits_for(tenant).interactive_priority
+        state["scheduling_class"] = "interactive"
         if not path.startswith("/v1/"):
             await self.app(scope, receive, send)  # identity only, no bucket
             return

@@ -166,6 +166,9 @@ class ChatCompletionRequest(BaseModel):
     response_format: dict | None = None
     extra_args: dict[str, object] | None = None
     user: str | None = None
+    # vLLM-compatible scheduling priority. A configured gateway replaces this
+    # untrusted client value with the authenticated tenant's class.
+    priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
 
 
 class FunctionCall(BaseModel):
@@ -347,6 +350,7 @@ class CompletionRequest(BaseModel):
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     user: str | None = None
+    priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
 
 
 class CompletionLogprobs(BaseModel):

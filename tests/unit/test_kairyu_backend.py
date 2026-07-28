@@ -408,12 +408,24 @@ async def test_multi_stream_partial_submit_failure_rolls_back_all_sub_ids():
     real_submit = backend._loop.submit
     submit_count = 0
 
-    def fail_second_submit(request_id, prompt, params):
+    def fail_second_submit(
+        request_id,
+        prompt,
+        params,
+        priority=0,
+        scheduling_class="interactive",
+    ):
         nonlocal submit_count
         submit_count += 1
         if submit_count == 2:
             raise RuntimeError("injected submit failure")
-        real_submit(request_id, prompt, params)
+        real_submit(
+            request_id,
+            prompt,
+            params,
+            priority=priority,
+            scheduling_class=scheduling_class,
+        )
 
     backend._loop.submit = fail_second_submit
     request = GenerationRequest(
@@ -444,7 +456,13 @@ async def test_single_submit_failure_rolls_back_public_id_reservation():
     backend = KairyuBackend(num_pages=256)
     real_submit = backend._loop.submit
 
-    def fail_submit(request_id, prompt, params):
+    def fail_submit(
+        request_id,
+        prompt,
+        params,
+        priority=0,
+        scheduling_class="interactive",
+    ):
         raise RuntimeError("injected submit failure")
 
     backend._loop.submit = fail_submit

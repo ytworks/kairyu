@@ -59,6 +59,12 @@ class GenerationRequest:
     request_id: str
     prompt: str
     sampling_params: SamplingParams
+    # vLLM-compatible scheduling priority: smaller integers run first.
+    priority: int = 0
+    # Bounded semantic class for metrics and trusted Kairyu-to-Kairyu transport.
+    # Scheduling itself uses ``priority``; arbitrary priority integers never
+    # become metric labels.
+    scheduling_class: str = "interactive"
     cache_hint: CacheHint | None = None
     tools: tuple[Mapping[str, object], ...] = ()
     tool_choice: str | Mapping[str, object] | None = None

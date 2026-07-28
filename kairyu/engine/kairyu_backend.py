@@ -69,6 +69,8 @@ def build_engine_loop(
     num_pages: int = 4096,
     page_size: int = 16,
     max_num_batched_tokens: int = 2048,
+    max_num_seqs: int = 256,
+    priority_age_s: float | None = 60.0,
     runner: object | None = None,
     tensor_parallel_size: int = 1,
     tokenizer: str | Tokenizer | None = None,
@@ -131,6 +133,8 @@ def build_engine_loop(
             num_pages=num_pages,
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            priority_age_s=priority_age_s,
             tokenizer=tokenizer,
             pipeline_depth=pipeline_depth,
         )
@@ -142,6 +146,8 @@ def build_engine_loop(
             num_pages=num_pages,
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            priority_age_s=priority_age_s,
             tokenizer=tokenizer,
             speculative=speculative,
             speculative_tokens=speculative_tokens,
@@ -209,8 +215,10 @@ def build_engine_loop(
     scheduler = Scheduler(
         cache,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
         page_size=page_size,
         speculative_tokens=speculative_tokens if speculative else 0,
+        priority_age_s=priority_age_s,
     )
     if model_path is not None:
         pool = PagedKVPool.for_cache(
@@ -264,6 +272,8 @@ def _build_pd_loop(
     num_pages: int,
     page_size: int,
     max_num_batched_tokens: int,
+    max_num_seqs: int,
+    priority_age_s: float | None,
     tokenizer: str | Tokenizer | None,
     pipeline_depth: int,
 ) -> tuple[EngineLoop, RadixKVCache, PDLoopAdapter]:
@@ -292,6 +302,8 @@ def _build_pd_loop(
         num_pages=num_pages,
         page_size=page_size,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        priority_age_s=priority_age_s,
         tokenizer=resolved,
     )
     generation = load_generation_defaults(model_path)
@@ -316,6 +328,8 @@ def _build_dist_tp_loop(
     num_pages: int,
     page_size: int,
     max_num_batched_tokens: int,
+    max_num_seqs: int,
+    priority_age_s: float | None,
     tokenizer: str | Tokenizer | None,
     speculative: str | None = None,
     speculative_tokens: int = 4,
@@ -339,8 +353,10 @@ def _build_dist_tp_loop(
     scheduler = Scheduler(
         cache,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
         page_size=page_size,
         speculative_tokens=speculative_tokens if speculative else 0,
+        priority_age_s=priority_age_s,
     )
     graph_scratch_page = cache.reserve_scratch_page() if graph_decode else None
     launcher = DistTPLauncher(
@@ -381,6 +397,8 @@ class KairyuBackend:
         num_pages: int = 4096,
         page_size: int = 16,
         max_num_batched_tokens: int = 2048,
+        max_num_seqs: int = 256,
+        priority_age_s: float | None = 60.0,
         runner: object | None = None,
         tensor_parallel_size: int = 1,
         tokenizer: str | Tokenizer | None = None,
@@ -399,6 +417,8 @@ class KairyuBackend:
             num_pages=num_pages,
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            priority_age_s=priority_age_s,
             runner=runner,
             tensor_parallel_size=tensor_parallel_size,
             tokenizer=tokenizer,
@@ -444,6 +464,14 @@ class KairyuBackend:
                 + ", ".join(sorted(unsupported))
             )
         self._loop.tokenize_prompt(request.prompt)
+
+    def scheduler_priority_metrics(self) -> dict[str, dict]:
+        """Expose bounded native scheduler counters to the serve collector."""
+
+        snapshot = getattr(self._scheduler, "priority_metrics_snapshot", None)
+        if snapshot is None:
+            return {}
+        return snapshot()
 
     async def _pump(self) -> None:
         restart_after_exit = False
@@ -572,6 +600,8 @@ class KairyuBackend:
                 request_id,
                 prompt_with_tool_intent(request),
                 request.sampling_params,
+                priority=request.priority,
+                scheduling_class=request.scheduling_class,
             )
             submitted = True
             queue = asyncio.Queue()
@@ -628,6 +658,8 @@ class KairyuBackend:
                     request_id=f"{request.request_id}#c{index}",
                     prompt=request.prompt,
                     sampling_params=params.clone(n=1, seed=seed),
+                    priority=request.priority,
+                    scheduling_class=request.scheduling_class,
                     cache_hint=request.cache_hint,
                     tools=request.tools,
                     tool_choice=request.tool_choice,

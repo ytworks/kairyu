@@ -1209,9 +1209,9 @@ class TestF5Logic:
             priority_age_s=10.0,
             clock=lambda: clock["t"],
         )
-        scheduler.add_request(EngineRequest("low", (1, 2, 3, 4), max_new_tokens=1, priority=0))
+        scheduler.add_request(EngineRequest("low", (1, 2, 3, 4), max_new_tokens=1, priority=5))
         clock["t"] = 1.0
-        scheduler.add_request(EngineRequest("high", (5, 6, 7, 8), max_new_tokens=1, priority=5))
+        scheduler.add_request(EngineRequest("high", (5, 6, 7, 8), max_new_tokens=1, priority=0))
         plan = scheduler.schedule()
         assert plan.scheduled[0].request_id == "high"  # priority beats FIFO
 
@@ -1225,14 +1225,14 @@ class TestF5Logic:
         )
         clock["t"] = 0.0
         scheduler2.add_request(
-            EngineRequest("old-low", (11, 12, 13, 14), max_new_tokens=1, priority=0)
+            EngineRequest("old-low", (11, 12, 13, 14), max_new_tokens=1, priority=5)
         )
         clock["t"] = 10.0
         scheduler2.add_request(
-            EngineRequest("new-mid", (15, 16, 17, 18), max_new_tokens=1, priority=3)
+            EngineRequest("new-mid", (15, 16, 17, 18), max_new_tokens=1, priority=0)
         )
         plan = scheduler2.schedule()
-        assert plan.scheduled[0].request_id == "old-low"  # aged 10 > priority 3
+        assert plan.scheduled[0].request_id == "old-low"  # aging removes the 5-point gap
 
     def test_admission_controller_shed_and_defer(self):
         from kairyu.entrypoints.server.slo import AdmissionController

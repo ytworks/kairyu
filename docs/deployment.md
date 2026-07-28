@@ -93,6 +93,8 @@ engines:
     options:
       model_path: "meta-llama/Llama-3.3-70B-Instruct"
       tensor_parallel_size: 4
+      max_num_seqs: 16       # bound active sequences
+      priority_age_s: 60.0   # null = FIFO; 0 = strict priority; >0 = aging
       pipeline_depth: 2        # unified schedule/device overlap; default 1
       decode_mode: cuda_graph   # explicit opt-in; eager is the safe default
       cuda_graph_max_batch: 8
@@ -132,7 +134,15 @@ embeddings:
     backend: mock                                # deterministic built-in CPU backend
     dimensions: 384
 batch: { data_dir: /var/lib/kairyu/batch, max_concurrency: 8 }
+tenants:
+  default_tenant: default
+  limits:
+    default:
+      interactive_priority: 0  # smaller values run first
+      batch_priority: 1        # Batch API overrides client-supplied priority
 ```
+
+Every tenant profile must keep `interactive_priority < batch_priority`.
 
 ### OpenAI-compatible upstream capabilities
 
@@ -147,8 +157,8 @@ migration profile.
 | `openai` | OpenAI Chat Completions sampling, logprobs, structured output, tools | Emits the canonical `max_completion_tokens`; allows `reasoning_effort`, `service_tier`, and `parallel_tool_calls` in `extra_args`. |
 | `anthropic` | temperature (0–1), top-p, one completion, max tokens, stop, non-strict tools | Rejects penalties, seed, logprobs, `response_format`, and strict tool schemas because the [Anthropic compatibility layer](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk) documents them as ignored. Anthropic recommends its native API for production features. |
 | `gemini` | max tokens, structured output, and non-strict tools | Allows `reasoning_effort` and the documented `extra_body.google` extension object. Sampling controls vary across Gemini model families, so fields not guaranteed by the [Gemini OpenAI compatibility contract](https://ai.google.dev/gemini-api/docs/openai) fail closed unless a pinned deployment declares a verified custom contract. |
-| `kairyu` | OpenAI controls plus `top_k`, `min_p`, `repetition_penalty`, `stop_token_ids`, `min_tokens`, and `ignore_eos` | Use for gateway-to-Kairyu replica traffic. These extensions are typed and preserved at the receiving HTTP boundary. |
-| `vllm` | OpenAI controls plus result-preserving [vLLM Chat extensions](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/) | Includes `skip_special_tokens` in addition to the Kairyu extension set. `prompt_logprobs` fails closed until Kairyu's result/API types can return the upstream prompt distribution. |
+| `kairyu` | OpenAI controls plus `top_k`, `min_p`, `repetition_penalty`, `stop_token_ids`, `min_tokens`, `ignore_eos`, and signed-int64 `priority` | Use for gateway-to-Kairyu replica traffic. These extensions and the bounded interactive/batch class hint are typed and preserved through the receiving HTTP boundary into native scheduler admission. |
+| `vllm` | OpenAI controls plus result-preserving [vLLM Chat extensions](https://docs.vllm.ai/en/latest/serving/openai_compatible_server/) and `priority` | Includes `skip_special_tokens` in addition to the Kairyu extension set. Smaller priority values run first. Kairyu's local vLLM adapter requires `scheduling_policy=priority` so the field cannot be silently ignored; a separately operated remote vLLM server must enable the same policy. `prompt_logprobs` fails closed until Kairyu's result/API types can return the upstream prompt distribution. |
 
 Example provider configurations:
 
@@ -277,7 +287,11 @@ runs exactly this sequence against mock replicas.
   ledger-reconcilable usage executions plus prompt/completion/cached/uncached
   tokens by tenant,
   histograms, per-replica outstanding/health, pool decision counts, batch
-  job states. Scrape every gateway and replica.
+  job states. Priority-enabled replicas also expose bounded
+  `kairyu_scheduler_priority_events_total`,
+  `kairyu_scheduler_queue_depth`, and
+  `kairyu_scheduler_queue_high_watermark` series by model and
+  interactive/batch class. Scrape every gateway and replica.
 - With a versioned `pricing:` section, `/admin/usage.csv` snapshots the local
   immutable ledger and exports tenant charges for a `[start_ts,end_ts)` period.
   The CSV carries source SHA-256, price-sheet version, Decimal unit rates,

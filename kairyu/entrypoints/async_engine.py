@@ -71,13 +71,17 @@ class AsyncLLMEngine:
         prompt: str,
         sampling_params: SamplingParams,
         request_id: str,
+        priority: int = 0,
     ) -> AsyncIterator[RequestOutput]:
         if request_id in self._active:
             raise ValueError(f"request ID {request_id!r} is already active")
         abort_event = asyncio.Event()
         self._active[request_id] = abort_event
         request = GenerationRequest(
-            request_id=request_id, prompt=prompt, sampling_params=sampling_params
+            request_id=request_id,
+            prompt=prompt,
+            sampling_params=sampling_params,
+            priority=priority,
         )
         stream: AsyncIterator | None = None
         next_task: asyncio.Task | None = None

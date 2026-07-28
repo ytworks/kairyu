@@ -298,7 +298,14 @@ class EngineLoop:
             raise ValueError("prompt must tokenize to at least one token")
         return prompt_token_ids
 
-    def submit(self, request_id: str, prompt: str, params: SamplingParams) -> None:
+    def submit(
+        self,
+        request_id: str,
+        prompt: str,
+        params: SamplingParams,
+        priority: int = 0,
+        scheduling_class: str = "interactive",
+    ) -> None:
         # Advisory fast rejection avoids tokenization and lock traffic for the
         # common duplicate case. The lock-protected check below remains the
         # authority when producers race.
@@ -312,6 +319,8 @@ class EngineLoop:
             stop_token_ids=tuple(params.stop_token_ids or ()) + self._default_stop_ids,
             min_tokens=params.min_tokens,
             ignore_eos=params.ignore_eos,
+            priority=priority,
+            scheduling_class=scheduling_class,
             sampling=engine_sampling_from(params),
         )
         track = _RequestTrack(

@@ -1,7 +1,7 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Implemented** (2026-07-03; D1/D2/D4 amended 2026-07-28;
-D3/D6 amended 2026-07-27). Reviewed
+Status: **Implemented** (2026-07-03; D1/D2/D4/D6 amended 2026-07-28;
+D3 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
 Milestone: M11 (roadmap P-B/P-C + F5 CPU halves; goal G6)
@@ -219,8 +219,9 @@ inference locally.
 ### D6 — F5 CPU: priority admission + SLO shed + autoscaler logic
 
 (a) `EngineRequest.priority` already exists — `Scheduler._admit_waiting`
-orders by (priority, arrival); starvation guard: priority ages up after
-`age_s`. (b) SLO early rejection: `slo.py` `AdmissionController` — a TTFT
+orders by (priority, arrival); smaller integers win (the vLLM wire contract)
+and the starvation guard improves a waiting request after `age_s`. (b) SLO
+early rejection: `slo.py` `AdmissionController` — a TTFT
 predictor from queue depth + running EMA of step time; over-SLO requests
 are shed (429 `slo_shed`) or deferred to batch (`defer` decision recorded).
 (c) `autoscale.py`: pure decision function `(metrics window) →
@@ -231,12 +232,63 @@ executor is a deploy-day k8s HPA/keda adapter).
 uses an `OrderedDict` so append, head pop, and cancellation by request ID are
 O(1). Priority admission uses a stable sequence-numbered heap plus an ID index;
 removal leaves lazily reclaimed tombstones with amortized compaction. The aging
-rank is factored as `priority - arrival/age` because the omitted `now/age` term
+rank is factored as `priority + arrival/age` because the omitted `-now/age` term
 is common to every waiting request. This preserves stable ties and starvation
 prevention without re-sorting the full queue on every schedule. Recompute
 preemption retains front-of-tie placement, and KV allocation still blocks at
 the selected head without skip-ahead. Reproduce the 100k A/B measurements with
 `uv run python bench/scheduler_queue_bench.py --requests 100000 --repeats 5`.
+
+**Overload-priority amendment (2026-07-28, issue #190).** The signed-int64
+`priority` extension now flows through Chat Completions, legacy Completions,
+Responses, `GenerationRequest`, ReplicaPool/OpenAI transport, vLLM, native,
+and process-split engines. Native production schedulers enable the indexed
+priority policy with a configurable aging interval. A configured gateway does
+not trust a client's requested value: authenticated interactive work receives
+the tenant's `interactive_priority` (default 0), while Batch API work receives
+`batch_priority` (default 1). Kairyu/vLLM replica transports preserve that
+trusted value exactly; unsupported provider profiles reject non-neutral
+priority before dispatch. Tenant profiles require the interactive integer to be
+strictly smaller than the batch integer. The heap ranks the full signed-int64
+domain without converting priorities to float: aging uses the exact integer
+numerator `priority * age_ns + arrival_ns`. Kairyu transport also carries an
+explicit bounded class hint for metrics, so custom positive or negative
+priority ranges cannot be misclassified. The local vLLM adapter forces its
+priority scheduler policy instead of passing a value into vLLM's default FCFS
+queue where it would be ignored.
+
+Decode remains first. Before lower-priority running prefills consume the
+remaining budget, a strictly outranking waiter is admitted. If sequence slots
+or KV pages block it, the worst lower-priority, output-free incomplete prefill
+is released and requeued for recomputation; output-bearing decode is never a
+victim. This is deliberately stronger than vLLM current main, which selects a
+priority victim only after running KV allocation fails and can leave a high
+priority waiter behind full active slots.
+
+The deterministic F5a gate offers one service token of interactive work and
+seven batch tokens every four ticks: 0.25x + 1.75x = exactly 2x capacity.
+Against the identical FCFS trace, interactive TTFT p99 is 400 → 1 ticks while
+batch consumes 300 residual service ticks, retains a 58-request overload
+backlog at the measurement boundary, and drains all work afterward. Raw
+request, scheduling, queue-depth, priority, latency, and accounting evidence is
+in `bench/results/f5a-priority-overload-cpu-2026-07-28.json`; reproduce it with
+`uv run python bench/priority_overload_bench.py --assert-gate`.
+
+The production-shaped Qwen3-32B TP8 gate calibrated 7.2812 requests/s and then
+offered 0.5x interactive plus 1.5x batch work through a one-replica gateway.
+Interactive TTFT p99 rose from 0.1530 s in the control window to 1.3244 s under
+the planned 2.00x overload, while all 64 requests completed and 100% met the
+fixed 2 s SLO. Batch made 56-request progress during the mixed window, retained
+backlog, and drained 192/192 afterward with zero failures. Gateway and replica
+class counters reconcile all interactive and batch dispatches; replica
+scheduler enqueue/admit/complete counters and queue gauges bind the same trace
+to native admission. A separate untimed warmup precedes capacity calibration,
+and the artifact pins a clean source commit, benchmark/config hashes, container
+image digest, model revision, `/backends` topology, and GPU inventory. The raw
+environment, arrivals, TTFT samples, Batch API states, counters, and assertions
+are in
+`bench/results/f5a-priority-overload-qwen3-32b-tp8-2026-07-28.json`; reproduce
+them with `uv run python bench/priority_overload_gpu_bench.py --assert-gate`.
 
 ### D7 — Open WebUI + frontier bench
 
@@ -373,10 +425,11 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 - **A10 (D5)**: content-parts touch ChatMessage.content typing, render_chat,
   _normalize_message flattening, and the shared render_prompt (batch worker
   parity).
-- **A11 (D6)**: injectable clock + arrival timestamps; EFFECTIVE priority
-  computed at sort time (EngineRequest frozen); fairness restated (highest
-  priority at head blocks on KVCacheFull; no skip-ahead); priority plumbing
-  descoped to engine-level (HTTP→priority mapping is tenant config, G6);
+- **A11 (D6)**: injectable clock + arrival timestamps; effective priority is
+  represented by an immutable aging rank (EngineRequest frozen); fairness
+  retains selected-head KV blocking with no skip-ahead. Issue #190 completed
+  the formerly descoped HTTP→tenant class→replica→engine path and aligned the
+  public numeric direction with vLLM (smaller wins);
   TTFT predictor uses GATEWAY-observable signals (in-flight count + observed
   TTFT EMA — engine internals invisible through ZMQ/vLLM backends).
 - **A12 (D4)**: embeddings use a model-ID → backend registry, not one anonymous

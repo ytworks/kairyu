@@ -80,6 +80,8 @@ def build_pd_coordinator(
     num_pages: int = 4096,
     page_size: int = 16,
     max_num_batched_tokens: int = 2048,
+    max_num_seqs: int = 256,
+    priority_age_s: float | None = 60.0,
     tokenizer=None,
     max_transfer_retries: int = 1,
     force_side_stream: bool | None = None,
@@ -141,7 +143,11 @@ def build_pd_coordinator(
         )
         cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
         scheduler = Scheduler(
-            cache, max_num_batched_tokens=max_num_batched_tokens, page_size=page_size
+            cache,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            page_size=page_size,
+            priority_age_s=priority_age_s,
         )
         pool = PagedKVPool.for_cache(cache, config, dtype=dtype, device=device)
         grammar_vocab = grammar_vocabulary(resolved, model_vocab_size=config.vocab_size)

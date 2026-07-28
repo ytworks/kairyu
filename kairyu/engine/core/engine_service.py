@@ -7,7 +7,8 @@ answered between steps, so the client's death-detection timeout must exceed
 the worst-case step time.
 
 Wire protocol (msgpack maps):
-  client → service: {"op": "add", "request_id", "prompt", "sampling": {...}}
+  client → service: {"op": "add", "request_id", "prompt", "sampling": {...},
+                     "priority": int, "scheduling_class": str}
                     {"op": "abort", "request_id"} | {"op": "ping"} | {"op": "shutdown"}
   service → client: per-step events {"request_id", "new_token_ids", "text",
                     "finished", "finish_reason", "num_cached_tokens",
@@ -126,6 +127,10 @@ def run_engine_service(port_pipe, config: dict) -> None:
                             request_id,
                             message["prompt"],
                             sampling_params_from_wire(message["sampling"]),
+                            priority=message.get("priority", 0),
+                            scheduling_class=message.get(
+                                "scheduling_class", "interactive"
+                            ),
                         )
                         owners[request_id] = identity  # only after a clean submit
                     elif op == "abort":

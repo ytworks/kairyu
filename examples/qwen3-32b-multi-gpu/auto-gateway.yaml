@@ -4,15 +4,29 @@ server:
   host: 127.0.0.1
   port: 8002
   api_keys_env: null
+  max_concurrency: 64
 
-engines:
+pools:
   qwen3-32b:
-    backend: openai
-    options:
-      base_url: http://127.0.0.1:8001/v1
-      model: qwen3-32b
-      api_key_env: null
-      upstream: kairyu
+    replicas:
+      - backend: openai
+        health_url: http://127.0.0.1:8001/readyz
+        options:
+          base_url: http://127.0.0.1:8001/v1
+          model: qwen3-32b
+          api_key_env: null
+          upstream: kairyu
+
+tenants:
+  default_tenant: default
+  limits:
+    default:
+      interactive_priority: 0
+      batch_priority: 1
+
+batch:
+  data_dir: /tmp/kairyu-f5a-batches
+  max_concurrency: 8
 
 orchestrators:
   kairyu-auto:

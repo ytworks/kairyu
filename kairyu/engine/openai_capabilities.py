@@ -67,6 +67,7 @@ RESERVED_EXTRA_ARGS = frozenset(
         "top_logprobs",
         "max_completion_tokens",
         "prompt_logprobs",
+        "priority",
         *SAMPLING_FIELD_NAMES,
     }
 )
@@ -90,6 +91,7 @@ class OpenAIRequestCapabilities:
     max_tokens_wire_name: str = "max_tokens"
     forward_neutral_fields: frozenset[str] = frozenset()
     strict_tools: bool = False
+    priority: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -149,6 +151,7 @@ _PROFILES = {
     "vllm": OpenAIRequestCapabilities(
         upstream="vllm",
         sampling_fields=_OPENAI_CORE | _VLLM_EXTENSIONS,
+        priority=True,
     ),
     # Kairyu's typed HTTP boundary exposes the vLLM-style sampling controls
     # that its native engines execute. ``best_of``, ``prompt_logprobs``, and
@@ -166,6 +169,7 @@ _PROFILES = {
             "top_k",
         },
         max_tokens_wire_name="max_completion_tokens",
+        priority=True,
     ),
     # Anthropic documents that these are the compatible controls it executes;
     # n>1 and temperature>1 are not truthful passthrough.

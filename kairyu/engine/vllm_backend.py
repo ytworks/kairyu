@@ -57,12 +57,19 @@ class VLLMBackend:
         self,
         model: str,
         enable_prefix_caching: bool | None = None,
+        scheduling_policy: str = "priority",
         **engine_args: object,
     ) -> None:
+        if scheduling_policy != "priority":
+            raise ValueError(
+                "Kairyu's vLLM backend requires scheduling_policy='priority' "
+                "so request priority is never silently ignored"
+            )
         vllm = _import_vllm()
         args = vllm.AsyncEngineArgs(
             model=model,
             enable_prefix_caching=True if enable_prefix_caching is None else enable_prefix_caching,
+            scheduling_policy=scheduling_policy,
             **engine_args,
         )
         self._vllm = vllm
@@ -98,7 +105,10 @@ class VLLMBackend:
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         vllm_params = self._vllm.SamplingParams(**to_vllm_sampling_kwargs(request.sampling_params))
         async for output in self._engine.generate(
-            prompt_with_tool_intent(request), vllm_params, request.request_id
+            prompt_with_tool_intent(request),
+            vllm_params,
+            request.request_id,
+            priority=request.priority,
         ):
             yield self._to_result(request, output)
 

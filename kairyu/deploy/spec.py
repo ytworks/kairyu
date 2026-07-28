@@ -113,6 +113,16 @@ class TenantLimitsSection(BaseModel):
 
     requests_per_minute: int = Field(default=600, ge=1)
     tokens_per_minute: int = Field(default=200_000, ge=1)
+    interactive_priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
+    batch_priority: int = Field(default=1, ge=-(2**63), le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def _priority_precedence(self) -> TenantLimitsSection:
+        if self.interactive_priority >= self.batch_priority:
+            raise ValueError(
+                "interactive_priority must be smaller than batch_priority"
+            )
+        return self
 
 
 class TenantSection(BaseModel):
@@ -206,6 +216,8 @@ class DeploymentSpec(BaseModel):
                     tenant: TenantLimits(
                         requests_per_minute=section.requests_per_minute,
                         tokens_per_minute=section.tokens_per_minute,
+                        interactive_priority=section.interactive_priority,
+                        batch_priority=section.batch_priority,
                     )
                     for tenant, section in self.tenants.limits.items()
                 },
