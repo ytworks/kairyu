@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kairyu-f1c
+  labels:
+    app.kubernetes.io/part-of: kairyu-f1c
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: f1c-gateway
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: f1c-endpointslice-reader
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/part-of: kairyu-f1c
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: f1c-gateway-endpointslice-reader
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/part-of: kairyu-f1c
+subjects:
+  - kind: ServiceAccount
+    name: f1c-gateway
+    namespace: kairyu-f1c
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: f1c-endpointslice-reader

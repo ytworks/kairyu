@@ -10,6 +10,7 @@
     "nodeSelector",
     "runtimeClassName",
     "attentionBackend",
+    "batchPostgres",
     "tolerations",
     "affinity",
     "modelStorage",
@@ -79,6 +80,48 @@
     "attentionBackend": {
       "type": "string",
       "enum": ["", "torch", "flashinfer"]
+    },
+    "batchPostgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "secretName", "secretKey", "dsnEnvName"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "secretName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dsnEnvName": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "secretName": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
     },
     "tolerations": {
       "type": "array",

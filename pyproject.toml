@@ -43,6 +43,7 @@ gpu = [
 fleet = [
     "pyzmq>=26",
     "msgpack>=1.0",
+    "psycopg[binary]>=3.2",
 ]
 # Fugu-suite dataset download/normalization (kairyu bench download); the
 # runner itself needs only core deps (httpx), so offline runs need no extras.
@@ -74,6 +75,7 @@ dev = [
     "safetensors>=0.5",
     "pyzmq>=26",
     "msgpack>=1.0",
+    "psycopg[binary]>=3.2",
     "opentelemetry-sdk>=1.27",
     "transformers>=5.12,<5.13",  # pinned band: template goldens byte-match (m9 D2)
     "openai>=1.66",

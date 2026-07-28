@@ -26,6 +26,24 @@ overridden for the cluster).
 Ordinary CI only lints and renders the GPU manifest. It has no GPU node and does not run
 the resulting pod.
 
+## Shared batch store
+
+The default filesystem BatchStore is intentionally single-gateway. For a
+multi-gateway release, configure `batch.store: postgres` in `config` and inject
+the matching DSN environment variable from an existing Secret:
+
+```yaml
+batchPostgres:
+  enabled: true
+  secretName: kairyu-batch-postgres
+  secretKey: dsn
+  dsnEnvName: KAIRYU_BATCH_POSTGRES_DSN
+```
+
+The chart also injects each Pod's immutable UID as
+`KAIRYU_BATCH_WORKER_ID`, which binds PostgreSQL claims and fencing audit rows
+to the actual gateway instance. The chart does not create or own PostgreSQL.
+
 ### Attention backend
 
 The checked-in `pcie-gddr` overlay targets RTX PRO 6000 Blackwell (SM120) nodes and pins

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -173,6 +174,14 @@ def _preflight_server(
 def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> FastAPI:
     """Construct engines, pools, orchestrator, and the app with a prober lifespan."""
     server_settings, tenant_config, api_keys, admin_keys = _preflight_server(spec)
+    batch_postgres_dsn: str | None = None
+    if spec.batch is not None and spec.batch.store == "postgres":
+        batch_postgres_dsn = os.environ.get(spec.batch.dsn_env)
+        if not batch_postgres_dsn:
+            raise ValueError(
+                f"batch PostgreSQL DSN environment variable "
+                f"{spec.batch.dsn_env!r} is not set"
+            )
     embedding_backends = {
         name: _create_embedding_backend(
             section.backend, dimensions=section.dimensions
@@ -360,6 +369,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     }
 
     workers: list[BatchWorker] = []  # filled after create_app (worker needs app metrics)
+    batch_stores: list[object] = []
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -380,6 +390,14 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 # cannot skip the remaining awaits AND the engine shutdowns (M7)
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+            shutdown_errors: list[Exception] = []
+            for store in batch_stores:
+                close = getattr(store, "close", None)
+                if callable(close):
+                    try:
+                        await asyncio.to_thread(close)
+                    except Exception as error:
+                        shutdown_errors.append(error)
             resources = list(engines.values())
             if orchestrator is not None:
                 resources.append(orchestrator)
@@ -387,7 +405,17 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             # create_app owns the usage ledger in an outer lifespan wrapper,
             # so it closes only after workers stop and this shutdown completes
             # or raises an ExceptionGroup.
-            await shutdown_all(resources, "application")
+            try:
+                await shutdown_all(resources, "application")
+            except Exception as error:
+                shutdown_errors.append(error)
+            if len(shutdown_errors) == 1:
+                raise shutdown_errors[0]
+            if shutdown_errors:
+                raise ExceptionGroup(
+                    "application resource shutdown failed",
+                    shutdown_errors,
+                )
 
     app = create_app(
         engines=engines,
@@ -414,12 +442,31 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     if spec.batch is not None:
         from kairyu.entrypoints.server.batch_routes import add_batch_routes
 
-        store = BatchStore(spec.batch.data_dir)
-        store.recover_orphans()
+        if spec.batch.store == "postgres":
+            from kairyu.batch.postgres_store import PostgresBatchStore
+
+            assert batch_postgres_dsn is not None
+            spool_dir = (
+                _resolve_path(spec.batch.spool_dir, base_dir)
+                if spec.batch.spool_dir is not None
+                else None
+            )
+            store = PostgresBatchStore(
+                batch_postgres_dsn,
+                store_id=spec.batch.store_id,
+                spool_dir=spool_dir,
+            )
+        else:
+            assert spec.batch.data_dir is not None
+            store = BatchStore(spec.batch.data_dir)
+            store.recover_orphans()
+        batch_stores.append(store)
         worker = BatchWorker(
             store,
             engines,
             max_concurrency=spec.batch.max_concurrency,
+            claim_poll_interval_s=spec.batch.poll_interval_s,
+            claim_lease_seconds=spec.batch.lease_seconds,
             metrics=app.state.metrics,
             chat_templates=chat_templates,  # batch and HTTP must render identically
             usage_ledger=getattr(app.state, "usage_ledger", None),

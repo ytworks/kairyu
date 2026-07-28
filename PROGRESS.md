@@ -235,16 +235,22 @@ post-delete windows remain published and independently replayed diagnostics.
 All other frozen conditions are unchanged. The focused candidate validation
 passed 132/132 tests, independent A26 replay passed every amended gate check,
 and PR #266 merged as `68f43f4`, closing #175 without rerunning the immutable
-formal measurement. F1b now has an A27 implementation candidate: a drain-first
-partitioned `RollingUpdate`, retry-free concurrent traffic, exact raw
-UID/revision/readiness/placement replay, and dedicated smoke/formal automation.
-Its focused replay suite passes 20/20 and exact-head PR smoke is green. The
-first formal attempt recorded 46,500/46,500 valid retry-free 2xx responses and
-completed 88/100 exact replacements without a recorded condition failure, then
-exposed that its unstated 900-second whole-run cap was shorter than the
-measured sequential rollout. A28 corrects only that safety cap to an
-empirically jitter-sized 1,500 seconds; one exact-head formal rerun remains
-before #176 can close.
+formal measurement. F1b is also closed: exact-head Actions run `30387260062`
+passed the A27/A28 drain-first 100-replica rollout, PR #267 merged as `ad9f1b8`,
+and #176 closed. F1c now has an A29 implementation candidate: three immutable
+gateway identities behind an explicit-session HRW load balancer, a PostgreSQL
+BatchStore with DB-clock leases and fenced atomic terminal output publication,
+and independently replayed cross-gateway affinity/batch/owner-Pod failover
+evidence. F1c is closed by exact-head source run `30399229234` at `be40b97`:
+all 26 replay checks passed over six sticky baseline sessions evenly using all
+three gateways, one common PostgreSQL identity, 12 stable replica UIDs, a
+fence-1 owner-Pod kill and post-expiry fence-2 reclaim by a different gateway,
+200/200 completed lines, and byte-identical output through all gateways. The
+complete independently replayable artifact is retained under
+`bench/results/f1c-three-gateway/`. F1a/F1b were not rerun; the evidence-only
+closure commit does not repeat F1c. Disposable live runs now write to
+`bench/results/f1c-three-gateway-live/`, so they cannot mutate the retained
+artifact or dirty the clean-source attestation.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
@@ -276,7 +282,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
-| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** the immutable 200-replica/ten-epoch artifact from Actions run `30374404150` records 33,000/33,000 retry-free 2xx responses, 5.221 ms measurement-wide placement p99, maximum 1.117-second withdrawal, exact lifecycle/provenance joins, and complete raw evidence; PR #266 merged as `68f43f4` and closed #175. **F1b implementation candidate:** A27 freezes a drain-first partitioned `RollingUpdate` of exactly 100 replicas with exact raw evidence replay and no operator repair. Its focused suite passes 20/20 and exact-head PR smoke is green. Formal run `30385162649` recorded 46,500/46,500 valid retry-free 2xx responses and completed 88/100 exact replacements before exposing an undersized unstated whole-run cap; A28 corrects only that safety cap from 900 to an empirically jitter-sized 1,500 seconds. One exact-head formal rerun remains before #176 closes. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** retained exact-head run `30374404150`, PR #266, issue #175. **F1b is closed:** retained exact-head run `30387260062`, PR #267, issue #176. **F1c is closed:** exact-head source run `30399229234` at `be40b97` passed all 26 independently replayed three-gateway affinity, shared PostgreSQL BatchStore, fenced owner-Pod failover, output, and provenance checks; the complete artifact is retained under `bench/results/f1c-three-gateway/`. F1a/F1b were not rerun and the evidence-only closure commit does not repeat F1c. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
@@ -378,6 +384,30 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [progress] F1c separates retained evidence from its live workspace
+- What: Moved F1c's disposable default and CI result directory to `bench/results/f1c-three-gateway-live/` while keeping the closed, independently replayable artifact under `bench/results/f1c-three-gateway/`. The artifact name and verifier contract are unchanged.
+- Why: The evidence-only closure commit made the former live output directory tracked. Diagnostic run `30399758298` then failed in 0.18 seconds before any build or measurement because startup cleanup correctly deleted the old result names and clean-source attestation correctly rejected those tracked deletions. Separate directories preserve both immutable evidence and fail-closed source provenance.
+- Refs: issue #177; PR #268; Actions run `30399758298`; `.github/workflows/f1c-gateway.yml`; `scripts/kind_gateway_gate.sh`; `bench/results/f1c-three-gateway/`
+
+### 2026-07-28 — [progress] F1c closes three-gateway affinity and shared batch failover
+- What: Closed G5 F1c on exact-head source commit `be40b97` with Actions run `30399229234`. All 26 independent replay checks passed: six baseline sessions distributed as two per gateway and stayed sticky, all gateways reconstructed the same 12-replica affinity decisions and PostgreSQL identity, a fence-1 owner on gateway B was killed, gateway A reclaimed only after that exact lease expired with fence 2, 200/200 batch lines completed with no failures, and all three gateways returned byte-identical output. The complete raw/replay artifact is committed under `bench/results/f1c-three-gateway/`; the evidence-only commit intentionally does not rerun F1c.
+- Refs: m10 A29; G5 F1c; issue #177; PR #268; Actions run `30399229234`; source commit `be40b97`; `bench/results/f1c-three-gateway/`
+
+### 2026-07-28 — [amendment] F1c attests the registry-to-kind image identity chain
+- What: F1c now retains the raw Docker inspection of the pinned PostgreSQL image and independently replays the registry manifest pin → Docker config ID → kind CRI config ID → Pod runtime digest chain. A Pod may report either the original registry pin or a CRI-reported import digest; any digest outside that attested set fails. The live script also fail-fast compares the Docker and CRI config IDs before deployment.
+- Why: Exact-head run `30398220981` loaded the same pinned `postgres@sha256:f3bd19…` content as run `30397522862`, but kind emitted a generated `import-2026-07-28@sha256:1b3460…` Pod/CRI repo digest instead of retaining the registry manifest digest. OCI manifest digests and image config IDs are different identities, and a local import may legitimately rewrite the former while preserving the latter. Requiring only the registry digest is therefore unstable; trusting every runtime digest would be too weak.
+- Refs: m10 A29; G5 F1c; issue #177; PR #268; Actions runs `30397522862` and `30398220981`; `scripts/kind_gateway_gate.sh`; `bench/fleet_gateway_bench.py`; `tests/bench/test_fleet_gateway_bench.py`
+
+### 2026-07-28 — [amendment] F1c separates causal lease proof from asynchronous observations
+- What: Corrected A29 replay without weakening its fencing proof. Digest-pinned Pods accept Kubernetes' tag-only display image only when the runtime `imageID` equals the source pin exactly. Owner-Pod absence remains required, but its polling observation is no longer treated as the actual stop timestamp; replay instead binds the kill request to the active old lease, forbids later old-fence renewals, requires expiry of that exact lease before the higher-fence reclaim, and requires one new-fence terminal commit. The immutable raw artifact from run `30397522862` passes all 26 corrected offline checks.
+- Why: The live drill exposed two invalid cross-domain assumptions: kind's local CRI config ID is not an OCI registry manifest digest, and a 250 ms Kubernetes polling observation can occur after a valid PostgreSQL-clock reclaim. The source-pinned Pod `imageID` matched exactly, and the observed sequence was kill request under fence 1, exact lease expiry, fence-2 reclaim 71.306 ms later, Pod-absence observation 45.868 ms after reclaim, renewals, and one in-lease terminal commit.
+- Refs: m10 A29; G5 F1c; issue #177; PR #268; Actions run `30397522862`; `bench/fleet_gateway_bench.py`; `tests/bench/test_fleet_gateway_bench.py`
+
+### 2026-07-28 — [amendment] F1c separates gateway affinity from fenced batch ownership
+- What: Added A29 and an F1c implementation candidate. Three independently restartable gateways sit behind an explicit `X-Session-ID` SHA-256 HRW load balancer while retaining ReplicaPool's existing HRW placement. A PostgreSQL BatchStore stores ordered file chunks and jobs, claims work with `FOR UPDATE SKIP LOCKED`, renews DB-clock leases on a separate connection, keeps claim-produced outputs pending, and atomically publishes only the active fencing token's referenced terminal files. The one F1c kind driver hashes and independently replays raw LB, placement, membership, Pod, HTTP, file, job, claim, runtime-image, and rendered-manifest evidence.
+- Why: A shared filesystem or process-local queue cannot preserve cross-gateway ownership after a gateway Pod disappears, and retrying inference without a fencing token can expose stale or duplicate terminal output. F1a and F1b already prove shared-runner capacity, dynamic replica membership, image/source provenance, and zero-failure rollout; rerunning them would add cost without testing F1c's distinct contract.
+- Refs: m10 A29; G5 F1c; issue #177; Actions runs `30374404150` and `30387260062`; `kairyu/batch/postgres_store.py`; `bench/fleet_gateway_bench.py`; `scripts/kind_gateway_gate.sh`; `deploy/kind/f1c/`
 
 ### 2026-07-28 — [amendment] F1b sizes its whole-run safety cap from formal evidence
 - What: Added A28. The formal whole-rollout timeout is now a 1,500-second stuck-run safety cap; the binding five-second withdrawal and 60-second per-replacement limits, retry-free zero-failure rules, exact 100-replica lineage, and all replay checks are unchanged.

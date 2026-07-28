@@ -41,9 +41,10 @@ type identity struct {
 }
 
 type server struct {
-	identity identity
-	ready    atomic.Bool
-	sequence atomic.Uint64
+	identity      identity
+	responseDelay time.Duration
+	ready         atomic.Bool
+	sequence      atomic.Uint64
 }
 
 type completionRequest struct {
@@ -171,6 +172,10 @@ func (s *server) content() string {
 	)
 }
 
+func (s *server) waitForResponse(request *http.Request) bool {
+	return waitContext(request.Context(), s.responseDelay) == nil
+}
+
 func (s *server) health(writer http.ResponseWriter, request *http.Request) {
 	if !requireMethod(writer, request, http.MethodGet) {
 		return
@@ -244,6 +249,9 @@ func (s *server) completions(writer http.ResponseWriter, request *http.Request) 
 	if !decodeRequest(writer, request, &input) {
 		return
 	}
+	if !s.waitForResponse(request) {
+		return
+	}
 	n := normalizedN(input.N)
 	model := normalizedModel(input.Model)
 	id := s.responseID("cmpl")
@@ -303,6 +311,9 @@ func (s *server) chatCompletions(writer http.ResponseWriter, request *http.Reque
 	}
 	var input chatRequest
 	if !decodeRequest(writer, request, &input) {
+		return
+	}
+	if !s.waitForResponse(request) {
 		return
 	}
 	n := normalizedN(input.N)
@@ -437,6 +448,18 @@ func runServer() error {
 	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return fmt.Errorf("invalid PORT %q: %w", port, err)
 	}
+	responseDelay := time.Duration(0)
+	if raw := os.Getenv("F1A_MOCK_RESPONSE_DELAY"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed < 0 || parsed >= serverShutdownTimeout {
+			return fmt.Errorf(
+				"invalid F1A_MOCK_RESPONSE_DELAY %q: require 0 <= delay < %s",
+				raw,
+				serverShutdownTimeout,
+			)
+		}
+		responseDelay = parsed
+	}
 	id := identity{
 		PodName: os.Getenv("POD_NAME"),
 		PodUID:  os.Getenv("POD_UID"),
@@ -450,6 +473,7 @@ func runServer() error {
 	}
 
 	mock := newServer(id)
+	mock.responseDelay = responseDelay
 	httpServer := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mock.routes(),

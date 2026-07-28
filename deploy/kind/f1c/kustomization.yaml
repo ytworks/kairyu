@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace-rbac.yaml
+  - replicas.yaml
+  - postgres.yaml
+  - gateways.yaml
+  - lb.yaml
+configMapGenerator:
+  - name: f1c-lb-code
+    namespace: kairyu-f1c
+    files:
+      - lb.py
+generatorOptions:
+  labels:
+    app.kubernetes.io/name: f1c-lb
+    app.kubernetes.io/part-of: kairyu-f1c

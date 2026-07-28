@@ -239,6 +239,12 @@ replicas' `/readyz` and restores them. Membership is dynamic
 (`add_replica`/`drain`/`remove_replica`) and can be driven by a TTL-heartbeat
 `ReplicaRegistry` + `PoolReconciler` (`kairyu/deploy/registry.py`).
 
+For horizontal gateway scale-out, an L7 load balancer consistently hashes the
+explicit `X-Session-ID` across gateway identities; each gateway then applies
+the same ReplicaPool HRW decision. Batch files and jobs can use the PostgreSQL
+shared store with atomic claim leases and fencing. The filesystem store remains
+the backward-compatible single-gateway option.
+
 ## 3. Installation
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Kairyu is not on PyPI yet —
@@ -258,7 +264,7 @@ Everything heavier is opt-in:
 |---|---|---|
 | `--extra engine` | torch, xgrammar, tokenizers, safetensors | real checkpoints through the `kairyu` backend, `json_schema` structured output |
 | `--extra hf` | tokenizers, safetensors | HF tokenizer/weights only (no torch) |
-| `--extra fleet` | pyzmq, msgpack | `kairyu-proc` process-split engine, KV event transport |
+| `--extra fleet` | pyzmq, msgpack, psycopg | process-split engine, KV event transport, shared PostgreSQL BatchStore |
 | `--extra otel` | opentelemetry-sdk | tracing spans (no-op without it) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU kernels/fabric (Linux-only markers; macOS `uv sync` skips them) |
 | `--extra bench` | datasets, huggingface_hub, pillow, h5py | `kairyu bench download` dataset fetching |
@@ -649,6 +655,11 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
   data_dir: /var/kairyu/batches
   max_concurrency: 4
 ```
+
+The shown batch block is the single-gateway filesystem default. For multiple
+gateways, install `--extra fleet` and select `store: postgres`,
+`dsn_env: KAIRYU_BATCH_POSTGRES_DSN`, and a common `store_id`; see
+[`docs/deployment.md`](docs/deployment.md).
 
 ### Backend options (`engines.*.options`)
 

@@ -10,6 +10,11 @@ resources: {}
 nodeSelector: {}
 runtimeClassName: ""
 attentionBackend: ""
+batchPostgres:
+  enabled: false
+  secretName: ""
+  secretKey: dsn
+  dsnEnvName: KAIRYU_BATCH_POSTGRES_DSN
 tolerations: []
 affinity: {}
 modelStorage:

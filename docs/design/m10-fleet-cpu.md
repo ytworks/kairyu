@@ -201,6 +201,11 @@ over (α, β) (pure function over the dataset; no online learning).
   ordinal is replaced exactly once, every offered request succeeds, and raw
   rollout, drain, readiness, membership, placement, Pod, and EndpointSlice
   evidence must pass the independent artifact replay.
+- F1c: three independently identifiable gateways sit behind an
+  `X-Session-ID` rendezvous-hash L7 load balancer and share one PostgreSQL
+  BatchStore. Cross-gateway affinity, file/job visibility, fenced lease
+  takeover after owner-Pod loss, and identical terminal output through every
+  gateway must pass one raw-evidence replay.
 - Tracing: span tree with InMemorySpanExporter; disabled → zero overhead
   (no otel import).
 - Helm: `helm template` golden test; kind smoke in CI.
@@ -611,3 +616,59 @@ over (α, β) (pure function over the dataset; no online learning).
   placement was interrupted by timeout cleanup before an outcome was recorded;
   the run is diagnostic evidence only because it did not complete all 100
   steps.
+- **A29**: F1c separates gateway affinity from durable batch ownership.
+  The edge load balancer uses deterministic SHA-256 rendezvous hashing over the
+  explicit `X-Session-ID` header and three immutable gateway identities.
+  Kubernetes `ClientIP` affinity and a JSON-body `user` field are not accepted
+  as proof of that L7 contract. Each converged gateway retains ReplicaPool's
+  existing SHA-256 rendezvous hash over the same eligible replica UID set, so
+  the selected model replica remains independent of which gateway receives the
+  request.
+
+  The shared BatchStore backend is PostgreSQL, selected explicitly by
+  `batch.store: postgres`; the filesystem backend and its restart-fails-orphans
+  behavior remain the backward-compatible single-gateway default. The DSN is
+  read only from the configured environment-variable name. Files are stored as
+  ordered database chunks rather than one 512 MiB value or an RWX filesystem.
+  SQLite or the filesystem store on NFS is not a supported HA substitute
+  because correctness would depend on network-filesystem locking and would
+  retain unfenced read-modify-write races.
+
+  A shared worker discovers jobs from the database; its process-local submit
+  signal is only a wake-up hint. Claiming a validating job, or an in-progress
+  job whose lease expired, is one `FOR UPDATE SKIP LOCKED` transaction using
+  the database clock. Every takeover increments a fencing token. Lease renewal,
+  cancellation, and terminal publication require the current immutable worker
+  identity and token; cancellation invalidates the token, and a stale claimant
+  rolls back any output publication. Startup never calls the filesystem
+  `recover_orphans` policy for this backend. The resulting guarantee is
+  at-least-once inference execution after a crash and exactly one fenced
+  terminal publication, not exactly-once inference or usage accounting.
+
+  One exact-head F1c kind drill is binding. It records three Ready gateway Pod
+  UIDs, a common store identity and converged replica membership; sends each
+  affinity request once with no retries; independently recomputes both
+  rendezvous choices; and joins the raw LB decision, gateway placement and
+  response replica UID. Files and batches are created and read through
+  different gateways. The driver kills the immutable active claim-owner Pod,
+  then requires a different gateway UID and larger fencing token to reclaim
+  the job after lease expiry, one terminal commit, and byte-identical output
+  through all three gateways including the restarted one. Pod absence is an
+  eventually consistent Kubernetes polling observation, not the actual stop
+  timestamp in the PostgreSQL clock domain: replay therefore requires the kill
+  request under the old lease, no later old-fence renewal, exact prior-lease
+  expiry before the higher-fence reclaim, and eventual old-UID absence, but
+  does not order the absence-observation timestamp before reclaim. Likewise,
+  Kubernetes may omit a source pin from the display `status.image`; for a
+  digest-pinned imported image, replay proves the complete identity chain:
+  the source registry pin is present in Docker `RepoDigests`, that image's
+  Docker config ID equals the kind CRI config ID, and the Pod runtime digest is
+  either the source pin or one of the CRI-reported import identities. A digest
+  outside that chain fails. Raw traffic, LB, placement, membership, Pod, batch
+  HTTP and claim-audit sidecars are hashed and independently replayed. F1a run
+  `30374404150` and F1b run `30387260062` retain their capacity, discovery,
+  provenance and raw-evidence precedents; neither is rerun. F1c adds no latency
+  percentile SLO: elapsed times are diagnostic and only a generous stuck-run
+  cap is binding. Exact-head source run `30399229234` at `be40b97` passed all
+  26 replay checks; its complete artifact is retained under
+  `bench/results/f1c-three-gateway/`.

@@ -1568,6 +1568,34 @@ async def test_helm_attention_backend_values_schema_and_template_are_strict():
     assert "value: {{ . | quote }}" in template
 
 
+async def test_helm_shared_batch_store_uses_secret_dsn_and_immutable_pod_uid():
+    chart_dir = Path("deploy/helm/kairyu")
+    defaults = yaml.safe_load((chart_dir / "values.yaml").read_text())
+    schema = json.loads((chart_dir / "values.schema.json").read_text())
+    template = (chart_dir / "templates/deployment.yaml").read_text()
+
+    assert defaults["batchPostgres"] == {
+        "enabled": False,
+        "secretName": "",
+        "secretKey": "dsn",
+        "dsnEnvName": "KAIRYU_BATCH_POSTGRES_DSN",
+    }
+    batch_schema = schema["properties"]["batchPostgres"]
+    assert batch_schema["additionalProperties"] is False
+    assert batch_schema["required"] == [
+        "enabled",
+        "secretName",
+        "secretKey",
+        "dsnEnvName",
+    ]
+    assert "batchPostgres" in schema["required"]
+    assert ".Values.batchPostgres.secretName" in template
+    assert ".Values.batchPostgres.secretKey" in template
+    assert ".Values.batchPostgres.dsnEnvName" in template
+    assert "name: KAIRYU_BATCH_WORKER_ID" in template
+    assert "fieldPath: metadata.uid" in template
+
+
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 def test_helm_gpu_values_render_real_engine_and_model_storage():
     rendered = subprocess.run(

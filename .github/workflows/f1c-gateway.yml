@@ -1,0 +1,82 @@
+name: F1c three-gateway shared BatchStore
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - ".github/workflows/f1c-gateway.yml"
+      - "scripts/kind_gateway_gate.sh"
+      - "deploy/kind/f1c/**"
+      - "deploy/kind/f1a/mock/**"
+      - "bench/fleet_gateway_bench.py"
+      - "tests/bench/test_fleet_gateway_bench.py"
+      - "kairyu/**"
+      - ".dockerignore"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  require-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the binding-drill label on pull requests
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: test '${{ contains(github.event.pull_request.labels.*.name, 'run-f1c') }}' = true
+
+  gateway:
+    # The label is applied once the PR head is final. This prevents every
+    # implementation push from repeating the one binding kind measurement.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-f1c')
+    needs: require-label
+    concurrency:
+      group: f1c-three-gateway-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'manual' }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      F1C_RESULTS_DIR: bench/results/f1c-three-gateway-live
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: >-
+            ${{
+              github.event_name == 'pull_request' &&
+              github.event.pull_request.head.sha ||
+              github.sha
+            }}
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
+        with:
+          install_only: true
+          version: v0.32.0
+          kubectl_version: v1.36.3
+      - name: Run the one binding F1c kind drill
+        shell: bash
+        run: bash scripts/kind_gateway_gate.sh
+      - name: Upload raw evidence and offline replay
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: f1c-three-gateway-${{ github.run_id }}
+          path: bench/results/f1c-three-gateway-live
+          if-no-files-found: error
+          retention-days: 30
+
+  required:
+    if: always()
+    needs: [require-label, gateway]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the exact-head binding drill
+        shell: bash
+        run: |
+          test '${{ needs.require-label.result }}' = success
+          test '${{ needs.gateway.result }}' = success

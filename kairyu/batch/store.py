@@ -25,6 +25,10 @@ class FileTooLargeError(Exception):
     """A streamed file exceeded its configured byte limit."""
 
 
+class StaleBatchClaimError(RuntimeError):
+    """A shared-store worker no longer owns the fenced batch lease."""
+
+
 class FileObject(BaseModel):
     id: str
     object: str = "file"

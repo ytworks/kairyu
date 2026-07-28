@@ -445,6 +445,92 @@ batch:
     assert app.state.batch_worker._tenant_limiter is app.state.tenant_limiter
 
 
+def test_batch_store_config_keeps_filesystem_compatibility_and_shared_controls():
+    with pytest.raises(
+        ValueError,
+        match="batch.data_dir is required for the filesystem store",
+    ):
+        load_deployment_spec(
+            """
+engines:
+  m: { backend: mock }
+batch: {}
+"""
+        )
+
+    spec = load_deployment_spec(
+        """
+engines:
+  m: { backend: mock }
+batch:
+  store: postgres
+  dsn_env: TEST_BATCH_DSN
+  store_id: fleet-a
+  poll_interval_s: 0.1
+  lease_seconds: 3
+"""
+    )
+
+    assert spec.batch is not None
+    assert spec.batch.store == "postgres"
+    assert spec.batch.data_dir is None
+    assert spec.batch.dsn_env == "TEST_BATCH_DSN"
+    assert spec.batch.store_id == "fleet-a"
+    assert spec.batch.poll_interval_s == 0.1
+    assert spec.batch.lease_seconds == 3
+
+    for invalid_batch, message in (
+        (
+            "store: postgres\n  data_dir: /ignored",
+            "data_dir cannot be set for the postgres store",
+        ),
+        (
+            "store: postgres\n  dsn_env: invalid-name",
+            "dsn_env",
+        ),
+        (
+            "store: postgres\n  store_id: '   '",
+            "store_id must be a non-empty PostgreSQL identity",
+        ),
+        (
+            "data_dir: /tmp/batch\n  spool_dir: /tmp/spool",
+            "spool_dir is only valid for the postgres store",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            load_deployment_spec(
+                f"""
+engines:
+  m: {{ backend: mock }}
+batch:
+  {invalid_batch}
+"""
+            )
+
+
+def test_postgres_batch_dsn_fails_before_owned_backends_are_built(monkeypatch):
+    monkeypatch.delenv("TEST_BATCH_DSN", raising=False)
+    spec = load_deployment_spec(
+        """
+engines:
+  m: { backend: mock }
+batch:
+  store: postgres
+  dsn_env: TEST_BATCH_DSN
+"""
+    )
+
+    def unexpected_backend(*args, **kwargs):
+        raise AssertionError("backend construction must not run before batch preflight")
+
+    monkeypatch.setattr(builder_module, "create_backend", unexpected_backend)
+    with pytest.raises(
+        ValueError,
+        match="TEST_BATCH_DSN.*is not set",
+    ):
+        build_app_from_spec(spec)
+
+
 async def test_tenant_auth_uses_the_preflight_key_snapshots(monkeypatch):
     monkeypatch.setenv("KAIRYU_DEPLOYMENT_KEYS", "key-a,key-b")
     monkeypatch.setenv("KAIRYU_DEPLOYMENT_ADMIN_KEYS", "admin-a,admin-b")
