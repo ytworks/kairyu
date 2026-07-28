@@ -1,0 +1,2095 @@
+{
+  "batch_at_measurement_end": {
+    "cancelled_at": null,
+    "completed_at": null,
+    "completion_window": "24h",
+    "created_at": 1785204641,
+    "endpoint": "/v1/chat/completions",
+    "error_file_id": null,
+    "errors": null,
+    "failed_at": null,
+    "id": "batch_be96105753034828af47421f",
+    "in_progress_at": 1785204641,
+    "input_file_id": "file-300af561cd1c4cf2ac2f4010",
+    "metadata": null,
+    "object": "batch",
+    "output_file_id": null,
+    "owner": "default",
+    "request_counts": {
+      "completed": 0,
+      "failed": 0,
+      "total": 0
+    },
+    "status": "in_progress"
+  },
+  "batch_final": {
+    "cancelled_at": null,
+    "completed_at": 1785204677,
+    "completion_window": "24h",
+    "created_at": 1785204641,
+    "endpoint": "/v1/chat/completions",
+    "error_file_id": null,
+    "errors": null,
+    "failed_at": null,
+    "id": "batch_be96105753034828af47421f",
+    "in_progress_at": 1785204641,
+    "input_file_id": "file-300af561cd1c4cf2ac2f4010",
+    "metadata": null,
+    "object": "batch",
+    "output_file_id": "file-5eb0d83681ee485eb100b82b",
+    "owner": "default",
+    "request_counts": {
+      "completed": 192,
+      "failed": 0,
+      "total": 192
+    },
+    "status": "completed"
+  },
+  "calibration": {
+    "capacity_requests_per_s": 7.447078196261767,
+    "concurrency": 8,
+    "requests": 32,
+    "samples": [
+      {
+        "error": null,
+        "index": 0,
+        "latency_s": 1.056103256996721,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 1,
+        "latency_s": 1.0863905518781394,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 2,
+        "latency_s": 1.0883860238827765,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 3,
+        "latency_s": 1.089189425110817,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 4,
+        "latency_s": 1.0897856501396745,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 5,
+        "latency_s": 1.092617979971692,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 6,
+        "latency_s": 1.0901755299419165,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 7,
+        "latency_s": 1.0909109760541469,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 8,
+        "latency_s": 1.0718423021025956,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 9,
+        "latency_s": 1.0724338290747255,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 10,
+        "latency_s": 1.0775542450137436,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 11,
+        "latency_s": 1.075840258039534,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 12,
+        "latency_s": 1.0703640130814165,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 13,
+        "latency_s": 1.0707181221805513,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 14,
+        "latency_s": 1.0715003188233823,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 15,
+        "latency_s": 1.0695956000126898,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 16,
+        "latency_s": 1.0676091469358653,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 17,
+        "latency_s": 1.0700416839681566,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 18,
+        "latency_s": 1.0726942159235477,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 19,
+        "latency_s": 1.0641362541355193,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 20,
+        "latency_s": 1.067009021062404,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 21,
+        "latency_s": 1.067701572086662,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 22,
+        "latency_s": 1.0656258258968592,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 23,
+        "latency_s": 1.0665747099556029,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 24,
+        "latency_s": 1.0636644130572677,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 25,
+        "latency_s": 1.0624400910455734,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 26,
+        "latency_s": 1.0646659599151462,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 27,
+        "latency_s": 1.064505344023928,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 28,
+        "latency_s": 1.0590346038807184,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 29,
+        "latency_s": 1.0590949729084969,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 30,
+        "latency_s": 1.062929519917816,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": 31,
+        "latency_s": 1.0579147499520332,
+        "status_code": 200,
+        "terminal": true
+      }
+    ],
+    "wall_s": 4.29698724206537
+  },
+  "checks": {
+    "arrival_pacing": true,
+    "batch_backlog_at_window_end": true,
+    "batch_drained": true,
+    "batch_progressed_in_window": true,
+    "calibration_completed": true,
+    "clean_source": true,
+    "exact_2x_planned_offered_load": true,
+    "gateway_class_counts": true,
+    "interactive_99pct_slo_attainment": true,
+    "interactive_http_2xx": true,
+    "interactive_p99_slo": true,
+    "interactive_terminal": true,
+    "provenance_pinned": true,
+    "replica_class_counts": true,
+    "replica_scheduler_completion_counts": true,
+    "replica_scheduler_enqueue_counts": true,
+    "scheduler_queue_evidence_published": true,
+    "warmup_completed": true
+  },
+  "control": {
+    "http_2xx": 64,
+    "pacing_within_one_interval": 1.0,
+    "planned": 64,
+    "samples": [
+      {
+        "error": null,
+        "index": 100000,
+        "latency_s": 0.28700142400339246,
+        "pacing_error_s": 0.00020317989401519299,
+        "send_offset_s": 1695501.200035469,
+        "status_code": 200,
+        "target_offset_s": 1695501.199832289,
+        "terminal": true,
+        "ttft_s": 0.12189478101208806
+      },
+      {
+        "error": null,
+        "index": 100001,
+        "latency_s": 0.2887387659866363,
+        "pacing_error_s": 0.000664988299831748,
+        "send_offset_s": 1695501.46905898,
+        "status_code": 200,
+        "target_offset_s": 1695501.4683939917,
+        "terminal": true,
+        "ttft_s": 0.12355342996306717
+      },
+      {
+        "error": null,
+        "index": 100002,
+        "latency_s": 0.29191125207580626,
+        "pacing_error_s": 0.0011080035474151373,
+        "send_offset_s": 1695501.738063698,
+        "status_code": 200,
+        "target_offset_s": 1695501.7369556944,
+        "terminal": true,
+        "ttft_s": 0.12657886813394725
+      },
+      {
+        "error": null,
+        "index": 100003,
+        "latency_s": 0.29817077913321555,
+        "pacing_error_s": 0.00038788607344031334,
+        "send_offset_s": 1695502.005905283,
+        "status_code": 200,
+        "target_offset_s": 1695502.0055173968,
+        "terminal": true,
+        "ttft_s": 0.13180132117122412
+      },
+      {
+        "error": null,
+        "index": 100004,
+        "latency_s": 0.3012312089558691,
+        "pacing_error_s": 0.000616888515651226,
+        "send_offset_s": 1695502.274695988,
+        "status_code": 200,
+        "target_offset_s": 1695502.2740790995,
+        "terminal": true,
+        "ttft_s": 0.13522066897712648
+      },
+      {
+        "error": null,
+        "index": 100005,
+        "latency_s": 0.4109962750226259,
+        "pacing_error_s": 0.0020651686936616898,
+        "send_offset_s": 1695502.544705971,
+        "status_code": 200,
+        "target_offset_s": 1695502.5426408022,
+        "terminal": true,
+        "ttft_s": 0.13641618308611214
+      },
+      {
+        "error": null,
+        "index": 100006,
+        "latency_s": 0.41842160606756806,
+        "pacing_error_s": 0.0006463653407990932,
+        "send_offset_s": 1695502.81184887,
+        "status_code": 200,
+        "target_offset_s": 1695502.8112025047,
+        "terminal": true,
+        "ttft_s": 0.14410406188108027
+      },
+      {
+        "error": null,
+        "index": 100007,
+        "latency_s": 0.4229387070517987,
+        "pacing_error_s": 0.0007929936982691288,
+        "send_offset_s": 1695503.080557201,
+        "status_code": 200,
+        "target_offset_s": 1695503.0797642074,
+        "terminal": true,
+        "ttft_s": 0.14988540182821453
+      },
+      {
+        "error": null,
+        "index": 100008,
+        "latency_s": 0.4249916570261121,
+        "pacing_error_s": 0.0004963160026818514,
+        "send_offset_s": 1695503.348822226,
+        "status_code": 200,
+        "target_offset_s": 1695503.34832591,
+        "terminal": true,
+        "ttft_s": 0.15494105499237776
+      },
+      {
+        "error": null,
+        "index": 100009,
+        "latency_s": 0.4286791398189962,
+        "pacing_error_s": 0.0006917873397469521,
+        "send_offset_s": 1695503.6175794,
+        "status_code": 200,
+        "target_offset_s": 1695503.6168876127,
+        "terminal": true,
+        "ttft_s": 0.156414003809914
+      },
+      {
+        "error": null,
+        "index": 100010,
+        "latency_s": 0.43097199220210314,
+        "pacing_error_s": 0.000919573474675417,
+        "send_offset_s": 1695503.886368889,
+        "status_code": 200,
+        "target_offset_s": 1695503.8854493154,
+        "terminal": true,
+        "ttft_s": 0.15753647102974355
+      },
+      {
+        "error": null,
+        "index": 100011,
+        "latency_s": 0.43371278000995517,
+        "pacing_error_s": 0.0019847110379487276,
+        "send_offset_s": 1695504.155995729,
+        "status_code": 200,
+        "target_offset_s": 1695504.1540110179,
+        "terminal": true,
+        "ttft_s": 0.16159135405905545
+      },
+      {
+        "error": null,
+        "index": 100012,
+        "latency_s": 0.8483779828529805,
+        "pacing_error_s": 0.001014444511383772,
+        "send_offset_s": 1695504.423587165,
+        "status_code": 200,
+        "target_offset_s": 1695504.4225727206,
+        "terminal": true,
+        "ttft_s": 0.1662954909261316
+      },
+      {
+        "error": null,
+        "index": 100013,
+        "latency_s": 1.7878693600650877,
+        "pacing_error_s": 0.000992677640169859,
+        "send_offset_s": 1695504.692127101,
+        "status_code": 200,
+        "target_offset_s": 1695504.6911344233,
+        "terminal": true,
+        "ttft_s": 0.14297443302348256
+      },
+      {
+        "error": null,
+        "index": 100014,
+        "latency_s": 1.573389224940911,
+        "pacing_error_s": 0.0007122093811631203,
+        "send_offset_s": 1695504.960408335,
+        "status_code": 200,
+        "target_offset_s": 1695504.9596961257,
+        "terminal": true,
+        "ttft_s": 0.5482222468126565
+      },
+      {
+        "error": null,
+        "index": 100015,
+        "latency_s": 1.3069258730392903,
+        "pacing_error_s": 0.0005414076149463654,
+        "send_offset_s": 1695505.228799236,
+        "status_code": 200,
+        "target_offset_s": 1695505.2282578284,
+        "terminal": true,
+        "ttft_s": 0.2800151640549302
+      },
+      {
+        "error": null,
+        "index": 100016,
+        "latency_s": 1.0623930669389665,
+        "pacing_error_s": 0.0012076159473508596,
+        "send_offset_s": 1695505.498027147,
+        "status_code": 200,
+        "target_offset_s": 1695505.496819531,
+        "terminal": true,
+        "ttft_s": 0.5500569390133023
+      },
+      {
+        "error": null,
+        "index": 100017,
+        "latency_s": 0.8184120261576027,
+        "pacing_error_s": 0.000806853175163269,
+        "send_offset_s": 1695505.766188087,
+        "status_code": 200,
+        "target_offset_s": 1695505.7653812338,
+        "terminal": true,
+        "ttft_s": 0.5245863511227071
+      },
+      {
+        "error": null,
+        "index": 100018,
+        "latency_s": 0.5506641129031777,
+        "pacing_error_s": 0.00122262560762465,
+        "send_offset_s": 1695506.035165562,
+        "status_code": 200,
+        "target_offset_s": 1695506.0339429365,
+        "terminal": true,
+        "ttft_s": 0.2560148099437356
+      },
+      {
+        "error": null,
+        "index": 100019,
+        "latency_s": 0.43956651189364493,
+        "pacing_error_s": 0.0008747261017560959,
+        "send_offset_s": 1695506.303379365,
+        "status_code": 200,
+        "target_offset_s": 1695506.302504639,
+        "terminal": true,
+        "ttft_s": 0.148125333013013
+      },
+      {
+        "error": null,
+        "index": 100020,
+        "latency_s": 0.41790722287259996,
+        "pacing_error_s": 0.0007969154976308346,
+        "send_offset_s": 1695506.571863257,
+        "status_code": 200,
+        "target_offset_s": 1695506.5710663416,
+        "terminal": true,
+        "ttft_s": 0.14094479498453438
+      },
+      {
+        "error": null,
+        "index": 100021,
+        "latency_s": 0.42030460201203823,
+        "pacing_error_s": 0.00012501864694058895,
+        "send_offset_s": 1695506.839753063,
+        "status_code": 200,
+        "target_offset_s": 1695506.8396280443,
+        "terminal": true,
+        "ttft_s": 0.15018794918432832
+      },
+      {
+        "error": null,
+        "index": 100022,
+        "latency_s": 0.42378848092630506,
+        "pacing_error_s": 0.0003348933532834053,
+        "send_offset_s": 1695507.10852464,
+        "status_code": 200,
+        "target_offset_s": 1695507.1081897467,
+        "terminal": true,
+        "ttft_s": 0.15173070994205773
+      },
+      {
+        "error": null,
+        "index": 100023,
+        "latency_s": 0.4249926919583231,
+        "pacing_error_s": 0.0005938906688243151,
+        "send_offset_s": 1695507.37734534,
+        "status_code": 200,
+        "target_offset_s": 1695507.3767514494,
+        "terminal": true,
+        "ttft_s": 0.15523911686614156
+      },
+      {
+        "error": null,
+        "index": 100024,
+        "latency_s": 0.42608997505158186,
+        "pacing_error_s": 0.00038632191717624664,
+        "send_offset_s": 1695507.645699474,
+        "status_code": 200,
+        "target_offset_s": 1695507.645313152,
+        "terminal": true,
+        "ttft_s": 0.15687762992456555
+      },
+      {
+        "error": null,
+        "index": 100025,
+        "latency_s": 0.4264207158703357,
+        "pacing_error_s": 0.0008249352686107159,
+        "send_offset_s": 1695507.91469979,
+        "status_code": 200,
+        "target_offset_s": 1695507.9138748548,
+        "terminal": true,
+        "ttft_s": 0.1573088609147817
+      },
+      {
+        "error": null,
+        "index": 100026,
+        "latency_s": 0.4266437301412225,
+        "pacing_error_s": 0.0005350704304873943,
+        "send_offset_s": 1695508.182971628,
+        "status_code": 200,
+        "target_offset_s": 1695508.1824365575,
+        "terminal": true,
+        "ttft_s": 0.15841128304600716
+      },
+      {
+        "error": null,
+        "index": 100027,
+        "latency_s": 0.42635944997891784,
+        "pacing_error_s": 0.0006875321269035339,
+        "send_offset_s": 1695508.451685792,
+        "status_code": 200,
+        "target_offset_s": 1695508.45099826,
+        "terminal": true,
+        "ttft_s": 0.15813067182898521
+      },
+      {
+        "error": null,
+        "index": 100028,
+        "latency_s": 0.4294501980766654,
+        "pacing_error_s": 0.0010068973060697317,
+        "send_offset_s": 1695508.72056686,
+        "status_code": 200,
+        "target_offset_s": 1695508.7195599626,
+        "terminal": true,
+        "ttft_s": 0.15774833713658154
+      },
+      {
+        "error": null,
+        "index": 100029,
+        "latency_s": 0.4326527661178261,
+        "pacing_error_s": 0.00011869659647345543,
+        "send_offset_s": 1695508.988240362,
+        "status_code": 200,
+        "target_offset_s": 1695508.9881216653,
+        "terminal": true,
+        "ttft_s": 0.16193819302134216
+      },
+      {
+        "error": null,
+        "index": 100030,
+        "latency_s": 0.4394085709936917,
+        "pacing_error_s": 0.00022990023717284203,
+        "send_offset_s": 1695509.256913268,
+        "status_code": 200,
+        "target_offset_s": 1695509.2566833678,
+        "terminal": true,
+        "ttft_s": 0.1636597889009863
+      },
+      {
+        "error": null,
+        "index": 100031,
+        "latency_s": 0.4165451438166201,
+        "pacing_error_s": 0.0008907616138458252,
+        "send_offset_s": 1695509.526135832,
+        "status_code": 200,
+        "target_offset_s": 1695509.5252450705,
+        "terminal": true,
+        "ttft_s": 0.1400455089751631
+      },
+      {
+        "error": null,
+        "index": 100032,
+        "latency_s": 0.4178946630563587,
+        "pacing_error_s": 0.000893227756023407,
+        "send_offset_s": 1695509.794700001,
+        "status_code": 200,
+        "target_offset_s": 1695509.7938067731,
+        "terminal": true,
+        "ttft_s": 0.1483322901185602
+      },
+      {
+        "error": null,
+        "index": 100033,
+        "latency_s": 0.4183435281738639,
+        "pacing_error_s": 0.0006772130727767944,
+        "send_offset_s": 1695510.063045689,
+        "status_code": 200,
+        "target_offset_s": 1695510.0623684758,
+        "terminal": true,
+        "ttft_s": 0.14986511506140232
+      },
+      {
+        "error": null,
+        "index": 100034,
+        "latency_s": 0.4192074730526656,
+        "pacing_error_s": 0.00032930541783571243,
+        "send_offset_s": 1695510.331259484,
+        "status_code": 200,
+        "target_offset_s": 1695510.3309301785,
+        "terminal": true,
+        "ttft_s": 0.14980925410054624
+      },
+      {
+        "error": null,
+        "index": 100035,
+        "latency_s": 0.4207334299571812,
+        "pacing_error_s": 0.00015046913176774979,
+        "send_offset_s": 1695510.59964235,
+        "status_code": 200,
+        "target_offset_s": 1695510.599491881,
+        "terminal": true,
+        "ttft_s": 0.15104599785991013
+      },
+      {
+        "error": null,
+        "index": 100036,
+        "latency_s": 0.4230375560000539,
+        "pacing_error_s": 0.0002520324196666479,
+        "send_offset_s": 1695510.868305616,
+        "status_code": 200,
+        "target_offset_s": 1695510.8680535837,
+        "terminal": true,
+        "ttft_s": 0.1501004898454994
+      },
+      {
+        "error": null,
+        "index": 100037,
+        "latency_s": 0.4228696071077138,
+        "pacing_error_s": 0.0005252326373010874,
+        "send_offset_s": 1695511.137140519,
+        "status_code": 200,
+        "target_offset_s": 1695511.1366152863,
+        "terminal": true,
+        "ttft_s": 0.15437858598306775
+      },
+      {
+        "error": null,
+        "index": 100038,
+        "latency_s": 0.4250657020602375,
+        "pacing_error_s": 0.00018552620895206928,
+        "send_offset_s": 1695511.405362515,
+        "status_code": 200,
+        "target_offset_s": 1695511.4051769888,
+        "terminal": true,
+        "ttft_s": 0.15481798606924713
+      },
+      {
+        "error": null,
+        "index": 100039,
+        "latency_s": 0.43495647399686277,
+        "pacing_error_s": 0.0003852264489978552,
+        "send_offset_s": 1695511.674123918,
+        "status_code": 200,
+        "target_offset_s": 1695511.6737386915,
+        "terminal": true,
+        "ttft_s": 0.15555547503754497
+      },
+      {
+        "error": null,
+        "index": 100040,
+        "latency_s": 0.4410356869921088,
+        "pacing_error_s": 0.00024008378386497498,
+        "send_offset_s": 1695511.942540478,
+        "status_code": 200,
+        "target_offset_s": 1695511.9423003942,
+        "terminal": true,
+        "ttft_s": 0.1666937959380448
+      },
+      {
+        "error": null,
+        "index": 100041,
+        "latency_s": 0.41715792985633016,
+        "pacing_error_s": 0.0007180762477219105,
+        "send_offset_s": 1695512.211580173,
+        "status_code": 200,
+        "target_offset_s": 1695512.2108620969,
+        "terminal": true,
+        "ttft_s": 0.14155621291138232
+      },
+      {
+        "error": null,
+        "index": 100042,
+        "latency_s": 0.4177735729608685,
+        "pacing_error_s": 0.0005369284190237522,
+        "send_offset_s": 1695512.479960728,
+        "status_code": 200,
+        "target_offset_s": 1695512.4794237996,
+        "terminal": true,
+        "ttft_s": 0.14899300108663738
+      },
+      {
+        "error": null,
+        "index": 100043,
+        "latency_s": 0.41933348099701107,
+        "pacing_error_s": 0.00018056295812129974,
+        "send_offset_s": 1695512.748166065,
+        "status_code": 200,
+        "target_offset_s": 1695512.747985502,
+        "terminal": true,
+        "ttft_s": 0.14987034793011844
+      },
+      {
+        "error": null,
+        "index": 100044,
+        "latency_s": 0.4210130830761045,
+        "pacing_error_s": 0.00011585932224988937,
+        "send_offset_s": 1695513.016663064,
+        "status_code": 200,
+        "target_offset_s": 1695513.0165472047,
+        "terminal": true,
+        "ttft_s": 0.15092078293673694
+      },
+      {
+        "error": null,
+        "index": 100045,
+        "latency_s": 0.4212045450694859,
+        "pacing_error_s": 0.0005184425972402096,
+        "send_offset_s": 1695513.28562735,
+        "status_code": 200,
+        "target_offset_s": 1695513.2851089074,
+        "terminal": true,
+        "ttft_s": 0.1521292100660503
+      },
+      {
+        "error": null,
+        "index": 100046,
+        "latency_s": 0.4217439529020339,
+        "pacing_error_s": 0.0010761122684925795,
+        "send_offset_s": 1695513.554746722,
+        "status_code": 200,
+        "target_offset_s": 1695513.5536706098,
+        "terminal": true,
+        "ttft_s": 0.15219205780886114
+      },
+      {
+        "error": null,
+        "index": 100047,
+        "latency_s": 0.4253066449891776,
+        "pacing_error_s": 0.0005245665088295937,
+        "send_offset_s": 1695513.822756879,
+        "status_code": 200,
+        "target_offset_s": 1695513.8222323125,
+        "terminal": true,
+        "ttft_s": 0.1538016959093511
+      },
+      {
+        "error": null,
+        "index": 100048,
+        "latency_s": 0.42559496383182704,
+        "pacing_error_s": 0.0007626318838447332,
+        "send_offset_s": 1695514.091556647,
+        "status_code": 200,
+        "target_offset_s": 1695514.0907940152,
+        "terminal": true,
+        "ttft_s": 0.15659112599678338
+      },
+      {
+        "error": null,
+        "index": 100049,
+        "latency_s": 0.42615913203917444,
+        "pacing_error_s": 0.0011162420269101858,
+        "send_offset_s": 1695514.36047196,
+        "status_code": 200,
+        "target_offset_s": 1695514.359355718,
+        "terminal": true,
+        "ttft_s": 0.15679408912546933
+      },
+      {
+        "error": null,
+        "index": 100050,
+        "latency_s": 0.4266850159037858,
+        "pacing_error_s": 0.0007481824140995741,
+        "send_offset_s": 1695514.628665603,
+        "status_code": 200,
+        "target_offset_s": 1695514.6279174206,
+        "terminal": true,
+        "ttft_s": 0.15803277003578842
+      },
+      {
+        "error": null,
+        "index": 100051,
+        "latency_s": 0.42999908211641014,
+        "pacing_error_s": 0.000913343857973814,
+        "send_offset_s": 1695514.897392467,
+        "status_code": 200,
+        "target_offset_s": 1695514.896479123,
+        "terminal": true,
+        "ttft_s": 0.15806704410351813
+      },
+      {
+        "error": null,
+        "index": 100052,
+        "latency_s": 0.42946534510701895,
+        "pacing_error_s": 0.001990190241485834,
+        "send_offset_s": 1695515.167031016,
+        "status_code": 200,
+        "target_offset_s": 1695515.1650408257,
+        "terminal": true,
+        "ttft_s": 0.16060165595263243
+      },
+      {
+        "error": null,
+        "index": 100053,
+        "latency_s": 0.43193864403292537,
+        "pacing_error_s": 0.0005638196598738432,
+        "send_offset_s": 1695515.434166348,
+        "status_code": 200,
+        "target_offset_s": 1695515.4336025284,
+        "terminal": true,
+        "ttft_s": 0.16241718200035393
+      },
+      {
+        "error": null,
+        "index": 100054,
+        "latency_s": 0.4363624700345099,
+        "pacing_error_s": 0.000783293042331934,
+        "send_offset_s": 1695515.702947524,
+        "status_code": 200,
+        "target_offset_s": 1695515.7021642309,
+        "terminal": true,
+        "ttft_s": 0.16325781820341945
+      },
+      {
+        "error": null,
+        "index": 100055,
+        "latency_s": 0.41339087509550154,
+        "pacing_error_s": 0.0001191494520753622,
+        "send_offset_s": 1695515.970845083,
+        "status_code": 200,
+        "target_offset_s": 1695515.9707259336,
+        "terminal": true,
+        "ttft_s": 0.13841259106993675
+      },
+      {
+        "error": null,
+        "index": 100056,
+        "latency_s": 0.4139751379843801,
+        "pacing_error_s": 0.0008530197665095329,
+        "send_offset_s": 1695516.240140656,
+        "status_code": 200,
+        "target_offset_s": 1695516.2392876362,
+        "terminal": true,
+        "ttft_s": 0.1441625200677663
+      },
+      {
+        "error": null,
+        "index": 100057,
+        "latency_s": 0.4154773037880659,
+        "pacing_error_s": 0.0005687081720679998,
+        "send_offset_s": 1695516.508418047,
+        "status_code": 200,
+        "target_offset_s": 1695516.507849339,
+        "terminal": true,
+        "ttft_s": 0.14587799180299044
+      },
+      {
+        "error": null,
+        "index": 100058,
+        "latency_s": 0.4176024980843067,
+        "pacing_error_s": 0.0004617923405021429,
+        "send_offset_s": 1695516.776872834,
+        "status_code": 200,
+        "target_offset_s": 1695516.7764110416,
+        "terminal": true,
+        "ttft_s": 0.14712240197695792
+      },
+      {
+        "error": null,
+        "index": 100059,
+        "latency_s": 0.4193593531381339,
+        "pacing_error_s": 0.00023380783386528492,
+        "send_offset_s": 1695517.045206552,
+        "status_code": 200,
+        "target_offset_s": 1695517.044972744,
+        "terminal": true,
+        "ttft_s": 0.1493389280512929
+      },
+      {
+        "error": null,
+        "index": 100060,
+        "latency_s": 0.42050754302181304,
+        "pacing_error_s": 0.0003483372274786234,
+        "send_offset_s": 1695517.313882784,
+        "status_code": 200,
+        "target_offset_s": 1695517.3135344468,
+        "terminal": true,
+        "ttft_s": 0.1507856179960072
+      },
+      {
+        "error": null,
+        "index": 100061,
+        "latency_s": 0.4199164221063256,
+        "pacing_error_s": 0.0010496615432202816,
+        "send_offset_s": 1695517.583145811,
+        "status_code": 200,
+        "target_offset_s": 1695517.5820961494,
+        "terminal": true,
+        "ttft_s": 0.15131217008456588
+      },
+      {
+        "error": null,
+        "index": 100062,
+        "latency_s": 0.42077511409297585,
+        "pacing_error_s": 0.0008524020668119192,
+        "send_offset_s": 1695517.851510254,
+        "status_code": 200,
+        "target_offset_s": 1695517.850657852,
+        "terminal": true,
+        "ttft_s": 0.15192511002533138
+      },
+      {
+        "error": null,
+        "index": 100063,
+        "latency_s": 0.3165409439243376,
+        "pacing_error_s": 0.0003243784885853529,
+        "send_offset_s": 1695518.119543933,
+        "status_code": 200,
+        "target_offset_s": 1695518.1192195546,
+        "terminal": true,
+        "ttft_s": 0.1528269099071622
+      }
+    ],
+    "slo_attainment": 1.0,
+    "terminal": 64,
+    "ttft_p50_s": 0.1521292100660503,
+    "ttft_p95_s": 0.2800151640549302,
+    "ttft_p99_s": 0.5500569390133023
+  },
+  "environment": {
+    "benchmark_sha256": "6629a203da2d11f54003e28b1c0b63d79f6d269fda5a964afa9acde732270007",
+    "config": {
+      "gateway": {
+        "path": "/home/y-takagi/kairyu/examples/qwen3-32b-multi-gpu/auto-gateway.yaml",
+        "sha256": "2c8cea02f5d7661756e4aa7df602fea0ee2b35cc23cbff03d30fae2cdcab6c74"
+      },
+      "replica": {
+        "path": "/home/y-takagi/kairyu/examples/qwen3-32b-multi-gpu/kairyu.template.yaml",
+        "sha256": "e62ab14dc782ed37224f6231fd95b83506270ecca489534ad104230c41263282"
+      }
+    },
+    "gateway_image_digest": "sha256:67b94f01bf5537a96a0c5b8330316556fd60ef5d2a9ff695b44e54a3cbea4a58",
+    "git_commit": "b1de63b2fe9f9351b3d0e61d3e16754f79608e7b",
+    "gpus": [
+      "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB",
+      "1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB",
+      "2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB",
+      "3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB",
+      "4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB",
+      "5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB",
+      "6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB",
+      "7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB"
+    ],
+    "model_revision": "9216db5781bf21249d130ec9da846c4624c16137",
+    "replica_image_digest": "sha256:67b94f01bf5537a96a0c5b8330316556fd60ef5d2a9ff695b44e54a3cbea4a58",
+    "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tracked_dirty": false,
+    "tracked_status": []
+  },
+  "gate": "G5-F5a",
+  "gateway_url": "http://127.0.0.1:8002",
+  "load": {
+    "batch_rate_fraction": 1.5,
+    "batch_requests": 192,
+    "interactive_rate_fraction": 0.5,
+    "interactive_requests": 64,
+    "planned_offered_load_ratio": 2.0
+  },
+  "metrics": {
+    "gateway_priority_delta": {
+      "kairyu_priority_requests_total{request_class=\"batch\",source=\"batch\"}": 192.0,
+      "kairyu_priority_requests_total{request_class=\"interactive\",source=\"http\"}": 160.0
+    },
+    "gateway_priority_delta_at_measurement_end": {
+      "kairyu_priority_requests_total{request_class=\"batch\",source=\"batch\"}": 54.0,
+      "kairyu_priority_requests_total{request_class=\"interactive\",source=\"http\"}": 160.0
+    },
+    "replica_priority_delta": {
+      "kairyu_priority_requests_total{request_class=\"batch\",source=\"http\"}": 192.0,
+      "kairyu_priority_requests_total{request_class=\"interactive\",source=\"http\"}": 160.0
+    },
+    "replica_priority_delta_at_measurement_end": {
+      "kairyu_priority_requests_total{request_class=\"batch\",source=\"http\"}": 54.0,
+      "kairyu_priority_requests_total{request_class=\"interactive\",source=\"http\"}": 160.0
+    },
+    "replica_scheduler_delta": {
+      "kairyu_scheduler_priority_events_total{event=\"admit\",model=\"qwen3-32b\",request_class=\"batch\"}": 192.0,
+      "kairyu_scheduler_priority_events_total{event=\"admit\",model=\"qwen3-32b\",request_class=\"interactive\"}": 160.0,
+      "kairyu_scheduler_priority_events_total{event=\"complete\",model=\"qwen3-32b\",request_class=\"batch\"}": 192.0,
+      "kairyu_scheduler_priority_events_total{event=\"complete\",model=\"qwen3-32b\",request_class=\"interactive\"}": 160.0,
+      "kairyu_scheduler_priority_events_total{event=\"enqueue\",model=\"qwen3-32b\",request_class=\"batch\"}": 192.0,
+      "kairyu_scheduler_priority_events_total{event=\"enqueue\",model=\"qwen3-32b\",request_class=\"interactive\"}": 160.0,
+      "kairyu_scheduler_priority_events_total{event=\"preempt\",model=\"qwen3-32b\",request_class=\"batch\"}": 0.0,
+      "kairyu_scheduler_priority_events_total{event=\"preempt\",model=\"qwen3-32b\",request_class=\"interactive\"}": 0.0
+    },
+    "replica_scheduler_delta_at_measurement_end": {
+      "kairyu_scheduler_priority_events_total{event=\"admit\",model=\"qwen3-32b\",request_class=\"batch\"}": 53.0,
+      "kairyu_scheduler_priority_events_total{event=\"admit\",model=\"qwen3-32b\",request_class=\"interactive\"}": 160.0,
+      "kairyu_scheduler_priority_events_total{event=\"complete\",model=\"qwen3-32b\",request_class=\"batch\"}": 46.0,
+      "kairyu_scheduler_priority_events_total{event=\"complete\",model=\"qwen3-32b\",request_class=\"interactive\"}": 151.0,
+      "kairyu_scheduler_priority_events_total{event=\"enqueue\",model=\"qwen3-32b\",request_class=\"batch\"}": 54.0,
+      "kairyu_scheduler_priority_events_total{event=\"enqueue\",model=\"qwen3-32b\",request_class=\"interactive\"}": 160.0,
+      "kairyu_scheduler_priority_events_total{event=\"preempt\",model=\"qwen3-32b\",request_class=\"batch\"}": 0.0,
+      "kairyu_scheduler_priority_events_total{event=\"preempt\",model=\"qwen3-32b\",request_class=\"interactive\"}": 0.0
+    },
+    "replica_scheduler_queue_at_measurement_end": {
+      "kairyu_scheduler_queue_depth{model=\"qwen3-32b\",request_class=\"batch\"}": 1.0,
+      "kairyu_scheduler_queue_depth{model=\"qwen3-32b\",request_class=\"interactive\"}": 0.0
+    },
+    "replica_scheduler_queue_high_watermark": {
+      "kairyu_scheduler_queue_high_watermark{model=\"qwen3-32b\",request_class=\"batch\"}": 8.0,
+      "kairyu_scheduler_queue_high_watermark{model=\"qwen3-32b\",request_class=\"interactive\"}": 7.0
+    }
+  },
+  "mixed": {
+    "http_2xx": 64,
+    "pacing_within_one_interval": 1.0,
+    "planned": 64,
+    "samples": [
+      {
+        "error": null,
+        "index": 200000,
+        "latency_s": 2.4922618970740587,
+        "pacing_error_s": 0.00015914998948574066,
+        "send_offset_s": 1695518.446038485,
+        "status_code": 200,
+        "target_offset_s": 1695518.445879335,
+        "terminal": true,
+        "ttft_s": 1.3177905960474163
+      },
+      {
+        "error": null,
+        "index": 200001,
+        "latency_s": 2.2247967638541013,
+        "pacing_error_s": 0.0007502783555537462,
+        "send_offset_s": 1695518.715191316,
+        "status_code": 200,
+        "target_offset_s": 1695518.7144410377,
+        "terminal": true,
+        "ttft_s": 1.0490133818238974
+      },
+      {
+        "error": null,
+        "index": 200002,
+        "latency_s": 1.9569792880211025,
+        "pacing_error_s": 0.0009036795236170292,
+        "send_offset_s": 1695518.98390642,
+        "status_code": 200,
+        "target_offset_s": 1695518.9830027404,
+        "terminal": true,
+        "ttft_s": 0.7807815191335976
+      },
+      {
+        "error": null,
+        "index": 200003,
+        "latency_s": 1.689984519034624,
+        "pacing_error_s": 0.0008475431241095066,
+        "send_offset_s": 1695519.252411986,
+        "status_code": 200,
+        "target_offset_s": 1695519.2515644429,
+        "terminal": true,
+        "ttft_s": 0.512707362882793
+      },
+      {
+        "error": null,
+        "index": 200004,
+        "latency_s": 2.3928173519670963,
+        "pacing_error_s": 0.00046849646605551243,
+        "send_offset_s": 1695519.520594642,
+        "status_code": 200,
+        "target_offset_s": 1695519.5201261456,
+        "terminal": true,
+        "ttft_s": 0.452685457887128
+      },
+      {
+        "error": null,
+        "index": 200005,
+        "latency_s": 2.538926225854084,
+        "pacing_error_s": 0.0006146938540041447,
+        "send_offset_s": 1695519.789302542,
+        "status_code": 200,
+        "target_offset_s": 1695519.7886878483,
+        "terminal": true,
+        "ttft_s": 0.3904628457967192
+      },
+      {
+        "error": null,
+        "index": 200006,
+        "latency_s": 2.4716271499637514,
+        "pacing_error_s": 0.0002762733493000269,
+        "send_offset_s": 1695520.057525824,
+        "status_code": 200,
+        "target_offset_s": 1695520.0572495507,
+        "terminal": true,
+        "ttft_s": 0.3308337719645351
+      },
+      {
+        "error": null,
+        "index": 200007,
+        "latency_s": 2.405763278948143,
+        "pacing_error_s": 0.00027517066337168217,
+        "send_offset_s": 1695520.326086424,
+        "status_code": 200,
+        "target_offset_s": 1695520.3258112534,
+        "terminal": true,
+        "ttft_s": 0.270591557957232
+      },
+      {
+        "error": null,
+        "index": 200008,
+        "latency_s": 2.537784721935168,
+        "pacing_error_s": 0.0006698279175907373,
+        "send_offset_s": 1695520.595042784,
+        "status_code": 200,
+        "target_offset_s": 1695520.594372956,
+        "terminal": true,
+        "ttft_s": 0.3465397220570594
+      },
+      {
+        "error": null,
+        "index": 200009,
+        "latency_s": 2.4979449689853936,
+        "pacing_error_s": 0.001994111342355609,
+        "send_offset_s": 1695520.86492877,
+        "status_code": 200,
+        "target_offset_s": 1695520.8629346588,
+        "terminal": true,
+        "ttft_s": 1.049289233982563
+      },
+      {
+        "error": null,
+        "index": 200010,
+        "latency_s": 2.466671576956287,
+        "pacing_error_s": 0.0003413176164031029,
+        "send_offset_s": 1695521.131837679,
+        "status_code": 200,
+        "target_offset_s": 1695521.1314963615,
+        "terminal": true,
+        "ttft_s": 1.1972034079954028
+      },
+      {
+        "error": null,
+        "index": 200011,
+        "latency_s": 2.1989048309624195,
+        "pacing_error_s": 0.001131399068981409,
+        "send_offset_s": 1695521.401189463,
+        "status_code": 200,
+        "target_offset_s": 1695521.400058064,
+        "terminal": true,
+        "ttft_s": 0.9279840800445527
+      },
+      {
+        "error": null,
+        "index": 200012,
+        "latency_s": 1.9318811232224107,
+        "pacing_error_s": 0.0007705492898821831,
+        "send_offset_s": 1695521.669390316,
+        "status_code": 200,
+        "target_offset_s": 1695521.6686197666,
+        "terminal": true,
+        "ttft_s": 0.6599230300635099
+      },
+      {
+        "error": null,
+        "index": 200013,
+        "latency_s": 2.660254364134744,
+        "pacing_error_s": 0.00019782967865467072,
+        "send_offset_s": 1695521.937379299,
+        "status_code": 200,
+        "target_offset_s": 1695521.9371814693,
+        "terminal": true,
+        "ttft_s": 0.5928284809924662
+      },
+      {
+        "error": null,
+        "index": 200014,
+        "latency_s": 2.709274783032015,
+        "pacing_error_s": 0.0010795542038977146,
+        "send_offset_s": 1695522.206822726,
+        "status_code": 200,
+        "target_offset_s": 1695522.2057431717,
+        "terminal": true,
+        "ttft_s": 0.5260897830594331
+      },
+      {
+        "error": null,
+        "index": 200015,
+        "latency_s": 2.648459920892492,
+        "pacing_error_s": 0.00025510857813060284,
+        "send_offset_s": 1695522.474559983,
+        "status_code": 200,
+        "target_offset_s": 1695522.4743048744,
+        "terminal": true,
+        "ttft_s": 0.4598670890554786
+      },
+      {
+        "error": null,
+        "index": 200016,
+        "latency_s": 2.7836177689023316,
+        "pacing_error_s": 0.00018359697423875332,
+        "send_offset_s": 1695522.743050174,
+        "status_code": 200,
+        "target_offset_s": 1695522.742866577,
+        "terminal": true,
+        "ttft_s": 0.6149405888281763
+      },
+      {
+        "error": null,
+        "index": 200017,
+        "latency_s": 2.723394972970709,
+        "pacing_error_s": 0.00017627817578613758,
+        "send_offset_s": 1695523.011604558,
+        "status_code": 200,
+        "target_offset_s": 1695523.0114282798,
+        "terminal": true,
+        "ttft_s": 0.5897748959250748
+      },
+      {
+        "error": null,
+        "index": 200018,
+        "latency_s": 2.455912131117657,
+        "pacing_error_s": 0.0003466184716671705,
+        "send_offset_s": 1695523.280336601,
+        "status_code": 200,
+        "target_offset_s": 1695523.2799899825,
+        "terminal": true,
+        "ttft_s": 0.32118592294864357
+      },
+      {
+        "error": null,
+        "index": 200019,
+        "latency_s": 2.524536939105019,
+        "pacing_error_s": 0.0009071989916265011,
+        "send_offset_s": 1695523.549458884,
+        "status_code": 200,
+        "target_offset_s": 1695523.548551685,
+        "terminal": true,
+        "ttft_s": 1.0491624539718032
+      },
+      {
+        "error": null,
+        "index": 200020,
+        "latency_s": 2.4899815709795803,
+        "pacing_error_s": 0.0008679493330419064,
+        "send_offset_s": 1695523.817981337,
+        "status_code": 200,
+        "target_offset_s": 1695523.8171133876,
+        "terminal": true,
+        "ttft_s": 1.0987700009718537
+      },
+      {
+        "error": null,
+        "index": 200021,
+        "latency_s": 2.223534096032381,
+        "pacing_error_s": 0.00042643374763429165,
+        "send_offset_s": 1695524.086101524,
+        "status_code": 200,
+        "target_offset_s": 1695524.0856750903,
+        "terminal": true,
+        "ttft_s": 0.8307686378248036
+      },
+      {
+        "error": null,
+        "index": 200022,
+        "latency_s": 2.952410938916728,
+        "pacing_error_s": 0.0011928912717849016,
+        "send_offset_s": 1695524.355429684,
+        "status_code": 200,
+        "target_offset_s": 1695524.3542367928,
+        "terminal": true,
+        "ttft_s": 0.7686975009273738
+      },
+      {
+        "error": null,
+        "index": 200023,
+        "latency_s": 2.89138701884076,
+        "pacing_error_s": 0.0009747915901243687,
+        "send_offset_s": 1695524.623773287,
+        "status_code": 200,
+        "target_offset_s": 1695524.6227984955,
+        "terminal": true,
+        "ttft_s": 0.7047182200476527
+      },
+      {
+        "error": null,
+        "index": 200024,
+        "latency_s": 3.0288204250391573,
+        "pacing_error_s": 0.0006337468512356281,
+        "send_offset_s": 1695524.891993945,
+        "status_code": 200,
+        "target_offset_s": 1695524.8913601981,
+        "terminal": true,
+        "ttft_s": 0.8450695690698922
+      },
+      {
+        "error": null,
+        "index": 200025,
+        "latency_s": 2.9653583141043782,
+        "pacing_error_s": 0.0015379730612039566,
+        "send_offset_s": 1695525.161459874,
+        "status_code": 200,
+        "target_offset_s": 1695525.1599219008,
+        "terminal": true,
+        "ttft_s": 0.9077525010798126
+      },
+      {
+        "error": null,
+        "index": 200026,
+        "latency_s": 2.699790382059291,
+        "pacing_error_s": 0.000540650449693203,
+        "send_offset_s": 1695525.429024254,
+        "status_code": 200,
+        "target_offset_s": 1695525.4284836035,
+        "terminal": true,
+        "ttft_s": 0.6405382989905775
+      },
+      {
+        "error": null,
+        "index": 200027,
+        "latency_s": 2.7459336870815605,
+        "pacing_error_s": 0.0008944750297814608,
+        "send_offset_s": 1695525.697939781,
+        "status_code": 200,
+        "target_offset_s": 1695525.697045306,
+        "terminal": true,
+        "ttft_s": 0.6119509660638869
+      },
+      {
+        "error": null,
+        "index": 200028,
+        "latency_s": 2.479541900102049,
+        "pacing_error_s": 0.00087210931815207,
+        "send_offset_s": 1695525.966479118,
+        "status_code": 200,
+        "target_offset_s": 1695525.9656070087,
+        "terminal": true,
+        "ttft_s": 0.3435583550017327
+      },
+      {
+        "error": null,
+        "index": 200029,
+        "latency_s": 2.547907598083839,
+        "pacing_error_s": 0.00042828056029975414,
+        "send_offset_s": 1695526.234596992,
+        "status_code": 200,
+        "target_offset_s": 1695526.2341687114,
+        "terminal": true,
+        "ttft_s": 1.0749250780791044
+      },
+      {
+        "error": null,
+        "index": 200030,
+        "latency_s": 2.5102233218494803,
+        "pacing_error_s": 0.0007258933037519455,
+        "send_offset_s": 1695526.503456307,
+        "status_code": 200,
+        "target_offset_s": 1695526.5027304138,
+        "terminal": true,
+        "ttft_s": 1.0138391808141023
+      },
+      {
+        "error": null,
+        "index": 200031,
+        "latency_s": 3.132187777897343,
+        "pacing_error_s": 0.0012727705761790276,
+        "send_offset_s": 1695526.772564887,
+        "status_code": 200,
+        "target_offset_s": 1695526.7712921165,
+        "terminal": true,
+        "ttft_s": 0.9489271170459688
+      },
+      {
+        "error": null,
+        "index": 200032,
+        "latency_s": 3.268354275962338,
+        "pacing_error_s": 0.0012346738949418068,
+        "send_offset_s": 1695527.041088493,
+        "status_code": 200,
+        "target_offset_s": 1695527.0398538192,
+        "terminal": true,
+        "ttft_s": 1.0878573849331588
+      },
+      {
+        "error": null,
+        "index": 200033,
+        "latency_s": 3.208961841883138,
+        "pacing_error_s": 7.960619404911995e-05,
+        "send_offset_s": 1695527.308495128,
+        "status_code": 200,
+        "target_offset_s": 1695527.3084155219,
+        "terminal": true,
+        "ttft_s": 1.1364163949619979
+      },
+      {
+        "error": null,
+        "index": 200034,
+        "latency_s": 2.942295507993549,
+        "pacing_error_s": 0.0004868083633482456,
+        "send_offset_s": 1695527.577464033,
+        "status_code": 200,
+        "target_offset_s": 1695527.5769772246,
+        "terminal": true,
+        "ttft_s": 0.8675986849702895
+      },
+      {
+        "error": null,
+        "index": 200035,
+        "latency_s": 2.987121342914179,
+        "pacing_error_s": 0.0018812320195138454,
+        "send_offset_s": 1695527.847420159,
+        "status_code": 200,
+        "target_offset_s": 1695527.845538927,
+        "terminal": true,
+        "ttft_s": 0.9334293529391289
+      },
+      {
+        "error": null,
+        "index": 200036,
+        "latency_s": 2.7214025461580604,
+        "pacing_error_s": 0.0006189912091940641,
+        "send_offset_s": 1695528.114719621,
+        "status_code": 200,
+        "target_offset_s": 1695528.1141006297,
+        "terminal": true,
+        "ttft_s": 0.6663555491250008
+      },
+      {
+        "error": null,
+        "index": 200037,
+        "latency_s": 2.768105403985828,
+        "pacing_error_s": 0.0008226486388593912,
+        "send_offset_s": 1695528.383484981,
+        "status_code": 200,
+        "target_offset_s": 1695528.3826623324,
+        "terminal": true,
+        "ttft_s": 0.6317501859739423
+      },
+      {
+        "error": null,
+        "index": 200038,
+        "latency_s": 2.5005326319951564,
+        "pacing_error_s": 0.002254574093967676,
+        "send_offset_s": 1695528.653478609,
+        "status_code": 200,
+        "target_offset_s": 1695528.6512240348,
+        "terminal": true,
+        "ttft_s": 0.3619013470597565
+      },
+      {
+        "error": null,
+        "index": 200039,
+        "latency_s": 2.567672698991373,
+        "pacing_error_s": 0.00029694242402911186,
+        "send_offset_s": 1695528.92008268,
+        "status_code": 200,
+        "target_offset_s": 1695528.9197857375,
+        "terminal": true,
+        "ttft_s": 0.9866487400140613
+      },
+      {
+        "error": null,
+        "index": 200040,
+        "latency_s": 2.5315539739094675,
+        "pacing_error_s": 0.00030530081130564213,
+        "send_offset_s": 1695529.188652741,
+        "status_code": 200,
+        "target_offset_s": 1695529.1883474402,
+        "terminal": true,
+        "ttft_s": 0.9235504190437496
+      },
+      {
+        "error": null,
+        "index": 200041,
+        "latency_s": 3.313361812150106,
+        "pacing_error_s": 0.0008966859895735979,
+        "send_offset_s": 1695529.457805829,
+        "status_code": 200,
+        "target_offset_s": 1695529.456909143,
+        "terminal": true,
+        "ttft_s": 1.06125234416686
+      },
+      {
+        "error": null,
+        "index": 200042,
+        "latency_s": 3.2477673820685595,
+        "pacing_error_s": 0.00100909941829741,
+        "send_offset_s": 1695529.726479945,
+        "status_code": 200,
+        "target_offset_s": 1695529.7254708456,
+        "terminal": true,
+        "ttft_s": 1.1100204889662564
+      },
+      {
+        "error": null,
+        "index": 200043,
+        "latency_s": 2.981402200879529,
+        "pacing_error_s": 0.0008833850733935833,
+        "send_offset_s": 1695529.994915933,
+        "status_code": 200,
+        "target_offset_s": 1695529.994032548,
+        "terminal": true,
+        "ttft_s": 0.8417247219476849
+      },
+      {
+        "error": null,
+        "index": 200044,
+        "latency_s": 3.020758338039741,
+        "pacing_error_s": 0.0002544971648603678,
+        "send_offset_s": 1695530.262848748,
+        "status_code": 200,
+        "target_offset_s": 1695530.2625942507,
+        "terminal": true,
+        "ttft_s": 0.8899817680940032
+      },
+      {
+        "error": null,
+        "index": 200045,
+        "latency_s": 2.753514691023156,
+        "pacing_error_s": 0.0009031984955072403,
+        "send_offset_s": 1695530.532059152,
+        "status_code": 200,
+        "target_offset_s": 1695530.5311559534,
+        "terminal": true,
+        "ttft_s": 0.6212279021274298
+      },
+      {
+        "error": null,
+        "index": 200046,
+        "latency_s": 2.793123814975843,
+        "pacing_error_s": 0.0010478501208126545,
+        "send_offset_s": 1695530.800765506,
+        "status_code": 200,
+        "target_offset_s": 1695530.7997176559,
+        "terminal": true,
+        "ttft_s": 0.6844980791211128
+      },
+      {
+        "error": null,
+        "index": 200047,
+        "latency_s": 2.5258563419338316,
+        "pacing_error_s": 0.0008144434541463852,
+        "send_offset_s": 1695531.069093802,
+        "status_code": 200,
+        "target_offset_s": 1695531.0682793586,
+        "terminal": true,
+        "ttft_s": 0.4163297610357404
+      },
+      {
+        "error": null,
+        "index": 200048,
+        "latency_s": 2.5709101408720016,
+        "pacing_error_s": 0.0006060628220438957,
+        "send_offset_s": 1695531.337447124,
+        "status_code": 200,
+        "target_offset_s": 1695531.3368410612,
+        "terminal": true,
+        "ttft_s": 0.384650754975155
+      },
+      {
+        "error": null,
+        "index": 200049,
+        "latency_s": 2.5798706500791013,
+        "pacing_error_s": 0.0018904770258814096,
+        "send_offset_s": 1695531.607293241,
+        "status_code": 200,
+        "target_offset_s": 1695531.605402764,
+        "terminal": true,
+        "ttft_s": 0.9688750449568033
+      },
+      {
+        "error": null,
+        "index": 200050,
+        "latency_s": 3.1935665181372315,
+        "pacing_error_s": 0.00038776127621531487,
+        "send_offset_s": 1695531.874352228,
+        "status_code": 200,
+        "target_offset_s": 1695531.8739644666,
+        "terminal": true,
+        "ttft_s": 1.1020897750277072
+      },
+      {
+        "error": null,
+        "index": 200051,
+        "latency_s": 3.0992915260139853,
+        "pacing_error_s": 0.0010012059938162565,
+        "send_offset_s": 1695532.143527375,
+        "status_code": 200,
+        "target_offset_s": 1695532.142526169,
+        "terminal": true,
+        "ttft_s": 1.1429721070453525
+      },
+      {
+        "error": null,
+        "index": 200052,
+        "latency_s": 2.8336782248225063,
+        "pacing_error_s": 0.0004309483338147402,
+        "send_offset_s": 1695532.41151882,
+        "status_code": 200,
+        "target_offset_s": 1695532.4110878718,
+        "terminal": true,
+        "ttft_s": 0.8751295229885727
+      },
+      {
+        "error": null,
+        "index": 200053,
+        "latency_s": 2.8308411890175194,
+        "pacing_error_s": 0.00010460661724209785,
+        "send_offset_s": 1695532.679754181,
+        "status_code": 200,
+        "target_offset_s": 1695532.6796495744,
+        "terminal": true,
+        "ttft_s": 0.9160340370144695
+      },
+      {
+        "error": null,
+        "index": 200054,
+        "latency_s": 2.5651651709340513,
+        "pacing_error_s": 0.00046942406333982944,
+        "send_offset_s": 1695532.948680701,
+        "status_code": 200,
+        "target_offset_s": 1695532.948211277,
+        "terminal": true,
+        "ttft_s": 0.6472414350137115
+      },
+      {
+        "error": null,
+        "index": 200055,
+        "latency_s": 2.562852830858901,
+        "pacing_error_s": 0.001186151523143053,
+        "send_offset_s": 1695533.217959131,
+        "status_code": 200,
+        "target_offset_s": 1695533.2167729796,
+        "terminal": true,
+        "ttft_s": 0.6915191228035837
+      },
+      {
+        "error": null,
+        "index": 200056,
+        "latency_s": 2.2967363810166717,
+        "pacing_error_s": 0.0006142486818134785,
+        "send_offset_s": 1695533.485948931,
+        "status_code": 200,
+        "target_offset_s": 1695533.4853346823,
+        "terminal": true,
+        "ttft_s": 0.4236777250189334
+      },
+      {
+        "error": null,
+        "index": 200057,
+        "latency_s": 2.2020884400699288,
+        "pacing_error_s": 0.0003527570515871048,
+        "send_offset_s": 1695533.754249142,
+        "status_code": 200,
+        "target_offset_s": 1695533.753896385,
+        "terminal": true,
+        "ttft_s": 0.4315131949260831
+      },
+      {
+        "error": null,
+        "index": 200058,
+        "latency_s": 2.019548488082364,
+        "pacing_error_s": 0.00041089626029133797,
+        "send_offset_s": 1695534.022868984,
+        "status_code": 200,
+        "target_offset_s": 1695534.0224580877,
+        "terminal": true,
+        "ttft_s": 0.4233087419997901
+      },
+      {
+        "error": null,
+        "index": 200059,
+        "latency_s": 1.931947615928948,
+        "pacing_error_s": 0.0016393698751926422,
+        "send_offset_s": 1695534.29265916,
+        "status_code": 200,
+        "target_offset_s": 1695534.29101979,
+        "terminal": true,
+        "ttft_s": 0.6946324999444187
+      },
+      {
+        "error": null,
+        "index": 200060,
+        "latency_s": 2.1625266971532255,
+        "pacing_error_s": 0.0008136141113936901,
+        "send_offset_s": 1695534.560395107,
+        "status_code": 200,
+        "target_offset_s": 1695534.5595814928,
+        "terminal": true,
+        "ttft_s": 0.684914467157796
+      },
+      {
+        "error": null,
+        "index": 200061,
+        "latency_s": 1.9761136220768094,
+        "pacing_error_s": 0.001213002484291792,
+        "send_offset_s": 1695534.829356198,
+        "status_code": 200,
+        "target_offset_s": 1695534.8281431955,
+        "terminal": true,
+        "ttft_s": 0.6829616010654718
+      },
+      {
+        "error": null,
+        "index": 200062,
+        "latency_s": 1.7093311701901257,
+        "pacing_error_s": 0.000674813985824585,
+        "send_offset_s": 1695535.097379712,
+        "status_code": 200,
+        "target_offset_s": 1695535.096704898,
+        "terminal": true,
+        "ttft_s": 0.41568310116417706
+      },
+      {
+        "error": null,
+        "index": 200063,
+        "latency_s": 1.5249631160404533,
+        "pacing_error_s": 0.00042981328442692757,
+        "send_offset_s": 1695535.365696414,
+        "status_code": 200,
+        "target_offset_s": 1695535.3652666006,
+        "terminal": true,
+        "ttft_s": 0.4162829741835594
+      }
+    ],
+    "slo_attainment": 1.0,
+    "terminal": 64,
+    "ttft_p50_s": 0.6915191228035837,
+    "ttft_p95_s": 1.1364163949619979,
+    "ttft_p99_s": 1.3177905960474163
+  },
+  "model": "qwen3-32b",
+  "passed": true,
+  "replica_url": "http://127.0.0.1:8001",
+  "schema_version": 1,
+  "topology": {
+    "gateway_backends": {
+      "attention_backend": "torch",
+      "engines": [
+        {
+          "attention_backend": "flashinfer",
+          "engine_backend": "replica-pool",
+          "model": "qwen3-32b",
+          "via_replica": {
+            "attention_backend": "flashinfer",
+            "kernel_tier": "fa2",
+            "versions": {
+              "flashinfer": "0.6.14",
+              "torch": "2.12.1"
+            }
+          }
+        }
+      ],
+      "kernel_tier": "torch",
+      "role": "gateway",
+      "source": "hw_profile",
+      "versions": {
+        "torch": "2.12.1"
+      }
+    },
+    "replica_backends": {
+      "attention_backend": "flashinfer",
+      "engines": [
+        {
+          "attention_backend": "flashinfer",
+          "engine_backend": "kairyu",
+          "model": "qwen3-32b"
+        }
+      ],
+      "kernel_tier": "fa2",
+      "role": "engine-host",
+      "source": "hw_profile",
+      "versions": {
+        "flashinfer": "0.6.14",
+        "torch": "2.12.1"
+      }
+    }
+  },
+  "ttft_slo_s": 2.0,
+  "warmup": {
+    "completed": 32,
+    "requests": 32,
+    "samples": [
+      {
+        "error": null,
+        "index": -10000,
+        "latency_s": 3.0026982300914824,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10001,
+        "latency_s": 3.030956970062107,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10002,
+        "latency_s": 3.032029784983024,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10003,
+        "latency_s": 3.037779616890475,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10004,
+        "latency_s": 3.0328605340328068,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10005,
+        "latency_s": 3.0354792249854654,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10006,
+        "latency_s": 3.037993871141225,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10007,
+        "latency_s": 3.0359721228014678,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10008,
+        "latency_s": 0.9529503809753805,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10009,
+        "latency_s": 0.953622855944559,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10010,
+        "latency_s": 0.9577942590694875,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10011,
+        "latency_s": 0.9575057209003717,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10012,
+        "latency_s": 0.9499971228651702,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10013,
+        "latency_s": 0.9500822729896754,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10014,
+        "latency_s": 0.9551546429283917,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10015,
+        "latency_s": 0.9491596021689475,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10016,
+        "latency_s": 0.9532346939668059,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10017,
+        "latency_s": 0.9553811310324818,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10018,
+        "latency_s": 0.9605689940508455,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10019,
+        "latency_s": 0.9585632737725973,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10020,
+        "latency_s": 0.9546757659409195,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10021,
+        "latency_s": 0.9518849109299481,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10022,
+        "latency_s": 0.9540193018037826,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10023,
+        "latency_s": 0.9506410141475499,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10024,
+        "latency_s": 1.1079727939795703,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10025,
+        "latency_s": 1.1081019218545407,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10026,
+        "latency_s": 1.1092507378198206,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10027,
+        "latency_s": 1.1096416469663382,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10028,
+        "latency_s": 1.1064896939788014,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10029,
+        "latency_s": 1.10218188399449,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10030,
+        "latency_s": 1.1059623800683767,
+        "status_code": 200,
+        "terminal": true
+      },
+      {
+        "error": null,
+        "index": -10031,
+        "latency_s": 1.1070582629181445,
+        "status_code": 200,
+        "terminal": true
+      }
+    ]
+  }
+}

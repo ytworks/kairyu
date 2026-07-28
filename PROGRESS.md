@@ -173,9 +173,9 @@ F5a priority admission is now production-wired from authenticated gateway
 classification through replica transport into the native scheduler. The
 deterministic CPU gate preserves interactive TTFT p99 at 1 tick versus 400 for
 FCFS under exact 2x load while batch consumes residual capacity and drains.
-The production-shaped Qwen3-32B TP8 gate calibrated 7.2812 requests/s; under
+The production-shaped Qwen3-32B TP8 gate calibrated 7.4471 requests/s; under
 planned 0.5x interactive plus 1.5x batch load, interactive TTFT p99 was
-1.3244 s with 100% attainment of the fixed 2 s SLO, while batch progressed in
+1.3178 s with 100% attainment of the fixed 2 s SLO, while batch progressed in
 the mixed window and drained 192/192 afterward.
 G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
 specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
@@ -337,10 +337,12 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   The deterministic
   CPU gate records interactive TTFT p99 of 1 tick versus 400 under FCFS at
   exact 2x load. A production-shaped Qwen3-32B TP8 gateway gate calibrated
-  7.2812 requests/s and, under planned 0.5x interactive plus 1.5x batch load,
-  measured interactive TTFT p99 of 1.3244 s with 100% attainment of the fixed
-  2 s SLO; batch progressed during the mixed window and drained 192/192 with
-  zero failures. The full CPU suite reports 2,213 passed. The production
+  7.4471 requests/s and, under planned 0.5x interactive plus 1.5x batch load,
+  measured interactive TTFT p99 of 1.3178 s with 100% attainment of the fixed
+  2 s SLO. During the mixed window, batch recorded 54 HTTP dispatches, 53
+  scheduler admissions, 46 scheduler completions, and one queued request; it
+  drained 192/192 with zero failures afterward. The full CPU suite reports
+  2,213 passed. The production
   artifact is generated only after an untimed
   warmup from a clean implementation commit and pins benchmark/config hashes,
   image digest, model revision, `/backends` topology, and GPU inventory.

@@ -274,13 +274,14 @@ request, scheduling, queue-depth, priority, latency, and accounting evidence is
 in `bench/results/f5a-priority-overload-cpu-2026-07-28.json`; reproduce it with
 `uv run python bench/priority_overload_bench.py --assert-gate`.
 
-The production-shaped Qwen3-32B TP8 gate calibrated 7.2812 requests/s and then
+The production-shaped Qwen3-32B TP8 gate calibrated 7.4471 requests/s and then
 offered 0.5x interactive plus 1.5x batch work through a one-replica gateway.
-Interactive TTFT p99 rose from 0.1530 s in the control window to 1.3244 s under
+Interactive TTFT p99 rose from 0.5501 s in the control window to 1.3178 s under
 the planned 2.00x overload, while all 64 requests completed and 100% met the
-fixed 2 s SLO. Batch made 56-request progress during the mixed window, retained
-backlog, and drained 192/192 afterward with zero failures. Gateway and replica
-class counters reconcile all interactive and batch dispatches; replica
+fixed 2 s SLO. During the mixed window, batch recorded 54 HTTP dispatches, 53
+scheduler admissions, 46 scheduler completions, and one queued request; it
+retained backlog and drained 192/192 afterward with zero failures. Gateway and
+replica class counters reconcile all interactive and batch dispatches; replica
 scheduler enqueue/admit/complete counters and queue gauges bind the same trace
 to native admission. A separate untimed warmup precedes capacity calibration,
 and the artifact pins a clean source commit, benchmark/config hashes, container
