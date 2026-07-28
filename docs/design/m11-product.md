@@ -177,6 +177,16 @@ request-bucket wash-in precedes every arm, and treatment accepted noisy work
 must remain within 10% of the controls before p99 can pass the unchanged 50 ms
 non-inferiority margin. This separates the cost of rejecting excess 9x traffic
 from the legitimate shared compute consumed by the admitted quota.
+On Qwen3-32B TP8 the gate calibrated 7.2697 requests/s and passed all 47
+checks. Good-only TTFT p99 was 0.1741 s; compliant-neighbor controls measured
+0.2783/0.2792 s and the 10x treatment measured 0.2801 s. The treatment admitted
+66 noisy requests and rejected 639 before shared dispatch, completed all 256
+good requests, matched control accepted noisy work at 1.03125x, and drained
+in-flight/reserved state to zero without reservation-bound violations. The
+complete pinned evidence is
+`bench/results/f5b-noisy-neighbor-qwen3-32b-tp8-2026-07-28.json`; the matched
+deterministic trace is
+`bench/results/f5b-noisy-neighbor-cpu-2026-07-28.json`.
 
 The earlier isolation gate established that tenant A at its limit 429s while
 tenant B proceeds; ledger

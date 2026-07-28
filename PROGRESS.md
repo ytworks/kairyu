@@ -193,9 +193,14 @@ seconds), and holds queue high-watermark to 2 versus 301 and p99 298 seconds
 without admission. An initial Qwen3-32B TP8 run passed every admission,
 dispatch, topology, drain, and fixed-SLO check, but exposed a confounded
 good-only latency comparator: treatment also contained the noisy tenant's
-legitimate admitted quota. The formal rerun is pending with bracketed
-compliant-neighbor controls, identical bucket wash-in, and an accepted-work
-matching check; good-only remains a secondary reference.
+legitimate admitted quota. The corrected formal rerun passes all 47 checks at
+7.2697 requests/s calibrated capacity. Good-only p99 is 0.1741 s; bracketed
+compliant-neighbor controls are 0.2783/0.2792 s and the 10x treatment is
+0.2801 s under the unchanged 50 ms margin and 2 s SLO. Treatment admits
+66 noisy requests, rejects 639 before shared dispatch, matches control accepted
+work at 1.03125x, and drains in-flight/reserved work to zero with no bound
+violations
+(`bench/results/f5b-noisy-neighbor-qwen3-32b-tp8-2026-07-28.json`).
 G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
 specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
 production gateway exposes direct, standard AUTO (Conductor), and max AUTO
@@ -341,6 +346,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [progress] F5b closes on real Qwen3-32B TP8
+- What: Completed the matched-comparator GPU gate on 8x RTX PRO 6000
+  Blackwell. All 47 checks pass. At 7.2697 requests/s calibrated capacity,
+  good-only TTFT p99 is 0.1741 s, compliant-neighbor controls are
+  0.2783/0.2792 s, and 10x treatment is 0.2801 s. The treatment admits 66 and
+  rejects 639 noisy requests before shared dispatch, while all 256 good
+  requests complete. Its accepted noisy work is 1.03125x the control average.
+  Gateway/replica/scheduler/usage counts reconcile; TP8 is reported at runtime;
+  in-flight and reserved-token gauges drain to zero with no bound violations.
+  The deterministic CPU gate also passes all 11 checks at the same clean
+  source commit.
+- Refs: issue #191; G5 F5b; commit `0d8d091`;
+  `bench/results/f5b-noisy-neighbor-cpu-2026-07-28.json`;
+  `bench/results/f5b-noisy-neighbor-qwen3-32b-tp8-2026-07-28.json`.
 
 ### 2026-07-28 — [amendment] F5b uses a causal compliant-neighbor comparator
 - What: Strengthened the real Qwen3-32B TP8 gate from good-only controls to

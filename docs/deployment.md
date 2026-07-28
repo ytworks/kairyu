@@ -157,6 +157,12 @@ missing usage, and multi-candidate work consume the full reservation.
 `kairyu_tenant_in_flight_requests` and `kairyu_tenant_reserved_tokens` must both
 return to zero after work drains.
 
+The formal F5b GPU check is `bench/noisy_neighbor_gpu_bench.py --assert-gate`.
+It compares 10x offered noisy traffic against bracketed compliant-neighbor
+controls with matched accepted work; good-only latency is retained as a
+secondary reference. The pinned Qwen3-32B TP8 result is
+`bench/results/f5b-noisy-neighbor-qwen3-32b-tp8-2026-07-28.json`.
+
 ### OpenAI-compatible upstream capabilities
 
 Set `options.upstream` explicitly whenever the provider is known. Kairyu
