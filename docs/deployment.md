@@ -287,18 +287,41 @@ Operational notes:
 ## 5. Rolling model update (gate C7)
 
 Weights update = rolling replica restart; there is no hot swap (m7 §3).
-For each replica node, one at a time:
+Do not stop a still-eligible replica and rely on a failed request to eject it.
+Use a drain-first, partitioned StatefulSet rollout:
 
-1. Stop the replica container. In-flight requests fail once; the gateway
-   ejects the replica after `unhealthy_after` consecutive failures and
-   traffic redistributes (verified by the smoke drill's kill step).
-2. Update the image/weights reference, start the container, and wait until
-   the node's own `/readyz` returns 200.
-3. The gateway's prober restores the replica automatically (watch
-   `kairyu_replica_healthy` return to 1). Proceed to the next node.
+1. Set `updateStrategy.type=RollingUpdate` and hold
+   `rollingUpdate.partition` at the current replica count before staging the
+   new image or weights. For the F1b restart drill, invoke
+   `kubectl rollout restart` once while that partition still holds every Pod.
+2. Starting at the highest ordinal, call the replica's `/admin/drain` through
+   the authenticated Kubernetes Pod proxy. Wait for both the ready,
+   non-terminating EndpointSlice UID to disappear and the gateway membership
+   record to mark that UID ineligible. Also wait for already placed work to
+   complete; do not drain the remaining replicas.
+3. Lower the partition by one. The StatefulSet may now replace only that
+   ordinal. Wait for a different Pod UID at the update revision, the replica's
+   `/readyz` to return 200, and the gateway to report the new UID eligible.
+4. Repeat the same bounded step for the next ordinal. On timeout, stop without
+   advancing the partition; do not repair the rollout with direct Pod deletes.
 
-Rehearse the drill on the CPU compose topology: `scripts/compose_smoke.sh`
-runs exactly this sequence against mock replicas.
+The no-new-work boundary is the later of gateway ineligibility and
+EndpointSlice withdrawal. A local `/admin/drain` acknowledgement alone is not
+proof that distributed routing has converged. Requests placed before that
+boundary may finish normally, but no placement after it may select the old UID,
+and the partition is not released until its outstanding count is zero.
+
+The automated F1b rehearsal freezes this sequence in a checked-in driver:
+exactly 100 old UIDs become 100 disjoint new UIDs, retry count is zero, every
+offered request returns 2xx, and raw request, placement, membership, rollout,
+readiness, Pod, and EndpointSlice evidence is independently replayed. Once the
+job starts, no human or cluster-installed rollout Operator chooses or repairs a
+step. Pull-request smoke validates the state machine at reduced scale; only the
+clean exact-head 100-replica formal kind artifact satisfies F1b.
+
+`scripts/compose_smoke.sh` remains the C1–C3 kill/eject/recover prerequisite.
+Its intentional fault-trigger request is not a drain-first rolling update and
+is not C7/F1b acceptance evidence.
 
 ## 6. Observability
 

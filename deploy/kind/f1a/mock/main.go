@@ -22,7 +22,17 @@ import (
 	"time"
 )
 
-const maxRequestBytes = 1 << 20
+const (
+	maxRequestBytes = 1 << 20
+
+	// The Pod manifest grants 15 seconds for preStop plus process shutdown.
+	// Keep the drain command and HTTP server shutdown below that bound with one
+	// second of scheduling margin: 9s + 5s < 15s.
+	maxDrainCommandTimeout = 9 * time.Second
+	serverShutdownTimeout  = 5 * time.Second
+	drainRequestTimeout    = 1 * time.Second
+	drainRetryInterval     = 100 * time.Millisecond
+)
 
 type identity struct {
 	PodName string `json:"pod_name"`
@@ -371,6 +381,54 @@ func writeSSE(writer io.Writer, value any) {
 	fmt.Fprintf(writer, "data: %s\n\n", payload)
 }
 
+type gracefulHTTPServer interface {
+	ListenAndServe() error
+	Shutdown(context.Context) error
+}
+
+func serveUntilStopped(
+	httpServer gracefulHTTPServer,
+	markDraining func(),
+	stop <-chan os.Signal,
+	shutdownTimeout time.Duration,
+) error {
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- httpServer.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveDone:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-stop:
+		markDraining()
+		shutdownContext, shutdownCancel := context.WithTimeout(
+			context.Background(),
+			shutdownTimeout,
+		)
+		defer shutdownCancel()
+
+		shutdownError := httpServer.Shutdown(shutdownContext)
+		// Shutdown closes the listener before it finishes waiting for active
+		// handlers. Always join ListenAndServe after Shutdown itself returns so
+		// main cannot exit while an in-flight response is still being drained.
+		serveError := <-serveDone
+		if shutdownError != nil {
+			if serveError != nil && !errors.Is(serveError, http.ErrServerClosed) {
+				return errors.Join(shutdownError, serveError)
+			}
+			return shutdownError
+		}
+		if serveError != nil && !errors.Is(serveError, http.ErrServerClosed) {
+			return serveError
+		}
+		return nil
+	}
+}
+
 func runServer() error {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -402,18 +460,7 @@ func runServer() error {
 	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-stop
-		mock.ready.Store(false)
-		shutdownContext, shutdownCancel := context.WithTimeout(
-			context.Background(),
-			5*time.Second,
-		)
-		defer shutdownCancel()
-		if err := httpServer.Shutdown(shutdownContext); err != nil {
-			log.Printf("graceful shutdown: %v", err)
-		}
-	}()
+	defer signal.Stop(stop)
 
 	log.Printf(
 		"kairyu F1a mock listening on %s pod_name=%s pod_uid=%s",
@@ -421,47 +468,154 @@ func runServer() error {
 		id.PodName,
 		id.PodUID,
 	)
-	err := httpServer.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	if err := serveUntilStopped(
+		httpServer,
+		func() { mock.ready.Store(false) },
+		stop,
+		serverShutdownTimeout,
+	); err != nil {
+		return fmt.Errorf("serve or graceful shutdown: %w", err)
 	}
-	return err
+	return nil
 }
 
-func runDrain(arguments []string) error {
-	flags := flag.NewFlagSet("drain", flag.ContinueOnError)
-	url := flags.String("url", "http://127.0.0.1:8080/admin/drain", "drain URL")
-	grace := flags.Duration("grace", 5*time.Second, "post-drain grace period")
-	if err := flags.Parse(arguments); err != nil {
-		return err
+func waitContext(ctx context.Context, duration time.Duration) error {
+	if duration == 0 {
+		return nil
 	}
-	if *grace < 0 {
-		return fmt.Errorf("grace must be non-negative")
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
+}
 
+func acknowledgeDrain(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+) error {
 	var lastError error
-	client := &http.Client{Timeout: time.Second}
-	for attempt := 0; attempt < 20; attempt++ {
-		request, err := http.NewRequest(http.MethodPost, *url, nil)
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			if lastError == nil {
+				lastError = err
+			}
+			return fmt.Errorf(
+				"drain was not acknowledged before deadline after %d attempts: %w",
+				attempt-1,
+				lastError,
+			)
+		}
+
+		request, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			url,
+			nil,
+		)
 		if err != nil {
-			return err
+			return fmt.Errorf("build drain request: %w", err)
 		}
 		response, err := client.Do(request)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, response.Body)
 			_ = response.Body.Close()
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				log.Printf("drain acknowledged; waiting %s", *grace)
-				time.Sleep(*grace)
 				return nil
 			}
 			err = fmt.Errorf("drain returned HTTP %d", response.StatusCode)
 		}
 		lastError = err
-		time.Sleep(100 * time.Millisecond)
+		if err := waitContext(ctx, drainRetryInterval); err != nil {
+			return fmt.Errorf(
+				"drain was not acknowledged before deadline after %d attempts: %w",
+				attempt,
+				lastError,
+			)
+		}
 	}
-	time.Sleep(*grace)
-	return fmt.Errorf("drain was not acknowledged: %w", lastError)
+}
+
+func performDrain(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	grace time.Duration,
+	waitGrace func(context.Context, time.Duration) error,
+) error {
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		return fmt.Errorf("drain command requires an explicit deadline")
+	}
+	ackDeadline := deadline.Add(-grace)
+	if !ackDeadline.After(time.Now()) {
+		return fmt.Errorf("drain grace %s leaves no time for acknowledgement", grace)
+	}
+	ackContext, ackCancel := context.WithDeadline(ctx, ackDeadline)
+	defer ackCancel()
+	if err := acknowledgeDrain(ackContext, client, url); err != nil {
+		// Do not consume the post-ACK propagation grace when no ACK occurred.
+		return err
+	}
+
+	log.Printf("drain acknowledged; waiting %s", grace)
+	if err := waitGrace(ctx, grace); err != nil {
+		return fmt.Errorf("post-drain grace interrupted: %w", err)
+	}
+	return nil
+}
+
+func runDrain(arguments []string) error {
+	flags := flag.NewFlagSet("drain", flag.ContinueOnError)
+	url := flags.String("url", "http://127.0.0.1:8080/admin/drain", "drain URL")
+	grace := flags.Duration("grace", 5*time.Second, "post-drain grace period")
+	timeout := flags.Duration(
+		"timeout",
+		maxDrainCommandTimeout,
+		"total drain command deadline",
+	)
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *grace < 0 {
+		return fmt.Errorf("grace must be non-negative")
+	}
+	if *timeout <= 0 || *timeout > maxDrainCommandTimeout {
+		return fmt.Errorf(
+			"timeout must be > 0 and <= %s, got %s",
+			maxDrainCommandTimeout,
+			*timeout,
+		)
+	}
+	if *grace >= *timeout {
+		return fmt.Errorf(
+			"grace must be less than timeout, got grace=%s timeout=%s",
+			*grace,
+			*timeout,
+		)
+	}
+
+	commandContext, commandCancel := context.WithTimeout(
+		context.Background(),
+		*timeout,
+	)
+	defer commandCancel()
+	requestTimeout := drainRequestTimeout
+	if acknowledgementBudget := *timeout - *grace; acknowledgementBudget < requestTimeout {
+		requestTimeout = acknowledgementBudget
+	}
+	client := &http.Client{Timeout: requestTimeout}
+	return performDrain(
+		commandContext,
+		client,
+		*url,
+		*grace,
+		waitContext,
+	)
 }
 
 func main() {

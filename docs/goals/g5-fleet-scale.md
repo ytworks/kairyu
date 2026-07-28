@@ -46,9 +46,16 @@ SLO vocabulary used by every gate below:
 | Gate | Target | Where proven |
 |---|---|---|
 | F1a | ReplicaPool dynamic membership: kind cluster, 1 gateway + 200 mock replicas, 10%/min churn for 10 min → zero 5xx, placement p99 <10 ms | kind CI job |
-| F1b | Rolling restart of 100 mock replicas via `kubectl rollout` + `/drain` → zero failed requests, no operator action (C7 lineage, automated) | kind CI job |
+| F1b | Drain-first partitioned StatefulSet restart of exactly 100 mock replicas via one `kubectl rollout restart`: retry=0, zero failed requests, no human/operator repair, exact old/new UID and revision joins, and independently replayed raw rollout/request/readiness evidence (C7 lineage) | dedicated formal kind CI job; PR smoke is non-acceptance |
 | F1c | 3 gateways behind an LB with consistent-hash session partitioning pass the C1 affinity assertion; batch jobs complete with the shared `BatchStore` | kind CI job |
 | F1d | One request produces one end-to-end OTel trace (gateway route → pool place → replica call); Conductor runs show per-stage spans | trace fixture test |
+
+F1b remains unproven until one clean, exact-head 100-replica formal artifact
+passes the contract in m10 A27. Retained F1a formal evidence may be reused for
+shared kind-runner capacity, image/source provenance, NodePort traffic, and
+discovery/placement/membership joins. F1a's `OnDelete` batch churn cannot prove
+the partitioned rollout, drain-first ordering, exact-100 lifecycle, or
+unattended completion and is not a substitute for the new F1b formal run.
 
 ### Stage F2 — KV-aware routing (CPU-first, then 4–8 GPU testbed)
 
