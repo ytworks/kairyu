@@ -1,0 +1,200 @@
+{
+  "info": {
+    "chainID": "sha256:b1dabd4b96cc550418ccd611743b9fefdbb9055535fee4028a552525e1d161b4",
+    "imageSpec": {
+      "architecture": "amd64",
+      "config": {
+        "Cmd": [
+          "postgres"
+        ],
+        "Entrypoint": [
+          "docker-entrypoint.sh"
+        ],
+        "Env": [
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/17/bin",
+          "GOSU_VERSION=1.19",
+          "LANG=en_US.utf8",
+          "PG_MAJOR=17",
+          "PG_VERSION=17.6-2.pgdg12+1",
+          "PGDATA=/var/lib/postgresql/data"
+        ],
+        "ExposedPorts": {
+          "5432/tcp": {}
+        },
+        "StopSignal": "SIGINT",
+        "Volumes": {
+          "/var/lib/postgresql/data": {}
+        }
+      },
+      "created": "2025-11-04T00:25:35.703470742Z",
+      "history": [
+        {
+          "comment": "debuerreotype 0.16",
+          "created": "2025-11-03T20:44:10Z",
+          "created_by": "# debian.sh --arch 'amd64' out/ 'bookworm' '@1762202650'"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:13.273834222Z",
+          "created_by": "RUN /bin/sh -c set -eux; \tgroupadd -r postgres --gid=999; \tuseradd -r -g postgres --uid=999 --home-dir=/var/lib/postgresql --shell=/bin/bash postgres; \tinstall --verbose --directory --owner postgres --group postgres --mode 1777 /var/lib/postgresql # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:17.733865241Z",
+          "created_by": "RUN /bin/sh -c set -ex; \tapt-get update; \tapt-get install -y --no-install-recommends \t\tgnupg \t\tless \t; \trm -rf /var/lib/apt/lists/* # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:24.699675683Z",
+          "created_by": "ENV GOSU_VERSION=1.19",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:24.699675683Z",
+          "created_by": "RUN /bin/sh -c set -eux; \tsavedAptMark=\"$(apt-mark showmanual)\"; \tapt-get update; \tapt-get install -y --no-install-recommends ca-certificates wget; \trm -rf /var/lib/apt/lists/*; \tdpkgArch=\"$(dpkg --print-architecture | awk -F- '{ print $NF }')\"; \twget -O /usr/local/bin/gosu \"https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch\"; \twget -O /usr/local/bin/gosu.asc \"https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch.asc\"; \texport GNUPGHOME=\"$(mktemp -d)\"; \tgpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \tgpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \tgpgconf --kill all; \trm -rf \"$GNUPGHOME\" /usr/local/bin/gosu.asc; \tapt-mark auto '.*' \u003e /dev/null; \t[ -z \"$savedAptMark\" ] || apt-mark manual $savedAptMark \u003e /dev/null; \tapt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \tchmod +x /usr/local/bin/gosu; \tgosu --version; \tgosu nobody true # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:29.407897521Z",
+          "created_by": "RUN /bin/sh -c set -eux; \tif [ -f /etc/dpkg/dpkg.cfg.d/docker ]; then \t\tgrep -q '/usr/share/locale' /etc/dpkg/dpkg.cfg.d/docker; \t\tsed -ri '/\\/usr\\/share\\/locale/d' /etc/dpkg/dpkg.cfg.d/docker; \t\t! grep -q '/usr/share/locale' /etc/dpkg/dpkg.cfg.d/docker; \tfi; \tapt-get update; apt-get install -y --no-install-recommends locales; rm -rf /var/lib/apt/lists/*; \techo 'en_US.UTF-8 UTF-8' \u003e\u003e /etc/locale.gen; \tlocale-gen; \tlocale -a | grep 'en_US.utf8' # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:29.407897521Z",
+          "created_by": "ENV LANG=en_US.utf8",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:32.289791742Z",
+          "created_by": "RUN /bin/sh -c set -eux; \tapt-get update; \tapt-get install -y --no-install-recommends \t\tlibnss-wrapper \t\txz-utils \t\tzstd \t; \trm -rf /var/lib/apt/lists/* # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:32.375806446Z",
+          "created_by": "RUN /bin/sh -c mkdir /docker-entrypoint-initdb.d # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:32.996626009Z",
+          "created_by": "RUN /bin/sh -c set -ex; \tkey='B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8'; \texport GNUPGHOME=\"$(mktemp -d)\"; \tmkdir -p /usr/local/share/keyrings/; \tgpg --batch --keyserver keyserver.ubuntu.com --recv-keys \"$key\"; \tgpg --batch --export --armor \"$key\" \u003e /usr/local/share/keyrings/postgres.gpg.asc; \tgpgconf --kill all; \trm -rf \"$GNUPGHOME\" # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:32.996626009Z",
+          "created_by": "ENV PG_MAJOR=17",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:32.996626009Z",
+          "created_by": "ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/17/bin",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:24:32.996626009Z",
+          "created_by": "ENV PG_VERSION=17.6-2.pgdg12+1",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.270324045Z",
+          "created_by": "RUN /bin/sh -c set -ex; \t\texport PYTHONDONTWRITEBYTECODE=1; \t\tdpkgArch=\"$(dpkg --print-architecture)\"; \taptRepo=\"[ signed-by=/usr/local/share/keyrings/postgres.gpg.asc ] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main $PG_MAJOR\"; \tcase \"$dpkgArch\" in \t\tamd64 | arm64 | ppc64el) \t\t\techo \"deb $aptRepo\" \u003e /etc/apt/sources.list.d/pgdg.list; \t\t\tapt-get update; \t\t\t;; \t\t*) \t\t\techo \"deb-src $aptRepo\" \u003e /etc/apt/sources.list.d/pgdg.list; \t\t\t\t\t\tsavedAptMark=\"$(apt-mark showmanual)\"; \t\t\t\t\t\ttempDir=\"$(mktemp -d)\"; \t\t\tcd \"$tempDir\"; \t\t\t\t\t\tapt-get update; \t\t\tapt-get install -y --no-install-recommends dpkg-dev; \t\t\techo \"deb [ trusted=yes ] file://$tempDir ./\" \u003e /etc/apt/sources.list.d/temp.list; \t\t\t_update_repo() { \t\t\t\tdpkg-scanpackages . \u003e Packages; \t\t\t\tapt-get -o Acquire::GzipIndexes=false update; \t\t\t}; \t\t\t_update_repo; \t\t\t\t\t\tnproc=\"$(nproc)\"; \t\t\texport DEB_BUILD_OPTIONS=\"nocheck parallel=$nproc\"; \t\t\tapt-get build-dep -y postgresql-common-dev; \t\t\tapt-get source --compile postgresql-common-dev; \t\t\t_update_repo; \t\t\tapt-get build-dep -y \"postgresql-$PG_MAJOR=$PG_VERSION\"; \t\t\tapt-get source --compile \"postgresql-$PG_MAJOR=$PG_VERSION\"; \t\t\t\t\t\t\t\t\tapt-mark showmanual | xargs apt-mark auto \u003e /dev/null; \t\t\tapt-mark manual $savedAptMark; \t\t\t\t\t\tls -lAFh; \t\t\t_update_repo; \t\t\tgrep '^Package: ' Packages; \t\t\tcd /; \t\t\t;; \tesac; \t\tapt-get install -y --no-install-recommends postgresql-common; \tsed -ri 's/#(create_main_cluster) .*$/\\1 = false/' /etc/postgresql-common/createcluster.conf; \tapt-get install -y --no-install-recommends \t\t\"postgresql-$PG_MAJOR=$PG_VERSION\" \t; \t\trm -rf /var/lib/apt/lists/*; \t\tif [ -n \"$tempDir\" ]; then \t\tapt-get purge -y --auto-remove; \t\trm -rf \"$tempDir\" /etc/apt/sources.list.d/temp.list; \tfi; \t\tfind /usr -name '*.pyc' -type f -exec bash -c 'for pyc; do dpkg -S \"$pyc\" \u0026\u003e /dev/null || rm -vf \"$pyc\"; done' -- '{}' +; \t\tpostgres --version # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.389932278Z",
+          "created_by": "RUN /bin/sh -c set -eux; \tdpkg-divert --add --rename --divert \"/usr/share/postgresql/postgresql.conf.sample.dpkg\" \"/usr/share/postgresql/$PG_MAJOR/postgresql.conf.sample\"; \tcp -v /usr/share/postgresql/postgresql.conf.sample.dpkg /usr/share/postgresql/postgresql.conf.sample; \tln -sv ../postgresql.conf.sample \"/usr/share/postgresql/$PG_MAJOR/\"; \tsed -ri \"s!^#?(listen_addresses)\\s*=\\s*\\S+.*!\\1 = '*'!\" /usr/share/postgresql/postgresql.conf.sample; \tgrep -F \"listen_addresses = '*'\" /usr/share/postgresql/postgresql.conf.sample # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.482875821Z",
+          "created_by": "RUN /bin/sh -c install --verbose --directory --owner postgres --group postgres --mode 3777 /var/run/postgresql # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.482875821Z",
+          "created_by": "ENV PGDATA=/var/lib/postgresql/data",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.566797218Z",
+          "created_by": "RUN /bin/sh -c install --verbose --directory --owner postgres --group postgres --mode 1777 \"$PGDATA\" # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.566797218Z",
+          "created_by": "VOLUME [/var/lib/postgresql/data]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.601778231Z",
+          "created_by": "COPY docker-entrypoint.sh docker-ensure-initdb.sh /usr/local/bin/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.703470742Z",
+          "created_by": "RUN /bin/sh -c ln -sT docker-ensure-initdb.sh /usr/local/bin/docker-enforce-initdb.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.703470742Z",
+          "created_by": "ENTRYPOINT [\"docker-entrypoint.sh\"]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.703470742Z",
+          "created_by": "STOPSIGNAL SIGINT",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.703470742Z",
+          "created_by": "EXPOSE map[5432/tcp:{}]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2025-11-04T00:25:35.703470742Z",
+          "created_by": "CMD [\"postgres\"]",
+          "empty_layer": true
+        }
+      ],
+      "os": "linux",
+      "rootfs": {
+        "diff_ids": [
+          "sha256:b512279032aa717092385dda875fffdcd96e4a4ad384225152522ac7bd5340a8",
+          "sha256:904420449cdc64ad5db24d67a40fcf697208af1610930bf78b7237b051b70924",
+          "sha256:d2b8ca0512fb701e199f2bcaec2e946b4565d20a367143adfcd285731289a586",
+          "sha256:1b3f38f45276702dc976b2e0dd53853c23ab627b1ff8fcd5640a9108049527fe",
+          "sha256:19ec7dbe6ef44d66750686083ebb33a2cd1db059de5d34be776a3c204f0ee1c9",
+          "sha256:14afcceb4afb68eb7c8adf454da68f00157edbd74ba27a0dc48131158ea52a8d",
+          "sha256:d15c5d7324afd130046381e4c8201e5ca07a252863149c817cd3999f1ee128cb",
+          "sha256:93c22a157a6335247b15e59350367941e905932d24e14737768bf5a946fa607b",
+          "sha256:02dca752cd9f1a6ddad5716cd20b7e1c60a117dfb643168a6453b91d191f0d90",
+          "sha256:c9e524793f9be09ba7dbb7d60c6a70a9b7d0b6e77ac69874ee12754385ed9f54",
+          "sha256:031384f5f894548ff3e388cc77cf0ed7895386c2fe677a5a37776e1da9983225",
+          "sha256:fa8ac9e03e8abaf482e1b459d5718515a9c7d385956cae529b3965e0824caa36",
+          "sha256:457741546835c836bfab408f494f1948421b4617fb0eeb27d828b0857975f2da",
+          "sha256:8b7819004443aa66b85f5ac9e1419e69624d60a04cfcc513481d44a7ccfa6da2"
+        ],
+        "type": "layers"
+      }
+    }
+  },
+  "status": {
+    "id": "sha256:567d5d704a3e5a4864393b623a0d50eb1b5a4ad134cdac7cf19555cb2d8ffe9e",
+    "pinned": false,
+    "repoDigests": [],
+    "repoTags": [
+      "docker.io/library/postgres:17.6-bookworm"
+    ],
+    "size": "445100258",
+    "username": ""
+  }
+}

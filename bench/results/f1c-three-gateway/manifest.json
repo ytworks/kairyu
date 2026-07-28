@@ -1,0 +1,192 @@
+{
+  "artifacts": {
+    "batch-claims.jsonl": {
+      "bytes": 6375,
+      "rows": 23,
+      "sha256": "a6925597f8c61806066862aa3cb623114e0d4fda55013e71e23d6b12a6228acb"
+    },
+    "batch-http.jsonl": {
+      "bytes": 78072,
+      "rows": 66,
+      "sha256": "99fdf58c362007f86ad4e3dce86fd68a21c76492ca05ef185262a03dd8708b83"
+    },
+    "batch-lifecycle.jsonl": {
+      "bytes": 1735,
+      "rows": 6,
+      "sha256": "69bae02cdcf3bb6f3419b825745c0b9d20dec30f46181511c33a2f16d93d20c0"
+    },
+    "batch-output-a.jsonl": {
+      "bytes": 124400,
+      "rows": 200,
+      "sha256": "d1c8460519461d68e586770c3fc9e0026a87d70a768e8e3177cbea24ca6233b8"
+    },
+    "batch-output-b.jsonl": {
+      "bytes": 124400,
+      "rows": 200,
+      "sha256": "d1c8460519461d68e586770c3fc9e0026a87d70a768e8e3177cbea24ca6233b8"
+    },
+    "batch-output-c.jsonl": {
+      "bytes": 124400,
+      "rows": 200,
+      "sha256": "d1c8460519461d68e586770c3fc9e0026a87d70a768e8e3177cbea24ca6233b8"
+    },
+    "gateway-pods.jsonl": {
+      "bytes": 2926,
+      "rows": 6,
+      "sha256": "ecdc6b04a01916f58df49101ff37de6ef1aafa0c4bb5704ca2596bc610bc6de0"
+    },
+    "lb-decisions.jsonl": {
+      "bytes": 50504,
+      "rows": 80,
+      "sha256": "a66bb15b5daa22d7b32ffb1c7e2415ba1ac2d5ef4dda94f5b6e8f724f1a0e446"
+    },
+    "placements-a.jsonl": {
+      "bytes": 121741,
+      "rows": 228,
+      "sha256": "28f822af381833aae6978fb10ca65f6c82bf567456b5cc6c52a536fa48b3857c"
+    },
+    "placements-b.jsonl": {
+      "bytes": 94417,
+      "rows": 59,
+      "sha256": "aeb4eb33c4a8ff21078e317ed8b09425e5f309594c9a6427511408d766cf6978"
+    },
+    "placements-c.jsonl": {
+      "bytes": 47173,
+      "rows": 29,
+      "sha256": "fd1a061120eeb12516554c481b2b92fb6ad034ae76ee02dd348840fd78915fae"
+    },
+    "postgres-pods.jsonl": {
+      "bytes": 986,
+      "rows": 2,
+      "sha256": "6c73ab660be3edf7c83a795db96f69d429299ac14179be7c565ed0a50fd843ee"
+    },
+    "replica-pods.jsonl": {
+      "bytes": 10602,
+      "rows": 24,
+      "sha256": "7511621427f208c181f8f6a25494eba1aa4a8acb66cfca3b02c8ef927cd8f509"
+    },
+    "store-identities.jsonl": {
+      "bytes": 1524,
+      "rows": 6,
+      "sha256": "f36f6108dc7af14d1087b1555892c01ad9276597d1e54d6343390bfa4388697c"
+    },
+    "traffic.jsonl": {
+      "bytes": 19196,
+      "rows": 14,
+      "sha256": "d2e9d14fd9b9e74d430f4ddefb307fa88d5cf53a0d1cc74a12ce8d20891b0fb3"
+    }
+  },
+  "batch_id": "batch_2f405f316c514dc3b1f03d50",
+  "checks": {
+    "active_claim_owner_pod_uid_was_killed": true,
+    "affinity_response_json_recomputes_exact_pod_identity": true,
+    "all_affinity_requests_retry_free_valid_2xx": true,
+    "all_gateway_membership_logs_converge_to_raw_replica_uids": true,
+    "all_gateways_use_one_postgres_identity": true,
+    "artifact_paths_and_digests_replay": true,
+    "baseline_sessions_remain_sticky": true,
+    "baseline_traffic_uses_all_three_gateways": true,
+    "batch_http_ids_paths_and_lifecycle_form_one_exact_graph": true,
+    "clean_source_and_image_references_attested": true,
+    "durable_claim_audit_has_one_new-fence_terminal_commit": true,
+    "expired_lease_reclaimed_by_different_gateway_with_higher_fence": true,
+    "file_create_poll_and_output_cross_gateways": true,
+    "frozen_gate_config_valid": true,
+    "gateway_failover_preserves_replica_affinity": true,
+    "gateway_placement_logs_join_raw_responses": true,
+    "lb_decision_log_joins_raw_responses": true,
+    "lb_sha256_hrw_matches_every_baseline_request": true,
+    "only_killed_gateway_uid_restarted": true,
+    "output_is_byte_identical_and_complete_through_all_gateways": true,
+    "reclaimed_batch_completed_without_failed_lines": true,
+    "replica_hrw_matches_across_gateways": true,
+    "replica_uid_membership_stable_and_ready": true,
+    "runtime_gateway_mock_and_postgres_images_match_sources": true,
+    "three_final_gateway_pod_uids_ready": true,
+    "three_initial_gateway_pod_uids_ready": true
+  },
+  "config": {
+    "baseline_rounds": 2,
+    "batch_delivery": "at-least-once execution with one fenced terminal publication",
+    "batch_lines": 200,
+    "gateway_ids": [
+      "a",
+      "b",
+      "c"
+    ],
+    "load_balancer_hash": "sha256-hrw-x-session-id",
+    "namespace": "kairyu-f1c",
+    "replica_count": 12,
+    "sessions_per_gateway": 2,
+    "timeout_seconds": 360.0
+  },
+  "created_unix_ns": 1785272953477198071,
+  "gate": "g5-f1c-three-gateway-shared-batchstore",
+  "passed": true,
+  "schema_version": 1,
+  "source": {
+    "commit": "be40b97d6580768d2d1b0d81cce9d64226ab1991",
+    "gateway_cri_image_metadata": {
+      "path": "gateway-cri-image.json",
+      "repo_digests": [
+        "docker.io/library/import-2026-07-28@sha256:95dbbf0a64a294cbaa4a09cdefff3596883c3f3d21aecde94323828a37f25508"
+      ],
+      "repo_tags": [
+        "docker.io/library/kairyu:dev"
+      ],
+      "revision": "be40b97d6580768d2d1b0d81cce9d64226ab1991",
+      "runtime_digests": [
+        "sha256:95dbbf0a64a294cbaa4a09cdefff3596883c3f3d21aecde94323828a37f25508",
+        "sha256:b3e9f14fa124a947da9805d50e66395a2894e7868e93c4bb5e943d960f7b1f3f"
+      ],
+      "sha256": "6cad4ecc4204c3b97d2f852389bf916fdee1dca31e7ab980c929ddfb6e656c76",
+      "status_id": "sha256:b3e9f14fa124a947da9805d50e66395a2894e7868e93c4bb5e943d960f7b1f3f"
+    },
+    "gateway_image_digest": "sha256:b3e9f14fa124a947da9805d50e66395a2894e7868e93c4bb5e943d960f7b1f3f",
+    "mock_cri_image_metadata": {
+      "path": "mock-cri-image.json",
+      "repo_digests": [],
+      "repo_tags": [
+        "docker.io/library/kairyu-f1a-mock:dev"
+      ],
+      "revision": "be40b97d6580768d2d1b0d81cce9d64226ab1991",
+      "runtime_digests": [
+        "sha256:0162ab949de85783e25bc5dd5d57ba37e872b34e76baf7c0217a09f3f4bfe7ed"
+      ],
+      "sha256": "c2b6eb0f1d27908c23e1685c4129ae03caa82899c86674d728869b2028635b5f",
+      "status_id": "sha256:0162ab949de85783e25bc5dd5d57ba37e872b34e76baf7c0217a09f3f4bfe7ed"
+    },
+    "mock_image_digest": "sha256:0162ab949de85783e25bc5dd5d57ba37e872b34e76baf7c0217a09f3f4bfe7ed",
+    "postgres_cri_image_metadata": {
+      "path": "postgres-cri-image.json",
+      "repo_digests": [],
+      "repo_tags": [
+        "docker.io/library/postgres:17.6-bookworm"
+      ],
+      "revision": null,
+      "runtime_digests": [
+        "sha256:567d5d704a3e5a4864393b623a0d50eb1b5a4ad134cdac7cf19555cb2d8ffe9e"
+      ],
+      "sha256": "6109501ff0f09658c15a3691f256db519a9e83d354d8bd4d4aaeb9d2f2fa8b3a",
+      "status_id": "sha256:567d5d704a3e5a4864393b623a0d50eb1b5a4ad134cdac7cf19555cb2d8ffe9e"
+    },
+    "postgres_docker_image_metadata": {
+      "config_id": "sha256:567d5d704a3e5a4864393b623a0d50eb1b5a4ad134cdac7cf19555cb2d8ffe9e",
+      "path": "postgres-docker-image.json",
+      "repo_digests": [
+        "postgres@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3"
+      ],
+      "repo_tags": [
+        "postgres:17.6-bookworm"
+      ],
+      "sha256": "5067210797232c9e38d734362e15f1b12caa88d8cedcf93708e6d0c02d7ce06e"
+    },
+    "postgres_image": "postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3",
+    "rendered_manifest": {
+      "bytes": 37275,
+      "path": "rendered-manifest.yaml",
+      "sha256": "3d19b67b972081963a9427647a2f3cc86eb807c97b12c7f0db1bab2e2b54a84a"
+    },
+    "tracked_clean": true
+  }
+}

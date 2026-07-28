@@ -241,15 +241,14 @@ and #176 closed. F1c now has an A29 implementation candidate: three immutable
 gateway identities behind an explicit-session HRW load balancer, a PostgreSQL
 BatchStore with DB-clock leases and fenced atomic terminal output publication,
 and independently replayed cross-gateway affinity/batch/owner-Pod failover
-evidence. It reuses the retained F1a/F1b results; one distinct exact-head F1c
-kind drill remains before #177 can close. Run `30397522862` completed the full
-live behavior and its raw artifact passes all 26 checks under the corrected
-offline replay; a fresh exact-head run is still required because that run's
-pre-correction verifier reported two false negatives. Run `30398220981` then
-exposed kind's second valid import form: the Pod reported a CRI-generated
-manifest digest rather than the registry pin while retaining the same pinned
-Docker/CRI config ID. The candidate now records and replays that full identity
-chain; one fresh exact-head drill remains.
+evidence. F1c is closed by exact-head source run `30399229234` at `be40b97`:
+all 26 replay checks passed over six sticky baseline sessions evenly using all
+three gateways, one common PostgreSQL identity, 12 stable replica UIDs, a
+fence-1 owner-Pod kill and post-expiry fence-2 reclaim by a different gateway,
+200/200 completed lines, and byte-identical output through all gateways. The
+complete independently replayable artifact is retained under
+`bench/results/f1c-three-gateway/`. F1a/F1b were not rerun; the evidence-only
+closure commit does not repeat F1c.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
@@ -281,7 +280,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
-| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** retained exact-head run `30374404150`, PR #266, issue #175. **F1b is closed:** retained exact-head run `30387260062`, PR #267, issue #176. **F1c implementation candidate:** A29 separates explicit-session gateway HRW from ReplicaPool HRW and adds a PostgreSQL shared BatchStore with DB-clock leases, fencing, atomic terminal output publication, and independently replayed three-gateway/owner-Pod-failover evidence. One exact-head F1c kind drill remains before #177 closes; F1a/F1b are not rerun. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** retained exact-head run `30374404150`, PR #266, issue #175. **F1b is closed:** retained exact-head run `30387260062`, PR #267, issue #176. **F1c is closed:** exact-head source run `30399229234` at `be40b97` passed all 26 independently replayed three-gateway affinity, shared PostgreSQL BatchStore, fenced owner-Pod failover, output, and provenance checks; the complete artifact is retained under `bench/results/f1c-three-gateway/`. F1a/F1b were not rerun and the evidence-only closure commit does not repeat F1c. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
@@ -383,6 +382,10 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [progress] F1c closes three-gateway affinity and shared batch failover
+- What: Closed G5 F1c on exact-head source commit `be40b97` with Actions run `30399229234`. All 26 independent replay checks passed: six baseline sessions distributed as two per gateway and stayed sticky, all gateways reconstructed the same 12-replica affinity decisions and PostgreSQL identity, a fence-1 owner on gateway B was killed, gateway A reclaimed only after that exact lease expired with fence 2, 200/200 batch lines completed with no failures, and all three gateways returned byte-identical output. The complete raw/replay artifact is committed under `bench/results/f1c-three-gateway/`; the evidence-only commit intentionally does not rerun F1c.
+- Refs: m10 A29; G5 F1c; issue #177; PR #268; Actions run `30399229234`; source commit `be40b97`; `bench/results/f1c-three-gateway/`
 
 ### 2026-07-28 — [amendment] F1c attests the registry-to-kind image identity chain
 - What: F1c now retains the raw Docker inspection of the pinned PostgreSQL image and independently replays the registry manifest pin → Docker config ID → kind CRI config ID → Pod runtime digest chain. A Pod may report either the original registry pin or a CRI-reported import digest; any digest outside that attested set fails. The live script also fail-fast compares the Docker and CRI config IDs before deployment.

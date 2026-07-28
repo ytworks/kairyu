@@ -669,4 +669,6 @@ over (α, β) (pure function over the dataset; no online learning).
   `30374404150` and F1b run `30387260062` retain their capacity, discovery,
   provenance and raw-evidence precedents; neither is rerun. F1c adds no latency
   percentile SLO: elapsed times are diagnostic and only a generous stuck-run
-  cap is binding.
+  cap is binding. Exact-head source run `30399229234` at `be40b97` passed all
+  26 replay checks; its complete artifact is retained under
+  `bench/results/f1c-three-gateway/`.

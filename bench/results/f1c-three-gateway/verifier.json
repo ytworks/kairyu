@@ -1,0 +1,43 @@
+{
+  "checks": {
+    "active_claim_owner_pod_uid_was_killed": true,
+    "affinity_response_json_recomputes_exact_pod_identity": true,
+    "all_affinity_requests_retry_free_valid_2xx": true,
+    "all_gateway_membership_logs_converge_to_raw_replica_uids": true,
+    "all_gateways_use_one_postgres_identity": true,
+    "artifact_paths_and_digests_replay": true,
+    "baseline_sessions_remain_sticky": true,
+    "baseline_traffic_uses_all_three_gateways": true,
+    "batch_http_ids_paths_and_lifecycle_form_one_exact_graph": true,
+    "clean_source_and_image_references_attested": true,
+    "durable_claim_audit_has_one_new-fence_terminal_commit": true,
+    "expired_lease_reclaimed_by_different_gateway_with_higher_fence": true,
+    "file_create_poll_and_output_cross_gateways": true,
+    "frozen_gate_config_valid": true,
+    "gateway_failover_preserves_replica_affinity": true,
+    "gateway_placement_logs_join_raw_responses": true,
+    "lb_decision_log_joins_raw_responses": true,
+    "lb_sha256_hrw_matches_every_baseline_request": true,
+    "only_killed_gateway_uid_restarted": true,
+    "output_is_byte_identical_and_complete_through_all_gateways": true,
+    "reclaimed_batch_completed_without_failed_lines": true,
+    "replica_hrw_matches_across_gateways": true,
+    "replica_uid_membership_stable_and_ready": true,
+    "runtime_gateway_mock_and_postgres_images_match_sources": true,
+    "three_final_gateway_pod_uids_ready": true,
+    "three_initial_gateway_pod_uids_ready": true
+  },
+  "gate": "g5-f1c-three-gateway-shared-batchstore",
+  "manifest_path": "manifest.json",
+  "passed": true,
+  "schema_version": 1,
+  "summary": {
+    "affinity_requests": 14,
+    "baseline_sessions": 6,
+    "batch_lines": 200,
+    "claim_events": 23,
+    "output_sha256": "d1c8460519461d68e586770c3fc9e0026a87d70a768e8e3177cbea24ca6233b8",
+    "replica_uids": 12
+  },
+  "verified_unix_ns": 1785272953814335609
+}

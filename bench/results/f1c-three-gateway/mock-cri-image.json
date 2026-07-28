@@ -1,0 +1,70 @@
+{
+  "info": {
+    "chainID": "sha256:bb1a22bc8c6a0bcc99fdbd79013fad11abfcea0f4730437c1ff9214873be0f91",
+    "imageSpec": {
+      "architecture": "amd64",
+      "config": {
+        "Entrypoint": [
+          "/kairyu-f1a-mock"
+        ],
+        "Env": [
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ],
+        "ExposedPorts": {
+          "8080/tcp": {}
+        },
+        "Labels": {
+          "org.opencontainers.image.revision": "be40b97d6580768d2d1b0d81cce9d64226ab1991"
+        },
+        "User": "65532:65532",
+        "WorkingDir": "/"
+      },
+      "created": "2026-07-28T21:07:10.01324429Z",
+      "history": [
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-07-28T21:07:10.01324429Z",
+          "created_by": "COPY /out/kairyu-f1a-mock /kairyu-f1a-mock # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-07-28T21:07:10.01324429Z",
+          "created_by": "USER 65532:65532",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-07-28T21:07:10.01324429Z",
+          "created_by": "EXPOSE map[8080/tcp:{}]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-07-28T21:07:10.01324429Z",
+          "created_by": "ENTRYPOINT [\"/kairyu-f1a-mock\"]",
+          "empty_layer": true
+        }
+      ],
+      "os": "linux",
+      "rootfs": {
+        "diff_ids": [
+          "sha256:bb1a22bc8c6a0bcc99fdbd79013fad11abfcea0f4730437c1ff9214873be0f91"
+        ],
+        "type": "layers"
+      }
+    }
+  },
+  "status": {
+    "id": "sha256:0162ab949de85783e25bc5dd5d57ba37e872b34e76baf7c0217a09f3f4bfe7ed",
+    "pinned": false,
+    "repoDigests": [],
+    "repoTags": [
+      "docker.io/library/kairyu-f1a-mock:dev"
+    ],
+    "size": "6401448",
+    "uid": {
+      "value": "65532"
+    },
+    "username": ""
+  }
+}
