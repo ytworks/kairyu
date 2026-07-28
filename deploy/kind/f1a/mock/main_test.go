@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func testServer(t *testing.T) (*server, *httptest.Server) {
@@ -189,5 +193,157 @@ func TestBackendsAndMethodValidation(t *testing.T) {
 			response.StatusCode,
 			response.Header.Get("Allow"),
 		)
+	}
+}
+
+type blockingShutdownServer struct {
+	listenStarted   chan struct{}
+	shutdownStarted chan struct{}
+	releaseShutdown chan struct{}
+}
+
+func newBlockingShutdownServer() *blockingShutdownServer {
+	return &blockingShutdownServer{
+		listenStarted:   make(chan struct{}),
+		shutdownStarted: make(chan struct{}),
+		releaseShutdown: make(chan struct{}),
+	}
+}
+
+func (s *blockingShutdownServer) ListenAndServe() error {
+	close(s.listenStarted)
+	<-s.shutdownStarted
+	return http.ErrServerClosed
+}
+
+func (s *blockingShutdownServer) Shutdown(ctx context.Context) error {
+	close(s.shutdownStarted)
+	select {
+	case <-s.releaseShutdown:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestServeUntilStoppedWaitsForGracefulShutdown(t *testing.T) {
+	httpServer := newBlockingShutdownServer()
+	stop := make(chan os.Signal, 1)
+	draining := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- serveUntilStopped(
+			httpServer,
+			func() { close(draining) },
+			stop,
+			time.Second,
+		)
+	}()
+
+	select {
+	case <-httpServer.listenStarted:
+	case <-time.After(time.Second):
+		t.Fatal("server did not start listening")
+	}
+	stop <- syscall.SIGTERM
+	select {
+	case <-httpServer.shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("graceful shutdown did not start")
+	}
+	select {
+	case <-draining:
+	default:
+		t.Fatal("server was not marked draining before shutdown")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("serve returned before graceful shutdown completed: %v", err)
+	default:
+	}
+
+	close(httpServer.releaseShutdown)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("serve returned an error after graceful shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve did not join graceful shutdown")
+	}
+}
+
+func TestPerformDrainWaitsGraceOnlyAfterAcknowledgement(t *testing.T) {
+	requests := 0
+	httpServer := httptest.NewServer(http.HandlerFunc(
+		func(writer http.ResponseWriter, request *http.Request) {
+			requests++
+			writer.WriteHeader(http.StatusNoContent)
+		},
+	))
+	defer httpServer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	waited := false
+	grace := 25 * time.Millisecond
+	err := performDrain(
+		ctx,
+		httpServer.Client(),
+		httpServer.URL,
+		grace,
+		func(ctx context.Context, duration time.Duration) error {
+			waited = true
+			if duration != grace {
+				t.Fatalf("grace = %s, want %s", duration, grace)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("performDrain returned an error: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("drain requests = %d, want 1", requests)
+	}
+	if !waited {
+		t.Fatal("post-ACK grace was not observed")
+	}
+}
+
+func TestPerformDrainFailureDoesNotWaitPostAckGrace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	httpServer := httptest.NewServer(http.HandlerFunc(
+		func(writer http.ResponseWriter, request *http.Request) {
+			http.Error(writer, "not ready", http.StatusServiceUnavailable)
+			cancel()
+		},
+	))
+	defer httpServer.Close()
+
+	waited := false
+	err := performDrain(
+		ctx,
+		httpServer.Client(),
+		httpServer.URL,
+		20*time.Millisecond,
+		func(ctx context.Context, duration time.Duration) error {
+			waited = true
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "not acknowledged before deadline") {
+		t.Fatalf("performDrain error = %v", err)
+	}
+	if waited {
+		t.Fatal("post-ACK grace ran even though drain was not acknowledged")
+	}
+}
+
+func TestRunDrainRejectsDeadlineOutsidePodBudget(t *testing.T) {
+	err := runDrain([]string{"-timeout=10s", "-grace=5s"})
+	if err == nil || !strings.Contains(err.Error(), "timeout must be > 0 and <= 9s") {
+		t.Fatalf("runDrain error = %v", err)
 	}
 }

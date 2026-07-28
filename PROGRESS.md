@@ -232,11 +232,20 @@ deletion during replacement container startup, while only one is within
 100 ms of a membership event. A26 restores the written F1a criterion:
 measurement-wide nearest-rank p99 is binding, while complete epoch and
 post-delete windows remain published and independently replayed diagnostics.
-All other frozen conditions are unchanged. Candidate-head focused validation
-passes 132/132 tests, and A26 replay of the immutable raw artifact passes every
-amended gate check; the legacy manifest differs only in its old published
-check map and old `passed` value. Automatic PR smoke and CI remain before #175
-merges. Production/fabric drills remain untouched.**
+All other frozen conditions are unchanged. The focused candidate validation
+passed 132/132 tests, independent A26 replay passed every amended gate check,
+and PR #266 merged as `68f43f4`, closing #175 without rerunning the immutable
+formal measurement. F1b now has an A27 implementation candidate: a drain-first
+partitioned `RollingUpdate`, retry-free concurrent traffic, exact raw
+UID/revision/readiness/placement replay, and dedicated smoke/formal automation.
+Its focused replay suite passes 20/20 and exact-head PR smoke is green. The
+first formal attempt recorded 46,500/46,500 valid retry-free 2xx responses and
+completed 88/100 exact replacements without a recorded condition failure, then
+exposed that its unstated 900-second whole-run cap was shorter than the
+measured sequential rollout. A28 corrects only that safety cap to an
+empirically jitter-sized 1,500 seconds; one exact-head formal rerun remains
+before #176 can close.
+Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
 
@@ -267,7 +276,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
-| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a implementation complete, PR closure pending:** production EndpointSlice discovery, origin-local outbound transports, equivalent-contract validation grouping, deferred audit encoding, and the replayable direct-NodePort kind gate are complete. The immutable 200-replica/ten-epoch artifact from Actions run `30374404150` records 33,000/33,000 retry-free 2xx responses, 5.221 ms measurement-wide placement p99, maximum 1.117-second withdrawal, exact lifecycle/provenance joins, and complete raw evidence. A26 restores the written measurement-wide p99 criterion while retaining every epoch and post-delete window as mandatory replayed diagnostics. The focused candidate suite passes 132/132, and independent A26 replay passes all amended checks; automatic PR smoke and CI remain before merge. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** the immutable 200-replica/ten-epoch artifact from Actions run `30374404150` records 33,000/33,000 retry-free 2xx responses, 5.221 ms measurement-wide placement p99, maximum 1.117-second withdrawal, exact lifecycle/provenance joins, and complete raw evidence; PR #266 merged as `68f43f4` and closed #175. **F1b implementation candidate:** A27 freezes a drain-first partitioned `RollingUpdate` of exactly 100 replicas with exact raw evidence replay and no operator repair. Its focused suite passes 20/20 and exact-head PR smoke is green. Formal run `30385162649` recorded 46,500/46,500 valid retry-free 2xx responses and completed 88/100 exact replacements before exposing an undersized unstated whole-run cap; A28 corrects only that safety cap from 900 to an empirically jitter-sized 1,500 seconds. One exact-head formal rerun remains before #176 closes. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
@@ -369,6 +378,30 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F1b sizes its whole-run safety cap from formal evidence
+- What: Added A28. The formal whole-rollout timeout is now a 1,500-second stuck-run safety cap; the binding five-second withdrawal and 60-second per-replacement limits, retry-free zero-failure rules, exact 100-replica lineage, and all replay checks are unchanged.
+- Why: Exact-head formal run `30385162649` completed 88 exact sequential replacements in 890.208 seconds with no recorded lifecycle-condition failure while recording 46,500/46,500 valid retry-free 2xx responses, then the former 900-second cap cancelled ordinal 11. The observed mean, p95, and maximum full-cycle durations were 10.116, 11.165, and 12.134 seconds. Extrapolating the maximum to 100 steps, adding 20% shared-runner jitter margin, and rounding up yields 1,500 seconds; issue #176 defines no rollout-latency SLO.
+- Refs: m10 D5/A27/A28; G5 F1b; issue #176; PR #267; Actions run `30385162649`; `bench/fleet_rollout_bench.py`
+
+### 2026-07-28 — [amendment] F1b attests pre-status Pods by immutable UID
+- What: F1b now retains the frozen Pod spec image when Kubernetes has created a replacement UID but has not yet emitted its first ContainerStatus. Replay also accepts that single Pending, not-Ready pre-status form only when the exact same immutable UID is later observed with the expected runtime reference and pinned CRI digest; missing eventual attestation or any visible mismatch still fails.
+- Why: Exact-head PR smoke run `30384219955` served 458/458 retry-free requests and passed every rollout, identity, readiness, placement, and provenance check except one normal pre-ContainerStatus snapshot. Replaying its immutable sidecars with the UID-completion rule passes every check while preserving fail-closed image provenance.
+- Refs: issue #176; PR #267; Actions run `30384219955`; m10 D5/A27; `bench/fleet_rollout_bench.py`; `tests/bench/test_fleet_rollout_bench.py`
+
+### 2026-07-28 — [amendment] F1b replays server IDs and eventual image attestation
+- What: F1b now joins each offered request to the gateway placement by the non-empty server-assigned response ID while separately retaining the unique client schedule ID. Lifecycle provenance permits only a Pending, not-Ready observation with a temporarily empty image ID, rejects every visible mismatch immediately, and still requires every observed Pod UID to later match the pinned CRI digest.
+- Why: PR smoke run `30383243344` completed 412/412 retry-free requests and all four replacements, but exposed two verifier false negatives: the gateway intentionally assigns its own request ID, and Kubernetes can publish a replacement Pod before CRI materializes `status.containerStatuses[].imageID`. Replaying that immutable artifact under the corrected rules yields no failed checks without weakening ID or image provenance.
+- Refs: issue #176; PR #267; Actions run `30383243344`; m10 D1/D5/A27; `bench/fleet_rollout_bench.py`; `tests/bench/test_fleet_rollout_bench.py`
+
+### 2026-07-28 — [amendment] F1b freezes a drain-first partitioned rollout
+- What: Added A27 and a separate F1b gate. One `kubectl rollout restart` is held at partition N, then a checked-in driver drains each old UID, proves EndpointSlice and gateway withdrawal plus zero outstanding work, releases exactly one ordinal, and proves the new UID/revision/Ready/eligibility state before continuing. Retry-free traffic and hashed request, placement, membership, rollout, Pod, and EndpointSlice sidecars are independently replayed. Pull requests run a reduced smoke; only one clean exact-head 100-replica formal artifact can close F1b.
+- Why: F1a's `OnDelete` batch churn proves shared capacity and dynamic discovery but cannot prove drain-before-termination ordering, a partition-controlled image restart, exact old/new UID lineage, or unattended zero-failure completion for 100 replicas.
+- Refs: m10 D5/A27; G5 F1b; issue #176; `bench/fleet_rollout_bench.py`; `scripts/kind_rollout_gate.sh`; `.github/workflows/f1b-rollout.yml`; `deploy/kind/f1b/`
+
+### 2026-07-28 — [progress] F1a merges the retained formal result
+- What: PR #266 merged as `68f43f4` and closed #175 after focused validation and independent A26 replay. The retained Actions run `30374404150` remains the binding 200-replica formal artifact; no duplicate formal run was needed.
+- Refs: issue #175; PR #266; commit `68f43f4`; Actions run `30374404150`; m10 D5/A26
 
 ### 2026-07-28 — [amendment] F1a restores the written measurement-wide p99
 - What: Added A26. F1a now applies the strict 10 ms nearest-rank placement p99 once across all requests in the frozen ten-minute measurement. Every epoch and ten-second post-delete window remains mandatory, hashed, published, and independently replayed diagnostic evidence, but its local p99 is not a second SLO. This supersedes only A16's later all-window threshold; the 200 replicas, 50 requests/s, ten churn batches, retry prohibition, zero-error rules, 99% pacing, lifecycle/identity joins, five-second withdrawal, provenance, sidecars, and fail-closed replay contract are unchanged.

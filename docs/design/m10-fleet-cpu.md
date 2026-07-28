@@ -1,8 +1,9 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28). Reviewed (1-reviewer panel
-with repo-line evidence; §6 binding; covers M10a+M10b).
+2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
+2026-07-28). Reviewed (1-reviewer panel with repo-line evidence; §6 binding;
+covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
 Depends on: m7 ReplicaPool/JsonlRouterLog, m7 deploy (spec/builder/prober),
@@ -195,6 +196,11 @@ over (α, β) (pure function over the dataset; no online learning).
   zero failed requests, and placement p99 below 10 ms. Raw request,
   membership, pod, EndpointSlice, resource, and kill/join sidecars must pass
   the independent artifact replay.
+- F1b: one gateway plus an exact 100-replica StatefulSet undergoes one
+  drain-first, partitioned rolling restart under retry-free traffic. Every old
+  ordinal is replaced exactly once, every offered request succeeds, and raw
+  rollout, drain, readiness, membership, placement, Pod, and EndpointSlice
+  evidence must pass the independent artifact replay.
 - Tracing: span tree with InMemorySpanExporter; disabled → zero overhead
   (no otel import).
 - Helm: `helm template` golden test; kind smoke in CI.
@@ -534,3 +540,74 @@ over (α, β) (pure function over the dataset; no online learning).
   amended gate check and every raw sidecar integrity check. The legacy manifest
   wrapper differs only in the old published check map and old `passed` value
   that this amendment intentionally replaces.
+- **A27**: F1b is a drain-first, partitioned `RollingUpdate` of one exact
+  100-replica StatefulSet, not a replay of F1a's `OnDelete` Pod churn. The
+  StatefulSet starts with `rollingUpdate.partition=100`, so staging the new
+  template and the driver's single `kubectl rollout restart` cannot terminate
+  a Pod. The provenance-pinned driver then walks ordinals 99 through 0. For
+  each ordinal it first calls that replica's `/admin/drain` through the
+  authenticated Kubernetes Pod proxy, waits until raw EndpointSlice evidence
+  has withdrawn the old ready,
+  non-terminating UID and the gateway membership stream marks the same
+  generation ineligible, and waits for its outstanding work to reach zero.
+  Only then may it lower the partition to that ordinal. It waits for the same
+  Pod name to acquire exactly one new UID at the update revision, become Ready,
+  and re-enter gateway eligibility before proceeding to the next ordinal.
+  Direct Pod DELETE, pre-draining the whole fleet, advancing a partition after
+  a timeout, or updating more than the one released ordinal fails the gate.
+
+  The binding boundary for "no new work reaches a terminating replica" is the
+  later raw observation of gateway ineligibility and EndpointSlice withdrawal,
+  not receipt of the local drain HTTP response. Distributed readiness
+  propagation between those observations remains published diagnostic
+  evidence. The partition cannot advance before the binding boundary and
+  outstanding count reaches zero, so requests placed before the boundary may
+  complete normally while no later placement may select that old UID.
+
+  Formal traffic is absolute-deadline open loop with retry count zero. Every
+  scheduled arrival has exactly one attempt; an unsent arrival, transport
+  error or timeout, 429, 5xx, other non-2xx response, missing request-to-
+  placement join, or mismatched response Pod identity is a failure. Initial
+  and final evidence must each contain exactly 100 Ready ordinals. The 100 old
+  UIDs and 100 new UIDs must be disjoint, each ordinal must have exactly one
+  old-to-new transition, all final Pods must carry the update revision, and an
+  extra replacement or container restart fails closed.
+
+  Raw `requests`, gateway placement/membership, rollout/partition events,
+  drain/readiness transitions, EndpointSlices, and Pods are retained with safe
+  relative paths, row counts, and SHA-256 digests. Post-run Kubernetes events
+  and resource descriptions remain auxiliary diagnostics in the same CI
+  artifact rather than F1b acceptance inputs. The independent verifier replays
+  the traffic schedule, drain and partition ordering, UID/revision transitions,
+  placement eligibility, availability, image/source provenance, and every
+  published result rather than trusting summary booleans. A pull-request smoke
+  uses the same state machine at reduced scale, but only one clean, exact-head
+  100-replica formal artifact can satisfy F1b.
+
+  "No operator action" means that, after the CI job starts, no human decision,
+  repair, or per-Pod command is admitted. The checked-in driver performs the
+  predetermined drain, wait, and partition writes; it is test orchestration,
+  not a cluster-installed rollout Operator. Retained F1a formal evidence may
+  establish shared-runner capacity, image provenance, NodePort traffic,
+  discovery, and request/placement/membership joins. It cannot establish the
+  partitioned rollout, drain-first ordering, exact-100 lifecycle, or unattended
+  completion because F1a deliberately performs `OnDelete` batch churn. F1b
+  therefore requires its own new formal run; F1a need not be rerun when its
+  frozen inputs remain unchanged.
+- **A28**: F1b's formal whole-rollout deadline is a stuck-run safety cap, not
+  an unstated completion-latency SLO. It is 1,500 seconds while the binding
+  per-ordinal withdrawal and replacement bounds remain five and 60 seconds.
+  Exact-head formal run `30385162649` completed ordinals 99 through 12 with
+  every recorded drain, withdrawal, readiness, endpoint, and replacement
+  condition true before the former 900-second cap cancelled ordinal 11.
+  Those 88 completed cycles took 890.208 seconds: mean 10.116, p95 11.165, and
+  maximum 12.134 seconds including inter-step orchestration. The 1,500-second
+  cap rounds up a 100-step
+  extrapolation of the observed maximum plus 20% runner-jitter margin
+  (`12.133584415 * 100 * 1.20 = 1,456.03`) and still leaves ten minutes for setup,
+  cooldown, replay, and artifact upload inside the 35-minute CI job. The
+  failed run's 46,500 completed request records were each sent exactly once,
+  returned valid HTTP 200 responses, and had no transport error. One additional
+  placement was interrupted by timeout cleanup before an outcome was recorded;
+  the run is diagnostic evidence only because it did not complete all 100
+  steps.

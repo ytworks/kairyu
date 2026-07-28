@@ -1,0 +1,79 @@
+name: F1b zero-failure rollout
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - ".github/workflows/f1b-rollout.yml"
+      - "scripts/kind_rollout_gate.sh"
+      - "deploy/kind/f1a/base/**"
+      - "deploy/kind/f1a/mock/**"
+      - "deploy/kind/f1a/kind-config.yaml"
+      - "deploy/kind/f1b/**"
+      - "bench/fleet_churn_bench.py"
+      - "bench/fleet_rollout_bench.py"
+      - "kairyu/**"
+      - ".dockerignore"
+      - "Dockerfile"
+      - "README.md"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Rollout profile
+        required: true
+        default: formal
+        type: choice
+        options:
+          - formal
+          - smoke
+
+permissions:
+  contents: read
+
+jobs:
+  rollout:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'f1b-formal'
+    concurrency:
+      group: f1b-zero-failure-rollout-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'formal' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      F1B_RESULTS_DIR: bench/results/f1b-zero-failure-rollout
+      PROFILE: >-
+        ${{
+          github.event_name == 'workflow_dispatch' && inputs.profile ||
+          contains(github.event.pull_request.labels.*.name, 'f1b-formal') && 'formal' ||
+          'smoke'
+        }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: >-
+            ${{
+              github.event_name == 'pull_request' &&
+              github.event.pull_request.head.sha ||
+              github.sha
+            }}
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
+        with:
+          install_only: true
+          version: v0.32.0
+          kubectl_version: v1.36.3
+      - name: Run F1b zero-failure rollout gate
+        shell: bash
+        run: bash scripts/kind_rollout_gate.sh "--${PROFILE}"
+      - name: Upload raw and verified evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: f1b-zero-failure-rollout-${{ env.PROFILE }}-${{ github.run_id }}
+          path: bench/results/f1b-zero-failure-rollout
+          if-no-files-found: error
+          retention-days: 30
