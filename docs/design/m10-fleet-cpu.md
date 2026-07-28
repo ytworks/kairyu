@@ -369,20 +369,61 @@ over (α, β) (pure function over the dataset; no online learning).
   backlog-paced. A periodic EndpointSlice or resource fetch that overruns its
   interval records both the scheduled deadline and number of skipped intervals,
   then resumes at the first future deadline; it never performs catch-up fetches.
+  Every periodic row retains `scheduled_ns`, `skipped_intervals_before`,
+  `fetch_started_ns`, and `observed_ns`. Artifact replay requires the first skip
+  count to be zero, re-derives each later deadline as exactly one interval plus
+  the declared skipped intervals after the preceding deadline, and requires the
+  preceding observation to finish before that future deadline and
+  `scheduled_ns <= fetch_started_ns <= observed_ns`. A missing, duplicated,
+  backdated, or understated skip therefore fails closed instead of fabricating
+  a denser evidence cadence than the runner actually achieved. The first
+  periodic slot must cover traffic start and the final slot/observation must
+  cover traffic completion, so a valid suffix cannot mask a truncated prefix
+  or tail. Every row also retains the expected schema/kind and a structurally
+  valid EndpointSlice or node/Pod resource payload; timestamps cannot make an
+  empty or wrong-kind sample count as evidence.
   Pod evidence no longer polls a 200-object LIST every second. It consists of
   the exact initial 200 identities, one label-selected collection LIST of the
   twenty replaced Pods after each epoch's EndpointSlice recovery, and the exact
-  final 200 identities. Recovery first requires 200 unique ready,
-  non-terminating, same-namespace Pod target references, new UIDs for all twenty
-  scheduled names, and complete old-UID withdrawal. The targeted Pod LIST then
-  corroborates UID, Ready state, container image, and runtime image identity;
-  ambiguous EndpointSlice names or UIDs fail closed. Gateway placement evidence
-  is copied after traffic on a worker thread: the bounded writer drains and
-  retries on backpressure rather than dropping rows, growing the queue, or
-  failing after a completed measurement. The formal backend probe interval is
-  one second, still inside the five-second withdrawal bound while reducing the
-  maximum unknown/ejected-replica probe burst by four. This supersedes A22's
-  per-second full-fleet Pod LIST. The 250 ms withdrawal observer, one-second raw
-  causality bracket, 10 ms placement bound, 99% pacing requirement, 50
-  requests/s, retry prohibition, churn schedule, exact-200 checks, and raw
-  artifact replay remain unchanged.
+  final 200 identities. Every one of those initial, per-epoch, and final Pod
+  captures must prove Ready state, the expected Pod name and UID, the frozen
+  container image, and the runtime image/config identity pinned by A21.
+  Initial and final captures cover the exact expected 200 ordinal names; an
+  epoch capture covers exactly its twenty scheduled names, whose UIDs must
+  differ from their old UIDs and equal the EndpointSlice mapping.
+  The single gateway capture is likewise anchored to its observed expected
+  Pod name/UID and pinned gateway container image rather than accepted as an
+  arbitrary well-formed Pod identity.
+
+  EndpointSlice recovery accepts only ready, non-terminating target references
+  with `kind=Pod`, the exact namespace, and non-empty name and UID. Those
+  references must form a strict one-to-one expected-name-to-UID mapping: a
+  duplicate pair, one name mapped to multiple UIDs, one UID mapped to multiple
+  names, an unexpected/missing ordinal name, or any address/name fallback fails
+  closed. Recovery first requires that exact 200-member mapping, new UIDs for
+  all twenty scheduled names, unchanged current UIDs for every other name, and
+  complete old-UID withdrawal. Only then may the targeted Pod LIST corroborate
+  Ready, identity, and image state. Exactly one raw recovery row may claim each
+  epoch's `endpoint_recovered_ns`; a second contradictory row at the same
+  timestamp or an unknown capture class fails replay. All observations from
+  traffic start through the first delete must equal the initial mapping, and
+  all observations after the final recovery must equal the final mapping.
+
+  Initial, epoch, and final Pod fetches retain causal brackets. Replay requires
+  the initial observation before traffic/churn, and for each epoch requires
+  `scheduled <= delete API start <= delete API completion`, old withdrawal
+  before exact EndpointSlice recovery, and
+  `endpoint_recovered_ns <= new_pods_fetch_started_ns
+  <= new_pods_observed_ns == new_ready_ns <= recovered_ns`. The final exact-200
+  fetch begins only after traffic and every epoch recovery. Missing or inverted
+  raw timestamps, or derived durations that do not match them, fail closed.
+
+  Gateway placement evidence is copied after traffic on a worker thread: the
+  bounded writer drains and retries on backpressure rather than dropping rows,
+  growing the queue, or failing after a completed measurement. The formal
+  backend probe interval is one second, still inside the five-second withdrawal
+  bound while reducing the maximum unknown/ejected-replica probe burst by four.
+  This supersedes A22's per-second full-fleet Pod LIST. The 250 ms withdrawal
+  observer, one-second raw causality bracket, 10 ms placement bound, 99% pacing
+  requirement, 50 requests/s, retry prohibition, churn schedule, exact-200
+  checks, and raw artifact replay remain unchanged.

@@ -585,6 +585,42 @@ def _pod_identity(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pod_identity_map(
+    payload: Any,
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    """Return an exact Pod name-to-identity map, rejecting ambiguity."""
+
+    if not isinstance(payload, list):
+        return {}, False
+    identities: dict[str, dict[str, Any]] = {}
+    names_by_uid: dict[str, str] = {}
+    for identity in payload:
+        if not isinstance(identity, dict):
+            return {}, False
+        name = identity.get("name")
+        uid = identity.get("uid")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(uid, str)
+            or not uid
+            or name in identities
+            or uid in names_by_uid
+        ):
+            return {}, False
+        identities[name] = identity
+        names_by_uid[uid] = name
+    return identities, True
+
+
+def _pod_payload_identities(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list) or not all(
+        isinstance(identity, dict) for identity in payload
+    ):
+        return []
+    return payload
+
+
 def _endpoint_uids(snapshot: dict[str, Any]) -> set[str]:
     values: set[str] = set()
     for item in snapshot.get("items", ()):
@@ -602,15 +638,16 @@ def _endpoint_uids(snapshot: dict[str, Any]) -> set[str]:
     return values
 
 
-def _ready_endpoint_targets(
+def _ready_endpoint_target_map(
     snapshot: dict[str, Any],
     *,
     namespace: str,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], bool]:
     """Return ready, non-terminating EndpointSlice pod names and UIDs."""
 
     values: dict[str, str] = {}
     names_by_uid: dict[str, str] = {}
+    pairs: set[tuple[str, str]] = set()
     for item in snapshot.get("items", ()):
         for endpoint in item.get("endpoints", ()):
             conditions = endpoint.get("conditions") or {}
@@ -626,14 +663,103 @@ def _ready_endpoint_targets(
                 target.get("kind") != "Pod"
                 or target.get("namespace") != namespace
                 or not isinstance(name, str)
+                or not name
                 or not isinstance(uid, str)
+                or not uid
                 or (name in values and values[name] != uid)
                 or (uid in names_by_uid and names_by_uid[uid] != name)
+                or (name, uid) in pairs
             ):
-                return {}
+                return {}, False
             values[name] = uid
             names_by_uid[uid] = name
-    return values
+            pairs.add((name, uid))
+    return values, True
+
+
+def _ready_endpoint_targets(
+    snapshot: dict[str, Any],
+    *,
+    namespace: str,
+) -> dict[str, str]:
+    values, valid = _ready_endpoint_target_map(
+        snapshot,
+        namespace=namespace,
+    )
+    return values if valid else {}
+
+
+def _endpoint_payload_shape_valid(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    items = payload.get("items")
+    return (
+        isinstance(items, list)
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("endpoints"), list)
+            and all(
+                isinstance(endpoint, dict)
+                and (
+                    endpoint.get("conditions") is None
+                    or isinstance(endpoint.get("conditions"), dict)
+                )
+                and (
+                    endpoint.get("targetRef") is None
+                    or isinstance(endpoint.get("targetRef"), dict)
+                )
+                for endpoint in item["endpoints"]
+            )
+            for item in items
+        )
+    )
+
+
+def _resource_payload_shape_valid(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    node = payload.get("node")
+    pods = payload.get("pods")
+
+    def metric(value: Any) -> bool:
+        return value is None or type(value) is int
+
+    return (
+        isinstance(node, dict)
+        and isinstance(node.get("name"), str)
+        and bool(node["name"])
+        and metric(node.get("cpu_usage_nano_cores"))
+        and metric(node.get("memory_working_set_bytes"))
+        and {
+            "name",
+            "cpu_usage_nano_cores",
+            "memory_working_set_bytes",
+        }
+        <= set(node)
+        and isinstance(pods, list)
+        and all(
+            isinstance(pod, dict)
+            and isinstance(pod.get("name"), str)
+            and bool(pod["name"])
+            and isinstance(pod.get("uid"), str)
+            and bool(pod["uid"])
+            and metric(pod.get("cpu_usage_nano_cores"))
+            and metric(pod.get("memory_working_set_bytes"))
+            and (
+                pod.get("network") is None
+                or isinstance(pod.get("network"), dict)
+            )
+            and {
+                "name",
+                "uid",
+                "cpu_usage_nano_cores",
+                "memory_working_set_bytes",
+                "network",
+            }
+            <= set(pod)
+            for pod in pods
+        )
+    )
 
 
 class JsonlSink:
@@ -948,10 +1074,11 @@ async def _snapshot_loop(
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     origin_ns = time.monotonic_ns()
+    interval_ns = int(interval_s * 1_000_000_000)
     index = 0
     skipped_intervals_before = 0
     while not stop.is_set():
-        target_ns = origin_ns + int(index * interval_s * 1_000_000_000)
+        target_ns = origin_ns + index * interval_ns
         remaining = (target_ns - time.monotonic_ns()) / 1_000_000_000
         if remaining > 0:
             try:
@@ -959,7 +1086,20 @@ async def _snapshot_loop(
                 break
             except TimeoutError:
                 pass
-        fetch_started_ns = time.monotonic_ns()
+        # A busy event loop can resume the absolute-deadline wait several
+        # intervals late. Skip every fully expired slot before issuing the
+        # fetch; otherwise this loop performs one stale catch-up fetch before
+        # its existing post-fetch skip can take effect.
+        while True:
+            fetch_started_ns = time.monotonic_ns()
+            if fetch_started_ns < target_ns + interval_ns:
+                break
+            first_unexpired_index = (
+                fetch_started_ns - origin_ns
+            ) // interval_ns
+            skipped_intervals_before += first_unexpired_index - index
+            index = first_unexpired_index
+            target_ns = origin_ns + index * interval_ns
         try:
             payload = await fetch()
             record = {
@@ -990,7 +1130,7 @@ async def _snapshot_loop(
         first_future_index = (
             math.floor(
                 (time.monotonic_ns() - origin_ns)
-                / (interval_s * 1_000_000_000)
+                / interval_ns
             )
             + 1
         )
@@ -1171,6 +1311,9 @@ async def _recover_epoch(
     endpoint_uids = set(initial_endpoint_uids)
     endpoint_targets: dict[str, str] = {}
     old_withdrawn_ns = initial_old_withdrawn_ns
+    endpoint_recovered_ns: int | None = None
+    new_pods_fetch_started_ns: int | None = None
+    new_pods_observed_ns: int | None = None
     new_ready_ns: int | None = None
     error: str | None = None
     while time.monotonic() < deadline:
@@ -1237,6 +1380,7 @@ async def _recover_epoch(
                 # the twenty replaced Pods, and only after that contract is
                 # satisfied, to publish full Pod/image identity without
                 # polling all 200 Pod objects on every recovery iteration.
+                candidate_pods_fetch_started_ns = time.monotonic_ns()
                 pods = await _kubectl_json(
                     args.kubectl,
                     args.namespace,
@@ -1249,6 +1393,7 @@ async def _recover_epoch(
                         f"({','.join(names)})"
                     ),
                 )
+                candidate_pods_observed_ns = time.monotonic_ns()
                 identities_by_name = {
                     identity["name"]: identity
                     for item in pods.get("items", ())
@@ -1271,7 +1416,12 @@ async def _recover_epoch(
                     )
                 )
                 if ready_new:
-                    new_ready_ns = observed_ns
+                    endpoint_recovered_ns = observed_ns
+                    new_pods_fetch_started_ns = (
+                        candidate_pods_fetch_started_ns
+                    )
+                    new_pods_observed_ns = candidate_pods_observed_ns
+                    new_ready_ns = candidate_pods_observed_ns
                     break
             except Exception:
                 pass
@@ -1310,6 +1460,9 @@ async def _recover_epoch(
             - (old_withdrawn_ns - api_started_ns) / 1_000_000_000
         ),
         "new_ready_ns": new_ready_ns,
+        "endpoint_recovered_ns": endpoint_recovered_ns,
+        "new_pods_fetch_started_ns": new_pods_fetch_started_ns,
+        "new_pods_observed_ns": new_pods_observed_ns,
         "new_ready_seconds": (
             None
             if new_ready_ns is None
@@ -1522,8 +1675,13 @@ def _runtime_mock_image_summary(
     for record in pods:
         if record.get("error"):
             continue
-        for identity in record.get("payload", ()):
-            for container in identity.get("containers", ()):
+        for identity in _pod_payload_identities(record.get("payload")):
+            containers = identity.get("containers")
+            if not isinstance(containers, list):
+                continue
+            for container in containers:
+                if not isinstance(container, dict):
+                    continue
                 if container.get("name") != container_name:
                     continue
                 for key, destination in (
@@ -1556,6 +1714,46 @@ def _normalized_image_reference(value: str) -> str:
     return value
 
 
+def _pod_identity_matches_image(
+    identity: dict[str, Any],
+    *,
+    container_name: Any,
+    expected_image: Any,
+    allowed_digests: set[str],
+) -> bool:
+    """Verify one Pod's exact container image against pinned CRI metadata."""
+
+    containers = identity.get("containers")
+    if (
+        not isinstance(container_name, str)
+        or not container_name
+        or not isinstance(expected_image, str)
+        or not expected_image
+        or not isinstance(containers, list)
+    ):
+        return False
+    matches = [
+        container
+        for container in containers
+        if isinstance(container, dict)
+        and container.get("name") == container_name
+    ]
+    if len(matches) != 1:
+        return False
+    container = matches[0]
+    runtime_image = container.get("runtime_image")
+    digest = _sha256_digest(container.get("image_id"))
+    return (
+        container.get("spec_image") == expected_image
+        and isinstance(runtime_image, str)
+        and bool(runtime_image)
+        and _normalized_image_reference(runtime_image)
+        == _normalized_image_reference(expected_image)
+        and digest is not None
+        and digest in allowed_digests
+    )
+
+
 def _derived_close(value: Any, expected: float) -> bool:
     return (
         type(value) in (int, float)
@@ -1566,6 +1764,71 @@ def _derived_close(value: Any, expected: float) -> bool:
             rel_tol=1e-12,
             abs_tol=1e-9,
         )
+    )
+
+
+def _periodic_schedule_consistent(
+    records: list[dict[str, Any]],
+    *,
+    interval_seconds: float,
+    coverage_start_ns: int | None,
+    coverage_end_ns: int | None,
+) -> bool:
+    """Replay one absolute-deadline sampler without trusting its summary."""
+
+    periodic = [
+        record for record in records if record.get("capture") is None
+    ]
+    interval_ns = int(interval_seconds * 1_000_000_000)
+    if (
+        not periodic
+        or interval_ns <= 0
+        or type(coverage_start_ns) is not int
+        or type(coverage_end_ns) is not int
+        or coverage_start_ns > coverage_end_ns
+    ):
+        return False
+    previous_scheduled_ns: int | None = None
+    previous_observed_ns: int | None = None
+    for record in periodic:
+        scheduled_ns = record.get("scheduled_ns")
+        skipped = record.get("skipped_intervals_before")
+        fetch_started_ns = record.get("fetch_started_ns")
+        observed_ns = record.get("observed_ns")
+        valid = (
+            type(scheduled_ns) is int
+            and type(skipped) is int
+            and skipped >= 0
+            and type(fetch_started_ns) is int
+            and type(observed_ns) is int
+            and scheduled_ns <= fetch_started_ns <= observed_ns
+            and fetch_started_ns < scheduled_ns + interval_ns
+        )
+        if previous_scheduled_ns is not None:
+            valid = (
+                valid
+                and scheduled_ns - previous_scheduled_ns
+                == (skipped + 1) * interval_ns
+                and previous_observed_ns is not None
+                and previous_observed_ns < scheduled_ns
+            )
+        else:
+            valid = valid and skipped == 0
+        if not valid:
+            return False
+        previous_scheduled_ns = scheduled_ns
+        previous_observed_ns = observed_ns
+    first_scheduled_ns = periodic[0]["scheduled_ns"]
+    last_scheduled_ns = periodic[-1]["scheduled_ns"]
+    last_observed_ns = periodic[-1]["observed_ns"]
+    return (
+        first_scheduled_ns <= coverage_start_ns
+        < first_scheduled_ns + interval_ns
+        and max(
+            last_scheduled_ns + interval_ns,
+            last_observed_ns,
+        )
+        > coverage_end_ns
     )
 
 
@@ -1839,16 +2102,45 @@ def evaluate_gate(
         bool(record.get("transport_error")) for record in requests
     )
     not_sent = sum(bool(record.get("not_sent")) for record in requests)
+    namespace = environment.get("namespace")
     endpoint_uids = set()
-    endpoint_uid_snapshots: list[set[str]] = []
     endpoint_timed_snapshots: list[dict[str, Any]] = []
     endpoint_errors = 0
+    endpoint_evidence_schema_valid = bool(endpoints)
+    endpoint_namespace_valid = (
+        isinstance(namespace, str) and bool(namespace)
+    )
+    all_endpoint_target_refs_valid = endpoint_namespace_valid
     for record in endpoints:
+        record_shape_valid = (
+            type(record.get("schema_version")) is int
+            and record["schema_version"] == SCHEMA_VERSION
+            and record.get("kind") == "endpointslices"
+            and "error" in record
+            and (
+                record.get("error") is not None
+                or _endpoint_payload_shape_valid(record.get("payload"))
+            )
+        )
+        endpoint_evidence_schema_valid = (
+            endpoint_evidence_schema_valid and record_shape_valid
+        )
         if record.get("error"):
             endpoint_errors += 1
             continue
-        snapshot_uids = _endpoint_uids(record.get("payload") or {})
-        endpoint_uid_snapshots.append(snapshot_uids)
+        payload = (
+            record["payload"]
+            if _endpoint_payload_shape_valid(record.get("payload"))
+            else {}
+        )
+        snapshot_uids = _endpoint_uids(payload)
+        snapshot_targets, target_refs_valid = _ready_endpoint_target_map(
+            payload,
+            namespace=namespace if isinstance(namespace, str) else "",
+        )
+        all_endpoint_target_refs_valid = (
+            all_endpoint_target_refs_valid and target_refs_valid
+        )
         if type(record.get("observed_ns")) is int:
             endpoint_timed_snapshots.append(
                 {
@@ -1862,10 +2154,15 @@ def evaluate_gate(
                         type(record.get("fetch_started_ns")) is int
                     ),
                     "uids": snapshot_uids,
+                    "targets": snapshot_targets,
+                    "target_refs_valid": target_refs_valid,
                     "capture": record.get("capture"),
                     "epoch": record.get("epoch"),
                     "observer_sequence": record.get("observer_sequence"),
                     "scheduled_ns": record.get("scheduled_ns"),
+                    "skipped_intervals_before": record.get(
+                        "skipped_intervals_before"
+                    ),
                 }
             )
         endpoint_uids.update(snapshot_uids)
@@ -1876,7 +2173,13 @@ def evaluate_gate(
     for record in pods:
         if record.get("error"):
             continue
-        for identity in record.get("payload", ()):
+        raw_payload = record.get("payload")
+        identities = _pod_payload_identities(raw_payload)
+        if not isinstance(raw_payload, list) or len(identities) != len(
+            raw_payload
+        ):
+            pod_uid_name_consistent = False
+        for identity in identities:
             uid = identity.get("uid")
             name = identity.get("name")
             if not isinstance(uid, str) or not uid:
@@ -1979,6 +2282,11 @@ def evaluate_gate(
             api_started_ns = record.get("api_started_ns")
             api_completed_ns = record.get("api_completed_ns")
             old_withdrawn_ns = record.get("old_withdrawn_ns")
+            endpoint_recovered_ns = record.get("endpoint_recovered_ns")
+            new_pods_fetch_started_ns = record.get(
+                "new_pods_fetch_started_ns"
+            )
+            new_pods_observed_ns = record.get("new_pods_observed_ns")
             new_ready_ns = record.get("new_ready_ns")
             recovered_ns = record.get("recovered_ns")
             raw_times_valid = all(
@@ -1988,6 +2296,9 @@ def evaluate_gate(
                     api_started_ns,
                     api_completed_ns,
                     old_withdrawn_ns,
+                    endpoint_recovered_ns,
+                    new_pods_fetch_started_ns,
+                    new_pods_observed_ns,
                     new_ready_ns,
                     recovered_ns,
                 )
@@ -1996,8 +2307,13 @@ def evaluate_gate(
                 raw_times_valid
                 and scheduled_ns == expected_scheduled_ns
                 and scheduled_ns <= api_started_ns <= api_completed_ns
-                and api_started_ns <= old_withdrawn_ns <= recovered_ns
-                and api_started_ns <= new_ready_ns <= recovered_ns
+                and api_started_ns
+                <= old_withdrawn_ns
+                <= endpoint_recovered_ns
+                <= new_pods_fetch_started_ns
+                <= new_pods_observed_ns
+                == new_ready_ns
+                <= recovered_ns
                 and api_completed_ns <= recovered_ns
             )
             derived = (
@@ -2037,6 +2353,30 @@ def evaluate_gate(
     else:
         churn_timeline_ok = False
 
+    pod_initial_records = [
+        record
+        for record in pods
+        if record.get("kind") == "pods"
+        and record.get("capture") == "initial"
+    ]
+    pod_recovery_records = [
+        record
+        for record in pods
+        if record.get("kind") == "pods"
+        and record.get("capture") == "churn_recovery"
+    ]
+    pod_final_records = [
+        record
+        for record in pods
+        if record.get("kind") == "pods"
+        and record.get("capture") == "final"
+    ]
+    gateway_pod_records = [
+        record
+        for record in pods
+        if record.get("kind") == "gateway_pods"
+        and record.get("capture") == "gateway"
+    ]
     statefulset = environment.get("statefulset")
     expected_initial_names = {
         f"{statefulset}-{ordinal}"
@@ -2052,17 +2392,21 @@ def evaluate_gate(
         item.get("name"): item.get("uid") for item in all_old_entries
     }
     initial_pod_payload = (
-        pods[0].get("payload", ())
-        if pods and not pods[0].get("error")
+        pod_initial_records[0].get("payload", ())
+        if len(pod_initial_records) == 1
+        and not pod_initial_records[0].get("error")
         else ()
     )
+    initial_pod_identities, initial_pod_map_valid = _pod_identity_map(
+        initial_pod_payload
+    )
     initial_pod_state = {
-        item.get("name"): item.get("uid")
-        for item in initial_pod_payload
-        if isinstance(item, dict)
+        name: identity["uid"]
+        for name, identity in initial_pod_identities.items()
     }
     state_mapping_valid = (
         bool(expected_initial_names)
+        and initial_pod_map_valid
         and len(all_old_entries) == config.replica_count
         and len(initial_state_by_name) == config.replica_count
         and set(initial_state_by_name) == expected_initial_names
@@ -2074,10 +2418,13 @@ def evaluate_gate(
     ever_seen_uids = set(current_fleet)
     expected_fleet_before_epoch: list[set[str]] = []
     expected_fleet_by_epoch: list[set[str]] = []
+    expected_state_before_epoch: list[dict[str, str]] = []
+    expected_state_by_epoch: list[dict[str, str]] = []
     lifecycle_valid = len(current_fleet) == config.replica_count
     exact_identity = True
     for expected_epoch, record in enumerate(ordered_churn):
         expected_fleet_before_epoch.append(set(current_fleet))
+        expected_state_before_epoch.append(dict(current_state_by_name))
         old_entries = record.get("old", ())
         new_entries = record.get("new", ())
         epoch_old_uids = {
@@ -2138,12 +2485,243 @@ def evaluate_gate(
             current_fleet = set(current_state_by_name.values())
             ever_seen_uids.update(epoch_new_uids)
         expected_fleet_by_epoch.append(set(current_fleet))
+        expected_state_by_epoch.append(dict(current_state_by_name))
     lifecycle_valid = (
         lifecycle_valid
         and len(ordered_churn) == config.churn_epochs
         and len(expected_fleet_by_epoch) == config.churn_epochs
         and len(current_fleet) == config.replica_count
         and current_fleet == new_uids
+    )
+    pod_recovery_epochs = [
+        record.get("epoch") for record in pod_recovery_records
+    ]
+    pod_capture_structure_complete = (
+        len(pods) == config.churn_epochs + 3
+        and len(pod_initial_records) == 1
+        and len(pod_recovery_records) == config.churn_epochs
+        and pod_recovery_epochs == list(range(config.churn_epochs))
+        and len(pod_final_records) == 1
+        and len(gateway_pod_records) == 1
+        and all(record.get("error") is None for record in pods)
+        and all(
+            type(record.get("schema_version")) is int
+            and record["schema_version"] == SCHEMA_VERSION
+            and "error" in record
+            for record in pods
+        )
+    )
+
+    def pod_record_identities(
+        record: dict[str, Any],
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, str], bool]:
+        identities, valid = _pod_identity_map(record.get("payload"))
+        return (
+            identities,
+            {
+                name: identity["uid"]
+                for name, identity in identities.items()
+            },
+            valid,
+        )
+
+    initial_capture_identities: dict[str, dict[str, Any]] = {}
+    initial_capture_state: dict[str, str] = {}
+    initial_capture_valid = False
+    if len(pod_initial_records) == 1:
+        (
+            initial_capture_identities,
+            initial_capture_state,
+            initial_capture_valid,
+        ) = pod_record_identities(pod_initial_records[0])
+    final_capture_identities: dict[str, dict[str, Any]] = {}
+    final_capture_state: dict[str, str] = {}
+    final_capture_valid = False
+    if len(pod_final_records) == 1:
+        (
+            final_capture_identities,
+            final_capture_state,
+            final_capture_valid,
+        ) = pod_record_identities(pod_final_records[0])
+    gateway_capture_identities: dict[str, dict[str, Any]] = {}
+    gateway_capture_valid = False
+    if len(gateway_pod_records) == 1:
+        (
+            gateway_capture_identities,
+            _,
+            gateway_capture_valid,
+        ) = pod_record_identities(gateway_pod_records[0])
+
+    recovery_capture_details = []
+    required_mock_identities = list(initial_capture_identities.values())
+    for epoch, churn_record in enumerate(ordered_churn):
+        captures = [
+            record
+            for record in pod_recovery_records
+            if record.get("epoch") == epoch
+        ]
+        identities: dict[str, dict[str, Any]] = {}
+        state: dict[str, str] = {}
+        capture_valid = False
+        if len(captures) == 1:
+            identities, state, capture_valid = pod_record_identities(
+                captures[0]
+            )
+        expected_state = {
+            identity.get("name"): identity.get("uid")
+            for identity in churn_record.get("new", ())
+            if isinstance(identity, dict)
+        }
+        identity_exact = (
+            capture_valid
+            and len(expected_state) == config.churn_batch_size
+            and state == expected_state
+        )
+        timeline_consistent = (
+            len(captures) == 1
+            and type(churn_record.get("endpoint_recovered_ns")) is int
+            and type(churn_record.get("new_pods_fetch_started_ns")) is int
+            and type(churn_record.get("new_pods_observed_ns")) is int
+            and type(churn_record.get("new_ready_ns")) is int
+            and type(churn_record.get("recovered_ns")) is int
+            and captures[0].get("fetch_started_ns")
+            == churn_record["new_pods_fetch_started_ns"]
+            and captures[0].get("observed_ns")
+            == churn_record["new_pods_observed_ns"]
+            and churn_record["endpoint_recovered_ns"]
+            <= churn_record["new_pods_fetch_started_ns"]
+            <= churn_record["new_pods_observed_ns"]
+            == churn_record["new_ready_ns"]
+            <= churn_record["recovered_ns"]
+        )
+        ready = (
+            identity_exact
+            and all(
+                identity.get("ready") is True
+                for identity in identities.values()
+            )
+        )
+        recovery_capture_details.append(
+            {
+                "epoch": churn_record.get("epoch"),
+                "identity_exact": identity_exact,
+                "timeline_consistent": timeline_consistent,
+                "ready": ready,
+            }
+        )
+        required_mock_identities.extend(identities.values())
+    required_mock_identities.extend(final_capture_identities.values())
+
+    initial_identity_exact = (
+        initial_capture_valid
+        and len(initial_capture_state) == config.replica_count
+        and initial_capture_state == initial_state_by_name
+    )
+    final_identity_exact = (
+        final_capture_valid
+        and len(final_capture_state) == config.replica_count
+        and final_capture_state == current_state_by_name
+    )
+    gateway_identity_exact = (
+        gateway_capture_valid
+        and len(gateway_capture_identities) == 1
+        and {
+            name: identity["uid"]
+            for name, identity in gateway_capture_identities.items()
+        }
+        == {
+            environment.get("gateway_pod_name"): environment.get(
+                "gateway_pod_uid"
+            )
+        }
+        and isinstance(environment.get("gateway_pod_name"), str)
+        and bool(environment["gateway_pod_name"])
+        and isinstance(environment.get("gateway_pod_uid"), str)
+        and bool(environment["gateway_pod_uid"])
+    )
+    pod_capture_identity_exact = (
+        lifecycle_valid
+        and initial_identity_exact
+        and len(recovery_capture_details) == config.churn_epochs
+        and all(
+            detail["identity_exact"] for detail in recovery_capture_details
+        )
+        and final_identity_exact
+        and gateway_identity_exact
+    )
+
+    def record_fetch_precedes_observation(record: dict[str, Any]) -> bool:
+        return (
+            type(record.get("fetch_started_ns")) is int
+            and type(record.get("observed_ns")) is int
+            and record["fetch_started_ns"] <= record["observed_ns"]
+        )
+
+    first_api_started_ns = min(
+        (
+            record["api_started_ns"]
+            for record in ordered_churn
+            if type(record.get("api_started_ns")) is int
+        ),
+        default=None,
+    )
+    last_recovered_ns = max(
+        (
+            record["recovered_ns"]
+            for record in ordered_churn
+            if type(record.get("recovered_ns")) is int
+        ),
+        default=None,
+    )
+    traffic_started_ns = min(
+        (
+            record["send_ns"]
+            for record in requests
+            if type(record.get("send_ns")) is int
+        ),
+        default=None,
+    )
+    traffic_completed_ns = max(
+        (
+            record["end_ns"]
+            for record in requests
+            if type(record.get("end_ns")) is int
+        ),
+        default=None,
+    )
+    pod_capture_timeline_consistent = (
+        pod_capture_structure_complete
+        and record_fetch_precedes_observation(pod_initial_records[0])
+        and type(first_api_started_ns) is int
+        and type(traffic_started_ns) is int
+        and pod_initial_records[0]["observed_ns"] <= first_api_started_ns
+        and pod_initial_records[0]["observed_ns"] <= traffic_started_ns
+        and all(
+            detail["timeline_consistent"]
+            for detail in recovery_capture_details
+        )
+        and record_fetch_precedes_observation(pod_final_records[0])
+        and type(last_recovered_ns) is int
+        and type(traffic_completed_ns) is int
+        and last_recovered_ns <= pod_final_records[0]["fetch_started_ns"]
+        and traffic_completed_ns <= pod_final_records[0]["fetch_started_ns"]
+        and record_fetch_precedes_observation(gateway_pod_records[0])
+        and pod_final_records[0]["observed_ns"]
+        <= gateway_pod_records[0]["fetch_started_ns"]
+    )
+    pod_capture_readiness_complete = (
+        pod_capture_identity_exact
+        and all(
+            identity.get("ready") is True
+            for identity in (
+                *initial_capture_identities.values(),
+                *final_capture_identities.values(),
+                *gateway_capture_identities.values(),
+            )
+        )
+        and all(
+            detail["ready"] for detail in recovery_capture_details
+        )
     )
     endpoint_epoch_recoveries = []
     for epoch, record in enumerate(ordered_churn):
@@ -2152,12 +2730,18 @@ def evaluate_gate(
             if epoch < len(expected_fleet_by_epoch)
             else set()
         )
+        expected_state = (
+            expected_state_by_epoch[epoch]
+            if epoch < len(expected_state_by_epoch)
+            else {}
+        )
         recovery_uids = {
             uid
             for uid in record.get("endpoint_uids_at_recovery", ())
             if isinstance(uid, str) and uid
         }
         api_started_ns = record.get("api_started_ns")
+        endpoint_recovered_ns = record.get("endpoint_recovered_ns")
         recovered_ns = record.get("recovered_ns")
         periodic_exact_observed_ns = [
             snapshot["observed_ns"]
@@ -2170,14 +2754,28 @@ def evaluate_gate(
             <= recovered_ns
             + int(config.evidence_interval_seconds * 1_000_000_000)
             and snapshot["capture"] is None
-            and snapshot["uids"] == expected_fleet
+            and snapshot["target_refs_valid"]
+            and snapshot["targets"] == expected_state
         ]
+        claimed_recovery_snapshots = [
+            snapshot
+            for snapshot in endpoint_timed_snapshots
+            if snapshot["capture"] == "churn_recovery"
+            and snapshot["epoch"] == epoch
+            and type(endpoint_recovered_ns) is int
+            and snapshot["observed_ns"] == endpoint_recovered_ns
+        ]
+        claimed_recovery_exact = (
+            len(claimed_recovery_snapshots) == 1
+            and claimed_recovery_snapshots[0]["target_refs_valid"]
+            and claimed_recovery_snapshots[0]["targets"] == expected_state
+        )
         exact = (
             lifecycle_valid
             and recovery_uids == expected_fleet
             and record.get("ready_endpoint_count_at_recovery")
             == config.replica_count
-            and record.get("new_ready_ns") is not None
+            and claimed_recovery_exact
             and bool(periodic_exact_observed_ns)
         )
         endpoint_epoch_recoveries.append(
@@ -2185,6 +2783,11 @@ def evaluate_gate(
                 "epoch": record.get("epoch"),
                 "expected_uids": sorted(expected_fleet),
                 "observed_uids": sorted(recovery_uids),
+                "endpoint_recovered_ns": endpoint_recovered_ns,
+                "claimed_recovery_snapshot_count": len(
+                    claimed_recovery_snapshots
+                ),
+                "claimed_recovery_exact": claimed_recovery_exact,
                 "periodic_exact_observed_ns": periodic_exact_observed_ns,
                 "exact": exact,
             }
@@ -2202,11 +2805,6 @@ def evaluate_gate(
         _ENDPOINT_WITHDRAWAL_POLL_SECONDS * 1_000_000_000
     )
     for epoch, record in enumerate(ordered_churn):
-        expected_before = (
-            expected_fleet_before_epoch[epoch]
-            if epoch < len(expected_fleet_before_epoch)
-            else set()
-        )
         old_epoch_uids = {
             uid
             for item in record.get("old", ())
@@ -2320,7 +2918,10 @@ def evaluate_gate(
         )
         predelete_exact = (
             len(predelete_snapshots) == 1
-            and predelete_snapshots[0]["uids"] == expected_before
+            and predelete_snapshots[0]["target_refs_valid"]
+            and epoch < len(expected_state_before_epoch)
+            and predelete_snapshots[0]["targets"]
+            == expected_state_before_epoch[epoch]
         )
         withdrawal_bracketed = (
             first_disjoint is not None
@@ -2789,6 +3390,19 @@ def evaluate_gate(
         )
         if isinstance(value, str)
     }
+    required_mock_images_pinned = (
+        pod_capture_identity_exact
+        and bool(expected_mock_runtime_digests)
+        and all(
+            _pod_identity_matches_image(
+                identity,
+                container_name=mock_container_name,
+                expected_image=expected_mock_image,
+                allowed_digests=expected_mock_runtime_digests,
+            )
+            for identity in required_mock_identities
+        )
+    )
     runtime_image_digests = {
         digest
         for raw in runtime_mock_image["image_ids"]
@@ -2800,11 +3414,16 @@ def evaluate_gate(
     for record in pods:
         if record.get("error"):
             continue
-        for identity in record.get("payload", ()):
+        for identity in _pod_payload_identities(record.get("payload")):
             uid = identity.get("uid")
             if not isinstance(uid, str) or not uid:
                 continue
-            for container in identity.get("containers", ()):
+            containers = identity.get("containers")
+            if not isinstance(containers, list):
+                continue
+            for container in containers:
+                if not isinstance(container, dict):
+                    continue
                 if container.get("name") == mock_container_name:
                     mock_pod_uids.add(uid)
                 if (
@@ -2837,6 +3456,7 @@ def evaluate_gate(
         and bool(runtime_image_digests)
         and runtime_image_digests <= expected_mock_runtime_digests
         and runtime_mock_per_uid_ok
+        and required_mock_images_pinned
     )
     gateway_container_name = environment.get("gateway_container_name")
     expected_gateway_image = environment.get("expected_gateway_image")
@@ -2876,12 +3496,30 @@ def evaluate_gate(
         identity
         for record in pods
         if not record.get("error")
-        for identity in record.get("payload", ())
+        for identity in _pod_payload_identities(record.get("payload"))
         if any(
-            container.get("name") == gateway_container_name
-            for container in identity.get("containers", ())
+            isinstance(container, dict)
+            and container.get("name") == gateway_container_name
+            for container in (
+                identity.get("containers")
+                if isinstance(identity.get("containers"), list)
+                else ()
+            )
         )
     ]
+    required_gateway_images_pinned = (
+        gateway_identity_exact
+        and bool(expected_gateway_runtime_digests)
+        and all(
+            _pod_identity_matches_image(
+                identity,
+                container_name=gateway_container_name,
+                expected_image=expected_gateway_image,
+                allowed_digests=expected_gateway_runtime_digests,
+            )
+            for identity in gateway_capture_identities.values()
+        )
+    )
     runtime_gateway_image_ok = (
         isinstance(gateway_container_name, str)
         and bool(gateway_container_name)
@@ -2908,6 +3546,10 @@ def evaluate_gate(
         == {_normalized_image_reference(expected_gateway_image)}
         and bool(runtime_gateway_digests)
         and runtime_gateway_digests <= expected_gateway_runtime_digests
+        and required_gateway_images_pinned
+    )
+    pod_capture_image_identity_pinned = (
+        required_mock_images_pinned and required_gateway_images_pinned
     )
     placement_windows = [overall, *epochs, *churn_windows]
     placement_ok = all(
@@ -2927,6 +3569,87 @@ def evaluate_gate(
             and bool(record["pod_uid"])
             and pod_name_by_uid.get(record["pod_uid"]) == record["pod_name"]
             for record in requests
+        )
+    )
+    allowed_endpoint_captures = {
+        None,
+        "churn_predelete",
+        "churn_withdrawal",
+        "churn_recovery",
+    }
+    endpoint_capture_labels_valid = all(
+        record.get("capture") in allowed_endpoint_captures
+        for record in endpoints
+    )
+    initial_region_snapshots = [
+        snapshot
+        for snapshot in endpoint_timed_snapshots
+        if type(traffic_started_ns) is int
+        and type(first_api_started_ns) is int
+        and traffic_started_ns
+        <= snapshot["observed_ns"]
+        <= first_api_started_ns
+    ]
+    final_region_snapshots = [
+        snapshot
+        for snapshot in endpoint_timed_snapshots
+        if type(last_recovered_ns) is int
+        and snapshot["observed_ns"] >= last_recovered_ns
+    ]
+    initial_endpoints_exact = (
+        type(first_api_started_ns) is int
+        and bool(initial_region_snapshots)
+        and all(
+            snapshot["target_refs_valid"]
+            and snapshot["targets"] == initial_state_by_name
+            for snapshot in initial_region_snapshots
+        )
+    )
+    final_endpoints_exact = (
+        type(last_recovered_ns) is int
+        and bool(final_region_snapshots)
+        and all(
+            snapshot["target_refs_valid"]
+            and snapshot["targets"] == current_state_by_name
+            for snapshot in final_region_snapshots
+        )
+    )
+    endpoint_target_refs_valid = (
+        endpoint_namespace_valid
+        and all_endpoint_target_refs_valid
+        and endpoint_capture_labels_valid
+        and initial_endpoints_exact
+        and final_endpoints_exact
+        and endpoint_predelete_exact
+        and len(endpoint_epoch_recoveries) == config.churn_epochs
+        and all(
+            recovery["claimed_recovery_exact"]
+            for recovery in endpoint_epoch_recoveries
+        )
+    )
+    endpoint_periodic_schedule_ok = _periodic_schedule_consistent(
+        endpoints,
+        interval_seconds=config.evidence_interval_seconds,
+        coverage_start_ns=traffic_started_ns,
+        coverage_end_ns=traffic_completed_ns,
+    )
+    resource_periodic_schedule_ok = _periodic_schedule_consistent(
+        resources,
+        interval_seconds=config.resource_interval_seconds,
+        coverage_start_ns=traffic_started_ns,
+        coverage_end_ns=traffic_completed_ns,
+    )
+    resource_evidence_schema_valid = (
+        bool(resources)
+        and all(
+            type(record.get("schema_version")) is int
+            and record["schema_version"] == SCHEMA_VERSION
+            and record.get("kind") == "resources"
+            and record.get("capture") is None
+            and "error" in record
+            and record.get("error") is None
+            and _resource_payload_shape_valid(record.get("payload"))
+            for record in resources
         )
     )
     checks = {
@@ -3017,6 +3740,13 @@ def evaluate_gate(
         ),
         "endpoint_raw_withdrawal_causal": endpoint_raw_withdrawal_causal,
         "new_endpoints_ready_with_exact_fleet_size": endpoint_recovery_exact,
+        "endpoint_evidence_schema_valid": endpoint_evidence_schema_valid,
+        "endpoint_capture_labels_valid": endpoint_capture_labels_valid,
+        "endpoint_target_refs_valid": endpoint_target_refs_valid,
+        "periodic_sampler_schedule_consistent": (
+            endpoint_periodic_schedule_ok
+            and resource_periodic_schedule_ok
+        ),
         "pod_uid_replaced_exactly_once": (
             exact_identity
             and lifecycle_valid
@@ -3031,11 +3761,11 @@ def evaluate_gate(
         ),
         "initial_endpoints_exact_old_fleet": (
             endpoint_errors == 0
-            and any(snapshot == old_uids for snapshot in endpoint_uid_snapshots)
+            and initial_endpoints_exact
         ),
         "final_endpoints_exact_new_fleet": (
             endpoint_errors == 0
-            and any(snapshot == new_uids for snapshot in endpoint_uid_snapshots)
+            and final_endpoints_exact
         ),
         "gateway_initial_membership_all_eligible": membership_initial,
         "gateway_final_membership_all_replacements_eligible": membership_final,
@@ -3058,11 +3788,22 @@ def evaluate_gate(
             and old_uids <= pod_uids
             and new_uids <= pod_uids
         ),
+        "pod_capture_structure_complete": pod_capture_structure_complete,
+        "pod_capture_identity_exact": pod_capture_identity_exact,
+        "pod_capture_timeline_consistent": (
+            pod_capture_timeline_consistent
+        ),
+        "pod_capture_readiness_complete": (
+            pod_capture_readiness_complete
+        ),
+        "pod_capture_image_identity_pinned": (
+            pod_capture_image_identity_pinned
+        ),
         "runtime_mock_image_pinned": runtime_mock_image_ok,
         "runtime_gateway_image_pinned": runtime_gateway_image_ok,
         "resource_evidence_complete": (
-            bool(resources)
-            and all(record.get("error") is None for record in resources)
+            resource_evidence_schema_valid
+            and resource_periodic_schedule_ok
         ),
         "clean_source": not environment.get(
             "source_dirty",
@@ -3361,12 +4102,16 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
     stop = asyncio.Event()
     owned_tasks: list[asyncio.Task] = []
     try:
+        initial_pods_fetch_started_ns = time.monotonic_ns()
         initial = await _initial_inventory(args, config)
+        initial_pods_observed_ns = time.monotonic_ns()
         initial_by_name = {item["name"]: item for item in initial}
         initial_pod_record = {
             "schema_version": SCHEMA_VERSION,
             "kind": "pods",
-            "observed_ns": time.monotonic_ns(),
+            "capture": "initial",
+            "fetch_started_ns": initial_pods_fetch_started_ns,
+            "observed_ns": initial_pods_observed_ns,
             "error": None,
             "payload": initial,
         }
@@ -3472,7 +4217,8 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
                 "kind": "pods",
                 "capture": "churn_recovery",
                 "epoch": record["epoch"],
-                "observed_ns": record["new_ready_ns"],
+                "fetch_started_ns": record["new_pods_fetch_started_ns"],
+                "observed_ns": record["new_pods_observed_ns"],
                 "error": record.get("error"),
                 "payload": record.get("new", ()),
             }
@@ -3480,6 +4226,7 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
         ]
         for record in churn_pod_records:
             sinks["pods"].write(record)
+        final_mock_fetch_started_ns = time.monotonic_ns()
         final_mock_snapshot = await _kubectl_json(
             args.kubectl,
             args.namespace,
@@ -3488,11 +4235,13 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             "-l",
             args.pod_selector,
         )
+        final_mock_observed_ns = time.monotonic_ns()
         final_mock_pod_record = {
             "schema_version": SCHEMA_VERSION,
             "kind": "pods",
             "capture": "final",
-            "observed_ns": time.monotonic_ns(),
+            "fetch_started_ns": final_mock_fetch_started_ns,
+            "observed_ns": final_mock_observed_ns,
             "error": None,
             "payload": [
                 _pod_identity(item)
@@ -3505,6 +4254,7 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             *churn_pod_records,
             final_mock_pod_record,
         ]
+        gateway_pods_fetch_started_ns = time.monotonic_ns()
         gateway_snapshot = await _kubectl_json(
             args.kubectl,
             args.namespace,
@@ -3513,10 +4263,13 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             "-l",
             args.gateway_pod_selector,
         )
+        gateway_pods_observed_ns = time.monotonic_ns()
         gateway_pod_record = {
             "schema_version": SCHEMA_VERSION,
             "kind": "gateway_pods",
-            "observed_ns": time.monotonic_ns(),
+            "capture": "gateway",
+            "fetch_started_ns": gateway_pods_fetch_started_ns,
+            "observed_ns": gateway_pods_observed_ns,
             "error": None,
             "payload": [
                 _pod_identity(item)
@@ -3545,6 +4298,7 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
     environment.update(
         {
             "source_end_match": source_end == source_start,
+            "namespace": args.namespace,
             "statefulset": args.statefulset,
             "mock_container_name": args.mock_container,
             "expected_mock_image": args.mock_image,
@@ -3554,6 +4308,16 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             ),
             "gateway_container_name": args.gateway_container,
             "expected_gateway_image": args.gateway_image,
+            "gateway_pod_name": (
+                gateway_pod_record["payload"][0].get("name")
+                if len(gateway_pod_record["payload"]) == 1
+                else None
+            ),
+            "gateway_pod_uid": (
+                gateway_pod_record["payload"][0].get("uid")
+                if len(gateway_pod_record["payload"]) == 1
+                else None
+            ),
             "runtime_gateway_image": _runtime_mock_image_summary(
                 pods,
                 args.gateway_container,

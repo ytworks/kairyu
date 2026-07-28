@@ -196,6 +196,56 @@ async def test_snapshot_loop_skips_overdue_intervals_without_catchup() -> None:
     )
 
 
+async def test_snapshot_loop_skips_slot_expired_while_waiting_before_fetch(
+    monkeypatch,
+) -> None:
+    stop = asyncio.Event()
+    captured = []
+    fetches = 0
+    wait_calls = 0
+    interval_s = 0.01
+
+    class Sink:
+        def write(self, value):
+            captured.append(value)
+
+    async def late_wait_for(awaitable, timeout):
+        nonlocal wait_calls
+        wait_calls += 1
+        task = asyncio.create_task(awaitable)
+        await asyncio.sleep(timeout + 0.035)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise TimeoutError
+
+    async def fetch():
+        nonlocal fetches
+        fetches += 1
+        if fetches == 2:
+            stop.set()
+        return {"fetch": fetches}
+
+    monkeypatch.setattr(fleet_bench.asyncio, "wait_for", late_wait_for)
+
+    records = await fleet_bench._snapshot_loop(
+        kind="late",
+        interval_s=interval_s,
+        stop=stop,
+        sink=Sink(),
+        fetch=fetch,
+    )
+
+    assert wait_calls == 1
+    assert fetches == 2
+    assert records == captured
+    assert records[1]["skipped_intervals_before"] >= 3
+    assert (
+        0
+        <= records[1]["fetch_started_ns"] - records[1]["scheduled_ns"]
+        < int(interval_s * 1_000_000_000)
+    )
+
+
 def _passing_evidence():
     config = SMOKE_CONFIG
     plan = churn_plan(config)
@@ -215,6 +265,28 @@ def _passing_evidence():
     new_by_ordinal = {
         ordinal: f"new-{ordinal}" for ordinal in range(config.replica_count)
     }
+
+    def pod_identity(uid):
+        ordinal = uid.split("-", 1)[1]
+        return {
+            "name": f"f1a-replica-{ordinal}",
+            "uid": uid,
+            "ready": True,
+            "phase": "Running",
+            "containers": [
+                {
+                    "name": "mock",
+                    "spec_image": mock_image,
+                    "runtime_image": (
+                        f"docker.io/library/{mock_image}"
+                        if uid.startswith("new-")
+                        else mock_image
+                    ),
+                    "image_id": runtime_image_id,
+                }
+            ],
+        }
+
     current_uids = set(old_by_ordinal.values())
     endpoint_transitions = []
     membership_snapshots = [
@@ -236,8 +308,11 @@ def _passing_evidence():
             name = f"f1a-replica-{ordinal}"
             old_uid = old_by_ordinal[ordinal]
             new_uid = new_by_ordinal[ordinal]
-            old.append({"name": name, "uid": old_uid})
-            new.append({"name": name, "uid": new_uid})
+            old_identity = pod_identity(old_uid)
+            new_identity = pod_identity(new_uid)
+            assert old_identity["name"] == new_identity["name"] == name
+            old.append(old_identity)
+            new.append(new_identity)
             old_epoch_uids.add(old_uid)
             new_epoch_uids.add(new_uid)
         scheduled_ns = measurement_origin_ns + int(
@@ -286,6 +361,11 @@ def _passing_evidence():
                 "old_withdrawn_ns": api_started_ns + 250_000_000,
                 "old_withdrawal_seconds": 0.25,
                 "old_withdrawal_margin_seconds": 4.75,
+                "endpoint_recovered_ns": api_started_ns + 400_000_000,
+                "new_pods_fetch_started_ns": (
+                    api_started_ns + 450_000_000
+                ),
+                "new_pods_observed_ns": api_started_ns + 500_000_000,
                 "new_ready_ns": api_started_ns + 500_000_000,
                 "new_ready_seconds": 0.5,
                 "recovered_ns": api_started_ns + 500_000_000,
@@ -371,6 +451,14 @@ def _passing_evidence():
             }
         )
 
+    traffic_started_ns = min(record["send_ns"] for record in requests)
+    traffic_completed_ns = max(record["end_ns"] for record in requests)
+    endpoint_interval_ns = int(
+        config.evidence_interval_seconds * 1_000_000_000
+    )
+    endpoint_periodic_origin_ns = measurement_origin_ns - 1_000_000_000
+    previous_periodic_scheduled_ns = None
+
     def endpoint_record(
         endpoint_state,
         observed_ns,
@@ -378,7 +466,10 @@ def _passing_evidence():
         capture=None,
         epoch=None,
     ):
+        nonlocal previous_periodic_scheduled_ns
         record = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "endpointslices",
             "error": None,
             "fetch_started_ns": observed_ns,
             "observed_ns": observed_ns,
@@ -391,7 +482,15 @@ def _passing_evidence():
                                     "ready": True,
                                     "terminating": False,
                                 },
-                                "targetRef": {"uid": uid},
+                                "targetRef": {
+                                    "kind": "Pod",
+                                    "namespace": "kairyu-f1a",
+                                    "name": (
+                                        "f1a-replica-"
+                                        f"{uid.split('-', 1)[1]}"
+                                    ),
+                                    "uid": uid,
+                                },
                             }
                             for uid in sorted(endpoint_state)
                         ]
@@ -401,6 +500,31 @@ def _passing_evidence():
         }
         if capture is not None:
             record["capture"] = capture
+        else:
+            scheduled_ns = (
+                endpoint_periodic_origin_ns
+                + (
+                    (observed_ns - endpoint_periodic_origin_ns)
+                    // endpoint_interval_ns
+                )
+                * endpoint_interval_ns
+            )
+            skipped = (
+                0
+                if previous_periodic_scheduled_ns is None
+                else (
+                    scheduled_ns - previous_periodic_scheduled_ns
+                )
+                // endpoint_interval_ns
+                - 1
+            )
+            record.update(
+                {
+                    "scheduled_ns": scheduled_ns,
+                    "skipped_intervals_before": skipped,
+                }
+            )
+            previous_periodic_scheduled_ns = scheduled_ns
         if epoch is not None:
             record["epoch"] = epoch
         return record
@@ -457,50 +581,80 @@ def _passing_evidence():
                 observer_after,
                 endpoint_record(
                     endpoint_after,
+                    churn_record["endpoint_recovered_ns"],
+                    capture="churn_recovery",
+                    epoch=epoch,
+                ),
+                endpoint_record(
+                    endpoint_after,
                     churn_record["recovered_ns"],
                 ),
             ]
         )
+    endpoints.append(
+        endpoint_record(
+            set(new_by_ordinal.values()),
+            traffic_completed_ns,
+        )
+    )
     placements = [*memberships, *replica_placements]
-
-    def pod_identity(uid):
-        ordinal = uid.split("-", 1)[1]
-        return {
-            "name": f"f1a-replica-{ordinal}",
-            "uid": uid,
-            "containers": [
-                {
-                    "name": "mock",
-                    "spec_image": mock_image,
-                    "runtime_image": (
-                        f"docker.io/library/{mock_image}"
-                        if uid.startswith("new-")
-                        else mock_image
-                    ),
-                    "image_id": runtime_image_id,
-                }
-            ],
-        }
+    final_pods_fetch_started_ns = traffic_completed_ns + 1_000_000
+    final_pods_observed_ns = final_pods_fetch_started_ns + 1_000_000
+    gateway_pods_fetch_started_ns = final_pods_observed_ns + 1_000_000
+    gateway_pods_observed_ns = gateway_pods_fetch_started_ns + 1_000_000
 
     pods = [
         {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "pods",
+            "capture": "initial",
+            "fetch_started_ns": measurement_origin_ns - 2_100_000_000,
+            "observed_ns": measurement_origin_ns - 2_000_000_000,
             "error": None,
             "payload": [
                 pod_identity(uid) for uid in sorted(old_by_ordinal.values())
             ],
         },
+        *[
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "pods",
+                "capture": "churn_recovery",
+                "epoch": record["epoch"],
+                "fetch_started_ns": record["new_pods_fetch_started_ns"],
+                "observed_ns": record["new_pods_observed_ns"],
+                "error": None,
+                "payload": [
+                    pod_identity(identity["uid"])
+                    for identity in record["new"]
+                ],
+            }
+            for record in churn
+        ],
         {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "pods",
+            "capture": "final",
+            "fetch_started_ns": final_pods_fetch_started_ns,
+            "observed_ns": final_pods_observed_ns,
             "error": None,
             "payload": [
                 pod_identity(uid) for uid in sorted(new_by_ordinal.values())
             ],
         },
         {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "gateway_pods",
+            "capture": "gateway",
+            "fetch_started_ns": gateway_pods_fetch_started_ns,
+            "observed_ns": gateway_pods_observed_ns,
             "error": None,
             "payload": [
                 {
                     "name": "f1a-gateway",
                     "uid": "gateway-uid",
+                    "ready": True,
+                    "phase": "Running",
                     "containers": [
                         {
                             "name": "gateway",
@@ -515,7 +669,59 @@ def _passing_evidence():
             ],
         },
     ]
-    resources = [{"error": None, "payload": {"node": {}, "pods": []}}]
+    resource_interval_ns = int(
+        config.resource_interval_seconds * 1_000_000_000
+    )
+    resource_last_scheduled_ns = (
+        traffic_started_ns
+        + (
+            (traffic_completed_ns - traffic_started_ns)
+            // resource_interval_ns
+        )
+        * resource_interval_ns
+    )
+    resources = [
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "resources",
+            "scheduled_ns": traffic_started_ns,
+            "skipped_intervals_before": 0,
+            "fetch_started_ns": traffic_started_ns,
+            "observed_ns": traffic_started_ns + 1_000_000,
+            "error": None,
+            "payload": {
+                "node": {
+                    "name": "kairyu-f1a-control-plane",
+                    "cpu_usage_nano_cores": 1,
+                    "memory_working_set_bytes": 1,
+                },
+                "pods": [],
+            },
+        },
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "resources",
+            "scheduled_ns": resource_last_scheduled_ns,
+            "skipped_intervals_before": (
+                (
+                    resource_last_scheduled_ns - traffic_started_ns
+                )
+                // resource_interval_ns
+                - 1
+            ),
+            "fetch_started_ns": resource_last_scheduled_ns,
+            "observed_ns": resource_last_scheduled_ns + 1_000_000,
+            "error": None,
+            "payload": {
+                "node": {
+                    "name": "kairyu-f1a-control-plane",
+                    "cpu_usage_nano_cores": 1,
+                    "memory_working_set_bytes": 1,
+                },
+                "pods": [],
+            },
+        },
+    ]
     environment = {
         "git_commit": "a" * 40,
         "expected_git_commit": "a" * 40,
@@ -589,6 +795,7 @@ def _passing_evidence():
                 "sha256": "7" * 64,
             }
         ],
+        "namespace": "kairyu-f1a",
         "statefulset": "f1a-replica",
         "mock_container_name": "mock",
         "expected_mock_image": mock_image,
@@ -603,6 +810,8 @@ def _passing_evidence():
         },
         "gateway_container_name": "gateway",
         "expected_gateway_image": gateway_image,
+        "gateway_pod_name": "f1a-gateway",
+        "gateway_pod_uid": "gateway-uid",
         "runtime_gateway_image": {
             "container_name": "gateway",
             "spec_images": [gateway_image],
@@ -811,6 +1020,51 @@ def test_placement_p99_excludes_warmup_and_cooldown_samples() -> None:
         placement["placement_latency_ns"] = 1_000_000_000
         placement["selected_at_ns"] = request["send_ns"] + 1_000_000_000
         request["end_ns"] = placement["selected_at_ns"] + 1_000_000
+    final_capture = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == "final"
+    )
+    gateway_capture = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == "gateway"
+    )
+    final_capture["fetch_started_ns"] = max(
+        request["end_ns"] for request in evidence["requests"]
+    ) + 1
+    final_capture["observed_ns"] = final_capture["fetch_started_ns"] + 1
+    gateway_capture["fetch_started_ns"] = final_capture["observed_ns"] + 1
+    gateway_capture["observed_ns"] = gateway_capture["fetch_started_ns"] + 1
+    coverage_end_ns = max(
+        request["end_ns"] for request in evidence["requests"]
+    )
+    for sidecar, interval_seconds in (
+        ("endpoints", SMOKE_CONFIG.evidence_interval_seconds),
+        ("resources", SMOKE_CONFIG.resource_interval_seconds),
+    ):
+        periodic = [
+            row
+            for row in evidence[sidecar]
+            if row.get("capture") is None
+        ]
+        interval_ns = int(interval_seconds * 1_000_000_000)
+        previous = periodic[-2]
+        last = periodic[-1]
+        scheduled_ns = (
+            periodic[0]["scheduled_ns"]
+            + (
+                (coverage_end_ns - periodic[0]["scheduled_ns"])
+                // interval_ns
+            )
+            * interval_ns
+        )
+        last["scheduled_ns"] = scheduled_ns
+        last["skipped_intervals_before"] = (
+            (scheduled_ns - previous["scheduled_ns"]) // interval_ns - 1
+        )
+        last["fetch_started_ns"] = scheduled_ns
+        last["observed_ns"] = scheduled_ns + 1
 
     result = evaluate_gate(**evidence)
 
@@ -926,6 +1180,159 @@ def test_gate_requires_periodic_exact_endpoint_snapshot_per_epoch() -> None:
     assert not result["checks"]["new_endpoints_ready_with_exact_fleet_size"]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("kind", "Service"),
+        ("namespace", "foreign"),
+        ("name", "f1a-replica-foreign"),
+    ],
+)
+def test_gate_rejects_foreign_endpoint_target_ref(
+    field: str,
+    value: str,
+) -> None:
+    evidence = _passing_evidence()
+    snapshot = next(
+        row
+        for row in evidence["endpoints"]
+        if row.get("capture") == "churn_recovery"
+        and row.get("epoch") == 0
+    )
+    target = snapshot["payload"]["items"][0]["endpoints"][0]["targetRef"]
+    target[field] = value
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["new_endpoints_ready_with_exact_fleet_size"]
+    if field != "name":
+        assert not result["checks"]["endpoint_target_refs_valid"]
+
+
+def test_gate_rejects_duplicate_endpoint_target_ref_pair() -> None:
+    evidence = _passing_evidence()
+    snapshot = next(
+        row
+        for row in evidence["endpoints"]
+        if row.get("capture") == "churn_recovery"
+        and row.get("epoch") == 0
+    )
+    targets = snapshot["payload"]["items"][0]["endpoints"]
+    targets.append(json.loads(json.dumps(targets[0])))
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["endpoint_target_refs_valid"]
+    assert not result["checks"]["new_endpoints_ready_with_exact_fleet_size"]
+
+
+def test_gate_rejects_foreign_target_ref_in_withdrawal_observer() -> None:
+    evidence = _passing_evidence()
+    observer = next(
+        row
+        for row in evidence["endpoints"]
+        if row.get("capture") == "churn_withdrawal"
+        and row.get("epoch") == 0
+    )
+    observer["payload"]["items"][0]["endpoints"][0]["targetRef"][
+        "namespace"
+    ] = "foreign"
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["endpoint_target_refs_valid"]
+
+
+def test_gate_requires_claimed_endpoint_recovery_snapshot() -> None:
+    evidence = _passing_evidence()
+    evidence["endpoints"] = [
+        row
+        for row in evidence["endpoints"]
+        if not (
+            row.get("capture") == "churn_recovery"
+            and row.get("epoch") == 0
+        )
+    ]
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["new_endpoints_ready_with_exact_fleet_size"]
+
+
+def test_gate_rejects_contradictory_duplicate_endpoint_recovery_claim() -> None:
+    evidence = _passing_evidence()
+    claimed = next(
+        row
+        for row in evidence["endpoints"]
+        if row.get("capture") == "churn_recovery"
+        and row.get("epoch") == 0
+        and row["observed_ns"]
+        == evidence["churn"][0]["endpoint_recovered_ns"]
+    )
+    contradictory = json.loads(json.dumps(claimed))
+    contradictory["payload"]["items"][0]["endpoints"][0]["targetRef"][
+        "name"
+    ] = "f1a-replica-contradictory"
+    evidence["endpoints"].append(contradictory)
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["new_endpoints_ready_with_exact_fleet_size"]
+    assert not result["checks"]["endpoint_target_refs_valid"]
+
+
+def test_gate_rejects_unknown_endpoint_capture_label() -> None:
+    evidence = _passing_evidence()
+    evidence["endpoints"][0]["capture"] = "unclassified"
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["endpoint_capture_labels_valid"]
+
+
+@pytest.mark.parametrize("region", ["initial", "final"])
+def test_gate_rejects_contradictory_stable_endpoint_region(
+    region: str,
+) -> None:
+    evidence = _passing_evidence()
+    source = (
+        evidence["endpoints"][0]
+        if region == "initial"
+        else evidence["endpoints"][-1]
+    )
+    contradictory = json.loads(json.dumps(source))
+    contradictory["capture"] = "churn_recovery"
+    contradictory["epoch"] = 0
+    if region == "initial":
+        contradictory["observed_ns"] = (
+            evidence["requests"][0]["send_ns"] + 1
+        )
+        contradictory["fetch_started_ns"] = contradictory["observed_ns"]
+    else:
+        contradictory["observed_ns"] += 1
+        contradictory["fetch_started_ns"] = contradictory["observed_ns"]
+    contradictory["payload"]["items"][0]["endpoints"][0]["targetRef"][
+        "uid"
+    ] = "contradictory-uid"
+    evidence["endpoints"].append(contradictory)
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    check = (
+        "initial_endpoints_exact_old_fleet"
+        if region == "initial"
+        else "final_endpoints_exact_new_fleet"
+    )
+    assert not result["checks"][check]
+
+
 def test_periodic_endpoint_fetch_started_inside_window_may_finish_after_it() -> None:
     evidence = _passing_evidence()
     churn = evidence["churn"][0]
@@ -938,13 +1345,142 @@ def test_periodic_endpoint_fetch_started_inside_window_may_finish_after_it() -> 
     interval_ns = int(
         SMOKE_CONFIG.evidence_interval_seconds * 1_000_000_000
     )
-    snapshot["fetch_started_ns"] = churn["recovered_ns"] + interval_ns - 1
+    snapshot["fetch_started_ns"] = snapshot["scheduled_ns"] + interval_ns - 1
     snapshot["observed_ns"] = churn["recovered_ns"] + interval_ns + 1
 
     result = evaluate_gate(**evidence)
 
     assert result["passed"]
     assert result["checks"]["new_endpoints_ready_with_exact_fleet_size"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda rows: rows[1].update(skipped_intervals_before=-1),
+        lambda rows: rows[1].update(
+            scheduled_ns=rows[1]["scheduled_ns"] + 1
+        ),
+        lambda rows: rows[1].update(
+            fetch_started_ns=(
+                rows[1]["scheduled_ns"]
+                + int(
+                    SMOKE_CONFIG.evidence_interval_seconds
+                    * 1_000_000_000
+                )
+            )
+        ),
+    ],
+)
+def test_gate_replays_periodic_sampler_schedule(mutation) -> None:
+    evidence = _passing_evidence()
+    periodic = [
+        row
+        for row in evidence["endpoints"]
+        if row.get("capture") is None
+    ]
+    mutation(periodic)
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["periodic_sampler_schedule_consistent"]
+
+
+def test_gate_replays_resource_sampler_schedule() -> None:
+    evidence = _passing_evidence()
+    evidence["resources"][0]["skipped_intervals_before"] = -1
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["periodic_sampler_schedule_consistent"]
+    assert not result["checks"]["resource_evidence_complete"]
+
+
+def test_gate_rejects_unclassified_resource_record() -> None:
+    evidence = _passing_evidence()
+    unclassified = json.loads(json.dumps(evidence["resources"][0]))
+    unclassified["capture"] = "bogus"
+    evidence["resources"].append(unclassified)
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["resource_evidence_complete"]
+
+
+@pytest.mark.parametrize("sidecar", ["endpoints", "resources"])
+@pytest.mark.parametrize("edge", ["head", "tail"])
+def test_gate_rejects_truncated_periodic_coverage(
+    sidecar: str,
+    edge: str,
+) -> None:
+    evidence = _passing_evidence()
+    periodic = [
+        row
+        for row in evidence[sidecar]
+        if row.get("capture") is None
+    ]
+    evidence[sidecar].remove(
+        periodic[0] if edge == "head" else periodic[-1]
+    )
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["periodic_sampler_schedule_consistent"]
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "mutation", "failed_check"),
+    [
+        (
+            "endpoints",
+            lambda row: row.update(kind="wrong"),
+            "endpoint_evidence_schema_valid",
+        ),
+        (
+            "endpoints",
+            lambda row: row.update(payload=None),
+            "endpoint_evidence_schema_valid",
+        ),
+        (
+            "resources",
+            lambda row: row.update(kind="wrong"),
+            "resource_evidence_complete",
+        ),
+        (
+            "resources",
+            lambda row: row.update(payload={"wrong": 1}),
+            "resource_evidence_complete",
+        ),
+        (
+            "resources",
+            lambda row: row.update(
+                payload={"node": {"garbage": []}, "pods": [{}]}
+            ),
+            "resource_evidence_complete",
+        ),
+    ],
+)
+def test_gate_rejects_malformed_periodic_record(
+    sidecar: str,
+    mutation,
+    failed_check: str,
+) -> None:
+    evidence = _passing_evidence()
+    row = next(
+        record
+        for record in evidence[sidecar]
+        if record.get("capture") is None
+    )
+    mutation(row)
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"][failed_check]
 
 
 def test_gate_rejects_inexact_predelete_endpoint_snapshot() -> None:
@@ -1259,6 +1795,165 @@ def test_gate_rejects_placement_generation_or_timestamp_mismatch() -> None:
 
     assert not result["passed"]
     assert not result["checks"]["placement_membership_temporal_join_complete"]
+
+
+@pytest.mark.parametrize("mode", ["missing", "duplicate"])
+def test_gate_requires_one_pod_recovery_capture_per_epoch(mode: str) -> None:
+    evidence = _passing_evidence()
+    recovery = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == "churn_recovery"
+        and row.get("epoch") == 0
+    )
+    if mode == "missing":
+        evidence["pods"].remove(recovery)
+    else:
+        evidence["pods"].insert(
+            2,
+            json.loads(json.dumps(recovery)),
+        )
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["pod_capture_structure_complete"]
+
+
+@pytest.mark.parametrize("payload", [None, [None]])
+@pytest.mark.parametrize("capture", ["initial", "gateway"])
+def test_gate_rejects_malformed_pod_payload_without_crashing(
+    capture: str,
+    payload,
+) -> None:
+    evidence = _passing_evidence()
+    record = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == capture
+    )
+    record["payload"] = payload
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["pod_capture_identity_exact"]
+
+
+@pytest.mark.parametrize(
+    "capture",
+    ["initial", "churn_recovery", "final", "gateway"],
+)
+def test_gate_requires_ready_pods_in_every_capture(capture: str) -> None:
+    evidence = _passing_evidence()
+    record = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == capture
+    )
+    record["payload"][0]["ready"] = False
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert result["checks"]["pod_capture_identity_exact"]
+    assert not result["checks"]["pod_capture_readiness_complete"]
+
+
+@pytest.mark.parametrize("capture", ["initial", "final"])
+def test_gate_requires_exact_full_fleet_pod_capture(capture: str) -> None:
+    evidence = _passing_evidence()
+    record = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == capture
+    )
+    record["payload"].pop()
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["pod_capture_identity_exact"]
+    assert not result["checks"]["pod_capture_readiness_complete"]
+
+
+def test_gate_rejects_wrong_uid_in_targeted_pod_capture() -> None:
+    evidence = _passing_evidence()
+    record = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == "churn_recovery"
+        and row.get("epoch") == 0
+    )
+    record["payload"][0]["uid"] = "forged-target-uid"
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["pod_capture_identity_exact"]
+
+
+def test_gate_rejects_pod_capture_timestamp_mismatch() -> None:
+    evidence = _passing_evidence()
+    record = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == "churn_recovery"
+        and row.get("epoch") == 0
+    )
+    record["observed_ns"] += 1
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["pod_capture_timeline_consistent"]
+
+
+def test_gate_rejects_endpoint_to_pod_causal_time_reversal() -> None:
+    evidence = _passing_evidence()
+    churn = evidence["churn"][0]
+    churn["endpoint_recovered_ns"] = churn["new_pods_fetch_started_ns"] + 1
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["churn_raw_timeline_consistent"]
+    assert not result["checks"]["pod_capture_timeline_consistent"]
+
+
+def test_gate_rejects_targeted_pod_image_drift_even_with_valid_final() -> None:
+    evidence = _passing_evidence()
+    recovery = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == "churn_recovery"
+        and row.get("epoch") == 0
+    )
+    recovery["payload"][0]["containers"][0]["image_id"] = (
+        "docker-pullable://sha256:" + "a" * 64
+    )
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["pod_capture_image_identity_pinned"]
+    assert not result["checks"]["runtime_mock_image_pinned"]
+
+
+@pytest.mark.parametrize("field", ["name", "uid"])
+def test_gate_anchors_gateway_pod_identity(field: str) -> None:
+    evidence = _passing_evidence()
+    gateway = next(
+        row
+        for row in evidence["pods"]
+        if row.get("capture") == "gateway"
+    )
+    gateway["payload"][0][field] = f"forged-{field}"
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["pod_capture_identity_exact"]
 
 
 def test_gate_rejects_runtime_mock_image_id_drift() -> None:
