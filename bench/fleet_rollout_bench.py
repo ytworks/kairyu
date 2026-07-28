@@ -593,7 +593,8 @@ async def _one_request(
                 record.update(identity.groupdict())
             record["response_valid"] = (
                 response.status_code == 200
-                and record["request_id_echo"] == request_id
+                and isinstance(record["request_id_echo"], str)
+                and bool(record["request_id_echo"])
                 and identity is not None
             )
         except (TypeError, ValueError):
@@ -1196,22 +1197,53 @@ def _all_replica_runtime_images_valid(
         isinstance(value, str) for value in allowed_digests
     ):
         return False
-    identities = [
-        identity
-        for record in records
-        if record.get("capture") != "gateway" and isinstance(record.get("payload"), list)
-        for identity in record["payload"]
-    ]
-    return bool(identities) and all(
-        isinstance(identity, dict)
-        and _pod_identity_matches_image(
-            identity,
-            container_name=container_name,
-            expected_image=expected_image,
-            allowed_digests=set(allowed_digests),
-        )
-        for identity in identities
-    )
+    allowed = set(allowed_digests)
+    if not allowed:
+        return False
+    seen_uids: set[str] = set()
+    pinned_uids: set[str] = set()
+    for record in records:
+        if record.get("capture") == "gateway":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, list):
+            return False
+        for identity in payload:
+            if not isinstance(identity, dict):
+                return False
+            uid = identity.get("uid")
+            containers = identity.get("containers")
+            if not isinstance(uid, str) or not uid or not isinstance(containers, list):
+                return False
+            seen_uids.add(uid)
+            if _pod_identity_matches_image(
+                identity,
+                container_name=container_name,
+                expected_image=expected_image,
+                allowed_digests=allowed,
+            ):
+                pinned_uids.add(uid)
+                continue
+            matches = [
+                container
+                for container in containers
+                if isinstance(container, dict) and container.get("name") == container_name
+            ]
+            if len(matches) != 1:
+                return False
+            container = matches[0]
+            runtime_image = container.get("runtime_image")
+            if not (
+                identity.get("phase") == "Pending"
+                and identity.get("ready") is False
+                and container.get("image_id") in (None, "")
+                and container.get("spec_image") == expected_image
+                and isinstance(runtime_image, str)
+                and fleet_churn._normalized_image_reference(runtime_image)
+                == fleet_churn._normalized_image_reference(expected_image)
+            ):
+                return False
+    return bool(seen_uids) and seen_uids == pinned_uids
 
 
 def evaluate_gate(
@@ -1326,7 +1358,8 @@ def evaluate_gate(
         row.get("status_code") == 200
         and row.get("transport_error") is None
         and row.get("response_valid") is True
-        and row.get("request_id_echo") == row.get("request_id")
+        and isinstance(row.get("request_id_echo"), str)
+        and bool(row["request_id_echo"])
         and isinstance(row.get("pod_uid"), str)
         and isinstance(row.get("pod_name"), str)
         and pod_name_by_uid.get(row["pod_uid"]) == row["pod_name"]
@@ -1399,6 +1432,11 @@ def evaluate_gate(
     request_by_id = {
         row.get("request_id"): row for row in requests if isinstance(row.get("request_id"), str)
     }
+    request_by_echo = {
+        row.get("request_id_echo"): row
+        for row in requests
+        if isinstance(row.get("request_id_echo"), str) and row.get("request_id_echo")
+    }
     placements_by_request: dict[str, list[dict[str, Any]]] = {}
     for row in replica_placements:
         request_id = row.get("request_id")
@@ -1428,10 +1466,11 @@ def evaluate_gate(
 
     request_placement_join = (
         len(request_by_id) == len(requests)
-        and set(placements_by_request) == set(request_by_id)
+        and len(request_by_echo) == len(requests)
+        and set(placements_by_request) == set(request_by_echo)
         and all(
             placement_matches_request(request_id, request)
-            for request_id, request in request_by_id.items()
+            for request_id, request in request_by_echo.items()
         )
     )
     placement_membership_join = membership_stream_valid and all(
@@ -2505,7 +2544,9 @@ async def run(
             await _fetch_gateway_placements(
                 args,
                 expected_request_ids={
-                    row["request_id"] for row in requests if isinstance(row.get("request_id"), str)
+                    row["request_id_echo"]
+                    for row in requests
+                    if isinstance(row.get("request_id_echo"), str) and row["request_id_echo"]
                 },
                 initial_uids=initial_uids,
                 final_uids=final_uids,

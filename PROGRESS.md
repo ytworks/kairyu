@@ -238,7 +238,7 @@ and PR #266 merged as `68f43f4`, closing #175 without rerunning the immutable
 formal measurement. F1b now has an A27 implementation candidate: a drain-first
 partitioned `RollingUpdate`, retry-free concurrent traffic, exact raw
 UID/revision/readiness/placement replay, and dedicated smoke/formal automation.
-Its focused replay suite passes 19/19; one exact-head PR smoke and one
+Its focused replay suite passes 20/20; one exact-head PR smoke and one
 exact-head 100-replica formal run remain before #176 can close.
 Production/fabric drills remain untouched.**
 
@@ -271,7 +271,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
-| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** the immutable 200-replica/ten-epoch artifact from Actions run `30374404150` records 33,000/33,000 retry-free 2xx responses, 5.221 ms measurement-wide placement p99, maximum 1.117-second withdrawal, exact lifecycle/provenance joins, and complete raw evidence; PR #266 merged as `68f43f4` and closed #175. **F1b implementation candidate:** A27 freezes a drain-first partitioned `RollingUpdate` of exactly 100 replicas with exact raw evidence replay and no operator repair. Its focused suite passes 19/19; the exact-head PR smoke and one exact-head formal run remain before #176 closes. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** the immutable 200-replica/ten-epoch artifact from Actions run `30374404150` records 33,000/33,000 retry-free 2xx responses, 5.221 ms measurement-wide placement p99, maximum 1.117-second withdrawal, exact lifecycle/provenance joins, and complete raw evidence; PR #266 merged as `68f43f4` and closed #175. **F1b implementation candidate:** A27 freezes a drain-first partitioned `RollingUpdate` of exactly 100 replicas with exact raw evidence replay and no operator repair. Its focused suite passes 20/20; the exact-head PR smoke and one exact-head formal run remain before #176 closes. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
@@ -373,6 +373,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F1b replays server IDs and eventual image attestation
+- What: F1b now joins each offered request to the gateway placement by the non-empty server-assigned response ID while separately retaining the unique client schedule ID. Lifecycle provenance permits only a Pending, not-Ready observation with a temporarily empty image ID, rejects every visible mismatch immediately, and still requires every observed Pod UID to later match the pinned CRI digest.
+- Why: PR smoke run `30383243344` completed 412/412 retry-free requests and all four replacements, but exposed two verifier false negatives: the gateway intentionally assigns its own request ID, and Kubernetes can publish a replacement Pod before CRI materializes `status.containerStatuses[].imageID`. Replaying that immutable artifact under the corrected rules yields no failed checks without weakening ID or image provenance.
+- Refs: issue #176; PR #267; Actions run `30383243344`; m10 D1/D5/A27; `bench/fleet_rollout_bench.py`; `tests/bench/test_fleet_rollout_bench.py`
 
 ### 2026-07-28 — [amendment] F1b freezes a drain-first partitioned rollout
 - What: Added A27 and a separate F1b gate. One `kubectl rollout restart` is held at partition N, then a checked-in driver drains each old UID, proves EndpointSlice and gateway withdrawal plus zero outstanding work, releases exactly one ordinal, and proves the new UID/revision/Ready/eligibility state before continuing. Retry-free traffic and hashed request, placement, membership, rollout, Pod, and EndpointSlice sidecars are independently replayed. Pull requests run a reduced smoke; only one clean exact-head 100-replica formal artifact can close F1b.

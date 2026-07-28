@@ -7,6 +7,7 @@ import pytest
 
 import bench.fleet_rollout_bench as rollout_bench
 
+_LIFECYCLE_IMAGES_VALID = rollout_bench._all_replica_runtime_images_valid
 _NAMESPACE = "kairyu-f1a"
 _STATEFULSET = "f1a-replica"
 _MOCK_IMAGE = "kairyu-f1a-mock:dev"
@@ -471,6 +472,7 @@ def _passing_evidence() -> dict:
         selected_uid = sorted(membership["eligible_ids"])[0]
         ordinal = int(selected_uid.rsplit("-", 1)[1])
         request_id = f"request-{sequence}"
+        request_id_echo = f"gateway-request-{sequence}"
         requests.append(
             {
                 "schema_version": rollout_bench.SCHEMA_VERSION,
@@ -484,7 +486,7 @@ def _passing_evidence() -> dict:
                 "status_code": 200,
                 "transport_error": None,
                 "response_valid": True,
-                "request_id_echo": request_id,
+                "request_id_echo": request_id_echo,
                 "pod_name": f"{_STATEFULSET}-{ordinal}",
                 "pod_uid": selected_uid,
             }
@@ -493,7 +495,7 @@ def _passing_evidence() -> dict:
             {
                 "schema_version": rollout_bench.SCHEMA_VERSION,
                 "kind": "replica",
-                "request_id": request_id,
+                "request_id": request_id_echo,
                 "replica_id": selected_uid,
                 "replica_generation": membership["generation_by_id"][selected_uid],
                 "placement_started_ns": send_ns,
@@ -663,6 +665,38 @@ def test_synthetic_raw_evidence_passes_full_replay(
     assert result["rollout"]["minimum_ready_endpoints_observed"] == 3
 
 
+def test_lifecycle_image_allows_only_eventually_pinned_pending_uid(
+    passing_evidence,
+) -> None:
+    pods = copy.deepcopy(passing_evidence["pods"])
+    pending = copy.deepcopy(next(row for row in pods if row["capture"] == "final")["payload"][0])
+    pending["ready"] = False
+    pending["phase"] = "Pending"
+    pending["containers"][0]["image_id"] = ""
+    pods.append(_pod_row("replacement_poll", 9_050_000_000, [pending]))
+    environment = {
+        **passing_evidence["environment"],
+        "mock_cri_image_metadata": {
+            "runtime_digests": ["sha256:" + "1" * 64],
+        },
+    }
+
+    assert _LIFECYCLE_IMAGES_VALID(
+        pods,
+        environment=environment,
+        container_name="mock",
+        expected_image=_MOCK_IMAGE,
+    )
+
+    pending["containers"][0]["image_id"] = "sha256:" + "f" * 64
+    assert not _LIFECYCLE_IMAGES_VALID(
+        pods,
+        environment=environment,
+        container_name="mock",
+        expected_image=_MOCK_IMAGE,
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -714,7 +748,7 @@ def test_replay_rejects_old_uid_placement_after_withdrawal_and_partition(
     placement["replica_id"] = old_uid
     placement["replica_generation"] = f"generation-{old_uid}"
     request = next(
-        row for row in evidence["requests"] if row["request_id"] == placement["request_id"]
+        row for row in evidence["requests"] if row["request_id_echo"] == placement["request_id"]
     )
     request["pod_uid"] = old_uid
     request["pod_name"] = f"{_STATEFULSET}-{step['ordinal']}"
