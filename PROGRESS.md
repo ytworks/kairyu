@@ -201,13 +201,15 @@ compliant-neighbor controls are 0.2783/0.2792 s and the 10x treatment is
 work at 1.03125x, and drains in-flight/reserved work to zero with no bound
 violations
 (`bench/results/f5b-noisy-neighbor-qwen3-32b-tp8-2026-07-28.json`).
-F5c now has a matched deterministic production-Scheduler gate over predeclared
-underload, smooth exact-2x, and bursty exact-2x traces. Admission uses an atomic
-lease, predicts interactive TTFT without treating already-deferred batch work
-as equal-priority interference, and bounds that deferred backlog separately
-with total active work. The source gate records raw queue/schedule deltas,
-decisions, outcomes, and an independent forced-admit replay oracle for FP/FN;
-the clean-commit formal artifact is the remaining closure step.
+F5c SLO admission is closed by a matched deterministic production-Scheduler
+gate over predeclared underload, smooth exact-2x, and bursty exact-2x traces.
+Admission uses an atomic lease, predicts interactive TTFT without treating
+already-deferred batch work as equal-priority interference, and bounds that
+backlog separately with total active work. Underload goodput remains 200/400
+ticks; smooth overload improves 3 → 397 and bursty overload 2 → 198. The
+independent forced-admit oracle reports zero false positives and 4/800 and
+6/800 false negatives; all admitted/deferred work drains
+(`bench/results/f5c-slo-admission-cpu-2026-07-28.json`).
 G6 P-B4 tiered AUTO proof remains closed after #208 revalidation. Declarative
 specs can configure bounded MoA proposal counts, and the Qwen3-32B TP8
 production gateway exposes direct, standard AUTO (Conductor), and max AUTO
@@ -353,6 +355,10 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [progress] F5c closes with matched queue-and-hope evidence
+- What: Completed the 50-check clean-commit F5c gate. Underload stays at 200/400 SLO-successful requests; smooth exact-2x improves queue-and-hope 3 → 397 and bursty exact-2x improves 2 → 198. The independent forced-admit oracle records zero false positives and 4/800 and 6/800 false negatives; every admitted/deferred request, lease, and scheduler queue drains.
+- Refs: issue #192; G5 F5c; commit `dac6980`; `bench/results/f5c-slo-admission-cpu-2026-07-28.json`
 
 ### 2026-07-28 — [amendment] F5c separates interactive prediction from deferred backlog
 - What: Replaced split SLO decision/start bookkeeping with an atomic, exactly-once admission lease; froze concurrency at admission for TTFT EMA feedback; separated interactive in-flight prediction from a total-active defer bound; and added matched production-Scheduler traces plus an independent forced-admit FP/FN oracle.

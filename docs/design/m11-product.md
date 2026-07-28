@@ -361,6 +361,17 @@ Per-request decisions/outcomes and per-tick queue/schedule deltas make the raw
 queue reconstructible. The homogeneous one-token workload isolates admission
 behavior and is not evidence for a variable-prompt cost model.
 
+The clean-commit formal run passes all 50 checks. Underload remains exactly
+200 → 200 SLO-successful requests. At smooth exact-2x, queue-and-hope achieves
+3 successes versus 397 with admission; the policy admits 401, defers 3, and
+sheds 396. At bursty exact-2x, the result is 2 → 198, with 204 admits, 196
+defers, and 400 sheds. The forced-admit oracle reports zero false positives in
+both saturation profiles and 4/800 and 6/800 false negatives (FNR 0.993% and
+0.997%); deferred queue high-watermarks are 3 and 2. All admitted/deferred work,
+leases, and queues drain. Raw evidence is in
+`bench/results/f5c-slo-admission-cpu-2026-07-28.json`; reproduce it with
+`uv run python bench/slo_admission_bench.py --assert-gate`.
+
 ### D7 — Open WebUI + frontier bench
 
 `deploy/compose/docker-compose.webui.yaml` points Open WebUI at the internal
