@@ -284,6 +284,10 @@ def configure_json_logging(level: int = logging.INFO) -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+    # Successful outbound requests are already represented by Kairyu's
+    # authoritative structured access line. Keep dependency warnings/errors
+    # without serializing another INFO line for every replica dispatch.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class TracingMiddleware:

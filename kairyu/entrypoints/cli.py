@@ -42,6 +42,10 @@ def main(argv: list[str] | None = None) -> None:
             host=args.host or spec.server.host,
             port=args.port or spec.server.port,
             log_config=None,  # keep the JSON root logger
+            # AccessLogMiddleware is the single structured access-log owner.
+            # Leaving Uvicorn's logger enabled duplicates every request and
+            # makes ServerSettings.access_log=False ineffective.
+            access_log=False,
         )
     elif args.command == "bench":
         from kairyu.bench.cli import handle

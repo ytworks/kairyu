@@ -78,7 +78,10 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: 100m
+              # Formal churn measurements observed a 233m maximum. Reserve
+              # >2x that demand so 20 concurrent Pod replacements cannot
+              # starve the latency-bearing gateway on a shared kind node.
+              cpu: 500m
               memory: 128Mi
             limits:
               cpu: "2"

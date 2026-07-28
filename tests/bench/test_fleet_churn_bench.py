@@ -54,6 +54,22 @@ def _write_containerd_manifest(
     return "sha256:" + fleet_bench._sha256_file(path)
 
 
+def test_jsonl_sink_truncates_and_drains_deferred_rows_in_order(tmp_path) -> None:
+    path = tmp_path / "evidence.jsonl"
+    path.write_text('{"stale":true}\n', encoding="utf-8")
+    sink = fleet_bench.JsonlSink(path)
+    values = [{"sequence": index} for index in range(3)]
+
+    for value in values:
+        sink.write(value)
+    sink.close()
+
+    assert [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ] == values
+
+
 def _passing_evidence():
     config = SMOKE_CONFIG
     plan = churn_plan(config)
@@ -1692,6 +1708,147 @@ async def test_delete_cancellation_reaps_endpoint_observer(monkeypatch) -> None:
 
     assert delete_cancelled
     assert observer_cancelled
+
+
+async def test_recovery_uses_one_label_list_and_filters_target_pods(
+    monkeypatch,
+) -> None:
+    plan_entry = fleet_bench.churn_plan(SMOKE_CONFIG)[0]
+    names = [
+        f"f1a-replica-{ordinal}"
+        for ordinal in plan_entry["ordinals"]
+    ]
+    old = [
+        {"name": name, "uid": f"old-{name}"}
+        for name in names
+    ]
+    unchanged = [
+        f"f1a-replica-{ordinal}"
+        for ordinal in range(SMOKE_CONFIG.replica_count)
+        if f"f1a-replica-{ordinal}" not in names
+    ]
+    current_uids = {
+        *(f"new-{name}" for name in names),
+        *(f"unchanged-{name}" for name in unchanged),
+    }
+    calls = []
+    endpoint_records = []
+    churn_records = []
+
+    class Sink:
+        def __init__(self, records):
+            self.records = records
+
+        def write(self, value):
+            self.records.append(value)
+
+    def pod_item(name, uid):
+        return {
+            "metadata": {"name": name, "uid": uid},
+            "spec": {
+                "nodeName": "node",
+                "containers": [{"name": "mock", "image": "mock"}],
+            },
+            "status": {
+                "podIP": "10.0.0.1",
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [
+                    {
+                        "name": "mock",
+                        "image": "mock",
+                        "imageID": "sha256:" + "a" * 64,
+                        "restartCount": 0,
+                    }
+                ],
+            },
+        }
+
+    async def fake_kubectl(_kubectl, _namespace, *arguments):
+        calls.append(arguments)
+        if arguments[:2] == ("get", "endpointslices"):
+            return {
+                "items": [
+                    {
+                        "endpoints": [
+                            {
+                                "conditions": {
+                                    "ready": True,
+                                    "terminating": False,
+                                },
+                                "targetRef": {"uid": uid},
+                            }
+                            for uid in sorted(current_uids)
+                        ]
+                    }
+                ]
+            }
+        assert arguments == (
+            "get",
+            "pods",
+            "-l",
+            "app.kubernetes.io/name=f1a-replica",
+        )
+        return {
+            "items": [
+                *[
+                    pod_item(name, f"new-{name}")
+                    for name in names
+                ],
+                *[
+                    pod_item(name, f"unchanged-{name}")
+                    for name in unchanged
+                ],
+            ]
+        }
+
+    monkeypatch.setattr(fleet_bench, "_kubectl_json", fake_kubectl)
+    now_ns = time.monotonic_ns()
+    result = await fleet_bench._recover_epoch(
+        SimpleNamespace(
+            kubectl="kubectl",
+            namespace="kairyu-f1a",
+            endpoint_service="f1a-replicas",
+            pod_selector="app.kubernetes.io/name=f1a-replica",
+        ),
+        SMOKE_CONFIG,
+        plan_entry=plan_entry,
+        old=old,
+        scheduled_ns=now_ns,
+        api_started_ns=now_ns,
+        api_completed_ns=now_ns,
+        delete_returncode=0,
+        delete_stderr="",
+        initial_old_withdrawn_ns=now_ns,
+        initial_endpoint_uids=current_uids,
+        endpoint_sink=Sink(endpoint_records),
+        sink=Sink(churn_records),
+    )
+
+    assert calls == [
+        (
+            "get",
+            "endpointslices",
+            "-l",
+            "kubernetes.io/service-name=f1a-replicas",
+        ),
+        (
+            "get",
+            "pods",
+            "-l",
+            "app.kubernetes.io/name=f1a-replica",
+        ),
+    ]
+    assert [item["name"] for item in result["new"]] == names
+    assert {item["uid"] for item in result["new"]} == {
+        f"new-{name}" for name in names
+    }
+    assert result["ready_endpoint_count_at_recovery"] == (
+        SMOKE_CONFIG.replica_count
+    )
+    assert result["error"] is None
+    assert len(endpoint_records) == 1
+    assert churn_records == [result]
 
 
 async def test_run_cancels_owned_tasks_before_closing_sinks(

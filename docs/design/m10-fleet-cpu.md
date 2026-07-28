@@ -1,7 +1,7 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D2/D5/A16–A21 amended 2026-07-28). Reviewed (1-reviewer panel
+2026-07-27; D2/D5/A16–A22 amended 2026-07-28). Reviewed (1-reviewer panel
 with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
@@ -349,3 +349,19 @@ over (α, β) (pure function over the dataset; no online learning).
   must name either that config or the containerd target. The existing
   source-revision label, raw CRI metadata hash, and per-pod runtime image-ID
   checks remain mandatory.
+- **A22**: the F1a driver and gateway isolate the latency-bearing path from
+  measurement and control-plane amplification without weakening the frozen
+  gate. Raw benchmark JSON encoding and writes use the same bounded,
+  lifecycle-owned deferred writer as production audit logs; close still drains
+  every admitted row before hashing and replay. Recovery replaces twenty
+  per-name Pod GETs with one label LIST and local name filtering, then polls at
+  one second after the independent 250 ms EndpointSlice withdrawal observer has
+  completed. The observer's absolute schedule, raw payloads, five-second bound,
+  and conservative one-second bracket are unchanged. Uvicorn's duplicate
+  access log and httpx's successful-request INFO summaries are suppressed while
+  the authoritative `kairyu.access` record and warnings/errors remain.
+  Finally, the formal gateway requests 500m CPU against a measured 233m maximum,
+  giving it more than 2x headroom and five times its former CFS weight while the
+  200 mocks together request only 200m. The 10 ms placement bound, 99% open-loop
+  pacing requirement, 50 requests/s, retry prohibition, churn batches, and all
+  raw evidence remain unchanged.

@@ -43,10 +43,13 @@ from typing import Any
 
 import httpx
 
+from kairyu.audit_io import BoundedJsonlWriter
+
 SCHEMA_VERSION = 1
 GATE = "G5-F1a"
 _COMMAND_TERMINATE_GRACE_SECONDS = 2.0
 _ENDPOINT_WITHDRAWAL_POLL_SECONDS = 0.25
+_RECOVERY_POLL_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -602,16 +605,24 @@ def _endpoint_uids(snapshot: dict[str, Any]) -> set[str]:
 class JsonlSink:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._handle = path.open("w", encoding="utf-8")
+        # A gate rerun into the same directory must never append to stale
+        # evidence. Encoding and filesystem writes run on the existing
+        # lifecycle-owned bounded writer so large Kubernetes snapshots cannot
+        # stall the traffic generator's event loop.
+        self.path.unlink(missing_ok=True)
+        self._writer = BoundedJsonlWriter(path)
 
     def write(self, value: dict[str, Any]) -> None:
-        self._handle.write(
-            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        self._writer.append_deferred(
+            lambda value=value: json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         )
-        self._handle.flush()
 
     def close(self) -> None:
-        self._handle.close()
+        self._writer.close()
 
 
 @dataclass(frozen=True)
@@ -1140,9 +1151,21 @@ async def _recover_epoch(
                 args.namespace,
                 "get",
                 "pods",
-                *names,
+                "-l",
+                args.pod_selector,
             )
-            new = [_pod_identity(item) for item in pods.get("items", ())]
+            target_names = set(names)
+            identities_by_name = {}
+            for item in pods.get("items", ()):
+                identity = _pod_identity(item)
+                name = identity["name"]
+                if isinstance(name, str) and name in target_names:
+                    identities_by_name[name] = identity
+            new = [
+                identities_by_name[name]
+                for name in names
+                if name in identities_by_name
+            ]
             ready_new = (
                 len(new) == len(old)
                 and all(
@@ -1162,7 +1185,7 @@ async def _recover_epoch(
                 break
         except Exception:
             pass
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(_RECOVERY_POLL_SECONDS)
     else:
         error = "recovery_timeout"
     recovered_ns = time.monotonic_ns()

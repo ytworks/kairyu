@@ -25,6 +25,10 @@ The kind v0.32.0 gate pins its Kubernetes v1.36.1 node image by digest and
 configures the kubelet for 350 pods. The mock StatefulSet requests only
 1 millicore and 4 MiB per replica; its 32 MiB memory limit protects the runner
 from a faulty process without reserving 6.4 GiB in the scheduler.
+The gateway requests 500 millicores (with a two-core limit): the public
+four-vCPU formal run measured a 233m gateway maximum, so this reserves more
+than 2x headroom and prevents a simultaneous 20-Pod replacement from starving
+the latency-bearing process without over-reserving a full core.
 
 The formal profile applies the base 200-replica manifest and is the
 authoritative test of the five-second graceful withdrawal window. The pull
@@ -70,3 +74,10 @@ starts afterward and cannot dilute this causal sampling cadence. Artifact
 replay verifies the observer sequence, scheduled/fetch/observation timestamps,
 the exact disjoint claim, and the unchanged one-second last-old-to-disjoint
 bracket.
+
+Recovery readiness uses one label-selected Pod LIST per second and filters the
+twenty scheduled names locally. It does not turn a twenty-name `kubectl get`
+into twenty API GETs per cycle. All raw evidence JSON is admitted in event-loop
+order to a bounded lifecycle-owned writer; encoding and flushing happen off the
+traffic loop, and shutdown drains the queue before sidecars are hashed and
+replayed.

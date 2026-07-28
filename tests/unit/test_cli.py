@@ -1,5 +1,7 @@
 """`kairyu serve` CLI (design m7 D3)."""
 
+import logging
+
 import pytest
 
 from kairyu.entrypoints import cli
@@ -32,6 +34,8 @@ def test_serve_runs_uvicorn_with_spec_address(monkeypatch, config):
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8123
     assert captured["app"].title == "kairyu"
+    assert captured["access_log"] is False
+    assert logging.getLogger("httpx").level == logging.WARNING
 
 
 def test_serve_flags_override_spec(monkeypatch, config):
