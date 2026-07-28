@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -1014,6 +1015,265 @@ async def test_async_client_is_reused_across_requests(monkeypatch):
     await backend.generate(_request())
     assert len(instances) == 1  # persistent pooled client, no per-request handshake
     await backend.shutdown()
+    assert backend._client is None
+
+
+async def test_owned_client_factory_creates_once_and_closes_with_backend():
+    captured: dict = {}
+    clients: list[httpx.AsyncClient] = []
+
+    def client_factory() -> httpx.AsyncClient:
+        client = httpx.AsyncClient(transport=_ok_transport(captured))
+        clients.append(client)
+        return client
+
+    backend = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        client_factory=client_factory,
+    )
+    assert backend._client is None
+
+    await backend.generate(_request())
+    await backend.generate(_request())
+
+    assert len(clients) == 1
+    assert backend._client is clients[0]
+    await backend.shutdown()
+    assert clients[0].is_closed is True
+    assert backend._client is None
+
+
+def test_validation_key_is_exactly_the_immutable_capability_contract():
+    first = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="kairyu",
+    )
+    second = OpenAICompatBackend(
+        base_url="http://replica-b:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="kairyu",
+    )
+    different = OpenAICompatBackend(
+        base_url="http://replica-c:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="generic",
+    )
+
+    assert first.request_validation_key == first.capabilities
+    assert first.request_validation_key == second.request_validation_key
+    assert first.request_validation_key != different.request_validation_key
+    assert isinstance(hash(first.request_validation_key), int)
+
+
+def test_validation_key_requires_subclasses_to_explicitly_opt_in():
+    class StatefulValidationBackend(OpenAICompatBackend):
+        def validate_request(self, request):
+            return None
+
+    backend = StatefulValidationBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="kairyu",
+    )
+
+    assert backend.request_validation_key is None
+
+
+async def test_client_factory_rejects_a_closed_client():
+    client = httpx.AsyncClient(transport=_ok_transport({}))
+    await client.aclose()
+    backend = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        client_factory=lambda: client,
+    )
+
+    with pytest.raises(RuntimeError, match="client_factory returned a closed"):
+        await backend.generate(_request())
+
+    assert backend._client is None
+
+
+async def test_owned_client_shutdown_is_terminal_exactly_once_and_cancellation_safe():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingClient:
+        def __init__(self) -> None:
+            self.is_closed = False
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            started.set()
+            await release.wait()
+            self.is_closed = True
+
+    client = BlockingClient()
+    backend = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        client_factory=lambda: client,
+    )
+    assert backend._get_client() is client
+
+    first = asyncio.create_task(backend.shutdown())
+    await asyncio.wait_for(started.wait(), timeout=0.2)
+    second = asyncio.create_task(backend.shutdown())
+    await asyncio.sleep(0)
+    assert second.done() is False
+
+    first.cancel()
+    await asyncio.sleep(0)
+    assert first.done() is False
+    assert second.done() is False
+    with pytest.raises(RuntimeError, match="is shut down"):
+        backend._get_client()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+
+    assert client.is_closed is True
+    assert client.close_calls == 1
+    assert backend._client is None
+    await backend.shutdown()
+    assert client.close_calls == 1
+
+
+async def test_external_client_is_shared_and_not_closed_by_replica_shutdown():
+    captured: dict = {}
+    client = httpx.AsyncClient(transport=_ok_transport(captured))
+    first = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        client=client,
+    )
+    second = OpenAICompatBackend(
+        base_url="http://replica-b:8000/v1",
+        model="m",
+        api_key_env=None,
+        client=client,
+    )
+
+    await first.generate(_request())
+    await first.shutdown()
+    assert client.is_closed is False
+    assert first._client is client
+    with pytest.raises(RuntimeError, match="is shut down"):
+        await first.generate(_request())
+
+    await second.generate(_request())
+    assert second._client is first._client
+    await second.shutdown()
+    assert client.is_closed is False
+    await client.aclose()
+
+
+async def test_stream_uses_backend_timeout_with_external_client():
+    observed: dict[str, float] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.update(request.extensions["timeout"])
+        return httpx.Response(
+            200,
+            content=_SSE_BODY,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(
+        timeout=0.125,
+        transport=httpx.MockTransport(handler),
+    )
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        timeout_s=17.0,
+        client=client,
+    )
+
+    results = [result async for result in backend.stream(_request())]
+
+    assert results[-1].finished is True
+    assert observed == {
+        "connect": 17.0,
+        "read": 17.0,
+        "write": 17.0,
+        "pool": 17.0,
+    }
+    await backend.shutdown()
+    assert client.is_closed is False
+    await client.aclose()
+
+
+async def test_closed_external_client_is_not_silently_replaced():
+    client = httpx.AsyncClient(transport=_ok_transport({}))
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        client=client,
+    )
+    await client.aclose()
+
+    with pytest.raises(RuntimeError, match="externally owned HTTP client is closed"):
+        await backend.generate(_request())
+
+    assert backend._client is client
+
+
+def test_external_client_and_transport_are_mutually_exclusive():
+    client = httpx.AsyncClient(transport=_ok_transport({}))
+    with pytest.raises(ValueError, match="client and transport are mutually exclusive"):
+        OpenAICompatBackend(
+            base_url="http://replica:8000/v1",
+            model="m",
+            api_key_env=None,
+            client=client,
+            transport=_ok_transport({}),
+        )
+
+
+def test_client_factory_is_mutually_exclusive_with_client_and_transport():
+    client = httpx.AsyncClient(transport=_ok_transport({}))
+
+    def factory() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=_ok_transport({}))
+
+    with pytest.raises(
+        ValueError,
+        match="client and client_factory are mutually exclusive",
+    ):
+        OpenAICompatBackend(
+            base_url="http://replica:8000/v1",
+            model="m",
+            api_key_env=None,
+            client=client,
+            client_factory=factory,
+        )
+    with pytest.raises(
+        ValueError,
+        match="client_factory and transport are mutually exclusive",
+    ):
+        OpenAICompatBackend(
+            base_url="http://replica:8000/v1",
+            model="m",
+            api_key_env=None,
+            client_factory=factory,
+            transport=_ok_transport({}),
+        )
 
 
 async def test_usage_completion_tokens_populate_token_ids():

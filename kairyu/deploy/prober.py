@@ -38,6 +38,7 @@ class HealthProber:
         client: httpx.AsyncClient | None = None,
         *,
         max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
+        close_client: bool = True,
     ) -> None:
         if (
             isinstance(max_concurrency, bool)
@@ -59,7 +60,7 @@ class HealthProber:
             # bind positional URLs to the current ids once; dynamically-added
             # replicas resolve their URL from the pool at check time
             configured_urls = dict(zip(pool.replica_ids, health_urls, strict=True))
-        self._initial_health_urls: dict[str, tuple[object, str | None]] = {
+        self._initial_health_urls: dict[str, tuple[str, str | None]] = {
             replica_id: (
                 pool.entry_generation(replica_id),
                 configured_urls.get(replica_id),
@@ -70,6 +71,9 @@ class HealthProber:
         self._pool = pool
         self._interval_s = interval_s
         self._client = client
+        # Injected clients retain the historical prober-owned behavior unless
+        # the dynamic-pool builder explicitly supplies its external owner.
+        self._owns_client = client is None or close_client
         self._max_concurrency = max_concurrency
         for replica_id in pool.replica_ids:
             generation = pool.entry_generation(replica_id)
@@ -77,20 +81,24 @@ class HealthProber:
                 pool.require_probe(replica_id)
 
     def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
+        if self._client is not None and self._client.is_closed:
+            if not self._owns_client:
+                raise RuntimeError("externally owned HTTP client is closed")
+            self._client = None
+        if self._client is None:
             self._client = httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S)
         return self._client
 
-    def _url_for(self, replica_id: str, generation: object) -> str | None:
+    def _url_for(self, replica_id: str, generation: str) -> str | None:
         url = self._pool.health_url(replica_id)
         if url is not None:
             return url
         initial = self._initial_health_urls.get(replica_id)
-        if initial is not None and initial[0] is generation:
+        if initial is not None and initial[0] == generation:
             return initial[1]
         return None
 
-    def _candidate_snapshot(self) -> tuple[tuple[str, object, str], ...]:
+    def _candidate_snapshot(self) -> tuple[tuple[str, str, str], ...]:
         candidates = []
         for replica_id, healthy in self._pool.healthy_by_id().items():
             if healthy:
@@ -107,13 +115,16 @@ class HealthProber:
     async def _check_candidate(
         self,
         replica_id: str,
-        generation: object,
+        generation: str,
         url: str,
         semaphore: asyncio.Semaphore,
     ) -> str | None:
         async with semaphore:
             try:
-                response = await self._get_client().get(url)
+                response = await self._get_client().get(
+                    url,
+                    timeout=_PROBE_TIMEOUT_S,
+                )
             except httpx.HTTPError:
                 return None
             except Exception:
@@ -125,7 +136,7 @@ class HealthProber:
         if response.status_code != 200:
             return None
         try:
-            if self._pool.entry_generation(replica_id) is not generation:
+            if self._pool.entry_generation(replica_id) != generation:
                 return None
             await self._pool.probe(replica_id)
         except ValueError:
@@ -165,5 +176,9 @@ class HealthProber:
                     )
                 await asyncio.sleep(self._interval_s)
         finally:
-            if self._client is not None and not self._client.is_closed:
+            if (
+                self._owns_client
+                and self._client is not None
+                and not self._client.is_closed
+            ):
                 await self._client.aclose()

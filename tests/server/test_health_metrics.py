@@ -93,10 +93,34 @@ async def test_unvalidated_remote_pool_is_unready_unplaceable_and_reports_zero()
 
     assert pool.healthy == (False,)
     assert ready.status_code == 503
-    assert ready.json()["pools"] == {"remote": [False]}
+    assert ready.json()["pools"] == {
+        "remote": {
+            "healthy": [False],
+            "draining": [False],
+            "eligible_ids": [],
+        }
+    }
     assert completion.status_code == 502
     assert pool.decision_counts["least_outstanding"] == 0
     assert 'kairyu_replica_healthy{pool="remote",replica="0"} 0.0' in metrics
+
+
+async def test_readyz_explains_healthy_but_draining_pool() -> None:
+    pool = ReplicaPool({"replica": MockBackend()})
+    pool.drain("replica")
+    app = create_app(engines={"remote": pool})
+
+    async with _client(app) as client:
+        ready = await client.get("/readyz")
+
+    assert ready.status_code == 503
+    assert ready.json()["pools"] == {
+        "remote": {
+            "healthy": [True],
+            "draining": [True],
+            "eligible_ids": [],
+        }
+    }
 
 
 async def test_metrics_exposes_request_and_pool_series():

@@ -176,7 +176,10 @@ class MetricsMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        started = time.perf_counter()
+        started_ns = time.perf_counter_ns()
+        # RequestIngressMiddleware owns the true outer-boundary timestamp.
+        # Retain this fallback for direct middleware tests and embedded stacks.
+        _state(scope).setdefault("placement_started_ns", started_ns)
         status = {"code": 500}
 
         async def wrapped_send(message: dict) -> None:
@@ -189,7 +192,7 @@ class MetricsMiddleware:
         finally:
             path = _template_path(scope["path"])  # bounded-cardinality label (M1)
             self._metrics.request_duration_seconds.labels(path=path).observe(
-                time.perf_counter() - started
+                (time.perf_counter_ns() - started_ns) / 1_000_000_000
             )
             if scope["path"].startswith(_GUARDED_PREFIX):
                 # an unknown model (404) collapses to "unknown" so an attacker
@@ -200,6 +203,18 @@ class MetricsMiddleware:
                 self._metrics.requests_total.labels(
                     model=model, code=str(status["code"])
                 ).inc()
+
+
+class RequestIngressMiddleware:
+    """Stamp the process's outer HTTP boundary for fleet placement evidence."""
+
+    def __init__(self, app: _ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] == "http":
+            _state(scope)["placement_started_ns"] = time.perf_counter_ns()
+        await self.app(scope, receive, send)
 
 
 class AccessLogMiddleware:
@@ -269,6 +284,10 @@ def configure_json_logging(level: int = logging.INFO) -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+    # Successful outbound requests are already represented by Kairyu's
+    # authoritative structured access line. Keep dependency warnings/errors
+    # without serializing another INFO line for every replica dispatch.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class TracingMiddleware:

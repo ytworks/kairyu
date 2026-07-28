@@ -10,9 +10,10 @@ compose, they do not merge.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 from yaml.resolver import BaseResolver
 
@@ -62,12 +63,55 @@ class BackendSpec(BaseModel):
         return f"{root}/readyz"
 
 
+class KubernetesEndpointSliceSpec(BaseModel):
+    """In-cluster EndpointSlice discovery for one headless replica Service."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    type: Literal["kubernetes_endpoints"] = "kubernetes_endpoints"
+    service: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+    )
+    namespace: str | None = Field(
+        default=None,
+        description="Defaults to the mounted service-account namespace.",
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+    )
+    port: str | int = "http"
+    scheme: Literal["http", "https"] = "http"
+    address_family_preference: Literal["ipv4", "ipv6"] = "ipv4"
+    model: str | None = None
+    api_key_env: str | None = None
+    poll_interval_s: float = Field(default=0.25, gt=0)
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def _reject_boolean_port(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("discovery port must be a name or an integer")
+        return value
+
+    @model_validator(mode="after")
+    def _valid_port(self) -> KubernetesEndpointSliceSpec:
+        if isinstance(self.port, int):
+            if not 1 <= self.port <= 65535:
+                raise ValueError("discovery integer port must be in 1..65535")
+        elif not self.port.strip():
+            raise ValueError("discovery port name must not be empty")
+        return self
+
+
 class PoolSpec(BaseModel):
-    """A ReplicaPool of N backends served under one model name."""
+    """A static or EndpointSlice-discovered ReplicaPool."""
 
     model_config = ConfigDict(frozen=True)
 
-    replicas: tuple[BackendSpec, ...] = Field(min_length=1)
+    replicas: tuple[BackendSpec, ...] = ()
+    discovery: KubernetesEndpointSliceSpec | None = None
     unhealthy_after: int = Field(default=3, ge=1)
     queue_depth_threshold: int = Field(default=8, ge=0)
     probe_interval_s: float = Field(
@@ -75,6 +119,21 @@ class PoolSpec(BaseModel):
         gt=0,
         description="Interval of the serve-layer health prober (m7 D4).",
     )
+    placement_log_path: str | None = Field(
+        default=None,
+        description=(
+            "Optional bounded JSONL placement/membership evidence path. "
+            "Session IDs remain SHA-256-only."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _membership_source(self) -> PoolSpec:
+        if bool(self.replicas) == (self.discovery is not None):
+            raise ValueError(
+                "pool must declare exactly one of replicas or discovery"
+            )
+        return self
 
 
 class ServerSection(ServerSettings):

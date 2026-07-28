@@ -27,7 +27,10 @@ Placement is pure hashing plus one optional JSONL append. No background tasks.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator, Mapping, Sequence
+import logging
+import time
+import uuid
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from kairyu.engine.backend import (
@@ -36,11 +39,13 @@ from kairyu.engine.backend import (
     GenerationResult,
     UpstreamClientError,
     shutdown_all,
+    shutdown_all_cancellation_safe,
 )
 from kairyu.orchestration.router import JsonlRouterLog
 
 _DEFAULT_UNHEALTHY_AFTER = 3
 _DEFAULT_QUEUE_DEPTH_THRESHOLD = 8
+logger = logging.getLogger(__name__)
 
 
 def _rendezvous_score(session_id: str, replica_id: str) -> bytes:
@@ -48,12 +53,43 @@ def _rendezvous_score(session_id: str, replica_id: str) -> bytes:
     return hashlib.sha256(f"{session_id}:{replica_id}".encode()).digest()
 
 
+def _rendezvous_winner(
+    session_id: str,
+    replica_ids: Sequence[str],
+    encoded_replica_ids: Mapping[str, bytes],
+) -> str:
+    """Return the byte-identical HRW winner without re-hashing the session prefix.
+
+    SHA-256 is incremental, so the state after ``"<session>:"`` can be copied
+    for every candidate.  This preserves the exact historical digest and
+    first-candidate tie behavior while avoiding one formatted string and one
+    UTF-8 encoding per replica on every placement.
+    """
+
+    prefix = hashlib.sha256()
+    prefix.update(session_id.encode())
+    prefix.update(b":")
+    winner = replica_ids[0]
+    winner_score: bytes | None = None
+    for replica_id in replica_ids:
+        candidate = prefix.copy()
+        candidate.update(encoded_replica_ids[replica_id])
+        score = candidate.digest()
+        if winner_score is None or score > winner_score:
+            winner = replica_id
+            winner_score = score
+    return winner
+
+
 @dataclass
 class _ReplicaEntry:
     backend: EngineBackend
     health_url: str | None = None
     validated: bool = True
-    generation: object = field(default_factory=object, compare=False)
+    generation: str = field(
+        default_factory=lambda: uuid.uuid4().hex,
+        compare=False,
+    )
     outstanding: int = 0
     consecutive_failures: int = 0
     manual_draining: bool = False
@@ -84,8 +120,10 @@ class ReplicaPool:
         prefix_index=None,
         prefix_alpha: float = 1.0,
         prefix_beta: float = 0.25,
+        allow_empty: bool = False,
+        membership_event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
-        if len(replicas) < 1:
+        if len(replicas) < 1 and not allow_empty:
             raise ValueError("ReplicaPool requires at least 1 replica")
         if unhealthy_after < 1:
             raise ValueError(f"unhealthy_after must be >= 1, got {unhealthy_after}")
@@ -100,6 +138,17 @@ class ReplicaPool:
         self._entries: dict[str, _ReplicaEntry] = {
             replica_id: _ReplicaEntry(backend=backend) for replica_id, backend in items
         }
+        # Placement is far hotter than membership mutation.  Keep immutable
+        # snapshots and stable metadata at the mutation boundary so a
+        # 200-replica request does not repeatedly scan/encode the same ring.
+        self._encoded_replica_ids = {
+            replica_id: replica_id.encode() for replica_id in self._entries
+        }
+        self._ordinal_by_id = {
+            replica_id: ordinal
+            for ordinal, replica_id in enumerate(self._entries)
+        }
+        self._eligible_snapshot = tuple(self._entries)
         self._log = log
         self._unhealthy_after = unhealthy_after
         self._queue_depth_threshold = queue_depth_threshold
@@ -108,6 +157,7 @@ class ReplicaPool:
         self._prefix_index = prefix_index
         self._prefix_alpha = prefix_alpha
         self._prefix_beta = prefix_beta
+        self._membership_event_sink = membership_event_sink
         self._decision_counts: dict[str, int] = {
             "session_affinity": 0,
             "queue_depth_fallback": 0,
@@ -126,7 +176,12 @@ class ReplicaPool:
         return tuple(self._entries)
 
     def add_replica(
-        self, replica_id: str, backend: EngineBackend, health_url: str | None = None
+        self,
+        replica_id: str,
+        backend: EngineBackend,
+        health_url: str | None = None,
+        *,
+        manual_draining: bool = False,
     ) -> None:
         if replica_id in self._entries:
             raise ValueError(f"replica {replica_id!r} already in the pool")
@@ -134,26 +189,81 @@ class ReplicaPool:
             backend=backend,
             health_url=health_url,
             validated=health_url is None,
+            manual_draining=manual_draining,
+        )
+        self._encoded_replica_ids[replica_id] = replica_id.encode()
+        self._ordinal_by_id[replica_id] = len(self._entries) - 1
+        self._refresh_eligible_snapshot()
+        entry = self._entries[replica_id]
+        self._emit_membership_event(
+            "replica_added",
+            replica_id,
+            entry.generation,
+            added=(replica_id,),
+            eligible=((replica_id,) if self._is_eligible(entry) else ()),
         )
 
     def drain(self, replica_id: str) -> None:
         """Acquire the manual drain owner; in-flight requests complete normally."""
-        self._entry(replica_id).manual_draining = True
+        entry = self._entry(replica_id)
+        was_eligible = self._is_eligible(entry)
+        entry.manual_draining = True
+        if was_eligible and not self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
+            self._emit_membership_event(
+                "manual_drain",
+                replica_id,
+                entry.generation,
+                draining=(replica_id,),
+                ineligible=(replica_id,),
+            )
 
     def cancel_drain(self, replica_id: str) -> None:
         """Release only the manual drain owner without changing other state."""
-        self._entry(replica_id).manual_draining = False
+        entry = self._entry(replica_id)
+        was_eligible = self._is_eligible(entry)
+        entry.manual_draining = False
+        if not was_eligible and self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
+            self._emit_membership_event(
+                "manual_undrain",
+                replica_id,
+                entry.generation,
+                undraining=(replica_id,),
+                eligible=(replica_id,),
+            )
 
     def acquire_drain(self, replica_id: str) -> DrainLease:
         """Acquire an independently reversible drain lease."""
         entry = self._entry(replica_id)
+        was_eligible = self._is_eligible(entry)
         lease = DrainLease()
         entry.drain_leases.add(lease)
+        if was_eligible and not self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
+            self._emit_membership_event(
+                "reconciler_drain",
+                replica_id,
+                entry.generation,
+                draining=(replica_id,),
+                ineligible=(replica_id,),
+            )
         return lease
 
     def release_drain(self, replica_id: str, lease: DrainLease) -> None:
         """Release only *lease*; manual and other lease owners remain active."""
-        self._entry(replica_id).drain_leases.discard(lease)
+        entry = self._entry(replica_id)
+        was_eligible = self._is_eligible(entry)
+        entry.drain_leases.discard(lease)
+        if not was_eligible and self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
+            self._emit_membership_event(
+                "reconciler_undrain",
+                replica_id,
+                entry.generation,
+                undraining=(replica_id,),
+                eligible=(replica_id,),
+            )
 
     def is_draining(self, replica_id: str) -> bool:
         return self._entry(replica_id).draining
@@ -171,22 +281,101 @@ class ReplicaPool:
             )
         entry.removed = True  # guarded decrement: late completions are no-ops (A2)
         del self._entries[replica_id]
+        self._encoded_replica_ids.pop(replica_id)
+        self._ordinal_by_id = {
+            current_id: ordinal
+            for ordinal, current_id in enumerate(self._entries)
+        }
+        self._refresh_eligible_snapshot()
         # drop this id's prefix history (M5): a re-added replica with the same id
         # must not inherit phantom prefixes and route shared traffic to a cold cache
         if self._prefix_index is not None:
             self._prefix_index.forget_replica(replica_id)
-        await shutdown_all((entry.backend,), f"replica {replica_id!r}")
+        self._emit_membership_event(
+            "replica_removed",
+            replica_id,
+            entry.generation,
+            removed=(replica_id,),
+        )
+        await shutdown_all_cancellation_safe(
+            (entry.backend,),
+            f"replica {replica_id!r}",
+        )
 
     def health_url(self, replica_id: str) -> str | None:
         return self._entry(replica_id).health_url
 
     def require_probe(self, replica_id: str) -> None:
         """Mark an existing id unknown until a readiness probe succeeds."""
-        self._entry(replica_id).validated = False
+        entry = self._entry(replica_id)
+        was_eligible = self._is_eligible(entry)
+        entry.validated = False
+        if was_eligible and not self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
+            self._emit_membership_event(
+                "probe_required",
+                replica_id,
+                entry.generation,
+                ineligible=(replica_id,),
+            )
 
-    def entry_generation(self, replica_id: str) -> object:
-        """Opaque token that changes whenever a replica ID is re-added."""
+    def entry_generation(self, replica_id: str) -> str:
+        """Serializable token that changes whenever a replica ID is re-added."""
         return self._entry(replica_id).generation
+
+    def set_membership_event_sink(
+        self,
+        sink: Callable[[dict[str, object]], None] | None,
+    ) -> None:
+        """Install a non-blocking observer for effective membership changes."""
+        self._membership_event_sink = sink
+
+    def clear_membership_event_sink(
+        self,
+        sink: Callable[[dict[str, object]], None],
+    ) -> None:
+        if self._membership_event_sink is sink:
+            self._membership_event_sink = None
+
+    def _emit_membership_event(
+        self,
+        reason: str,
+        replica_id: str,
+        generation: str,
+        *,
+        added: tuple[str, ...] = (),
+        draining: tuple[str, ...] = (),
+        undraining: tuple[str, ...] = (),
+        removed: tuple[str, ...] = (),
+        eligible: tuple[str, ...] = (),
+        ineligible: tuple[str, ...] = (),
+    ) -> None:
+        sink = self._membership_event_sink
+        if sink is None:
+            return
+        try:
+            sink(
+                {
+                    "reason": reason,
+                    "replica_id": replica_id,
+                    "replica_generation": generation,
+                    "added": list(added),
+                    "draining": list(draining),
+                    "undraining": list(undraining),
+                    "removed": list(removed),
+                    "eligible": list(eligible),
+                    "ineligible": list(ineligible),
+                }
+            )
+        except Exception:
+            # Membership observers are downstream audit consumers. A broken
+            # observer must not turn an already-applied pool mutation into a
+            # false failure or strand a detached backend before shutdown.
+            logger.exception(
+                "membership event observer failed for %s (%s)",
+                replica_id,
+                reason,
+            )
 
     def _entry(self, replica_id: str) -> _ReplicaEntry:
         entry = self._entries.get(replica_id)
@@ -221,9 +410,41 @@ class ReplicaPool:
     def healthy_by_id(self) -> dict[str, bool]:
         return dict(zip(self._entries, self.healthy, strict=True))
 
+    def membership_snapshot(
+        self,
+    ) -> tuple[
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+        dict[str, str],
+    ]:
+        """Capture one internally consistent state for audit publication."""
+
+        replica_ids = []
+        healthy_ids = []
+        generation_by_id = {}
+        for replica_id, entry in self._entries.items():
+            replica_ids.append(replica_id)
+            if self._is_healthy(entry):
+                healthy_ids.append(replica_id)
+            generation_by_id[replica_id] = entry.generation
+        return (
+            tuple(replica_ids),
+            tuple(healthy_ids),
+            self._eligible_snapshot,
+            generation_by_id,
+        )
+
     def validated_by_id(self) -> dict[str, bool]:
         """Read-only probe-validation state keyed by stable replica id."""
         return {rid: entry.validated for rid, entry in self._entries.items()}
+
+    def draining_by_id(self) -> dict[str, bool]:
+        return {rid: entry.draining for rid, entry in self._entries.items()}
+
+    @property
+    def eligible_ids(self) -> tuple[str, ...]:
+        return self._eligible_ids()
 
     def outstanding_by_id(self) -> dict[str, int]:
         return {rid: entry.outstanding for rid, entry in self._entries.items()}
@@ -239,9 +460,19 @@ class ReplicaPool:
         Accepts the legacy ordinal or the replica id (A1). Validates the entry
         and resets its failure count — a probe NEVER clears draining (A4).
         """
-        entry = self._entry(self._resolve_id(key))
+        replica_id = self._resolve_id(key)
+        entry = self._entry(replica_id)
+        was_eligible = self._is_eligible(entry)
         entry.validated = True
         entry.consecutive_failures = 0
+        if not was_eligible and self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
+            self._emit_membership_event(
+                "probe_succeeded",
+                replica_id,
+                entry.generation,
+                eligible=(replica_id,),
+            )
 
     async def probe_backends(self) -> dict | None:
         """Best-effort ``/backends`` payload of ONE replica, for the gateway's own
@@ -273,11 +504,17 @@ class ReplicaPool:
     def _is_healthy(self, entry: _ReplicaEntry) -> bool:
         return entry.validated and entry.consecutive_failures < self._unhealthy_after
 
+    def _is_eligible(self, entry: _ReplicaEntry) -> bool:
+        return self._is_healthy(entry) and not entry.draining
+
     def _eligible_ids(self) -> tuple[str, ...]:
-        return tuple(
+        return self._eligible_snapshot
+
+    def _refresh_eligible_snapshot(self) -> None:
+        self._eligible_snapshot = tuple(
             rid
             for rid, entry in self._entries.items()
-            if self._is_healthy(entry) and not entry.draining
+            if self._is_eligible(entry)
         )
 
     def validate_request(self, request: GenerationRequest) -> None:
@@ -286,14 +523,31 @@ class ReplicaPool:
         Placement may select any eligible member after preflight, so accepting
         a request that only some members can execute would make behavior depend
         on load or affinity. Backends without a validator retain the historical
-        assumption that they accept the canonical request.
+        assumption that they accept the canonical request. A backend may
+        explicitly publish an immutable ``request_validation_key``; equal keys
+        on the same backend type promise identical validation semantics, so one
+        representative is sufficient. Unknown or unhashable keys retain
+        per-replica validation.
         """
 
         failures: list[str] = []
+        validated_keys: set[tuple[type, object]] = set()
         for replica_id in self._eligible_ids():
-            validate = getattr(self._entries[replica_id].backend, "validate_request", None)
+            backend = self._entries[replica_id].backend
+            validate = getattr(backend, "validate_request", None)
             if validate is None:
                 continue
+            validation_key = getattr(backend, "request_validation_key", None)
+            if validation_key is not None:
+                typed_key = (type(backend), validation_key)
+                try:
+                    if typed_key in validated_keys:
+                        continue
+                    validated_keys.add(typed_key)
+                except TypeError:
+                    # A malformed optional key must not weaken validation.
+                    # Validate this backend independently instead.
+                    pass
             try:
                 validate(request)
             except ValueError as error:
@@ -304,8 +558,9 @@ class ReplicaPool:
             )
 
     def _least_outstanding(self, candidates: Sequence[str]) -> str:
-        order = {rid: position for position, rid in enumerate(self._entries)}
-        return min(candidates, key=lambda rid: (self._entries[rid].outstanding, order[rid]))
+        # ``candidates`` is already in insertion order and ``min`` keeps the
+        # first equal key, preserving the historical stable tie break.
+        return min(candidates, key=lambda rid: self._entries[rid].outstanding)
 
     def _select(self, request: GenerationRequest) -> tuple[str, str, str | None]:
         """Pick a replica; returns (replica_id, reason, session_id). Pure hashing."""
@@ -318,7 +573,11 @@ class ReplicaPool:
             )
         session_id = request.cache_hint.session_id if request.cache_hint else None
         if session_id:
-            affine = max(eligible, key=lambda rid: _rendezvous_score(session_id, rid))
+            affine = _rendezvous_winner(
+                session_id,
+                eligible,
+                self._encoded_replica_ids,
+            )
             if self._entries[affine].outstanding > self._queue_depth_threshold:
                 return self._least_outstanding(eligible), "queue_depth_fallback", session_id
             return affine, "session_affinity", session_id
@@ -355,7 +614,14 @@ class ReplicaPool:
         """Select a replica and log the decision before dispatch (m5 D4)."""
         from kairyu.telemetry import traced_span
 
+        started_ns = (
+            request.placement_started_ns
+            if request.placement_started_ns is not None
+            else time.perf_counter_ns()
+        )
         replica_id, reason, session_id = self._select(request)
+        selected_at_ns = time.perf_counter_ns()
+        placement_latency_ns = max(0, selected_at_ns - started_ns)
         self._decision_counts[reason] += 1
         with traced_span(
             "kairyu.pool.place", {"replica_id": replica_id, "reason": reason}
@@ -365,13 +631,48 @@ class ReplicaPool:
             self._prefix_index.observe(replica_id, request.prompt)
         if self._log is not None:
             # legacy field stays the ordinal; replica_id added alongside (A1)
-            ordinal = list(self._entries).index(replica_id)
-            self._log.record_replica(session_id, ordinal, reason, replica_id=replica_id)
+            self._log.record_replica(
+                session_id,
+                self._ordinal_by_id[replica_id],
+                reason,
+                replica_id=replica_id,
+                replica_generation=self._entries[replica_id].generation,
+                placement_latency_ns=placement_latency_ns,
+                request_id=request.request_id,
+                placement_started_ns=started_ns,
+                selected_at_ns=selected_at_ns,
+                pool_size=len(self._entries),
+                eligible_size=len(self._eligible_snapshot),
+            )
         return replica_id
 
     def _finish(self, entry: _ReplicaEntry) -> None:
         if not entry.removed:  # late completion on a removed id is a no-op (A2)
             entry.outstanding -= 1
+
+    def _record_backend_failure(
+        self,
+        replica_id: str,
+        entry: _ReplicaEntry,
+    ) -> None:
+        was_eligible = self._is_eligible(entry)
+        entry.consecutive_failures += 1
+        if was_eligible and not self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
+            self._emit_membership_event(
+                "health_ejected",
+                replica_id,
+                entry.generation,
+                ineligible=(replica_id,),
+            )
+
+    def _record_backend_success(self, entry: _ReplicaEntry) -> None:
+        # Once the failure threshold ejects an entry, only the readiness prober
+        # may restore it. A slower request that was dispatched before ejection
+        # must not silently put the replica back on the ring without emitting
+        # the corresponding probe-succeeded membership transition.
+        if self._is_healthy(entry):
+            entry.consecutive_failures = 0
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         replica_id = self._place(request)
@@ -384,10 +685,10 @@ class ReplicaPool:
             # count it, or one misbehaving client would eject the whole pool (O1)
             raise
         except Exception:
-            entry.consecutive_failures += 1
+            self._record_backend_failure(replica_id, entry)
             raise
         else:
-            entry.consecutive_failures = 0
+            self._record_backend_success(entry)
             return result
         finally:
             self._finish(entry)
@@ -402,10 +703,10 @@ class ReplicaPool:
         except UpstreamClientError:
             raise  # client-side 4xx, not a replica failure (O1)
         except Exception:
-            entry.consecutive_failures += 1
+            self._record_backend_failure(replica_id, entry)
             raise
         else:
-            entry.consecutive_failures = 0
+            self._record_backend_success(entry)
         finally:
             self._finish(entry)
 

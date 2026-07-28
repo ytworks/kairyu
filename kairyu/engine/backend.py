@@ -21,14 +21,55 @@ class Shutdownable(Protocol):
 
 
 async def shutdown_all(resources: Iterable[Shutdownable], label: str) -> None:
-    """Shutdown each unique resource, then aggregate ordinary failures."""
+    """Shutdown each unique resource and report every failed cleanup."""
     unique = list({id(resource): resource for resource in resources}.values())
     results = await asyncio.gather(
         *(resource.shutdown() for resource in unique), return_exceptions=True
     )
-    errors = [result for result in results if isinstance(result, Exception)]
+    errors: list[Exception] = []
+    for resource, result in zip(unique, results, strict=True):
+        if isinstance(result, Exception):
+            errors.append(result)
+        elif isinstance(result, BaseException):
+            # ``gather(return_exceptions=True)`` returns a child coroutine's
+            # self-cancellation as a value. Do not silently treat an unfinished
+            # resource cleanup as success, but keep the public aggregate an
+            # ExceptionGroup so ordinary lifecycle handlers can report it.
+            error = RuntimeError(
+                f"{type(resource).__name__}.shutdown raised "
+                f"{type(result).__name__}"
+            )
+            error.__cause__ = result
+            errors.append(error)
     if errors:
         raise ExceptionGroup(f"{label} shutdown failed", errors)
+
+
+async def shutdown_all_cancellation_safe(
+    resources: Iterable[Shutdownable],
+    label: str,
+) -> None:
+    """Finish shutdown of detached resources before propagating cancellation.
+
+    Once an owner removes a resource from its live registry, no later lifecycle
+    pass can find it. Shield that final shutdown and preserve cancellation as
+    the outward result, chaining any cleanup failure for diagnostics.
+    """
+
+    cleanup = asyncio.create_task(shutdown_all(resources, label))
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError as cancelled:
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        try:
+            cleanup.result()
+        except BaseException as cleanup_error:
+            raise cancelled from cleanup_error
+        raise
 
 
 class UpstreamClientError(Exception):
@@ -69,6 +110,10 @@ class GenerationRequest:
     tools: tuple[Mapping[str, object], ...] = ()
     tool_choice: str | Mapping[str, object] | None = None
     tools_in_prompt: bool = False
+    # Process-local gateway timestamp, never serialized to an upstream. When
+    # present, ReplicaPool records request-ingress-to-selection latency rather
+    # than only the pure hash/least-load function cost (G5 F1a).
+    placement_started_ns: int | None = None
 
 
 @dataclass(frozen=True)

@@ -354,6 +354,8 @@ class TestRegistryAndReconciler:
         assert backend._model == "llama"
         assert backend._api_key_env is None
         assert backend.capabilities.upstream == "kairyu"
+        assert backend._client is None
+        assert backend._owns_client is True
         assert health_url == "http://replica/readyz"
 
     async def test_initial_scale_uses_reconciler_default_model(self):
@@ -637,7 +639,7 @@ class TestRegistryAndReconciler:
         }
         assert pool._entries["replica"].backend is candidate
         assert pool.health_url("replica") == "http://new/readyz"
-        assert pool.entry_generation("replica") is not old_generation
+        assert pool.entry_generation("replica") != old_generation
         assert pool.validated_by_id() == {"replica": False}
         assert pool.healthy_by_id() == {"replica": False}
         assert old.shutdown_calls == 1
