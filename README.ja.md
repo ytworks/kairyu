@@ -247,6 +247,12 @@ GPU 用に Triton カーネルシームを備えます。
 メンバーシップは動的(`add_replica`/`drain`/`remove_replica`)で、TTL ハートビートの
 `ReplicaRegistry` + `PoolReconciler`(`kairyu/deploy/registry.py`)から駆動できます。
 
+ゲートウェイを水平スケールする場合、L7 ロードバランサが明示的な
+`X-Session-ID` をゲートウェイ識別子へ一貫してハッシュし、各ゲートウェイが同じ
+ReplicaPool HRW 配置を適用します。Batch のファイルとジョブは、原子的な claim
+lease と fencing を持つ PostgreSQL 共有ストアに置けます。ファイルシステム版は
+後方互換の単一ゲートウェイ用です。
+
 ## 3. インストール
 
 Python 3.11+ と [uv](https://docs.astral.sh/uv/) が必要です。Kairyu はまだ PyPI 未公開
@@ -266,7 +272,7 @@ uv sync --group dev           # + テスト/lint ツールチェーン
 |---|---|---|
 | `--extra engine` | torch, xgrammar, tokenizers, safetensors | `kairyu` バックエンドでの実チェックポイント実行、`json_schema` 構造化出力 |
 | `--extra hf` | tokenizers, safetensors | HF トークナイザ/重みのみ(torch なし) |
-| `--extra fleet` | pyzmq, msgpack | `kairyu-proc` プロセス分離エンジン、KV イベントトランスポート |
+| `--extra fleet` | pyzmq, msgpack, psycopg | プロセス分離エンジン、KV イベントトランスポート、PostgreSQL 共有 BatchStore |
 | `--extra otel` | opentelemetry-sdk | トレーシングスパン(なければ no-op) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU カーネル/ファブリック(Linux 限定マーカー。macOS の `uv sync` はスキップ) |
 | `--extra bench` | datasets, huggingface_hub, pillow, h5py | `kairyu bench download` のデータセット取得 |
@@ -646,6 +652,11 @@ batch:                         # 任意の OpenAI 互換 /v1/files + /v1/batches
   data_dir: /var/kairyu/batches
   max_concurrency: 4
 ```
+
+上記は単一ゲートウェイ用のファイルシステム既定値です。複数ゲートウェイでは
+`--extra fleet` をインストールし、`store: postgres`、
+`dsn_env: KAIRYU_BATCH_POSTGRES_DSN`、共通の `store_id` を指定します。詳細は
+[`docs/deployment.md`](docs/deployment.md)を参照してください。
 
 ### バックエンドオプション (`engines.*.options`)
 

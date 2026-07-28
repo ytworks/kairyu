@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f1c-lb
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-lb
+    app.kubernetes.io/component: load-balancer
+    app.kubernetes.io/part-of: kairyu-f1c
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: f1c-lb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: f1c-lb
+        app.kubernetes.io/component: load-balancer
+        app.kubernetes.io/part-of: kairyu-f1c
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: load-balancer
+          image: kairyu:dev
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "/opt/f1c/lb.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            - name: F1C_GATEWAYS
+              value: >-
+                a=http://f1c-gateway-a:8000,
+                b=http://f1c-gateway-b:8000,
+                c=http://f1c-gateway-c:8000
+            - name: F1C_AUDIT_PATH
+              value: /evidence/decisions.jsonl
+            - name: F1C_LISTEN_PORT
+              value: "8082"
+            - name: F1C_UPSTREAM_TIMEOUT_S
+              value: "10"
+            - name: F1C_MAX_BODY_BYTES
+              value: "67108864"
+          ports:
+            - name: http
+              containerPort: 8082
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: code
+              mountPath: /opt/f1c
+              readOnly: true
+            - name: evidence
+              mountPath: /evidence
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: code
+          configMap:
+            name: f1c-lb-code
+        - name: evidence
+          hostPath:
+            path: /var/lib/kairyu-f1c/evidence/lb
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: f1c-lb
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-lb
+    app.kubernetes.io/component: load-balancer
+    app.kubernetes.io/part-of: kairyu-f1c
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: f1c-lb
+  ports:
+    - name: http
+      port: 8082
+      nodePort: 30082
+      protocol: TCP
+      targetPort: http

@@ -50,12 +50,12 @@ SLO vocabulary used by every gate below:
 | F1c | 3 gateways behind an LB with consistent-hash session partitioning pass the C1 affinity assertion; batch jobs complete with the shared `BatchStore` | kind CI job |
 | F1d | One request produces one end-to-end OTel trace (gateway route → pool place → replica call); Conductor runs show per-stage spans | trace fixture test |
 
-F1b remains unproven until one clean, exact-head 100-replica formal artifact
-passes the contract in m10 A27. Retained F1a formal evidence may be reused for
-shared kind-runner capacity, image/source provenance, NodePort traffic, and
-discovery/placement/membership joins. F1a's `OnDelete` batch churn cannot prove
-the partitioned rollout, drain-first ordering, exact-100 lifecycle, or
-unattended completion and is not a substitute for the new F1b formal run.
+F1a and F1b are closed by retained exact-head Actions runs `30374404150` and
+`30387260062`. F1c reuses their kind-runner capacity, image/source provenance,
+NodePort traffic, discovery/placement/membership, and zero-failure rollout
+evidence instead of repeating either measurement. Its one additional binding
+drill is limited to the distinct three-gateway affinity, shared PostgreSQL
+BatchStore, and fenced owner-Pod failover contract in m10 A29.
 
 ### Stage F2 — KV-aware routing (CPU-first, then 4–8 GPU testbed)
 

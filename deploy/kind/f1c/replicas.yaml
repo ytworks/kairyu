@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: f1c-replicas
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-replica
+    app.kubernetes.io/part-of: kairyu-f1c
+spec:
+  # Preserve each Pod UID in EndpointSlices. All three gateways must converge
+  # on the same HRW ring rather than seeing one load-balanced Service address.
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/name: f1c-replica
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: f1c-replica
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-replica
+    app.kubernetes.io/part-of: kairyu-f1c
+spec:
+  serviceName: f1c-replicas
+  replicas: 12
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: f1c-replica
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: f1c-replica
+        app.kubernetes.io/part-of: kairyu-f1c
+    spec:
+      terminationGracePeriodSeconds: 15
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mock
+          image: kairyu-f1a-mock:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # Make the owner-kill/reclaim boundary deterministic. The F1a
+            # profiles leave this unset and retain their zero-delay behavior.
+            - name: F1A_MOCK_RESPONSE_DELAY
+              value: 100ms
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /kairyu-f1a-mock
+                  - drain
+                  - -url=http://127.0.0.1:8080/admin/drain
+                  - -grace=5s
+          resources:
+            requests:
+              cpu: 1m
+              memory: 4Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi

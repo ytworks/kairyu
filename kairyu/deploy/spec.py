@@ -159,8 +159,29 @@ class EmbeddingSection(BaseModel):
 class BatchSection(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    data_dir: str
+    store: Literal["filesystem", "postgres"] = "filesystem"
+    data_dir: str | None = None
+    dsn_env: str = Field(
+        default="KAIRYU_BATCH_POSTGRES_DSN",
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )
+    store_id: str = Field(default="kairyu", min_length=1, max_length=128)
+    spool_dir: str | None = None
     max_concurrency: int = Field(default=4, ge=1)
+    poll_interval_s: float = Field(default=0.5, ge=0.05)
+    lease_seconds: float = Field(default=30.0, ge=1.0)
+
+    @model_validator(mode="after")
+    def _store_config(self) -> BatchSection:
+        if self.store == "filesystem" and not self.data_dir:
+            raise ValueError("batch.data_dir is required for the filesystem store")
+        if self.store == "filesystem" and self.spool_dir is not None:
+            raise ValueError("batch.spool_dir is only valid for the postgres store")
+        if self.store == "postgres" and self.data_dir is not None:
+            raise ValueError("batch.data_dir cannot be set for the postgres store")
+        if not self.store_id.strip() or "\x00" in self.store_id:
+            raise ValueError("batch.store_id must be a non-empty PostgreSQL identity")
+        return self
 
 
 class TenantLimitsSection(BaseModel):

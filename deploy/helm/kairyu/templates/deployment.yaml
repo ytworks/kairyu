@@ -31,10 +31,23 @@ spec:
         - name: kairyu
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- with .Values.attentionBackend }}
+          {{- if or .Values.attentionBackend .Values.batchPostgres.enabled }}
           env:
+          {{- with .Values.attentionBackend }}
             - name: KAIRYU_ATTENTION_BACKEND
               value: {{ . | quote }}
+          {{- end }}
+          {{- if .Values.batchPostgres.enabled }}
+            - name: {{ .Values.batchPostgres.dsnEnvName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.batchPostgres.secretName | quote }}
+                  key: {{ .Values.batchPostgres.secretKey | quote }}
+            - name: KAIRYU_BATCH_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          {{- end }}
           {{- end }}
           ports:
             - containerPort: 8000

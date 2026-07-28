@@ -1,0 +1,396 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: f1c-gateway-config
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+immutable: true
+data:
+  config.yaml: |
+    server:
+      host: 0.0.0.0
+      port: 8000
+      max_concurrency: 128
+    pools:
+      f1a:
+        discovery:
+          type: kubernetes_endpoints
+          service: f1c-replicas
+          namespace: kairyu-f1c
+          port: http
+          model: f1a
+          api_key_env: null
+          poll_interval_s: 0.25
+        unhealthy_after: 1
+        queue_depth_threshold: 8
+        probe_interval_s: 1.0
+        placement_log_path: /evidence/placements.jsonl
+    batch:
+      store: postgres
+      store_id: kairyu-f1c
+      dsn_env: KAIRYU_BATCH_POSTGRES_DSN
+      poll_interval_s: 0.1
+      lease_seconds: 3
+      max_concurrency: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f1c-gateway-a
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+    kairyu.ai/gateway-id: a
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: f1c-gateway
+      kairyu.ai/gateway-id: a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: f1c-gateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: kairyu-f1c
+        kairyu.ai/gateway-id: a
+    spec:
+      serviceAccountName: f1c-gateway
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: kairyu:dev
+          imagePullPolicy: IfNotPresent
+          args: ["/etc/kairyu/config.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            - name: KAIRYU_BATCH_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: f1c-postgres
+                  key: dsn
+            - name: KAIRYU_BATCH_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: KAIRYU_GATEWAY_ID
+              value: a
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 300
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kairyu
+              readOnly: true
+            - name: evidence
+              mountPath: /evidence
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: f1c-gateway-config
+        - name: evidence
+          hostPath:
+            path: /var/lib/kairyu-f1c/evidence/a
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: f1c-gateway-a
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+    kairyu.ai/gateway-id: a
+spec:
+  selector:
+    app.kubernetes.io/name: f1c-gateway
+    kairyu.ai/gateway-id: a
+  ports:
+    - name: http
+      port: 8000
+      protocol: TCP
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f1c-gateway-b
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+    kairyu.ai/gateway-id: b
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: f1c-gateway
+      kairyu.ai/gateway-id: b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: f1c-gateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: kairyu-f1c
+        kairyu.ai/gateway-id: b
+    spec:
+      serviceAccountName: f1c-gateway
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: kairyu:dev
+          imagePullPolicy: IfNotPresent
+          args: ["/etc/kairyu/config.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            - name: KAIRYU_BATCH_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: f1c-postgres
+                  key: dsn
+            - name: KAIRYU_BATCH_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: KAIRYU_GATEWAY_ID
+              value: b
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 300
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kairyu
+              readOnly: true
+            - name: evidence
+              mountPath: /evidence
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: f1c-gateway-config
+        - name: evidence
+          hostPath:
+            path: /var/lib/kairyu-f1c/evidence/b
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: f1c-gateway-b
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+    kairyu.ai/gateway-id: b
+spec:
+  selector:
+    app.kubernetes.io/name: f1c-gateway
+    kairyu.ai/gateway-id: b
+  ports:
+    - name: http
+      port: 8000
+      protocol: TCP
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f1c-gateway-c
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+    kairyu.ai/gateway-id: c
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: f1c-gateway
+      kairyu.ai/gateway-id: c
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: f1c-gateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: kairyu-f1c
+        kairyu.ai/gateway-id: c
+    spec:
+      serviceAccountName: f1c-gateway
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: kairyu:dev
+          imagePullPolicy: IfNotPresent
+          args: ["/etc/kairyu/config.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            - name: KAIRYU_BATCH_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: f1c-postgres
+                  key: dsn
+            - name: KAIRYU_BATCH_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: KAIRYU_GATEWAY_ID
+              value: c
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 300
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kairyu
+              readOnly: true
+            - name: evidence
+              mountPath: /evidence
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: f1c-gateway-config
+        - name: evidence
+          hostPath:
+            path: /var/lib/kairyu-f1c/evidence/c
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: f1c-gateway-c
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: kairyu-f1c
+    kairyu.ai/gateway-id: c
+spec:
+  selector:
+    app.kubernetes.io/name: f1c-gateway
+    kairyu.ai/gateway-id: c
+  ports:
+    - name: http
+      port: 8000
+      protocol: TCP
+      targetPort: http

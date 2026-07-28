@@ -1,0 +1,132 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: f1c-postgres
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-postgres
+    app.kubernetes.io/part-of: kairyu-f1c
+type: Opaque
+immutable: true
+stringData:
+  database: kairyu
+  username: kairyu
+  # This credential is deliberately limited to the disposable kind fixture.
+  password: f1c-kind-only
+  dsn: postgresql://kairyu:f1c-kind-only@f1c-postgres:5432/kairyu?sslmode=disable
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: f1c-postgres
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-postgres
+    app.kubernetes.io/part-of: kairyu-f1c
+spec:
+  selector:
+    app.kubernetes.io/name: f1c-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      protocol: TCP
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f1c-postgres
+  namespace: kairyu-f1c
+  labels:
+    app.kubernetes.io/name: f1c-postgres
+    app.kubernetes.io/part-of: kairyu-f1c
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: f1c-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: f1c-postgres
+        app.kubernetes.io/part-of: kairyu-f1c
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsGroup: 999
+            runAsNonRoot: true
+            runAsUser: 999
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: f1c-postgres
+                  key: database
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: f1c-postgres
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: f1c-postgres
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - /usr/bin/pg_isready
+                - -U
+                - kairyu
+                - -d
+                - kairyu
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - /usr/bin/pg_isready
+                - -U
+                - kairyu
+                - -d
+                - kairyu
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}

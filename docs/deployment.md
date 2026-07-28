@@ -133,7 +133,7 @@ embeddings:
   embed-test:
     backend: mock                                # deterministic built-in CPU backend
     dimensions: 384
-batch: { data_dir: /var/lib/kairyu/batch, max_concurrency: 8 }
+batch: { data_dir: /var/lib/kairyu/batch, max_concurrency: 8 }  # single gateway
 tenants:
   default_tenant: default
   limits:
@@ -156,6 +156,25 @@ single-candidate terminal usage refunds unused capacity. Failure, disconnect,
 missing usage, and multi-candidate work consume the full reservation.
 `kairyu_tenant_in_flight_requests` and `kairyu_tenant_reserved_tokens` must both
 return to zero after work drains.
+
+For two or more gateways, select the shared PostgreSQL batch backend instead of
+mounting the filesystem store over NFS:
+
+```yaml
+batch:
+  store: postgres
+  dsn_env: KAIRYU_BATCH_POSTGRES_DSN
+  store_id: production
+  max_concurrency: 8
+  poll_interval_s: 0.5
+  lease_seconds: 30
+```
+
+Inject the DSN from a Secret and set `KAIRYU_BATCH_WORKER_ID` to the immutable
+gateway Pod UID. PostgreSQL owns file chunks, jobs, claims, leases and fencing
+tokens; a process-local submit signal only wakes the local poller. After an
+owner crash, inference may run again, but only the current fenced claimant may
+publish the terminal job and output.
 
 The formal F5b GPU check is `bench/noisy_neighbor_gpu_bench.py --assert-gate`.
 It compares 10x offered noisy traffic against bracketed compliant-neighbor
@@ -273,9 +292,10 @@ Operational notes:
   replica holding its warm radix-KV prefix. Watch
   `kairyu_pool_decisions_total{reason="session_affinity"}` — a low share on
   multi-turn traffic means clients aren't sending session identity.
-- **Gateway HA**: gateways are stateless (the batch data dir is the one
-  exception) — run two behind the edge LB. Point batch clients at one
-  gateway, or share `batch.data_dir` over NFS.
+- **Gateway HA**: run gateways behind an L7 load balancer that consistently
+  hashes `X-Session-ID`. Use `batch.store: postgres` for cross-gateway files and
+  jobs. The filesystem store remains single-gateway only and must not be shared
+  over NFS.
 - **Two GPU nodes acting as one model** (TP/PP/P-D across nodes) is an
   engine-layer concern configured by `ClusterSpec` per `docs/gpu-runbook.md`
   §7; the gateway still sees one OpenAI endpoint per coherence domain.

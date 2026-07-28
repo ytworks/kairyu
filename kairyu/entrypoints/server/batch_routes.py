@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from kairyu.batch.store import BatchStore, FileTooLargeError
+from kairyu.batch.store import BatchStoreProtocol, FileTooLargeError
 from kairyu.batch.worker import BatchWorker
 
 
@@ -42,7 +43,16 @@ def _not_found(kind: str, object_id: str) -> JSONResponse:
     )
 
 
-def add_batch_routes(app: FastAPI, store: BatchStore, worker: BatchWorker) -> None:
+def add_batch_routes(
+    app: FastAPI, store: BatchStoreProtocol, worker: BatchWorker
+) -> None:
+    shared_store = callable(getattr(store, "claim_next_batch", None))
+
+    async def store_call(function, *args, **kwargs):
+        if shared_store:
+            return await asyncio.to_thread(function, *args, **kwargs)
+        return function(*args, **kwargs)
+
     @app.post("/v1/files")
     async def upload_file(
         request: Request,
@@ -76,14 +86,22 @@ def add_batch_routes(app: FastAPI, store: BatchStore, worker: BatchWorker) -> No
     @app.get("/v1/files/{file_id}")
     async def get_file(request: Request, file_id: str):
         try:
-            return store.get_file(file_id, owner=_tenant_of(request))
+            return await store_call(
+                store.get_file,
+                file_id,
+                owner=_tenant_of(request),
+            )
         except KeyError:
             return _not_found("file", file_id)
 
     @app.get("/v1/files/{file_id}/content")
     async def get_file_content(request: Request, file_id: str):
         try:
-            content = store.read_file_content(file_id, owner=_tenant_of(request))
+            content = await store_call(
+                store.read_file_content,
+                file_id,
+                owner=_tenant_of(request),
+            )
         except KeyError:
             return _not_found("file", file_id)
         return Response(content=content, media_type="application/octet-stream")
@@ -91,7 +109,8 @@ def add_batch_routes(app: FastAPI, store: BatchStore, worker: BatchWorker) -> No
     @app.post("/v1/batches")
     async def create_batch(request: Request, body: CreateBatchRequest):
         try:
-            job = store.create_batch(
+            job = await store_call(
+                store.create_batch,
                 input_file_id=body.input_file_id,
                 endpoint=body.endpoint,
                 completion_window=body.completion_window,
@@ -117,24 +136,34 @@ def add_batch_routes(app: FastAPI, store: BatchStore, worker: BatchWorker) -> No
     @app.get("/v1/batches")
     async def list_batches(request: Request, limit: int = 20):
         owner = _tenant_of(request)
-        jobs = store.list_batches(limit, owner=owner)
+        jobs = await store_call(store.list_batches, limit, owner=owner)
         return {"object": "list", "data": [job.model_dump() for job in jobs]}
 
     @app.get("/v1/batches/{batch_id}")
     async def get_batch(request: Request, batch_id: str):
         try:
-            return store.get_batch(batch_id, owner=_tenant_of(request))
+            return await store_call(
+                store.get_batch,
+                batch_id,
+                owner=_tenant_of(request),
+            )
         except KeyError:
             return _not_found("batch", batch_id)
 
     @app.post("/v1/batches/{batch_id}/cancel")
     async def cancel_batch(request: Request, batch_id: str):
         owner = _tenant_of(request)
+        shared_cancel = getattr(store, "cancel_batch", None)
+        if callable(shared_cancel):
+            try:
+                return await store_call(shared_cancel, batch_id, owner=owner)
+            except KeyError:
+                return _not_found("batch", batch_id)
         try:
-            job = store.get_batch(batch_id, owner=owner)
+            job = await store_call(store.get_batch, batch_id, owner=owner)
         except KeyError:
             return _not_found("batch", batch_id)
         if job.status in ("validating", "in_progress"):
             job.status = "cancelled"
-            store.update_batch(job)
-        return store.get_batch(batch_id, owner=owner)
+            await store_call(store.update_batch, job)
+        return await store_call(store.get_batch, batch_id, owner=owner)
