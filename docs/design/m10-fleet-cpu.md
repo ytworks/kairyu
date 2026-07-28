@@ -1,7 +1,7 @@
 # M10 Design: Fleet Elasticity (M10a) + KV-Aware Routing (M10b) — CPU Halves
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
-2026-07-27; D2/D5/A16–A23 amended 2026-07-28). Reviewed (1-reviewer panel
+2026-07-27; D1/D2/D5/A16–A24 amended 2026-07-28). Reviewed (1-reviewer panel
 with repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
@@ -427,3 +427,35 @@ over (α, β) (pure function over the dataset; no online learning).
   observer, one-second raw causality bracket, 10 ms placement bound, 99% pacing
   requirement, 50 requests/s, retry prohibition, churn schedule, exact-200
   checks, and raw artifact replay remain unchanged.
+- **A24**: F1a control-plane observation no longer creates a fresh `kubectl`
+  process for each read. One lifecycle-owned `kubectl proxy` and one persistent
+  HTTP client carry every EndpointSlice, Pod LIST, and kubelet resource read;
+  only the ten mutating Pod DELETE commands remain subprocesses during traffic.
+  HTTP reads have a ten-second fail-closed timeout, and normal, exceptional, and
+  cancelled exits terminate and reap the proxy. Raw Kubernetes payloads,
+  fetch/observation timestamps, absolute schedules, hashes, and replay checks
+  are unchanged. The F1a gateway's own EndpointSlice discovery cadence is
+  500 ms rather than 250 ms: even the historical 3.618-second maximum
+  withdrawal leaves at least 1.13 seconds of worst-phase margin under the
+  unchanged five-second limit, while halving full 180–200-endpoint parsing
+  during replacement.
+
+  ReplicaPool retains byte-identical SHA-256 rendezvous hashing but copies the
+  hash state after the session prefix and caches encoded replica IDs, the
+  insertion-order ordinal map, and the eligible ring at membership mutation
+  boundaries. Least-outstanding relies on that ring's stable order instead of
+  rebuilding an ordinal map per request. Membership audit capture traverses
+  entries once for one internally consistent snapshot. Dynamic add, remove,
+  drain, health ejection, and probe transitions refresh the immutable ring
+  before publishing their event, so placement and artifact replay observe the
+  same state. A 200-replica/10,000-request exact-allocation A/B measured
+  1.541 seconds to 0.808 seconds (1.91x) without changing any winner.
+
+  Exact-head Actions run 30365961550 motivated this amendment: all 33,000
+  requests returned 2xx and overall placement p99 was 7.998 ms, but all ten
+  post-delete windows reached 10.761–26.315 ms. Placement overlapping both
+  synchronized EndpointSlice/resource reads had 36.025 ms p99 versus 4.188 ms
+  when neither ran, despite gateway CPU peaking at only 279m and memory at
+  56 MiB. The request rate, retry prohibition, ten-minute schedule, 10 ms
+  placement bound, evidence cadence, and every fail-closed replay condition
+  remain frozen.

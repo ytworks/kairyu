@@ -461,8 +461,12 @@ class PoolReconciler:
     def _capture_pool_event(self, transition: dict[str, object]) -> None:
         """Append one post-mutation snapshot without performing sink I/O."""
         self._event_sequence += 1
-        replica_ids = self._pool.replica_ids
-        healthy_by_id = self._pool.healthy_by_id()
+        (
+            replica_ids,
+            healthy_ids,
+            eligible_ids,
+            generation_by_id,
+        ) = self._pool.membership_snapshot()
         event = {
             **transition,
             # Capture the state-transition time, not the later outbox flush
@@ -475,16 +479,9 @@ class PoolReconciler:
                 f"{self._event_source_id}:{self._event_sequence:020d}"
             ),
             "replica_ids": list(replica_ids),
-            "healthy_ids": [
-                replica_id
-                for replica_id in replica_ids
-                if healthy_by_id[replica_id]
-            ],
-            "eligible_ids": list(self._pool.eligible_ids),
-            "generation_by_id": {
-                replica_id: self._pool.entry_generation(replica_id)
-                for replica_id in replica_ids
-            },
+            "healthy_ids": list(healthy_ids),
+            "eligible_ids": list(eligible_ids),
+            "generation_by_id": generation_by_id,
         }
         self._pending_events.append(event)
 

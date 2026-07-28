@@ -53,6 +53,34 @@ def _rendezvous_score(session_id: str, replica_id: str) -> bytes:
     return hashlib.sha256(f"{session_id}:{replica_id}".encode()).digest()
 
 
+def _rendezvous_winner(
+    session_id: str,
+    replica_ids: Sequence[str],
+    encoded_replica_ids: Mapping[str, bytes],
+) -> str:
+    """Return the byte-identical HRW winner without re-hashing the session prefix.
+
+    SHA-256 is incremental, so the state after ``"<session>:"`` can be copied
+    for every candidate.  This preserves the exact historical digest and
+    first-candidate tie behavior while avoiding one formatted string and one
+    UTF-8 encoding per replica on every placement.
+    """
+
+    prefix = hashlib.sha256()
+    prefix.update(session_id.encode())
+    prefix.update(b":")
+    winner = replica_ids[0]
+    winner_score: bytes | None = None
+    for replica_id in replica_ids:
+        candidate = prefix.copy()
+        candidate.update(encoded_replica_ids[replica_id])
+        score = candidate.digest()
+        if winner_score is None or score > winner_score:
+            winner = replica_id
+            winner_score = score
+    return winner
+
+
 @dataclass
 class _ReplicaEntry:
     backend: EngineBackend
@@ -110,6 +138,17 @@ class ReplicaPool:
         self._entries: dict[str, _ReplicaEntry] = {
             replica_id: _ReplicaEntry(backend=backend) for replica_id, backend in items
         }
+        # Placement is far hotter than membership mutation.  Keep immutable
+        # snapshots and stable metadata at the mutation boundary so a
+        # 200-replica request does not repeatedly scan/encode the same ring.
+        self._encoded_replica_ids = {
+            replica_id: replica_id.encode() for replica_id in self._entries
+        }
+        self._ordinal_by_id = {
+            replica_id: ordinal
+            for ordinal, replica_id in enumerate(self._entries)
+        }
+        self._eligible_snapshot = tuple(self._entries)
         self._log = log
         self._unhealthy_after = unhealthy_after
         self._queue_depth_threshold = queue_depth_threshold
@@ -152,6 +191,9 @@ class ReplicaPool:
             validated=health_url is None,
             manual_draining=manual_draining,
         )
+        self._encoded_replica_ids[replica_id] = replica_id.encode()
+        self._ordinal_by_id[replica_id] = len(self._entries) - 1
+        self._refresh_eligible_snapshot()
         entry = self._entries[replica_id]
         self._emit_membership_event(
             "replica_added",
@@ -167,6 +209,7 @@ class ReplicaPool:
         was_eligible = self._is_eligible(entry)
         entry.manual_draining = True
         if was_eligible and not self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
             self._emit_membership_event(
                 "manual_drain",
                 replica_id,
@@ -181,6 +224,7 @@ class ReplicaPool:
         was_eligible = self._is_eligible(entry)
         entry.manual_draining = False
         if not was_eligible and self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
             self._emit_membership_event(
                 "manual_undrain",
                 replica_id,
@@ -196,6 +240,7 @@ class ReplicaPool:
         lease = DrainLease()
         entry.drain_leases.add(lease)
         if was_eligible and not self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
             self._emit_membership_event(
                 "reconciler_drain",
                 replica_id,
@@ -211,6 +256,7 @@ class ReplicaPool:
         was_eligible = self._is_eligible(entry)
         entry.drain_leases.discard(lease)
         if not was_eligible and self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
             self._emit_membership_event(
                 "reconciler_undrain",
                 replica_id,
@@ -235,6 +281,12 @@ class ReplicaPool:
             )
         entry.removed = True  # guarded decrement: late completions are no-ops (A2)
         del self._entries[replica_id]
+        self._encoded_replica_ids.pop(replica_id)
+        self._ordinal_by_id = {
+            current_id: ordinal
+            for ordinal, current_id in enumerate(self._entries)
+        }
+        self._refresh_eligible_snapshot()
         # drop this id's prefix history (M5): a re-added replica with the same id
         # must not inherit phantom prefixes and route shared traffic to a cold cache
         if self._prefix_index is not None:
@@ -259,6 +311,7 @@ class ReplicaPool:
         was_eligible = self._is_eligible(entry)
         entry.validated = False
         if was_eligible and not self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
             self._emit_membership_event(
                 "probe_required",
                 replica_id,
@@ -357,6 +410,31 @@ class ReplicaPool:
     def healthy_by_id(self) -> dict[str, bool]:
         return dict(zip(self._entries, self.healthy, strict=True))
 
+    def membership_snapshot(
+        self,
+    ) -> tuple[
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+        dict[str, str],
+    ]:
+        """Capture one internally consistent state for audit publication."""
+
+        replica_ids = []
+        healthy_ids = []
+        generation_by_id = {}
+        for replica_id, entry in self._entries.items():
+            replica_ids.append(replica_id)
+            if self._is_healthy(entry):
+                healthy_ids.append(replica_id)
+            generation_by_id[replica_id] = entry.generation
+        return (
+            tuple(replica_ids),
+            tuple(healthy_ids),
+            self._eligible_snapshot,
+            generation_by_id,
+        )
+
     def validated_by_id(self) -> dict[str, bool]:
         """Read-only probe-validation state keyed by stable replica id."""
         return {rid: entry.validated for rid, entry in self._entries.items()}
@@ -388,6 +466,7 @@ class ReplicaPool:
         entry.validated = True
         entry.consecutive_failures = 0
         if not was_eligible and self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
             self._emit_membership_event(
                 "probe_succeeded",
                 replica_id,
@@ -429,7 +508,10 @@ class ReplicaPool:
         return self._is_healthy(entry) and not entry.draining
 
     def _eligible_ids(self) -> tuple[str, ...]:
-        return tuple(
+        return self._eligible_snapshot
+
+    def _refresh_eligible_snapshot(self) -> None:
+        self._eligible_snapshot = tuple(
             rid
             for rid, entry in self._entries.items()
             if self._is_eligible(entry)
@@ -476,8 +558,9 @@ class ReplicaPool:
             )
 
     def _least_outstanding(self, candidates: Sequence[str]) -> str:
-        order = {rid: position for position, rid in enumerate(self._entries)}
-        return min(candidates, key=lambda rid: (self._entries[rid].outstanding, order[rid]))
+        # ``candidates`` is already in insertion order and ``min`` keeps the
+        # first equal key, preserving the historical stable tie break.
+        return min(candidates, key=lambda rid: self._entries[rid].outstanding)
 
     def _select(self, request: GenerationRequest) -> tuple[str, str, str | None]:
         """Pick a replica; returns (replica_id, reason, session_id). Pure hashing."""
@@ -490,7 +573,11 @@ class ReplicaPool:
             )
         session_id = request.cache_hint.session_id if request.cache_hint else None
         if session_id:
-            affine = max(eligible, key=lambda rid: _rendezvous_score(session_id, rid))
+            affine = _rendezvous_winner(
+                session_id,
+                eligible,
+                self._encoded_replica_ids,
+            )
             if self._entries[affine].outstanding > self._queue_depth_threshold:
                 return self._least_outstanding(eligible), "queue_depth_fallback", session_id
             return affine, "session_affinity", session_id
@@ -544,10 +631,9 @@ class ReplicaPool:
             self._prefix_index.observe(replica_id, request.prompt)
         if self._log is not None:
             # legacy field stays the ordinal; replica_id added alongside (A1)
-            ordinal = list(self._entries).index(replica_id)
             self._log.record_replica(
                 session_id,
-                ordinal,
+                self._ordinal_by_id[replica_id],
                 reason,
                 replica_id=replica_id,
                 replica_generation=self._entries[replica_id].generation,
@@ -556,7 +642,7 @@ class ReplicaPool:
                 placement_started_ns=started_ns,
                 selected_at_ns=selected_at_ns,
                 pool_size=len(self._entries),
-                eligible_size=len(self._eligible_ids()),
+                eligible_size=len(self._eligible_snapshot),
             )
         return replica_id
 
@@ -572,6 +658,7 @@ class ReplicaPool:
         was_eligible = self._is_eligible(entry)
         entry.consecutive_failures += 1
         if was_eligible and not self._is_eligible(entry):
+            self._refresh_eligible_snapshot()
             self._emit_membership_event(
                 "health_ejected",
                 replica_id,

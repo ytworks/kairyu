@@ -222,6 +222,16 @@ internal calls, 47,266 versus 50,504 internal tokens, and 1,499.274 versus
 failed the same gate with a 60 s upstream timeout; the selected 1024-token
 policy completed it while preserving the public final 8192-token allowance.
 The artifacts explicitly limit the quality claim to this subset.
+The exact-head public F1a rerun serves 33,000/33,000 requests with zero
+failures and 7.998 ms overall placement p99, but still fails all ten stricter
+post-delete windows at 10.761–26.315 ms. Raw evidence isolates the remaining
+tail to churn-time control-plane observation: simultaneous EndpointSlice and
+resource reads measure 36.025 ms p99 versus 4.188 ms with neither active, while
+gateway CPU/memory peak at only 279m/56 MiB. The implemented correction replaces
+per-read `kubectl` processes with one persistent proxy/client, reduces formal
+gateway discovery to a margin-preserving 500 ms cadence, and makes the exact
+SHA-256 HRW path 1.91x faster through mutation-boundary ring caches. Its
+unchanged exact-head 200-replica formal rerun remains the blocker for #175.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
@@ -355,6 +365,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F1a removes observer process churn and exact-HRW repetition
+- What: Added A24. All F1a Kubernetes sampling reads now use one lifecycle-owned `kubectl proxy` and persistent bounded-timeout HTTP client; Pod DELETE remains the only measurement-time kubectl subprocess. The formal gateway polls EndpointSlices every 500 ms instead of four times per second. ReplicaPool preserves every historical SHA-256 rendezvous winner while reusing the session-prefix hash state and mutation-boundary encoded-ID, ordinal, and eligible-ring caches; membership audit capture now builds one internally consistent state in one traversal. All frozen traffic, placement, withdrawal, evidence, and replay thresholds remain unchanged.
+- Why: Exact-head Actions run `30365961550` returned 33,000/33,000 2xx with 7.998 ms overall placement p99, but every post-delete window reached 10.761–26.315 ms. Simultaneous EndpointSlice/resource fetches correlated with 36.025 ms p99 versus 4.188 ms outside either fetch while gateway CPU/memory had ample headroom. Exact-allocation microbenchmarking over 200 replicas and 10,000 requests improved 1.541 s → 0.808 s (1.91x). Even the historical 3.618 s maximum old-UID withdrawal leaves at least 1.13 s worst-phase margin at the new cadence under the unchanged five-second limit.
+- Refs: m10 D1/D2/D5/A24; G5 F1a; issue #175; PR #266; Actions run `30365961550`; `bench/fleet_churn_bench.py`; `kairyu/orchestration/replica.py`; `kairyu/deploy/registry.py`; `deploy/kind/f1a/`
 
 ### 2026-07-28 — [amendment] F1a makes sparse lifecycle evidence fail-closed
 - What: Clarified A23's reduced-control-plane evidence contract without changing the frozen gate. Ready, non-terminating EndpointSlice `targetRef` rows must form the exact expected Pod-name-to-UID bijection with no duplicate, alias, fallback, missing, unexpected, or contradictory same-timestamp identity. The initial 200 Pods, each epoch's twenty replacement Pods, the final 200 Pods, and the single anchored gateway Pod must each prove Ready state, lifecycle identity, and pinned container/runtime image identity. Raw fetch brackets make initial, EndpointSlice recovery, targeted Pod corroboration, final capture, and derived recovery times causally replayable. Periodic rows retain their schema/kind/payload, scheduled deadline, exact skipped-slot count, and traffic-start/end coverage; independent replay re-derives every deadline/skip transition and rejects catch-up, truncated, empty, duplicated, or backdated evidence.

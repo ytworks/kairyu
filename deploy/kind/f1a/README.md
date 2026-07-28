@@ -90,3 +90,10 @@ control plane with catch-up requests. All raw evidence JSON is admitted in
 event-loop order to a bounded lifecycle-owned writer. The post-traffic gateway
 audit copy drains and retries bounded backpressure on a worker thread, and
 shutdown drains every accepted row before sidecars are hashed and replayed.
+All Kubernetes sampling reads share one lifecycle-owned `kubectl proxy` and
+persistent HTTP client; the driver does not start a new `kubectl` process for
+each EndpointSlice, Pod, or resource sample. The gateway likewise polls
+EndpointSlices every 500 ms, retaining at least 1.13 seconds of worst-phase
+margin against the historical 3.618-second withdrawal maximum and the
+unchanged five-second limit while halving control-plane parsing during 20-Pod
+replacement.

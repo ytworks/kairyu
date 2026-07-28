@@ -174,6 +174,61 @@ def test_constructor_rejects_invalid_thresholds():
         ReplicaPool([MockBackend()], queue_depth_threshold=-1)
 
 
+async def test_cached_ring_preserves_exact_hrw_and_membership_order() -> None:
+    replica_ids = ("replica:one", "レプリカ-二", "replica-three")
+    pool = ReplicaPool(
+        {replica_id: MockBackend() for replica_id in replica_ids}
+    )
+    sessions = ("plain", "セッション", "contains:colon", " ")
+
+    def expected(session_id: str, candidates: tuple[str, ...]) -> str:
+        return max(
+            candidates,
+            key=lambda replica_id: hashlib.sha256(
+                f"{session_id}:{replica_id}".encode()
+            ).digest(),
+        )
+
+    for session_id in sessions:
+        assert pool._select(make_request("select", session_id))[0] == expected(
+            session_id,
+            replica_ids,
+        )
+
+    pool.drain("レプリカ-二")
+    eligible = ("replica:one", "replica-three")
+    assert pool.eligible_ids == eligible
+    for session_id in sessions:
+        assert pool._select(make_request("drained", session_id))[0] == expected(
+            session_id,
+            eligible,
+        )
+
+    await pool.remove_replica("レプリカ-二")
+    pool.add_replica(
+        "replacement",
+        MockBackend(),
+        health_url="http://replacement/readyz",
+    )
+    assert pool.eligible_ids == eligible
+    await pool.probe("replacement")
+    eligible = (*eligible, "replacement")
+    assert pool.eligible_ids == eligible
+    for session_id in sessions:
+        assert pool._select(make_request("replaced", session_id))[0] == expected(
+            session_id,
+            eligible,
+        )
+
+    replica_snapshot, healthy, snapshot_eligible, generations = (
+        pool.membership_snapshot()
+    )
+    assert replica_snapshot == eligible
+    assert healthy == eligible
+    assert snapshot_eligible == eligible
+    assert tuple(generations) == eligible
+
+
 def test_validation_deduplicates_only_explicit_equivalent_backend_contracts():
     first = KeyedValidationBackend(("openai", "same"))
     equivalent = KeyedValidationBackend(("openai", "same"))

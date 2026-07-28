@@ -40,6 +40,7 @@ import uuid
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -48,8 +49,13 @@ from kairyu.audit_io import AuditQueueFull, BoundedJsonlWriter
 SCHEMA_VERSION = 1
 GATE = "G5-F1a"
 _COMMAND_TERMINATE_GRACE_SECONDS = 2.0
+_KUBECTL_PROXY_START_TIMEOUT_SECONDS = 10.0
+_KUBERNETES_READ_TIMEOUT_SECONDS = 10.0
 _ENDPOINT_WITHDRAWAL_POLL_SECONDS = 0.25
 _RECOVERY_POLL_SECONDS = 1.0
+_KUBECTL_PROXY_ADDRESS = re.compile(
+    r"Starting to serve on 127\.0\.0\.1:(?P<port>[0-9]+)"
+)
 
 
 @dataclass(frozen=True)
@@ -537,6 +543,237 @@ async def _kubectl_json(
     payload = json.loads(stdout)
     if not isinstance(payload, dict):
         raise RuntimeError("kubectl JSON output must be an object")
+    return payload
+
+
+class KubernetesProxyReader:
+    """One lifecycle-owned kubectl proxy and persistent HTTP client."""
+
+    def __init__(self, kubectl: str) -> None:
+        self._kubectl = kubectl
+        self._process: asyncio.subprocess.Process | None = None
+        self._client: httpx.AsyncClient | None = None
+        self._output_drain: asyncio.Task | None = None
+
+    async def __aenter__(self) -> KubernetesProxyReader:
+        self._process = await asyncio.create_subprocess_exec(
+            self._kubectl,
+            "proxy",
+            "--address=127.0.0.1",
+            r"--accept-hosts=^127\.0\.0\.1$",
+            "--port=0",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            port = await asyncio.wait_for(
+                self._read_port(),
+                timeout=_KUBECTL_PROXY_START_TIMEOUT_SECONDS,
+            )
+            self._output_drain = asyncio.create_task(self._drain_output())
+            self._client = httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{port}",
+                timeout=_KUBERNETES_READ_TIMEOUT_SECONDS,
+                limits=httpx.Limits(
+                    max_connections=16,
+                    max_keepalive_connections=16,
+                ),
+                trust_env=False,
+            )
+        except BaseException:
+            await self.aclose()
+            raise
+        return self
+
+    async def __aexit__(self, *_exc_info) -> None:
+        await self.aclose()
+
+    async def _read_port(self) -> int:
+        process = self._process
+        if process is None or process.stdout is None:
+            raise RuntimeError("kubectl proxy stdout is unavailable")
+        output: list[str] = []
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                await process.wait()
+                rendered = "".join(output)[-500:]
+                raise RuntimeError(
+                    "kubectl proxy exited before serving"
+                    + (f": {rendered}" if rendered else "")
+                )
+            text = line.decode(errors="replace")
+            output.append(text)
+            match = _KUBECTL_PROXY_ADDRESS.search(text)
+            if match is not None:
+                return int(match.group("port"))
+
+    async def _drain_output(self) -> None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return
+        while await process.stdout.readline():
+            pass
+
+    async def get_json(
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        client = self._client
+        if client is None:
+            raise RuntimeError("kubectl proxy reader is not running")
+        response = await client.get(path, params=params)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Kubernetes API JSON output must be an object")
+        return payload
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        try:
+            if client is not None:
+                await client.aclose()
+        finally:
+            await self._stop_process()
+
+    async def _stop_process(self) -> None:
+        process, self._process = self._process, None
+        output_drain, self._output_drain = self._output_drain, None
+        if process is not None:
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    # The child can exit between the returncode check and signal.
+                    pass
+            try:
+                await asyncio.wait_for(
+                    process.wait(),
+                    timeout=_COMMAND_TERMINATE_GRACE_SECONDS,
+                )
+            except TimeoutError:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                await process.wait()
+        if output_drain is not None:
+            if not output_drain.done():
+                output_drain.cancel()
+            await asyncio.gather(output_drain, return_exceptions=True)
+
+
+def _proxy_reader(args: argparse.Namespace) -> KubernetesProxyReader | None:
+    return getattr(args, "_kubernetes_proxy_reader", None)
+
+
+async def _read_endpoint_slices(args: argparse.Namespace) -> dict[str, Any]:
+    reader = _proxy_reader(args)
+    if reader is not None:
+        namespace = quote(str(args.namespace), safe="")
+        return await reader.get_json(
+            (
+                "/apis/discovery.k8s.io/v1/namespaces/"
+                f"{namespace}/endpointslices"
+            ),
+            params={
+                "labelSelector": (
+                    f"kubernetes.io/service-name={args.endpoint_service}"
+                )
+            },
+        )
+    return await _kubectl_json(
+        args.kubectl,
+        args.namespace,
+        "get",
+        "endpointslices",
+        "-l",
+        f"kubernetes.io/service-name={args.endpoint_service}",
+    )
+
+
+async def _read_pods(
+    args: argparse.Namespace,
+    *,
+    selector: str | None = None,
+    names: list[str] | None = None,
+) -> dict[str, Any]:
+    reader = _proxy_reader(args)
+    if reader is None:
+        if names is not None:
+            return await _kubectl_json(
+                args.kubectl,
+                args.namespace,
+                "get",
+                "pods",
+                *names,
+            )
+        if selector is None:
+            raise ValueError("pod selector is required")
+        return await _kubectl_json(
+            args.kubectl,
+            args.namespace,
+            "get",
+            "pods",
+            "-l",
+            selector,
+        )
+
+    effective_selector = selector
+    if effective_selector is None and names is not None:
+        effective_selector = args.pod_selector
+    namespace = quote(str(args.namespace), safe="")
+    payload = await reader.get_json(
+        f"/api/v1/namespaces/{namespace}/pods",
+        params=(
+            {"labelSelector": effective_selector}
+            if effective_selector is not None
+            else None
+        ),
+    )
+    if names is None:
+        return payload
+    requested = set(names)
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return payload
+    by_name = {
+        name: item
+        for item in items
+        if isinstance(item, dict)
+        and isinstance(
+            name := item.get("metadata", {}).get("name"),
+            str,
+        )
+        and name in requested
+    }
+    return {
+        **payload,
+        "items": [by_name[name] for name in names if name in by_name],
+    }
+
+
+async def _read_node_summary(
+    args: argparse.Namespace,
+    node: str,
+) -> dict[str, Any]:
+    path = f"/api/v1/nodes/{quote(node, safe='')}/proxy/stats/summary"
+    reader = _proxy_reader(args)
+    if reader is not None:
+        return await reader.get_json(path)
+    _, stdout, _ = await _run_command(
+        args.kubectl,
+        "get",
+        "--raw",
+        path,
+    )
+    payload = json.loads(stdout)
+    if not isinstance(payload, dict):
+        raise RuntimeError("kubectl raw JSON output must be an object")
     return payload
 
 
@@ -1144,13 +1381,7 @@ async def _initial_inventory(args: argparse.Namespace, config: GateConfig) -> li
         f"{args.statefulset}-{ordinal}"
         for ordinal in range(config.replica_count)
     ]
-    snapshot = await _kubectl_json(
-        args.kubectl,
-        args.namespace,
-        "get",
-        "pods",
-        *names,
-    )
+    snapshot = await _read_pods(args, names=names)
     inventory = [_pod_identity(item) for item in snapshot.get("items", ())]
     if len(inventory) != config.replica_count:
         raise RuntimeError(
@@ -1191,14 +1422,7 @@ async def _observe_endpoint_withdrawal(
         scheduled_ns = api_started_ns + index * interval_ns
         fetch_started_ns = time.monotonic_ns()
         try:
-            endpoints = await _kubectl_json(
-                args.kubectl,
-                args.namespace,
-                "get",
-                "endpointslices",
-                "-l",
-                f"kubernetes.io/service-name={args.endpoint_service}",
-            )
+            endpoints = await _read_endpoint_slices(args)
         except Exception as endpoint_error:
             observed_ns = time.monotonic_ns()
             endpoint_sink.write(
@@ -1319,14 +1543,7 @@ async def _recover_epoch(
     while time.monotonic() < deadline:
         endpoint_fetch_started_ns = time.monotonic_ns()
         try:
-            endpoints = await _kubectl_json(
-                args.kubectl,
-                args.namespace,
-                "get",
-                "endpointslices",
-                "-l",
-                f"kubernetes.io/service-name={args.endpoint_service}",
-            )
+            endpoints = await _read_endpoint_slices(args)
         except Exception as endpoint_error:
             endpoint_sink.write(
                 {
@@ -1381,13 +1598,9 @@ async def _recover_epoch(
                 # satisfied, to publish full Pod/image identity without
                 # polling all 200 Pod objects on every recovery iteration.
                 candidate_pods_fetch_started_ns = time.monotonic_ns()
-                pods = await _kubectl_json(
-                    args.kubectl,
-                    args.namespace,
-                    "get",
-                    "pods",
-                    "-l",
-                    (
+                pods = await _read_pods(
+                    args,
+                    selector=(
                         f"{args.pod_selector},"
                         "statefulset.kubernetes.io/pod-name in "
                         f"({','.join(names)})"
@@ -1504,14 +1717,7 @@ async def _churn_loop(
             ]
             old = [dict(initial_by_name[name]) for name in names]
             predelete_fetch_started_ns = time.monotonic_ns()
-            predelete_endpoints = await _kubectl_json(
-                args.kubectl,
-                args.namespace,
-                "get",
-                "endpointslices",
-                "-l",
-                f"kubernetes.io/service-name={args.endpoint_service}",
-            )
+            predelete_endpoints = await _read_endpoint_slices(args)
             endpoint_sink.write(
                 {
                     "schema_version": SCHEMA_VERSION,
@@ -4121,25 +4327,15 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
         )
 
         async def fetch_endpoints() -> dict[str, Any]:
-            return await _kubectl_json(
-                args.kubectl,
-                args.namespace,
-                "get",
-                "endpointslices",
-                "-l",
-                f"kubernetes.io/service-name={args.endpoint_service}",
-            )
+            return await _read_endpoint_slices(args)
 
         node = str(initial[0]["node"])
 
         async def fetch_resources() -> dict[str, Any]:
-            _, stdout, _ = await _run_command(
-                args.kubectl,
-                "get",
-                "--raw",
-                f"/api/v1/nodes/{node}/proxy/stats/summary",
+            return _resource_summary(
+                await _read_node_summary(args, node),
+                args.namespace,
             )
-            return _resource_summary(json.loads(stdout), args.namespace)
 
         endpoint_task = asyncio.create_task(
             _snapshot_loop(
@@ -4227,13 +4423,9 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
         for record in churn_pod_records:
             sinks["pods"].write(record)
         final_mock_fetch_started_ns = time.monotonic_ns()
-        final_mock_snapshot = await _kubectl_json(
-            args.kubectl,
-            args.namespace,
-            "get",
-            "pods",
-            "-l",
-            args.pod_selector,
+        final_mock_snapshot = await _read_pods(
+            args,
+            selector=args.pod_selector,
         )
         final_mock_observed_ns = time.monotonic_ns()
         final_mock_pod_record = {
@@ -4255,13 +4447,9 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
             final_mock_pod_record,
         ]
         gateway_pods_fetch_started_ns = time.monotonic_ns()
-        gateway_snapshot = await _kubectl_json(
-            args.kubectl,
-            args.namespace,
-            "get",
-            "pods",
-            "-l",
-            args.gateway_pod_selector,
+        gateway_snapshot = await _read_pods(
+            args,
+            selector=args.gateway_pod_selector,
         )
         gateway_pods_observed_ns = time.monotonic_ns()
         gateway_pod_record = {
@@ -4373,6 +4561,12 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
                 "delete; raw sequence/schedule/fetch/observation timestamps "
                 "must replay before slower pod readiness recovery"
             ),
+            "kubernetes_observation_transport": (
+                "one lifecycle-owned kubectl proxy and persistent HTTP client "
+                "carry all EndpointSlice, Pod, and resource reads; only the "
+                "ten Pod DELETE operations use kubectl subprocesses during "
+                "traffic"
+            ),
             "membership": (
                 "gateway audit snapshots must begin with the full old fleet "
                 "eligible and end with the full replacement fleet eligible"
@@ -4402,6 +4596,24 @@ async def run(args: argparse.Namespace, config: GateConfig) -> dict[str, Any]:
         "sidecars": sidecars,
         **replay,
     }
+
+
+async def _run_with_kubernetes_proxy(
+    args: argparse.Namespace,
+    config: GateConfig,
+) -> dict[str, Any]:
+    """Run a parsed CLI benchmark with one owned Kubernetes read channel."""
+    missing = object()
+    previous_reader = getattr(args, "_kubernetes_proxy_reader", missing)
+    async with KubernetesProxyReader(args.kubectl) as reader:
+        args._kubernetes_proxy_reader = reader
+        try:
+            return await run(args, config)
+        finally:
+            if previous_reader is missing:
+                del args._kubernetes_proxy_reader
+            else:
+                args._kubernetes_proxy_reader = previous_reader
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -4513,7 +4725,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-    result = asyncio.run(run(args, config))
+    result = asyncio.run(_run_with_kubernetes_proxy(args, config))
     rendered = json.dumps(result, indent=2, sort_keys=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(rendered + "\n")

@@ -21,13 +21,14 @@ data:
           port: http
           model: f1a
           api_key_env: null
-          poll_interval_s: 0.25
+          # Halve discovery parsing during churn while retaining at least
+          # 1.13 seconds of phase margin against the historical 3.618-second
+          # withdrawal maximum and the unchanged five-second contract.
+          poll_interval_s: 0.5
         unhealthy_after: 1
         queue_depth_threshold: 8
-        # EndpointSlice discovery already withdraws terminating replicas every
-        # 250 ms. A one-second backend probe still detects non-Kubernetes
-        # failures well inside the five-second gate while reducing the maximum
-        # unknown/ejected-replica probe burst by 4x.
+        # Discovery and backend probing both remain well inside the five-second
+        # withdrawal gate without synchronized four-Hz control-plane bursts.
         probe_interval_s: 1.0
         placement_log_path: /evidence/placements.jsonl
 ---

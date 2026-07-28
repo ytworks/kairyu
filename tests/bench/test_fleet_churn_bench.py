@@ -2376,6 +2376,379 @@ async def test_cancelled_command_kills_term_ignoring_child(
     assert process.kill_called is True
 
 
+async def test_kubernetes_proxy_reader_reuses_client_and_closes_process(
+    monkeypatch,
+) -> None:
+    class FakeStdout:
+        def __init__(self, stopped):
+            self._stopped = stopped
+            self._startup_pending = True
+
+        async def readline(self):
+            if self._startup_pending:
+                self._startup_pending = False
+                return b"Starting to serve on 127.0.0.1:54321\n"
+            await self._stopped.wait()
+            return b""
+
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self.stopped = asyncio.Event()
+            self.stdout = FakeStdout(self.stopped)
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+            self.stopped.set()
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+            self.stopped.set()
+
+        async def wait(self):
+            await self.stopped.wait()
+            return self.returncode
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": []}
+
+    class FakeClient:
+        def __init__(self, **options):
+            self.options = options
+            self.calls = []
+            self.closed = False
+
+        async def get(self, path, *, params=None):
+            self.calls.append((path, params))
+            return FakeResponse()
+
+        async def aclose(self):
+            self.closed = True
+
+    process = FakeProcess()
+    process_calls = []
+    clients = []
+
+    async def create_process(*command, **options):
+        process_calls.append((command, options))
+        return process
+
+    def create_client(**options):
+        client = FakeClient(**options)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        fleet_bench.asyncio,
+        "create_subprocess_exec",
+        create_process,
+    )
+    monkeypatch.setattr(fleet_bench.httpx, "AsyncClient", create_client)
+
+    async with fleet_bench.KubernetesProxyReader("kubectl-test") as reader:
+        assert await reader.get_json("/api/v1/pods") == {"items": []}
+        assert await reader.get_json(
+            "/apis/discovery.k8s.io/v1/endpointslices",
+            params={"labelSelector": "service=test"},
+        ) == {"items": []}
+
+    assert len(process_calls) == 1
+    command, options = process_calls[0]
+    assert command == (
+        "kubectl-test",
+        "proxy",
+        "--address=127.0.0.1",
+        r"--accept-hosts=^127\.0\.0\.1$",
+        "--port=0",
+    )
+    assert options == {
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.STDOUT,
+    }
+    assert len(clients) == 1
+    assert clients[0].options["base_url"] == "http://127.0.0.1:54321"
+    assert clients[0].options["timeout"] == (
+        fleet_bench._KUBERNETES_READ_TIMEOUT_SECONDS
+    )
+    assert clients[0].options["trust_env"] is False
+    assert clients[0].calls == [
+        ("/api/v1/pods", None),
+        (
+            "/apis/discovery.k8s.io/v1/endpointslices",
+            {"labelSelector": "service=test"},
+        ),
+    ]
+    assert clients[0].closed
+    assert process.terminated
+    assert not process.killed
+
+
+async def test_kubernetes_proxy_reader_tolerates_exit_before_terminate() -> None:
+    class ExitedProcess:
+        def __init__(self):
+            self.returncode = None
+
+        def terminate(self):
+            self.returncode = 0
+            raise ProcessLookupError
+
+        async def wait(self):
+            return self.returncode
+
+    reader = fleet_bench.KubernetesProxyReader("kubectl-test")
+    process = ExitedProcess()
+    reader._process = process
+
+    await reader.aclose()
+
+    assert reader._process is None
+    assert process.returncode == 0
+
+
+async def test_kubernetes_reads_route_through_one_injected_proxy(
+    monkeypatch,
+) -> None:
+    endpoint_payload = {"items": [{"metadata": {"name": "slice"}}]}
+    selected_pods = {"items": [{"metadata": {"name": "selected"}}]}
+    inventory_pods = {
+        "resourceVersion": "17",
+        "items": [
+            {"metadata": {"name": "pod-b", "uid": "uid-b"}},
+            {"metadata": {"name": "extra", "uid": "uid-extra"}},
+            {"metadata": {"name": "pod-a", "uid": "uid-a"}},
+        ],
+    }
+    summary_payload = {"node": {"nodeName": "node/one"}}
+
+    class FakeReader:
+        def __init__(self):
+            self.calls = []
+            self.pod_reads = 0
+
+        async def get_json(self, path, *, params=None):
+            self.calls.append((path, params))
+            if path.endswith("/endpointslices"):
+                return endpoint_payload
+            if path.endswith("/pods"):
+                self.pod_reads += 1
+                return selected_pods if self.pod_reads == 1 else inventory_pods
+            if path.endswith("/stats/summary"):
+                return summary_payload
+            raise AssertionError(path)
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("kubectl fallback must not run")
+
+    reader = FakeReader()
+    args = SimpleNamespace(
+        _kubernetes_proxy_reader=reader,
+        kubectl="kubectl",
+        namespace="kairyu-f1a",
+        endpoint_service="f1a-replicas",
+        pod_selector="app=f1a",
+    )
+    monkeypatch.setattr(fleet_bench, "_kubectl_json", unexpected)
+    monkeypatch.setattr(fleet_bench, "_run_command", unexpected)
+
+    assert await fleet_bench._read_endpoint_slices(args) is endpoint_payload
+    assert await fleet_bench._read_pods(
+        args,
+        selector="app=gateway",
+    ) is selected_pods
+    inventory = await fleet_bench._read_pods(
+        args,
+        names=["pod-a", "pod-b"],
+    )
+    assert await fleet_bench._read_node_summary(
+        args,
+        "node/one",
+    ) is summary_payload
+
+    assert [item["metadata"]["name"] for item in inventory["items"]] == [
+        "pod-a",
+        "pod-b",
+    ]
+    assert inventory["resourceVersion"] == "17"
+    assert reader.calls == [
+        (
+            (
+                "/apis/discovery.k8s.io/v1/namespaces/"
+                "kairyu-f1a/endpointslices"
+            ),
+            {
+                "labelSelector": (
+                    "kubernetes.io/service-name=f1a-replicas"
+                )
+            },
+        ),
+        (
+            "/api/v1/namespaces/kairyu-f1a/pods",
+            {"labelSelector": "app=gateway"},
+        ),
+        (
+            "/api/v1/namespaces/kairyu-f1a/pods",
+            {"labelSelector": "app=f1a"},
+        ),
+        (
+            "/api/v1/nodes/node%2Fone/proxy/stats/summary",
+            None,
+        ),
+    ]
+
+
+async def test_kubernetes_reads_keep_direct_helper_kubectl_fallback(
+    monkeypatch,
+) -> None:
+    kubectl_calls = []
+    command_calls = []
+
+    async def fake_kubectl(kubectl, namespace, *arguments):
+        kubectl_calls.append((kubectl, namespace, arguments))
+        return {"arguments": list(arguments)}
+
+    async def fake_command(*arguments):
+        command_calls.append(arguments)
+        return 0, '{"node":{"nodeName":"node-a"}}', ""
+
+    monkeypatch.setattr(fleet_bench, "_kubectl_json", fake_kubectl)
+    monkeypatch.setattr(fleet_bench, "_run_command", fake_command)
+    args = SimpleNamespace(
+        kubectl="kubectl-test",
+        namespace="kairyu-f1a",
+        endpoint_service="f1a-replicas",
+    )
+
+    await fleet_bench._read_endpoint_slices(args)
+    await fleet_bench._read_pods(args, names=["pod-a", "pod-b"])
+    await fleet_bench._read_pods(args, selector="app=gateway")
+    assert await fleet_bench._read_node_summary(args, "node-a") == {
+        "node": {"nodeName": "node-a"}
+    }
+
+    assert kubectl_calls == [
+        (
+            "kubectl-test",
+            "kairyu-f1a",
+            (
+                "get",
+                "endpointslices",
+                "-l",
+                "kubernetes.io/service-name=f1a-replicas",
+            ),
+        ),
+        (
+            "kubectl-test",
+            "kairyu-f1a",
+            ("get", "pods", "pod-a", "pod-b"),
+        ),
+        (
+            "kubectl-test",
+            "kairyu-f1a",
+            ("get", "pods", "-l", "app=gateway"),
+        ),
+    ]
+    assert command_calls == [
+        (
+            "kubectl-test",
+            "get",
+            "--raw",
+            "/api/v1/nodes/node-a/proxy/stats/summary",
+        )
+    ]
+
+
+async def test_cli_proxy_lifecycle_closes_on_success_and_failure(
+    monkeypatch,
+) -> None:
+    proxies = []
+    outcomes = [{"passed": True}, RuntimeError("benchmark failed")]
+
+    class FakeProxy:
+        def __init__(self, kubectl):
+            self.kubectl = kubectl
+            self.exit_type = None
+            proxies.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _traceback):
+            self.exit_type = exc_type
+
+    async def fake_run(args, _config):
+        assert args._kubernetes_proxy_reader is proxies[-1]
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(fleet_bench, "KubernetesProxyReader", FakeProxy)
+    monkeypatch.setattr(fleet_bench, "run", fake_run)
+    args = SimpleNamespace(kubectl="kubectl-test")
+
+    assert await fleet_bench._run_with_kubernetes_proxy(
+        args,
+        SMOKE_CONFIG,
+    ) == {"passed": True}
+    assert not hasattr(args, "_kubernetes_proxy_reader")
+
+    with pytest.raises(RuntimeError, match="benchmark failed"):
+        await fleet_bench._run_with_kubernetes_proxy(args, SMOKE_CONFIG)
+    assert not hasattr(args, "_kubernetes_proxy_reader")
+    assert [proxy.kubectl for proxy in proxies] == [
+        "kubectl-test",
+        "kubectl-test",
+    ]
+    assert [proxy.exit_type for proxy in proxies] == [None, RuntimeError]
+
+
+async def test_cli_proxy_lifecycle_closes_on_cancellation(monkeypatch) -> None:
+    run_started = asyncio.Event()
+    proxy_exited = asyncio.Event()
+    exit_type = None
+
+    class FakeProxy:
+        def __init__(self, _kubectl):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _traceback):
+            nonlocal exit_type
+            exit_type = exc_type
+            proxy_exited.set()
+
+    async def fake_run(args, _config):
+        assert args._kubernetes_proxy_reader is not None
+        run_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fleet_bench, "KubernetesProxyReader", FakeProxy)
+    monkeypatch.setattr(fleet_bench, "run", fake_run)
+    args = SimpleNamespace(kubectl="kubectl-test")
+    task = asyncio.create_task(
+        fleet_bench._run_with_kubernetes_proxy(args, SMOKE_CONFIG)
+    )
+    await asyncio.wait_for(run_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert proxy_exited.is_set()
+    assert exit_type is asyncio.CancelledError
+    assert not hasattr(args, "_kubernetes_proxy_reader")
+
+
 async def test_delete_observes_endpoint_withdrawal_before_command_returns(
     monkeypatch,
 ) -> None:
