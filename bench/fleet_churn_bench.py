@@ -229,6 +229,62 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _cri_image_metadata(path: Path, artifact_dir: Path) -> dict[str, Any]:
+    path = path.resolve()
+    artifact_dir = artifact_dir.resolve()
+    if path.parent != artifact_dir:
+        raise ValueError(
+            f"CRI image metadata must be beside the manifest: {path}"
+        )
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict):
+        raise ValueError(f"CRI image metadata must be an object: {path}")
+    status = payload.get("status")
+    info = payload.get("info")
+    image_spec = info.get("imageSpec") if isinstance(info, dict) else None
+    if not isinstance(status, dict) or not isinstance(image_spec, dict):
+        raise ValueError(f"incomplete CRI image metadata: {path}")
+    config = image_spec.get("config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    if not isinstance(labels, dict):
+        raise ValueError(f"CRI image labels are missing: {path}")
+
+    digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+
+    def exact_digest(value: Any) -> str:
+        if not isinstance(value, str) or digest_pattern.fullmatch(value) is None:
+            raise ValueError(f"invalid CRI image digest in {path}: {value!r}")
+        return value
+
+    status_id = exact_digest(status.get("id"))
+    raw_repo_digests = status.get("repoDigests")
+    raw_repo_tags = status.get("repoTags")
+    if not isinstance(raw_repo_digests, list) or not all(
+        isinstance(value, str) for value in raw_repo_digests
+    ):
+        raise ValueError(f"invalid CRI repoDigests in {path}")
+    if not isinstance(raw_repo_tags, list) or not raw_repo_tags or not all(
+        isinstance(value, str) and value for value in raw_repo_tags
+    ):
+        raise ValueError(f"invalid CRI repoTags in {path}")
+    repo_digests = []
+    for value in raw_repo_digests:
+        _, separator, digest = value.rpartition("@")
+        if not separator:
+            raise ValueError(f"invalid CRI repoDigest in {path}: {value!r}")
+        repo_digests.append(exact_digest(digest))
+    revision = labels.get("org.opencontainers.image.revision")
+    return {
+        "path": path.name,
+        "sha256": _sha256_file(path),
+        "status_id": status_id,
+        "repo_digests": sorted(raw_repo_digests),
+        "repo_tags": sorted(raw_repo_tags),
+        "runtime_digests": sorted({status_id, *repo_digests}),
+        "revision": revision,
+    }
+
+
 def _git_output(*command: str, binary: bool = False) -> bytes | str:
     completed = subprocess.run(
         ["git", *command],
@@ -279,6 +335,7 @@ def source_environment(args: argparse.Namespace) -> dict[str, Any]:
         line for line in untracked.splitlines() if line
     )
     git_commit = str(_git_output("rev-parse", "HEAD")).strip()
+    artifact_dir = Path(args.output).resolve().parent
     frozen_inputs = []
     for raw in args.frozen_input:
         path = Path(raw).resolve()
@@ -304,6 +361,18 @@ def source_environment(args: argparse.Namespace) -> dict[str, Any]:
         "frozen_inputs": frozen_inputs,
         "gateway_image_digest": args.gateway_image_digest,
         "mock_image_digest": args.mock_image_digest,
+        "gateway_containerd_image_digest": (
+            args.gateway_containerd_image_digest
+        ),
+        "mock_containerd_image_digest": args.mock_containerd_image_digest,
+        "gateway_cri_image_metadata": _cri_image_metadata(
+            Path(args.gateway_cri_image_metadata),
+            artifact_dir,
+        ),
+        "mock_cri_image_metadata": _cri_image_metadata(
+            Path(args.mock_cri_image_metadata),
+            artifact_dir,
+        ),
         "kind_node_image": args.kind_node_image,
         "tool_versions": {
             name: value
@@ -1151,6 +1220,7 @@ def _derived_close(value: Any, expected: float) -> bool:
 def _provenance_valid(environment: dict[str, Any]) -> bool:
     sha256 = re.compile(r"[0-9a-f]{64}")
     commit = re.compile(r"[0-9a-f]{40}")
+    exact_image_sha256 = re.compile(r"sha256:[0-9a-f]{64}")
 
     def digest(value: Any) -> bool:
         return isinstance(value, str) and sha256.fullmatch(value) is not None
@@ -1162,10 +1232,53 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
             is not None
         )
 
+    git_commit = environment.get("git_commit")
+
+    def cri_metadata(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        path = value.get("path")
+        status_id = value.get("status_id")
+        repo_digests = value.get("repo_digests")
+        repo_tags = value.get("repo_tags")
+        runtime_digests = value.get("runtime_digests")
+        if (
+            not isinstance(path, str)
+            or not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or not digest(value.get("sha256"))
+            or not isinstance(status_id, str)
+            or exact_image_sha256.fullmatch(status_id) is None
+            or not isinstance(repo_digests, list)
+            or not all(isinstance(item, str) for item in repo_digests)
+            or not isinstance(repo_tags, list)
+            or not repo_tags
+            or not all(isinstance(item, str) and item for item in repo_tags)
+            or not isinstance(runtime_digests, list)
+            or value.get("revision") != git_commit
+        ):
+            return False
+        derived_digests = {status_id}
+        for repo_digest in repo_digests:
+            _, separator, candidate = repo_digest.rpartition("@")
+            if (
+                not separator
+                or exact_image_sha256.fullmatch(candidate) is None
+            ):
+                return False
+            derived_digests.add(candidate)
+        return (
+            repo_digests == sorted(set(repo_digests))
+            and repo_tags == sorted(set(repo_tags))
+            and runtime_digests == sorted(derived_digests)
+        )
+
     frozen_inputs = environment.get("frozen_inputs")
     tool_versions = environment.get("tool_versions")
-    git_commit = environment.get("git_commit")
     expected_git_commit = environment.get("expected_git_commit")
+    gateway_image_digest = environment.get("gateway_image_digest")
+    mock_image_digest = environment.get("mock_image_digest")
     return (
         isinstance(git_commit, str)
         and commit.fullmatch(git_commit) is not None
@@ -1176,8 +1289,16 @@ def _provenance_valid(environment: dict[str, Any]) -> bool:
         and digest(environment.get("tracked_diff_sha256"))
         and digest(environment.get("benchmark_sha256"))
         and digest(environment.get("driver_sha256"))
-        and image_digest(environment.get("gateway_image_digest"))
-        and image_digest(environment.get("mock_image_digest"))
+        and isinstance(gateway_image_digest, str)
+        and exact_image_sha256.fullmatch(gateway_image_digest) is not None
+        and isinstance(mock_image_digest, str)
+        and exact_image_sha256.fullmatch(mock_image_digest) is not None
+        and environment.get("gateway_containerd_image_digest")
+        == gateway_image_digest
+        and environment.get("mock_containerd_image_digest")
+        == mock_image_digest
+        and cri_metadata(environment.get("gateway_cri_image_metadata"))
+        and cri_metadata(environment.get("mock_cri_image_metadata"))
         and image_digest(environment.get("kind_node_image"))
         and isinstance(tool_versions, dict)
         and set(tool_versions) == {"kind", "kubectl", "docker"}
@@ -2151,9 +2272,25 @@ def evaluate_gate(
         ),
     )
     expected_mock_image = environment.get("expected_mock_image")
-    expected_mock_digest = _sha256_digest(
-        environment.get("mock_image_digest")
-    )
+    mock_cri_metadata = environment.get("mock_cri_image_metadata")
+    expected_mock_runtime_digests = {
+        digest
+        for raw in (
+            mock_cri_metadata.get("runtime_digests", ())
+            if isinstance(mock_cri_metadata, dict)
+            else ()
+        )
+        if (digest := _sha256_digest(raw)) is not None
+    }
+    expected_mock_runtime_tags = {
+        _normalized_image_reference(value)
+        for value in (
+            mock_cri_metadata.get("repo_tags", ())
+            if isinstance(mock_cri_metadata, dict)
+            else ()
+        )
+        if isinstance(value, str)
+    }
     runtime_image_digests = {
         digest
         for raw in runtime_mock_image["image_ids"]
@@ -2197,15 +2334,33 @@ def evaluate_gate(
             for value in runtime_mock_image["runtime_images"]
         }
         == {_normalized_image_reference(expected_mock_image)}
-        and expected_mock_digest is not None
-        and runtime_image_digests == {expected_mock_digest}
+        and expected_mock_runtime_tags
+        == {_normalized_image_reference(expected_mock_image)}
+        and bool(runtime_image_digests)
+        and runtime_image_digests <= expected_mock_runtime_digests
         and runtime_mock_per_uid_ok
     )
     gateway_container_name = environment.get("gateway_container_name")
     expected_gateway_image = environment.get("expected_gateway_image")
-    expected_gateway_digest = _sha256_digest(
-        environment.get("gateway_image_digest")
-    )
+    gateway_cri_metadata = environment.get("gateway_cri_image_metadata")
+    expected_gateway_runtime_digests = {
+        digest
+        for raw in (
+            gateway_cri_metadata.get("runtime_digests", ())
+            if isinstance(gateway_cri_metadata, dict)
+            else ()
+        )
+        if (digest := _sha256_digest(raw)) is not None
+    }
+    expected_gateway_runtime_tags = {
+        _normalized_image_reference(value)
+        for value in (
+            gateway_cri_metadata.get("repo_tags", ())
+            if isinstance(gateway_cri_metadata, dict)
+            else ()
+        )
+        if isinstance(value, str)
+    }
     runtime_gateway_image = _runtime_mock_image_summary(
         pods,
         (
@@ -2251,8 +2406,10 @@ def evaluate_gate(
             for value in runtime_gateway_image["runtime_images"]
         }
         == {_normalized_image_reference(expected_gateway_image)}
-        and expected_gateway_digest is not None
-        and runtime_gateway_digests == {expected_gateway_digest}
+        and expected_gateway_runtime_tags
+        == {_normalized_image_reference(expected_gateway_image)}
+        and bool(runtime_gateway_digests)
+        and runtime_gateway_digests <= expected_gateway_runtime_digests
     )
     placement_windows = [overall, *epochs, *churn_windows]
     placement_ok = all(
@@ -2538,6 +2695,16 @@ def _safe_sidecar(manifest_path: Path, raw: str) -> Path:
     return path
 
 
+def _cri_metadata_file_matches(
+    manifest_path: Path,
+    descriptor: Any,
+) -> bool:
+    if not isinstance(descriptor, dict):
+        return False
+    path = _safe_sidecar(manifest_path, str(descriptor.get("path", "")))
+    return path.is_file() and _cri_image_metadata(path, path.parent) == descriptor
+
+
 def verify_artifact(manifest_path: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text())
     if not isinstance(manifest, dict):
@@ -2546,6 +2713,17 @@ def verify_artifact(manifest_path: Path) -> dict[str, Any]:
         "schema_version": manifest.get("schema_version") == SCHEMA_VERSION,
         "gate": manifest.get("gate") == GATE,
     }
+    environment = manifest.get("environment") or {}
+    for role in ("gateway", "mock"):
+        try:
+            checks[f"{role}_cri_image_metadata_raw"] = (
+                _cri_metadata_file_matches(
+                    manifest_path,
+                    environment.get(f"{role}_cri_image_metadata"),
+                )
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            checks[f"{role}_cri_image_metadata_raw"] = False
     loaded: dict[str, list[dict[str, Any]]] = {}
     for name in (
         "requests",
@@ -2936,6 +3114,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gateway-image-digest")
     parser.add_argument("--mock-image-digest")
+    parser.add_argument("--gateway-containerd-image-digest")
+    parser.add_argument("--mock-containerd-image-digest")
+    parser.add_argument("--gateway-cri-image-metadata")
+    parser.add_argument("--mock-cri-image-metadata")
     parser.add_argument("--kind-node-image")
     parser.add_argument("--expected-git-commit")
     parser.add_argument("--kind-version")

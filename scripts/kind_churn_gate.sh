@@ -64,11 +64,15 @@ run_bounded() {
 CLUSTER_NAME=${F1A_CLUSTER_NAME:-kairyu-f1a}
 GATEWAY_IMAGE=kairyu:dev
 MOCK_IMAGE=kairyu-f1a-mock:dev
+GATEWAY_CONTAINERD_IMAGE=docker.io/library/kairyu:dev
+MOCK_CONTAINERD_IMAGE=docker.io/library/kairyu-f1a-mock:dev
 KIND_CONFIG=${F1A_KIND_CONFIG:-deploy/kind/f1a/kind-config.yaml}
 MANIFEST_DIR=${F1A_MANIFEST_DIR:-deploy/kind/f1a}
 RESULTS_DIR=${F1A_RESULTS_DIR:-bench/results/f1a-fleet-churn}
 GATEWAY_PORT=${F1A_GATEWAY_PORT:-18080}
 GATEWAY_URL="http://127.0.0.1:${GATEWAY_PORT}"
+GATEWAY_CRI_IMAGE_METADATA="${RESULTS_DIR}/gateway-cri-image.json"
+MOCK_CRI_IMAGE_METADATA="${RESULTS_DIR}/mock-cri-image.json"
 OUTPUT="${RESULTS_DIR}/manifest.json"
 VERIFIER_OUTPUT="${RESULTS_DIR}/verifier.json"
 PORT_FORWARD_LOG="${RESULTS_DIR}/port-forward.log"
@@ -101,6 +105,8 @@ known_results=(
   nodes-describe.txt
   runtime-images.txt
   gateway-membership-before-traffic.prom
+  gateway-cri-image.json
+  mock-cri-image.json
 )
 for result_name in "${known_results[@]}"; do
   rm -f -- "${RESULTS_DIR}/${result_name}"
@@ -268,6 +274,23 @@ fi
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$MOCK_IMAGE" "${ARCHIVE_MANIFEST_DIR}/mock"
 assert_clean_source
+GATEWAY_IMAGE_DIGEST=$(
+  "$DOCKER" image inspect --format '{{.Id}}' "$GATEWAY_IMAGE"
+)
+MOCK_IMAGE_DIGEST=$(
+  "$DOCKER" image inspect --format '{{.Id}}' "$MOCK_IMAGE"
+)
+for image in "$GATEWAY_IMAGE" "$MOCK_IMAGE"; do
+  image_revision=$(
+    "$DOCKER" image inspect \
+      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+      "$image"
+  )
+  if [[ "$image_revision" != "$SOURCE_COMMIT" ]]; then
+    echo "image ${image} revision ${image_revision} != ${SOURCE_COMMIT}" >&2
+    exit 1
+  fi
+done
 
 mapfile -t existing_clusters < <("$KIND" get clusters)
 for existing in "${existing_clusters[@]}"; do
@@ -281,8 +304,43 @@ CLUSTER_MAY_EXIST=1
 "$KIND" create cluster --name "$CLUSTER_NAME" \
   --config "$ARCHIVE_KIND_CONFIG" --wait 180s
 CLUSTER_CREATED=1
+mapfile -t kind_nodes < <("$KIND" get nodes --name "$CLUSTER_NAME")
+CONTROL_PLANE=${kind_nodes[0]}
 "$KIND" load docker-image "$GATEWAY_IMAGE" "$MOCK_IMAGE" \
   --name "$CLUSTER_NAME"
+run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
+  crictl inspecti --output json "$GATEWAY_IMAGE" \
+  >"$GATEWAY_CRI_IMAGE_METADATA"
+run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
+  crictl inspecti --output json "$MOCK_IMAGE" \
+  >"$MOCK_CRI_IMAGE_METADATA"
+containerd_target_digest() {
+  local image_reference=$1
+  run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
+    ctr -n k8s.io images ls |
+    awk -v ref="$image_reference" '
+      $1 == ref {
+        print $3
+        found++
+      }
+      END {
+        if (found != 1) {
+          exit 1
+        }
+      }
+    '
+}
+GATEWAY_CONTAINERD_IMAGE_DIGEST=$(
+  containerd_target_digest "$GATEWAY_CONTAINERD_IMAGE"
+)
+MOCK_CONTAINERD_IMAGE_DIGEST=$(
+  containerd_target_digest "$MOCK_CONTAINERD_IMAGE"
+)
+if [[ "$GATEWAY_CONTAINERD_IMAGE_DIGEST" != "$GATEWAY_IMAGE_DIGEST" ||
+      "$MOCK_CONTAINERD_IMAGE_DIGEST" != "$MOCK_IMAGE_DIGEST" ]]; then
+  echo "kind containerd image target does not match built Docker image" >&2
+  exit 1
+fi
 "$KUBECTL" apply -k "$ARCHIVE_APPLY_DIR"
 
 required_capacity=$((REPLICAS + 10))
@@ -396,25 +454,6 @@ if ((membership_ready == 0)); then
   exit 1
 fi
 
-GATEWAY_IMAGE_DIGEST=$(
-  "$DOCKER" image inspect --format '{{.Id}}' "$GATEWAY_IMAGE"
-)
-MOCK_IMAGE_DIGEST=$(
-  "$DOCKER" image inspect --format '{{.Id}}' "$MOCK_IMAGE"
-)
-for image in "$GATEWAY_IMAGE" "$MOCK_IMAGE"; do
-  image_revision=$(
-    "$DOCKER" image inspect \
-      --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-      "$image"
-  )
-  if [[ "$image_revision" != "$SOURCE_COMMIT" ]]; then
-    echo "image ${image} revision ${image_revision} != ${SOURCE_COMMIT}" >&2
-    exit 1
-  fi
-done
-mapfile -t kind_nodes < <("$KIND" get nodes --name "$CLUSTER_NAME")
-CONTROL_PLANE=${kind_nodes[0]}
 KIND_NODE_IMAGE=$(
   "$DOCKER" inspect --format '{{.Config.Image}}' "$CONTROL_PLANE"
 )
@@ -439,6 +478,10 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1a-uv-cache}
   --kubectl "$KUBECTL" \
   --gateway-image-digest "$GATEWAY_IMAGE_DIGEST" \
   --mock-image-digest "$MOCK_IMAGE_DIGEST" \
+  --gateway-containerd-image-digest "$GATEWAY_CONTAINERD_IMAGE_DIGEST" \
+  --mock-containerd-image-digest "$MOCK_CONTAINERD_IMAGE_DIGEST" \
+  --gateway-cri-image-metadata "$GATEWAY_CRI_IMAGE_METADATA" \
+  --mock-cri-image-metadata "$MOCK_CRI_IMAGE_METADATA" \
   --kind-node-image "$KIND_NODE_IMAGE" \
   --kind-version "$KIND_VERSION" \
   --kubectl-version "$KUBECTL_VERSION" \

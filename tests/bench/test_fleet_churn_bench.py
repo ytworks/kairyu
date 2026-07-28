@@ -31,10 +31,13 @@ def _passing_evidence():
     measurement_origin_ns = 100_000_000_000
     mock_image = "kairyu-f1a-mock:dev"
     mock_digest = "sha256:" + "e" * 64
-    runtime_image_id = "docker-pullable://" + mock_digest
+    mock_runtime_digest = "sha256:" + "f" * 64
+    runtime_image_id = "docker-pullable://" + mock_runtime_digest
     gateway_image = "kairyu:dev"
     gateway_digest = "sha256:" + "1" * 64
-    gateway_runtime_image_id = "docker-pullable://" + gateway_digest
+    gateway_status_digest = "sha256:" + "3" * 64
+    gateway_runtime_digest = "sha256:" + "4" * 64
+    gateway_runtime_image_id = "docker-pullable://" + gateway_runtime_digest
     old_by_ordinal = {
         ordinal: f"old-{ordinal}" for ordinal in range(config.replica_count)
     }
@@ -335,6 +338,32 @@ def _passing_evidence():
         "driver_sha256": "c" * 64,
         "gateway_image_digest": gateway_digest,
         "mock_image_digest": mock_digest,
+        "gateway_containerd_image_digest": gateway_digest,
+        "mock_containerd_image_digest": mock_digest,
+        "gateway_cri_image_metadata": {
+            "path": "gateway-cri-image.json",
+            "sha256": "5" * 64,
+            "status_id": gateway_status_digest,
+            "repo_digests": [
+                "docker.io/library/import@"
+                + gateway_runtime_digest
+            ],
+            "repo_tags": [f"docker.io/library/{gateway_image}"],
+            "runtime_digests": [
+                gateway_status_digest,
+                gateway_runtime_digest,
+            ],
+            "revision": "a" * 40,
+        },
+        "mock_cri_image_metadata": {
+            "path": "mock-cri-image.json",
+            "sha256": "6" * 64,
+            "status_id": mock_runtime_digest,
+            "repo_digests": [],
+            "repo_tags": [f"docker.io/library/{mock_image}"],
+            "runtime_digests": [mock_runtime_digest],
+            "revision": "a" * 40,
+        },
         "kind_node_image": "kindest/node@sha256:" + "2" * 64,
         "tool_versions": {
             "kind": "kind v0.29.0",
@@ -971,14 +1000,38 @@ def test_gate_rejects_runtime_mock_image_id_drift() -> None:
     assert not result["checks"]["runtime_mock_image_pinned"]
 
 
-def test_gate_rejects_mock_digest_not_running_in_pods() -> None:
+def test_gate_rejects_containerd_target_not_matching_built_image() -> None:
     evidence = _passing_evidence()
     evidence["environment"]["mock_image_digest"] = "sha256:" + "a" * 64
 
     result = evaluate_gate(**evidence)
 
     assert not result["passed"]
+    assert not result["checks"]["provenance_pinned"]
+
+
+def test_gate_rejects_runtime_digest_not_allowed_by_cri_metadata() -> None:
+    evidence = _passing_evidence()
+    metadata = evidence["environment"]["mock_cri_image_metadata"]
+    metadata["status_id"] = "sha256:" + "a" * 64
+    metadata["runtime_digests"] = [metadata["status_id"]]
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
     assert not result["checks"]["runtime_mock_image_pinned"]
+
+
+def test_gate_rejects_cri_revision_not_matching_source() -> None:
+    evidence = _passing_evidence()
+    evidence["environment"]["gateway_cri_image_metadata"]["revision"] = (
+        "b" * 40
+    )
+
+    result = evaluate_gate(**evidence)
+
+    assert not result["passed"]
+    assert not result["checks"]["provenance_pinned"]
 
 
 def test_gate_rejects_gateway_runtime_image_id_drift() -> None:
@@ -1138,6 +1191,52 @@ def test_source_environment_rejects_untracked_gate_input(
     driver.write_text("#!/bin/sh\n")
     frozen = tmp_path / "manifest.yaml"
     frozen.write_text("kind: List\n")
+    gateway_cri = tmp_path / "gateway-cri-image.json"
+    gateway_cri.write_text(
+        json.dumps(
+            {
+                "status": {
+                    "id": "sha256:" + "4" * 64,
+                    "repoDigests": [
+                        "docker.io/library/import@sha256:" + "5" * 64
+                    ],
+                    "repoTags": ["docker.io/library/kairyu:dev"],
+                },
+                "info": {
+                    "imageSpec": {
+                        "config": {
+                            "Labels": {
+                                "org.opencontainers.image.revision": "a" * 40
+                            }
+                        }
+                    }
+                },
+            }
+        )
+    )
+    mock_cri = tmp_path / "mock-cri-image.json"
+    mock_cri.write_text(
+        json.dumps(
+            {
+                "status": {
+                    "id": "sha256:" + "6" * 64,
+                    "repoDigests": [],
+                    "repoTags": [
+                        "docker.io/library/kairyu-f1a-mock:dev"
+                    ],
+                },
+                "info": {
+                    "imageSpec": {
+                        "config": {
+                            "Labels": {
+                                "org.opencontainers.image.revision": "a" * 40
+                            }
+                        }
+                    }
+                },
+            }
+        )
+    )
     repository = str(fleet_bench.Path.cwd())
 
     def fake_git_output(*command, binary=False):
@@ -1168,10 +1267,15 @@ def test_source_environment_rejects_untracked_gate_input(
         expected_git_commit="a" * 40,
         gateway_image_digest="sha256:" + "1" * 64,
         mock_image_digest="sha256:" + "2" * 64,
+        gateway_containerd_image_digest="sha256:" + "1" * 64,
+        mock_containerd_image_digest="sha256:" + "2" * 64,
+        gateway_cri_image_metadata=str(gateway_cri),
+        mock_cri_image_metadata=str(mock_cri),
         kind_node_image="kindest/node@sha256:" + "3" * 64,
         kind_version="kind v0",
         kubectl_version="v1",
         docker_version="29",
+        output=tmp_path / "manifest.json",
     )
 
     environment = source_environment(args)
@@ -1320,6 +1424,36 @@ async def test_run_cancels_owned_tasks_before_closing_sinks(
 
 def test_artifact_verifier_rehashes_and_replays_sidecars(tmp_path) -> None:
     evidence = _passing_evidence()
+    for role in ("gateway", "mock"):
+        key = f"{role}_cri_image_metadata"
+        metadata = evidence["environment"][key]
+        path = tmp_path / metadata["path"]
+        path.write_text(
+            json.dumps(
+                {
+                    "status": {
+                        "id": metadata["status_id"],
+                        "repoDigests": metadata["repo_digests"],
+                        "repoTags": metadata["repo_tags"],
+                    },
+                    "info": {
+                        "imageSpec": {
+                            "config": {
+                                "Labels": {
+                                    "org.opencontainers.image.revision": (
+                                        metadata["revision"]
+                                    )
+                                }
+                            }
+                        }
+                    },
+                }
+            )
+        )
+        evidence["environment"][key] = fleet_bench._cri_image_metadata(
+            path,
+            tmp_path,
+        )
     replay = evaluate_gate(**evidence)
     sidecar_rows = {
         "requests": evidence["requests"],
@@ -1379,6 +1513,14 @@ def test_artifact_verifier_rehashes_and_replays_sidecars(tmp_path) -> None:
     assert not p99_result["checks"]["published_placement_matches_replay"]
 
     manifest_path.write_text(json.dumps(manifest))
+    gateway_cri_path = tmp_path / "gateway-cri-image.json"
+    gateway_cri_raw = gateway_cri_path.read_text()
+    gateway_cri_path.write_text("{}")
+    cri_result = verify_artifact(manifest_path)
+    assert not cri_result["verified"]
+    assert not cri_result["checks"]["gateway_cri_image_metadata_raw"]
+    gateway_cri_path.write_text(gateway_cri_raw)
+
     with (tmp_path / "requests.jsonl").open("a") as handle:
         handle.write("{}\n")
     assert not verify_artifact(manifest_path)["verified"]
