@@ -406,8 +406,9 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 
 提供エンドポイント: `/v1/chat/completions`(SSE ストリーミング、tools、logprobs、
 `n>1`、`response_format: json_schema`、vision コンテンツパーツ)、`/v1/completions`、
-`/v1/models`、`/v1/embeddings`、`/v1/responses`(サブセット)、`/v1/files` +
-`/v1/batches`、`/health`、`/readyz`、`/metrics`(Prometheus)、`/admin/*`。
+`/v1/models`、`/v1/embeddings`、`/v1/responses`(型付き SSE、function tools、
+継続状態)、`/v1/files` + `/v1/batches`、`/health`、`/readyz`、
+`/metrics`(Prometheus)、`/admin/*`。
 全リストは[設定リファレンス](#http-サーフェス)を参照してください。
 
 ## 6. オーケストレーション版 — セットアップと使い方
@@ -681,7 +682,8 @@ batch:                         # 任意の OpenAI 互換 /v1/files + /v1/batches
 
 `/v1/chat/completions`(SSE、tools、logprobs、n>1、`response_format: json_schema`、
 vision コンテンツパーツのワイヤ形式)、`/v1/completions`、`/v1/embeddings`
-(float + base64)、`/v1/responses`(サブセット: `input`、`instructions`、
+(float + base64)、`/v1/responses`(`input`、`instructions`、正規の型付き SSE、
+通常／namespace function tools、`function_call_output`、テナント分離された
 `previous_response_id`)、`/v1/models`、`/v1/files` + `/v1/batches`、`/health`、
 `/readyz`、`/metrics`、`POST /admin/drain` / `POST /admin/undrain`(認証保護。drain は
 readyz を 503 に切り替え)、`GET /admin/usage?tenant=`(台帳有効時)。
@@ -690,6 +692,15 @@ readyz を 503 に切り替え)、`GET /admin/usage?tenant=`(台帳有効時)。
 温まった KV プレフィックスを持つレプリカに固定します。`X-Kairyu-Trace: 1` は
 `kairyu-auto` レスポンスに `kairyu_trace` ブロックを追加します。
 `stream_options: {include_usage: true}` は最後に usage チャンクを付加します。
+
+Responses ストリームは `response.created` から `response.completed` または
+`response.incomplete` まで、OpenAI のイベント名と欠番のない sequence number を
+返します。失敗時も型付き error/failed イベントで終了します。保存に成功した response
+は `previous_response_id` で継続できますが、ID はテナント境界を越えません。
+function call の引数と結果は通常のチャットテンプレートおよび capability 検証を通って
+往復します。稼働中モデルに対する未変更 Codex CLI の確認には
+`scripts/codex_responses_smoke.sh` を使えます。接続設定と未対応機能は
+`docs/deployment.md` に記載しています。
 
 ### マルチテナンシー
 

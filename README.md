@@ -399,7 +399,8 @@ worker group (gloo on CPU, NCCL on GPU). There is no CLI flag for it.
 Endpoints served: `/v1/chat/completions` (SSE streaming, tools, logprobs, `n>1`,
 `response_format: json_schema`, vision content parts), `/v1/completions`, `/v1/models`,
 `/v1/route` (non-dispatching route preview), `/routing` (routing descriptor),
-`/v1/embeddings`, `/v1/responses` (subset), `/v1/files` + `/v1/batches`, `/health`,
+`/v1/embeddings`, `/v1/responses` (typed SSE, function tools, continuation state),
+`/v1/files` + `/v1/batches`, `/health`,
 `/readyz`, `/metrics` (Prometheus), `/admin/*`. Full list in the
 [configuration reference](#http-surface).
 
@@ -681,7 +682,8 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
 
 `/v1/chat/completions` (SSE, tools, logprobs, n>1, `response_format: json_schema`,
 vision content-parts wire format), `/v1/completions`, `/v1/embeddings`
-(float + base64), `/v1/responses` (subset: `input`, `instructions`,
+(float + base64), `/v1/responses` (`input`, `instructions`, canonical typed SSE,
+flat and namespaced function tools, `function_call_output`, tenant-scoped
 `previous_response_id`), `/v1/models`, `/v1/files` + `/v1/batches`, `/health`,
 `/v1/route`, `/routing`,
 `/readyz`, `/metrics`, `POST /admin/drain` / `POST /admin/undrain` (auth-protected;
@@ -698,6 +700,15 @@ structured-output fields as direct chat models. Scalar sampling reaches private
 orchestration stages under the advertised private max-token policy, while the
 exact public max-token limit, `n`, logprobs, tools, and response grammar apply
 to the selected final worker or synthesis boundary.
+
+The Responses stream uses OpenAI event names and gapless sequence numbers from
+`response.created` through `response.completed` or `response.incomplete`; failures
+terminate with typed error/failed events. Successful stored responses can be continued
+with `previous_response_id`, but IDs never cross tenant boundaries. Function-call
+arguments and outputs round-trip through the normal model chat template and request
+capability checks. Run `scripts/codex_responses_smoke.sh` against a serving model to
+exercise an unmodified Codex CLI over `wire_api="responses"`; deployment details and
+unsupported Responses features are listed in `docs/deployment.md`.
 
 `POST /v1/route` accepts `{model, messages}` and renders the same model-specific chat
 template as actual chat before calling the Router's non-mutating `preview()`. It never

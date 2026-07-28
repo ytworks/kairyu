@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Implemented** (2026-07-03; D1/D2 amended 2026-07-28;
+Status: **Implemented** (2026-07-03; D1/D2/D4 amended 2026-07-28;
 D3/D6 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
@@ -173,7 +173,7 @@ arithmetic. `/admin/usage.csv` reads a size-bounded ledger snapshot and exports
 rates, component charges, discount, total, source SHA-256, and deterministic
 invoice ID. Any malformed/truncated record fails the export closed.
 
-### D4 — `/v1/responses` (subset) + `/v1/embeddings`
+### D4 — `/v1/responses` developer surface + `/v1/embeddings`
 
 Responses: `POST /v1/responses` accepting `model`, `input` (string or
 message array), `previous_response_id`, `stream`; a `ResponseStore`
@@ -186,6 +186,27 @@ backends are registered under explicit, non-colliding served model IDs; the
 handler resolves that bounded registry before work, returns `model_not_found`
 for misses, exposes every configured ID through `/v1/models`, and uses only the
 resolved ID for the response, request metrics, and usage accounting.
+
+**Typed stream/tool amendment (2026-07-28, issue #201).** Responses requests
+normalize into the existing Chat Completions validation/execution boundary so
+model-specific templates, sampling, structured output, named/required tool
+choice, upstream capability preflight, and usage ownership stay single-sourced.
+Text streams pull backend deltas directly and emit canonical, gapless
+`response.*` SSE events; tool streams buffer until parsed calls satisfy the
+requested policy because invalid provisional calls cannot be retracted.
+Completed, incomplete, and failed terminals are typed and only successful
+stored responses are continuable.
+
+Flat function tools and Codex namespace tools normalize into the existing chat
+tool protocol. Public namespace/name/call IDs are restored on output, and
+`function_call_output` becomes a linked tool-role turn. The legacy prompt-only
+template also preserves prior assistant calls rather than dropping them.
+`previous_response_id` storage is bounded, deep-copy isolated, and tenant
+scoped for both unary and stream paths. Unknown or unsupported Responses fields
+fail before dispatch instead of being silently ignored. Official OpenAI SDK
+sync/async streaming tests and an unmodified Codex CLI against Qwen3-32B TP8
+cover the wire contract and multi-turn tool loop; the reproducible record is
+`bench/results/responses-codex-qwen3-32b-tp8-2026-07-28.json`.
 
 ### D5 — Vision wire format
 
@@ -340,6 +361,12 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   content: [{type: output_text, text, annotations: []}]}; instructions
   supported; STREAM DESCOPED (typed response.* event protocol is its own
   milestone — recorded).
+- **A16 (D4, Issue #201)**: supersedes A8's stream descoping. Text streaming
+  uses direct pull-through with canonical typed events and gapless sequence
+  numbers; tool streams buffer for final policy validation. Function and
+  namespace tools, linked outputs, tenant-scoped continuation, completed/
+  incomplete/failed terminals, sync/async official SDK parsing, and an
+  unmodified Codex Responses client are binding acceptance coverage.
 - **A9 (D4)**: /v1/embeddings must support encoding_format=base64 (the SDK
   DEFAULT); dev dep bumped to openai>=1.66 (client.responses exists from
   1.66).

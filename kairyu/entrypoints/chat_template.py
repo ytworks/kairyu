@@ -23,10 +23,36 @@ from pathlib import Path
 
 def render_chat(messages: Sequence[dict]) -> str:
     """Legacy minimal renderer: role-prefixed concatenation (pre-m9 default)."""
-    lines = [
-        f"{message['role']}: {flatten_content(message.get('content'))[0]}"
-        for message in messages
-    ]
+    lines = []
+    for message in messages:
+        text = flatten_content(message.get("content"))[0]
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            rendered_calls = []
+            for call in tool_calls:
+                function = call.get("function") if isinstance(call, Mapping) else None
+                if not isinstance(function, Mapping):
+                    continue
+                arguments = function.get("arguments", {})
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        pass
+                rendered_calls.append(
+                    "<tool_call>"
+                    + json.dumps(
+                        {
+                            "name": function.get("name"),
+                            "arguments": arguments,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    + "</tool_call>"
+                )
+            text += "".join(rendered_calls)
+        lines.append(f"{message['role']}: {text}")
     return "\n".join(lines) + "\nassistant:"
 
 
