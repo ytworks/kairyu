@@ -14,6 +14,11 @@ gateway membership withdrawal.  It waits for the replacement UID and rollout
 revision to become ready and eligible before continuing.  No operator step is
 required.
 
+The formal profile retains a five-second withdrawal bound and a 60-second
+per-replacement bound. Its 1,500-second whole-rollout deadline is only a
+stuck-run safety cap sized for 100 sequential replacements and shared-runner
+jitter; it is not an additional rollout-latency acceptance target.
+
 Run either profile from one clean source commit:
 
 ```bash

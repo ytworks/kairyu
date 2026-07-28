@@ -238,8 +238,13 @@ and PR #266 merged as `68f43f4`, closing #175 without rerunning the immutable
 formal measurement. F1b now has an A27 implementation candidate: a drain-first
 partitioned `RollingUpdate`, retry-free concurrent traffic, exact raw
 UID/revision/readiness/placement replay, and dedicated smoke/formal automation.
-Its focused replay suite passes 20/20; one exact-head PR smoke and one
-exact-head 100-replica formal run remain before #176 can close.
+Its focused replay suite passes 20/20 and exact-head PR smoke is green. The
+first formal attempt recorded 46,500/46,500 valid retry-free 2xx responses and
+completed 88/100 exact replacements without a recorded condition failure, then
+exposed that its unstated 900-second whole-run cap was shorter than the
+measured sequential rollout. A28 corrects only that safety cap to an
+empirically jitter-sized 1,500 seconds; one exact-head formal rerun remains
+before #176 can close.
 Production/fabric drills remain untouched.**
 
 _Last updated: 2026-07-28_
@@ -271,7 +276,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
-| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** the immutable 200-replica/ten-epoch artifact from Actions run `30374404150` records 33,000/33,000 retry-free 2xx responses, 5.221 ms measurement-wide placement p99, maximum 1.117-second withdrawal, exact lifecycle/provenance joins, and complete raw evidence; PR #266 merged as `68f43f4` and closed #175. **F1b implementation candidate:** A27 freezes a drain-first partitioned `RollingUpdate` of exactly 100 replicas with exact raw evidence replay and no operator repair. Its focused suite passes 20/20; the exact-head PR smoke and one exact-head formal run remain before #176 closes. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** the immutable 200-replica/ten-epoch artifact from Actions run `30374404150` records 33,000/33,000 retry-free 2xx responses, 5.221 ms measurement-wide placement p99, maximum 1.117-second withdrawal, exact lifecycle/provenance joins, and complete raw evidence; PR #266 merged as `68f43f4` and closed #175. **F1b implementation candidate:** A27 freezes a drain-first partitioned `RollingUpdate` of exactly 100 replicas with exact raw evidence replay and no operator repair. Its focused suite passes 20/20 and exact-head PR smoke is green. Formal run `30385162649` recorded 46,500/46,500 valid retry-free 2xx responses and completed 88/100 exact replacements before exposing an undersized unstated whole-run cap; A28 corrects only that safety cap from 900 to an empirically jitter-sized 1,500 seconds. One exact-head formal rerun remains before #176 closes. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
@@ -373,6 +378,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-28 — [amendment] F1b sizes its whole-run safety cap from formal evidence
+- What: Added A28. The formal whole-rollout timeout is now a 1,500-second stuck-run safety cap; the binding five-second withdrawal and 60-second per-replacement limits, retry-free zero-failure rules, exact 100-replica lineage, and all replay checks are unchanged.
+- Why: Exact-head formal run `30385162649` completed 88 exact sequential replacements in 890.208 seconds with no recorded lifecycle-condition failure while recording 46,500/46,500 valid retry-free 2xx responses, then the former 900-second cap cancelled ordinal 11. The observed mean, p95, and maximum full-cycle durations were 10.116, 11.165, and 12.134 seconds. Extrapolating the maximum to 100 steps, adding 20% shared-runner jitter margin, and rounding up yields 1,500 seconds; issue #176 defines no rollout-latency SLO.
+- Refs: m10 D5/A27/A28; G5 F1b; issue #176; PR #267; Actions run `30385162649`; `bench/fleet_rollout_bench.py`
 
 ### 2026-07-28 — [amendment] F1b attests pre-status Pods by immutable UID
 - What: F1b now retains the frozen Pod spec image when Kubernetes has created a replacement UID but has not yet emitted its first ContainerStatus. Replay also accepts that single Pending, not-Ready pre-status form only when the exact same immutable UID is later observed with the expected runtime reference and pinned CRI digest; missing eventual attestation or any visible mismatch still fails.

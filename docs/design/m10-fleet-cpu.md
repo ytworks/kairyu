@@ -594,3 +594,20 @@ over (α, β) (pure function over the dataset; no online learning).
   completion because F1a deliberately performs `OnDelete` batch churn. F1b
   therefore requires its own new formal run; F1a need not be rerun when its
   frozen inputs remain unchanged.
+- **A28**: F1b's formal whole-rollout deadline is a stuck-run safety cap, not
+  an unstated completion-latency SLO. It is 1,500 seconds while the binding
+  per-ordinal withdrawal and replacement bounds remain five and 60 seconds.
+  Exact-head formal run `30385162649` completed ordinals 99 through 12 with
+  every recorded drain, withdrawal, readiness, endpoint, and replacement
+  condition true before the former 900-second cap cancelled ordinal 11.
+  Those 88 completed cycles took 890.208 seconds: mean 10.116, p95 11.165, and
+  maximum 12.134 seconds including inter-step orchestration. The 1,500-second
+  cap rounds up a 100-step
+  extrapolation of the observed maximum plus 20% runner-jitter margin
+  (`12.133584415 * 100 * 1.20 = 1,456.03`) and still leaves ten minutes for setup,
+  cooldown, replay, and artifact upload inside the 35-minute CI job. The
+  failed run's 46,500 completed request records were each sent exactly once,
+  returned valid HTTP 200 responses, and had no transport error. One additional
+  placement was interrupted by timeout cleanup before an outcome was recorded;
+  the run is diagnostic evidence only because it did not complete all 100
+  steps.

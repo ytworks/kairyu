@@ -126,7 +126,7 @@ FORMAL_CONFIG = RolloutGateConfig(
     evidence_interval_seconds=0.25,
     withdrawal_timeout_seconds=5.0,
     replacement_timeout_seconds=60.0,
-    rollout_timeout_seconds=900.0,
+    rollout_timeout_seconds=1_500.0,
     schedule_lateness_limit_ms=1_000.0,
     pacing_success_fraction=0.99,
 )
