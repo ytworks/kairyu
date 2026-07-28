@@ -7,7 +7,7 @@ usage() {
 usage: scripts/kind_churn_gate.sh [--formal|--smoke] [--keep-cluster]
 
 Environment overrides:
-  KIND, KUBECTL, DOCKER, CURL, UV, GIT, TAR, TIMEOUT, GREP, SED
+  KIND, KUBECTL, DOCKER, CURL, UV, GIT, TAR, TIMEOUT, GREP, SED, JQ
   F1A_CLUSTER_NAME, F1A_KIND_CONFIG, F1A_MANIFEST_DIR
   F1A_RESULTS_DIR, F1A_GATEWAY_PORT
 
@@ -56,6 +56,7 @@ TAR=${TAR:-tar}
 TIMEOUT=${TIMEOUT:-timeout}
 GREP=${GREP:-grep}
 SED=${SED:-sed}
+JQ=${JQ:-jq}
 
 run_bounded() {
   local duration=$1
@@ -189,7 +190,7 @@ trap cleanup EXIT
 
 for tool in \
   "$KIND" "$KUBECTL" "$DOCKER" "$CURL" "$UV" "$GIT" "$TAR" "$TIMEOUT" \
-  "$GREP" "$SED"; do
+  "$GREP" "$SED" "$JQ"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "required tool is unavailable: $tool" >&2
     exit 1
@@ -300,9 +301,8 @@ MOCK_IMAGE_DIGEST=$(
 )
 docker_image_config_digest() {
   local image_reference=$1
-  "$DOCKER" image inspect \
-    --format '{{with .Descriptor}}{{with index . "annotations"}}{{index . "config.digest"}}{{end}}{{else}}{{.Id}}{{end}}' \
-    "$image_reference"
+  "$DOCKER" image inspect "$image_reference" |
+    "$JQ" -er '.[0] | .Descriptor.annotations["config.digest"] // .Id'
 }
 GATEWAY_IMAGE_CONFIG_DIGEST=$(
   docker_image_config_digest "$GATEWAY_IMAGE"
