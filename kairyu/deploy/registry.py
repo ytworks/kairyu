@@ -411,6 +411,7 @@ def openai_replica_factory(
     identity: ReplicaIdentity,
     *,
     client: httpx.AsyncClient | None = None,
+    client_factory: Callable[[], httpx.AsyncClient] | None = None,
 ) -> tuple[EngineBackend, str | None]:
     """Default factory for a fully identified OpenAI-protocol replica."""
     from kairyu.engine.registry import create_backend
@@ -422,6 +423,7 @@ def openai_replica_factory(
         api_key_env=identity.api_key_env,
         upstream="kairyu",
         client=client,
+        client_factory=client_factory,
     )
     base = identity.address.removesuffix("/v1")
     # readiness, not liveness: a drained/wedged replica must stay ejected (O3)

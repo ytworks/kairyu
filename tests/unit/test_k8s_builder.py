@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import httpx
@@ -48,23 +47,51 @@ class _FakeEndpointSliceDiscovery:
         self.closed = True
 
 
-def test_dynamic_http_client_does_not_cap_active_or_warmed_replicas(
+def test_dynamic_http_clients_share_only_tls_and_bound_cross_origin_probe_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
-    sentinel = object()
+    tls_context = object()
+    ssl_options: list[dict[str, object]] = []
+    client_options: list[dict[str, object]] = []
+
+    def create_ssl_context(**options):
+        ssl_options.append(options)
+        return tls_context
 
     def construct(**options):
-        captured.update(options)
-        return sentinel
+        client_options.append(options)
+        return object()
 
+    monkeypatch.setattr(
+        builder_module.httpx,
+        "create_ssl_context",
+        create_ssl_context,
+    )
     monkeypatch.setattr(builder_module.httpx, "AsyncClient", construct)
 
-    assert builder_module._create_dynamic_pool_http_client() is sentinel
-    limits = captured["limits"]
-    assert limits.max_connections is None
-    assert limits.max_keepalive_connections is None
-    assert limits.keepalive_expiry == 30.0
+    factory = builder_module._DynamicPoolHTTPClientFactory()
+    first = factory.create_replica_client()
+    second = factory.create_replica_client()
+    probe = factory.create_probe_client()
+
+    assert len({id(first), id(second), id(probe)}) == 3
+    assert ssl_options == [{"verify": True, "trust_env": True}]
+    assert len(client_options) == 3
+    assert all(options["verify"] is tls_context for options in client_options)
+    assert all(options["trust_env"] is False for options in client_options)
+
+    first_limits = client_options[0]["limits"]
+    second_limits = client_options[1]["limits"]
+    assert first_limits is not second_limits
+    for limits in (first_limits, second_limits):
+        assert limits.max_connections is None
+        assert limits.max_keepalive_connections == 1
+        assert limits.keepalive_expiry == 30.0
+
+    probe_limits = client_options[2]["limits"]
+    assert probe_limits.max_connections == 16
+    assert probe_limits.max_keepalive_connections == 16
+    assert probe_limits.keepalive_expiry == 30.0
 
 
 @pytest.mark.asyncio
@@ -85,6 +112,30 @@ async def test_dynamic_pool_wires_discovery_prober_log_and_lifespan(
         "KubernetesEndpointSliceDiscovery",
         _FakeEndpointSliceDiscovery,
     )
+    router_logs = []
+
+    class FakeRouterLog:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.membership_records: list[dict[str, object]] = []
+            self.replica_records: list[tuple[tuple, dict]] = []
+            self.closed = False
+            router_logs.append(self)
+
+        def record_membership(self, actions: dict, **snapshot: object) -> None:
+            normalized_snapshot = {
+                key: list(value) if isinstance(value, tuple) else value
+                for key, value in snapshot.items()
+            }
+            self.membership_records.append({**actions, **normalized_snapshot})
+
+        def record_replica(self, *args, **kwargs) -> None:
+            self.replica_records.append((args, kwargs))
+
+        async def shutdown(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(builder_module, "JsonlRouterLog", FakeRouterLog)
     requests: list[str] = []
     timeouts: list[tuple[str, float]] = []
 
@@ -111,13 +162,30 @@ async def test_dynamic_pool_wires_discovery_prober_log_and_lifespan(
             },
         )
 
-    shared_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(upstream)
-    )
+    class FakeHTTPClientFactory:
+        instances: list[FakeHTTPClientFactory] = []
+
+        def __init__(self) -> None:
+            self.replica_clients: list[httpx.AsyncClient] = []
+            self.probe_client: httpx.AsyncClient | None = None
+            self.instances.append(self)
+
+        def create_replica_client(self) -> httpx.AsyncClient:
+            client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            self.replica_clients.append(client)
+            return client
+
+        def create_probe_client(self) -> httpx.AsyncClient:
+            assert self.probe_client is None
+            self.probe_client = httpx.AsyncClient(
+                transport=httpx.MockTransport(upstream)
+            )
+            return self.probe_client
+
     monkeypatch.setattr(
         builder_module,
-        "_create_dynamic_pool_http_client",
-        lambda: shared_client,
+        "_DynamicPoolHTTPClientFactory",
+        FakeHTTPClientFactory,
     )
     spec = load_deployment_spec(
         """
@@ -152,9 +220,10 @@ pools:
         "scheme": "http",
         "address_family_preference": "ipv4",
     }
-    assert app.state.dynamic_pool_http_clients == (shared_client,)
-    assert prober._client is shared_client
-    assert prober._owns_client is False
+    client_factory = FakeHTTPClientFactory.instances[0]
+    assert app.state.dynamic_pool_http_client_factories == (client_factory,)
+    assert prober._client is client_factory.probe_client
+    assert prober._owns_client is True
 
     async with app.router.lifespan_context(app):
         for _ in range(100):
@@ -165,10 +234,10 @@ pools:
         assert pool.healthy == (True,)
         assert pool.eligible_ids == ("pod-uid",)
         backend = pool._entries["pod-uid"].backend
-        assert backend._client is shared_client
-        result = await backend.generate(
+        assert backend._client is None
+        result = await pool.generate(
             GenerationRequest(
-                request_id="shared-client",
+                request_id="origin-local-client",
                 prompt="hello",
                 sampling_params=SamplingParams(
                     temperature=0,
@@ -177,6 +246,10 @@ pools:
             )
         )
         assert result.completions[0].text == "shared"
+        assert len(client_factory.replica_clients) == 1
+        data_client = client_factory.replica_clients[0]
+        assert backend._client is data_client
+        assert data_client is not client_factory.probe_client
         assert requests.count("/readyz") >= 1
         assert requests[-1] == "/v1/chat/completions"
         assert {timeout for path, timeout in timeouts if path == "/readyz"} == {
@@ -184,20 +257,22 @@ pools:
         }
         assert timeouts[-1] == ("/v1/chat/completions", 60.0)
 
-        # A reconciler removes individual backends during every churn epoch.
-        # Their shutdown must leave the pool/prober's shared transport alive.
-        await backend.shutdown()
-        assert shared_client.is_closed is False
+        # Data and readiness transports are independent while the replica lives.
+        assert data_client.is_closed is False
+        assert client_factory.probe_client is not None
+        assert client_factory.probe_client.is_closed is False
 
     assert source.polls >= 1
     assert source.closed is True
-    assert shared_client.is_closed is True
-    records = [
-        json.loads(line)
-        for line in (tmp_path / "evidence/membership.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
+    assert data_client.is_closed is True
+    assert client_factory.probe_client is not None
+    assert client_factory.probe_client.is_closed is True
+    assert len(router_logs) == 1
+    router_log = router_logs[0]
+    assert router_log.path == tmp_path / "evidence/membership.jsonl"
+    assert router_log.closed is True
+    assert len(router_log.replica_records) == 1
+    records = router_log.membership_records
     assert [record["reason"] for record in records] == [
         "replica_added",
         "probe_succeeded",
@@ -212,47 +287,6 @@ pools:
         records[0]["replica_generation"]
         == records[1]["replica_generation"]
     )
-
-
-@pytest.mark.asyncio
-async def test_dynamic_http_client_concurrent_close_finishes_once_when_cancelled() -> None:
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    class BlockingClient:
-        def __init__(self) -> None:
-            self.is_closed = False
-            self.close_calls = 0
-
-        async def aclose(self) -> None:
-            self.close_calls += 1
-            # httpx exposes is_closed as soon as aclose starts. A second owner
-            # waiter must still await the in-flight close task.
-            self.is_closed = True
-            started.set()
-            await release.wait()
-
-    client = BlockingClient()
-    owner = builder_module._DynamicPoolHTTPClientOwner(client)
-    first = asyncio.create_task(owner.shutdown())
-    await asyncio.wait_for(started.wait(), timeout=0.2)
-    second = asyncio.create_task(owner.shutdown())
-    await asyncio.sleep(0)
-    assert second.done() is False
-
-    first.cancel()
-    await asyncio.sleep(0)
-    assert first.done() is False
-    assert second.done() is False
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    await second
-
-    assert client.is_closed is True
-    assert client.close_calls == 1
-    await owner.shutdown()
-    assert client.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -302,7 +336,7 @@ pools:
     app = builder_module.build_app_from_spec(spec)
     assert app.state.reconcilers == ()
     assert app.state.probers == ()
-    assert app.state.dynamic_pool_http_clients == ()
+    assert app.state.dynamic_pool_http_client_factories == ()
     async with app.router.lifespan_context(app):
         pass
 

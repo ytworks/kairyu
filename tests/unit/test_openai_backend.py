@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -1017,6 +1018,98 @@ async def test_async_client_is_reused_across_requests(monkeypatch):
     assert backend._client is None
 
 
+async def test_owned_client_factory_creates_once_and_closes_with_backend():
+    captured: dict = {}
+    clients: list[httpx.AsyncClient] = []
+
+    def client_factory() -> httpx.AsyncClient:
+        client = httpx.AsyncClient(transport=_ok_transport(captured))
+        clients.append(client)
+        return client
+
+    backend = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        client_factory=client_factory,
+    )
+    assert backend._client is None
+
+    await backend.generate(_request())
+    await backend.generate(_request())
+
+    assert len(clients) == 1
+    assert backend._client is clients[0]
+    await backend.shutdown()
+    assert clients[0].is_closed is True
+    assert backend._client is None
+
+
+async def test_client_factory_rejects_a_closed_client():
+    client = httpx.AsyncClient(transport=_ok_transport({}))
+    await client.aclose()
+    backend = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        client_factory=lambda: client,
+    )
+
+    with pytest.raises(RuntimeError, match="client_factory returned a closed"):
+        await backend.generate(_request())
+
+    assert backend._client is None
+
+
+async def test_owned_client_shutdown_is_terminal_exactly_once_and_cancellation_safe():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingClient:
+        def __init__(self) -> None:
+            self.is_closed = False
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            started.set()
+            await release.wait()
+            self.is_closed = True
+
+    client = BlockingClient()
+    backend = OpenAICompatBackend(
+        base_url="http://replica-a:8000/v1",
+        model="m",
+        api_key_env=None,
+        client_factory=lambda: client,
+    )
+    assert backend._get_client() is client
+
+    first = asyncio.create_task(backend.shutdown())
+    await asyncio.wait_for(started.wait(), timeout=0.2)
+    second = asyncio.create_task(backend.shutdown())
+    await asyncio.sleep(0)
+    assert second.done() is False
+
+    first.cancel()
+    await asyncio.sleep(0)
+    assert first.done() is False
+    assert second.done() is False
+    with pytest.raises(RuntimeError, match="is shut down"):
+        backend._get_client()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+
+    assert client.is_closed is True
+    assert client.close_calls == 1
+    assert backend._client is None
+    await backend.shutdown()
+    assert client.close_calls == 1
+
+
 async def test_external_client_is_shared_and_not_closed_by_replica_shutdown():
     captured: dict = {}
     client = httpx.AsyncClient(transport=_ok_transport(captured))
@@ -1037,6 +1130,8 @@ async def test_external_client_is_shared_and_not_closed_by_replica_shutdown():
     await first.shutdown()
     assert client.is_closed is False
     assert first._client is client
+    with pytest.raises(RuntimeError, match="is shut down"):
+        await first.generate(_request())
 
     await second.generate(_request())
     assert second._client is first._client
@@ -1106,6 +1201,36 @@ def test_external_client_and_transport_are_mutually_exclusive():
             model="m",
             api_key_env=None,
             client=client,
+            transport=_ok_transport({}),
+        )
+
+
+def test_client_factory_is_mutually_exclusive_with_client_and_transport():
+    client = httpx.AsyncClient(transport=_ok_transport({}))
+
+    def factory() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=_ok_transport({}))
+
+    with pytest.raises(
+        ValueError,
+        match="client and client_factory are mutually exclusive",
+    ):
+        OpenAICompatBackend(
+            base_url="http://replica:8000/v1",
+            model="m",
+            api_key_env=None,
+            client=client,
+            client_factory=factory,
+        )
+    with pytest.raises(
+        ValueError,
+        match="client_factory and transport are mutually exclusive",
+    ):
+        OpenAICompatBackend(
+            base_url="http://replica:8000/v1",
+            model="m",
+            api_key_env=None,
+            client_factory=factory,
             transport=_ok_transport({}),
         )
 

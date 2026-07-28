@@ -278,14 +278,30 @@ over (α, β) (pure function over the dataset; no online learning).
   transport errors, unsent arrivals, missing request-to-placement joins,
   incomplete final gateway membership, missing raw sidecars, or any placement
   p99 window at or above 10 ms may pass.
-- **A17**: one dynamic `ReplicaPool` owns one outbound `AsyncClient`, shared by
-  every discovered OpenAI backend and its readiness prober. Replica removal and
-  replacement never close that transport; application teardown stops
-  reconcilers/probers/backends first and then closes the sole owner exactly once,
-  cancellation-safely. Data calls retain their backend timeout and probes retain
-  their shorter timeout per request. Active and idle connection-count limits are
-  open because trusted EndpointSlice membership has no declared fleet ceiling;
-  gateway admission and the probe semaphore bound active use, while a 30-second
-  idle expiry bounds sockets for churned-out Pod IPs. This reduces client and TLS
-  setup from O(replicas) to O(dynamic pools), matching the shared-client design
-  used by current vLLM routers.
+- **A17 (superseded by A18)**: one dynamic `ReplicaPool` owns one outbound
+  `AsyncClient`, shared by every discovered OpenAI backend and its readiness
+  prober. Replica removal and replacement never close that transport;
+  application teardown stops reconcilers/probers/backends first and then closes
+  the sole owner exactly once, cancellation-safely. Data calls retain their
+  backend timeout and probes retain their shorter timeout per request. Active
+  and idle connection-count limits are open because trusted EndpointSlice
+  membership has no declared fleet ceiling; gateway admission and the probe
+  semaphore bound active use, while a 30-second idle expiry bounds sockets for
+  churned-out Pod IPs. This reduces client and TLS setup from O(replicas) to
+  O(dynamic pools), matching the shared-client design used by current vLLM
+  routers.
+- **A18**: one dynamic `ReplicaPool` eagerly creates one immutable TLS context,
+  then each discovered OpenAI backend lazily creates and owns an origin-local
+  `AsyncClient` from it. Removing or replacing a replica closes only that
+  replica's client, cancellation-safely through the existing backend lifecycle.
+  Active data connections remain bounded by gateway admission rather than a
+  transport queue; each origin retains at most one idle connection for 30
+  seconds. Readiness uses a separately owned client capped at the prober's 16
+  concurrent connections. Both paths ignore proxy environment variables because
+  EndpointSlice addresses are cluster-internal. Sharing the TLS context removes
+  synchronous per-replica CA loading while separate transports avoid httpcore
+  1.0's fleet-wide flat connection scan. vLLM's shared aiohttp/reqwest clients
+  are not a counterexample: both index reusable connections by origin, whereas
+  httpcore 1.0 scans one cross-origin list and performs quadratic idle cleanup.
+  A18 therefore supersedes A17's shared-httpx-transport choice while retaining
+  its pool-scope TLS setup objective and per-operation timeout contract.

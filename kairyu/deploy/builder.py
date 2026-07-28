@@ -7,6 +7,7 @@ import contextlib
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from ssl import SSLContext
 
 import httpx
 from fastapi import FastAPI
@@ -24,7 +25,6 @@ from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.engine.backend import (
     EngineBackend,
     shutdown_all,
-    shutdown_all_cancellation_safe,
 )
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.chat_template import ChatTemplate
@@ -47,55 +47,59 @@ _SERVICE_ACCOUNT_NAMESPACE_PATH = Path(
 )
 
 
-class _DynamicPoolHTTPClientOwner:
-    """Exactly-once, cancellation-safe owner of one dynamic pool's client."""
-
-    def __init__(self, client: httpx.AsyncClient) -> None:
-        self.client = client
-        self._close_task: asyncio.Task[None] | None = None
-
-    async def shutdown(self) -> None:
-        task = self._close_task
-        if task is None:
-            if self.client.is_closed:
-                return
-            task = asyncio.create_task(self.client.aclose())
-            self._close_task = task
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as cancelled:
-            # The client is not discoverable after application teardown. Finish
-            # its close before propagating cancellation so sockets cannot leak.
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    continue
-            try:
-                task.result()
-            except BaseException as cleanup_error:
-                raise cancelled from cleanup_error
-            raise
+_DYNAMIC_REPLICA_MAX_KEEPALIVE = 1
+_DYNAMIC_PROBE_CONCURRENCY = 16
 
 
-def _create_dynamic_pool_http_client() -> httpx.AsyncClient:
-    """Build the fleet-wide data/probe connection pool for one ReplicaPool.
+class _DynamicPoolHTTPClientFactory:
+    """Cheap origin-local clients backed by one immutable TLS context.
 
-    Dynamic discovery has no declared maximum fleet size. Keep both aggregate
-    limits open so they cannot fall below the server concurrency cap or evict a
-    ready replica's warmed connection. EndpointSlice membership is a trusted
-    control-plane input; inbound request concurrency and the prober's own
-    semaphore bound active connections, while finite idle expiry bounds sockets
-    retained for churned-out pod IPs.
+    httpcore 1.0 keeps every origin's connections in one linear list inside an
+    ``AsyncConnectionPool``. A single fleet-wide client therefore makes each
+    request scan the whole fleet and makes idle cleanup quadratic. Conversely,
+    constructing a default client per discovered replica reloads the CA bundle
+    synchronously on the event loop. Share only the immutable ``SSLContext``:
+    each replica still owns an origin-local transport and closes it when it
+    leaves the pool, while client construction no longer reloads certificates.
     """
 
-    return httpx.AsyncClient(
-        limits=httpx.Limits(
-            max_connections=None,
-            max_keepalive_connections=None,
-            keepalive_expiry=30.0,
+    def __init__(self) -> None:
+        # EndpointSlice addresses are cluster-internal. Proxy environment
+        # variables must not redirect either data or readiness traffic. Build
+        # the context with trust_env enabled once so an explicitly supported
+        # HTTPS discovery can still use SSL_CERT_FILE/SSL_CERT_DIR.
+        self.ssl_context: SSLContext = httpx.create_ssl_context(
+            verify=True,
+            trust_env=True,
         )
-    )
+
+    def create_replica_client(self) -> httpx.AsyncClient:
+        # Active connections remain admission-bounded but uncapped here, so
+        # concurrent long generations never queue behind a transport limit.
+        # Retain one warm idle socket per replica: fleet-wide FD retention is
+        # O(replicas), while excess burst sockets close after use.
+        return httpx.AsyncClient(
+            verify=self.ssl_context,
+            trust_env=False,
+            limits=httpx.Limits(
+                max_connections=None,
+                max_keepalive_connections=_DYNAMIC_REPLICA_MAX_KEEPALIVE,
+                keepalive_expiry=30.0,
+            ),
+        )
+
+    def create_probe_client(self) -> httpx.AsyncClient:
+        # Healthy replicas are not probed. Bootstrap/ejection work shares this
+        # deliberately bounded control-plane pool and never shares data sockets.
+        return httpx.AsyncClient(
+            verify=self.ssl_context,
+            trust_env=False,
+            limits=httpx.Limits(
+                max_connections=_DYNAMIC_PROBE_CONCURRENCY,
+                max_keepalive_connections=_DYNAMIC_PROBE_CONCURRENCY,
+                keepalive_expiry=30.0,
+            ),
+        )
 
 
 def _create_embedding_backend(backend: str, *, dimensions: int) -> EmbeddingBackend:
@@ -182,7 +186,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
 
     probers: list[HealthProber] = []
     reconcilers: list[tuple[PoolReconciler, float]] = []
-    dynamic_http_client_owners: list[_DynamicPoolHTTPClientOwner] = []
+    dynamic_http_client_factories: list[_DynamicPoolHTTPClientFactory] = []
     placement_log_paths: dict[str, Path] = {}
     claimed_log_paths: dict[Path, str] = {}
     for name, pool_spec in spec.pools.items():
@@ -235,10 +239,8 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
 
         discovery = pool_spec.discovery
         assert discovery is not None
-        http_client_owner = _DynamicPoolHTTPClientOwner(
-            _create_dynamic_pool_http_client()
-        )
-        dynamic_http_client_owners.append(http_client_owner)
+        http_client_factory = _DynamicPoolHTTPClientFactory()
+        dynamic_http_client_factories.append(http_client_factory)
         source = KubernetesEndpointSliceDiscovery(
             discovery.service,
             _resolve_kubernetes_namespace(discovery.namespace),
@@ -307,7 +309,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             source,
             factory=partial(
                 openai_replica_factory,
-                client=http_client_owner.client,
+                client_factory=http_client_factory.create_replica_client,
             ),
             default_model=discovery.model or name,
             event_sink=event_sink,
@@ -321,8 +323,8 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 pool,
                 {},
                 pool_spec.probe_interval_s,
-                client=http_client_owner.client,
-                close_client=False,
+                client=http_client_factory.create_probe_client(),
+                max_concurrency=_DYNAMIC_PROBE_CONCURRENCY,
             )
         )
 
@@ -377,16 +379,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
             # create_app owns the usage ledger in an outer lifespan wrapper,
             # so it closes only after workers stop and this shutdown completes
             # or raises an ExceptionGroup.
-            try:
-                await shutdown_all(resources, "application")
-            finally:
-                # Individual dynamic backends and probers are non-owners. Close
-                # their common pool only after all of them and the reconciler
-                # loops have stopped, even if another resource shutdown fails.
-                await shutdown_all_cancellation_safe(
-                    dynamic_http_client_owners,
-                    "dynamic pool HTTP clients",
-                )
+            await shutdown_all(resources, "application")
 
     app = create_app(
         engines=engines,
@@ -406,8 +399,8 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     app.state.reconcilers = tuple(
         reconciler for reconciler, _interval_s in reconcilers
     )
-    app.state.dynamic_pool_http_clients = tuple(
-        owner.client for owner in dynamic_http_client_owners
+    app.state.dynamic_pool_http_client_factories = tuple(
+        dynamic_http_client_factories
     )
 
     if spec.batch is not None:

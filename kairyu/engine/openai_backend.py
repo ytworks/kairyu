@@ -4,20 +4,21 @@ Used by the Conductor for frontier-tier roles (design m1 D1) and as the remote
 DP-replica member behind ReplicaPool (design m6 D2). Errors surface explicitly:
 missing API key and non-2xx statuses raise RuntimeError with context.
 
-m6 D2 fixes: one persistent pooled AsyncClient per standalone backend, or one
-externally-owned client shared by a dynamic ReplicaPool (no per-request or
-per-replica handshake), real SSE streaming (cumulative partials, MockBackend
-semantics), optional auth (``api_key_env=None`` for keyless node-to-node
-replicas), and token-count passthrough (synthetic ids carrying
-``usage.completion_tokens`` / the streamed-delta count, mirroring
+m6 D2 fixes: one persistent pooled AsyncClient per backend (no per-request
+handshake), with optional externally-owned client injection or an owned client
+factory for origin-local dynamic replicas; real SSE streaming (cumulative
+partials, MockBackend semantics); optional auth (``api_key_env=None`` for
+keyless node-to-node replicas); and token-count passthrough (synthetic ids
+carrying ``usage.completion_tokens`` / the streamed-delta count, mirroring
 MockBackend's count-only ids).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 
 import httpx
 
@@ -50,6 +51,24 @@ _SSE_DATA_PREFIX = "data:"
 _SSE_DONE = "[DONE]"
 # OpenAI exposes token text and bytes in logprobs, but not tokenizer token IDs.
 _UNKNOWN_TOKEN_ID = -1
+
+
+async def _await_task_cancellation_safe(task: asyncio.Task[None]) -> None:
+    """Finish an owned-client close before propagating caller cancellation."""
+
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            task.result()
+        except BaseException as cleanup_error:
+            raise cancelled from cleanup_error
+        raise
 
 
 def _usage_from(data: dict | None) -> GenerationUsage | None:
@@ -297,9 +316,14 @@ class OpenAICompatBackend:
         upstream: str = "generic",
         capabilities: Mapping[str, object] | OpenAIRequestCapabilities | None = None,
         client: httpx.AsyncClient | None = None,
+        client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
+        if client is not None and client_factory is not None:
+            raise ValueError("client and client_factory are mutually exclusive")
         if client is not None and transport is not None:
             raise ValueError("client and transport are mutually exclusive")
+        if client_factory is not None and transport is not None:
+            raise ValueError("client_factory and transport are mutually exclusive")
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key_env = api_key_env
@@ -310,9 +334,12 @@ class OpenAICompatBackend:
         self._request_stream_usage = request_stream_usage
         self._capabilities = resolve_openai_capabilities(upstream, capabilities)
         self._client = client
-        # An injected client is owned by the dynamic pool lifecycle. Removing
-        # one replica must not tear down every other replica's connection pool.
+        self._client_factory = client_factory
+        # An injected instance has an external owner. A factory creates this
+        # backend's origin-local client, so normal replica shutdown owns it.
         self._owns_client = client is None
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     @property
     def base_url(self) -> str:
@@ -378,12 +405,24 @@ class OpenAICompatBackend:
         return headers
 
     def _get_client(self) -> httpx.AsyncClient:
+        if self._closed:
+            raise RuntimeError(f"backend {self._base_url} is shut down")
         if self._client is not None and self._client.is_closed:
             if not self._owns_client:
                 raise RuntimeError("externally owned HTTP client is closed")
             self._client = None
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout_s, transport=self._transport)
+            self._client = (
+                self._client_factory()
+                if self._client_factory is not None
+                else httpx.AsyncClient(
+                    timeout=self._timeout_s,
+                    transport=self._transport,
+                )
+            )
+            if self._client.is_closed:
+                self._client = None
+                raise RuntimeError("client_factory returned a closed HTTP client")
         return self._client
 
     def _payload(self, request: GenerationRequest) -> dict:
@@ -547,12 +586,23 @@ class OpenAICompatBackend:
             usage=usage,
         )
 
-    async def shutdown(self) -> None:
+    async def _shutdown_impl(self) -> None:
         if not self._owns_client:
             return
-        if self._client is not None and not self._client.is_closed:
-            await self._client.aclose()
+        client = self._client
+        if client is not None and not client.is_closed:
+            await client.aclose()
         self._client = None
+
+    async def shutdown(self) -> None:
+        task = self._close_task
+        if task is None:
+            # Terminal before the first await: no concurrent request can
+            # recreate a just-detached replica's origin-local client.
+            self._closed = True
+            task = asyncio.create_task(self._shutdown_impl())
+            self._close_task = task
+        await _await_task_cancellation_safe(task)
 
 
 register_backend("openai", OpenAICompatBackend)
