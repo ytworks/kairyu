@@ -68,9 +68,11 @@ WORKDIR /app
 # libs) uv's parallel compile exhausts file descriptors (EMFILE / os error 24).
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON=python3.12
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-install-project --no-dev --extra gpu --extra engine --extra fleet
+RUN uv sync --frozen --no-install-project --no-dev --extra gpu --extra engine --extra fleet \
+    --extra flashattention4
 COPY kairyu ./kairyu
-RUN uv sync --frozen --no-dev --extra gpu --extra engine --extra fleet
+RUN uv sync --frozen --no-dev --extra gpu --extra engine --extra fleet \
+    --extra flashattention4
 # Install the AOT FlashInfer kernel cache into the venv. NOT via `uv sync --frozen`
 # (it rejects lockfile drift); --no-deps keeps the frozen env intact (flashinfer-python
 # is already present from the sync above).

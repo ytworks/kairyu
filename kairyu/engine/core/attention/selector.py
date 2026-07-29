@@ -8,10 +8,18 @@ from kairyu.engine.core.hw_profile import HardwareProfile
 
 def select_backend(profile: HardwareProfile | None = None):
     """Env override wins; else the profile's kernel tier; CPU -> torch."""
-    if select_backend_name(profile) == "flashinfer":
+    name = select_backend_name(profile)
+    if name == "flashinfer":
         from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
 
         return FlashInferBackend()
+    if name in ("flashattention3", "flashattention4"):
+        from kairyu.engine.core.attention.flashattention_gpu import (
+            FlashAttentionBackend,
+        )
+
+        generation = 3 if name == "flashattention3" else 4
+        return FlashAttentionBackend(generation=generation, profile=profile)
     from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
 
     return TorchAttentionBackend()

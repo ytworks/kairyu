@@ -9,7 +9,10 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from kairyu.engine.backend import EngineBackend, EngineReadiness
-from kairyu.engine.core.attention_selector import select_backend_name
+from kairyu.engine.core.attention_selector import (
+    AttentionBackendDecision,
+    select_backend_decision,
+)
 from kairyu.engine.core.hw_profile import probe
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.orchestration.replica import ReplicaPool
@@ -167,7 +170,8 @@ def add_health_routes(
 
         attention backend is a process-level decision (env override or probed hw
         profile — deterministic and shared), resolved once here with
-        ``select_backend_name(probe())`` rather than deep-walking each engine.
+        ``select_backend_decision(probe())`` rather than deep-walking each
+        engine.
 
         Topology note: a pure gateway runs NO local attention — it forwards to
         replicas — so its own probe reports torch and its engines are all pools.
@@ -176,13 +180,30 @@ def add_health_routes(
         best-effort, null on unreachable). `role` distinguishes the two cases."""
         from importlib.metadata import PackageNotFoundError, version
 
-        override = os.environ.get("KAIRYU_ATTENTION_BACKEND")
         try:
             profile = probe()
-            attention = select_backend_name(profile)
             kernel_tier = profile.kernel_tier
-        except Exception:  # introspection must never 500; fall back to torch
-            attention, kernel_tier = "torch", "torch"
+        except Exception:  # introspection must never 500
+            profile, kernel_tier = None, "torch"
+        try:
+            decision = select_backend_decision(profile)
+        except Exception as error:  # invalid env must not break introspection
+            override = os.environ.get("KAIRYU_ATTENTION_BACKEND")
+            decision = AttentionBackendDecision(
+                requested=override or "auto",
+                resolved="torch",
+                source="env" if override else "hw_profile",
+                components={
+                    "prefill": "torch",
+                    "decode": "torch",
+                    "kv_mode": "tensor-gather",
+                },
+                rationale=(
+                    "safe reporting fallback after attention selection raised "
+                    f"{type(error).__name__}"
+                ),
+            )
+        attention = decision.resolved
 
         def _pkg_version(*names: str) -> str | None:
             # flashinfer ships under a few distribution names (flashinfer-python;
@@ -194,10 +215,17 @@ def add_health_routes(
                     continue
             return None
 
-        def _versions_for(attn: str) -> dict[str, str | None]:
+        def _versions_for(
+            components: Mapping[str, str],
+        ) -> dict[str, str | None]:
             out: dict[str, str | None] = {"torch": _pkg_version("torch")}
-            if attn == "flashinfer":  # only meaningful when it is the resolved kernel
+            used = frozenset(components.values())
+            if "flashinfer" in used:
                 out["flashinfer"] = _pkg_version("flashinfer", "flashinfer-python")
+            if "flashattention4" in used:
+                out["flash-attn-4"] = _pkg_version("flash-attn-4")
+            if "flashattention3" in used:
+                out["flash_attn_3"] = _pkg_version("flash_attn_3")
             return out
 
         engine_list = []
@@ -207,6 +235,11 @@ def add_health_routes(
                 "model": name,
                 "engine_backend": label,
                 "attention_backend": attention if label in _LOCAL_ATTENTION_BACKENDS else None,
+                "attention_components": (
+                    dict(decision.components)
+                    if label in _LOCAL_ATTENTION_BACKENDS
+                    else None
+                ),
             }
             tensor_parallel_size = getattr(
                 engine,
@@ -222,11 +255,17 @@ def add_health_routes(
                 replica = await engine.probe_backends()
                 if replica:  # adopt the replica's (real) attention backend
                     entry["attention_backend"] = replica.get("attention_backend")
+                    replica_components = replica.get("attention_components")
                     entry["via_replica"] = {
                         "attention_backend": replica.get("attention_backend"),
                         "kernel_tier": replica.get("kernel_tier"),
                         "versions": replica.get("versions"),
                     }
+                    if isinstance(replica_components, dict):
+                        entry["attention_components"] = dict(replica_components)
+                        entry["via_replica"]["attention_components"] = dict(
+                            replica_components
+                        )
                     replica_sizes = {
                         item.get("tensor_parallel_size")
                         for item in replica.get("engines", ())
@@ -249,10 +288,13 @@ def add_health_routes(
 
         return {
             "attention_backend": attention,
-            "source": "env" if override else "hw_profile",
+            "requested_attention_backend": decision.requested,
+            "attention_components": dict(decision.components),
+            "selection_rationale": decision.rationale,
+            "source": decision.source,
             "kernel_tier": kernel_tier,
             "role": role,
-            "versions": _versions_for(attention),
+            "versions": _versions_for(decision.components),
             "engines": engine_list,
         }
 
