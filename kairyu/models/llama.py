@@ -16,20 +16,46 @@ from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, RotaryEmbedding
 from kairyu.models.mla import MlaAttention
 from kairyu.models.moe import build_mlp
+from kairyu.quant.linear import LinearRole, ModelScope, make_linear
 
 
 class DecoderLayer(nn.Module):
     def __init__(
-        self, config: ModelConfig, layer_index: int = 0, backend=None, linear_factory=None
+        self,
+        config: ModelConfig,
+        layer_index: int = 0,
+        backend=None,
+        linear_factory=None,
+        *,
+        prefix: str | None = None,
+        model_scope: ModelScope = ModelScope.TARGET,
     ) -> None:
         super().__init__()
+        prefix = prefix or f"model.layers.{layer_index}"
         if config.is_mla:
-            self.self_attn = MlaAttention(config, linear_factory=linear_factory)
+            self.self_attn = MlaAttention(
+                config,
+                linear_factory=linear_factory,
+                prefix=f"{prefix}.self_attn",
+                layer_index=layer_index,
+                model_scope=model_scope,
+            )
         else:
             self.self_attn = Attention(
-                config, backend=backend, linear_factory=linear_factory
+                config,
+                backend=backend,
+                linear_factory=linear_factory,
+                prefix=f"{prefix}.self_attn",
+                layer_index=layer_index,
+                model_scope=model_scope,
             )
-        self.mlp = build_mlp(config, layer_index, linear_factory=linear_factory)
+        self.mlp = build_mlp(
+            config,
+            layer_index,
+            linear_factory=linear_factory,
+            prefix=f"{prefix}.mlp",
+            model_scope=model_scope,
+        )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
@@ -60,9 +86,7 @@ class DecoderLayer(nn.Module):
 
     def plan_decode_tensors(self, kv_pool, page_tables, seq_lens, *, q_dtype):
         """Step-boundary host phase for this layer's attention backend."""
-        self.self_attn.plan_decode_tensors(
-            kv_pool, page_tables, seq_lens, q_dtype=q_dtype
-        )
+        self.self_attn.plan_decode_tensors(kv_pool, page_tables, seq_lens, q_dtype=q_dtype)
 
     def forward_decode_tensors(
         self,
@@ -129,7 +153,11 @@ class _Backbone(nn.Module):
         # and plan cache are per-instance — sharing is load-bearing)
         self.layers = nn.ModuleList(
             DecoderLayer(
-                config, layer_index=index, backend=backend, linear_factory=linear_factory
+                config,
+                layer_index=index,
+                backend=backend,
+                linear_factory=linear_factory,
+                prefix=f"model.layers.{index}",
             )
             for index in range(config.num_hidden_layers)
         )
@@ -143,9 +171,22 @@ class DenseDecoder(nn.Module):
     def __init__(self, config: ModelConfig, attention_backend=None, linear_factory=None) -> None:
         super().__init__()
         self.config = config
-        # projections only — embeddings, norms and lm_head stay unquantized
-        self.model = _Backbone(config, backend=attention_backend, linear_factory=linear_factory)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.model = _Backbone(
+            config,
+            backend=attention_backend,
+            linear_factory=linear_factory,
+        )
+        self.lm_head = make_linear(
+            linear_factory,
+            config.hidden_size,
+            config.vocab_size,
+            False,
+            qualified_name="lm_head",
+            role=LinearRole.OUTPUT_HEAD,
+            # A tied checkpoint has no independent packed head payload.  This
+            # is a hard format constraint; untied heads remain a policy choice.
+            allow_quantization=not config.tie_word_embeddings,
+        )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
@@ -259,9 +300,7 @@ class DenseDecoder(nn.Module):
             if backend is None or id(backend) in planned:
                 continue
             planned.add(id(backend))
-            layer.plan_decode_tensors(
-                kv_pool, page_tables, seq_lens, q_dtype=q_dtype
-            )
+            layer.plan_decode_tensors(kv_pool, page_tables, seq_lens, q_dtype=q_dtype)
 
     @torch.no_grad()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:

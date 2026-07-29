@@ -41,7 +41,9 @@ def _runner(model_dir, sampler=None):
     from kairyu.engine.core.radix_kv import RadixKVCache
     from kairyu.models.loader import load_model
 
-    model, config, _ = load_model(model_dir, dtype=torch.bfloat16)
+    model, config, _ = load_model(
+        model_dir, dtype=torch.bfloat16, target_device="cuda:0"
+    )
     cache = RadixKVCache(num_pages=128, page_size=16)
     pool = PagedKVPool.for_cache(cache, config, dtype=torch.bfloat16, device="cuda:0")
     return PagedModelRunner(model.to("cuda:0"), pool, sampler=sampler), cache

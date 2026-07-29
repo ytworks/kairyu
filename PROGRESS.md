@@ -182,6 +182,14 @@ dequantization and full-engine checkpoint generation; unsupported combinations
 fail loudly. RTX PRO 6000 evidence records correctness, latency, temporary
 memory, BF16 baselines, and pinned vLLM 0.26.0 comparisons
 (`bench/results/quant-{gemm,vllm}-rtxpro6000-2026-07-27.json`).
+Quantized projection construction now carries checkpoint-canonical identity,
+semantic role, target/draft scope, device/dtype, TP placement, and a one-time
+kernel capability snapshot through dense, MoE, MLA, EAGLE, and MTP paths.
+Policy resolves each projection to one concrete compatible kernel before
+serving, preserves checkpoint ignore/exclusion rules and state-dict names, and
+fails closed instead of silently falling back. The contextual CPU acceptance
+gate passes 23/23 without skips; the actual SM120 FP8/INT8/AWQ/GPTQ/NVFP4
+kernel and full-model GPU gate passes 28/28 without skips.
 G6 P-B1 streaming orchestration is now closed. Direct routes already streamed;
 Conductor and MoA now keep pre-final work private and pull their final
 worker/synthesizer backend iterator through Orchestrator to OpenAI SSE.
@@ -326,7 +334,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
-| M14 — Quant compute (FP8/INT8/AWQ/GPTQ/NVFP4 CPU oracles + fused/native GPU kernels) | **GPU-validated** (2026-07-27, `docs/design/m14-quant-compute.md`): all five schemes production-dispatch on CUDA without a full dequantized weight, pass per-kernel and full-engine GPU gates, and fail loudly outside their supported capability/layout. CPU format proofs remain pinned vs live Hub checkpoints. |
+| M14 — Quant compute (FP8/INT8/AWQ/GPTQ/NVFP4 CPU oracles + fused/native GPU kernels) | **GPU-validated** (2026-07-30, `docs/design/m14-quant-compute.md`): all five schemes production-dispatch on CUDA without a full dequantized weight, pass per-kernel and full-engine GPU gates, and fail loudly outside their supported capability/layout. Construction now binds canonical projection identity, role/scope, target device/dtype, TP placement, and probed kernel capabilities while retaining checkpoint names and explicit exclusions. CPU format proofs remain pinned vs live Hub checkpoints. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
 | M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26); A3 makes rank 0 the sole sampling owner and broadcasts one canonical device-token packet before any rank advances (2026-07-29). |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete and production-enabled** (2026-07-26, `docs/design/m17-graphs-drafts.md`): explicit eager/graph serving mode, production builder wiring, real single-GPU/TP2 capture-replay parity, TP8 Qwen3-32B measurement and clean graph/NCCL teardown; fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. |
@@ -471,6 +479,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [amendment] m14 binds projection identity and hardware at construction
+- What: Added an immutable contextual linear-construction contract carrying checkpoint-canonical name, semantic role, target/EAGLE/MTP scope, layer/expert identity, logical device/dtype, TP rank and shard geometry, and a one-time kernel-capability snapshot. Dense, attention, MLA, routed/shared MoE, output-head, and draft projection sites now provide that context without changing local module or state-dict names. The default policy preserves checkpoint `ignore` rules and established dense/excluded roles; specialized policies may select only an explicitly compatible checkpoint format and concrete kernel. Runtime factories bind fused CUDA callables before serving and report deterministic context-rich errors instead of silently falling back. The public three-argument factory remains compatible. The skip-free contextual CPU gate passes 23/23, and the actual RTX PRO 6000 SM120 kernel/full-model gate passes 28/28 across FP8, INT8, AWQ, GPTQ, and NVFP4.
+- Why: Projection shape alone cannot safely select heterogeneous checkpoint formats or hardware kernels. Binding stable identity and actual placement/capabilities once prevents checkpoint-name drift, per-forward policy work, accidental CPU-oracle/dense fallback on CUDA, and unsupported format execution while keeping legacy callers and checkpoints loadable.
+- Refs: issue #228; m14 §8; `kairyu/quant/linear.py`; `kairyu/models/{attention,layers,mla,moe,eagle,mtp}.py`; `kairyu/models/{loader,parallel}.py`; `tests/unit/test_linear_factory_context.py`; `tests/gpu/{test_quant_kernels,test_quant_full_model_gpu}.py`
 
 ### 2026-07-30 — [progress] m18 D3 P-D overlap validates on real Qwen3-32B
 - What: Retained `bench/results/issue-223-pd-overlap-qwen3-32b-rtxpro6000-2026-07-30.json` from clean implementation commit `a08c416` on two peer-accessible RTX PRO 6000 Blackwell GPUs. The blocking and deferred production backends each completed two rounds, eight outputs, and 128 generated tokens with exact token/text parity. A Qwen3-32B-layout 64-layer P2P probe copied 134,217,728 bytes with identical source-before, source-after, blocking-destination, and deferred-destination SHA-256 `438ce11a438299fd87132d874a96871e5383d274a7b84e13085069e55edcc2de`. Blocking role work begins after the copy interval; deferred source and destination role work both overlap it. Deferred returns with one incomplete completion and no publication, then finishes with zero pending or settled outcomes. All ten live checks and the independent stored replay pass. Artifact SHA-256: `215b3f5068ee0e8ba39c048fecfd01f5d4478120e60f86dd5cb2a69aa9923748`.

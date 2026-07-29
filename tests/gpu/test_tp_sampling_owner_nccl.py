@@ -134,6 +134,7 @@ def _tp1(model_dir: str, mode: str):
         model_dir,
         dtype=torch.bfloat16,
         attention_backend=select_backend(probe()),
+        target_device="cuda:0",
     )
     model = model.to("cuda:0")
     cache = RadixKVCache(num_pages=NUM_PAGES, page_size=PAGE_SIZE)

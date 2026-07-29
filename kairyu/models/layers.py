@@ -14,6 +14,7 @@ import torch
 from torch import nn
 
 from kairyu.models.config import ModelConfig, RopeScaling
+from kairyu.quant.linear import ExpertScope, LinearRole, ModelScope, make_linear
 
 
 class RMSNorm(nn.Module):
@@ -47,9 +48,7 @@ def _yarn_inv_freq_and_factor(
     original_max = scaling.original_max_position_embeddings
 
     def correction_dim(num_rotations: float) -> float:
-        return (dim * math.log(original_max / (num_rotations * 2 * math.pi))) / (
-            2 * math.log(base)
-        )
+        return (dim * math.log(original_max / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
 
     low = max(math.floor(correction_dim(scaling.beta_fast)), 0)
     high = min(math.ceil(correction_dim(scaling.beta_slow)), dim - 1)
@@ -82,9 +81,9 @@ def _llama3_inv_freq(inv_freq: torch.Tensor, scaling: RopeScaling) -> torch.Tens
     high_freq_wavelen = scaling.original_max_position_embeddings / scaling.high_freq_factor
     wavelen = 2 * math.pi / inv_freq
     scaled = torch.where(wavelen > low_freq_wavelen, inv_freq / scaling.factor, inv_freq)
-    smooth = (
-        scaling.original_max_position_embeddings / wavelen - scaling.low_freq_factor
-    ) / (scaling.high_freq_factor - scaling.low_freq_factor)
+    smooth = (scaling.original_max_position_embeddings / wavelen - scaling.low_freq_factor) / (
+        scaling.high_freq_factor - scaling.low_freq_factor
+    )
     smoothed = (1 - smooth) * scaled / scaling.factor + smooth * scaled
     is_medium = (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen)
     return torch.where(is_medium, smoothed, scaled)
@@ -120,9 +119,7 @@ class RotaryEmbedding(nn.Module):
         return emb.cos() * self.attention_scaling, emb.sin() * self.attention_scaling
 
 
-def apply_rope_interleave(
-    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> torch.Tensor:
+def apply_rope_interleave(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """DeepSeek interleaved rope (m15 A2): even/odd pairs, cos/sin truncated
     to d/2; output is [rotated_evens ‖ rotated_odds] (NOT re-interleaved)."""
     half = x.shape[-1] // 2
@@ -147,12 +144,54 @@ def apply_rope(
 
 
 class SwiGluMlp(nn.Module):
-    def __init__(self, config: ModelConfig, linear_factory=None) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        linear_factory=None,
+        *,
+        prefix: str = "mlp",
+        layer_index: int | None = None,
+        expert_index: int | None = None,
+        expert_scope: ExpertScope = ExpertScope.NONE,
+        model_scope: ModelScope = ModelScope.TARGET,
+    ) -> None:
         super().__init__()
-        make = linear_factory or (lambda i, o, b: nn.Linear(i, o, bias=b))
-        self.gate_proj = make(config.hidden_size, config.intermediate_size, False)
-        self.up_proj = make(config.hidden_size, config.intermediate_size, False)
-        self.down_proj = make(config.intermediate_size, config.hidden_size, False)
+        common = {
+            "layer_index": layer_index,
+            "expert_index": expert_index,
+            "expert_scope": expert_scope,
+            "model_scope": model_scope,
+        }
+        self.gate_proj = make_linear(
+            linear_factory,
+            config.hidden_size,
+            config.intermediate_size,
+            False,
+            qualified_name=f"{prefix}.gate_proj",
+            role=LinearRole.MLP_GATE,
+            shard_dim=0,
+            **common,
+        )
+        self.up_proj = make_linear(
+            linear_factory,
+            config.hidden_size,
+            config.intermediate_size,
+            False,
+            qualified_name=f"{prefix}.up_proj",
+            role=LinearRole.MLP_UP,
+            shard_dim=0,
+            **common,
+        )
+        self.down_proj = make_linear(
+            linear_factory,
+            config.intermediate_size,
+            config.hidden_size,
+            False,
+            qualified_name=f"{prefix}.down_proj",
+            role=LinearRole.MLP_DOWN,
+            shard_dim=1,
+            **common,
+        )
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.down_proj(nn.functional.silu(self.gate_proj(hidden)) * self.up_proj(hidden))

@@ -38,7 +38,8 @@ def _generate(path, device: str, dtype: torch.dtype, prompt, max_new=8):
     from kairyu.models.loader import load_model
 
     model, config, _ = load_model(
-        path, dtype=dtype, attention_backend=TorchAttentionBackend()
+        path, dtype=dtype, attention_backend=TorchAttentionBackend(),
+        target_device=device,
     )
     model = model.to(device)
     cache = RadixKVCache(num_pages=64, page_size=4)

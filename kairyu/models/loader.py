@@ -43,21 +43,21 @@ def load_generation_defaults(model_dir: str) -> GenerationDefaults:
     return parse_generation_defaults(directory, config)
 
 
-def build_model(
-    config: ModelConfig, attention_backend=None, linear_factory=None
-) -> DenseDecoder:
+def build_model(config: ModelConfig, attention_backend=None, linear_factory=None) -> DenseDecoder:
     """Registry: architecture -> module (one builder covers the dense family)."""
     if config.architecture not in _SUPPORTED_BUILDERS:
         raise ValueError(f"no builder for architecture {config.architecture!r}")
-    return DenseDecoder(
-        config, attention_backend=attention_backend, linear_factory=linear_factory
-    )
+    return DenseDecoder(config, attention_backend=attention_backend, linear_factory=linear_factory)
 
 
 def load_model(
     path: str | Path,
     dtype: torch.dtype = torch.float32,
     attention_backend=None,
+    *,
+    target_device: str | torch.device = "cpu",
+    linear_capabilities=None,
+    linear_selection_policy=None,
 ) -> tuple[DenseDecoder, ModelConfig, GenerationDefaults]:
     from kairyu.quant.linear import linear_factory
 
@@ -76,7 +76,13 @@ def load_model(
     model = build_model(
         config,
         attention_backend=attention_backend,
-        linear_factory=linear_factory(quant),
+        linear_factory=linear_factory(
+            quant,
+            device=target_device,
+            dtype=dtype,
+            capabilities=linear_capabilities,
+            selection_policy=linear_selection_policy,
+        ),
     )
     reader = CheckpointReader(directory)
     state: dict[str, torch.Tensor] = {}
@@ -84,9 +90,7 @@ def load_model(
     # (rotary inv_freq) are absent from checkpoints by contract (m14 A1)
     expected = model.state_dict()
     quantized_buffer_dtypes = {
-        (
-            f"{module_name}.{buffer_name}" if module_name else buffer_name
-        ): buffer.dtype
+        (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
         for module_name, module in model.named_modules()
         if getattr(module, "is_quantized", False)
         for buffer_name, buffer in module.named_buffers(recurse=False)

@@ -156,8 +156,7 @@ def build_pd_coordinator(
         selected = torch.device(value)
         if selected.type not in {"cpu", "cuda"}:
             raise ValueError(
-                "P-D role devices must be CPU or CUDA, "
-                f"got unsupported device {selected}"
+                f"P-D role devices must be CPU or CUDA, got unsupported device {selected}"
             )
         if selected.type == "cuda" and selected.index is None:
             return torch.device("cuda", torch.cuda.current_device())
@@ -219,9 +218,7 @@ def build_pd_coordinator(
         and prefill_attention_backend is decode_attention_backend
         and not getattr(prefill_attention_backend, "device_agnostic", False)
     ):
-        raise ValueError(
-            "cross-device P-D cannot share one stateful attention backend instance"
-        )
+        raise ValueError("cross-device P-D cannot share one stateful attention backend instance")
 
     def validate_backend_device(name: str, backend, role_device: torch.device) -> None:
         declared = getattr(backend, "device", None)
@@ -247,7 +244,10 @@ def build_pd_coordinator(
 
     def half(role_device: torch.device, role_attention_backend):
         model, config, _generation = load_model(
-            model_path, dtype=dtype, attention_backend=role_attention_backend
+            model_path,
+            dtype=dtype,
+            attention_backend=role_attention_backend,
+            target_device=role_device,
         )
         cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
         scheduler = Scheduler(

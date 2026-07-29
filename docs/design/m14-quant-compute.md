@@ -228,3 +228,46 @@ The external vLLM run reports BF16-relative RMSE 0.03743/0.03748 for FP8 and
 Raw provenance and p95/minimum data:
 `bench/results/quant-gemm-rtxpro6000-2026-07-27.json` and
 `bench/results/quant-vllm-rtxpro6000-2026-07-27.json`.
+
+## 8. Contextual construction amendment (2026-07-30, issue #228)
+
+The three-argument factory remains a supported compatibility input, but the
+production factory now binds the execution environment once and receives a
+typed identity for every projection:
+
+- canonical checkpoint module name and semantic role;
+- target/draft model scope, layer index, and routed/shared expert identity;
+- logical target device and compute dtype;
+- TP mode, rank/world size, shard axis, and local/global dimensions; and
+- an immutable snapshot of available linear-kernel families.
+
+Target-model, MoE, MLA, EAGLE, and MTP construction all provide this context.
+EAGLE and MTP use checkpoint-canonical identities for policy while retaining
+their established local `state_dict` names. Context and the resolved selection
+are plain Python attributes, never child modules, parameters, or persistent
+buffers, so checkpoint keys and tensor ownership do not change.
+
+Selection is fail-closed. The default policy first applies hard architectural
+constraints, then checkpoint `ignore` entries (literal prefixes or explicit
+`re:` full matches), then the pre-existing dense defaults for routers, output
+heads, and draft fusion projections. All remaining projections use the
+checkpoint format. A specialized policy may select another compatible format
+or kernel explicitly; it cannot override an architectural prohibition.
+Quantized CUDA selections may choose only a fused CUDA family. They never fall
+back to the CPU oracle, dense `F.linear`, full-weight dequantization, or an
+emulation kernel.
+
+Capability probing happens once when a runtime factory is created. It records
+the target SM, a successful Triton import, and the presence of FlashInfer's
+`SfLayout`, `mm_fp4`, and `nvfp4_quantize` symbols. The selected kernel family
+and decision reason are exposed on each projection as `linear_selection`;
+failures include the canonical name, scope, role, device/dtype, TP placement,
+local/global dimensions, and the capability-probe result. The resolved kernel
+callable is bound before serving rather than selected on every ordinary
+forward.
+
+The single-device loader, P–D role builders, and TP rank builder pass their
+resolved device, dtype, and placement into the factory. Offline checkpoint
+shape validation deliberately keeps the factory's logical target at CPU while
+allocating tensors under `torch.device("meta")`: it performs no CUDA probe or
+allocation and does not claim runtime kernel readiness.

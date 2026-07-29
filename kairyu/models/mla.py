@@ -21,36 +21,103 @@ from kairyu.engine.core.attention.mla_torch import mla_absorbed, mla_decompress
 from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, apply_rope_interleave, mla_softmax_scale
+from kairyu.quant.linear import LinearRole, ModelScope, make_linear
 
 _HF_MLA_NORM_EPS = 1e-6  # hardcoded in DeepseekV3RMSNorm construction (A4)
 
 
 class MlaAttention(nn.Module):
-    def __init__(self, config: ModelConfig, linear_factory=None) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        linear_factory=None,
+        *,
+        prefix: str = "self_attn",
+        layer_index: int | None = None,
+        model_scope: ModelScope = ModelScope.TARGET,
+    ) -> None:
         super().__init__()
         mla = config.mla
         assert mla is not None
-        make = linear_factory or (lambda i, o, b: nn.Linear(i, o, bias=b))
         heads = config.num_attention_heads
         self.num_heads = heads
         self.mla = mla
         self.scale = mla_softmax_scale(mla.qk_head_dim, config.rope_scaling)
         bias = config._attention_bias
         if mla.q_lora_rank is not None:
-            self.q_a_proj = make(config.hidden_size, mla.q_lora_rank, bias)
+            self.q_a_proj = make_linear(
+                linear_factory,
+                config.hidden_size,
+                mla.q_lora_rank,
+                bias,
+                qualified_name=f"{prefix}.q_a_proj",
+                model_scope=model_scope,
+                role=LinearRole.MLA_QUERY_A,
+                layer_index=layer_index,
+                shard_dim=0,
+            )
             self.q_a_layernorm = RMSNorm(mla.q_lora_rank, _HF_MLA_NORM_EPS)
-            self.q_b_proj = make(mla.q_lora_rank, heads * mla.qk_head_dim, False)
+            self.q_b_proj = make_linear(
+                linear_factory,
+                mla.q_lora_rank,
+                heads * mla.qk_head_dim,
+                False,
+                qualified_name=f"{prefix}.q_b_proj",
+                model_scope=model_scope,
+                role=LinearRole.MLA_QUERY_B,
+                layer_index=layer_index,
+                shard_dim=0,
+            )
             self.q_proj = None
         else:
-            self.q_proj = make(config.hidden_size, heads * mla.qk_head_dim, False)
-        self.kv_a_proj_with_mqa = make(
-            config.hidden_size, mla.kv_lora_rank + mla.qk_rope_head_dim, bias
+            self.q_proj = make_linear(
+                linear_factory,
+                config.hidden_size,
+                heads * mla.qk_head_dim,
+                False,
+                qualified_name=f"{prefix}.q_proj",
+                model_scope=model_scope,
+                role=LinearRole.ATTENTION_QUERY,
+                layer_index=layer_index,
+                shard_dim=0,
+            )
+        self.kv_a_proj_with_mqa = make_linear(
+            linear_factory,
+            config.hidden_size,
+            mla.kv_lora_rank + mla.qk_rope_head_dim,
+            bias,
+            qualified_name=f"{prefix}.kv_a_proj_with_mqa",
+            model_scope=model_scope,
+            role=LinearRole.MLA_KV_A,
+            layer_index=layer_index,
+            shard_dim=0,
         )
         self.kv_a_layernorm = RMSNorm(mla.kv_lora_rank, _HF_MLA_NORM_EPS)
-        self.kv_b_proj = make(
-            mla.kv_lora_rank, heads * (mla.qk_nope_head_dim + mla.v_head_dim), False
+        self.kv_b_proj = make_linear(
+            linear_factory,
+            mla.kv_lora_rank,
+            heads * (mla.qk_nope_head_dim + mla.v_head_dim),
+            False,
+            qualified_name=f"{prefix}.kv_b_proj",
+            model_scope=model_scope,
+            role=LinearRole.MLA_KV_B,
+            layer_index=layer_index,
+            shard_dim=0,
+            # _uk_uv reads the physical floating weight directly.  This is an
+            # architectural exclusion, not a capability fallback.
+            allow_quantization=False,
         )
-        self.o_proj = make(heads * mla.v_head_dim, config.hidden_size, bias)
+        self.o_proj = make_linear(
+            linear_factory,
+            heads * mla.v_head_dim,
+            config.hidden_size,
+            bias,
+            qualified_name=f"{prefix}.o_proj",
+            model_scope=model_scope,
+            role=LinearRole.ATTENTION_OUTPUT,
+            layer_index=layer_index,
+            shard_dim=1,
+        )
 
     def _uk_uv(self) -> tuple[torch.Tensor, torch.Tensor]:
         """kv_b_proj.weight [(H*(d_nope+d_v)), r] -> w_uk [H,r,d_nope], w_uv [H,r,d_v]."""
@@ -109,7 +176,13 @@ class MlaAttention(nn.Module):
         chunk_start = int(positions[0].item())
         form = mla_absorbed if chunk_len == 1 else mla_decompress
         context = form(
-            q_nope, q_pe, c_all, kpe_all, w_uk, w_uv, self.scale,
+            q_nope,
+            q_pe,
+            c_all,
+            kpe_all,
+            w_uk,
+            w_uv,
+            self.scale,
             causal_offset=chunk_start,
         )
         return self.o_proj(context.reshape(chunk_len, self.num_heads * mla.v_head_dim))
