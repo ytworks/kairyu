@@ -24,6 +24,26 @@ _COMMON_EOS_TOKENS = ("<|eot_id|>", "<|im_end|>", "<|endoftext|>", "</s>")
 GrammarVocabType = Literal["raw", "byte_fallback", "byte_level"]
 
 
+def _normalize_special_token(value: object, *, field: str) -> str | None:
+    """Normalize Hugging Face's string-or-AddedToken config representation."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        content = value.get("content")
+        if isinstance(content, str) and content:
+            return content
+        raise ValueError(
+            f"tokenizer_config.json {field!r} AddedToken must contain "
+            "a non-empty string 'content'"
+        )
+    raise ValueError(
+        f"tokenizer_config.json {field!r} must be a string, null, or "
+        f"an AddedToken object; got {type(value).__name__}"
+    )
+
+
 @dataclass(frozen=True)
 class GrammarVocabulary:
     """Encoded tokenizer vocabulary plus the metadata xgrammar must decode with.
@@ -162,8 +182,9 @@ def _grammar_metadata(backend: dict) -> tuple[GrammarVocabType, bool]:
 class HFTokenizer:
     """Wraps a Hugging Face ``tokenizer.json`` (file or containing directory).
 
-    ``eos_token`` is read from a sibling ``tokenizer_config.json`` when present,
-    otherwise probed from common EOS token names.
+    ``eos_token`` is read from a sibling ``tokenizer_config.json`` when present.
+    Both Hugging Face's string and AddedToken object representations are
+    supported. Missing or null values are probed from common EOS token names.
     """
 
     def __init__(self, path: str | Path, eos_token: str | None = None) -> None:
@@ -173,8 +194,15 @@ class HFTokenizer:
         self._grammar_vocab_type, self._grammar_add_prefix_space = _grammar_metadata(
             json.loads(self._tok.to_str())
         )
+        if eos_token is not None and not isinstance(eos_token, str):
+            raise TypeError("eos_token must be a string or None")
         if eos_token is None and config is not None:
-            eos_token = json.loads(config.read_text()).get("eos_token")
+            payload = json.loads(config.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("tokenizer_config.json must contain a JSON object")
+            eos_token = _normalize_special_token(
+                payload.get("eos_token"), field="eos_token"
+            )
         self.eos_token_id = self._resolve_eos(eos_token)
         self._vocab: list[str] | None = None
 
