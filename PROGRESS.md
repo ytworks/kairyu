@@ -61,9 +61,12 @@ issue #225 closes. Qwen free-running cross-degree equality will be diagnostic;
 the binding gate requires complete finite raw evidence, verified rank/ownership
 topology, common-prefix distribution compatibility, and reciprocal
 cross-selected logprob tolerance from direct full-distribution probes at the
-first divergence. Exact packet adoption/next-decode use is binding in the real
-TP2 injected production gate; separate TP8 evidence binds NCCL overwrite,
-rank topology, and rank-0-only ownership without claiming a per-rank digest.
+first divergence. The formal runner exposes build helpers installed beside its
+active Python executable so direct venv execution can JIT FlashInfer without
+changing the GPU-visible launch path. Exact packet adoption/next-decode use is
+binding in the real TP2 injected production gate; separate TP8 evidence binds
+NCCL overwrite, rank topology, and rank-0-only ownership without claiming a
+per-rank digest.
 Penalty-active requests now maintain lazy per-device prompt/seen/count rows and
 an append-only committed shadow; a scheduler-owned epoch makes normal sampling
 skip retained-history copies and comparisons. Exact pending commits require no
@@ -458,7 +461,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 ## Change Log
 
 ### 2026-07-29 — [amendment] m16 A3 makes rank 0 the sole TP sampling owner
-- What: Replaced all-rank sampling and sampled-result comparison with one protocol in both the production SPMD runner and in-process facade. Rank 0 alone owns RNG, penalties, grammar, logprobs, and public output materialization. Followers execute a passive model/KV path, receive one fixed int64 token slot per scheduled chunk on the model communicator, and adopt its device scalar before returning to the next control receive. Eager followers skip the replicated `lm_head`; every follower skips sampler state and public D2H. The packet retains partial-prefill sentinels, seeded/mixed/structured/speculative state, and fatal protocol diagnostics. A model-subgroup abort plus peer-first reap bounds post-model/pre-packet rank-0 failure teardown. The real TP2 injection gate binds packet adoption and use by the next decode; TP8 evidence independently binds NCCL overwrite plus complete rank-0-owner/passive-follower topology. Cross-degree Qwen evidence treats free-running TP1/TP8 equality as diagnostic and instead binds complete finite raw records, verified rank/ownership topology, common-prefix distribution compatibility, and direct reciprocal cross-selected logprob tolerance at the first divergence.
+- What: Replaced all-rank sampling and sampled-result comparison with one protocol in both the production SPMD runner and in-process facade. Rank 0 alone owns RNG, penalties, grammar, logprobs, and public output materialization. Followers execute a passive model/KV path, receive one fixed int64 token slot per scheduled chunk on the model communicator, and adopt its device scalar before returning to the next control receive. Eager followers skip the replicated `lm_head`; every follower skips sampler state and public D2H. The packet retains partial-prefill sentinels, seeded/mixed/structured/speculative state, and fatal protocol diagnostics. A model-subgroup abort plus peer-first reap bounds post-model/pre-packet rank-0 failure teardown. The real TP2 injection gate binds packet adoption and use by the next decode; TP8 evidence independently binds NCCL overwrite plus complete rank-0-owner/passive-follower topology. Cross-degree Qwen evidence treats free-running TP1/TP8 equality as diagnostic and instead binds complete finite raw records, verified rank/ownership topology, common-prefix distribution compatibility, and direct reciprocal cross-selected logprob tolerance at the first divergence. Its direct-venv launch path discovers `ninja` beside the active Python executable before FlashInfer JIT, avoiding a shell wrapper that changes GPU visibility.
 - Why: Independent rank sampling duplicates stateful work and can advance future KV/model state from a locally divergent token before a later Python result comparison detects it. Rank-0 authority makes one token canonical by construction, removes sampled-result object traffic, keeps the decode dependency device-side, and remains compatible with a future vocab-sharded head. Cross-degree free-running equality is not a correctness invariant because one reduction-order near-tie changes every later prefix; distribution comparisons are meaningful only while prefixes remain aligned. A worst-rank p95 sanity ceiling is binding for the tiny collective; p99/max/tail counts remain visible but non-binding because late host launch jitter affects every aligned CUDA event and is not protocol correctness.
 - Refs: issue #225; m16 A3/D4; `kairyu/engine/core/{model_runner,worker,tp_runner}.py`; `bench/tp_sampling_owner_{bench,qwen}.py`; `tests/{unit,dist,gpu}/`
 

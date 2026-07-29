@@ -12,6 +12,17 @@ from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import EngineSampling
 
 
+def test_python_bin_is_added_to_path_for_flashinfer_jit(monkeypatch) -> None:
+    monkeypatch.setattr(gate.sys, "executable", "/venv/bin/python")
+    monkeypatch.setattr(gate.shutil, "which", lambda _name, *, path: None)
+    monkeypatch.setattr(gate.os, "access", lambda path, mode: path == gate.Path("/venv/bin/ninja"))
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    gate._ensure_python_bin_on_path()
+
+    assert gate.os.environ["PATH"] == "/venv/bin:/usr/bin"
+
+
 def _record(
     token_id: int,
     logprob: float,

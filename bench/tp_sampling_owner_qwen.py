@@ -37,6 +37,8 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -88,6 +90,17 @@ SOURCE_BOUND_PATHS = (
     "kairyu/engine/kairyu_backend.py",
     "kairyu/models/parallel.py",
 )
+
+
+def _ensure_python_bin_on_path() -> None:
+    """Expose build helpers installed beside the active Python executable."""
+    path = os.environ.get("PATH", "")
+    if shutil.which("ninja", path=path) is not None:
+        return
+    python_bin = Path(sys.executable).parent
+    ninja = python_bin / "ninja"
+    if os.access(ninja, os.X_OK):
+        os.environ["PATH"] = os.pathsep.join(part for part in (str(python_bin), path) if part)
 
 
 @dataclass(frozen=True)
@@ -1354,6 +1367,7 @@ def verify_evidence(
 def _measure(args: argparse.Namespace) -> dict[str, Any]:
     from bench.parity_tp import _checkpoint_provenance
 
+    _ensure_python_bin_on_path()
     source_start = _source_provenance()
     hardware = _hardware_provenance()
     if not _hardware_is_exact_eight_gpu(hardware):
