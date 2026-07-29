@@ -12,6 +12,7 @@ import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.core.engine_service import LEGACY_WIRE_VERSION, WIRE_VERSION
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.registry import create_backend
 from kairyu.engine.zmq_backend import ZmqEngineBackend
@@ -56,6 +57,122 @@ async def test_stream_yields_incremental_partials(zmq_backend):
     lengths = [len(p.completions[0].token_ids) for p in partials]
     assert lengths == sorted(lengths)
     assert lengths[-1] == 5
+
+
+async def test_long_v2_generation_matches_in_process_with_logprobs(zmq_backend):
+    request = _request(
+        "long-v2",
+        "long process wire parity",
+        max_tokens=128,
+        logprobs=3,
+        ignore_eos=True,
+    )
+    reference = await KairyuBackend(num_pages=256).generate(request)
+    result = await zmq_backend.generate(
+        _request(
+            "long-v2",
+            "long process wire parity",
+            max_tokens=128,
+            logprobs=3,
+            ignore_eos=True,
+        )
+    )
+    expected = reference.completions[0]
+    actual = result.completions[0]
+    assert actual.token_ids == expected.token_ids
+    assert actual.text == expected.text
+    assert actual.finish_reason == expected.finish_reason == "length"
+    assert actual.logprobs == expected.logprobs
+    assert actual.logprob_content == expected.logprob_content
+    assert actual.cumulative_logprob == expected.cumulative_logprob
+    assert result.usage == reference.usage
+
+
+async def test_raw_v2_events_are_one_snapshot_then_sequenced_deltas(zmq_backend):
+    request = _request("raw-v2", "inspect delta frames", max_tokens=8)
+    queue = await zmq_backend._submit(request)
+    events = []
+    try:
+        while True:
+            event = await queue.get()
+            events.append(event)
+            if event.get("finished"):
+                break
+    finally:
+        zmq_backend._queues.pop(request.request_id, None)
+        zmq_backend._release_wire_route(request.request_id)
+
+    assert events[0]["event"] == "snapshot"
+    assert [event["sequence"] for event in events] == list(range(len(events)))
+    assert len({event["stream_id"] for event in events}) == 1
+    assert all(event["event"] == "delta" for event in events[1:])
+    assert all(
+        {"outputs", "text", "logprobs", "logprob_content"}.isdisjoint(event)
+        for event in events[1:]
+    )
+
+
+async def test_v2_delivery_fails_bad_stream_id_and_drops_retired_wire_generation():
+    backend = ZmqEngineBackend(num_pages=64)
+    queue = asyncio.Queue()
+    backend._queues["delivery"] = queue
+    backend._wire_request_ids["delivery"] = "wire-current"
+    backend._public_request_ids["wire-current"] = "delivery"
+    backend._stream_ids["delivery"] = "current"
+
+    backend._deliver_event(
+        {
+            "wire_version": 2,
+            "request_id": "wire-current",
+            "event": "delta",
+        }
+    )
+    malformed = queue.get_nowait()
+    assert "omitted its stream_id" in malformed["error"]
+
+    backend._deliver_event(
+        {
+            "wire_version": 2,
+            "request_id": "wire-current",
+            "stream_id": "stale",
+            "event": "delta",
+        }
+    )
+    malformed = queue.get_nowait()
+    assert "stream_id mismatch" in malformed["error"]
+
+    backend._deliver_event(
+        {
+            "wire_version": 2,
+            "request_id": "wire-retired",
+            "stream_id": "stale",
+            "event": "delta",
+        }
+    )
+    assert queue.empty()
+
+
+async def test_new_service_keeps_legacy_client_cumulative_wire():
+    backend = ZmqEngineBackend(num_pages=64)
+    request = _request("legacy-client", "rolling upgrade", max_tokens=4)
+    backend._wire_version = LEGACY_WIRE_VERSION
+    try:
+        queue = await backend._submit(request)
+        events = []
+        while True:
+            event = await asyncio.wait_for(queue.get(), timeout=5)
+            events.append(event)
+            if event.get("finished"):
+                break
+        assert all("wire_version" not in event for event in events)
+        assert all("outputs" in event and "text" in event for event in events)
+        assert [len(event["outputs"]) for event in events] == sorted(
+            len(event["outputs"]) for event in events
+        )
+    finally:
+        backend._queues.pop(request.request_id, None)
+        backend._release_wire_route(request.request_id)
+        await backend.shutdown()
 
 
 async def test_stop_string_works_across_process(zmq_backend):
@@ -106,6 +223,7 @@ async def test_usage_fields_cross_the_wire(zmq_backend):
         if event.get("finished"):
             break
     zmq_backend._queues.pop("u2", None)
+    zmq_backend._release_wire_route("u2")
     assert events[0]["num_prompt_tokens"] == 20
     assert events[-1]["num_cached_tokens"] >= 16
 
@@ -151,6 +269,7 @@ async def test_inflight_request_sees_service_death():
         assert "error" in event  # delivered, not a permanent hang
     finally:
         backend._queues.pop("d2", None)
+        backend._release_wire_route("d2")
         await backend.shutdown()
 
 
@@ -164,6 +283,7 @@ async def test_backend_recovers_after_service_death():
         backend._process.kill()
         await asyncio.wait_for(queue.get(), timeout=10)  # error event; receiver exits
         backend._queues.pop("r2", None)
+        backend._release_wire_route("r2")
         # the next request respawns a fresh child and completes normally
         result = await asyncio.wait_for(
             backend.generate(_request("r3", "recovered", max_tokens=2)), timeout=15
@@ -216,13 +336,15 @@ async def test_duplicate_request_id_preserves_original_queue_and_can_be_reused(
     assert reused.finished is True
 
 
-async def test_cancelled_request_id_can_be_reused_after_queued_abort():
+@pytest.mark.parametrize("wire_version", (LEGACY_WIRE_VERSION, WIRE_VERSION))
+async def test_cancelled_request_id_can_be_reused_after_queued_abort(wire_version):
     sigstop = getattr(signal, "SIGSTOP", None)
     sigcont = getattr(signal, "SIGCONT", None)
     if sigstop is None or sigcont is None:
         pytest.skip("requires POSIX process stop/continue signals")
 
     backend = ZmqEngineBackend(num_pages=256)
+    backend._wire_version = wire_version
     original = None
     reused = None
     process = None
@@ -290,6 +412,38 @@ async def test_cancelled_request_id_can_be_reused_after_queued_abort():
                             pass
             finally:
                 await backend.shutdown()
+
+
+async def test_pipeline_depth_three_cancelled_id_can_be_reused_immediately():
+    backend = ZmqEngineBackend(num_pages=256, pipeline_depth=3)
+    stream = backend.stream(
+        _request(
+            "pipeline-reuse",
+            "first pipelined request",
+            max_tokens=1_000,
+            ignore_eos=True,
+        )
+    )
+    try:
+        first = await asyncio.wait_for(anext(stream), timeout=15)
+        assert first.finished is False
+        await stream.aclose()
+        result = await asyncio.wait_for(
+            backend.generate(
+                _request(
+                    "pipeline-reuse",
+                    "reused pipelined request",
+                    max_tokens=3,
+                    ignore_eos=True,
+                )
+            ),
+            timeout=15,
+        )
+        assert result.finished is True
+        assert len(result.completions[0].token_ids) == 3
+    finally:
+        await stream.aclose()
+        await backend.shutdown()
 
 
 async def test_submit_failure_clears_request_reservation_and_queue(monkeypatch):

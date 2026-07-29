@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from kairyu.engine.backend import (
     GenerationRequest,
@@ -25,7 +27,13 @@ from kairyu.engine.backend import (
     GenerationUsage,
     prompt_with_tool_intent,
 )
-from kairyu.engine.core.engine_service import run_engine_service, sampling_params_to_wire
+from kairyu.engine.core.engine_service import (
+    LEGACY_WIRE_VERSION,
+    WIRE_VERSION,
+    run_engine_service,
+    sampling_params_to_wire,
+)
+from kairyu.engine.core.sampling_types import stable_request_seed
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput, TokenLogprob
 
@@ -47,6 +55,201 @@ def _decode_token_logprob(raw: list) -> TokenLogprob:
 
 class EngineServiceError(RuntimeError):
     """The engine service process died or became unreachable."""
+
+
+@dataclass
+class _WireAccumulator:
+    """Reconstruct the public cumulative result from legacy or v2 events."""
+
+    started: bool = False
+    next_sequence: int = 0
+    outputs: list[int] = field(default_factory=list)
+    text_parts: list[str] = field(default_factory=list)
+    text_length: int = 0
+    logprobs: list[dict] | None = None
+    logprob_content: list[list] | None = None
+    num_prompt_tokens: int = 0
+    num_cached_tokens: int = 0
+    cumulative_logprob: float = 0.0
+    wire_version: int | None = None
+
+    @staticmethod
+    def _require_offset(event: dict, name: str, expected: int) -> None:
+        actual = event.get(name)
+        if type(actual) is not int or actual != expected:
+            raise EngineServiceError(
+                f"engine wire delta {name} mismatch: expected {expected}, got {actual!r}"
+            )
+
+    def _snapshot(self, event: dict) -> None:
+        if self.started:
+            raise EngineServiceError("engine wire sent a duplicate snapshot")
+        sequence = event.get("sequence")
+        if type(sequence) is not int or sequence != 0:
+            raise EngineServiceError(
+                f"engine wire snapshot sequence must be 0, got "
+                f"{sequence!r}"
+            )
+        outputs = event.get("outputs")
+        text = event.get("text")
+        if not isinstance(outputs, list) or not isinstance(text, str):
+            raise EngineServiceError("engine wire snapshot has invalid outputs or text")
+        self.outputs.extend(outputs)
+        self.text_parts.append(text)
+        self.text_length = len(text)
+        if "logprobs" in event:
+            if not isinstance(event["logprobs"], list):
+                raise EngineServiceError("engine wire snapshot has invalid logprobs")
+            self.logprobs = list(event["logprobs"])
+        if "logprob_content" in event:
+            if not isinstance(event["logprob_content"], list):
+                raise EngineServiceError(
+                    "engine wire snapshot has invalid logprob content"
+                )
+            self.logprob_content = list(event["logprob_content"])
+        self.num_prompt_tokens = event.get("num_prompt_tokens", 0)
+        self.started = True
+        self.next_sequence = 1
+
+    def _delta(self, event: dict) -> None:
+        if not self.started:
+            raise EngineServiceError("engine wire sent a delta before its snapshot")
+        sequence = event.get("sequence")
+        if type(sequence) is not int or sequence != self.next_sequence:
+            raise EngineServiceError(
+                f"engine wire sequence mismatch: expected {self.next_sequence}, "
+                f"got {sequence!r}"
+            )
+        new_token_ids = event.get("new_token_ids")
+        text_delta = event.get("text_delta")
+        if not isinstance(new_token_ids, list) or not isinstance(text_delta, str):
+            raise EngineServiceError("engine wire delta has invalid token IDs or text")
+        self._require_offset(event, "output_offset", len(self.outputs))
+        self.outputs.extend(new_token_ids)
+        text_offset = event.get("text_offset")
+        if (
+            type(text_offset) is not int
+            or text_offset < 0
+            or text_offset > self.text_length
+        ):
+            raise EngineServiceError(
+                f"engine wire delta text_offset mismatch: expected a value in "
+                f"[0, {self.text_length}], got {text_offset!r}"
+            )
+        if text_offset != self.text_length and event.get("finished") is not True:
+            raise EngineServiceError(
+                "engine wire attempted a non-terminal visible-text rewrite"
+            )
+        if text_offset == self.text_length:
+            self.text_parts.append(text_delta)
+        else:
+            current = "".join(self.text_parts)
+            self.text_parts = [current[:text_offset] + text_delta]
+        self.text_length = text_offset + len(text_delta)
+
+        has_new_logprobs = "new_logprobs" in event
+        has_logprob_offset = "logprob_offset" in event
+        if has_new_logprobs != has_logprob_offset:
+            raise EngineServiceError(
+                "engine wire delta logprobs and offset must appear together"
+            )
+        if self.logprobs is not None and not has_new_logprobs:
+            raise EngineServiceError(
+                "engine wire delta omitted active logprob metadata"
+            )
+        if has_new_logprobs:
+            new_logprobs = event["new_logprobs"]
+            if not isinstance(new_logprobs, list):
+                raise EngineServiceError("engine wire delta has invalid logprobs")
+            expected = len(self.logprobs or ())
+            self._require_offset(event, "logprob_offset", expected)
+            if self.logprobs is None:
+                self.logprobs = []
+            self.logprobs.extend(new_logprobs)
+        has_new_content = "new_logprob_content" in event
+        has_content_offset = "logprob_content_offset" in event
+        if has_new_content != has_content_offset:
+            raise EngineServiceError(
+                "engine wire delta logprob content and offset must appear together"
+            )
+        if self.logprob_content is not None and not has_new_content:
+            raise EngineServiceError(
+                "engine wire delta omitted active rich logprob metadata"
+            )
+        if has_new_content:
+            new_content = event["new_logprob_content"]
+            if not isinstance(new_content, list):
+                raise EngineServiceError(
+                    "engine wire delta has invalid logprob content"
+                )
+            expected = len(self.logprob_content or ())
+            self._require_offset(event, "logprob_content_offset", expected)
+            if self.logprob_content is None:
+                self.logprob_content = []
+            self.logprob_content.extend(new_content)
+        self.next_sequence += 1
+
+    def apply(self, event: dict, *, materialize: bool = True) -> dict:
+        """Return one normalized cumulative event.
+
+        A missing version (or explicit v1) is a response from an older service
+        and remains byte-compatible. Version 2 is reconstructed and validated
+        here; request-local state is discarded on cancellation/error.
+        """
+
+        wire_version = event.get("wire_version", LEGACY_WIRE_VERSION)
+        if type(wire_version) is not int:
+            raise EngineServiceError(
+                f"invalid engine wire version {wire_version!r}"
+            )
+        if self.wire_version is None:
+            self.wire_version = wire_version
+        elif wire_version != self.wire_version:
+            raise EngineServiceError(
+                f"engine wire changed version within one request: "
+                f"{self.wire_version!r} -> {wire_version!r}"
+            )
+        if wire_version == LEGACY_WIRE_VERSION:
+            return event
+        if wire_version != WIRE_VERSION:
+            raise EngineServiceError(
+                f"unsupported engine wire version {wire_version!r}"
+            )
+        event_type = event.get("event")
+        if event_type == "snapshot":
+            self._snapshot(event)
+        elif event_type == "delta":
+            self._delta(event)
+        else:
+            raise EngineServiceError(
+                f"unknown engine wire event type {event_type!r}"
+            )
+
+        self.num_cached_tokens = event.get(
+            "num_cached_tokens",
+            self.num_cached_tokens,
+        )
+        self.cumulative_logprob = event.get(
+            "cumulative_logprob",
+            self.cumulative_logprob,
+        )
+        if not materialize:
+            return {"finished": event["finished"]}
+        normalized = {
+            "request_id": event["request_id"],
+            "outputs": self.outputs,
+            "text": "".join(self.text_parts),
+            "finished": event["finished"],
+            "finish_reason": event.get("finish_reason"),
+            "num_prompt_tokens": self.num_prompt_tokens,
+            "num_cached_tokens": self.num_cached_tokens,
+            "cumulative_logprob": self.cumulative_logprob,
+        }
+        if self.logprobs is not None:
+            normalized["logprobs"] = self.logprobs
+        if self.logprob_content is not None:
+            normalized["logprob_content"] = self.logprob_content
+        return normalized
 
 
 def _import_deps():
@@ -116,6 +319,10 @@ class ZmqEngineBackend:
         self._context = None
         self._receiver: asyncio.Task | None = None
         self._queues: dict[str, asyncio.Queue] = {}
+        self._stream_ids: dict[str, str] = {}
+        self._wire_request_ids: dict[str, str] = {}
+        self._public_request_ids: dict[str, str] = {}
+        self._wire_version = WIRE_VERSION
         self._active_request_ids: set[str] = set()
         self._start_lock = asyncio.Lock()
         self._atexit_registered = False
@@ -243,9 +450,7 @@ class ZmqEngineBackend:
                     event = msgpack.unpackb(raw)
                     if event.get("op") in ("pong", "bye"):
                         continue
-                    queue = self._queues.get(event["request_id"])
-                    if queue is not None:
-                        queue.put_nowait(event)
+                    self._deliver_event(event)
                 except Exception as error:
                     # a single corrupt/malformed frame must not kill the receiver
                     # and hang every request (E1); drop it and keep reading
@@ -257,39 +462,118 @@ class ZmqEngineBackend:
             for queue in self._queues.values():
                 queue.put_nowait({"error": repr(error)})
 
+    def _deliver_event(self, event: dict) -> None:
+        """Route one decoded event without crossing request generations."""
+
+        wire_request_id = event["request_id"]
+        request_id = self._public_request_ids.get(wire_request_id)
+        if request_id is None:
+            # The public ID was cancelled/reused and this event belongs to its
+            # retired wire generation (v1 and v2 both echo request_id).
+            return
+        queue = self._queues.get(request_id)
+        if queue is None:
+            return
+        if event.get("wire_version") == WIRE_VERSION:
+            stream_id = event.get("stream_id")
+            if not isinstance(stream_id, str):
+                queue.put_nowait(
+                    {
+                        "error": repr(
+                            EngineServiceError(
+                                "engine wire v2 event omitted its stream_id"
+                            )
+                        )
+                    }
+                )
+                return
+            expected_stream_id = self._stream_ids.get(request_id)
+            if stream_id != expected_stream_id:
+                # A retired generation has a different wire request ID and was
+                # dropped above. A mismatch on the current route is therefore
+                # malformed; fail this request instead of waiting forever.
+                queue.put_nowait(
+                    {
+                        "error": repr(
+                            EngineServiceError(
+                                "engine wire v2 stream_id mismatch: "
+                                f"expected {expected_stream_id!r}, got {stream_id!r}"
+                            )
+                        )
+                    }
+                )
+                return
+        queue.put_nowait(event)
+
     async def _submit(self, request: GenerationRequest) -> asyncio.Queue:
         await self._ensure_started()
         assert self._socket is not None
         _, msgpack = _import_deps()
         queue: asyncio.Queue = asyncio.Queue()
+        generation = uuid.uuid4().hex
+        wire_request_id = f"wire-{generation}"
+        stream_id = generation if self._wire_version == WIRE_VERSION else None
         self._queues[request.request_id] = queue
+        self._wire_request_ids[request.request_id] = wire_request_id
+        self._public_request_ids[wire_request_id] = request.request_id
+        if stream_id is not None:
+            self._stream_ids[request.request_id] = stream_id
         try:
+            sampling = sampling_params_to_wire(request.sampling_params)
+            if sampling["seed"] is None:
+                # The child schedules by the generation-unique wire ID. Make
+                # the historical public-ID default seed explicit so process
+                # splitting and request retries remain output-identical.
+                sampling["seed"] = stable_request_seed(request.request_id)
+            message = {
+                "op": "add",
+                "request_id": wire_request_id,
+                "prompt": prompt_with_tool_intent(request),
+                "sampling": sampling,
+                "priority": request.priority,
+                "scheduling_class": request.scheduling_class,
+            }
+            if self._wire_version == WIRE_VERSION:
+                # Per-request negotiation keeps rolling upgrades
+                # bidirectionally compatible: an old service ignores these
+                # fields; a new service defaults absent fields to v1.
+                message["wire_version"] = WIRE_VERSION
+                message["stream_id"] = stream_id
             await self._socket.send(
-                msgpack.packb(
-                    {
-                        "op": "add",
-                        "request_id": request.request_id,
-                        "prompt": prompt_with_tool_intent(request),
-                        "sampling": sampling_params_to_wire(request.sampling_params),
-                        "priority": request.priority,
-                        "scheduling_class": request.scheduling_class,
-                    }
-                )
+                msgpack.packb(message)
             )
         except BaseException:
             if self._queues.get(request.request_id) is queue:
                 self._queues.pop(request.request_id, None)
+                self._release_wire_route(request.request_id)
             raise
         return queue
 
     async def _abort(self, request_id: str) -> None:
         if self._socket is None:
             return
+        wire_request_id = self._wire_request_ids.get(request_id)
+        if wire_request_id is None:
+            return
         _, msgpack = _import_deps()
         try:
-            await self._socket.send(msgpack.packb({"op": "abort", "request_id": request_id}))
+            await self._socket.send(
+                msgpack.packb(
+                    {
+                        "op": "abort",
+                        "request_id": wire_request_id,
+                        "stream_id": self._stream_ids.get(request_id),
+                    }
+                )
+            )
         except Exception:  # pragma: no cover - shutdown race
             pass
+
+    def _release_wire_route(self, request_id: str) -> None:
+        wire_request_id = self._wire_request_ids.pop(request_id, None)
+        if wire_request_id is not None:
+            self._public_request_ids.pop(wire_request_id, None)
+        self._stream_ids.pop(request_id, None)
 
     def _result(self, request: GenerationRequest, event: dict) -> GenerationResult:
         logprobs = None
@@ -330,29 +614,44 @@ class ZmqEngineBackend:
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         self._reserve_request_id(request.request_id)
         queue = None
+        accumulator = _WireAccumulator()
         finished_cleanly = False
         try:
             queue = await self._submit(request)
             while True:
                 event = await queue.get()
                 self._raise_on_error(event)
+                event = accumulator.apply(
+                    event,
+                    materialize=bool(event.get("finished")),
+                )
                 if event["finished"]:
                     finished_cleanly = True
                     return self._result(request, event)
         finally:
             try:
-                if queue is not None and self._queues.get(request.request_id) is queue:
+                owns_queue = (
+                    queue is not None
+                    and self._queues.get(request.request_id) is queue
+                )
+                if owns_queue:
                     self._queues.pop(request.request_id, None)
-                if queue is not None and not finished_cleanly:
-                    # client disconnect / cancellation: tell the engine to stop
-                    # generating, or it keeps burning compute until max_tokens
-                    await self._abort(request.request_id)
+                try:
+                    if queue is not None and not finished_cleanly:
+                        # Keep the old stream generation available until its
+                        # abort frame is sent. Only then may the public request
+                        # ID be reused by a new generation.
+                        await self._abort(request.request_id)
+                finally:
+                    if owns_queue:
+                        self._release_wire_route(request.request_id)
             finally:
                 self._active_request_ids.discard(request.request_id)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         self._reserve_request_id(request.request_id)
         queue = None
+        accumulator = _WireAccumulator()
         emitted = -1
         finished_cleanly = False
         try:
@@ -360,6 +659,7 @@ class ZmqEngineBackend:
             while True:
                 event = await queue.get()
                 self._raise_on_error(event)
+                event = accumulator.apply(event)
                 if len(event["outputs"]) > emitted or event["finished"]:
                     emitted = len(event["outputs"])
                     yield self._result(request, event)
@@ -368,10 +668,18 @@ class ZmqEngineBackend:
                     return
         finally:
             try:
-                if queue is not None and self._queues.get(request.request_id) is queue:
+                owns_queue = (
+                    queue is not None
+                    and self._queues.get(request.request_id) is queue
+                )
+                if owns_queue:
                     self._queues.pop(request.request_id, None)
-                if queue is not None and not finished_cleanly:
-                    await self._abort(request.request_id)
+                try:
+                    if queue is not None and not finished_cleanly:
+                        await self._abort(request.request_id)
+                finally:
+                    if owns_queue:
+                        self._release_wire_route(request.request_id)
             finally:
                 self._active_request_ids.discard(request.request_id)
 

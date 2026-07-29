@@ -70,6 +70,15 @@ tokens, and PP all pass through this one path. On Qwen3-32B TP8, depth 2 retaine
 the depth-1 output digest and measured 66.951 → 67.814 token/s (+1.29%, wall
 −1.27%) over 8×32-token requests
 (`bench/results/unified-loop-qwen3-32b-tp8-2026-07-27.json`).
+The `kairyu-proc` result boundary now negotiates a versioned delta wire per
+request. One cumulative snapshot is followed by sequenced token/text/logprob
+deltas; empty non-terminal updates are suppressed, terminal detokenization can
+replace one exact suffix, and client-generated internal request/stream
+generations isolate cancelled public-ID reuse. The default sampling seed remains
+derived from the public ID, preserving deterministic output. Legacy clients and
+services remain mutually compatible. Long process parity and deterministic
+msgpack byte-volume gates are implemented; the clean-source retained artifact
+is the remaining #212 closure step.
 Streaming detokenization is now truly incremental on the supported native
 paths. `HFTokenizer` delegates arriving deltas to the Rust `DecodeStream`, Toy
 joins only new IDs, and unknown/overridden tokenizer implementations retain the
@@ -264,7 +273,7 @@ closure commit does not repeat F1c. Disposable live runs now write to
 artifact or dirty the clean-source attestation.
 Production/fabric drills remain untouched.**
 
-_Last updated: 2026-07-28_
+_Last updated: 2026-07-29_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -281,7 +290,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + `PipelinedModelRunner` consumed by the unified production `EngineLoop`; the old pipelined core is compatibility-only). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
-| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-28, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + tokenizer-native xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, ZMQ `kairyu-proc` process split. |
+| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-29, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + tokenizer-native xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, and negotiated snapshot/delta ZMQ `kairyu-proc` wire with legacy compatibility and stream-generation isolation. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
@@ -430,6 +439,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [amendment] m8 D6 negotiates a linear process-result wire
+- What: Replaced `kairyu-proc`'s per-step cumulative output/text/logprob retransmission with per-request wire v2: one sequence-0 snapshot followed by offset-checked deltas. Empty non-terminal events are suppressed; terminal exact detokenization may replace one suffix; generate reconstructs all deltas without materializing cumulative text until terminal, while stream materializes only at its cumulative public yield. A client-generated internal wire request ID and `stream_id` bind add/abort/result/error generations and prevent stale v1 or v2 events from crossing immediate public-ID reuse. An omitted sampling seed is made explicit from that public ID, retaining deterministic output. Missing version retains the cumulative v1 path in both rolling-upgrade directions. Added long process parity, malformed sequence/offset/version/metadata, cancellation/reuse, and deterministic msgpack byte-volume coverage.
+- Why: Retransmitting every cumulative prefix makes serialized bytes quadratic in output length and consumes the same host/process boundary needed by streaming and TPOT-sensitive serving. Version negotiation avoids a flag day, while sequence, offsets, and stream generations fail closed instead of silently reconstructing corrupt or stale output.
+- Refs: issue #212; m8 D6; `kairyu/engine/core/engine_service.py`; `kairyu/engine/zmq_backend.py`; `bench/proc_wire_bench.py`; `tests/unit/test_{proc_wire_protocol,zmq_backend}.py`; `tests/bench/test_proc_wire_bench.py`
 
 ### 2026-07-29 — [progress] G2 A7 closes on real Qwen3-32B TP4/8 evidence
 - What: Retain the four-cell Qwen3-32B result on 8× RTX PRO 6000: TP4 direct/gateway 87.6725%/87.3531% and TP8 direct/gateway 87.6725%/87.3531%, each with 512/512 successful requests. The independent verifier re-hashes 2,058 raw rows and passes all eight binding trace, usage, topology, and provenance checks.

@@ -10,6 +10,13 @@ methodology, config committed next to every number).
 The perf harnesses in the top-level `bench/` directory (TTFT/TPOT/goodput)
 are separate; this suite measures answer quality.
 
+`bench/proc_wire_bench.py` is a deterministic process-boundary complexity
+gate. It encodes the same cumulative generation trace through the legacy and
+versioned-delta `kairyu-proc` msgpack paths, retains every frame size, and
+asserts linear v2 byte growth versus the legacy quadratic control. Serialized
+bytes are binding; wall time is deliberately absent so OS jitter cannot change
+the result.
+
 `bench/frontier_compare.py` requests OpenAI-compatible streaming usage and defines
 token TPOT as `(last content chunk time - first content chunk time) /
 (completion_tokens - 1)`, using the final streamed `completion_tokens`. It never

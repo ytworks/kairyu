@@ -377,10 +377,25 @@ makes it reachable from YAML).
   update** (the D1 threading discipline holds by construction). Owns tokenizer +
   sampler + engine core. Heartbeats are answered between steps; the backend's
   death-detection timeout must exceed worst-case step time (documented knob).
-- Events: msgpack `{request_id, new_token_ids, text_delta, logprobs?, finished,
-  finish_reason, num_cached_tokens}`; **the first event for a request also
-  carries `num_prompt_tokens`** (amended — the service owns the tokenizer, so
-  the server side cannot count prompt tokens; M9's usage truth needs it).
+- Events: msgpack wire v2 is negotiated per `add` without a global handshake.
+  The client sends `wire_version=2` plus a fresh `stream_id`; an old service
+  ignores those fields and returns the legacy cumulative event, while a new
+  service defaults a missing version to legacy for old clients. A v2 request
+  receives one cumulative `snapshot` at sequence 0, then only sequenced deltas
+  `{output_offset, new_token_ids, text_offset, text_delta, new_logprobs?,
+  new_logprob_content?, finished, finish_reason, num_cached_tokens}`.
+  **The snapshot also carries `num_prompt_tokens`** (the service owns the
+  tokenizer, so the server side cannot count prompt tokens; M9 usage truth
+  needs it). Offsets and sequence are checked before reconstruction. Empty
+  non-terminal updates are suppressed so unrelated scheduler steps do not
+  inflate a request's wire volume. Normal visible text appends; terminal exact
+  detokenization may replace one suffix using a single longest-common-prefix
+  offset. Each public request is scheduled under a fresh internal wire request
+  ID, and every result/error and abort is generation-bound by `stream_id`, so
+  cancelling and immediately reusing a public request ID cannot cross streams
+  even on the legacy response path. When the caller omits a sampling seed, the
+  client sends the historical public-request-ID-derived seed explicitly; the
+  internal ID therefore cannot change deterministic output.
 - Backend: `zmq.asyncio` DEALER with **lazy socket/receiver-task creation on
   first `_submit`** (amended — `build_app_from_spec` constructs backends before
   any event loop exists; same lazy pattern as today's `_pump_task`).
@@ -400,6 +415,15 @@ makes it reachable from YAML).
   safe.
 
 Deps: `pyzmq`, `msgpack` (dev group + `[fleet]` extra).
+
+**Process-wire amendment (2026-07-29, issue #212):** the original D6 delta
+schema above is now the production protocol rather than a documented intent.
+`bench/proc_wire_bench.py` feeds cumulative production `StreamUpdate` values
+through both msgpack encoders and retains every frame size. Its gate uses exact
+serialized byte counts, not timing: protocol v2 must grow approximately 2x
+when output length doubles, while the legacy cumulative control must expose
+its approximately 4x growth. Long-generation process parity covers tokens,
+text, usage, finish state, id-keyed logprobs, and rich logprob content.
 
 ## 3. What M8 does not include (explicit non-goals)
 
