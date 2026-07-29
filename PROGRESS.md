@@ -377,6 +377,16 @@ is recorded as a failed, unmeasured item with its latency rather than a complete
 zero, so an all-empty slot carries `score: null` and cannot be compared with a
 published accuracy number.
 
+G5 F2c's first formal Qwen3-32B run stopped at round 1 family 0 on an
+over-strong cross-endpoint output-equality assertion. Targeted evidence showed
+individually repeatable but cross-endpoint-different continuations under fully
+warm caches, consistent with a BF16/TP near-tie across different
+cache-population execution shapes rather than semantic cache corruption. The
+corrected harness trace-binds a family-specific canonical assistant
+continuation, uses it as both arms' frozen turn-2 transcript after a complete
+turn-1 success barrier, and retains output match rate as diagnostic only. The
+formal performance run remains to be rerun from a clean pinned source.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -384,6 +394,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [amendment] F2c replaces post-treatment output equality with a frozen transcript
+- What: The first formal F2c execution stopped at round 1 family 0 on the former exact cross-arm output assertion. A targeted fixed-endpoint reproduction reported fully warm prompt caches (2,544/2,546 cached tokens): each endpoint repeated its own continuation twice, yet B0 and A1 differed; a separate longer family matched between warm and cold arms. The corrected trace now predeclares one family-specific canonical assistant continuation, binds its digest and the resulting turn-2 prompt digest, waits for every turn-1 arm to succeed, and supplies that same frozen transcript to both turn-2 arms without consuming either observed output. Every output digest remains raw evidence, while cross-arm match count, total, and rate are diagnostic only. Prompt identity, paired prompt/completion work, routing, engine usage, provenance, and all formal TTFT/goodput/cache thresholds remain binding.
+- Why: The fixed-endpoint result is consistent with a BF16/TP near-tie under different cross-endpoint and cache-population execution shapes; A1/B0 prefix KV may have been formed through different chunk/prefill histories, so it neither establishes semantic cache corruption nor isolates a physical GPU-pair effect. G2 already establishes that free-running greedy sequence equality is not a correctness gate because one moved near-tie changes every later autoregressive prefix. Reusing the observed turn-1 output also made a post-treatment result part of later workload construction. A predeclared common transcript preserves identical turn-2 work and the routing-performance causal comparison without conflating it with free-running numerical identity.
+- Refs: m10 D6/A32; G5 F2c; G2 free-running correctness amendment; issue #181; `bench/kv_aware_ttft_f2c_bench.py`; `tests/bench/test_kv_aware_ttft_f2c_bench.py`; `docs/gpu-runbook.md`
 
 ### 2026-07-29 — [amendment] F2c freezes a real-engine paired crossover
 - What: Added m10 A32 and the pre-results F2c method. The production `ReplicaPool`/`OpenAICompatBackend` path compares `PrefixIndex` with session HRW on four independent Qwen3-32B TP2 endpoints across all eight GPUs. Two disjoint two-replica cohorts run simultaneously and exchange policies for eight rounds; a recorded single-use namespace separates smoke/retry cache roots, and each round uses 16 unique 2,048-word RAG families, cold seeds opposite the measured HRW target, identical paired hints/prompts/outputs, actual turn-1 output in turn 2, and exact eight-token work. Nearest-rank TTFT p95 must improve by at least 30% pooled, at the seventh ordered round ratio, and by geometric mean. SLO-goodput must retain at least 0.99 pooled, at the second ordered ratio, and by geometric mean; engine-token cache rate must improve strictly pooled without a per-round regression. Raw router decisions, engine usage, topology, configuration, model/source hashes, and timing diagnostics are independently replayed.

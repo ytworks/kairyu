@@ -227,12 +227,16 @@ image, and drill are unchanged.
   ```
 
   Run only the changed-scope smoke needed to establish the harness. Smoke
-  binds evidence integrity, routing, usage, output, and provenance; its
-  performance metrics are diagnostic only. If that smoke generates tokens,
-  recreate all four containers before the formal run so its per-round roots
-  begin with empty independent caches. Run the one binding profile from a
-  clean pinned commit; the harness records `nvidia-smi` inventory/topology and
-  defaults to the four endpoints above:
+  binds evidence integrity, routing, usage, prompt identity, valid output
+  digests, and provenance; its performance metrics are diagnostic only. The
+  cross-arm output-match count, total, and rate are also diagnostic in both
+  profiles. Each trace family predeclares a canonical assistant continuation;
+  after both turn-1 requests succeed, both arms use that frozen common
+  transcript for turn 2 rather than either observed output. If that smoke
+  generates tokens, recreate all four containers before the formal run so its
+  per-round roots begin with empty independent caches. Run the one binding
+  profile from a clean pinned commit; the harness records `nvidia-smi`
+  inventory/topology and defaults to the four endpoints above:
 
   ```bash
   uv run python bench/kv_aware_ttft_f2c_bench.py \
@@ -258,4 +262,5 @@ image, and drill are unchanged.
   Retain both generated JSON files. The offline command rehashes the raw JSONL
   and recomputes the trace, production routing decisions, exact engine
   `cached_tokens` rates, nearest-rank p95, crossover order statistics,
-  goodput, configuration, topology, and source/model provenance.
+  goodput, frozen turn-2 transcript identity, diagnostic output-match rate,
+  configuration, topology, and source/model provenance.

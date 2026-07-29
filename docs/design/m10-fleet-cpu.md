@@ -906,11 +906,31 @@ over (α, β) (pure function over the dataset; no online learning).
   `session_affinity` selects the deliberately cold opposite engine. Every
   candidate/control pair receives byte-identical prompt content, session and
   prefix hints, greedy sampling, and exactly eight output tokens
-  (`min_tokens=max_tokens=8`, `ignore_eos=true`). Turn 1 completes on both
-  policies and its output digest must agree before either turn-2 request is
-  constructed; the actual turn-1 output is then included in both identical
-  turn-2 prompts. Missing, failed, duplicate, non-terminal, unequal-output, or
-  inexact-usage rows fail the proof.
+  (`min_tokens=max_tokens=8`, `ignore_eos=true`). Each family predeclares one
+  canonical assistant continuation as trace input; the trace descriptor binds
+  both its digest and the resulting turn-2 prompt digest. Turn 1 must complete
+  successfully on both policies before phase 2 begins, but neither observed
+  output becomes input to a later request. Both arms instead receive the same
+  frozen canonical transcript in turn 2. Missing, failed, duplicate,
+  non-terminal, prompt/transcript-mismatched, invalid-output-digest, or
+  inexact-usage rows fail the proof. Cross-arm output digest matches are
+  retained as a count, total, and rate, but remain diagnostic only.
+
+  The first formal execution stopped at round 1 family 0 on the former exact
+  output-equality assertion. A targeted fixed-endpoint reproduction left both
+  endpoints fully warm (2,544/2,546 cached prompt tokens): each endpoint
+  repeated its own continuation twice, but B0 and A1 differed. A separate
+  longer family matched between the warm and cold arms. The result is
+  consistent with a BF16/TP near-tie under different cross-endpoint and
+  cache-population execution shapes; A1/B0 prefix KV may have been formed
+  through different chunk/prefill histories, so it does not establish semantic
+  cache corruption or isolate a physical GPU-pair effect. This is the
+  numerical behavior already covered by G2's rule that free-running greedy
+  sequence equality is not a correctness gate: one moved near-tie changes the
+  later autoregressive prefix without proving a broken route or cache. The
+  frozen transcript preserves identical post-turn-1 work and removes
+  post-treatment output dependence without weakening routing, engine-usage,
+  or performance evidence.
 
   TTFT uses nearest-rank p95 with no interpolation, trimming, or exclusion.
   Candidate/control p95 must be at most 0.70 in the pooled population, in the
@@ -936,10 +956,10 @@ over (α, β) (pure function over the dataset; no online learning).
   the thresholds above. The artifact still binds every planned
   request, route decision, selected replica, topology and GPU identity, exact
   configuration, model revision and weight digests, clean expected source
-  commit, relevant source/config hashes, prompt/output identities, and exact
-  engine usage. Its offline verifier rehashes the raw JSONL and reconstructs
-  the trace, routing contract, statistics, and manifest verdict without
-  trusting derived fields.
+  commit, relevant source/config hashes, prompt identities, valid per-request
+  output digests, diagnostic output-match rate, and exact engine usage. Its
+  offline verifier rehashes the raw JSONL and reconstructs the trace, routing
+  contract, statistics, and manifest verdict without trusting derived fields.
 
   This direct L2 fixture is the narrow F2c proof: normal HTTP session-only blank
   hints intentionally bypass cross-session `PrefixIndex`, so using that

@@ -164,15 +164,28 @@ across eight rounds. A recorded, single-use namespace keeps smoke and retry
 roots disjoint. Each round has 16 unique 2,048-word RAG families: a cold seed
 targets one logical replica, while the measured session hashes to the
 opposite replica. Paired policies receive identical session/prefix hints,
-prompts, fixed eight-token generation, and actual turn-1 output before turn 2;
-production decisions must be `prefix_match` versus `session_affinity`, and
-outputs and exact engine usage must agree. Nearest-rank p95, the seventh
-ordered TTFT ratio, pooled ratio, and geometric mean bind the 30% gain.
+prompts, and fixed eight-token generation. Each family predeclares a canonical
+assistant continuation whose digest and resulting turn-2 prompt digest are
+trace-bound. Turn 1 must succeed on both arms before turn 2, but neither
+post-treatment output is reused; both arms receive the same frozen transcript.
+Production decisions must be `prefix_match` versus `session_affinity`, and
+paired prompt tokens and completion work must agree while each arm's exact
+engine usage remains retained. Nearest-rank p95, the seventh ordered TTFT
+ratio, pooled ratio, and geometric mean bind the 30% gain.
 Goodput binds a 0.99 pooled, second-order, and geometric-mean floor; exact
 `cached_tokens / prompt_tokens` must improve pooled without a round
 regression. Raw scheduling skew and lateness remain replayed diagnostics
-without an arbitrary fail cutoff. Router JSONL, topology, configuration,
-model/source hashes, and all raw request evidence are independently replayed.
+without an arbitrary fail cutoff. Per-request output digests remain raw
+evidence, while their cross-arm match count, total, and rate are diagnostic
+only. The first formal attempt stopped on the former exact-output assertion;
+a fixed-endpoint reproduction found individually repeatable but cross-endpoint
+different continuations despite fully warm caches. This is consistent with a
+BF16/TP near-tie under different cache-population execution shapes, including
+possible chunk/prefill-history differences; it does not establish semantic
+cache corruption or a physical GPU-pair effect. Per G2's free-running
+precedent, it is not a routing correctness gate. Router JSONL, topology,
+configuration, model/source hashes, and all raw request evidence are
+independently replayed.
 This intentionally does not broaden F2c into DeploymentSpec exact-KV-event
 wiring, whose hash-provider and subscriber lifecycle are a separate D7 product
 responsibility.

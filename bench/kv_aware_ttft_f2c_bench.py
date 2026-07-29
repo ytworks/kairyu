@@ -216,6 +216,7 @@ class FamilyTrace:
     shared_prefix: str
     seed_prompt: str
     turn1_prompt: str
+    canonical_assistant_continuation: str
     prefix_fingerprint: str
 
     @property
@@ -229,6 +230,14 @@ class FamilyTrace:
     @property
     def turn1_prompt_sha256(self) -> str:
         return sha256_text(self.turn1_prompt)
+
+    @property
+    def canonical_assistant_continuation_sha256(self) -> str:
+        return sha256_text(self.canonical_assistant_continuation)
+
+    @property
+    def turn2_prompt_sha256(self) -> str:
+        return sha256_text(turn2_prompt(self))
 
     @property
     def seed_session_sha256(self) -> str:
@@ -532,16 +541,21 @@ def build_trace(config: WorkloadConfig) -> tuple[FamilyTrace, ...]:
                         shared_prefix
                         + "Question one: identify the RAG family in eight tokens.\n"
                     ),
+                    canonical_assistant_continuation=(
+                        f"Canonical family answer {family_id} is fixed for crossover."
+                    ),
                     prefix_fingerprint=fingerprint,
                 )
             )
     return tuple(trace)
 
 
-def turn2_prompt(family: FamilyTrace, turn1_output: str) -> str:
+def turn2_prompt(family: FamilyTrace) -> str:
     return (
         family.turn1_prompt
-        + f"Assistant answer: {turn1_output}\n"
+        + "Assistant answer: "
+        + family.canonical_assistant_continuation
+        + "\n"
         + "Question two: confirm the same RAG family in eight tokens.\n"
     )
 
@@ -563,6 +577,10 @@ def trace_descriptor(
             "shared_prefix_sha256": family.shared_prefix_sha256,
             "seed_prompt_sha256": family.seed_prompt_sha256,
             "turn1_prompt_sha256": family.turn1_prompt_sha256,
+            "canonical_assistant_continuation_sha256": (
+                family.canonical_assistant_continuation_sha256
+            ),
+            "turn2_prompt_sha256": family.turn2_prompt_sha256,
             "prefix_fingerprint": family.prefix_fingerprint,
             "prefix_fingerprint_sha256": sha256_text(
                 family.prefix_fingerprint
@@ -701,6 +719,24 @@ def derive_metrics(
     """Recompute every binding statistic from raw request rows."""
 
     binding = _binding_rows(rows)
+    output_pairs: dict[tuple[int, int, int], dict[str, object]] = {}
+    for row in binding:
+        key = (
+            int(row["round_index"]),
+            int(row["family_index"]),
+            int(row["turn"]),
+        )
+        output_pairs.setdefault(key, {})[str(row["policy"])] = row.get(
+            "output_sha256"
+        )
+    complete_output_pairs = [
+        pair for pair in output_pairs.values() if set(pair) == set(POLICIES)
+    ]
+    output_match_total = len(complete_output_pairs)
+    output_match_count = sum(
+        pair[CANDIDATE_POLICY] == pair[BASELINE_POLICY]
+        for pair in complete_output_pairs
+    )
     failures = [
         row
         for row in rows
@@ -719,6 +755,14 @@ def derive_metrics(
             default=0,
         ),
         "timing_fields_are_diagnostic_only": True,
+        "output_match_count": output_match_count,
+        "output_match_total": output_match_total,
+        "output_match_rate": (
+            output_match_count / output_match_total
+            if output_match_total
+            else 0.0
+        ),
+        "output_match_is_diagnostic_only": True,
     }
     if failures:
         return {
@@ -1209,8 +1253,12 @@ def _expected_request_specs(
                         if turn == 0
                         else family.turn1_prompt_sha256
                         if turn == 1
-                        else None
+                        else family.turn2_prompt_sha256
                     ),
+                    "canonical_assistant_continuation_sha256": (
+                        family.canonical_assistant_continuation_sha256
+                    ),
+                    "turn2_prompt_sha256": family.turn2_prompt_sha256,
                     "selected_replica_id": selected,
                     "reason": reason,
                 }
@@ -1443,9 +1491,8 @@ def replay_checks(
                         <= config.prompt_token_max
                     )
 
-    output_pairs_equal = True
     paired_prompt_and_work_equal = True
-    turn2_prompts_equal = True
+    frozen_turn2_transcript_exact = True
     paired_skews_exact = True
     for family in build_trace(config):
         for turn in (0, 1, 2):
@@ -1455,10 +1502,6 @@ def replay_checks(
             baseline = by_id[
                 request_id_for(family, BASELINE_POLICY, turn)
             ]
-            output_pairs_equal &= (
-                candidate.get("output_sha256")
-                == baseline.get("output_sha256")
-            )
             candidate_usage = candidate.get("usage")
             baseline_usage = baseline.get("usage")
             paired_prompt_and_work_equal &= (
@@ -1475,13 +1518,14 @@ def replay_checks(
                 == config.max_tokens
             )
             if turn == 2:
-                turn2_prompts_equal &= (
+                frozen_turn2_prompt = turn2_prompt(family)
+                frozen_turn2_transcript_exact &= (
                     candidate.get("prompt_sha256")
                     == baseline.get("prompt_sha256")
+                    == family.turn2_prompt_sha256
                     and candidate.get("prompt_chars")
                     == baseline.get("prompt_chars")
-                    and int(candidate.get("prompt_chars", 0))
-                    > len(family.turn1_prompt)
+                    == len(frozen_turn2_prompt)
                 )
             if all(
                 isinstance(row.get("receipt_ns"), int)
@@ -1635,14 +1679,11 @@ def replay_checks(
         "successful_rows_have_no_error_type": successful_error_types_clear,
         "fixed_decode_finishes_by_length": fixed_length_finishes,
         "formal_prompt_token_envelope": prompt_token_envelope,
-        "paired_outputs_identical": output_pairs_equal,
         "paired_prompts_and_exact_work_identical": (
             paired_prompt_and_work_equal
         ),
-        "turn2_uses_identical_actual_turn1_output": (
-            output_pairs_equal
-            and paired_prompt_and_work_equal
-            and turn2_prompts_equal
+        "turn2_uses_frozen_common_transcript": (
+            frozen_turn2_transcript_exact
         ),
         "rag_roots_are_unique_and_complete": (
             all(bool(root) for root in roots) and len(set(roots)) == len(roots)
@@ -2521,7 +2562,6 @@ async def _run_round(
             observation for pair in phase1 for observation in pair
         )
 
-        turn1_outputs: dict[str, str] = {}
         for family, pair in zip(families, phase1, strict=True):
             candidate, baseline = pair
             if (
@@ -2529,16 +2569,13 @@ async def _run_round(
                 or baseline.row["status"] != "success"
             ):
                 raise RuntimeError(
-                    f"turn1 failed before equality barrier: {family.family_id}"
+                    "turn1 failed before frozen transcript barrier: "
+                    f"{family.family_id}"
                 )
-            if candidate.output != baseline.output:
-                raise RuntimeError(
-                    f"turn1 output mismatch: {family.family_id}"
-                )
-            turn1_outputs[family.family_id] = candidate.output
 
-        # The complete phase-one equality barrier closes before any phase-two
-        # prompt is constructed. Both arms receive the exact same actual text.
+        # The complete phase-one success barrier closes before phase two.
+        # Both arms then receive the predeclared family-specific transcript;
+        # neither post-treatment output becomes input to a later request.
         phase2_anchor_ns = time.perf_counter_ns() + interval_ns
         phase2 = await asyncio.gather(
             *(
@@ -2548,9 +2585,7 @@ async def _run_round(
                     config,
                     family,
                     turn=2,
-                    prompt=turn2_prompt(
-                        family, turn1_outputs[family.family_id]
-                    ),
+                    prompt=turn2_prompt(family),
                     planned_ns=(
                         phase2_anchor_ns + family.family_index * interval_ns
                     ),

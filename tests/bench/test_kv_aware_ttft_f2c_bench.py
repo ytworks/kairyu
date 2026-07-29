@@ -32,9 +32,23 @@ def test_trace_is_deterministic_and_pairs_opposite_session_hrw_targets() -> None
         )
         assert family.seed_replica_id != family.measured_replica_id
         assert family.prefix_fingerprint
-        assert family.shared_prefix not in f2c.canonical_json(
+        descriptor_json = f2c.canonical_json(
             f2c.trace_descriptor(config, first)
         )
+        assert family.shared_prefix not in descriptor_json
+        assert family.canonical_assistant_continuation not in descriptor_json
+        assert family.turn2_prompt_sha256 == f2c.sha256_text(
+            f2c.turn2_prompt(family)
+        )
+        turn2_spec = f2c._expected_request_specs(config)[
+            f2c.request_id_for(family, f2c.CANDIDATE_POLICY, 2)
+        ]
+        assert (
+            turn2_spec["canonical_assistant_continuation_sha256"]
+            == family.canonical_assistant_continuation_sha256
+        )
+        assert turn2_spec["turn2_prompt_sha256"] == family.turn2_prompt_sha256
+        assert turn2_spec["expected_prompt_sha256"] == family.turn2_prompt_sha256
 
 
 def test_nearest_rank_p95_and_geometric_mean_are_exactly_frozen() -> None:
@@ -88,6 +102,7 @@ def _passing_request_rows(
                             "round_index": round_index,
                             "family_index": family_index,
                             "policy": policy,
+                            "turn": turn,
                             "status": "success",
                             "receipt_ns": receipt_ns,
                             "done_ns": receipt_ns + 2_000_000_000,
@@ -103,6 +118,10 @@ def _passing_request_rows(
                                 "cached_tokens": 1_000 if candidate else 500,
                                 "completion_tokens": config.max_tokens,
                             },
+                            "output_sha256": f2c.sha256_text(
+                                f"round-{round_index}-family-{family_index}-"
+                                f"turn-{turn}"
+                            ),
                         }
                     )
     return rows
@@ -127,6 +146,10 @@ def test_metric_recomputation_binds_stats_but_not_jitter_diagnostics() -> None:
     assert metrics["cache"]["baseline_token_weighted_rate"] == 0.25
     assert metrics["diagnostics"]["max_paired_receipt_skew_ns"] == 9_000_000_000
     assert metrics["diagnostics"]["max_schedule_lateness_ns"] == 8_000_000_000
+    assert metrics["diagnostics"]["output_match_count"] == 256
+    assert metrics["diagnostics"]["output_match_total"] == 256
+    assert metrics["diagnostics"]["output_match_rate"] == 1.0
+    assert metrics["diagnostics"]["output_match_is_diagnostic_only"] is True
     assert all(checks.values())
 
 
@@ -208,10 +231,7 @@ def _passing_artifact_rows(
             elif turn == 1:
                 prompt = family.turn1_prompt
             else:
-                prompt = f2c.turn2_prompt(
-                    family,
-                    f"{family.family_id}:turn-1:identical-output",
-                )
+                prompt = f2c.turn2_prompt(family)
             for policy in f2c.POLICIES:
                 candidate = policy == f2c.CANDIDATE_POLICY
                 planned_ns = (
@@ -332,6 +352,10 @@ def test_compact_artifact_replays_and_accepts_every_gate(tmp_path: Path) -> None
         "max_paired_receipt_skew_ns": 8_000_000_000,
         "max_schedule_lateness_ns": 16_000_000_000,
         "timing_fields_are_diagnostic_only": True,
+        "output_match_count": 8,
+        "output_match_total": 8,
+        "output_match_rate": 1.0,
+        "output_match_is_diagnostic_only": True,
     }
 
 
@@ -509,9 +533,9 @@ def test_success_rows_require_clear_error_and_length_finish(
 
 @pytest.mark.parametrize(
     "tamper",
-    ("prompt_sha256", "prompt_chars", "prompt_tokens", "completion_tokens", "output"),
+    ("prompt_chars", "prompt_tokens", "completion_tokens"),
 )
-def test_paired_prompt_output_and_exact_work_are_bound(
+def test_paired_prompt_and_exact_work_are_bound(
     tmp_path: Path,
     tamper: str,
 ) -> None:
@@ -521,21 +545,63 @@ def test_paired_prompt_output_and_exact_work_are_bound(
         for row in rows
         if row.get("policy") == f2c.BASELINE_POLICY and row.get("turn") == 2
     )
-    if tamper == "prompt_sha256":
-        baseline_turn2["prompt_sha256"] = "d" * 64
-    elif tamper == "prompt_chars":
+    if tamper == "prompt_chars":
         baseline_turn2["prompt_chars"] += 1
     elif tamper == "prompt_tokens":
         baseline_turn2["usage"]["prompt_tokens"] += 1
-    elif tamper == "completion_tokens":
-        baseline_turn2["usage"]["completion_tokens"] -= 1
     else:
-        baseline_turn2["output_sha256"] = "e" * 64
+        baseline_turn2["usage"]["completion_tokens"] -= 1
 
     manifest = f2c.write_artifact(tmp_path, rows)
-    assert not manifest["checks"]["paired_prompts_and_exact_work_identical"] or (
-        tamper == "output" and not manifest["checks"]["paired_outputs_identical"]
+    assert not manifest["passed"]
+    assert (
+        not manifest["checks"]["paired_prompts_and_exact_work_identical"]
+        or not manifest["checks"]["turn2_uses_frozen_common_transcript"]
     )
+
+
+def test_canonical_turn2_prompt_tamper_is_rejected(tmp_path: Path) -> None:
+    rows = _passing_artifact_rows(f2c.profile_config("smoke"))
+    baseline_turn2 = next(
+        row
+        for row in rows
+        if row.get("policy") == f2c.BASELINE_POLICY and row.get("turn") == 2
+    )
+    baseline_turn2["prompt_sha256"] = "d" * 64
+
+    with pytest.raises(ValueError, match="prompt identity mismatch"):
+        f2c.write_artifact(tmp_path, rows)
+
+
+def test_output_mismatch_is_diagnostic_only_for_smoke_and_formal(
+    tmp_path: Path,
+) -> None:
+    config = f2c.profile_config("smoke")
+    matched = f2c.write_artifact(
+        tmp_path / "matched",
+        _passing_artifact_rows(config),
+    )
+    rows = _passing_artifact_rows(config)
+    baseline_turn1 = next(
+        row
+        for row in rows
+        if row.get("policy") == f2c.BASELINE_POLICY and row.get("turn") == 1
+    )
+    baseline_turn1["output_sha256"] = "e" * 64
+    mismatched = f2c.write_artifact(tmp_path / "mismatched", rows)
+
+    assert mismatched["passed"]
+    diagnostics = mismatched["metrics"]["diagnostics"]
+    assert diagnostics["output_match_count"] == 7
+    assert diagnostics["output_match_total"] == 8
+    assert diagnostics["output_match_rate"] == pytest.approx(7 / 8)
+    assert diagnostics["output_match_is_diagnostic_only"] is True
+    assert "paired_outputs_identical" not in mismatched["checks"]
+
+    formal = f2c.profile_config("formal", trace_namespace="output-diagnostic")
+    assert f2c.threshold_checks(
+        matched["metrics"], formal
+    ) == f2c.threshold_checks(mismatched["metrics"], formal)
 
 
 def test_run_end_count_and_source_file_set_are_structural(tmp_path: Path) -> None:
