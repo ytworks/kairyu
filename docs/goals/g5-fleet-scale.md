@@ -146,6 +146,16 @@ unchanged, the recorded completed-success run is verified through the GitHub
 Actions API, and both retained files are byte-identical to that run's original
 artifact.
 
+Exact-source Actions run `30417507859` at `f383806` closes F2b. Across all 500
+offered routes, maximum exact truth age was 232.314498 ms, the first stale
+approximate route followed the physical feed pause by 251.339950 ms, and
+same-process complete-replay recovery followed resume by 50.740933 ms.
+Maximum route lateness and selected-route gap were 3.608193 and 21.536138 ms,
+so no catch-up execution hid an OS scheduling stall. The independently
+replayed 2,196-row artifact is retained byte-identically at
+`bench/results/f2b-kv-event-retained/`; F1a and F2a were not rerun, and this
+evidence-only retention does not repeat F2b.
+
 ### Stage F3 — NIC KV transfer + P/D pools (needs RDMA hardware)
 
 | Gate | Target | Where proven |

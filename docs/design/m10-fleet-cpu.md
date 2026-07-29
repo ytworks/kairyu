@@ -866,3 +866,13 @@ over (α, β) (pure function over the dataset; no online learning).
   frozen gate-input hash is unchanged, the recorded run resolves through the
   GitHub Actions API to the matching completed successful workflow, and the
   retained raw and manifest bytes equal the original Actions artifact.
+
+  Exact-source run `30417507859` at `f383806` closes F2b. Its 500 routes split
+  into 175 fresh exact, 140 stale approximate, and 185 restored exact
+  decisions. Maximum exact truth age was 232.314498 ms; the first stale
+  approximate route followed pause by 251.339950 ms; complete replay restored
+  the same process and object identities 50.740933 ms after resume. Maximum
+  offered-route lateness and selected-route gap were 3.608193 and 21.536138
+  ms. The independently replayed 2,196-row artifact is retained byte-identically
+  at `bench/results/f2b-kv-event-retained/`; its evidence-only retention does
+  not repeat the binding run.
