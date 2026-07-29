@@ -479,8 +479,11 @@ request-local. Unsupported backends/models and B=1 keep the sequential path.
 CPU contracts cover mixed lengths, cache hits, chunking, real Scheduler
 preemption/page reuse, KV bytes, and rollback; skip-free SM120 and real NCCL
 TP2 gates cover FlashInfer parity and all-rank model/plan/run reductions. The
-clean-commit Qwen3-32B TP8 formal artifact is still pending, so issue #224 is
-not yet closed.
+clean-commit Qwen3-32B TP8 artifact passes all binding checks and independent
+replay: every rank reduces model calls 8→1, FlashInfer plans 8→1, and layer
+runs 512→64 while all eight first tokens remain exact. Rank-0 CUDA events fall
+48,373→6,037; wall time 15.153→2.907 seconds is retained only as diagnostic
+evidence.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -489,6 +492,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [evidence] m13 D1 batched prefill closes on Qwen3-32B TP8
+- What: Retained `bench/results/issue-224-batched-prefill-qwen3-32b-tp8-2026-07-30.json` from clean implementation commit `2fcd9be` on 8× RTX PRO 6000 Blackwell. One fixed B=8 cold-prefill group produced the exact same eight first tokens in sequential and batched modes. Every rank records model calls 8→1, FlashInfer plans 8→1, layer runs 512→64, and sequential rows 8→0; rank-0 CUDA events fall 48,373→6,037. All 11 live checks and the independent stored/source/hardware/checkpoint replay pass. Artifact SHA-256: `96c2450cea3711fc941ee44a7f0aec9202323cc4759fb97ac8f0d21ab65927d8`.
+- Why: The exact checkpoint, clean start/end source binding, eight-rank NCCL topology, all-rank counters, and raw token parity prove that the production TP path removes request-proportional prefill chains without crossing KV ownership. The diagnostic wall reduction from 15.153 to 2.907 seconds is not a verdict, so scheduler/OS jitter cannot create a false pass or failure.
+- Refs: issue #224; m13 D1; GPU-day C4; commit `2fcd9be`; `bench/batched_prefill_qwen.py`; `bench/results/issue-224-batched-prefill-qwen3-32b-tp8-2026-07-30.json`
 
 ### 2026-07-30 — [amendment] m13 D1 completes native cross-request prefill batching
 - What: Added a validated ragged `PrefillBatch`, vectorized request-owned KV writes, a native FlashInfer `attend_prefill` contract, one flat dense-model execution for compatible scheduled chunks, strict sequential fallback, and all-rank TP mode/counter diagnostics over the bounded model communicator. CPU tests cover mixed lengths, shared cached prefixes, chunk boundaries, real Scheduler preemption/page reuse, single-request fallback, and KV/token parity. Skip-free SM120 and real NCCL TP2 gates bind FlashInfer plan/run reduction and exact first-token parity. The formal Qwen3-32B TP8 harness pins clean committed source, the exact 17-shard checkpoint at start/end, eight UUID/PCI identities, raw schedules/tokens, all-rank counters, and stored-verdict replay; its artifact remains pending.
