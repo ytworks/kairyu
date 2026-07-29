@@ -1288,7 +1288,10 @@ def _replay_rows(
                 config.chunk_chars,
                 item.prefix_fingerprint,
             )
-            if policy == HRW_POLICY:
+            if policy == HRW_POLICY or not item.prefix_fingerprint:
+                # A blank root is an explicit session-only opt-out. Replay the
+                # HRW path directly: consulting the simulated prefix index here
+                # would fail to bind the production no-prefix-work contract.
                 expected_replica = _expected_hrw(item.session_id, replicas)
                 expected_reason = "session_affinity"
                 expected_session_hash = item.session_sha256
@@ -1368,19 +1371,28 @@ def _replay_rows(
         return True
 
     replay_results = []
+    blank_hint_replay_results = []
     for policy in POLICIES:
         replay_results.append(replay(policy, "shared", None))
         for calibration_index in range(config.uniform_calibration_rounds):
-            replay_results.append(
-                replay(
-                    policy,
-                    "uniform_calibration",
-                    calibration_index,
-                )
+            replayed = replay(
+                policy,
+                "uniform_calibration",
+                calibration_index,
             )
+            replay_results.append(replayed)
+            if policy == PREFIX_POLICY:
+                blank_hint_replay_results.append(replayed)
         for round_index in range(config.uniform_rounds):
-            replay_results.append(replay(policy, "uniform", round_index))
+            replayed = replay(policy, "uniform", round_index)
+            replay_results.append(replayed)
+            if policy == PREFIX_POLICY:
+                blank_hint_replay_results.append(replayed)
     checks["every_actual_selection_and_cache_hit_replays"] = all(replay_results)
+    checks["blank_hints_replay_as_session_only_hrw"] = (
+        bool(blank_hint_replay_results)
+        and all(blank_hint_replay_results)
+    )
 
     shared_rows = [
         row for row in placement_rows if row.get("trace") == "shared"

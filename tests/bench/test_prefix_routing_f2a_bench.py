@@ -165,11 +165,28 @@ def test_formal_context_requires_typed_github_identity() -> None:
 
 def test_independent_replay_accepts_the_frozen_smoke_artifact(
     smoke_artifact: Path,
+    monkeypatch,
 ) -> None:
+    overlap_calls = 0
+    original_overlap = f2a._overlap
+
+    def counted_overlap(keys, stored):
+        nonlocal overlap_calls
+        overlap_calls += 1
+        return original_overlap(keys, stored)
+
+    monkeypatch.setattr(f2a, "_overlap", counted_overlap)
     result = f2a.verify_artifact(smoke_artifact)
 
     assert result["passed"], result["errors"]
     assert result["checks"]["every_actual_selection_and_cache_hit_replays"]
+    assert result["checks"]["blank_hints_replay_as_session_only_hrw"]
+    config = f2a.profile_config("smoke")
+    assert overlap_calls == (
+        config.shared_families
+        * config.shared_requests_per_family
+        * config.replicas
+    )
     assert result["checks"]["shared_trace_is_identical_between_policies"]
     assert result["checks"]["uniform_traces_and_sessions_match_between_policies"]
     assert result["checks"]["paired_round_order_alternates"]
