@@ -6,6 +6,8 @@ import pytest
 
 from kairyu.bench.cli import add_bench_parser
 from kairyu.bench.config import build_config, parse_target_flag
+from kairyu.bench.execution import build_execution_runner
+from kairyu.bench.types import ExecutionConfig
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -94,3 +96,92 @@ def test_judge_flags_enable_judge():
     config = build_config(args)
     assert config.judge.enabled
     assert config.judge.model == "kairyu-auto"
+
+
+def test_execution_config_requires_an_immutable_docker_image():
+    digest = "a" * 64
+    local = ExecutionConfig()
+    assert local.runner == "local"
+    assert local.image is None
+    assert local.cpus == 1.0
+    assert local.pids_limit == 64
+    assert local.disk_mb == 256
+    assert local.pull_policy == "never"
+
+    for image in (f"sha256:{digest}", f"registry.example/kairyu@sha256:{digest}"):
+        config = ExecutionConfig(runner="docker", image=image)
+        assert config.image == image
+
+    with pytest.raises(ValueError, match="image is required"):
+        ExecutionConfig(runner="docker")
+    with pytest.raises(ValueError, match="immutable"):
+        ExecutionConfig(runner="docker", image="kairyu-bench:latest")
+    with pytest.raises(ValueError, match="only for runner='docker'"):
+        ExecutionConfig(image=f"sha256:{digest}")
+    with pytest.raises(ValueError, match="resource settings"):
+        ExecutionConfig(cpus=2.0)
+    with pytest.raises(ValueError, match="finite positive"):
+        ExecutionConfig(cpus=True)
+    with pytest.raises(ValueError):
+        ExecutionConfig(runner="docker", image=f"sha256:{digest}", cpus=float("inf"))
+    with pytest.raises(ValueError, match="repository is invalid"):
+        ExecutionConfig(runner="docker", image=f"-repo@sha256:{digest}")
+    with pytest.raises(ValueError, match="resource settings"):
+        build_execution_runner({"runner": "local", "cpus": 2.0})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cpus", 0),
+        ("pids_limit", 1),
+        ("disk_mb", 0),
+        ("disk_mb", 65_537),
+        ("pull_policy", "always"),
+    ],
+)
+def test_execution_config_rejects_unsafe_resource_policy(field, value):
+    with pytest.raises(ValueError):
+        ExecutionConfig(**{field: value})
+
+
+def test_execution_cli_is_explicit_and_overrides_yaml(tmp_path):
+    digest = "b" * 64
+    config_path = tmp_path / "bench.yaml"
+    config_path.write_text(
+        f"""
+targets:
+  - {{ base_url: "http://yaml:8000", model: yaml-model }}
+execution:
+  runner: docker
+  image: sha256:{digest}
+  cpus: 1
+  pids_limit: 32
+  disk_mb: 128
+""",
+        encoding="utf-8",
+    )
+    args = _parse(
+        [
+            "run",
+            "--config",
+            str(config_path),
+            "--exec-cpus",
+            "2.5",
+            "--exec-pids-limit",
+            "48",
+            "--exec-disk-mb",
+            "512",
+        ]
+    )
+    config = build_config(args)
+    assert config.execution.runner == "docker"
+    assert config.execution.image == f"sha256:{digest}"
+    assert config.execution.cpus == 2.5
+    assert config.execution.pids_limit == 48
+    assert config.execution.disk_mb == 512
+
+    local = build_config(
+        _parse(["run", "--config", str(config_path), "--exec-runner", "local"])
+    )
+    assert local.execution == ExecutionConfig()

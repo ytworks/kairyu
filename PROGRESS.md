@@ -436,6 +436,15 @@ footnoted scoreboard (G6 P-C1). A target call that returns no response content
 is recorded as a failed, unmeasured item with its latency rather than a completed
 zero, so an all-empty slot carries `score: null` and cannot be compared with a
 published accuracy number.
+LiveCodeBench and SciCode scoring now select one explicit, fingerprinted
+execution runner. The trusted-development local subprocess remains available;
+the unattended path uses a digest-only Docker image, completed create before
+timed attach, exact-ID cleanup on every catchable exit, no network or daemon
+logging, read-only root/input, non-root execution without capabilities, and
+bounded CPU, memory/swap, PIDs, writable tmpfs, output, and wall time. A
+dedicated non-skipping CI job builds the hash-pinned Python/NumPy/HDF5 runtime
+and directly measures the effective cgroup, mount, identity, and security state.
+The real Docker conformance gate passes 6/6 with zero skips.
 
 G5 F2c is closed by the retained exact-source Qwen3-32B 8-GPU artifact. All
 offline-replayed checks passed over 512 binding requests with zero failures.
@@ -492,6 +501,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [amendment] Fugu code scoring gains a content-addressed container boundary
+- What: Added a pluggable execution-runner contract and explicit benchmark config, fingerprint, CLI, methodology, and run-environment metadata. Local execution retains the trusted-development behavior while reaping descendants and bounding output. The Docker runner accepts only immutable image identities, completes creation and cleanup ownership transfer before starting code, times an attached execution, and removes the exact returned container ID on normal, failed, cancelled, and timed-out catchable paths. Its boundary disables network and daemon logging, uses a read-only root and input mount, drops capabilities and privileges under UID/GID 65534, and bounds CPU, memory/swap, PIDs, `/work`, `/dev/shm`, output, numerical-library threads, and wall time. The supplied hash-pinned Python 3.12 NumPy/HDF5 image and mandatory CI job run the real six-case cross-runner/security/resource/cleanup conformance gate without skips.
+- Why: The previous host-Python subprocess contained ordinary runaway code but was explicitly not a security boundary for unattended model-generated benchmark programs. Content identity, fail-closed runner selection, effective-state measurements, exact lifecycle ownership, and disclosed supervisor/daemon/host-user assumptions make the stronger boundary auditable without calling an unavailable or skipped environment a pass.
+- Refs: issue #210; `kairyu/bench/{execution,sandbox,types,config,runner}.py`; `kairyu/bench/adapters/{base,livecodebench,scicode}.py`; `deploy/bench/`; `tests/bench/test_bench_exec_{runners,docker}.py`; `.github/workflows/ci.yml`; `docs/benchmarks.md`
 
 ### 2026-07-30 — [evidence] m13 D1 batched prefill closes on Qwen3-32B TP8
 - What: Retained `bench/results/issue-224-batched-prefill-qwen3-32b-tp8-2026-07-30.json` from clean implementation commit `2fcd9be` on 8× RTX PRO 6000 Blackwell. One fixed B=8 cold-prefill group produced the exact same eight first tokens in sequential and batched modes. Every rank records model calls 8→1, FlashInfer plans 8→1, layer runs 512→64, and sequential rows 8→0; rank-0 CUDA events fall 48,373→6,037. All 11 live checks and the independent stored/source/hardware/checkpoint replay pass. Artifact SHA-256: `96c2450cea3711fc941ee44a7f0aec9202323cc4759fb97ac8f0d21ab65927d8`.

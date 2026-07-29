@@ -16,6 +16,7 @@ from kairyu.bench.adapters.base import (
     excerpt,
     extract_code_block,
 )
+from kairyu.bench.execution import ExecutionRunner
 from kairyu.bench.sandbox import run_python
 from kairyu.bench.types import (
     BenchItem,
@@ -145,14 +146,27 @@ def normalize_output(text: str) -> list[str]:
     return lines
 
 
-def grade_code(code: str, tests: list[dict], fn_name: str | None) -> tuple[bool, str]:
-    """Run every test in the sandbox; (passed, first failure detail)."""
+def grade_code(
+    code: str,
+    tests: list[dict],
+    fn_name: str | None,
+    *,
+    runner: ExecutionRunner | None = None,
+) -> tuple[bool, str]:
+    """Run every test with the selected executor; return its first failure.
+
+    ``runner=None`` preserves the public helper's historical local
+    behavior for direct callers. Benchmark adapters always inject
+    ``RunContext.execution_runner`` so an explicitly selected container/remote
+    runner can never silently fall back to host execution.
+    """
+    execute = run_python if runner is None else runner.run_python
     for index, test in enumerate(tests):
         if test.get("testtype") == "functional":
             spec = json.dumps(
                 {"input": test["input"], "expected": test["output"], "fn": fn_name}
             )
-            result = run_python(
+            result = execute(
                 _compose_solution(code, _FUNCTIONAL_DRIVER),
                 stdin=spec,
                 timeout_s=_TEST_TIMEOUT_S,
@@ -162,7 +176,7 @@ def grade_code(code: str, tests: list[dict], fn_name: str | None) -> tuple[bool,
                 detail = "timeout" if result.timed_out else result.stderr[-300:]
                 return False, f"functional test {index}: {detail or 'wrong answer'}"
         else:
-            result = run_python(
+            result = execute(
                 _compose_solution(code),
                 stdin=test["input"],
                 timeout_s=_TEST_TIMEOUT_S,
@@ -243,6 +257,15 @@ class LiveCodeBenchAdapter(GenerativeAdapter):
             max_tokens=target.max_output_tokens,
         )
 
+    def check_preconditions(self, target: BenchTarget, ctx: RunContext) -> str | None:
+        reason = super().check_preconditions(target, ctx)
+        if reason is not None:
+            return reason
+        available, detail = ctx.execution_runner.availability()
+        if not available:
+            return f"selected execution runner unavailable ({detail})"
+        return None
+
     async def score(
         self, item: BenchItem, response_text: str, ctx: RunContext
     ) -> ItemResult:
@@ -257,7 +280,11 @@ class LiveCodeBenchAdapter(GenerativeAdapter):
             )
         async with ctx.exec_semaphore:
             passed, detail = await asyncio.to_thread(
-                grade_code, code, item.payload["tests"], item.payload.get("fn_name")
+                grade_code,
+                code,
+                item.payload["tests"],
+                item.payload.get("fn_name"),
+                runner=ctx.execution_runner,
             )
         return ItemResult(
             item_id=item.id,
@@ -271,8 +298,12 @@ class LiveCodeBenchAdapter(GenerativeAdapter):
         base = super().methodology(ctx)
         base["release"] = _RELEASE
         base["release_problems"] = _RELEASE_ROWS[_RELEASE]
-        base["execution"] = (
-            f"local subprocess sandbox, {_TEST_TIMEOUT_S}s/test, {_MEMORY_MB}MB rlimit; "
-            "pass@1 = all public+private tests pass"
-        )
+        base["execution"] = {
+            "runner": ctx.execution_runner.metadata(),
+            "per_test_limits": {
+                "timeout_s": _TEST_TIMEOUT_S,
+                "memory_mb": _MEMORY_MB,
+            },
+            "scoring": "pass@1 = all public+private tests pass",
+        }
         return base

@@ -1,6 +1,9 @@
 """Execution sandbox: success, failure, timeout, memory, file placement."""
 
+import os
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -82,3 +85,33 @@ def test_timed_out_forking_tree_is_reaped():
     )
     result = run_python(code, timeout_s=1.0)
     assert result.timed_out and not result.ok
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires Linux /proc")
+def test_successful_parent_cannot_leave_a_background_child_running():
+    code = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "    stdin=subprocess.DEVNULL,\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "print(child.pid, flush=True)\n"
+    )
+    result = run_python(code, timeout_s=3.0)
+    assert result.ok, result.stderr
+    child_pid = int(result.stdout.strip())
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
+        except (FileNotFoundError, ProcessLookupError):
+            break
+        if state == "Z":
+            break
+        time.sleep(0.02)
+    else:
+        os.kill(child_pid, 9)
+        pytest.fail(f"local runner left child process {child_pid} alive")

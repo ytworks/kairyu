@@ -8,9 +8,10 @@ and re-read for resume, so round-tripping through JSON must be lossless.
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SCHEMA_VERSION = 1
 
@@ -136,12 +137,73 @@ class JudgeConfig(SamplingOptions):
         return self.base_url is not None and self.model is not None
 
 
+_IMMUTABLE_IMAGE_RE = re.compile(
+    r"(?:sha256:[0-9a-f]{64}|[^\s@]+@sha256:[0-9a-f]{64})"
+)
+
+
+class ExecutionConfig(BaseModel):
+    """How benchmark-generated code is executed.
+
+    Docker images are accepted only by immutable content identity. A local
+    image ID is useful immediately after building the supplied runtime, while
+    ``repository@sha256:...`` is the portable registry form. Mutable tags are
+    deliberately not resolved on behalf of a benchmark run.
+    """
+
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+    runner: Literal["local", "docker"] = "local"
+    image: str | None = None
+    cpus: float = Field(default=1.0, gt=0)
+    pids_limit: int = Field(default=64, ge=2)
+    disk_mb: int = Field(default=256, ge=1, le=65_536)
+    pull_policy: Literal["never"] = "never"
+
+    @field_validator("cpus", mode="before")
+    @classmethod
+    def _reject_boolean_cpus(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("execution.cpus must be a finite positive number")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_runner_image(self) -> ExecutionConfig:
+        if self.runner == "local":
+            if self.image is not None:
+                raise ValueError("execution.image is valid only for runner='docker'")
+            if (self.cpus, self.pids_limit, self.disk_mb, self.pull_policy) != (
+                1.0,
+                64,
+                256,
+                "never",
+            ):
+                raise ValueError(
+                    "Docker execution resource settings require runner='docker'"
+                )
+            return self
+        if self.image is None:
+            raise ValueError("execution.image is required for runner='docker'")
+        if _IMMUTABLE_IMAGE_RE.fullmatch(self.image) is None:
+            raise ValueError(
+                "execution.image must be an immutable sha256:<64 hex> image ID "
+                "or repository@sha256:<64 hex> digest"
+            )
+        repository = self.image.split("@", 1)[0]
+        if "@" in self.image and (
+            repository.startswith("-") or repository.endswith(":")
+        ):
+            raise ValueError("execution.image repository is invalid")
+        return self
+
+
 class BenchConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     suite: str = "fugu"
     targets: tuple[BenchTarget, ...] = Field(min_length=1)
     judge: JudgeConfig = JudgeConfig()
+    execution: ExecutionConfig = ExecutionConfig()
     limit: int | None = Field(default=None, ge=1)  # None = full dataset
     smoke: bool = False  # preset: limit<=SMOKE_LIMIT, halved output budget
     offline_fixtures: bool = False  # read committed fixtures, no cache/network

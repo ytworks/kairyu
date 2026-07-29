@@ -34,6 +34,7 @@ from kairyu.bench.types import (
 )
 
 if TYPE_CHECKING:  # judge lands in its own module; adapters only see the protocol
+    from kairyu.bench.execution import ExecutionRunner
     from kairyu.bench.judge import JudgeClient
     from kairyu.bench.progress import ProgressReporter
 
@@ -73,6 +74,14 @@ class DownloadContext:
     force: bool = False
 
 
+def _default_execution_runner() -> ExecutionRunner:
+    """Keep directly constructed test/development contexts on the local runner."""
+    from kairyu.bench.execution import build_execution_runner
+    from kairyu.bench.types import ExecutionConfig
+
+    return build_execution_runner(ExecutionConfig())
+
+
 @dataclass
 class RunContext:
     """Built once per suite run and shared by every (benchmark, target) pair."""
@@ -90,6 +99,7 @@ class RunContext:
     offline_fixtures: bool = False
     smoke: bool = False
     docker: tuple[bool, str] = (False, "docker not probed")
+    execution_runner: ExecutionRunner = field(default_factory=_default_execution_runner)
     exec_semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(4))
     download_failures: dict[str, str] = field(default_factory=dict)
     # Observer for live output. Defaults to silence so programmatic use and

@@ -39,7 +39,6 @@ from kairyu.bench.adapters.base import (
     target_api_key,
     utc_now,
 )
-from kairyu.bench.sandbox import run_python
 from kairyu.bench.types import (
     BenchItem,
     BenchTarget,
@@ -386,10 +385,11 @@ class SciCodeAdapter(GenerativeAdapter):
         reason = super().check_preconditions(target, ctx)
         if reason is not None:
             return reason
-        from kairyu.bench.sandbox import has_module
-
-        if not has_module("numpy"):
-            return "sandbox interpreter lacks numpy (pip install numpy)"
+        available, detail = ctx.execution_runner.availability()
+        if not available:
+            return f"selected execution runner unavailable ({detail})"
+        if not ctx.execution_runner.has_module("numpy"):
+            return "selected execution runner lacks numpy (pip install numpy)"
         return None
 
     def build_request(
@@ -567,7 +567,7 @@ class SciCodeAdapter(GenerativeAdapter):
         program = "\n\n".join(block for block in blocks if block)
         async with ctx.exec_semaphore:
             result = await asyncio.to_thread(
-                run_python,
+                ctx.execution_runner.run_python,
                 program,
                 timeout_s=_TEST_TIMEOUT_S,
                 memory_mb=_MEMORY_MB,
@@ -611,9 +611,16 @@ class SciCodeAdapter(GenerativeAdapter):
             "description + background + generated code per prior step, separated "
             "by ------ (official process_problem_steps)"
         )
-        base["execution"] = (
-            "dataset test_cases executed in the local sandbox; target-based "
-            "tests use test_data.h5 via a compact reimplementation of the "
-            "official loader"
-        )
+        base["execution"] = {
+            "runner": ctx.execution_runner.metadata(),
+            "per_test_limits": {
+                "timeout_s": _TEST_TIMEOUT_S,
+                "memory_mb": _MEMORY_MB,
+            },
+            "scoring": (
+                "dataset test_cases executed by the selected runner; target-based "
+                "tests use test_data.h5 via a compact reimplementation of the "
+                "official loader"
+            ),
+        }
         return base

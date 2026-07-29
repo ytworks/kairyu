@@ -500,10 +500,77 @@ target). For quick runs:
 - `--offline-fixtures` — committed synthetic fixtures, no network at all
   (used to verify the plumbing end-to-end).
 
-## Execution sandbox caveat
+## Execution runners and threat model
 
-LiveCodeBench/SciCode run model-generated code in a subprocess with a fresh
-temp cwd, scrubbed env, `python -I`, rlimits (memory/CPU/procs/file size) and
-a wall-clock kill. This contains runaway code but is **not a security
-boundary against a hostile model** — run untrusted evaluations inside a
-container (a `--exec-runner docker` hook is future work).
+LiveCodeBench and SciCode execute model-generated Python. The execution runner
+is an explicit, fingerprinted part of every run:
+
+```yaml
+execution:
+  runner: docker
+  image: sha256:<immutable-local-image-id>
+  cpus: 1.0
+  pids_limit: 64
+  disk_mb: 256
+```
+
+The equivalent CLI starts with `--exec-runner docker --exec-image
+sha256:<id>`. `local` remains the default for trusted development. It uses a
+fresh cwd, a scrubbed environment, `python -I`, Linux rlimits, a new process
+group, and a wall-clock kill, but it is **not** a security boundary against
+hostile code.
+
+The Docker runner is the unattended/untrusted option. It accepts only
+`repository@sha256:<64 hex>` or a local `sha256:<64 hex>` image ID; mutable tags
+are rejected instead of being silently resolved. It starts each test with:
+
+- no network and no inherited host secrets;
+- a read-only root filesystem, all Linux capabilities dropped,
+  `no-new-privileges`, and an unprivileged UID;
+- bounded CPU, memory/swap, PIDs, output, writable `/work`, and wall time;
+- daemon-side container logging disabled so output cannot bypass the in-process
+  output cap and consume host disk;
+- no Docker socket, repository, cache, home directory, or arbitrary host mount;
+- one private read-only staging mount containing only `main.py`, stdin, and the
+  explicitly supplied test artifacts; completed creation gives cleanup an
+  immutable container ID before execution starts, and every normal, failed,
+  cancelled, or timed-out return removes that exact ID.
+
+The user-code wall timer starts with `docker start --attach`. The preceding
+`docker create` cannot execute code. A signal-isolated helper has ten seconds to
+transfer the exact ID into an already-armed cleanup lease; after a caller
+timeout or interruption it retains cleanup ownership and removes any ID the
+trusted daemon returns later. Cleanup therefore never guesses whether a delayed
+create request acquired an ID, while a wedged control plane cannot hold the
+benchmark caller indefinitely.
+
+Numerical-library worker pools are fixed to one thread so they fit inside the
+PID boundary and produce stable scoring behavior across hosts. Large read-only
+assets such as SciCode's approximately 1 GB `test_data.h5`
+remain in that staging mount and are symlinked into `/work`; they are not
+duplicated into the memory-backed work filesystem. Generated files remain
+bounded by the tmpfs limits.
+
+Build the supplied runtime (Python plus the hash-pinned NumPy/HDF5 wheels), then
+record its immutable ID:
+
+```bash
+docker build -f deploy/bench/Dockerfile.exec -t kairyu-bench-exec:local deploy/bench
+docker image inspect kairyu-bench-exec:local --format '{{.Id}}'
+```
+
+Use the returned `sha256:...` value in the benchmark config. A different
+runtime may be used, but it must contain `/usr/bin/env`, a `python` executable
+on the runner's scrubbed system `PATH`, and every module the selected suite
+requires.
+`--exec-runner docker` never falls back to local execution if Docker or the
+pinned image is unavailable.
+
+The remaining trusted computing base is the Docker daemon/runtime, host kernel,
+the Kairyu benchmark supervisor, host users allowed to inspect its temporary
+directory, and the contents of the explicitly trusted digest-pinned image.
+Containers use the `io.kairyu.bench-exec=true` label and restart policy `no` so
+an operator can remove them after an uncatchable supervisor/host failure.
+Container isolation does not defend against a killed supervisor, malicious
+image, Docker/kernel escape, hostile privileged host user, or an operator who
+mounts additional host resources outside Kairyu.

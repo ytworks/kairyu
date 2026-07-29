@@ -16,7 +16,7 @@ from kairyu.bench.adapters.base import (
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.runner import SuiteRunner
 from kairyu.bench.store import ResultStore
-from kairyu.bench.types import DownloadReport, PairResult
+from kairyu.bench.types import DownloadReport, ExecutionConfig, PairResult
 
 _FINGERPRINT_EXCLUSIONS = {
     "run_id",
@@ -73,6 +73,68 @@ class _CacheBackedAdapter:
 
 def _runner(config, http_factory, docker=(False, "docker unavailable (test)")):
     return SuiteRunner(config, http_factory=http_factory, probe_docker=lambda: docker)
+
+
+def test_direct_run_context_gets_a_local_execution_runner(tmp_path):
+    ctx = RunContext(
+        cache=BenchCache(tmp_path / "cache"),
+        http_factory=lambda: None,
+    )
+
+    assert callable(ctx.execution_runner.run_python)
+    assert ctx.execution_runner.metadata()["runner"] == "local"
+
+
+async def test_selected_execution_runner_is_built_once_and_recorded(
+    tmp_path, http_factory, monkeypatch
+):
+    class RecordingRunner:
+        def metadata(self):
+            return {
+                "runner": "docker",
+                "image": "sha256:" + "c" * 64,
+                "resolved_runtime": "recording-test",
+            }
+
+        def availability(self):
+            return False, "pinned image unavailable in test"
+
+    selected = RecordingRunner()
+    built_with = []
+
+    def build(config):
+        built_with.append(config)
+        return selected
+
+    monkeypatch.setattr("kairyu.bench.execution.build_execution_runner", build)
+    execution = ExecutionConfig(
+        runner="docker",
+        image="sha256:" + "c" * 64,
+    )
+    config = make_config(
+        tmp_path,
+        models=("m",),
+        only=("gpqa-diamond",),
+        execution=execution,
+    )
+
+    assert await _runner(config, http_factory).run() == 0
+
+    assert built_with == [execution]
+    metadata = json.loads(
+        (tmp_path / "results" / "test-run" / "run.json").read_text(encoding="utf-8")
+    )
+    assert metadata["config"]["execution"] == execution.model_dump(mode="json")
+    assert metadata["identity"]["config"]["execution"] == execution.model_dump(
+        mode="json"
+    )
+    assert metadata["environment"]["execution"] == {
+        "runner": "docker",
+        "image": "sha256:" + "c" * 64,
+        "resolved_runtime": "recording-test",
+        "available": False,
+        "availability_detail": "pinned image unavailable in test",
+    }
 
 
 async def test_run_produces_scoreboard_for_all_targets(tmp_path, http_factory, capsys):

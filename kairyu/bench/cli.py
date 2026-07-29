@@ -91,6 +91,35 @@ def add_bench_parser(subparsers) -> None:
     run.add_argument("--cache-dir", default=None)
     run.add_argument("--no-download", action="store_true")
     run.add_argument(
+        "--exec-runner",
+        choices=("local", "docker"),
+        default=None,
+        help="Generated-code runner (default: local; use docker for untrusted code)",
+    )
+    run.add_argument(
+        "--exec-image",
+        default=None,
+        help="Immutable sha256 image ID or repository@sha256 digest for Docker execution",
+    )
+    run.add_argument(
+        "--exec-cpus",
+        type=float,
+        default=None,
+        help="CPU limit for each execution container (default: 1.0)",
+    )
+    run.add_argument(
+        "--exec-pids-limit",
+        type=int,
+        default=None,
+        help="PID limit for each execution container (default: 64)",
+    )
+    run.add_argument(
+        "--exec-disk-mb",
+        type=int,
+        default=None,
+        help="Writable container /work limit in MiB (default: 256)",
+    )
+    run.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable the live progress display (scoreboard output is unchanged)",
