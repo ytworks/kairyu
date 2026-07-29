@@ -131,12 +131,6 @@ def _resolve_kubernetes_namespace(configured: str | None) -> str:
     return namespace
 
 
-def _server_settings(spec: DeploymentSpec) -> ServerSettings:
-    return ServerSettings(
-        **{field: getattr(spec.server, field) for field in ServerSettings.model_fields}
-    )
-
-
 def _preflight_server(
     spec: DeploymentSpec,
 ) -> tuple[
@@ -145,7 +139,7 @@ def _preflight_server(
     frozenset[str],
     frozenset[str],
 ]:
-    settings = _server_settings(spec)
+    settings = spec.server.to_server_settings()
     api_keys = settings.resolve_api_keys()
     admin_keys = settings.resolve_admin_keys()
     section = spec.tenants

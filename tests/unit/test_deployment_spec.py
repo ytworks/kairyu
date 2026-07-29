@@ -8,9 +8,11 @@ from pydantic import ValidationError
 
 from kairyu.deploy.spec import (
     BackendSpec,
+    ServerSection,
     _UniqueKeySafeLoader,
     load_deployment_spec,
 )
+from kairyu.entrypoints.server.settings import ServerSettings
 
 GATEWAY_YAML = """
 server:
@@ -175,6 +177,100 @@ def test_defaults():
     assert spec.batch is None
     assert spec.tenants is None
     assert spec.embeddings == {}
+
+
+def test_server_section_owns_stable_schema_without_runtime_inheritance():
+    schema = ServerSection.model_json_schema()
+    contract = {
+        name: {
+            key: value
+            for key, value in property_schema.items()
+            if key not in {"title", "description"}
+        }
+        for name, property_schema in schema["properties"].items()
+    }
+
+    assert not issubclass(ServerSection, ServerSettings)
+    assert schema["additionalProperties"] is False
+    assert schema.get("required", []) == []
+    assert contract == {
+        "host": {"default": "0.0.0.0", "type": "string"},
+        "port": {
+            "default": 8000,
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer",
+        },
+        "api_keys_env": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        },
+        "max_concurrency": {
+            "anyOf": [
+                {"minimum": 1, "type": "integer"},
+                {"type": "null"},
+            ],
+            "default": None,
+        },
+        "metrics": {"default": True, "type": "boolean"},
+        "protect_metrics": {"default": False, "type": "boolean"},
+        "access_log": {"default": True, "type": "boolean"},
+        "tracing": {"default": False, "type": "boolean"},
+        "usage_ledger_path": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        },
+        "admin_keys_env": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        },
+    }
+
+
+def test_server_section_yaml_round_trip_and_runtime_translation():
+    spec = load_deployment_spec(
+        """
+server:
+  host: 127.0.0.1
+  port: 8100
+  api_keys_env: KAIRYU_API_KEYS
+  max_concurrency: 64
+  metrics: false
+  protect_metrics: true
+  access_log: false
+  tracing: true
+  usage_ledger_path: /tmp/usage.jsonl
+  admin_keys_env: KAIRYU_ADMIN_KEYS
+engines:
+  m: {backend: mock}
+"""
+    )
+
+    dumped = yaml.safe_dump(spec.model_dump(mode="json"), sort_keys=False)
+    assert load_deployment_spec(dumped) == spec
+    assert spec.server.to_server_settings() == ServerSettings(
+        api_keys_env="KAIRYU_API_KEYS",
+        max_concurrency=64,
+        metrics=False,
+        protect_metrics=True,
+        access_log=False,
+        tracing=True,
+        usage_ledger_path="/tmp/usage.jsonl",
+        admin_keys_env="KAIRYU_ADMIN_KEYS",
+    )
+    assert ServerSection().to_server_settings() == ServerSettings()
+
+
+def test_server_section_rejects_runtime_only_or_unknown_yaml_keys():
+    with pytest.raises(ValidationError, match="future_runtime_only"):
+        load_deployment_spec(
+            """
+server:
+  future_runtime_only: true
+engines:
+  m: {backend: mock}
+"""
+        )
 
 
 def test_named_embedding_sections_parse():

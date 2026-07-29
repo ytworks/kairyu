@@ -136,11 +136,70 @@ class PoolSpec(BaseModel):
         return self
 
 
-class ServerSection(ServerSettings):
-    """Bind address plus the ServerSettings fields, flat in YAML."""
+class ServerSection(BaseModel):
+    """Versioned deployment-facing server schema.
+
+    The YAML surface deliberately owns its fields instead of inheriting the
+    runtime ``ServerSettings`` model. ``to_server_settings`` is the one
+    explicit translation boundary, so runtime-only additions cannot silently
+    change accepted deployment artifacts.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     host: str = "0.0.0.0"
     port: int = Field(default=_DEFAULT_PORT, ge=1, le=65535)
+    api_keys_env: str | None = Field(
+        default=None,
+        description=(
+            "Env var holding comma-separated API keys; None disables auth "
+            "(keyless node-to-node replicas, design m6 D2 / m7 D5)."
+        ),
+    )
+    max_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        description="Global in-flight cap on /v1/* requests; None disables the guard.",
+    )
+    metrics: bool = Field(default=True, description="Expose /metrics (Prometheus).")
+    protect_metrics: bool = Field(
+        default=False,
+        description="Require an API key for /metrics too.",
+    )
+    access_log: bool = Field(
+        default=True,
+        description="Emit one JSON access-log line per request.",
+    )
+    tracing: bool = Field(
+        default=False,
+        description="Enable OTel spans (needs the otel extra; no-op without it).",
+    )
+    usage_ledger_path: str | None = Field(
+        default=None,
+        description="JSONL usage-ledger path; None disables metering (m11 D3).",
+    )
+    admin_keys_env: str | None = Field(
+        default=None,
+        description=(
+            "Env var holding comma-separated ADMIN API keys; when set, /admin/* "
+            "state changes (drain/undrain) require one of these, so an ordinary "
+            "data-plane key cannot take the node out of service (S5)."
+        ),
+    )
+
+    def to_server_settings(self) -> ServerSettings:
+        """Translate the deployment vocabulary to runtime settings explicitly."""
+
+        return ServerSettings(
+            api_keys_env=self.api_keys_env,
+            max_concurrency=self.max_concurrency,
+            metrics=self.metrics,
+            protect_metrics=self.protect_metrics,
+            access_log=self.access_log,
+            tracing=self.tracing,
+            usage_ledger_path=self.usage_ledger_path,
+            admin_keys_env=self.admin_keys_env,
+        )
 
 
 class OrchestratorSection(BaseModel):
@@ -308,7 +367,7 @@ class DeploymentSpec(BaseModel):
                     for tenant, section in self.tenants.limits.items()
                 },
                 default_tenant=self.tenants.default_tenant,
-                resolved_api_keys=self.server.resolve_api_keys(),
+                resolved_api_keys=self.server.to_server_settings().resolve_api_keys(),
             )
         if self.pricing is not None:
             if self.server.usage_ledger_path is None:
