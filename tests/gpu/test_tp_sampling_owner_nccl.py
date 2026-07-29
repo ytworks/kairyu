@@ -214,6 +214,19 @@ def _tp2(model_dir: str, mode: str):
                 "device": "cuda:1",
             },
         )
+        prefill_rows = launcher.runner.prefill_execution_stats()
+        assert [row["rank"] for row in prefill_rows] == [0, 1]
+        assert [row["device"] for row in prefill_rows] == [
+            "cuda:0",
+            "cuda:1",
+        ]
+        for row in prefill_rows:
+            structural = row["stats"]
+            assert structural["rows"] > 0
+            assert structural["model_calls"] == structural["rows"]
+            assert structural["sequential_rows"] == structural["rows"]
+            assert structural["batched_groups"] == 0
+            assert "TorchAttentionBackend" in structural["capability_gap"]
         stats = None
         if local._graph is not None:
             backend = local._graph._backend

@@ -42,6 +42,10 @@ import torch
 
 from kairyu.engine.core.attention import graph_capture_gap
 from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.engine.core.prefill import (
+    PrefillSequence,
+    build_prefill_batch,
+)
 from kairyu.engine.core.sampler import DeviceSample, Sampler
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
@@ -304,6 +308,42 @@ def _tensor_decode_gap(model: DenseDecoder) -> str | None:
     return None
 
 
+def _batched_prefill_gap(model: DenseDecoder) -> str | None:
+    """Why this model/backend must retain sequential prefill, or ``None``.
+
+    ``attend_batched`` alone is not enough: the Torch compatibility backend
+    implements it as a Python row loop.  The fast path requires an explicit
+    native flat-query contract so a claimed batch really removes the
+    request-proportional model and attention launch chains.
+    """
+    if not callable(getattr(model, "forward_prefill_batch", None)):
+        return f"{type(model).__name__} has no forward_prefill_batch"
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        return f"{type(model).__name__} exposes no model.layers to check"
+    for index, layer in enumerate(layers):
+        attention = getattr(layer, "self_attn", None)
+        if not callable(getattr(attention, "forward_prefill_batch", None)):
+            return (
+                f"layer {index}'s attention ({type(attention).__name__}) has no "
+                "forward_prefill_batch"
+            )
+        backend = getattr(attention, "backend", None)
+        if not getattr(backend, "supports_batched_prefill", False):
+            return (
+                f"layer {index}'s attention backend "
+                f"{type(backend).__name__} does not declare "
+                "supports_batched_prefill"
+            )
+        if not callable(getattr(backend, "attend_prefill", None)):
+            return (
+                f"layer {index}'s attention backend "
+                f"{type(backend).__name__} declares supports_batched_prefill "
+                "but has no attend_prefill"
+            )
+    return None
+
+
 class PagedModelRunner:
     def __init__(
         self,
@@ -316,6 +356,7 @@ class PagedModelRunner:
         graph_max_pages: int = 0,
         graph_scratch_page: int | None = None,
         sampling_owner: bool = True,
+        enable_batched_prefill: bool = True,
     ) -> None:
         if cache is not None:  # fail-fast sizing agreement (m12 D3)
             if pool.num_pages != cache.num_pages or pool.page_size != cache.page_size:
@@ -367,6 +408,16 @@ class PagedModelRunner:
         # eager batching. Unsupported model/attention combinations retain the
         # list-based compatibility path.
         self._tensor_decode_supported = _tensor_decode_gap(model) is None
+        # Cross-request prefill is deliberately stricter than semantic
+        # ``attend_batched`` support. Only a backend that owns one native
+        # ragged plan/run opts in; Torch, MLA, and custom models keep the
+        # established sequential behavior.
+        self._prefill_batch_gap = _batched_prefill_gap(model)
+        self._batched_prefill_enabled = bool(enable_batched_prefill)
+        self._prefill_rows_executed = 0
+        self._prefill_model_calls = 0
+        self._prefill_batched_groups = 0
+        self._prefill_sequential_rows = 0
 
         # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
         # the seam has existed since m17 with no caller, and enabling it by
@@ -462,6 +513,52 @@ class PagedModelRunner:
     def sampling_owner(self) -> bool:
         """Whether this runner is allowed to advance sampling state."""
         return getattr(self, "_sampling_owner", True)
+
+    def set_batched_prefill_enabled(self, enabled: bool) -> None:
+        """Switch the optimization without changing scheduling semantics.
+
+        Primarily an operational rollback and matched-A/B evidence seam.  A
+        capability gap still wins: enabling cannot make an unsupported backend
+        enter the native path.
+        """
+        if type(enabled) is not bool:
+            raise TypeError("batched prefill enabled flag must be bool")
+        self._batched_prefill_enabled = enabled
+
+    def prefill_execution_stats(self, *, reset: bool = False) -> dict[str, object]:
+        """Return structural counters; optional reset is out-of-band only."""
+        backend_rows: list[dict[str, object]] = []
+        seen: set[int] = set()
+        layers = getattr(getattr(self._model, "model", None), "layers", ())
+        for layer in layers:
+            backend = getattr(getattr(layer, "self_attn", None), "backend", None)
+            if backend is None or id(backend) in seen:
+                continue
+            seen.add(id(backend))
+            getter = getattr(backend, "prefill_execution_stats", None)
+            if callable(getter):
+                row = getter(reset=reset)
+                if not isinstance(row, dict):
+                    raise RuntimeError(
+                        f"{type(backend).__name__}.prefill_execution_stats "
+                        "must return a dict"
+                    )
+                backend_rows.append(row)
+        result = {
+            "enabled": getattr(self, "_batched_prefill_enabled", True),
+            "capability_gap": getattr(self, "_prefill_batch_gap", None),
+            "rows": getattr(self, "_prefill_rows_executed", 0),
+            "model_calls": getattr(self, "_prefill_model_calls", 0),
+            "batched_groups": getattr(self, "_prefill_batched_groups", 0),
+            "sequential_rows": getattr(self, "_prefill_sequential_rows", 0),
+            "backend": backend_rows,
+        }
+        if reset:
+            self._prefill_rows_executed = 0
+            self._prefill_model_calls = 0
+            self._prefill_batched_groups = 0
+            self._prefill_sequential_rows = 0
+        return result
 
     def _require_sampling_owner(self) -> None:
         if not self.sampling_owner:
@@ -700,10 +797,19 @@ class PagedModelRunner:
         sampled: (
             dict[str, tuple[SampledToken | _PendingDeviceToken, ...]] | None
         ) = {} if sample else None
+        prefills = [chunk for chunk in scheduled if chunk.is_prefill]
         decodes = [chunk for chunk in scheduled if not chunk.is_prefill]
-        for chunk in scheduled:
-            if chunk.is_prefill:
-                self._execute_prefill(chunk, states[chunk.request_id], sampled)
+        if (
+            len(prefills) >= 2
+            and self._batched_prefill_enabled
+            and self._prefill_batch_gap is None
+        ):
+            self._execute_prefill_batch(prefills, states, sampled)
+        else:
+            for chunk in prefills:
+                self._execute_prefill(
+                    chunk, states[chunk.request_id], sampled
+                )
         # C4: single-token decodes for all sequences run as ONE tensor forward
         # (byte-identical to per-sequence decode; see test_batched_decode).
         # Eager execution keeps the cheaper per-sequence path for B=1, but graph
@@ -880,9 +986,89 @@ class PagedModelRunner:
             torch.arange(start, end, device=self._device),
             self._pool, page_table, seq_len=end, write_from=cached,
         )
+        self._prefill_rows_executed = (
+            getattr(self, "_prefill_rows_executed", 0) + 1
+        )
+        self._prefill_model_calls = (
+            getattr(self, "_prefill_model_calls", 0) + 1
+        )
+        self._prefill_sequential_rows = (
+            getattr(self, "_prefill_sequential_rows", 0) + 1
+        )
         if sampled is not None and state.prefill_done and end == len(prompt):
             logits = self._model.logits(hidden[-1])
             token = self._sample_record(state, logits, position=0)
+            if isinstance(token, SampledToken):
+                self._remember(chunk.request_id, 0, token)
+            sampled[chunk.request_id] = (token,)
+
+    def _execute_prefill_batch(
+        self,
+        chunks: list[ScheduledChunk],
+        states: Mapping[str, object],
+        sampled: dict | None,
+    ) -> None:
+        """Run compatible ScheduledChunks through one flat model chain."""
+        rows: list[PrefillSequence] = []
+        for chunk in chunks:
+            state = states[chunk.request_id]
+            allocation = state.allocation
+            if allocation is None:
+                raise RuntimeError(
+                    f"prefill request {chunk.request_id!r} has no KV allocation"
+                )
+            prompt = state.request.prompt_token_ids
+            end = state.computed_prompt
+            start = end - chunk.num_tokens
+            rows.append(
+                PrefillSequence(
+                    request_id=chunk.request_id,
+                    token_ids=tuple(prompt[start:end]),
+                    page_table=tuple(allocation.pages)
+                    + tuple(state.decode_pages),
+                    chunk_start=start,
+                    seq_len=end,
+                    # Do not clamp this to `start`: a full-cache hit recomputes
+                    # the final query while retaining its shared KV slot.
+                    write_from=allocation.num_cached_tokens,
+                )
+            )
+        batch = build_prefill_batch(
+            rows, page_size=self._pool.page_size, device=self._device
+        )
+        hidden = self._model.forward_prefill_batch(batch, self._pool)
+        self._prefill_rows_executed = (
+            getattr(self, "_prefill_rows_executed", 0) + len(chunks)
+        )
+        self._prefill_model_calls = (
+            getattr(self, "_prefill_model_calls", 0) + 1
+        )
+        self._prefill_batched_groups = (
+            getattr(self, "_prefill_batched_groups", 0) + 1
+        )
+        if sampled is None:
+            return
+
+        emitting_chunks: list[ScheduledChunk] = []
+        terminal_rows: list[int] = []
+        for index, chunk in enumerate(chunks):
+            state = states[chunk.request_id]
+            if (
+                state.prefill_done
+                and batch.seq_lens[index]
+                == len(state.request.prompt_token_ids)
+            ):
+                emitting_chunks.append(chunk)
+                terminal_rows.append(batch.qo_indptr[index + 1] - 1)
+        if not emitting_chunks:
+            return
+
+        selected = torch.tensor(
+            terminal_rows, dtype=torch.long, device=hidden.device
+        )
+        logits = self._model.logits(hidden.index_select(0, selected))
+        records = self._sample_rows(emitting_chunks, states, logits)
+        for chunk, token in zip(emitting_chunks, records, strict=True):
             if isinstance(token, SampledToken):
                 self._remember(chunk.request_id, 0, token)
             sampled[chunk.request_id] = (token,)

@@ -21,7 +21,7 @@ GPU-adapter pattern (naming, fakes, coverage) every later kernel follows.
 
 ## 2. Key design decisions
 
-### D1 — Protocol: per-request-chunk attend; batching is a recorded GPU-day step
+### D1 — Protocol: per-request and native ragged-prefill entries
 
 `kairyu/engine/core/attention/__init__.py`:
 
@@ -32,9 +32,22 @@ class AttentionBackend(Protocol):
 ```
 
 Exactly M12's `paged_attention` signature (designed for this extraction).
-Cross-request batched planning (one FlashInfer plan for the whole step) is a
-GPU-day optimization recorded in §3 — the adapter plans per chunk (indptr
-arrays of length 2), which is correct and keeps the seam minimal.
+Issue #224 adds the completed GPU-day extension:
+
+- `supports_batched_prefill` is an explicit capability declaration. A backend
+  whose `attend_batched` is a Python row loop does not opt in.
+- `attend_prefill(flat_query, ..., qo_indptr)` consumes one flat ragged query
+  and request-local paged-KV metadata. FlashInfer performs one plan for the
+  step and one run per layer, with the shared backend instance reusing that
+  plan across layers.
+- `PrefillBatch` preserves ScheduledChunk order, query bounds, page tables,
+  sequence lengths, cached `write_from`, and token-to-request row IDs.
+  `PagedKVPool.write_ragged` owns the vectorized slot mapping; attention
+  kernels never own K/V placement.
+
+Writable physical pages are exclusive across batch rows. Fully cached pages
+may be shared and are filtered out before the write. Page aliases within one
+row or a writable page referenced by another row fail before model execution.
 
 ### D2 — `TorchAttentionBackend` (`torch_backend.py`)
 
@@ -97,13 +110,17 @@ sequence, and the version is pinned in the `[gpu]` extra.
 tiers. `build_engine_loop(model_path=...)` calls it with `probe()` so deploy
 day is config-free; CPU environments keep getting the torch backend.
 
-## 3. Non-goals
+## 3. Non-goals and fallbacks
 
-- Cross-request batched planning (GPU-day; the seam supports it — plan takes
-  per-chunk arrays that generalize to batch indptr).
 - MLA wired into an architecture (M15); FlashMLA / Triton MLA kernels
   (deploy-day, SM90/100; SM120 fallback is G4 M-B1).
 - Attention dtype policies beyond the pool's dtype.
+- MLA and custom/Torch backends without native ragged-prefill capability retain
+  the established sequential prefill path. A single prefill request also stays
+  sequential to avoid plan/packing overhead. Mixed prefill/decode steps run one
+  prefill chain first and then the existing eager/graph decode chain.
+- Ragged prefill CUDA-graph capture is not claimed: FlashInfer planning is a
+  host phase and ragged shapes vary. Decode graph capture remains unchanged.
 
 ## 4. Phasing
 
@@ -121,6 +138,11 @@ day is config-free; CPU environments keep getting the torch backend.
   many-page tables; plan/run ordering; decode-vs-prefill wrapper choice.
 - Selector: env override, CPU→torch, fa2/full→flashinfer (constructed lazily —
   no import unless selected).
+- Issue #224: CPU mixed-length/cache/chunk/preemption/KV-ownership parity;
+  real SM120 BF16 FlashInfer parity; one prefill plan and one run per layer
+  instead of one chain per request; Qwen3-32B TP8 all-rank structural evidence.
+  Fixed wall-clock thresholds are diagnostic only because OS jitter must not
+  decide this gate.
 
 ## 6. Review record (binding amendments)
 

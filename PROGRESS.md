@@ -472,6 +472,19 @@ and checkpoint headers validate the tensors runtime will consume without
 materializing them. It aggregates independent schema/filesystem errors and
 leaves network/hardware readiness to deployment gates.
 
+Cross-request prefill now has a native ragged batch path. Compatible scheduled
+chunks share one flat dense-model invocation and one FlashInfer plan reused
+across all layers, while cached-prefix writes and physical page ownership remain
+request-local. Unsupported backends/models and B=1 keep the sequential path.
+CPU contracts cover mixed lengths, cache hits, chunking, real Scheduler
+preemption/page reuse, KV bytes, and rollback; skip-free SM120 and real NCCL
+TP2 gates cover FlashInfer parity and all-rank model/plan/run reductions. The
+clean-commit Qwen3-32B TP8 artifact passes all binding checks and independent
+replay: every rank reduces model calls 8→1, FlashInfer plans 8→1, and layer
+runs 512→64 while all eight first tokens remain exact. Rank-0 CUDA events fall
+48,373→6,037; wall time 15.153→2.907 seconds is retained only as diagnostic
+evidence.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -479,6 +492,16 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [evidence] m13 D1 batched prefill closes on Qwen3-32B TP8
+- What: Retained `bench/results/issue-224-batched-prefill-qwen3-32b-tp8-2026-07-30.json` from clean implementation commit `2fcd9be` on 8× RTX PRO 6000 Blackwell. One fixed B=8 cold-prefill group produced the exact same eight first tokens in sequential and batched modes. Every rank records model calls 8→1, FlashInfer plans 8→1, layer runs 512→64, and sequential rows 8→0; rank-0 CUDA events fall 48,373→6,037. All 11 live checks and the independent stored/source/hardware/checkpoint replay pass. Artifact SHA-256: `96c2450cea3711fc941ee44a7f0aec9202323cc4759fb97ac8f0d21ab65927d8`.
+- Why: The exact checkpoint, clean start/end source binding, eight-rank NCCL topology, all-rank counters, and raw token parity prove that the production TP path removes request-proportional prefill chains without crossing KV ownership. The diagnostic wall reduction from 15.153 to 2.907 seconds is not a verdict, so scheduler/OS jitter cannot create a false pass or failure.
+- Refs: issue #224; m13 D1; GPU-day C4; commit `2fcd9be`; `bench/batched_prefill_qwen.py`; `bench/results/issue-224-batched-prefill-qwen3-32b-tp8-2026-07-30.json`
+
+### 2026-07-30 — [amendment] m13 D1 completes native cross-request prefill batching
+- What: Added a validated ragged `PrefillBatch`, vectorized request-owned KV writes, a native FlashInfer `attend_prefill` contract, one flat dense-model execution for compatible scheduled chunks, strict sequential fallback, and all-rank TP mode/counter diagnostics over the bounded model communicator. CPU tests cover mixed lengths, shared cached prefixes, chunk boundaries, real Scheduler preemption/page reuse, single-request fallback, and KV/token parity. Skip-free SM120 and real NCCL TP2 gates bind FlashInfer plan/run reduction and exact first-token parity. The formal Qwen3-32B TP8 harness pins clean committed source, the exact 17-shard checkpoint at start/end, eight UUID/PCI identities, raw schedules/tokens, all-rank counters, and stored-verdict replay; its artifact remains pending.
+- Why: Per-request prefill launched a complete projection/attention/MLP chain for every concurrent prompt and left bursty GPU capacity unused. An explicit native capability keeps compatibility backends honest, page-granular ownership prevents cross-request KV corruption, and structural launch counts avoid turning OS jitter into a false performance verdict.
+- Refs: issue #224; m13 D1; GPU-day C4; `kairyu/engine/core/{prefill,kv_pool,model_runner,worker}.py`; `kairyu/engine/core/attention/`; `kairyu/models/{attention,llama}.py`; `bench/batched_prefill_qwen.py`; `tests/{unit,gpu}/test_batched_prefill*`
 
 ### 2026-07-30 — [amendment] m16 A12 preserves canonical names through parallel binding
 - What: Replaced TP/SP parameter-owning wrappers with execution bindings on the original canonical modules, and changed EP ownership to a global-index `ModuleList` whose remote experts are `None` holes. Post-bind `state_dict`, `named_*`, `get_*`, tied weights, adapter lookup, quantization context, and checkpoint loading now share native HF paths. Rank-local state round-trips under the same topology; requesting a complete HF export from one sharded rank fails with deterministic topology detail. Checkpoint slicing now combines contextual TP placement with exact physical member layouts declared by dense, FP8, INT8, AWQ, GPTQ, NVFP4, and auxiliary router state instead of parsing name suffixes. Row-parallel bias remains registered canonically but is omitted from each local GEMM and added exactly once after reduction. Skip-free gates pass for the 14-case naming contract, seven deployment-preflight formats/architectures, three CPU multi-process EP/SP cases, eight real EP/SP/TP/FP8 NCCL cases, one real TP CUDA-graph capture/replay case, and 28 real SM120 quantized kernel/full-model cases.

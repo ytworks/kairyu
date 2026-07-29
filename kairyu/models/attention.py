@@ -13,6 +13,7 @@ from torch import nn
 
 from kairyu.engine.core.attention import AttentionBackend, TorchAttentionBackend
 from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.engine.core.prefill import PrefillBatch
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, apply_rope
 from kairyu.quant.linear import LinearRole, ModelScope, make_linear
@@ -185,6 +186,56 @@ class Attention(nn.Module):
         query, keys = apply_rope(query, keys, cos, sin)
         kv_pool.write_batched(layer, page_tables, positions, keys, values, write_from=write_from)
         context = self.backend.attend_decode(query, kv_pool, layer, page_tables, seq_lens)
+        return self.o_proj(context)
+
+    def forward_prefill_batch(
+        self,
+        hidden: torch.Tensor,  # [sum(T_i), H]
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_pool: PagedKVPool,
+        layer: int,
+        batch: PrefillBatch,
+    ) -> torch.Tensor:
+        """Native ragged prefill over independent paged sequences.
+
+        Projection, RoPE, KV slot mapping, and the backend plan all consume the
+        same flat ScheduledChunk order.  ``build_prefill_batch`` has already
+        proven that writable pages are private; ``write_ragged`` then filters
+        cached positions so shared radix pages remain byte-identical.
+        """
+        tokens = hidden.shape[0]
+        query = self.q_proj(hidden).view(
+            tokens, self.num_heads, self.head_dim
+        )
+        keys = self.k_proj(hidden).view(
+            tokens, self.num_kv_heads, self.head_dim
+        )
+        values = self.v_proj(hidden).view(
+            tokens, self.num_kv_heads, self.head_dim
+        )
+        if self.q_norm is not None:
+            query = self.q_norm(query)
+            keys = self.k_norm(keys)
+        query, keys = apply_rope(query, keys, cos, sin)
+        kv_pool.write_ragged(
+            layer,
+            batch.page_tables,
+            batch.row_ids,
+            batch.positions,
+            keys,
+            values,
+            batch.write_from,
+        )
+        context = self.backend.attend_prefill(
+            query,
+            kv_pool,
+            layer,
+            batch.page_lists,
+            batch.seq_lens,
+            batch.chunk_starts,
+            batch.qo_indptr,
+        )
         return self.o_proj(context)
 
     def forward_decode_batch(

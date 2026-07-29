@@ -129,6 +129,54 @@ class PagedKVPool:
                 values = torch.where(writable, values, v_flat[flat])
             v_flat[flat] = values
 
+    def write_ragged(
+        self,
+        layer: int,
+        page_tables: torch.Tensor,  # [B, P] int
+        row_ids: torch.Tensor,  # [T] owner row for each flat token
+        positions: torch.Tensor,  # [T] absolute position within its owner
+        keys: torch.Tensor,  # [T, num_kv_heads, head_dim]
+        values: torch.Tensor,
+        write_from: torch.Tensor,  # [B], retain cached KV below this
+    ) -> None:
+        """Write a variable-token prefill batch without crossing row ownership.
+
+        ``build_prefill_batch`` validates that writable physical slots are
+        unique across rows.  This device half derives every destination from
+        ``(row_ids, positions, page_tables)`` and filters cached positions
+        before assignment, so shared radix pages are never rewritten.
+        """
+        if row_ids.ndim != 1 or positions.ndim != 1:
+            raise ValueError("ragged row_ids and positions must be one-dimensional")
+        if row_ids.shape != positions.shape or positions.shape[0] != keys.shape[0]:
+            raise ValueError(
+                "ragged KV inputs must have one row id and position per token"
+            )
+        if values.shape[0] != keys.shape[0]:
+            raise ValueError("ragged keys and values must have the same token count")
+        if write_from.ndim != 1 or write_from.shape[0] != page_tables.shape[0]:
+            raise ValueError("write_from must have one entry per ragged row")
+
+        owners = row_ids.long()
+        page_index = torch.div(
+            positions, self.page_size, rounding_mode="floor"
+        ).long()
+        pages = page_tables[owners, page_index].long()
+        slots = positions.long() - page_index * self.page_size
+        flat = pages * self.page_size + slots
+        writable = positions >= write_from[owners]
+        flat = flat[writable]
+
+        k_flat = self.k[layer].reshape(
+            -1, self.num_kv_heads, self.head_dim
+        )
+        k_flat[flat] = keys[writable]
+        if self.v_head_dim:
+            v_flat = self.v[layer].reshape(
+                -1, self.num_kv_heads, self.v_head_dim
+            )
+            v_flat[flat] = values[writable]
+
     def gather_batched(
         self, layer: int, page_tables: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:

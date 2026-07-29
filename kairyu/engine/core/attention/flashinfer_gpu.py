@@ -52,6 +52,8 @@ def _is_capturing() -> bool:
 class FlashInferBackend:
     """One instance serves every layer: shared workspace + plan cache."""
 
+    supports_batched_prefill = True
+
     #: ``GraphDecodeBackend`` (see ``kairyu.engine.core.attention``): declared
     #: TRUE only because the host work lives in ``plan_decode`` — outside the
     #: captured region — and ``attend_decode`` below is a bare ``run()`` over
@@ -85,11 +87,27 @@ class FlashInferBackend:
         self._decode_tensor_wrapper: object | None = None
         self._decode_tensor_key: tuple | None = None
         self._decode_tensor_layers: set[int] = set()
+        self._prefill_plan_calls = 0
+        self._prefill_run_calls = 0
 
     @property
     def device(self) -> torch.device:
         """The explicit device owning this stateful backend's workspace."""
         return self._device
+
+    def prefill_execution_stats(
+        self, *, reset: bool = False
+    ) -> dict[str, object]:
+        """Native prefill plan/run counts for matched structural evidence."""
+        result = {
+            "type": type(self).__name__,
+            "plans": self._prefill_plan_calls,
+            "runs": self._prefill_run_calls,
+        }
+        if reset:
+            self._prefill_plan_calls = 0
+            self._prefill_run_calls = 0
+        return result
 
     def _paged_arrays(
         self, page_table: list[int], seq_len: int, page_size: int
@@ -168,6 +186,7 @@ class FlashInferBackend:
                 q_data_type=query.dtype,
                 kv_data_type=kv_pool.k.dtype,
             )
+            self._prefill_plan_calls += 1
         self._plan_key = key
         self._planned_decode = is_decode
         return is_decode
@@ -192,6 +211,7 @@ class FlashInferBackend:
             out = wrapper.run(query, paged_kv)  # decode: [B=1, H, D] query
             return out.reshape(1, -1)
         out = wrapper.run(query, paged_kv)  # [T, H, D]
+        self._prefill_run_calls += 1
         return out.reshape(query.shape[0], -1)
 
     def _graph_decode_wrapper(self, batch_size: int, max_pages: int) -> object:
@@ -374,34 +394,50 @@ class FlashInferBackend:
             )
         if not queries:
             return []
-        if any(query.shape[0] != 1 for query in queries):
-            return [
-                self.attend(
-                    query,
-                    kv_pool,
-                    layer,
-                    page_table,
-                    seq_len,
-                    chunk_start,
-                )
-                for query, page_table, seq_len, chunk_start in zip(
-                    queries, page_tables, seq_lens, chunk_starts, strict=True
-                )
-            ]
-
         for query, seq_len, chunk_start in zip(queries, seq_lens, chunk_starts, strict=True):
             chunk_len = query.shape[0]
+            if chunk_len < 1:
+                raise ValueError("FlashInfer batched attention rows must not be empty")
             assert chunk_start + chunk_len == seq_len, (
                 "FlashInfer causal=True is bottom-right aligned: the chunk must be "
                 f"the tail of the sequence (chunk_start={chunk_start} T={chunk_len} "
                 f"seq_len={seq_len})"
             )
+        first = queries[0]
+        if any(
+            query.device != first.device
+            or query.dtype != first.dtype
+            or query.shape[1:] != first.shape[1:]
+            for query in queries[1:]
+        ):
+            raise ValueError(
+                "FlashInfer batched attention queries must share device, dtype, "
+                "head count, and head dimension"
+            )
+
+        query_lens = tuple(int(query.shape[0]) for query in queries)
+        is_decode = all(query_len == 1 for query_len in query_lens)
+        if not is_decode:
+            offsets = [0]
+            for query_len in query_lens:
+                offsets.append(offsets[-1] + query_len)
+            flat = self.attend_prefill(
+                torch.cat(queries, dim=0),
+                kv_pool,
+                layer,
+                tuple(tuple(page_table) for page_table in page_tables),
+                tuple(seq_lens),
+                tuple(chunk_starts),
+                tuple(offsets),
+            )
+            return list(torch.split(flat, query_lens, dim=0))
 
         key = (
             "batched_decode",
             tuple(tuple(page_table) for page_table in page_tables),
             tuple(seq_lens),
             tuple(chunk_starts),
+            query_lens,
         )
         if key != self._plan_key or not self._planned_decode:
             indptr, indices, last_page_len = self._paged_batch_arrays(
@@ -411,11 +447,11 @@ class FlashInferBackend:
                 indptr,
                 indices,
                 last_page_len,
-                queries[0].shape[1],
+                first.shape[1],
                 kv_pool.num_kv_heads,
                 kv_pool.head_dim,
                 kv_pool.page_size,
-                q_data_type=queries[0].dtype,
+                q_data_type=first.dtype,
                 kv_data_type=kv_pool.k.dtype,
             )
             self._plan_key = key
@@ -424,4 +460,83 @@ class FlashInferBackend:
         query_batch = torch.cat(queries, dim=0)
         paged_kv = (kv_pool.k[layer], kv_pool.v[layer])
         out = self._decode.run(query_batch, paged_kv)
-        return [row.reshape(1, -1) for row in out.unbind(dim=0)]
+        contexts = out.reshape(query_batch.shape[0], -1)
+        return list(torch.split(contexts, query_lens, dim=0))
+
+    def attend_prefill(
+        self,
+        query: torch.Tensor,
+        kv_pool: PagedKVPool,
+        layer: int,
+        page_tables: tuple[tuple[int, ...], ...],
+        seq_lens: tuple[int, ...],
+        chunk_starts: tuple[int, ...],
+        qo_indptr: tuple[int, ...],
+    ) -> torch.Tensor:
+        """One FlashInfer ragged-prefill plan shared by every model layer."""
+        batch = len(seq_lens)
+        lengths = {
+            "page_tables": len(page_tables),
+            "seq_lens": batch,
+            "chunk_starts": len(chunk_starts),
+            "qo_indptr": len(qo_indptr) - 1,
+        }
+        if batch < 1 or len(set(lengths.values())) != 1:
+            details = ", ".join(
+                f"{name}={length}" for name, length in lengths.items()
+            )
+            raise ValueError(
+                "FlashInfer ragged prefill inputs must describe the same "
+                f"non-empty batch ({details})"
+            )
+        if qo_indptr[0] != 0 or qo_indptr[-1] != query.shape[0]:
+            raise ValueError(
+                "FlashInfer qo_indptr must span the flat query exactly"
+            )
+        query_lens = tuple(
+            qo_indptr[index + 1] - qo_indptr[index]
+            for index in range(batch)
+        )
+        if any(query_len < 1 for query_len in query_lens):
+            raise ValueError("FlashInfer ragged prefill rows must not be empty")
+        for query_len, seq_len, chunk_start in zip(
+            query_lens, seq_lens, chunk_starts, strict=True
+        ):
+            assert chunk_start + query_len == seq_len, (
+                "FlashInfer causal=True is bottom-right aligned: the chunk must "
+                "be the tail of the sequence "
+                f"(chunk_start={chunk_start} T={query_len} seq_len={seq_len})"
+            )
+
+        key = (
+            "batched_prefill",
+            page_tables,
+            seq_lens,
+            chunk_starts,
+            query_lens,
+        )
+        if key != self._plan_key or self._planned_decode:
+            kv_indptr, kv_indices, last_page_len = self._paged_batch_arrays(
+                page_tables, seq_lens, kv_pool.page_size
+            )
+            self._prefill.plan(
+                torch.tensor(qo_indptr, dtype=torch.int32),
+                kv_indptr,
+                kv_indices,
+                last_page_len,
+                query.shape[1],
+                kv_pool.num_kv_heads,
+                head_dim_qk=kv_pool.head_dim,
+                page_size=kv_pool.page_size,
+                causal=True,
+                q_data_type=query.dtype,
+                kv_data_type=kv_pool.k.dtype,
+            )
+            self._prefill_plan_calls += 1
+            self._plan_key = key
+            self._planned_decode = False
+        out = self._prefill.run(
+            query, (kv_pool.k[layer], kv_pool.v[layer])
+        )
+        self._prefill_run_calls += 1
+        return out.reshape(query.shape[0], -1)
