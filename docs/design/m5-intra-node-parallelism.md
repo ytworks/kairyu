@@ -34,9 +34,11 @@ RadixKV; worker ranks execute the same step. The load-bearing observation: **KV
 *accounting* is device-agnostic.** Pages, the radix tree, refcounts, and page IDs are
 identical on every rank — only the KV *tensor* is head-sharded (70B GQA has 8 KV heads;
 at TP=8 each rank stores 1 head in the same page slots). So the CPU-side RadixKV remains
-a single structure on the driver, page tables broadcast with the step input, and G2's A7
-(radix reuse preserved under TP) holds by construction rather than by synchronization.
-Verified against the code in review: RadixKV/Scheduler hold no device state. Caveat
+a single structure on the driver and page tables are broadcast with the step input.
+This construction predicts rank-invariant accounting, but is not itself A7 evidence:
+A7 binds to real engine-originated prompt-token cache usage measured independently at
+TP=4 and TP=8. Verified against the code in review: RadixKV/Scheduler hold no device
+state. Caveat
 (amended): the pool's `num_pages` must be sized as the **min over ranks** of post-
 weight-shard free memory at the given TP degree — accounting is rank-invariant only
 after pool size is fixed identically on the driver. Scheduler, radix KV, and step-loop
@@ -140,14 +142,18 @@ maps.) The design is now:
   re-sampling of token 0), and it shields the request from `_preempt_for_decode`
   (victims must have empty outputs) — without it, decode-core preemption would set
   `computed_prompt = 0` and recompute the whole prompt on the decode GPUs, defeating
-  the topology. Radix fold-in keeps A7 holding in P-D mode (bench row added, §6).
+  the topology. Radix fold-in remains the P-D reuse mechanism; P-D behavior is
+  validated under A10 rather than issue #157's binding A7 artifact.
 
 ### D6 — Scaling measurement is part of the deliverable, not an afterthought
 
 `bench/serving_bench.py` grows `--tensor-parallel`, `--dp-replicas`, `--pd` topology
 arguments and a sweep mode that emits the TP=2 base and TP=4/8 points into one results
-file (G2 §8 same-file rule). `bench/multiturn_prefix.py` gains a `--replicas` mode to
-measure A8's affinity hit-rate clause.
+file (G2 §8 same-file rule). `bench/multiturn_prefix.py` defines the deterministic A7
+workload geometry and retains its CPU KV-manager sanity check;
+`bench/tp_kv_hit_g2_a7_bench.py` runs that geometry through the production engine and
+gateway. The former also retains its `--replicas` mode for A8's affinity hit-rate
+clause.
 
 ## 3. Prerequisites promoted by review; what M5 does not include
 
@@ -204,9 +210,15 @@ Same split as M2 §3. CPU now, GPU session later:
 | A1, A2 | `bench/parity_tp.py` (new) | 64 fixed prompts, overlap ON/OFF; 8B TP=1 vs TP=2, 70B TP=2 vs 4/8 |
 | A3–A5 | `bench/serving_bench.py --sweep-tp 2,4,8` | TP=2 base in same results file; plus a report-only TPOT point at concurrency 64 (stresses all-reduce growth; no threshold, A9 spirit) |
 | A6 | `bench/serving_bench.py` vs pinned vLLM TP=4/8 | ShareGPT@128 + shared-prefix trace |
-| A7 | `bench/multiturn_prefix.py --tensor-parallel N` and `--pd` | hit rate at TP=4/8 AND under the P-D split (D5 claims it; this row proves it) |
+| A7 | `bench/tp_kv_hit_g2_a7_bench.py` | fixed 50%-shared-prefix trace on the real native Qwen3-32B engine at TP4/8, direct and through the single-replica gateway; each engine-derived prompt-token hit rate must be strictly >80%, with raw/config/topology evidence verified from the committed artifact |
 | A8, A9 | `bench/serving_bench.py --dp-replicas 2` + `multiturn_prefix.py --replicas 2` | goodput, router p99, affinity hit retention; DP-vs-TP sweep |
 | A10 | `bench/pd_mixed.py` (new) | long-prefill + decode-SLO mix; handoff p99 |
+
+A7 closed on Qwen3-32B and 8× RTX PRO 6000 on 2026-07-29. TP4 and TP8
+produced the same engine-token accounting at each path: direct 87.6725% and
+gateway 87.3531%, with 512/512 successful requests per cell. The committed
+raw/manifest pair independently replays all eight binding checks from
+`bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`.
 
 ## 7. Review record
 
@@ -229,3 +241,7 @@ vs code; performance realism vs gates; goal compliance/scope). Verdict:
 - Verified by review: D1 rank-invariance and KV-head divisibility check out against
   `radix_kv.py`/`scheduler.py`.
 - Human sign-off: pending.
+
+Issue #157 supersedes only the earlier A7-under-P-D bench requirement: binding A7
+evidence is TP4/8 direct plus gateway engine truth. D5's P-D mechanism remains
+unchanged and is evaluated by A10, but is not an A7 pass condition.

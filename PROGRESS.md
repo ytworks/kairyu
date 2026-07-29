@@ -32,6 +32,17 @@ substantive differences. The ten-check assembler pins all 15 weight digests,
 the 64×16 raw rows, clean measurement commit, CUDA 13.0/NCCL 2.29.7, and
 physical PCIe topology
 (`bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json`).
+G2 A7 now has an executable real-engine gate. Its Qwen3-32B trace reuses the
+fixed 64-session × 8-turn, 512-token shared-prefix plus 128-token turn geometry,
+then measures engine-originated prompt-token cache usage independently at TP4
+and TP8 through both the direct replica and a single-replica gateway. Only
+complete HTTP/usage evidence, exact TP/path topology, replayable provenance, and
+the written strict >80% rates are binding; latency, OS jitter, output equality,
+repeat count, and gateway affinity counters are not. A7 is closed on Qwen3-32B
+and 8× RTX PRO 6000: TP4 direct/gateway measured 87.6725%/87.3531%, and TP8
+direct/gateway measured the identical 87.6725%/87.3531%, with 512/512 successful
+requests per cell and all eight binding checks passing independent raw replay
+(`bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`).
 The device-side half of m2 §2.2 is now closed for grammar-free CUDA sampling:
 greedy, filtered stochastic sampling, penalties, and logprobs keep the selected
 token on-device, patch the next decode slot D2D, and defer one batched public
@@ -419,6 +430,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [progress] G2 A7 closes on real Qwen3-32B TP4/8 evidence
+- What: Retain the four-cell Qwen3-32B result on 8× RTX PRO 6000: TP4 direct/gateway 87.6725%/87.3531% and TP8 direct/gateway 87.6725%/87.3531%, each with 512/512 successful requests. The independent verifier re-hashes 2,058 raw rows and passes all eight binding trace, usage, topology, and provenance checks.
+- Why: Matching engine-token accounting at TP4 and TP8 proves the issue #157 KV-hit invariant through both the replica and production gateway without importing latency, OS-jitter, output, affinity, or repeat-count criteria.
+- Refs: issue #157; G2 A7; m5 D1/D6; `bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`; measurement commit `b5bcaf10df99ee60e92a291afd4a2764c232a1f2`
+
+### 2026-07-29 — [progress] G2 A7 gateway admits its declared trace
+- What: Pin the example gateway's default tenant to a 600,000-token one-run burst after the first formal TP4 gateway arm reached the generic 200,000-token capacity at request 406; retain its sustained 200,000-token/minute rate and rerun from a fresh engine.
+- Why: A7 must measure all 512 fixed requests through the gateway, not turn the unrelated generic tenant quota into a partial KV result or hide the rejection with a client retry.
+- Refs: issue #157; `examples/qwen3-32b-multi-gpu/auto-gateway.yaml`; `bench/tp_kv_hit_g2_a7_bench.py`
+
+### 2026-07-29 — [amendment] G2 A7 binds to real engine usage at TP4/8
+- What: Replaced the label-only CPU A7 procedure with a deterministic Qwen3-32B real-engine harness over TP4/8 direct and single-replica-gateway paths. The 64-session × 8-turn trace retains exact 512-token shared and 128-token appended geometry. The offline verifier pools only engine-originated `cached_tokens / prompt_tokens`, requires the four written strict >80% results plus complete HTTP usage, exact `/backends` topology, raw integrity, and stable source/config/GPU provenance. The CPU RadixKV result remains a geometry diagnostic. Gateway session-affinity counters are retained beside the engine metric but are non-binding; latency, OS jitter, output equality, and repeat counts are outside this deterministic accounting gate. P-D remains an A10 concern rather than an issue #157 A7 condition.
+- Why: `bench/multiturn_prefix.py --tensor-parallel N --pd` only recorded labels around one CPU RadixKVCache and could neither exercise TP sharding nor traverse the gateway. Binding to response usage from the real sharded engine proves the stated invariant without importing unrelated timing or output-quality requirements.
+- Refs: G2 A7; m5 D1/D5/D6; issue #157; `bench/tp_kv_hit_g2_a7_bench.py`; `bench/multiturn_prefix.py`; `examples/qwen3-32b-multi-gpu/compose.yaml`; `tests/bench/test_tp_kv_hit_g2_a7_bench.py`
 
 ### 2026-07-29 — [amendment] D3 adds credential-free offline deployment preflight
 - What: Added `kairyu validate <deployment.yaml>` with stable 0/1 exit status and deterministic aggregation of DeploymentSpec, backend capability, linked orchestrator/DAG, `.jinja`, native model metadata/checkpoint tensor-shape, and tokenizer errors. The validation-only loader context retains tenant topology checks without resolving API-key environment values; network and hardware remain explicit skipped/indeterminate classes. Backend constructors, server startup, tensor materialization, model execution, subprocesses, and probes are never invoked. The command covers only artifact links the current DeploymentSpec can declare; standalone adapter, grammar, and benchmark links remain not applicable rather than being invented.

@@ -21,6 +21,10 @@ tenants:
   default_tenant: default
   limits:
     default:
+      # Gateway normalization makes the fixed G2 A7 trace 562,096 prompt
+      # tokens plus 512 one-token completions.  Keep the sustained 200k/minute
+      # guard and size only its one-run burst for that declared trace.
+      token_burst: 600000
       interactive_priority: 0
       batch_priority: 1
 

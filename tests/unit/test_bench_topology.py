@@ -58,3 +58,23 @@ def test_multiturn_prefix_config_carries_topology_flags():
     assert config["replicas"] == 2
     assert config["tensor_parallel"] == 8
     assert config["pd"] is True
+
+
+def test_multiturn_prefix_fixed_workload_geometry_and_theoretical_hits():
+    bench = _load_bench_module("multiturn_prefix")
+    workload = bench.fixed_workload()
+
+    assert bench.WORKLOAD_SEED == 42
+    assert len(workload) == 64 * 8
+    assert [request.sequence for request in workload] == list(range(64 * 8))
+    for turn in range(8):
+        rows = workload[turn * 64 : (turn + 1) * 64]
+        assert {request.session for request in rows} == set(range(64))
+        assert {request.turn for request in rows} == {turn}
+        assert {request.prompt_tokens for request in rows} == {
+            512 + (turn + 1) * 128
+        }
+
+    assert sum(request.expected_cached_tokens for request in workload) == 491_008
+    assert sum(request.prompt_tokens for request in workload) == 557_056
+    assert workload == bench.fixed_workload()

@@ -235,6 +235,8 @@ bench/data/
 !bench/results/hf-reference-*.json
 !bench/results/g2-a1-*.json
 !bench/results/g2-a2-llama*.json
+!bench/results/g2-a7-kv-hit-*/
+!bench/results/g2-a7-kv-hit-*/*
 !bench/results/quant-gemm-*.json
 !bench/results/quant-vllm-*.json
 !bench/results/orchestration-stream-*.json
