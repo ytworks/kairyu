@@ -1,6 +1,7 @@
 """Model-construction coverage for optional attention-backend preflight."""
 
 import pytest
+import torch
 
 from kairyu.models.config import ModelConfig
 from kairyu.models.llama import DenseDecoder
@@ -29,14 +30,18 @@ def test_attention_backend_model_preflight_runs_once_before_layer_construction()
         def __init__(self):
             self.configs = []
 
-        def validate_model_config(self, config):
-            self.configs.append(config)
+        def validate_model_config(self, config, *, dtype=None):
+            self.configs.append((config, dtype))
             raise ValueError("unsupported kernel shape")
 
     backend = Backend()
     with pytest.raises(ValueError, match="unsupported kernel shape"):
-        DenseDecoder(_config(), attention_backend=backend)
-    assert backend.configs == [_config()]
+        DenseDecoder(
+            _config(),
+            attention_backend=backend,
+            dtype=torch.bfloat16,
+        )
+    assert backend.configs == [(_config(), torch.bfloat16)]
 
 
 def test_backend_without_model_preflight_retains_existing_construction_path():

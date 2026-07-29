@@ -43,6 +43,24 @@ and 8× RTX PRO 6000: TP4 direct/gateway measured 87.6725%/87.3531%, and TP8
 direct/gateway measured the identical 87.6725%/87.3531%, with 512/512 successful
 requests per cell and all eight binding checks passing independent raw replay
 (`bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`).
+Issue #277's unmerged M13 extension exposes `auto`, torch, FlashInfer, FA3, and
+FA4 as strict public choices. FA3/FA4 use FlashAttention for prefill and retain
+FlashInfer ownership of paged decode/CUDA graphs; `/backends` reports that
+composition, versions, architecture, selection source, and any actual
+`auto`-to-torch construction fallback. Explicit choices never fall back. On SM120,
+Qwen3-32B TP4/8-local prefill parity passed and 24 balanced AB/BA pairs per
+shape made FlashInfer faster in every pair (0.108619/0.083225 ms medians versus
+FA4 0.2637465/0.2617595 ms), so `auto` objectively remains FlashInfer. An exact
+TP8 image/model serving proof returned identical deterministic output and
+usage under both explicit choices; its two-run timing is retained as
+non-binding jitter diagnostics. FA3 remains fake-module/API-contract verified
+only because this host has no representative SM8x/SM90 hardware; no FA3 device
+or performance result is claimed
+(`bench/results/attention-backends-qwen3-32b-sm120-2026-07-29.json`,
+`bench/results/attention-backends-serving-qwen3-32b-sm120-2026-07-29.json`).
+Under the current validation policy, API-contract coverage cannot close a
+hardware-specific path: the extension remains unmerged and issue #277 remains
+open until representative FA3 hardware is available.
 The device-side half of m2 §2.2 is now closed for grammar-free CUDA sampling:
 greedy, filtered stochastic sampling, penalties, and logprobs keep the selected
 token on-device, patch the next decode slot D2D, and defer one batched public
@@ -359,7 +377,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-29, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + tokenizer-native xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, and negotiated snapshot/delta ZMQ `kairyu-proc` wire with legacy compatibility and stream-generation isolation. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
-| M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
+| M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete; FA3/FA4 extension in progress** (`docs/design/m13-attention-backend.md`): issue #277 adds strict `auto`/torch/FlashInfer/FA3/FA4 choices and reports phase composition. Retained SM120 FA4/Qwen3-32B evidence keeps `auto` on the objectively faster stable FlashInfer path; FA3 remains API-contract/fail-closed only because this host has no supported FA3 GPU. |
 | M14 — Quant compute (FP8/INT8/AWQ/GPTQ/NVFP4 CPU oracles + fused/native GPU kernels) | **GPU-validated** (2026-07-30, `docs/design/m14-quant-compute.md`): all five schemes production-dispatch on CUDA without a full dequantized weight, pass per-kernel and full-engine GPU gates, and fail loudly outside their supported capability/layout. Construction now binds canonical projection identity, role/scope, target device/dtype, TP placement, and probed kernel capabilities while retaining checkpoint names and explicit exclusions. CPU format proofs remain pinned vs live Hub checkpoints. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
 | M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26); A3 makes rank 0 the sole sampling owner and broadcasts one canonical device-token packet before any rank advances (2026-07-29); A12 keeps canonical HF names and physical packed-member shard contracts through TP/SP/EP binding, with explicit rank-local serialization and deterministic rejection of single-rank full-HF export (2026-07-30). |
@@ -451,8 +469,11 @@ mutable UI image.
 The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
 GPU, selects the configured runtime/node profile, mounts an existing host path or
 PVC read-only, and starts the real Kairyu engine from `/models/checkpoint`.
-The checked-in SM120/`pcie-gddr` profile pins the torch attention fallback while
-the strict chart value also permits FlashInfer on supported hardware.
+The checked-in SM120/`pcie-gddr` profile selects `auto`, which currently
+resolves to FlashInfer from retained Qwen3-32B TP4/8 evidence. The strict chart
+value permits all five public choices: `auto`, torch, FlashInfer, FA3, and FA4.
+Runtime architecture/dependency guards still fail unsupported explicit choices
+before serving.
 CI now schema-lints and template-renders both the CPU defaults and GPU overlay
 before the kind CPU deployment/HTTP drill; it does not schedule the GPU pod.
 `kairyu bench run` executes the 11-slot Fugu-release quality suite against any
@@ -551,6 +572,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [amendment] M13 adds strict, reportable FA3/FA4 phase adapters
+- What: Extended the public attention switch and Helm schema to `auto`, torch,
+  FlashInfer, FA3, and FA4. FA3/FA4 own prefill while FlashInfer retains paged
+  decode and CUDA graphs; `/backends` reports the actual prefill/decode/KV
+  composition, versions, architecture rationale, and selection source.
+  Explicit choices fail before serving on missing dependencies, unsupported
+  architecture, dtype, or shape. Only `auto` may use a reported construction
+  fallback. Retained SM120 Qwen3-32B parity and 24 interleaved AB/BA pairs per
+  TP4/TP8-local shape show FlashInfer faster in all 48 pairs, so `auto` remains
+  FlashInfer rather than promoting FA4. FA3 has API-contract coverage and
+  fails closed on this unsupported SM120 host; no FA3 hardware result is
+  claimed.
+- Why: Kernel availability alone is not a performance policy, and a monolithic
+  label would hide the graph-critical decode owner. Profile-specific raw paired
+  samples expose order and host/OS jitter without arbitrary timing thresholds,
+  while unsupported hardware is neither run nor counted as passed.
+- Refs: issue #277; `docs/design/m13-attention-backend.md`;
+  `bench/results/attention-backends-qwen3-32b-sm120-2026-07-29.json`;
+  `bench/results/attention-backends-serving-qwen3-32b-sm120-2026-07-29.json`
 
 ### 2026-07-30 — [progress] Issue #227 passes the clean-source Qwen3-32B TP8 gate
 - What: Retained
@@ -692,7 +733,6 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - What: Replaced `kairyu-proc`'s per-step cumulative output/text/logprob retransmission with per-request wire v2: one sequence-0 snapshot followed by offset-checked deltas. Empty non-terminal events are suppressed; terminal exact detokenization may replace one suffix; generate reconstructs all deltas without materializing cumulative text until terminal, while stream materializes only at its cumulative public yield. A client-generated internal wire request ID and `stream_id` bind add/abort/result/error generations and prevent stale v1 or v2 events from crossing immediate public-ID reuse. An omitted sampling seed is made explicit from that public ID, retaining deterministic output. Missing version retains the cumulative v1 path in both rolling-upgrade directions. Added long process parity, malformed sequence/offset/version/metadata, cancellation/reuse, and deterministic msgpack byte-volume coverage.
 - Why: Retransmitting every cumulative prefix makes serialized bytes quadratic in output length and consumes the same host/process boundary needed by streaming and TPOT-sensitive serving. Version negotiation avoids a flag day, while sequence, offsets, and stream generations fail closed instead of silently reconstructing corrupt or stale output.
 - Refs: issue #212; m8 D6; `kairyu/engine/core/engine_service.py`; `kairyu/engine/zmq_backend.py`; `bench/proc_wire_bench.py`; `tests/unit/test_{proc_wire_protocol,zmq_backend}.py`; `tests/bench/test_proc_wire_bench.py`
-
 ### 2026-07-29 — [progress] G2 A7 closes on real Qwen3-32B TP4/8 evidence
 - What: Retain the four-cell Qwen3-32B result on 8× RTX PRO 6000: TP4 direct/gateway 87.6725%/87.3531% and TP8 direct/gateway 87.6725%/87.3531%, each with 512/512 successful requests. The independent verifier re-hashes 2,058 raw rows and passes all eight binding trace, usage, topology, and provenance checks.
 - Why: Matching engine-token accounting at TP4 and TP8 proves the issue #157 KV-hit invariant through both the replica and production gateway without importing latency, OS-jitter, output, affinity, or repeat-count criteria.

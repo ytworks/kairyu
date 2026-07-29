@@ -286,7 +286,7 @@ def build_pd_coordinator(
         transfer_device=decode_pool.k.device,
         gate_devices=(prefill_pool.k.device, decode_pool.k.device),
     )
-    return PDCoordinator(
+    coordinator = PDCoordinator(
         prefill_scheduler=prefill_scheduler,
         prefill_runner=prefill_runner,
         decode_scheduler=decode_scheduler,
@@ -294,3 +294,7 @@ def build_pd_coordinator(
         handoff=handoff,
         max_transfer_retries=max_transfer_retries,
     )
+    coordinator.attention_backend_decision = getattr(
+        attention_backend, "selection_decision", None
+    )
+    return coordinator

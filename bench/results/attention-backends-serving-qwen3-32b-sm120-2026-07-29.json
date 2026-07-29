@@ -1,0 +1,585 @@
+{
+  "aggregate": {
+    "flashattention4": {
+      "completion_tokens": 512,
+      "median_of_run_summaries": {
+        "output_tokens_per_s": 116.44999999999999,
+        "throughput_rps": 3.635,
+        "tpot_mean_ms": 40.213,
+        "ttft_p50_ms": 915.2149999999999,
+        "ttft_p99_ms": 1141.505
+      },
+      "requests": 16,
+      "runs": 2
+    },
+    "flashinfer": {
+      "completion_tokens": 512,
+      "median_of_run_summaries": {
+        "output_tokens_per_s": 115.79499999999999,
+        "throughput_rps": 3.615,
+        "tpot_mean_ms": 39.9785,
+        "ttft_p50_ms": 1083.595,
+        "ttft_p99_ms": 1331.17
+      },
+      "requests": 16,
+      "runs": 2
+    }
+  },
+  "arms": [
+    {
+      "backend": "flashinfer",
+      "benchmark": {
+        "config": {
+          "base_url": "http://127.0.0.1:8001",
+          "concurrency": 8,
+          "dataset": null,
+          "dp_replicas": 1,
+          "max_tokens": 32,
+          "model": "qwen3-32b",
+          "num_requests": 8,
+          "pd": false,
+          "tensor_parallel": 8,
+          "ttft_slo_s": 10.0
+        },
+        "samples": [
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 0,
+            "total_ms": 2270.0248088221997,
+            "tpot_ms": 27.86859018998521,
+            "ttft_ms": 1406.0985129326582
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 1,
+            "total_ms": 2237.63499292545,
+            "tpot_ms": 27.83253696566868,
+            "ttft_ms": 1374.826346989721
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 2,
+            "total_ms": 2206.8668950814754,
+            "tpot_ms": 59.393287613807665,
+            "ttft_ms": 365.6749790534377
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 3,
+            "total_ms": 2207.083182176575,
+            "tpot_ms": 59.40539203584194,
+            "ttft_ms": 365.51602906547487
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 4,
+            "total_ms": 2207.1870961226523,
+            "tpot_ms": 59.41220519373253,
+            "ttft_ms": 365.4087351169437
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 5,
+            "total_ms": 2235.809066100046,
+            "tpot_ms": 27.841781100799,
+            "ttft_ms": 1372.713851975277
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 6,
+            "total_ms": 2236.558757023886,
+            "tpot_ms": 27.874282388497267,
+            "ttft_ms": 1372.4560029804707
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 7,
+            "total_ms": 2236.288968939334,
+            "tpot_ms": 27.86923742162124,
+            "ttft_ms": 1372.3426088690758
+          }
+        ],
+        "summary": {
+          "completion_tokens_total": 256,
+          "dataset": "synthetic",
+          "goodput_rps": 3.52,
+          "output_tokens_per_s": 112.77,
+          "requests": 8,
+          "throughput_rps": 3.52,
+          "tpot_mean_ms": 39.687,
+          "tpot_method": "token",
+          "ttft_p50_ms": 1372.4,
+          "ttft_p99_ms": 1406.1,
+          "wall_s": 2.27
+        }
+      },
+      "pair": 0,
+      "pair_order": "AB",
+      "sequence": 0
+    },
+    {
+      "backend": "flashattention4",
+      "benchmark": {
+        "config": {
+          "base_url": "http://127.0.0.1:8001",
+          "concurrency": 8,
+          "dataset": null,
+          "dp_replicas": 1,
+          "max_tokens": 32,
+          "model": "qwen3-32b",
+          "num_requests": 8,
+          "pd": false,
+          "tensor_parallel": 8,
+          "ttft_slo_s": 10.0
+        },
+        "samples": [
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 0,
+            "total_ms": 2246.238450985402,
+            "tpot_ms": 39.79616938909936,
+            "ttft_ms": 1012.5571999233216
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 1,
+            "total_ms": 2224.1407688707113,
+            "tpot_ms": 39.83404806574747,
+            "ttft_ms": 989.2852788325399
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 2,
+            "total_ms": 2224.2158430162817,
+            "tpot_ms": 39.841910546285014,
+            "ttft_ms": 989.1166160814464
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 3,
+            "total_ms": 2224.5397882070392,
+            "tpot_ms": 39.86306919626171,
+            "ttft_ms": 988.7846431229264
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 4,
+            "total_ms": 2224.35863991268,
+            "tpot_ms": 39.85905577428639,
+            "ttft_ms": 988.7279109098017
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 5,
+            "total_ms": 2224.902932997793,
+            "tpot_ms": 39.88187841980929,
+            "ttft_ms": 988.5647019837052
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 6,
+            "total_ms": 2224.746697815135,
+            "tpot_ms": 39.88245844600662,
+            "ttft_ms": 988.3904859889299
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 7,
+            "total_ms": 2224.905723007396,
+            "tpot_ms": 39.89200716117217,
+            "ttft_ms": 988.2535010110587
+          }
+        ],
+        "summary": {
+          "completion_tokens_total": 256,
+          "dataset": "synthetic",
+          "goodput_rps": 3.55,
+          "output_tokens_per_s": 113.71,
+          "requests": 8,
+          "throughput_rps": 3.55,
+          "tpot_mean_ms": 39.856,
+          "tpot_method": "token",
+          "ttft_p50_ms": 988.76,
+          "ttft_p99_ms": 1012.56,
+          "wall_s": 2.251
+        }
+      },
+      "pair": 0,
+      "pair_order": "AB",
+      "sequence": 1
+    },
+    {
+      "backend": "flashattention4",
+      "benchmark": {
+        "config": {
+          "base_url": "http://127.0.0.1:8001",
+          "concurrency": 8,
+          "dataset": null,
+          "dp_replicas": 1,
+          "max_tokens": 32,
+          "model": "qwen3-32b",
+          "num_requests": 8,
+          "pd": false,
+          "tensor_parallel": 8,
+          "ttft_slo_s": 10.0
+        },
+        "samples": [
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 0,
+            "total_ms": 2145.939372945577,
+            "tpot_ms": 28.241669999495628,
+            "ttft_ms": 1270.4476029612124
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 1,
+            "total_ms": 2084.6020649187267,
+            "tpot_ms": 52.86577932025877,
+            "ttft_ms": 445.7629059907049
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 2,
+            "total_ms": 2085.2463108021766,
+            "tpot_ms": 52.88843957767371,
+            "ttft_ms": 445.7046838942915
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 3,
+            "total_ms": 2113.2789340335876,
+            "tpot_ms": 28.20059583492337,
+            "ttft_ms": 1239.0604631509632
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 4,
+            "total_ms": 2084.578401874751,
+            "tpot_ms": 52.894828803536875,
+            "ttft_ms": 444.8387089651078
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 5,
+            "total_ms": 2084.656577091664,
+            "tpot_ms": 52.90570551709783,
+            "ttft_ms": 444.57970606163144
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 6,
+            "total_ms": 2115.007770014927,
+            "tpot_ms": 28.28152629456693,
+            "ttft_ms": 1238.280454883352
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 7,
+            "total_ms": 2114.3045898061246,
+            "tpot_ms": 28.281274739833126,
+            "ttft_ms": 1237.5850728712976
+          }
+        ],
+        "summary": {
+          "completion_tokens_total": 256,
+          "dataset": "synthetic",
+          "goodput_rps": 3.72,
+          "output_tokens_per_s": 119.19,
+          "requests": 8,
+          "throughput_rps": 3.72,
+          "tpot_mean_ms": 40.57,
+          "tpot_method": "token",
+          "ttft_p50_ms": 841.67,
+          "ttft_p99_ms": 1270.45,
+          "wall_s": 2.148
+        }
+      },
+      "pair": 1,
+      "pair_order": "BA",
+      "sequence": 2
+    },
+    {
+      "backend": "flashinfer",
+      "benchmark": {
+        "config": {
+          "base_url": "http://127.0.0.1:8001",
+          "concurrency": 8,
+          "dataset": null,
+          "dp_replicas": 1,
+          "max_tokens": 32,
+          "model": "qwen3-32b",
+          "num_requests": 8,
+          "pd": false,
+          "tensor_parallel": 8,
+          "ttft_slo_s": 10.0
+        },
+        "samples": [
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 0,
+            "total_ms": 2131.2777660787106,
+            "tpot_ms": 42.07030803175463,
+            "ttft_ms": 827.0982170943171
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 1,
+            "total_ms": 2097.0906098373234,
+            "tpot_ms": 41.99067389802827,
+            "ttft_ms": 795.3797189984471
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 2,
+            "total_ms": 2097.3957998212427,
+            "tpot_ms": 42.00385770790519,
+            "ttft_ms": 795.2762108761817
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 3,
+            "total_ms": 2122.5949458312243,
+            "tpot_ms": 27.946806993455656,
+            "ttft_ms": 1256.243929034099
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 4,
+            "total_ms": 2096.7905230354518,
+            "tpot_ms": 42.01544502810124,
+            "ttft_ms": 794.3117271643132
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 5,
+            "total_ms": 2096.835386939347,
+            "tpot_ms": 42.02717889641081,
+            "ttft_ms": 793.9928411506116
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 6,
+            "total_ms": 2096.9442219939083,
+            "tpot_ms": 42.04168055026281,
+            "ttft_ms": 793.6521249357611
+          },
+          {
+            "completion_tokens": 32,
+            "output_chunks": 32,
+            "request_index": 7,
+            "total_ms": 2097.3420049995184,
+            "tpot_ms": 42.06600119810431,
+            "ttft_ms": 793.2959678582847
+          }
+        ],
+        "summary": {
+          "completion_tokens_total": 256,
+          "dataset": "synthetic",
+          "goodput_rps": 3.71,
+          "output_tokens_per_s": 118.82,
+          "requests": 8,
+          "throughput_rps": 3.71,
+          "tpot_mean_ms": 40.27,
+          "tpot_method": "token",
+          "ttft_p50_ms": 794.79,
+          "ttft_p99_ms": 1256.24,
+          "wall_s": 2.154
+        }
+      },
+      "pair": 1,
+      "pair_order": "BA",
+      "sequence": 3
+    }
+  ],
+  "artifact_sha256": "34803deec429d1bb5b7cbcddf870a3435b4d8eea0a96e9e940449de35c836ead",
+  "backend_reports": {
+    "flashattention4": {
+      "attention_backend": "flashattention4",
+      "attention_components": {
+        "decode": "flashinfer",
+        "kv_mode": "paged-materialized",
+        "prefill": "flashattention4"
+      },
+      "engines": [
+        {
+          "attention_backend": "flashattention4",
+          "attention_components": {
+            "decode": "flashinfer",
+            "kv_mode": "paged-materialized",
+            "prefill": "flashattention4"
+          },
+          "engine_backend": "kairyu",
+          "model": "qwen3-32b",
+          "tensor_parallel_size": 8
+        }
+      ],
+      "kernel_tier": "fa2",
+      "requested_attention_backend": "flashattention4",
+      "role": "engine-host",
+      "selection_rationale": "explicit KAIRYU_ATTENTION_BACKEND override",
+      "source": "env",
+      "versions": {
+        "flash-attn-4": "4.0.0b24",
+        "flashinfer": "0.6.14",
+        "torch": "2.12.1"
+      }
+    },
+    "flashinfer": {
+      "attention_backend": "flashinfer",
+      "attention_components": {
+        "decode": "flashinfer",
+        "kv_mode": "paged-direct",
+        "prefill": "flashinfer"
+      },
+      "engines": [
+        {
+          "attention_backend": "flashinfer",
+          "attention_components": {
+            "decode": "flashinfer",
+            "kv_mode": "paged-direct",
+            "prefill": "flashinfer"
+          },
+          "engine_backend": "kairyu",
+          "model": "qwen3-32b",
+          "tensor_parallel_size": 8
+        }
+      ],
+      "kernel_tier": "fa2",
+      "requested_attention_backend": "flashinfer",
+      "role": "engine-host",
+      "selection_rationale": "explicit KAIRYU_ATTENTION_BACKEND override",
+      "source": "env",
+      "versions": {
+        "flashinfer": "0.6.14",
+        "torch": "2.12.1"
+      }
+    }
+  },
+  "benchmark": "qwen3-32b-sm120-attention-serving-proof",
+  "correctness": {
+    "exact_response_and_usage_match": true,
+    "request": {
+      "max_tokens": 8,
+      "messages": [
+        {
+          "content": "What is 2 + 2? Answer with the number only. /no_think",
+          "role": "user"
+        }
+      ],
+      "model": "qwen3-32b",
+      "temperature": 0
+    },
+    "responses": {
+      "flashattention4": {
+        "content": "<think>\n\n</think>\n\n4",
+        "finish_reason": "stop",
+        "model": "qwen3-32b",
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 23,
+          "prompt_tokens_details": null,
+          "total_tokens": 29
+        }
+      },
+      "flashinfer": {
+        "content": "<think>\n\n</think>\n\n4",
+        "finish_reason": "stop",
+        "model": "qwen3-32b",
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 23,
+          "prompt_tokens_details": null,
+          "total_tokens": 29
+        }
+      }
+    }
+  },
+  "environment": {
+    "gpu_count": 8,
+    "gpus": [
+      "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-c2dec644-056f-5a18-64af-0dcb2d4b5aa1, 00000000:16:00.0, 97887, 595.84",
+      "1, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-7ca344d0-c282-61d7-446b-dcdf5c2dee16, 00000000:27:00.0, 97887, 595.84",
+      "2, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-8accd8d3-6791-1e54-af77-b229a199b1f1, 00000000:49:00.0, 97887, 595.84",
+      "3, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-7a56fbb4-fd9d-1f93-7bd6-f7e55579a964, 00000000:5A:00.0, 97887, 595.84",
+      "4, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-d8ef7924-e297-e1ef-e51e-82c77b41715a, 00000000:98:00.0, 97887, 595.84",
+      "5, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-4884d626-ecaa-7fc1-49d2-158f6d118801, 00000000:B8:00.0, 97887, 595.84",
+      "6, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-f212d821-c550-947e-904c-1ee6be110c96, 00000000:C8:00.0, 97887, 595.84",
+      "7, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-9813a152-84b7-57ef-3109-76b4a1d47673, 00000000:D8:00.0, 97887, 595.84"
+    ],
+    "profile": "SM120 PCIe"
+  },
+  "generated_at_utc": "2026-07-29T11:52:15.476831+00:00",
+  "measurement_harness": {
+    "base_commit": "b6d358b2409b9aa47d54556e4fc89cfb79a70fab",
+    "committed_at_measurement": false,
+    "content_sha256": "25f8bb6e7cbc946b72b27dcaa58bd59760379bddb7a8dd6150addfccb2554545",
+    "diff_from_base_sha256": "9bec4945877e91efd460367b1c8c39ff06bb54809d64a293309450f757d762a4",
+    "path": "bench/serving_bench.py",
+    "provenance_limit": "the exact harness content and diff are retained by hash, but a complete worktree-status snapshot was not captured at measurement"
+  },
+  "methodology": {
+    "backend_labels": {
+      "A": "flashinfer",
+      "B": "flashattention4"
+    },
+    "decision_rule": "serving proof establishes execution and reports jitter; auto selection remains bound to the 24-pair verified kernel artifact",
+    "order": [
+      "flashinfer",
+      "flashattention4",
+      "flashattention4",
+      "flashinfer"
+    ],
+    "paired_order": [
+      "AB",
+      "BA"
+    ],
+    "precision_limit": "request timings retain full floating-point values; per-run wall_s was retained after 3-decimal rounding and derived rates after 2-decimal rounding, so serving aggregates are not bit-exactly reconstructable from wall time",
+    "raw_samples": "all request TTFT, total latency, token-granular TPOT, output chunks, and completion-token counts retained",
+    "status": "diagnostic_non_binding",
+    "warmup": "one disjoint 8-token request after each service restart",
+    "workload": "8 concurrent synthetic requests, 32 output tokens each"
+  },
+  "schema_version": 2,
+  "source": {
+    "commit": "b6d358b2409b9aa47d54556e4fc89cfb79a70fab",
+    "image_id": "sha256:c43c53045a06a0fad9ad471a615faba882fd703ff78ba01d21a1ee094e2beccc",
+    "image_reference": "kairyu-qwen3-32b-kairyu:latest",
+    "image_size_bytes": 8142299337,
+    "model": "Qwen/Qwen3-32B",
+    "model_revision": "9216db5781bf21249d130ec9da846c4624c16137",
+    "selection_artifact": "bench/results/attention-backends-qwen3-32b-sm120-2026-07-29.json",
+    "selection_artifact_sha256": "4c3bdf5dd54888a1909daa0ad0c97bd151b2d655d8db6dcc69517cfc35e5bd33"
+  }
+}

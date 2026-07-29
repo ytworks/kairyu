@@ -73,3 +73,14 @@ CUDA base image); (e) PROGRESS.md Current Status reflects deploy-ready.
 - The checked-in `pcie-gddr` overlay pins `torch` because the current FlashInfer
   build has no Blackwell/SM120 kernels. Operators may select `flashinfer` only on
   hardware/builds that support it; CPU defaults omit the environment variable.
+
+### 2026-07-29 — D2 amendment: the SM120 overlay follows retained evidence
+
+- The attention value now accepts `auto`, `torch`, `flashinfer`,
+  `flashattention3`, and `flashattention4` (plus the empty CPU default).
+- The checked-in `pcie-gddr` overlay selects `auto`. The pinned CUDA image and
+  retained Qwen3-32B SM120 TP4/8 evidence resolve that profile to FlashInfer;
+  the overlay no longer preserves the obsolete torch pin after Blackwell
+  FlashInfer support was validated. Explicit alternatives remain strict and
+  fail before serving when their dependency, architecture, or shape is
+  unsupported.

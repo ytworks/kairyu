@@ -147,6 +147,59 @@ def build_run_config(args: argparse.Namespace) -> dict:
     }
 
 
+def summarize_results(
+    results: list[RequestMetrics],
+    *,
+    wall_ns: int,
+    dataset_label: str,
+    ttft_slo_s: float,
+) -> tuple[dict, list[dict]]:
+    """Build summary plus lossless per-request timing/usage evidence."""
+    if wall_ns <= 0:
+        raise ValueError(f"wall_ns must be positive, got {wall_ns}")
+    wall_s = wall_ns / 1e9
+    ttfts = sorted(metric.ttft_s for metric in results)
+    tpots = [metric.tpot_s for metric in results if metric.tpot_s > 0]
+    token_granular = all(metric.token_granular for metric in results)
+    tpot_method = "token" if token_granular else "chunk"
+    within_slo = sum(metric.ttft_s <= ttft_slo_s for metric in results)
+    completion_tokens_total = (
+        sum(metric.completion_tokens or 0 for metric in results)
+        if token_granular
+        else None
+    )
+    samples = [
+        {
+            "request_index": index,
+            "ttft_ms": metric.ttft_s * 1e3,
+            "total_ms": metric.total_s * 1e3,
+            "tpot_ms": metric.tpot_s * 1e3,
+            "output_chunks": metric.output_chunks,
+            "completion_tokens": metric.completion_tokens,
+        }
+        for index, metric in enumerate(results)
+    ]
+    summary = {
+        "dataset": dataset_label,
+        "requests": len(results),
+        "wall_ns": wall_ns,
+        "wall_s": wall_s,
+        "ttft_p50_ms": round(statistics.median(ttfts) * 1e3, 2),
+        "ttft_p99_ms": round(_percentile(ttfts, 0.99) * 1e3, 2),
+        "tpot_mean_ms": round(statistics.mean(tpots) * 1e3, 3) if tpots else None,
+        "tpot_method": tpot_method,
+        "throughput_rps": round(len(results) / wall_s, 2),
+        "goodput_rps": round(within_slo / wall_s, 2),
+        "completion_tokens_total": completion_tokens_total,
+        "output_tokens_per_s": (
+            round(completion_tokens_total / wall_s, 2)
+            if completion_tokens_total is not None
+            else None
+        ),
+    }
+    return summary, samples
+
+
 async def run_benchmark(args: argparse.Namespace) -> None:
     print(f"config={json.dumps(build_run_config(args))}")
     prompts, dataset_label = load_prompts(
@@ -162,35 +215,32 @@ async def run_benchmark(args: argparse.Namespace) -> None:
             async with semaphore:
                 return await run_one(client, args.model, prompt, args.max_tokens)
 
-        wall_start = time.perf_counter()
+        wall_start_ns = time.perf_counter_ns()
         results = await asyncio.gather(*(bounded(p) for p in prompts))
-        wall = time.perf_counter() - wall_start
+        wall_ns = time.perf_counter_ns() - wall_start_ns
 
-    ttfts = sorted(metric.ttft_s for metric in results)
-    tpots = [metric.tpot_s for metric in results if metric.tpot_s > 0]
-    token_granular = all(metric.token_granular for metric in results)
-    tpot_method = "token" if token_granular else "chunk"
-    within_slo = sum(1 for metric in results if metric.ttft_s <= args.ttft_slo_s)
-    summary = {
-        "dataset": dataset_label,
-        "requests": len(results),
-        "wall_s": round(wall, 3),
-        "ttft_p50_ms": round(statistics.median(ttfts) * 1e3, 2),
-        "ttft_p99_ms": round(_percentile(ttfts, 0.99) * 1e3, 2),
-        "tpot_mean_ms": round(statistics.mean(tpots) * 1e3, 3) if tpots else None,
-        "tpot_method": tpot_method,  # labeled: token (usage-true) vs chunk fallback
-        "throughput_rps": round(len(results) / wall, 2),
-        "goodput_rps": round(within_slo / wall, 2),
-    }
+    summary, samples = summarize_results(
+        results,
+        wall_ns=wall_ns,
+        dataset_label=dataset_label,
+        ttft_slo_s=args.ttft_slo_s,
+    )
     print(f"target={args.base_url} model={args.model} dataset={dataset_label}")
-    print(f"requests={len(results)} concurrency={args.concurrency} wall={wall:.2f}s")
+    print(
+        f"requests={len(results)} concurrency={args.concurrency} "
+        f"wall={summary['wall_s']:.2f}s"
+    )
     print(
         f"TTFT p50={summary['ttft_p50_ms']}ms p99={summary['ttft_p99_ms']}ms"
     )
-    if tpots:
-        print(f"TPOT mean={summary['tpot_mean_ms']}ms/token ({tpot_method}-granularity)")
+    if summary["tpot_mean_ms"] is not None:
+        print(
+            f"TPOT mean={summary['tpot_mean_ms']}ms/token "
+            f"({summary['tpot_method']}-granularity)"
+        )
     print(
         f"throughput={summary['throughput_rps']} req/s; "
+        f"output={summary['output_tokens_per_s']} token/s; "
         f"goodput(TTFT<={args.ttft_slo_s}s)={summary['goodput_rps']} req/s"
     )
     if args.results_dir:
@@ -199,7 +249,14 @@ async def run_benchmark(args: argparse.Namespace) -> None:
         results_dir.mkdir(parents=True, exist_ok=True)
         out = results_dir / f"{stamp}-serving.json"  # timestamped: same-day safe
         out.write_text(
-            json.dumps({"config": build_run_config(args), "summary": summary}, indent=2)
+            json.dumps(
+                {
+                    "config": build_run_config(args),
+                    "summary": summary,
+                    "samples": samples,
+                },
+                indent=2,
+            )
         )
         print(f"results written to {out}")
 

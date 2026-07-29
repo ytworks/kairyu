@@ -97,6 +97,8 @@ async def test_backend_model_path_generates(checkpoint):
     backend = KairyuBackend(
         num_pages=256, page_size=4, model_path=str(path), tokenizer=_SmallVocabTokenizer()
     )
+    assert backend.attention_backend_decision.requested == "torch"
+    assert backend.attention_backend_decision.resolved == "torch"
     result = await backend.generate(
         GenerationRequest(
             request_id="r1",

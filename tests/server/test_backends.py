@@ -4,6 +4,7 @@ import importlib.metadata
 
 import httpx
 
+from kairyu.engine.core.attention_selector import AttentionBackendDecision
 from kairyu.engine.core.hw_profile import HardwareProfile
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
@@ -74,6 +75,66 @@ async def test_backends_explicit_auto_reports_env_source(monkeypatch):
         "kv_mode": "paged-direct",
     }
     assert "stable" in body["selection_rationale"]
+
+
+async def test_backends_reports_the_local_engine_actual_auto_fallback(monkeypatch):
+    monkeypatch.delenv("KAIRYU_ATTENTION_BACKEND", raising=False)
+    monkeypatch.setattr(
+        health_module,
+        "probe",
+        lambda: HardwareProfile(arch="cuda", sm=120),
+    )
+
+    class KairyuBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.attention_backend_decision = AttentionBackendDecision(
+                requested="auto",
+                resolved="torch",
+                source="hw_profile",
+                components={
+                    "prefill": "torch",
+                    "decode": "torch",
+                    "kv_mode": "tensor-gather",
+                },
+                rationale=(
+                    "automatic torch fallback after flashinfer construction "
+                    "raised ModuleNotFoundError"
+                ),
+            )
+
+    app = create_app(engines={"m": KairyuBackend()})
+    async with _client(app) as client:
+        resp = await client.get("/backends")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["requested_attention_backend"] == "auto"
+    assert body["attention_backend"] == "torch"
+    assert body["attention_components"]["prefill"] == "torch"
+    assert "ModuleNotFoundError" in body["selection_rationale"]
+    assert "flashinfer" not in body["versions"]
+    assert body["engines"][0]["attention_backend"] == "torch"
+
+
+async def test_backends_does_not_invent_torch_after_invalid_selection(monkeypatch):
+    monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "invalid")
+    monkeypatch.setattr(
+        health_module,
+        "probe",
+        lambda: HardwareProfile(arch="cuda", sm=120),
+    )
+    app = create_app(engines={"m": MockBackend()})
+
+    async with _client(app) as client:
+        resp = await client.get("/backends")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["requested_attention_backend"] == "invalid"
+    assert body["attention_backend"] == "unavailable"
+    assert body["attention_components"] == {}
+    assert "ValueError" in body["selection_rationale"]
 
 
 async def test_backends_fa4_components_and_missing_versions(monkeypatch):
