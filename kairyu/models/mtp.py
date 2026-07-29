@@ -20,24 +20,49 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm
 from kairyu.models.llama import DecoderLayer
+from kairyu.quant.linear import LinearRole, ModelScope, make_linear
 
 
 class MtpDraftHead(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, linear_factory=None) -> None:
         super().__init__()
         hidden = config.hidden_size
+        layer_index = config.num_hidden_layers
+        prefix = f"model.layers.{layer_index}"
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, hidden)
         self.enorm = RMSNorm(hidden, config.rms_norm_eps)
         self.hnorm = RMSNorm(hidden, config.rms_norm_eps)
-        self.eh_proj = nn.Linear(2 * hidden, hidden, bias=False)
+        self.eh_proj = make_linear(
+            linear_factory,
+            2 * hidden,
+            hidden,
+            False,
+            qualified_name=f"{prefix}.eh_proj",
+            model_scope=ModelScope.MTP_DRAFT,
+            role=LinearRole.DRAFT_FUSION,
+            layer_index=layer_index,
+        )
         # layer_index = num_hidden_layers: past first_k_dense_replace, so the
         # block correctly comes out MoE (A8)
-        self.decoder = DecoderLayer(config, layer_index=config.num_hidden_layers)
-        self.shared_head = nn.ModuleDict(
-            {"norm": RMSNorm(hidden, config.rms_norm_eps)}
+        self.decoder = DecoderLayer(
+            config,
+            layer_index=layer_index,
+            linear_factory=linear_factory,
+            prefix=prefix,
+            model_scope=ModelScope.MTP_DRAFT,
         )
-        self.head = nn.Linear(hidden, config.vocab_size, bias=False)
+        self.shared_head = nn.ModuleDict({"norm": RMSNorm(hidden, config.rms_norm_eps)})
+        self.head = make_linear(
+            linear_factory,
+            hidden,
+            config.vocab_size,
+            False,
+            qualified_name=f"{prefix}.shared_head.head",
+            model_scope=ModelScope.MTP_DRAFT,
+            role=LinearRole.OUTPUT_HEAD,
+            layer_index=layer_index,
+        )
 
     def fresh_pool(self, num_pages: int = 64, page_size: int = 4) -> PagedKVPool:
         """The head's own 1-layer KV (dense per-proposal recompute on CPU)."""
@@ -60,23 +85,19 @@ class MtpDraftHead(nn.Module):
         """One MTP application over the context: [T] tokens + [T, H] target
         hidden -> [T, H] draft hidden (last row feeds ``logits``)."""
         embedding = self.embed_tokens(token_ids)
-        fused = self.eh_proj(
-            torch.cat([self.enorm(embedding), self.hnorm(target_hidden)], dim=-1)
-        )
+        fused = self.eh_proj(torch.cat([self.enorm(embedding), self.hnorm(target_hidden)], dim=-1))
         length = token_ids.shape[0]
         pool = self.fresh_pool(num_pages=-(-length // 4) + 1)
         positions = torch.arange(length)
         cos, sin = rotary_emb(positions)
         page_table = list(range(pool.num_pages))
-        return self.decoder(
-            fused, cos, sin, pool, 0, page_table, positions, length, 0
-        )
+        return self.decoder(fused, cos, sin, pool, 0, page_table, positions, length, 0)
 
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.head(self.shared_head["norm"](hidden))
 
 
-def load_mtp_head(path, config: ModelConfig) -> MtpDraftHead:
+def load_mtp_head(path, config: ModelConfig, *, linear_factory=None) -> MtpDraftHead:
     """DeepSeek checkpoint MTP-extra layer -> MtpDraftHead.
 
     Maps ``model.layers.{L}.`` names (L = num_hidden_layers); the decoder
@@ -84,26 +105,33 @@ def load_mtp_head(path, config: ModelConfig) -> MtpDraftHead:
     """
     from kairyu.engine.core.weights import CheckpointReader
 
-    head = MtpDraftHead(config)
+    head = MtpDraftHead(config, linear_factory=linear_factory)
     reader = CheckpointReader(path)
     prefix = f"model.layers.{config.num_hidden_layers}."
-    rename = {
+    direct = {
         "embed_tokens.weight": "embed_tokens.weight",
         "enorm.weight": "enorm.weight",
         "hnorm.weight": "hnorm.weight",
-        "eh_proj.weight": "eh_proj.weight",
         "shared_head.norm.weight": "shared_head.norm.weight",
-        "shared_head.head.weight": "head.weight",
     }
     state: dict[str, torch.Tensor] = {}
     for name in reader.names():
         if not name.startswith(prefix):
             continue
-        local = name[len(prefix):]
-        if local in rename:
-            state[rename[local]] = reader.tensor(name)
+        local = name[len(prefix) :]
+        if local in direct:
+            target = direct[local]
+        elif local.startswith("eh_proj."):
+            # Dense ``weight`` and every packed-format payload retain the
+            # local projection prefix.
+            target = local
+        elif local.startswith("shared_head.head."):
+            # The module's established local attribute is ``head`` even though
+            # the checkpoint identity is ``shared_head.head``.
+            target = f"head.{local[len('shared_head.head.') :]}"
         else:  # decoder block tensors keep their in-layer names
-            state[f"decoder.{local}"] = reader.tensor(name)
+            target = f"decoder.{local}"
+        state[target] = reader.tensor(name)
     missing = set(head.state_dict()) - set(state)
     if missing:
         raise KeyError(f"MTP layer missing tensors: {sorted(missing)[:5]}")

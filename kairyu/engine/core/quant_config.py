@@ -36,6 +36,18 @@ class QuantConfig:
     activation_bits: int | None = None
     group_size: int | None = None
     activation_dynamic: bool | None = None
+    ignored_layers: tuple[str, ...] = ()
+
+
+def _ignored_layers(quant: dict) -> tuple[str, ...]:
+    raw = quant.get("ignore", ())
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)) or any(
+        not isinstance(pattern, str) or not pattern for pattern in raw
+    ):
+        raise ValueError("quantization ignore must contain non-empty strings")
+    return tuple(raw)
 
 
 def _detect_compressed_tensors(quant: dict) -> QuantConfig:
@@ -49,12 +61,14 @@ def _detect_compressed_tensors(quant: dict) -> QuantConfig:
             weight_bits=8,
             activation_bits=activations.get("num_bits"),
             activation_dynamic=bool(activations.get("dynamic", False)),
+            ignored_layers=_ignored_layers(quant),
         )
     if weights.get("type") == "int" and weights.get("num_bits") == 8:
         return QuantConfig(
             method=QuantMethod.INT8,
             weight_bits=8,
             activation_bits=activations.get("num_bits"),
+            ignored_layers=_ignored_layers(quant),
         )
     if weights.get("type") == "float" and weights.get("num_bits") == 4:
         # compressed-tensors FP4 uses DIFFERENT tensor names (weight_packed)
@@ -64,9 +78,7 @@ def _detect_compressed_tensors(quant: dict) -> QuantConfig:
             "compressed-tensors FP4 checkpoints are not supported; "
             "use a modelopt NVFP4 checkpoint (quant_method: modelopt)"
         )
-    raise ValueError(
-        "unsupported compressed-tensors scheme: FP8/INT8 W8A8 are supported"
-    )
+    raise ValueError("unsupported compressed-tensors scheme: FP8/INT8 W8A8 are supported")
 
 
 def _detect_modelopt(quant: dict) -> QuantConfig:
@@ -77,19 +89,20 @@ def _detect_modelopt(quant: dict) -> QuantConfig:
             method=QuantMethod.NVFP4,
             weight_bits=4,
             group_size=quant.get("group_size", 16),
+            ignored_layers=_ignored_layers(quant),
         )
     if algo == "FP8":
         scheme = str(quant.get("activation_scheme", "dynamic")).lower()
         if scheme not in ("dynamic", "static"):
             raise ValueError(
-                f"unsupported modelopt FP8 activation_scheme {scheme!r}: "
-                "supported: dynamic, static"
+                f"unsupported modelopt FP8 activation_scheme {scheme!r}: supported: dynamic, static"
             )
         return QuantConfig(
             method=QuantMethod.FP8,
             weight_bits=8,
             activation_bits=8,
             activation_dynamic=scheme == "dynamic",
+            ignored_layers=_ignored_layers(quant),
         )
     raise ValueError(f"unsupported modelopt quant_algo {algo!r}; supported: NVFP4, FP8")
 
@@ -115,14 +128,14 @@ def detect_quantization(hf_config: dict) -> QuantConfig:
         scheme = str(quant.get("activation_scheme", "dynamic")).lower()
         if scheme not in ("dynamic", "static"):
             raise ValueError(
-                f"unsupported FP8 activation_scheme {scheme!r}: "
-                "supported: dynamic, static"
+                f"unsupported FP8 activation_scheme {scheme!r}: supported: dynamic, static"
             )
         return QuantConfig(
             method=QuantMethod.FP8,
             weight_bits=8,
             activation_bits=8,
             activation_dynamic=scheme == "dynamic",
+            ignored_layers=_ignored_layers(quant),
         )
     if method == "awq":
         version = str(quant.get("version", "gemm")).lower()
@@ -134,6 +147,7 @@ def detect_quantization(hf_config: dict) -> QuantConfig:
             method=QuantMethod.AWQ,
             weight_bits=quant.get("bits"),
             group_size=quant.get("group_size"),
+            ignored_layers=_ignored_layers(quant),
         )
     if method == "gptq":
         if quant.get("bits") != 4:
@@ -147,6 +161,7 @@ def detect_quantization(hf_config: dict) -> QuantConfig:
             method=QuantMethod.GPTQ,
             weight_bits=quant.get("bits"),
             group_size=quant.get("group_size"),
+            ignored_layers=_ignored_layers(quant),
         )
     supported = ", ".join(m.value for m in _SUPPORTED)
     raise ValueError(f"unsupported quant_method {method!r}; supported: {supported}")

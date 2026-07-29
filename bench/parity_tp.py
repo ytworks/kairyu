@@ -539,7 +539,8 @@ def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
     device = "cuda:0" if gpu else "cpu"
     dtype = torch.bfloat16 if gpu else torch.float32
     model, config, _ = load_model(
-        model_path, dtype=dtype, attention_backend=select_backend(profile)
+        model_path, dtype=dtype, attention_backend=select_backend(profile),
+        target_device=device,
     )
     model = model.to(device)
     pool = PagedKVPool(

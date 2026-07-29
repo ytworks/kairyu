@@ -36,7 +36,8 @@ def model_and_config(tmp_path_factory):
     # path, so it uses the backend that needs no plan step; FlashInfer's own
     # half of the contract is gated in test_flashinfer_tensor_decode.py
     model, config, _ = load_model(
-        str(path), dtype=torch.bfloat16, attention_backend=TorchAttentionBackend()
+        str(path), dtype=torch.bfloat16, attention_backend=TorchAttentionBackend(),
+        target_device="cuda:0",
     )
     return model.to("cuda:0"), config
 

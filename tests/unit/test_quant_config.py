@@ -71,9 +71,7 @@ def test_modelopt_fp8_unknown_activation_scheme_fails_loudly():
 
 
 def test_awq_with_group_size():
-    hf_config = {
-        "quantization_config": {"quant_method": "awq", "bits": 4, "group_size": 128}
-    }
+    hf_config = {"quantization_config": {"quant_method": "awq", "bits": 4, "group_size": 128}}
     config = detect_quantization(hf_config)
     assert config.method is QuantMethod.AWQ
     assert config.weight_bits == 4
@@ -81,12 +79,38 @@ def test_awq_with_group_size():
 
 
 def test_gptq():
-    hf_config = {
-        "quantization_config": {"quant_method": "gptq", "bits": 4, "group_size": 128}
-    }
+    hf_config = {"quantization_config": {"quant_method": "gptq", "bits": 4, "group_size": 128}}
     config = detect_quantization(hf_config)
     assert config.method is QuantMethod.GPTQ
     assert config.weight_bits == 4
+
+
+def test_checkpoint_ignore_metadata_is_preserved():
+    config = detect_quantization(
+        {
+            "quantization_config": {
+                "quant_method": "fp8",
+                "ignore": ["lm_head", r"re:model\.layers\.0\..*"],
+            }
+        }
+    )
+    assert config.ignored_layers == (
+        "lm_head",
+        r"re:model\.layers\.0\..*",
+    )
+
+
+@pytest.mark.parametrize("ignore", ["lm_head", [""]])
+def test_malformed_checkpoint_ignore_metadata_fails(ignore):
+    with pytest.raises(ValueError, match="ignore"):
+        detect_quantization(
+            {
+                "quantization_config": {
+                    "quant_method": "fp8",
+                    "ignore": ignore,
+                }
+            }
+        )
 
 
 def test_unsupported_method_raises_with_supported_list():

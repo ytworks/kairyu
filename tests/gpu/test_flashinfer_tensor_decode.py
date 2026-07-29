@@ -203,7 +203,8 @@ def _flashinfer_graph_runner(
     # why the model-level hook plans per instance and not per layer.
     backend = FlashInferBackend(device="cuda:0")
     model, config, _ = load_model(
-        llama_dir, dtype=torch.bfloat16, attention_backend=backend
+        llama_dir, dtype=torch.bfloat16, attention_backend=backend,
+        target_device="cuda:0",
     )
     cache = RadixKVCache(num_pages=num_pages, page_size=PAGE_SIZE)
     pool = PagedKVPool.for_cache(cache, config, dtype=torch.bfloat16, device="cuda:0")

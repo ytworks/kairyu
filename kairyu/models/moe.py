@@ -12,22 +12,69 @@ from torch import nn
 
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import SwiGluMlp
+from kairyu.quant.linear import (
+    ExpertScope,
+    LinearRole,
+    ModelScope,
+    make_linear,
+)
 
 
 class _ExpertMlp(nn.Module):
     """One expert: SwiGLU at moe_intermediate_size, HF names."""
 
-    def __init__(self, config: ModelConfig, intermediate_size: int, linear_factory=None):
+    def __init__(
+        self,
+        config: ModelConfig,
+        intermediate_size: int,
+        linear_factory=None,
+        *,
+        prefix: str,
+        layer_index: int,
+        expert_index: int | None,
+        expert_scope: ExpertScope,
+        model_scope: ModelScope = ModelScope.TARGET,
+    ):
         super().__init__()
-        make = linear_factory or (lambda i, o, b: nn.Linear(i, o, bias=b))
-        self.gate_proj = make(config.hidden_size, intermediate_size, False)
-        self.up_proj = make(config.hidden_size, intermediate_size, False)
-        self.down_proj = make(intermediate_size, config.hidden_size, False)
+        common = {
+            "layer_index": layer_index,
+            "expert_index": expert_index,
+            "expert_scope": expert_scope,
+            "model_scope": model_scope,
+        }
+        self.gate_proj = make_linear(
+            linear_factory,
+            config.hidden_size,
+            intermediate_size,
+            False,
+            qualified_name=f"{prefix}.gate_proj",
+            role=LinearRole.MLP_GATE,
+            shard_dim=0,
+            **common,
+        )
+        self.up_proj = make_linear(
+            linear_factory,
+            config.hidden_size,
+            intermediate_size,
+            False,
+            qualified_name=f"{prefix}.up_proj",
+            role=LinearRole.MLP_UP,
+            shard_dim=0,
+            **common,
+        )
+        self.down_proj = make_linear(
+            linear_factory,
+            intermediate_size,
+            config.hidden_size,
+            False,
+            qualified_name=f"{prefix}.down_proj",
+            role=LinearRole.MLP_DOWN,
+            shard_dim=1,
+            **common,
+        )
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(
-            nn.functional.silu(self.gate_proj(hidden)) * self.up_proj(hidden)
-        )
+        return self.down_proj(nn.functional.silu(self.gate_proj(hidden)) * self.up_proj(hidden))
 
 
 def _mix_experts(
@@ -41,25 +88,49 @@ def _mix_experts(
     for expert_id in topk_indices.unique():
         token_mask, slot = (topk_indices == expert_id).nonzero(as_tuple=True)
         expert_out = experts[int(expert_id)](hidden[token_mask])
-        out.index_add_(
-            0, token_mask, expert_out * topk_weights[token_mask, slot][:, None]
-        )
+        out.index_add_(0, token_mask, expert_out * topk_weights[token_mask, slot][:, None])
     return out
 
 
 class Qwen3MoeSparseBlock(nn.Module):
     """Softmax top-k routing (A8: fp32 softmax BEFORE top-k; renorm no eps)."""
 
-    def __init__(self, config: ModelConfig, linear_factory=None) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        linear_factory=None,
+        *,
+        prefix: str = "mlp",
+        layer_index: int = 0,
+        model_scope: ModelScope = ModelScope.TARGET,
+    ) -> None:
         super().__init__()
         moe = config.moe
         assert moe is not None
         self.top_k = moe.num_experts_per_tok
         self.norm_topk_prob = moe.norm_topk_prob
-        self.gate = nn.Linear(config.hidden_size, moe.num_experts, bias=False)
+        self.gate = make_linear(
+            linear_factory,
+            config.hidden_size,
+            moe.num_experts,
+            False,
+            qualified_name=f"{prefix}.gate",
+            model_scope=model_scope,
+            role=LinearRole.MOE_ROUTER,
+            layer_index=layer_index,
+        )
         self.experts = nn.ModuleList(
-            _ExpertMlp(config, moe.moe_intermediate_size, linear_factory)
-            for _ in range(moe.num_experts)
+            _ExpertMlp(
+                config,
+                moe.moe_intermediate_size,
+                linear_factory,
+                prefix=f"{prefix}.experts.{expert_index}",
+                layer_index=layer_index,
+                expert_index=expert_index,
+                expert_scope=ExpertScope.ROUTED,
+                model_scope=model_scope,
+            )
+            for expert_index in range(moe.num_experts)
         )
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -81,7 +152,15 @@ class DeepseekV3MoeBlock(nn.Module):
     routed outputs only; shared experts add unscaled.
     """
 
-    def __init__(self, config: ModelConfig, linear_factory=None) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        linear_factory=None,
+        *,
+        prefix: str = "mlp",
+        layer_index: int = 0,
+        model_scope: ModelScope = ModelScope.TARGET,
+    ) -> None:
         super().__init__()
         moe = config.moe
         assert moe is not None and moe.n_group and moe.topk_group
@@ -90,26 +169,57 @@ class DeepseekV3MoeBlock(nn.Module):
         self.topk_group = moe.topk_group
         self.norm_topk_prob = moe.norm_topk_prob
         self.routed_scaling_factor = moe.routed_scaling_factor
-        self.gate = nn.Linear(config.hidden_size, moe.num_experts, bias=False)
-        self.gate.register_buffer(
-            "e_score_correction_bias", torch.zeros(moe.num_experts)
+        self.gate = make_linear(
+            linear_factory,
+            config.hidden_size,
+            moe.num_experts,
+            False,
+            qualified_name=f"{prefix}.gate",
+            model_scope=model_scope,
+            role=LinearRole.MOE_ROUTER,
+            layer_index=layer_index,
         )
+        self.gate.register_buffer("e_score_correction_bias", torch.zeros(moe.num_experts))
         self.experts = nn.ModuleList(
-            _ExpertMlp(config, moe.moe_intermediate_size, linear_factory)
-            for _ in range(moe.num_experts)
+            _ExpertMlp(
+                config,
+                moe.moe_intermediate_size,
+                linear_factory,
+                prefix=f"{prefix}.experts.{expert_index}",
+                layer_index=layer_index,
+                expert_index=expert_index,
+                expert_scope=ExpertScope.ROUTED,
+                model_scope=model_scope,
+            )
+            for expert_index in range(moe.num_experts)
         )
         if moe.n_shared_experts:
             self.shared_experts = _ExpertMlp(
-                config, moe.moe_intermediate_size * moe.n_shared_experts, linear_factory
+                config,
+                moe.moe_intermediate_size * moe.n_shared_experts,
+                linear_factory,
+                prefix=f"{prefix}.shared_experts",
+                layer_index=layer_index,
+                expert_index=None,
+                expert_scope=ExpertScope.SHARED,
+                model_scope=model_scope,
             )
         else:
             self.shared_experts = None
 
     def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # routing is entirely fp32 (A6)
-        logits = nn.functional.linear(
-            hidden.to(torch.float32), self.gate.weight.to(torch.float32)
-        )
+        if getattr(self.gate, "is_quantized", False):
+            # An explicit policy may opt into a packed router.  Its projection
+            # returns the activation dtype, then routing resumes in fp32.
+            logits = self.gate(hidden).to(torch.float32)
+        else:
+            # Preserve the established DeepSeek route exactly: casting both
+            # operands before the matmul avoids bf16/fp16 top-k drift.
+            logits = nn.functional.linear(
+                hidden.to(torch.float32),
+                self.gate.weight.to(torch.float32),
+            )
         scores = logits.sigmoid()
         corrected = scores + self.gate.e_score_correction_bias
         tokens = corrected.shape[0]
@@ -125,9 +235,7 @@ class DeepseekV3MoeBlock(nn.Module):
         topk_indices = masked.topk(self.top_k, dim=-1).indices
         topk_weights = scores.gather(1, topk_indices)  # UNCORRECTED scores
         if self.norm_topk_prob:
-            topk_weights = topk_weights / (
-                topk_weights.sum(dim=-1, keepdim=True) + 1e-20
-            )
+            topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
         topk_weights = topk_weights * self.routed_scaling_factor
         return topk_indices, topk_weights.to(hidden.dtype)
 
@@ -139,11 +247,36 @@ class DeepseekV3MoeBlock(nn.Module):
         return out
 
 
-def build_mlp(config: ModelConfig, layer_index: int, linear_factory=None) -> nn.Module:
+def build_mlp(
+    config: ModelConfig,
+    layer_index: int,
+    linear_factory=None,
+    *,
+    prefix: str = "mlp",
+    model_scope: ModelScope = ModelScope.TARGET,
+) -> nn.Module:
     """Per-layer mlp choice: dense SwiGLU or the architecture's sparse block."""
     moe = config.moe
     if moe is None or not moe.is_sparse_layer(layer_index):
-        return SwiGluMlp(config, linear_factory=linear_factory)
+        return SwiGluMlp(
+            config,
+            linear_factory=linear_factory,
+            prefix=prefix,
+            layer_index=layer_index,
+            model_scope=model_scope,
+        )
     if config.architecture == "DeepseekV3ForCausalLM":
-        return DeepseekV3MoeBlock(config, linear_factory=linear_factory)
-    return Qwen3MoeSparseBlock(config, linear_factory=linear_factory)
+        return DeepseekV3MoeBlock(
+            config,
+            linear_factory=linear_factory,
+            prefix=prefix,
+            layer_index=layer_index,
+            model_scope=model_scope,
+        )
+    return Qwen3MoeSparseBlock(
+        config,
+        linear_factory=linear_factory,
+        prefix=prefix,
+        layer_index=layer_index,
+        model_scope=model_scope,
+    )

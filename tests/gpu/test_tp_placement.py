@@ -66,7 +66,9 @@ def _single_process_gpu_greedy(model_dir: str, prompt: list[int], max_new: int):
     from kairyu.engine.core.scheduler import EngineRequest, Scheduler
     from kairyu.models.loader import load_model
 
-    model, config, _ = load_model(model_dir, dtype=torch.bfloat16)
+    model, config, _ = load_model(
+        model_dir, dtype=torch.bfloat16, target_device="cuda:0"
+    )
     model = model.to("cuda:0")
     cache = RadixKVCache(num_pages=64, page_size=4)
     scheduler = Scheduler(cache, max_num_batched_tokens=6, page_size=4)

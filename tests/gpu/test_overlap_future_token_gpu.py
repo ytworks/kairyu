@@ -47,7 +47,8 @@ def _generate(
     from kairyu.models.loader import load_model
 
     model, config, _ = load_model(
-        model_dir, dtype=torch.bfloat16, attention_backend=select_backend(probe())
+        model_dir, dtype=torch.bfloat16, attention_backend=select_backend(probe()),
+        target_device="cuda:0",
     )
     model = model.to("cuda:0")
     cache = RadixKVCache(num_pages=128, page_size=16)
@@ -333,7 +334,9 @@ def test_steady_decode_feedback_profiler_has_no_host_scalar_sync(
 
     if not torch.cuda.is_available():  # pragma: no cover - CPU box
         pytest.skip("device sampler profiler gate needs CUDA")
-    model, config, _ = load_model(llama_dir, dtype=torch.bfloat16)
+    model, config, _ = load_model(
+        llama_dir, dtype=torch.bfloat16, target_device="cuda:0"
+    )
     model = model.to("cuda:0")
     cache = RadixKVCache(num_pages=128, page_size=16)
     scheduler = Scheduler(cache, max_num_batched_tokens=64, page_size=16)

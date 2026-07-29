@@ -308,7 +308,10 @@ def build_engine_loop(
         compute_device = "cuda" if gpu else "cpu"
         compute_dtype = torch.bfloat16 if gpu else torch.float32
         model, model_config, generation = load_model(
-            model_path, dtype=compute_dtype, attention_backend=select_backend(profile)
+            model_path,
+            dtype=compute_dtype,
+            attention_backend=select_backend(profile),
+            target_device=compute_device,
         )
         model = model.to(compute_device)
         default_eos = generation.eos_token_id

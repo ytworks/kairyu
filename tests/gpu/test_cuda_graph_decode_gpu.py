@@ -62,7 +62,8 @@ def _generate(model_dir: str, graph_backend, max_new: int = 6):
     # its own gates live in test_flashinfer_tensor_decode.py. This file is the
     # graph seam itself, so it uses the reference kernel.
     model, config, _ = load_model(
-        model_dir, dtype=torch.bfloat16, attention_backend=TorchAttentionBackend()
+        model_dir, dtype=torch.bfloat16, attention_backend=TorchAttentionBackend(),
+        target_device="cuda:0",
     )
     model = model.to("cuda:0")
     cache = RadixKVCache(num_pages=128, page_size=16)
@@ -150,7 +151,8 @@ def test_padding_rows_never_write_kv_into_an_allocatable_page(llama_dir):
 
     _require_cuda()
     model, config, _ = load_model(
-        llama_dir, dtype=torch.bfloat16, attention_backend=TorchAttentionBackend()
+        llama_dir, dtype=torch.bfloat16, attention_backend=TorchAttentionBackend(),
+        target_device="cuda:0",
     )
     cache = RadixKVCache(num_pages=16, page_size=16)
     pool = PagedKVPool.for_cache(cache, config, dtype=torch.bfloat16, device="cuda:0")
@@ -193,7 +195,9 @@ def test_an_incomplete_graph_config_is_rejected(llama_dir):
     from kairyu.models.loader import load_model
 
     _require_cuda()
-    model, config, _ = load_model(llama_dir, dtype=torch.bfloat16)
+    model, config, _ = load_model(
+        llama_dir, dtype=torch.bfloat16, target_device="cuda:0"
+    )
     cache = RadixKVCache(num_pages=32, page_size=16)
     pool = PagedKVPool.for_cache(cache, config, dtype=torch.bfloat16, device="cuda:0")
     with pytest.raises(ValueError, match="must be >= 1"):

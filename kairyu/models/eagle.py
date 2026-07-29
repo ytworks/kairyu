@@ -27,6 +27,7 @@ import torch
 from torch import nn
 
 from kairyu.models.layers import RMSNorm, apply_rope
+from kairyu.quant.linear import LinearRole, ModelScope, make_linear
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ class EagleConfig:
 class _EagleMidLayer(nn.Module):
     """The 2H-input decoder layer (checkpoint prefix ``midlayer.``)."""
 
-    def __init__(self, config: EagleConfig) -> None:
+    def __init__(self, config: EagleConfig, linear_factory=None) -> None:
         super().__init__()
         hidden = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -59,18 +60,88 @@ class _EagleMidLayer(nn.Module):
         self.hidden_norm = RMSNorm(hidden, config.rms_norm_eps)
         self.self_attn = nn.ModuleDict(
             {
-                "q_proj": nn.Linear(2 * hidden, hidden, bias=False),
-                "k_proj": nn.Linear(2 * hidden, hidden, bias=False),
-                "v_proj": nn.Linear(2 * hidden, hidden, bias=False),
-                "o_proj": nn.Linear(hidden, hidden, bias=False),
+                "q_proj": make_linear(
+                    linear_factory,
+                    2 * hidden,
+                    hidden,
+                    False,
+                    qualified_name="midlayer.self_attn.q_proj",
+                    model_scope=ModelScope.EAGLE_DRAFT,
+                    role=LinearRole.ATTENTION_QUERY,
+                    layer_index=0,
+                    shard_dim=0,
+                ),
+                "k_proj": make_linear(
+                    linear_factory,
+                    2 * hidden,
+                    hidden,
+                    False,
+                    qualified_name="midlayer.self_attn.k_proj",
+                    model_scope=ModelScope.EAGLE_DRAFT,
+                    role=LinearRole.ATTENTION_KEY,
+                    layer_index=0,
+                    shard_dim=0,
+                ),
+                "v_proj": make_linear(
+                    linear_factory,
+                    2 * hidden,
+                    hidden,
+                    False,
+                    qualified_name="midlayer.self_attn.v_proj",
+                    model_scope=ModelScope.EAGLE_DRAFT,
+                    role=LinearRole.ATTENTION_VALUE,
+                    layer_index=0,
+                    shard_dim=0,
+                ),
+                "o_proj": make_linear(
+                    linear_factory,
+                    hidden,
+                    hidden,
+                    False,
+                    qualified_name="midlayer.self_attn.o_proj",
+                    model_scope=ModelScope.EAGLE_DRAFT,
+                    role=LinearRole.ATTENTION_OUTPUT,
+                    layer_index=0,
+                    shard_dim=1,
+                ),
             }
         )
         self.post_attention_layernorm = RMSNorm(hidden, config.rms_norm_eps)
         self.mlp = nn.ModuleDict(
             {
-                "gate_proj": nn.Linear(hidden, config.intermediate_size, bias=False),
-                "up_proj": nn.Linear(hidden, config.intermediate_size, bias=False),
-                "down_proj": nn.Linear(config.intermediate_size, hidden, bias=False),
+                "gate_proj": make_linear(
+                    linear_factory,
+                    hidden,
+                    config.intermediate_size,
+                    False,
+                    qualified_name="midlayer.mlp.gate_proj",
+                    model_scope=ModelScope.EAGLE_DRAFT,
+                    role=LinearRole.MLP_GATE,
+                    layer_index=0,
+                    shard_dim=0,
+                ),
+                "up_proj": make_linear(
+                    linear_factory,
+                    hidden,
+                    config.intermediate_size,
+                    False,
+                    qualified_name="midlayer.mlp.up_proj",
+                    model_scope=ModelScope.EAGLE_DRAFT,
+                    role=LinearRole.MLP_UP,
+                    layer_index=0,
+                    shard_dim=0,
+                ),
+                "down_proj": make_linear(
+                    linear_factory,
+                    config.intermediate_size,
+                    hidden,
+                    False,
+                    qualified_name="midlayer.mlp.down_proj",
+                    model_scope=ModelScope.EAGLE_DRAFT,
+                    role=LinearRole.MLP_DOWN,
+                    layer_index=0,
+                    shard_dim=1,
+                ),
             }
         )
 
@@ -103,9 +174,7 @@ class _EagleMidLayer(nn.Module):
         context = nn.functional.scaled_dot_product_attention(
             query[None], key[None], value[None], is_causal=chunk_len > 1
         )[0]
-        attn_out = self.self_attn["o_proj"](
-            context.transpose(0, 1).reshape(chunk_len, -1)
-        )
+        attn_out = self.self_attn["o_proj"](context.transpose(0, 1).reshape(chunk_len, -1))
         hidden = hidden + attn_out  # residual = PRE-norm hidden (A2)
         normed = self.post_attention_layernorm(hidden)
         mlp_out = self.mlp["down_proj"](
@@ -117,17 +186,31 @@ class _EagleMidLayer(nn.Module):
 class EagleDraftHead(nn.Module):
     """SpecForge-shaped EAGLE-3 head: fc fusion + midlayer + reduced-vocab head."""
 
-    def __init__(self, config: EagleConfig) -> None:
+    def __init__(self, config: EagleConfig, linear_factory=None) -> None:
         super().__init__()
         hidden = config.hidden_size
         self.config = config
-        self.fc = nn.Linear(3 * hidden, hidden, bias=False)
-        self.midlayer = _EagleMidLayer(config)
-        self.norm = RMSNorm(hidden, config.rms_norm_eps)
-        self.lm_head = nn.Linear(hidden, config.draft_vocab_size, bias=False)
-        self.register_buffer(
-            "d2t", torch.zeros(config.draft_vocab_size, dtype=torch.int64)
+        self.fc = make_linear(
+            linear_factory,
+            3 * hidden,
+            hidden,
+            False,
+            qualified_name="fc",
+            model_scope=ModelScope.EAGLE_DRAFT,
+            role=LinearRole.DRAFT_FUSION,
         )
+        self.midlayer = _EagleMidLayer(config, linear_factory=linear_factory)
+        self.norm = RMSNorm(hidden, config.rms_norm_eps)
+        self.lm_head = make_linear(
+            linear_factory,
+            hidden,
+            config.draft_vocab_size,
+            False,
+            qualified_name="lm_head",
+            model_scope=ModelScope.EAGLE_DRAFT,
+            role=LinearRole.OUTPUT_HEAD,
+        )
+        self.register_buffer("d2t", torch.zeros(config.draft_vocab_size, dtype=torch.int64))
 
     def fuse(self, aux_hidden: torch.Tensor) -> torch.Tensor:
         """Target aux hiddens [T, 3H] -> the draft chain's initial hidden [T, H].
@@ -166,7 +249,7 @@ class EagleDraftHead(nn.Module):
         return drafted
 
 
-def load_eagle_head(path, config: EagleConfig) -> EagleDraftHead:
+def load_eagle_head(path, config: EagleConfig, *, linear_factory=None) -> EagleDraftHead:
     """SpecForge checkpoint -> EagleDraftHead; unknown tensors fail loudly.
 
     ``embed_tokens``/``t2d`` are accepted-and-ignored (embeds come from the
@@ -174,7 +257,7 @@ def load_eagle_head(path, config: EagleConfig) -> EagleDraftHead:
     """
     from kairyu.engine.core.weights import CheckpointReader
 
-    head = EagleDraftHead(config)
+    head = EagleDraftHead(config, linear_factory=linear_factory)
     reader = CheckpointReader(path)
     expected = dict(head.state_dict())
     ignored = ("embed_tokens.weight", "t2d")

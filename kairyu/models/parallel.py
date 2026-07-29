@@ -207,9 +207,7 @@ class RowParallelLinear(nn.Module):
             local_amax = self.local.activation_amax(x).contiguous()
             global_amax = self._comm.tensor_all_reduce_max(local_amax)
             activation_scale = (global_amax / 448.0).clamp(min=1e-12)
-            partial = self.local.forward_with_activation_scale(
-                x, activation_scale
-            )
+            partial = self.local.forward_with_activation_scale(x, activation_scale)
         else:
             partial = self.local(x)
         if self._context is None:
@@ -261,9 +259,7 @@ def load_tp_shard(
     state: dict[str, torch.Tensor] = {}
     expected = model.state_dict()
     quantized_buffer_dtypes = {
-        (
-            f"{module_name}.{buffer_name}" if module_name else buffer_name
-        ): buffer.dtype
+        (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
         for module_name, module in model.named_modules()
         if getattr(module, "is_quantized", False)
         for buffer_name, buffer in module.named_buffers(recurse=False)
@@ -310,6 +306,8 @@ def build_tp_model(
     device: str = "cpu",
     attention_backend=None,
     sequence_parallel: bool = False,
+    linear_capabilities=None,
+    linear_selection_policy=None,
 ):
     """Rank-sharded DenseDecoder: tp_view config + row-parallel/gathered wrappers.
 
@@ -336,7 +334,15 @@ def build_tp_model(
     model = DenseDecoder(
         local_config,
         attention_backend=attention_backend,
-        linear_factory=linear_factory(quant),
+        linear_factory=linear_factory(
+            quant,
+            device=device,
+            dtype=dtype,
+            tensor_parallel_size=tp,
+            tensor_parallel_rank=rank,
+            capabilities=linear_capabilities,
+            selection_policy=linear_selection_policy,
+        ),
     )
     reader = CheckpointReader(model_dir)
     # dtype is applied while loading, so a bf16 target never materializes the
