@@ -78,7 +78,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              count: ${KAIRYU_GPU_COUNT:-all}
               capabilities: [gpu]
 
 volumes:

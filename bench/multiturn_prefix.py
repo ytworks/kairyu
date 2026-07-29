@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from dataclasses import dataclass
 
 from kairyu.engine.core.radix_kv import RadixKVCache
 
@@ -25,6 +26,69 @@ NUM_SESSIONS = 64
 TURNS_PER_SESSION = 8
 SYSTEM_PROMPT_TOKENS = 512  # shared prefix across every session
 TURN_TOKENS = 128  # user turn + assistant reply appended per turn
+WORKLOAD_SEED = 42
+
+
+@dataclass(frozen=True)
+class WorkloadPrompt:
+    """One request in the fixed A7 workload geometry.
+
+    ``prompt_token_ids`` are synthetic IDs used only by this CPU RadixKV
+    simulator.  Real-engine harnesses should preserve ``sequence``, ``session``,
+    ``turn``, ``prompt_tokens``, and ``expected_cached_tokens`` while replacing
+    the IDs with text encoded by the checkpoint's tokenizer.
+    """
+
+    sequence: int
+    session: int
+    turn: int
+    prompt_token_ids: tuple[int, ...]
+    expected_cached_tokens: int
+
+    @property
+    def prompt_tokens(self) -> int:
+        return len(self.prompt_token_ids)
+
+
+def fixed_workload() -> tuple[WorkloadPrompt, ...]:
+    """Build the deterministic 64-session, 8-turn A7 workload.
+
+    The theoretical cached count assumes serialized requests, no eviction, and
+    a cache that retains every completed prompt: the first request is cold,
+    the other first-turn requests reuse the shared system prefix, and later
+    turns reuse each session's complete preceding prompt.
+    """
+
+    rng = random.Random(WORKLOAD_SEED)
+    system_prompt = tuple(range(SYSTEM_PROMPT_TOKENS))
+    histories: dict[int, tuple[int, ...]] = {
+        session: () for session in range(NUM_SESSIONS)
+    }
+    workload: list[WorkloadPrompt] = []
+    for turn in range(TURNS_PER_SESSION):
+        order = list(range(NUM_SESSIONS))
+        rng.shuffle(order)
+        for session in order:
+            new_turn = tuple(
+                rng.randrange(10_000, 1_000_000) for _ in range(TURN_TOKENS)
+            )
+            prompt = system_prompt + histories[session] + new_turn
+            expected_cached = (
+                0
+                if not workload
+                else SYSTEM_PROMPT_TOKENS + turn * TURN_TOKENS
+            )
+            workload.append(
+                WorkloadPrompt(
+                    sequence=len(workload),
+                    session=session,
+                    turn=turn,
+                    prompt_token_ids=prompt,
+                    expected_cached_tokens=expected_cached,
+                )
+            )
+            histories[session] += new_turn
+    return tuple(workload)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,25 +120,13 @@ def build_run_config(args: argparse.Namespace) -> dict:
 def main() -> None:
     args = build_parser().parse_args()
     print(f"config={json.dumps(build_run_config(args))}")
-    rng = random.Random(42)
     cache = RadixKVCache(num_pages=NUM_PAGES, page_size=PAGE_SIZE)
-    system_prompt = tuple(range(SYSTEM_PROMPT_TOKENS))
-    histories: dict[int, tuple[int, ...]] = {s: () for s in range(NUM_SESSIONS)}
 
     total_prompt_tokens = 0
-    # interleave sessions the way concurrent serving would
-    for _turn in range(TURNS_PER_SESSION):
-        order = list(range(NUM_SESSIONS))
-        rng.shuffle(order)
-        for session in order:
-            new_turn = tuple(
-                rng.randrange(10_000, 1_000_000) for _ in range(TURN_TOKENS)
-            )
-            prompt = system_prompt + histories[session] + new_turn
-            allocation = cache.allocate(prompt)
-            cache.free(allocation)
-            histories[session] = histories[session] + new_turn
-            total_prompt_tokens += len(prompt)
+    for request in fixed_workload():
+        allocation = cache.allocate(request.prompt_token_ids)
+        cache.free(allocation)
+        total_prompt_tokens += request.prompt_tokens
 
     shared_ratio = SYSTEM_PROMPT_TOKENS / (
         SYSTEM_PROMPT_TOKENS + (TURNS_PER_SESSION / 2 + 0.5) * TURN_TOKENS

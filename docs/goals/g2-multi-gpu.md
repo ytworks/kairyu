@@ -49,8 +49,10 @@ results are ever reported (goal acceptance criteria, carried from G1).
 ## 3. Definitions and measurement regimes
 
 - Metrics: TTFT (first streamed token incl. tokenize + queueing, m2 §5 convention),
-  TPOT, output tokens/s, goodput at a stated SLO, KV cache hit rate. Report p50/p99
-  over ≥3 runs, fixed seeds, warmup excluded.
+  TPOT, output tokens/s, goodput at a stated SLO, KV cache hit rate. For
+  latency/throughput distributions, report p50/p99 over ≥3 runs with fixed seeds
+  and warmup excluded. Deterministic accounting gates run one complete fixed trace
+  per declared topology/path unless their gate explicitly requires repetition.
 - **Two regimes** — every target below names its regime:
   - *latency-bound*: closed loop, concurrency 8.
   - *saturation*: open-loop arrival sweep to peak goodput.
@@ -71,7 +73,7 @@ results are ever reported (goal acceptance criteria, carried from G1).
 | A4 (TPOT scaling) | TPOT p50 at TP=8 ≤ ½ × TP=2 (≥50% efficiency; decode is bandwidth-bound and all-reduce latency does not shrink with N — linear TPOT scaling is not a defensible promise) | latency-bound |
 | A5 (throughput scaling) | Output tokens/s at TP=8 ≥ 2.8 × TP=2 (≥70% efficiency) | saturation |
 | A6 (vLLM comparison) | vs vLLM TP=4 and TP=8, ShareGPT @128 conc: goodput ≥ 0.95× vLLM AND TTFT p99 ≤ vLLM. On the 50%-shared-prefix multi-turn trace: TTFT p50 ≥20% better than vLLM (radix-KV structural edge — the G1 claim, preserved where it is defensible) | saturation |
-| A7 (KV invariance) | KV hit rate >80% @50% shared prefix preserved at TP=4/8 (`bench/multiturn_prefix.py`; guards that KV sharding does not break radix reuse) | — |
+| A7 (KV invariance) | On the fixed 50%-shared-prefix trace, the real native engine's prompt-token KV hit rate (`sum(cached_tokens) / sum(prompt_tokens)`, recomputed from engine-originated response usage) is strictly >80% independently at TP=4 and TP=8, both against the replica directly and through a single-replica gateway. `bench/tp_kv_hit_g2_a7_bench.py` verifies the committed raw trace, config, and physical topology; routing counters are diagnostic and never cache-hit truth | — |
 
 ### Stage 5.2 — DP replicas + routing (blocked on 5.1)
 
@@ -298,11 +300,16 @@ G1 rules carried forward verbatim, plus:
   results file** (no cross-session bases).
 - Required bench additions (named here, designed in m5/m6): topology arguments for
   `bench/serving_bench.py` (TP/PP/DP sweep), `bench/kv_transfer_bench.py` (B2), a P-D
-  mixed-workload trace. `bench/router_latency.py` and `bench/multiturn_prefix.py` are
-  reused as-is for A7/A8.
-- ≥3 runs, fixed seeds, warmup excluded, open-loop sweep for saturation claims, goodput
-  SLO stated per result, pinned vLLM/NCCL/driver versions, CUDA-graph parity disclosed
-  (m2 §5 controls).
+  mixed-workload trace. `bench/multiturn_prefix.py` remains the deterministic CPU
+  workload-geometry source and KV-manager sanity check. Formal A7 real-engine
+  evidence is collected and independently replayed by
+  `bench/tp_kv_hit_g2_a7_bench.py`; `bench/router_latency.py` remains reusable for
+  A8.
+- Latency/throughput/goodput claims use ≥3 runs, fixed seeds, warmup excluded,
+  open-loop sweeps for saturation claims, a stated goodput SLO, pinned
+  vLLM/NCCL/driver versions, and disclosed CUDA-graph parity (m2 §5 controls).
+  Deterministic accounting gates such as A7 use one complete fixed trace per
+  declared cell unless the gate says otherwise.
 
 ## 9. Human sign-off checklist (blocking)
 

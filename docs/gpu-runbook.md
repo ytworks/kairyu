@@ -61,7 +61,8 @@ fake and mirrored in `tests/gpu/`). The real runner is `PagedModelRunner`
 ```bash
 uv run python examples/serve.py &                 # swap engines= to KairyuBackend(gpu)
 uv run python bench/serving_bench.py --model kairyu --num-requests 256 --concurrency 128
-uv run python bench/multiturn_prefix.py           # now with real engine KV
+uv run python bench/multiturn_prefix.py           # CPU workload/KV-manager diagnostic
+# Real-engine TP4/8 direct+gateway A7 procedure: §6.
 # baselines on the SAME box, same trace:
 vllm serve meta-llama/Llama-3.1-8B-Instruct --enable-prefix-caching &
 uv run python bench/serving_bench.py --base-url http://localhost:8000 --model <vllm>
@@ -69,9 +70,11 @@ python -m sglang.launch_server --model-path ... &
 uv run python bench/serving_bench.py --base-url http://localhost:30000 --model <sglang>
 ```
 
-Controls checklist (m2-engine.md §5): ≥3 runs, fixed seeds, warmup excluded, open-loop
-arrival sweep, goodput SLO stated, CUDA-graph handicap disclosed. Results →
-`bench/results/<date>-<gpu>.json`; no number leaves this file without a config next to it.
+Controls checklist (m2-engine.md §5) for performance claims: ≥3 runs, fixed
+seeds, warmup excluded, open-loop arrival sweep, goodput SLO stated, CUDA-graph
+handicap disclosed. Deterministic accounting gates such as A7 use one complete
+fixed trace per declared cell. Results → `bench/results/<date>-<gpu>.json`; no
+number leaves this file without a config next to it.
 
 ## 3. Remaining pre-GPU-deferred interfaces (with the runner, day 3)
 
@@ -86,7 +89,7 @@ scheduler protocol §2.1.
 | Criterion | Where measured |
 |---|---|
 | TTFT ≥20% better vs vLLM @128 conc (or p99 win at equal tput) | `serving_bench.py`, step 2 |
-| KV hit >80% @50% shared prefix | `multiturn_prefix.py` on real engine (88.1% already shown at KV-manager level) |
+| KV hit >80% @50% shared prefix | `tp_kv_hit_g2_a7_bench.py` on the real native engine at TP4/8, direct and through the gateway; the existing 88.1% KV-manager result is diagnostic only |
 | Router −40% cost @97% quality | needs serving traffic + judge; pipeline ready (`m4-router-learning.md`) |
 | vLLM API compat pytest | already green; re-run with vLLM installed to un-skip cross-checks |
 
@@ -142,7 +145,12 @@ GPU-only remainder (design m5 §4.2).
 - Gates A3–A5: `bench/serving_bench.py --sweep-tp 2,4,8` (TP=2 base in same file;
   conc-64 report-only point).
 - Gate A6: vs pinned vLLM TP=4/8 (ShareGPT@128 + shared-prefix trace).
-- Gate A7: `bench/multiturn_prefix.py --tensor-parallel N` and `--pd`.
+- Gate A7: run `bench/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
+  and TP8, once through each replica's direct endpoint and once through its
+  single-replica gateway. Assemble
+  `bench/results/g2-a7-kv-hit-qwen3-32b-<gpu>-<date>/`; the verifier must
+  recompute each strict >80% verdict from raw engine prompt-token usage and
+  validate the fixed trace, configs, `/backends`, and physical topology.
 - Gates A8–A9: `--dp-replicas 2` + `multiturn_prefix.py --replicas 2`; DP-vs-TP sweep.
 - Gate A10: `bench/pd_mixed.py` (stream-copy KVHandoff on side stream; ≤5 ms p99).
 
@@ -185,10 +193,11 @@ image, and drill are unchanged.
 - 9.2 Re-run the smoke drill against the real fleet:
   `scripts/compose_smoke.sh` end to end, including the kill/recover step
   (drains one GPU replica — schedule accordingly).
-- 9.3 Measure the cache story under the gateway: `bench/multiturn_prefix.py`
-  through the gateway with per-session `user` ids; report
-  `kairyu_pool_decisions_total{reason="session_affinity"}` share and the
-  engine-level radix hit rate side by side (G2 A7/A8 through the M7 path).
+- 9.3 Repeat A7's formal gateway arm with per-session `user` ids using
+  `bench/tp_kv_hit_g2_a7_bench.py`. Record the
+  `kairyu_pool_decisions_total{reason="session_affinity"}` count beside the
+  engine-derived prompt-token hit rate, but never use routing counters as
+  cache-hit truth (G2 A7/A8 through the M7 path).
 - 9.4 Rolling-update drill on real weights (`docs/deployment.md` §5), one
   replica at a time, gateway `/metrics` watched throughout — gate C7 on
   hardware.
