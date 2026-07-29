@@ -95,7 +95,11 @@ release wait for an event query rather than a stream-ordering wait. Role
 devices are configured and probed independently, unsupported P2P pairs fail at
 construction, and ambiguous completion/cleanup retains ownership and fails
 closed. The related unit/benchmark matrix and 23 real two-GPU tests pass with
-no skips; the clean-commit Qwen3-32B blocking/deferred artifact is pending.
+no skips. The clean-commit Qwen3-32B blocking/deferred artifact passes every
+binding check and independent stored replay: eight outputs and 128 generated
+tokens per condition are exact, the 128 MiB P2P probe preserves source and
+destination bytes, and only the deferred event intervals overlap both role
+work intervals.
 The `kairyu-proc` result boundary now negotiates a versioned delta wire per
 request. One cumulative snapshot is followed by sequenced token/text/logprob
 deltas; empty non-terminal updates are suppressed, terminal detokenization can
@@ -467,6 +471,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [progress] m18 D3 P-D overlap validates on real Qwen3-32B
+- What: Retained `bench/results/issue-223-pd-overlap-qwen3-32b-rtxpro6000-2026-07-30.json` from clean implementation commit `a08c416` on two peer-accessible RTX PRO 6000 Blackwell GPUs. The blocking and deferred production backends each completed two rounds, eight outputs, and 128 generated tokens with exact token/text parity. A Qwen3-32B-layout 64-layer P2P probe copied 134,217,728 bytes with identical source-before, source-after, blocking-destination, and deferred-destination SHA-256 `438ce11a438299fd87132d874a96871e5383d274a7b84e13085069e55edcc2de`. Blocking role work begins after the copy interval; deferred source and destination role work both overlap it. Deferred returns with one incomplete completion and no publication, then finishes with zero pending or settled outcomes. All ten live checks and the independent stored replay pass. Artifact SHA-256: `215b3f5068ee0e8ba39c048fecfd01f5d4478120e60f86dd5cb2a69aa9923748`.
+- Why: The real checkpoint and raw KV evidence establish output safety, consumer dependency, physical completion ownership, and useful device overlap without treating host timing as correctness. Across the two fixed-order rounds, the diagnostic-only median deferred/blocking ratios are 0.9942 wall time, 1.2065 TTFT, 0.9948 completion latency, and 1.0059 output token/s; their mixed direction is exactly why OS/runtime/clock/thermal-sensitive short timing is recorded but non-binding.
+- Refs: issue #223; m18 D3; commit `a08c416`; `bench/pd_overlap_qwen.py`; `bench/results/issue-223-pd-overlap-qwen3-32b-rtxpro6000-2026-07-30.json`
 
 ### 2026-07-30 — [amendment] m18 D3 retains physical P-D completion ownership
 - What: Replaced stream-ordering-as-completion with an opaque retained completion queried by the production P-D coordinator before destination KV publication, decode adoption, source commit, or page release. Cross-device CUDA handoff now uses dedicated source-copy and destination dependency/completion streams, requires peer access, and exposes independently probed `pd_prefill_device`, `pd_decode_device`, and a serialized `pd_defer_handoff=false` control. Every mutation boundary reconciles partial success; uncertain completion or cleanup poisons/retains ownership and fails closed. Added exact byte, timeline, role/backend, retry, cancellation, partial-publication, and completion-loss coverage plus a clean-source Qwen3-32B evidence harness. The formal artifact remains pending and is not counted as passing evidence.
