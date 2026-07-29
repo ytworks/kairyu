@@ -113,6 +113,13 @@ retain local hashing. Cold success admits only the root needed for later
 discovery through a dedicated fast path, while a successful warm route promotes
 the same chain to full depth. It does not claim a 500-Pod deployment.
 
+F2a is closed by exact-source run `30411111758` at `c067cb8`. Shared cached
+prompt-work improved 37.9259x; the uniform paired median, exact median lower
+bound, and full-sample geometric mean were 1.002142, 0.999512, and 1.008610,
+with 21/21 ratios at or above 0.99. Worst-trace placement p99 was 0.145979 ms.
+The independently replayed raw artifact is retained under
+`bench/results/f2a-prefix-routing-500-2026-07-28/`.
+
 ### Stage F3 — NIC KV transfer + P/D pools (needs RDMA hardware)
 
 | Gate | Target | Where proven |

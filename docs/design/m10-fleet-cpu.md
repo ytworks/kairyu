@@ -791,3 +791,12 @@ over (α, β) (pure function over the dataset; no online learning).
   exact-source formal run is binding. A later evidence-only commit may retain
   those immutable bytes without rerunning when the source commit is an ancestor
   and every frozen gate-input hash is unchanged.
+
+  Exact-source run `30411111758` at `c067cb8` closes F2a. Shared cached
+  prompt-work improved 37.9259x over the non-zero HRW baseline. Across the 21
+  blank-root paired rounds, the goodput-ratio median was 1.002142, the exact
+  96.0823%-coverage median lower bound was 0.999512, the full-sample geometric
+  mean was 1.008610, and all 21 ratios met 0.99. Worst-trace placement p99 was
+  0.145979 ms. The independently replayed 24,709-row artifact is retained at
+  `bench/results/f2a-prefix-routing-500-2026-07-28/`; its evidence-only
+  retention commit does not repeat the measurement.
