@@ -9,7 +9,6 @@ gates its target with a bounded refine loop. All prompts are rendered as
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
@@ -22,6 +21,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
 )
 from kairyu.orchestration.budget import Budget, BudgetState
+from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.orchestration.trace import (
     TraceBudget,
     TraceError,
@@ -164,6 +164,7 @@ class Conductor:
         self._roles = tuple(roles)
         self._workers = dict(workers)
         self._shared_prefix = shared_prefix
+        self._prefix_fingerprint = prefix_root_fingerprint(shared_prefix)
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
         self._final_sampling_params = final_sampling_params or self._sampling_params
         self._final_tools = tuple(final_tools)
@@ -287,8 +288,10 @@ class Conductor:
         return f"{self._shared_prefix}{body}"
 
     def _cache_hint(self, session: str) -> CacheHint:
-        fingerprint = hashlib.sha256(self._shared_prefix.encode()).hexdigest()[:16]
-        return CacheHint(session_id=session, prefix_fingerprint=fingerprint)
+        return CacheHint(
+            session_id=session,
+            prefix_fingerprint=self._prefix_fingerprint,
+        )
 
     def _trace_event(
         self,

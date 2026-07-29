@@ -13,6 +13,7 @@ from kairyu.engine.backend import (
 from kairyu.engine.mock import MockBackend
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, RoleSpec
+from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.outputs import CompletionOutput
 
 
@@ -136,6 +137,29 @@ def _linear_roles() -> tuple[RoleSpec, ...]:
             prompt="[worker] execute: {planner}",
             depends_on=("planner",),
         ),
+    )
+
+
+def test_cache_hint_carries_only_an_exact_complete_shared_root() -> None:
+    worker = MockBackend()
+    empty = Conductor(roles=_linear_roles(), workers={"w": worker})
+    short = Conductor(
+        roles=_linear_roles(),
+        workers={"w": worker},
+        shared_prefix="s" * 255,
+    )
+    shared_prefix = "s" * 256 + "unused suffix"
+    complete = Conductor(
+        roles=_linear_roles(),
+        workers={"w": worker},
+        shared_prefix=shared_prefix,
+    )
+
+    assert empty._cache_hint("session").prefix_fingerprint == ""
+    assert short._cache_hint("session").prefix_fingerprint == ""
+    assert (
+        complete._cache_hint("session").prefix_fingerprint
+        == prefix_root_fingerprint(shared_prefix)
     )
 
 

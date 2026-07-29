@@ -1553,6 +1553,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "uvicorn" },
+    { name = "xxhash" },
 ]
 
 [package.optional-dependencies]
@@ -1645,6 +1646,7 @@ requires-dist = [
     { name = "triton", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=3.0" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "xgrammar", marker = "extra == 'engine'", specifier = ">=0.2.3" },
+    { name = "xxhash", specifier = ">=3.5" },
 ]
 provides-extras = ["hf", "engine", "otel", "gpu", "fleet", "bench", "bench-agentic"]
 

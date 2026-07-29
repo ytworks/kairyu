@@ -36,8 +36,11 @@ SLO vocabulary used by every gate below:
 - `DeploymentSpec` pools gain `discovery: static | k8s-endpoints | register`;
   **static remains the default** so every existing test, example, and compose file
   keeps working unchanged.
-- CPU-first discipline: F1/F2 gates run against CPU-mock fleets in CI (kind cluster);
-  GPU validation slots in per `docs/gpu-runbook.md`.
+- CPU-first discipline: F1 deployment/lifecycle gates run against CPU-mock
+  fleets in kind. F2a isolates selector quality and cost in a 500-logical-entry
+  CPU bench while reusing F1a's deployment precedent; later F2 gates use the
+  fixture named in their table row. GPU validation slots in per
+  `docs/gpu-runbook.md`.
 
 ## 3. Acceptance gates
 
@@ -70,10 +73,52 @@ repeat the binding drill.
 
 | Gate | Target | Where proven |
 |---|---|---|
-| F2a | Prefix-trie scorer: on a shared-prefix trace against mock replicas with simulated cache state, prefix-hit-rate ≥2× the session-hashing baseline, no goodput loss on a uniform trace, placement p99 <10 ms at 500 replicas | CPU bench |
+| F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform session-only (blank-root) rounds, the exact distribution-free one-sided ≥95% median lower bound and the full-sample geometric mean of the <10 ms SLO-goodput ratio are each ≥0.99, equivalently with ≥15/21 individual ratios ≥0.99 for the median bound; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
 | F2b | RadixKV KV-event index: staleness <500 ms under churn; router degrades gracefully to the approximate trie when the event stream dies | CPU test + chaos fixture |
 | F2c | Real-engine validation: TTFT p95 reduction ≥30% on a multi-turn+RAG trace vs session-hashing, 4–8 GPUs | GPU testbed |
 | F2d | Placement decisions land in the JSONL decision log (`prefix_match` reason) and feed `learning/dataset.py`; bandit-tuned α/β beats hand-tuned on a replayed trace | CPU bench |
+
+F2a reuses F1a run `30374404150` only for its kind deployment, ingress clock,
+discovery, placement-log, provenance, and hosted-runner precedents. It does not
+reuse F1a's measurements and does not repeat the kind drill. The one distinct
+binding run uses 500 logical eligible `ReplicaPool` entries through the public
+generation path, retains raw cache/placement/performance JSONL, and independently
+replays both policies under the same per-request session IDs and initial cache
+state. One fully retained and replayed non-binding uniform calibration pair
+warms CPython's policy-specific allocator path before the 21 binding paired
+rounds; it does not enter any metric. Alternating execution order, the exact
+median lower bound, full-sample geometric-mean guard, and sign-count guard make
+the declared 1% equivalence tolerance robust to host scheduling jitter. The
+location bound is the seventh ordered ratio for 21 pairs, with exact 96.0823%
+binomial coverage; no round is removed or clipped, and the former Student-t
+log-mean bound remains diagnostic only. Immediately before each calibration and
+binding arm's clock, that same pool and policy execute a declared 512-request
+run-in over disjoint prompts. Its
+deterministic trace digest, completed count, and positive interval remain in
+the arm summary and are independently bound before measurement, but its
+samples enter no metric; this prevents fresh-pool code and CPU-frequency ramp
+from favoring the second arm. SLO-goodput divides qualifying completions by the
+summed public-generation dispatch time of every offered request, so a slow
+non-qualifying request cannot disappear from the cost; round wall time is
+audit-only. The implementation
+carries one lazy cumulative-hash chain from placement through successful
+publication. The process-local approximate index uses versioned XXH3-64 keys;
+Conductor carries a root only when its shared prefix contains a complete
+256-character chunk, and that hint is the exact local XXH3 root. A blank
+`CacheHint` declares session-only affinity and bypasses native prefix work;
+binding uniform traffic exercises this production opt-out/HRW path rather than
+general cold prefix-tracking overhead. Sessionless requests
+retain local discovery, while malformed non-empty hints and custom chunk sizes
+retain local hashing. Cold success admits only the root needed for later
+discovery through a dedicated fast path, while a successful warm route promotes
+the same chain to full depth. It does not claim a 500-Pod deployment.
+
+F2a is closed by exact-source run `30411111758` at `c067cb8`. Shared cached
+prompt-work improved 37.9259x; the uniform paired median, exact median lower
+bound, and full-sample geometric mean were 1.002142, 0.999512, and 1.008610,
+with 21/21 ratios at or above 0.99. Worst-trace placement p99 was 0.145979 ms.
+The independently replayed raw artifact is retained under
+`bench/results/f2a-prefix-routing-500-2026-07-28/`.
 
 ### Stage F3 — NIC KV transfer + P/D pools (needs RDMA hardware)
 

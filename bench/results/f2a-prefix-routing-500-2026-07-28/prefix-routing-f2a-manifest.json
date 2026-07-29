@@ -1,0 +1,524 @@
+{
+  "config": {
+    "chunk_chars": 256,
+    "hit_rate_ratio_threshold": 2.0,
+    "placement_p99_limit_ms": 10.0,
+    "prefix_chunks": 4,
+    "prefix_hash_version": "xxh3-64-v1",
+    "profile": "formal",
+    "replicas": 500,
+    "seed": 254418982,
+    "shared_families": 64,
+    "shared_requests_per_family": 16,
+    "uniform_calibration_rounds": 1,
+    "uniform_equivalence_margin": 0.01,
+    "uniform_requests_per_round": 512,
+    "uniform_rounds": 21,
+    "uniform_sign_min_rounds": 15,
+    "uniform_warmup_requests_per_arm": 512
+  },
+  "environment": {
+    "cpu_count": 4,
+    "github": {
+      "GITHUB_EVENT_NAME": "pull_request",
+      "GITHUB_RUN_ATTEMPT": "1",
+      "GITHUB_RUN_ID": "30411111758",
+      "GITHUB_SHA": "f95dc03685b34adb92697c977e722845f4bad799"
+    },
+    "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+    "sched_affinity": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "gate_checks": {
+    "prefix_shared_and_uniform_p99_below_10ms": true,
+    "session_hrw_shared_hits_are_nonzero": true,
+    "shared_prefix_hit_rate_ratio_at_least_2": true,
+    "uniform_exact_median_goodput_lcb_noninferior": true,
+    "uniform_geometric_mean_goodput_guard_noninferior": true,
+    "uniform_paired_goodput_sign_gate": true
+  },
+  "metrics": {
+    "placement": {
+      "prefix_p99_ms": 0.145271,
+      "prefix_p99_ns": 145271,
+      "prefix_sample_count": 11776,
+      "prefix_shared_p99_ms": 0.016059,
+      "prefix_shared_p99_ns": 16059,
+      "prefix_shared_sample_count": 1024,
+      "prefix_uniform_p99_ms": 0.145979,
+      "prefix_uniform_p99_ns": 145979,
+      "prefix_uniform_sample_count": 10752,
+      "prefix_worst_trace_p99_ms": 0.145979,
+      "prefix_worst_trace_p99_ns": 145979
+    },
+    "shared": {
+      "hit_rate_ratio": 37.925925925925924,
+      "hit_rate_ratio_infinite": false,
+      "hrw_cached_prefix_chunks": 108,
+      "hrw_hit_rate": 0.02109375,
+      "hrw_prompt_chunks": 5120,
+      "hrw_request_hits": 27,
+      "prefix_cached_prefix_chunks": 4096,
+      "prefix_hit_rate": 0.8,
+      "prefix_prompt_chunks": 5120,
+      "prefix_request_hits": 1024,
+      "request_count_per_policy": 1024
+    },
+    "uniform": {
+      "diagnostic_paired_log_ratio_degrees_of_freedom": 20,
+      "diagnostic_paired_log_ratio_lcb95": 0.00046605778634973075,
+      "diagnostic_paired_log_ratio_lcb_method": "one-sided-95pct-student-t",
+      "diagnostic_paired_log_ratio_mean": 0.008572864580182133,
+      "diagnostic_paired_log_ratio_sample_stdev": 0.021539782471487134,
+      "diagnostic_paired_log_ratio_t_critical": 1.7247182429207863,
+      "diagnostic_paired_ratio_lcb95": 1.0004661664081538,
+      "equivalence_margin": 0.01,
+      "goodput_definition": "successful placements below the fixed 10ms placement SLO divided by summed raw dispatch intervals for every request in the arm; round wall is audit-only",
+      "noninferiority_floor": 0.99,
+      "paired_median_prefix_over_hrw_ratio": 1.002142367925882,
+      "paired_ratio_exact_median_lcb95": 0.9995121263518293,
+      "paired_ratio_exact_median_lcb_achieved_coverage": 0.9608230590820312,
+      "paired_ratio_exact_median_lcb_method": "one-sided-exact-binomial-order-statistic",
+      "paired_ratio_exact_median_lcb_order_rank": 7,
+      "paired_ratio_exact_median_lcb_requested_confidence": 0.95,
+      "paired_ratio_geometric_mean": 1.008609716818209,
+      "paired_round_count": 21,
+      "paired_rounds": [
+        {
+          "hrw_dispatch_sum_ns": 77063387,
+          "hrw_placement_slo_goodput_rps": 6643.881354449163,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 70557683,
+          "prefix_over_hrw_ratio": 1.0922040481402995,
+          "prefix_placement_slo_goodput_rps": 7256.474110693232,
+          "prefix_slo_success_count": 512,
+          "round_index": 0
+        },
+        {
+          "hrw_dispatch_sum_ns": 70622080,
+          "hrw_placement_slo_goodput_rps": 7249.857268435027,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 69714877,
+          "prefix_over_hrw_ratio": 1.013013047415977,
+          "prefix_placement_slo_goodput_rps": 7344.200004828238,
+          "prefix_slo_success_count": 512,
+          "round_index": 1
+        },
+        {
+          "hrw_dispatch_sum_ns": 70621360,
+          "hrw_placement_slo_goodput_rps": 7249.931182293855,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 70120777,
+          "prefix_over_hrw_ratio": 1.0071388684127103,
+          "prefix_placement_slo_goodput_rps": 7301.687487005456,
+          "prefix_slo_success_count": 512,
+          "round_index": 2
+        },
+        {
+          "hrw_dispatch_sum_ns": 70222171,
+          "hrw_placement_slo_goodput_rps": 7291.144558888674,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 70141825,
+          "prefix_over_hrw_ratio": 1.0011454791773666,
+          "prefix_placement_slo_goodput_rps": 7299.496413160051,
+          "prefix_slo_success_count": 512,
+          "round_index": 3
+        },
+        {
+          "hrw_dispatch_sum_ns": 69940946,
+          "hrw_placement_slo_goodput_rps": 7320.461464733406,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 69975085,
+          "prefix_over_hrw_ratio": 0.9995121263518293,
+          "prefix_placement_slo_goodput_rps": 7316.890004492313,
+          "prefix_slo_success_count": 512,
+          "round_index": 4
+        },
+        {
+          "hrw_dispatch_sum_ns": 70416871,
+          "hrw_placement_slo_goodput_rps": 7270.984818396716,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 70257274,
+          "prefix_over_hrw_ratio": 1.002271608203871,
+          "prefix_placement_slo_goodput_rps": 7287.501647160407,
+          "prefix_slo_success_count": 512,
+          "round_index": 5
+        },
+        {
+          "hrw_dispatch_sum_ns": 69798450,
+          "hrw_placement_slo_goodput_rps": 7335.406445272066,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 70167349,
+          "prefix_over_hrw_ratio": 0.994742583192077,
+          "prefix_placement_slo_goodput_rps": 7296.841156133745,
+          "prefix_slo_success_count": 512,
+          "round_index": 6
+        },
+        {
+          "hrw_dispatch_sum_ns": 69932709,
+          "hrw_placement_slo_goodput_rps": 7321.3237027611785,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 70063520,
+          "prefix_over_hrw_ratio": 0.9981329656289035,
+          "prefix_placement_slo_goodput_rps": 7307.6545397662,
+          "prefix_slo_success_count": 512,
+          "round_index": 7
+        },
+        {
+          "hrw_dispatch_sum_ns": 70367595,
+          "hrw_placement_slo_goodput_rps": 7276.076438309424,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 70217164,
+          "prefix_over_hrw_ratio": 1.002142367925882,
+          "prefix_placement_slo_goodput_rps": 7291.664471097124,
+          "prefix_slo_success_count": 512,
+          "round_index": 8
+        },
+        {
+          "hrw_dispatch_sum_ns": 70107761,
+          "hrw_placement_slo_goodput_rps": 7303.043096755008,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 70001837,
+          "prefix_over_hrw_ratio": 1.0015131602903506,
+          "prefix_placement_slo_goodput_rps": 7314.093771567737,
+          "prefix_slo_success_count": 512,
+          "round_index": 9
+        },
+        {
+          "hrw_dispatch_sum_ns": 69606193,
+          "hrw_placement_slo_goodput_rps": 7355.66733264668,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 69916381,
+          "prefix_over_hrw_ratio": 0.9955634431364518,
+          "prefix_placement_slo_goodput_rps": 7323.033496256049,
+          "prefix_slo_success_count": 512,
+          "round_index": 10
+        },
+        {
+          "hrw_dispatch_sum_ns": 69804260,
+          "hrw_placement_slo_goodput_rps": 7334.795899276061,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 69777009,
+          "prefix_over_hrw_ratio": 1.000390544111743,
+          "prefix_placement_slo_goodput_rps": 7337.660460625361,
+          "prefix_slo_success_count": 512,
+          "round_index": 11
+        },
+        {
+          "hrw_dispatch_sum_ns": 69436462,
+          "hrw_placement_slo_goodput_rps": 7373.647580143124,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 69771514,
+          "prefix_over_hrw_ratio": 0.9951978682876224,
+          "prefix_placement_slo_goodput_rps": 7338.238353262623,
+          "prefix_slo_success_count": 512,
+          "round_index": 12
+        },
+        {
+          "hrw_dispatch_sum_ns": 71646134,
+          "hrw_placement_slo_goodput_rps": 7146.233459016784,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 68727148,
+          "prefix_over_hrw_ratio": 1.0424720955975069,
+          "prefix_placement_slo_goodput_rps": 7449.748969650246,
+          "prefix_slo_success_count": 512,
+          "round_index": 13
+        },
+        {
+          "hrw_dispatch_sum_ns": 69614615,
+          "hrw_placement_slo_goodput_rps": 7354.777441489837,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 69821569,
+          "prefix_over_hrw_ratio": 0.9970359589026135,
+          "prefix_placement_slo_goodput_rps": 7332.97757889113,
+          "prefix_slo_success_count": 512,
+          "round_index": 14
+        },
+        {
+          "hrw_dispatch_sum_ns": 70052293,
+          "hrw_placement_slo_goodput_rps": 7308.825708246267,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 69898099,
+          "prefix_over_hrw_ratio": 1.002205982740675,
+          "prefix_placement_slo_goodput_rps": 7324.948851613261,
+          "prefix_slo_success_count": 512,
+          "round_index": 15
+        },
+        {
+          "hrw_dispatch_sum_ns": 72061466,
+          "hrw_placement_slo_goodput_rps": 7105.045573177765,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 69919566,
+          "prefix_over_hrw_ratio": 1.030633771382391,
+          "prefix_placement_slo_goodput_rps": 7322.699914927962,
+          "prefix_slo_success_count": 512,
+          "round_index": 16
+        },
+        {
+          "hrw_dispatch_sum_ns": 70059880,
+          "hrw_placement_slo_goodput_rps": 7308.03421301892,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 69855140,
+          "prefix_over_hrw_ratio": 1.0029309224775729,
+          "prefix_placement_slo_goodput_rps": 7329.453494760729,
+          "prefix_slo_success_count": 512,
+          "round_index": 17
+        },
+        {
+          "hrw_dispatch_sum_ns": 69629949,
+          "hrw_placement_slo_goodput_rps": 7353.1577626173475,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 69886534,
+          "prefix_over_hrw_ratio": 0.9963285487873815,
+          "prefix_placement_slo_goodput_rps": 7326.161002633211,
+          "prefix_slo_success_count": 512,
+          "round_index": 18
+        },
+        {
+          "hrw_dispatch_sum_ns": 70017423,
+          "hrw_placement_slo_goodput_rps": 7312.465641587523,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "session_hrw",
+            "prefix_aware"
+          ],
+          "prefix_dispatch_sum_ns": 69573084,
+          "prefix_over_hrw_ratio": 1.0063866509065489,
+          "prefix_placement_slo_goodput_rps": 7359.167806906476,
+          "prefix_slo_success_count": 512,
+          "round_index": 19
+        },
+        {
+          "hrw_dispatch_sum_ns": 69956395,
+          "hrw_placement_slo_goodput_rps": 7318.84483184132,
+          "hrw_slo_success_count": 512,
+          "placement_slo_ns": 10000000,
+          "policy_order": [
+            "prefix_aware",
+            "session_hrw"
+          ],
+          "prefix_dispatch_sum_ns": 69635134,
+          "prefix_over_hrw_ratio": 1.0046134900810273,
+          "prefix_placement_slo_goodput_rps": 7352.610249877598,
+          "prefix_slo_success_count": 512,
+          "round_index": 20
+        }
+      ],
+      "placement_slo_ns": 10000000,
+      "rounds_at_or_above_noninferiority_floor": 21,
+      "sign_gate_exact_one_sided_pvalue": 4.76837158203125e-07,
+      "sign_gate_min_rounds": 15
+    }
+  },
+  "passed": true,
+  "raw": {
+    "path": "prefix-routing-f2a-raw.jsonl",
+    "rows": 24709,
+    "sha256": "82bb2a2ff420dbd4e244685ce2a83f38379028604be3c1077e85daf5b31cd0f3"
+  },
+  "schema_version": "kairyu.f2a.prefix-routing.v3",
+  "source": {
+    "commit": "c067cb8a6d1aa661c82a56a007fc325011426459",
+    "expected_commit": "c067cb8a6d1aa661c82a56a007fc325011426459",
+    "expected_commit_matches": true,
+    "files": [
+      {
+        "path": "kairyu/orchestration/replica.py",
+        "sha256": "f8ba0b8bc9500342725061d7b563a10b9c59b5a938689ae5c0e140a4e660c5c0"
+      },
+      {
+        "path": "kairyu/orchestration/prefix_index.py",
+        "sha256": "1483cf39b951b77bb64600740d3e64d192bbc6d21c3972d2309b4c6681294727"
+      },
+      {
+        "path": "kairyu/orchestration/conductor.py",
+        "sha256": "cef8af6837b6956890fc2e099d7724c8e6f5afce82d38f05068d6ed555e48c42"
+      },
+      {
+        "path": "bench/prefix_routing_f2a_bench.py",
+        "sha256": "aa8858f4702215e4cbcfad8dd81f8a0b8a2377d2a238e691c9ad71aa88cf542e"
+      },
+      {
+        "path": ".github/workflows/f2a-prefix-routing.yml",
+        "sha256": "6eacc78c8639952ed050ddb2108c5995482be791e1f9073a9c2c71e836608536"
+      },
+      {
+        "path": "kairyu/engine/backend.py",
+        "sha256": "04918705a3d0d3dbd030804a4089f7c88920ee0f213424af374c907f8f6a45e7"
+      },
+      {
+        "path": "kairyu/sampling_params.py",
+        "sha256": "9cff168b0496b5e4fe57546421255109fd314092646bb2d6b0869bddc486afd5"
+      },
+      {
+        "path": "kairyu/telemetry.py",
+        "sha256": "b81408e6dd7ef2f5b0bb009f5724c58287cea82cda19482c51a388f16bd4d0eb"
+      },
+      {
+        "path": "kairyu/orchestration/router.py",
+        "sha256": "59c6ad3f21e40fb1ad651ec4dcdb275a539fb8afbcde4efd8bd7cd31de30fcf2"
+      },
+      {
+        "path": "pyproject.toml",
+        "sha256": "32214805f5e2614e01840db413db0c1d38137cf14feb8d11a4ce4df6d71cfc4f"
+      },
+      {
+        "path": "uv.lock",
+        "sha256": "6f53db9196b005152c7f7d856af22ad12097cfa50ed0621bd293b5b838c096c5"
+      }
+    ],
+    "git_clean_at_start": true
+  },
+  "source_end": {
+    "commit": "c067cb8a6d1aa661c82a56a007fc325011426459",
+    "expected_commit": "c067cb8a6d1aa661c82a56a007fc325011426459",
+    "expected_commit_matches": true,
+    "files": [
+      {
+        "path": "kairyu/orchestration/replica.py",
+        "sha256": "f8ba0b8bc9500342725061d7b563a10b9c59b5a938689ae5c0e140a4e660c5c0"
+      },
+      {
+        "path": "kairyu/orchestration/prefix_index.py",
+        "sha256": "1483cf39b951b77bb64600740d3e64d192bbc6d21c3972d2309b4c6681294727"
+      },
+      {
+        "path": "kairyu/orchestration/conductor.py",
+        "sha256": "cef8af6837b6956890fc2e099d7724c8e6f5afce82d38f05068d6ed555e48c42"
+      },
+      {
+        "path": "bench/prefix_routing_f2a_bench.py",
+        "sha256": "aa8858f4702215e4cbcfad8dd81f8a0b8a2377d2a238e691c9ad71aa88cf542e"
+      },
+      {
+        "path": ".github/workflows/f2a-prefix-routing.yml",
+        "sha256": "6eacc78c8639952ed050ddb2108c5995482be791e1f9073a9c2c71e836608536"
+      },
+      {
+        "path": "kairyu/engine/backend.py",
+        "sha256": "04918705a3d0d3dbd030804a4089f7c88920ee0f213424af374c907f8f6a45e7"
+      },
+      {
+        "path": "kairyu/sampling_params.py",
+        "sha256": "9cff168b0496b5e4fe57546421255109fd314092646bb2d6b0869bddc486afd5"
+      },
+      {
+        "path": "kairyu/telemetry.py",
+        "sha256": "b81408e6dd7ef2f5b0bb009f5724c58287cea82cda19482c51a388f16bd4d0eb"
+      },
+      {
+        "path": "kairyu/orchestration/router.py",
+        "sha256": "59c6ad3f21e40fb1ad651ec4dcdb275a539fb8afbcde4efd8bd7cd31de30fcf2"
+      },
+      {
+        "path": "pyproject.toml",
+        "sha256": "32214805f5e2614e01840db413db0c1d38137cf14feb8d11a4ce4df6d71cfc4f"
+      },
+      {
+        "path": "uv.lock",
+        "sha256": "6f53db9196b005152c7f7d856af22ad12097cfa50ed0621bd293b5b838c096c5"
+      }
+    ]
+  }
+}

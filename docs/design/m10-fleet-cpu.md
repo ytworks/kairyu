@@ -148,9 +148,36 @@ and tunnel lifecycle are not part of the gateway-under-test.
 
 Block-granular approximate trie: `observe(replica_id, token_blocks)`,
 `overlap(replica_id, token_blocks) -> int`. `ReplicaPool` gains optional
-`prefix_index=` + score `α·overlap − β·outstanding` over power-of-two
-random candidates; session affinity remains the tiebreak; `enabled=False`
-default. Decision reason `prefix_match` in the router log.
+`prefix_index=` + score `α·overlap − β·outstanding` over reverse-indexed warm
+members of the immutable eligible snapshot. Cold placement has a conservative
+score baseline of zero: the warm maximum wins when its score is non-negative,
+a zero warm/cold tie prefers reuse, and a negative warm maximum falls through
+to the existing session-HRW plus queue-depth valve (or least-outstanding for a
+request without a session). Equal-score warm candidates use session HRW as the
+deterministic tiebreak. `enabled=False` is the default. Only a successful unary
+generation or normally completed stream advertises the selected prefix. The
+approximate, process-local index uses versioned XXH3-64 cumulative keys
+(`xxh3-64-v1`), matching vLLM Router's non-cryptographic routing-key approach;
+the 64-bit key width is unchanged and a collision can only cause a cache miss,
+never alter generated output. Conductor carries a trusted
+`CacheHint.prefix_fingerprint` only when its shared prefix covers the complete
+default 256-character root chunk; the carried value is the exact same XXH3 key
+as local hashing. A blank `CacheHint` declares session-only affinity and bypasses
+native prefix hashing/publication; this covers empty/short Conductor prefixes
+and normal HTTP session traffic without charging them for undeclared
+cross-session reuse. Those callers retain same-session HRW locality but do not
+learn or discover cross-session prefixes until they provide an exact root.
+Sessionless callers retain local discovery, while
+malformed non-empty hints and custom chunk sizes retain the exact local
+fallback. Each tracked request owns one bounded, lazy hash chain shared by
+selection and successful publication. A cold success initially advertises only
+its root key through a dedicated root-publication fast path,
+which is sufficient to make the next related request discoverable; a successful
+warm `prefix_match` extends that same request-local chain and promotes the entry
+to full usable depth. Thus a complete prompt chunk is hashed at most once per
+request, one-off cold prompts do not populate unneeded deep index entries, and
+no process-global prompt cache needs invalidation. Decision reason
+`prefix_match` enters the router log.
 
 ### D7 — RadixKV events → gateway index (`radix_kv.py` event_sink + `kv_index.py`)
 
@@ -209,8 +236,10 @@ over (α, β) (pure function over the dataset; no online learning).
 - Tracing: span tree with InMemorySpanExporter; disabled → zero overhead
   (no otel import).
 - Helm: `helm template` golden test; kind smoke in CI.
-- M10b: prefix routing beats least-outstanding on a synthetic
-  shared-prefix workload (decision counts); staleness fallback chaos test.
+- M10b: prefix routing beats the same-request session-HRW baseline on the
+  replayable F2a 500-entry shared-prefix trace, remains non-inferior on the
+  paired uniform trace, and keeps placement p99 below 10 ms; staleness fallback
+  chaos test.
 
 ## 6. Review record (binding amendments)
 
@@ -672,3 +701,102 @@ over (α, β) (pure function over the dataset; no online learning).
   cap is binding. Exact-head source run `30399229234` at `be40b97` passed all
   26 replay checks; its complete artifact is retained under
   `bench/results/f1c-three-gateway/`.
+- **A30**: F2a compares prefix-aware routing with session hashing without
+  changing the request contract. Both arms receive the same ordered prompts,
+  the same per-request unique session IDs, 500 immutable eligible replica IDs,
+  and independently cloned initial simulated cache placement. The shared trace
+  is deliberately cross-session: it measures reuse that session affinity cannot
+  express, while keeping the complete request stream identical between arms.
+  The treatment differs only by enabling `PrefixIndex`. A warm maximum-score
+  candidate with a non-negative score is selected before ordinary session
+  placement; a zero warm/cold tie prefers reuse and session HRW breaks equal
+  warm scores. If no candidate has usable overlap, or the best warm score is
+  negative, the pre-F2 session-HRW and queue-depth behavior is retained without
+  scanning every cold replica. A bounded first-chunk reverse map limits warm
+  scoring to eligible candidates that can have non-zero overlap. This
+  supersedes D6's unimplemented power-of-two wording and the implementation's
+  former session-first bypass.
+
+  Cache truth belongs to the selected mock backend, not to `prefix_match` or
+  `PrefixIndex.overlap`. The backend reports whether the family was resident
+  before dispatch and updates its cache only after successful generation.
+  `ReplicaPool` likewise advertises an approximate prefix only after successful
+  unary completion or normal stream exhaustion; upstream error, client error,
+  and cancellation cannot create a false warm entry. Because cumulative chunk
+  keys are unusable after an ancestor is evicted, one over-cap prompt retains
+  the root-side bounded prefix rather than unreachable tail keys. Selection and
+  successful publication consume one request-local lazy key chain. A cold
+  success publishes only its already-computed XXH3-64 root through the native
+  cold fast path; a successful warm route extends that chain once and promotes
+  it to full usable depth.
+
+  F2a's distinct claim is selector quality and cost at 500 logical
+  `ReplicaPool` entries. Retained F1a run `30374404150` already proves the kind
+  deployment, NodePort ingress-to-selection clock, discovery, membership,
+  provenance, and hosted-runner capacity; it is not rerun and contributes none
+  of F2a's hit-rate, goodput, or 500-entry measurements. The F2a CPU bench
+  drives the public `ReplicaPool.generate` path and its production placement
+  logger against 500 concrete mock backends. It does not claim a 500-Pod
+  Kubernetes deployment.
+
+  Shared-prefix hit rate is cached prompt-work chunks divided by total prompt
+  chunks, derived from raw backend observations, and must beat the non-zero
+  session-HRW baseline by at least 2×. Uniform traffic uses 21 matched rounds
+  with alternating A/B order. Before them, one full non-binding uniform
+  calibration pair exercises both fresh policy pools; its raw selections,
+  cache outcomes, summaries, order, and `binding=false` marker are replayed but
+  enter no metric. This keeps CPython's first arena allocation out of a
+  steady-state goodput claim without discarding any binding sample after seeing
+  its value. Uniform calibration, run-in, and binding requests deliberately
+  carry blank root hints, so the no-loss claim binds the production session-only
+  opt-out/HRW path rather than general cold prefix-tracking overhead or a
+  trace-only family oracle. Immediately before every
+  calibration and binding arm's clock, that same pool and policy also execute a
+  declared 512-request uniform run-in over
+  disjoint prompts. Its deterministic trace digest, completed count, and
+  positive time interval remain in the arm summary and are independently bound
+  before the measured interval, but none of its requests enter a gate. Per-arm
+  run-in prevents pool construction, cold code, CPU-frequency ramp, or scheduler
+  migration from systematically favoring whichever arm happens to run second.
+  SLO goodput is the number of successful requests whose production placement
+  latency is below 10 ms divided by the summed end-to-end
+  `ReplicaPool.generate` dispatch intervals for every offered request in that
+  arm; a request missing the SLO remains in the denominator. Round wall time is
+  retained only for ordering and audit. Each paired round is the independent
+  experimental unit; the 512 request timings inside it may be arbitrarily
+  correlated. No Gaussian or symmetry assumption is made across those paired
+  round ratios. The binding location statistic is the exact distribution-free
+  one-sided lower confidence bound for the population median:
+  with 21 paired ratios, the largest order-statistic rank with at least 95%
+  coverage is the seventh (`P[Binomial(21, 0.5) >= 7] = 0.960823`), which must
+  be at least 0.99. This is mathematically identical to requiring at least
+  15/21 individual ratios to be at least 0.99. The geometric mean of all 21
+  ratios must independently be at least 0.99, so the resistant median cannot
+  conceal a small number of large losses. No round is trimmed, winsorized, or
+  excluded. The former Student-t log-mean lower bound remains in the manifest
+  as diagnostic evidence only. The 1% non-inferiority margin, exact median
+  inference, full-sample magnitude guard, and sign count jointly distinguish
+  systematic regression from time-local runner interference. Nearest-rank
+  treatment placement p99 is computed over each complete shared and uniform raw
+  population, and the worse value must be strictly below 10 ms.
+
+  Raw cache seeds, prompt/session hashes, selections, cache hits, receipt and
+  selection timestamps, round order, and wall times are JSONL. Prompt bodies
+  are excluded. An adjacent manifest binds row count and SHA-256, the clean
+  source commit, workflow and relevant source hashes at both ends of the
+  measurement, non-empty GitHub run identity tied to the expected head, runner
+  environment, all derived metrics, and every gate check. The independent
+  verifier reconstructs both policies, cache evolution, SLO-goodput numerator,
+  round intervals, and statistics rather than trusting the manifest. One clean
+  exact-source formal run is binding. A later evidence-only commit may retain
+  those immutable bytes without rerunning when the source commit is an ancestor
+  and every frozen gate-input hash is unchanged.
+
+  Exact-source run `30411111758` at `c067cb8` closes F2a. Shared cached
+  prompt-work improved 37.9259x over the non-zero HRW baseline. Across the 21
+  blank-root paired rounds, the goodput-ratio median was 1.002142, the exact
+  96.0823%-coverage median lower bound was 0.999512, the full-sample geometric
+  mean was 1.008610, and all 21 ratios met 0.99. Worst-trace placement p99 was
+  0.145979 ms. The independently replayed 24,709-row artifact is retained at
+  `bench/results/f2a-prefix-routing-500-2026-07-28/`; its evidence-only
+  retention commit does not repeat the measurement.
