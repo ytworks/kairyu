@@ -13,9 +13,11 @@ from torch import nn
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import SwiGluMlp
 from kairyu.quant.linear import (
+    CheckpointMemberLayout,
     ExpertScope,
     LinearRole,
     ModelScope,
+    bind_checkpoint_member_layout,
     make_linear,
 )
 
@@ -92,6 +94,54 @@ def _mix_experts(
     return out
 
 
+def route_experts(
+    block: nn.Module,
+    hidden: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Canonical Qwen/DeepSeek routing shared by local and EP execution."""
+
+    if hasattr(block, "n_group"):
+        # DeepSeek routing is entirely fp32 (A6).
+        if getattr(block.gate, "is_quantized", False):
+            # An explicit policy may opt into a packed router. Its projection
+            # returns the activation dtype, then routing resumes in fp32.
+            logits = block.gate(hidden).to(torch.float32)
+        else:
+            # Preserve the established DeepSeek route exactly: casting both
+            # operands before the matmul avoids bf16/fp16 top-k drift.
+            logits = nn.functional.linear(
+                hidden.to(torch.float32),
+                block.gate.weight.to(torch.float32),
+            )
+        scores = logits.sigmoid()
+        corrected = scores + block.gate.e_score_correction_bias
+        tokens = corrected.shape[0]
+        grouped = corrected.view(tokens, block.n_group, -1)
+        group_scores = grouped.topk(2, dim=-1).values.sum(dim=-1)
+        group_keep = group_scores.topk(block.topk_group, dim=-1).indices
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_keep, 1.0)
+        masked = corrected.masked_fill(
+            (group_mask[:, :, None].expand_as(grouped) == 0).reshape(tokens, -1),
+            float("-inf"),
+        )
+        topk_indices = masked.topk(block.top_k, dim=-1).indices
+        topk_weights = scores.gather(1, topk_indices)
+        if block.norm_topk_prob:
+            topk_weights = topk_weights / (
+                topk_weights.sum(dim=-1, keepdim=True) + 1e-20
+            )
+        topk_weights = topk_weights * block.routed_scaling_factor
+        return topk_indices, topk_weights.to(hidden.dtype)
+
+    logits = block.gate(hidden)
+    probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+    topk_weights, topk_indices = probs.topk(block.top_k, dim=-1)
+    if block.norm_topk_prob:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_indices, topk_weights.to(hidden.dtype)
+
+
 class Qwen3MoeSparseBlock(nn.Module):
     """Softmax top-k routing (A8: fp32 softmax BEFORE top-k; renorm no eps)."""
 
@@ -134,12 +184,7 @@ class Qwen3MoeSparseBlock(nn.Module):
         )
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        logits = self.gate(hidden)
-        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-        topk_weights, topk_indices = probs.topk(self.top_k, dim=-1)
-        if self.norm_topk_prob:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-        topk_weights = topk_weights.to(hidden.dtype)
+        topk_indices, topk_weights = route_experts(self, hidden)
         return _mix_experts(hidden, self.experts, topk_indices, topk_weights)
 
 
@@ -180,6 +225,11 @@ class DeepseekV3MoeBlock(nn.Module):
             layer_index=layer_index,
         )
         self.gate.register_buffer("e_score_correction_bias", torch.zeros(moe.num_experts))
+        bind_checkpoint_member_layout(
+            self.gate,
+            "e_score_correction_bias",
+            CheckpointMemberLayout(column_dim=0, row_dim=None),
+        )
         self.experts = nn.ModuleList(
             _ExpertMlp(
                 config,
@@ -208,36 +258,7 @@ class DeepseekV3MoeBlock(nn.Module):
             self.shared_experts = None
 
     def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # routing is entirely fp32 (A6)
-        if getattr(self.gate, "is_quantized", False):
-            # An explicit policy may opt into a packed router.  Its projection
-            # returns the activation dtype, then routing resumes in fp32.
-            logits = self.gate(hidden).to(torch.float32)
-        else:
-            # Preserve the established DeepSeek route exactly: casting both
-            # operands before the matmul avoids bf16/fp16 top-k drift.
-            logits = nn.functional.linear(
-                hidden.to(torch.float32),
-                self.gate.weight.to(torch.float32),
-            )
-        scores = logits.sigmoid()
-        corrected = scores + self.gate.e_score_correction_bias
-        tokens = corrected.shape[0]
-        grouped = corrected.view(tokens, self.n_group, -1)
-        group_scores = grouped.topk(2, dim=-1).values.sum(dim=-1)  # top-2 hardcoded
-        group_keep = group_scores.topk(self.topk_group, dim=-1).indices
-        group_mask = torch.zeros_like(group_scores)
-        group_mask.scatter_(1, group_keep, 1.0)
-        masked = corrected.masked_fill(
-            (group_mask[:, :, None].expand_as(grouped) == 0).reshape(tokens, -1),
-            float("-inf"),
-        )
-        topk_indices = masked.topk(self.top_k, dim=-1).indices
-        topk_weights = scores.gather(1, topk_indices)  # UNCORRECTED scores
-        if self.norm_topk_prob:
-            topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
-        topk_weights = topk_weights * self.routed_scaling_factor
-        return topk_indices, topk_weights.to(hidden.dtype)
+        return route_experts(self, hidden)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         topk_indices, topk_weights = self._route(hidden)

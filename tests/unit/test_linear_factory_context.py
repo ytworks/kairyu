@@ -425,7 +425,7 @@ def test_tp_builder_threads_rank_and_global_local_projection_shapes(tmp_path):
         comm=_IdentityComm(),
     )
     query = model.model.layers[0].self_attn.q_proj.linear_context
-    output = model.model.layers[0].self_attn.o_proj.local.linear_context
+    output = model.model.layers[0].self_attn.o_proj.linear_context
     gate = model.model.layers[0].mlp.gate_proj.linear_context
     head = model.lm_head.linear_context
 

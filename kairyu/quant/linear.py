@@ -72,6 +72,54 @@ class TensorParallelMode(Enum):
 
 
 @dataclass(frozen=True)
+class CheckpointMemberLayout:
+    """Physical checkpoint axes for one direct persistent linear member.
+
+    Quantized formats do not all store their logical ``[out, in]`` weight in
+    that order.  Keeping this exact-member contract on the concrete module
+    avoids both suffix parsing and assumptions that packed tensors share the
+    dense weight's physical axes.
+    """
+
+    column_dim: int | None
+    row_dim: int | None
+
+    def __post_init__(self) -> None:
+        if self.column_dim not in (None, 0, 1):
+            raise ValueError("column checkpoint shard dim must be 0, 1, or None")
+        if self.row_dim not in (None, 0, 1):
+            raise ValueError("row checkpoint shard dim must be 0, 1, or None")
+
+    def shard_dim(self, mode: TensorParallelMode) -> int | None:
+        return {
+            TensorParallelMode.REPLICATED: None,
+            TensorParallelMode.COLUMN: self.column_dim,
+            TensorParallelMode.ROW: self.row_dim,
+        }[mode]
+
+
+def bind_checkpoint_member_layout(
+    module: nn.Module,
+    member: str,
+    layout: CheckpointMemberLayout,
+) -> None:
+    """Attach an exact auxiliary-state layout to a contextual projection."""
+
+    if not member or "." in member:
+        raise ValueError("checkpoint member layout requires a direct member name")
+    if member not in module._parameters and member not in module._buffers:
+        raise ValueError(
+            f"checkpoint member {member!r} is not registered directly on "
+            f"{type(module).__name__}"
+        )
+    layouts = dict(getattr(module, "_kairyu_checkpoint_member_layouts", {}))
+    if member in layouts:
+        raise ValueError(f"checkpoint member {member!r} already has a layout")
+    layouts[member] = layout
+    object.__setattr__(module, "_kairyu_checkpoint_member_layouts", layouts)
+
+
+@dataclass(frozen=True)
 class TensorParallelPlacement:
     """Logical TP ownership of one projection at construction time."""
 
@@ -337,9 +385,20 @@ class QuantizedLinearBase(nn.Module):
     def dequantize(self) -> torch.Tensor:  # pragma: no cover - abstract
         raise NotImplementedError
 
+    def checkpoint_member_layouts(self) -> dict[str, CheckpointMemberLayout]:
+        """Exact direct-member layouts; concrete packed formats extend this."""
+
+        return {
+            "bias": CheckpointMemberLayout(column_dim=0, row_dim=None),
+        }
+
+    def _add_local_bias(self) -> bool:
+        return not bool(getattr(self, "_kairyu_row_parallel_omit_bias", False))
+
     def forward_reference(self, x: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize().to(x.dtype)
-        return nn.functional.linear(x, weight, self.bias)
+        bias = self.bias if self._add_local_bias() else None
+        return nn.functional.linear(x, weight, bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.device.type == "cuda":
@@ -350,10 +409,10 @@ class QuantizedLinearBase(nn.Module):
         """Production CUDA dispatch. Unsupported paths fail; none dequantize."""
         bound = getattr(self, "_fused_forward", None)
         if bound is not None:
-            return bound(x, self)
+            return bound(x, self, add_bias=self._add_local_bias())
         from kairyu.kernels.quant_gemm_gpu import linear_forward
 
-        return linear_forward(x, self)
+        return linear_forward(x, self, add_bias=self._add_local_bias())
 
 
 class Fp8Linear(QuantizedLinearBase):
@@ -390,13 +449,38 @@ class Fp8Linear(QuantizedLinearBase):
     def dequantize(self) -> torch.Tensor:
         return fp8.dequantize_fp8(self.weight, self.weight_scale)
 
+    def checkpoint_member_layouts(self) -> dict[str, CheckpointMemberLayout]:
+        return {
+            **super().checkpoint_member_layouts(),
+            "weight": CheckpointMemberLayout(column_dim=0, row_dim=1),
+            "weight_scale": CheckpointMemberLayout(column_dim=0, row_dim=None),
+            "input_scale": CheckpointMemberLayout(column_dim=None, row_dim=None),
+        }
+
     def forward_reference(self, x: torch.Tensor) -> torch.Tensor:
         input_scale = None if self.activation_dynamic else self.input_scale
         x_q, x_scale = fp8.quantize_fp8_activation(x.to(torch.float32), scale=input_scale)
         out = fp8.fp8_w8a8_matmul(x_q, x_scale, self.weight, self.weight_scale)
-        if self.bias is not None:
+        if self.bias is not None and self._add_local_bias():
             out = out + self.bias
         return out.to(x.dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Honor an optional row-parallel activation-scale owner.
+
+        The communicator is bound to this same projection object by the TP
+        builder.  Keeping the projection at its checkpoint-canonical module
+        path preserves parameter names, adapter targeting, and quantization
+        metadata while retaining the global per-token scale required by
+        dynamic FP8 row sharding.
+        """
+        comm = getattr(self, "_row_parallel_comm", None)
+        if comm is not None and self.activation_dynamic:
+            local_amax = self.activation_amax(x).contiguous()
+            global_amax = comm.tensor_all_reduce_max(local_amax)
+            activation_scale = (global_amax / fp8.FP8_MAX).clamp(min=1e-12)
+            return self.forward_with_activation_scale(x, activation_scale)
+        return super().forward(x)
 
     def activation_amax(self, x: torch.Tensor) -> torch.Tensor:
         """Per-token amax used to synchronize row-parallel quantization."""
@@ -423,11 +507,16 @@ class Fp8Linear(QuantizedLinearBase):
                 from kairyu.kernels.quant_gemm_gpu import fp8_linear_forward
 
                 bound = fp8_linear_forward
-            return bound(x, self, activation_scale=activation_scale)
+            return bound(
+                x,
+                self,
+                activation_scale=activation_scale,
+                add_bias=self._add_local_bias(),
+            )
         scaled = (x.to(torch.float32) / activation_scale).clamp(-fp8.FP8_MAX, fp8.FP8_MAX)
         x_q = scaled.to(torch.float8_e4m3fn)
         out = fp8.fp8_w8a8_matmul(x_q, activation_scale, self.weight, self.weight_scale)
-        if self.bias is not None:
+        if self.bias is not None and self._add_local_bias():
             out = out + self.bias
         return out.to(x.dtype)
 
@@ -445,11 +534,18 @@ class Int8Linear(QuantizedLinearBase):
     def dequantize(self) -> torch.Tensor:
         return int8.dequantize_int8(self.weight, self.weight_scale)
 
+    def checkpoint_member_layouts(self) -> dict[str, CheckpointMemberLayout]:
+        return {
+            **super().checkpoint_member_layouts(),
+            "weight": CheckpointMemberLayout(column_dim=0, row_dim=1),
+            "weight_scale": CheckpointMemberLayout(column_dim=0, row_dim=None),
+        }
+
     def forward_reference(self, x: torch.Tensor) -> torch.Tensor:
         # exact W8A8 reference: int32 accumulation (the GPU kernel's oracle)
         x_q, x_scale = int8.quantize_int8_activation(x.to(torch.float32))
         out = int8.int8_w8a8_matmul(x_q, x_scale, self.weight, self.weight_scale)
-        if self.bias is not None:
+        if self.bias is not None and self._add_local_bias():
             out = out + self.bias
         return out.to(x.dtype)
 
@@ -484,6 +580,15 @@ class AwqLinear(QuantizedLinearBase):
     def dequantize(self) -> torch.Tensor:
         return awq.dequantize_awq(self.qweight, self.qzeros, self.scales, self.group_size)
 
+    def checkpoint_member_layouts(self) -> dict[str, CheckpointMemberLayout]:
+        packed = CheckpointMemberLayout(column_dim=1, row_dim=0)
+        return {
+            **super().checkpoint_member_layouts(),
+            "qweight": packed,
+            "qzeros": packed,
+            "scales": packed,
+        }
+
 
 class GptqLinear(QuantizedLinearBase):
     quant_scheme = "gptq"
@@ -508,6 +613,16 @@ class GptqLinear(QuantizedLinearBase):
         return gptq.dequantize_gptq(
             self.qweight, self.qzeros, self.scales, self.g_idx, self.group_size
         )
+
+    def checkpoint_member_layouts(self) -> dict[str, CheckpointMemberLayout]:
+        packed = CheckpointMemberLayout(column_dim=1, row_dim=0)
+        return {
+            **super().checkpoint_member_layouts(),
+            "qweight": packed,
+            "qzeros": packed,
+            "scales": packed,
+            "g_idx": CheckpointMemberLayout(column_dim=None, row_dim=0),
+        }
 
 
 class NvFp4Linear(QuantizedLinearBase):
@@ -534,12 +649,24 @@ class NvFp4Linear(QuantizedLinearBase):
     def dequantize(self) -> torch.Tensor:
         return nvfp4.dequantize_nvfp4(self.weight, self.weight_scale, self.weight_scale_2)
 
+    def checkpoint_member_layouts(self) -> dict[str, CheckpointMemberLayout]:
+        packed = CheckpointMemberLayout(column_dim=0, row_dim=1)
+        replicated = CheckpointMemberLayout(column_dim=None, row_dim=None)
+        return {
+            **super().checkpoint_member_layouts(),
+            "weight": packed,
+            "weight_scale": packed,
+            "weight_scale_2": replicated,
+            "input_scale": replicated,
+        }
+
     def forward_reference(self, x: torch.Tensor) -> torch.Tensor:
         flat = x.reshape(-1, x.shape[-1]).to(torch.float32)
         packed, scale = nvfp4.quantize_nvfp4_with_scale(flat, self.input_scale)
         activation = nvfp4.dequantize_nvfp4(packed, scale, self.input_scale)
         weight = self.dequantize()
-        out = nn.functional.linear(activation, weight, self.bias)
+        bias = self.bias if self._add_local_bias() else None
+        out = nn.functional.linear(activation, weight, bias)
         return out.reshape(*x.shape[:-1], self.out_features).to(x.dtype)
 
 

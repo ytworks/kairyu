@@ -499,15 +499,16 @@ def _validate_checkpoint_index(
     return findings
 
 
-def _expected_checkpoint_shapes(
+def _expected_checkpoint_contract(
     model_config,
     quant_config,
-) -> dict[str, tuple[int, ...]]:
-    """Build only meta tensors to reuse the runtime model's exact state contract."""
+) -> tuple[dict[str, tuple[int, ...]], dict[str, int | None]]:
+    """Build meta tensors to reuse the runtime model's exact state contract."""
 
     import torch
 
     from kairyu.models.loader import build_model
+    from kairyu.models.parallel import checkpoint_member_specs
     from kairyu.quant.linear import linear_factory
 
     with torch.device("meta"):
@@ -515,7 +516,7 @@ def _expected_checkpoint_shapes(
             model_config,
             linear_factory=linear_factory(quant_config),
         )
-    return {
+    shapes = {
         name: tuple(tensor.shape)
         for name, tensor in model.state_dict().items()
         if not (
@@ -523,14 +524,19 @@ def _expected_checkpoint_shapes(
             and model_config.tie_word_embeddings
         )
     }
+    specs = checkpoint_member_specs(model)
+    return shapes, {
+        name: specs[name].shard_dim
+        for name in shapes
+    }
 
 
 def _checkpoint_shapes_are_compatible(
     actual: Mapping[str, tuple[int, ...]],
     expected: Mapping[str, tuple[int, ...]],
     *,
-    model_config,
     quant_config,
+    checkpoint_shard_dims: Mapping[str, int | None],
     tensor_parallel_size: object,
 ) -> bool:
     """Apply the same FP8 scale-shape contract as the runtime loaders."""
@@ -540,7 +546,6 @@ def _checkpoint_shapes_are_compatible(
         and not isinstance(tensor_parallel_size, bool)
         and tensor_parallel_size > 1
     )
-    shard_spec = None
     for name, expected_shape in expected.items():
         actual_shape = actual.get(name)
         if actual_shape == expected_shape:
@@ -551,16 +556,8 @@ def _checkpoint_shapes_are_compatible(
             and actual_shape == (1,)
         ):
             return False
-        if sharded:
-            from kairyu.models.parallel import (
-                _checkpoint_shard_dim,
-                tp_shard_spec,
-            )
-
-            if shard_spec is None:
-                shard_spec = tp_shard_spec(model_config)
-            if _checkpoint_shard_dim(name, shard_spec, quant_config) is not None:
-                return False
+        if sharded and checkpoint_shard_dims[name] is not None:
+            return False
     return True
 
 
@@ -602,6 +599,7 @@ def _validate_model(
     model_config = None
     quant_config = None
     expected_checkpoint_shapes: dict[str, tuple[int, ...]] | None = None
+    expected_checkpoint_shard_dims: dict[str, int | None] | None = None
     if config is not None:
         try:
             model_config = parse_model_config(config)
@@ -611,7 +609,10 @@ def _validate_model(
                 is_mla=model_config.is_mla,
                 architecture=model_config.architecture,
             )
-            expected_checkpoint_shapes = _expected_checkpoint_shapes(
+            (
+                expected_checkpoint_shapes,
+                expected_checkpoint_shard_dims,
+            ) = _expected_checkpoint_contract(
                 model_config,
                 quant_config,
             )
@@ -673,8 +674,8 @@ def _validate_model(
                 if not _checkpoint_shapes_are_compatible(
                     actual_shapes,
                     expected_checkpoint_shapes,
-                    model_config=model_config,
                     quant_config=quant_config,
+                    checkpoint_shard_dims=expected_checkpoint_shard_dims,
                     tensor_parallel_size=tensor_parallel_size,
                 ):
                     raise ValueError("checkpoint tensor shapes are incompatible")

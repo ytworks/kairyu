@@ -5,7 +5,8 @@ spawn verification incl. uneven all_to_all splits, 2026-07-03; §6 binding).
 Amended 2026-07-25 (D1: `tensor_reduce_scatter`, measured), 2026-07-26
 (**D4**: separate TP control/model serving groups; **D6**: opt-in sequence
 parallelism, lifting the §3 call-site non-goal), and 2026-07-27
-(**D2/A10**: compressed-FP8 dense TP).
+(**D2/A10**: compressed-FP8 dense TP), and 2026-07-30
+(**D2/A12**: canonical TP/EP parameter names).
 Milestone: M16 (roadmap Track E3 local half; G2-as-amended multi-GPU gates'
 code, NCCL swapped in on deploy day)
 Date: 2026-07-03
@@ -101,6 +102,43 @@ module's shard dim (the m8 seam, unused until now).
 > partial GEMM and output sum. No full FP32 activation or dequantized weight is
 > materialized. Other quantization formats remain rejected until their packed
 > shard/scale contracts are specified.
+
+> **Amended 2026-07-30 (issue #233).** Parallel execution is bound to the
+> parameter-owning module at its canonical HF/checkpoint leaf. TP row reduction
+> and SP scatter/gather behavior are attached to that same module object; they
+> do not register synthetic `local`, `norm`, or `embedding` children. The
+> canonical leaf therefore remains the single identity used by `state_dict`,
+> `named_parameters`, tied-weight identity, adapter lookup, quantization
+> metadata, and checkpoint loading after binding.
+>
+> EP preserves the global expert namespace in a global-length
+> `ModuleList`. An owned expert remains registered at
+> `experts.<global-index>`; a remotely owned slot is a `None` hole and therefore
+> owns no tensor and emits no state entry on this rank. Gate and shared-expert
+> modules likewise remain at their canonical paths. A local lookup of a remote
+> expert reports its deterministic owner-rank error instead of renumbering it
+> into a rank-local namespace.
+>
+> Canonical state from one parallel rank is explicitly **rank-local**. Its keys
+> are native checkpoint names, but its tensors contain only that rank's TP/EP
+> ownership and are loadable only into the same rank and topology. Requesting a
+> complete `full-hf` serialization from one sharded rank fails deterministically
+> with the recorded shard topology; a future collective exporter must gather TP
+> slices, union EP holes, validate replicated values, and restore ties before it
+> may claim a complete HF checkpoint.
+>
+> TP checkpoint member specifications are derived from the contextual linear
+> leaf itself: its canonical qualified name supplies the source prefix, its
+> typed TP placement supplies logical ownership, and each dense or packed
+> format supplies exact physical axes for every persistent member. Loading
+> binds the canonical module tree first and then slices into that tree. There
+> is no suffix rewrite table between checkpoint loading, adapter targeting, and
+> quantization policy; an unknown persistent member or a context/path
+> disagreement fails closed. These naming and tooling changes do not alter any
+> collective: column/row TP still uses the D2 shard and reduction rules
+> (including an unbiased local GEMM followed by one canonical bias add), SP
+> still uses D6 scatter/gather/reduce-scatter, and EP still uses D3's all-to-all
+> dispatch/combine.
 
 ### D3 — EP dispatch/combine (`models/moe_parallel.py`)
 
@@ -340,3 +378,10 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   num_layers/config hash; workers validate) — workers have no cache object so
   the m12 sizing check doesn't fire; shutdown = broadcast None sentinel;
   per-rank KV bytes are 1/tp (sizing note).
+- **A12 (issue #233)**: TP/SP execution behavior binds to the canonical
+  parameter-owning leaf without wrapper-owned parameter prefixes. EP retains a
+  global-index `ModuleList` with `None` holes for remote experts. Native-name
+  state is explicitly rank-local; one sharded rank cannot claim a full HF
+  export. Context-derived checkpoint slicing, adapter targeting, quantization
+  metadata, and post-bind enumeration therefore share one name and ownership
+  contract while D2/D3/D6 collective behavior remains unchanged.
