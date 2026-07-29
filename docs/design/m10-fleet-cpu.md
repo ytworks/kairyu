@@ -877,8 +877,9 @@ over (α, β) (pure function over the dataset; no online learning).
   ms. The independently replayed 2,196-row artifact is retained byte-identically
   at `bench/results/f2b-kv-event-retained/`; its evidence-only retention does
   not repeat the binding run.
-- **A32**: F2c measures the real D6 placement path, not a gateway mock. The
-  candidate is a production `ReplicaPool` with `PrefixIndex`; the control is
+- **A32 (closed 2026-07-29)**: F2c measures the real D6 placement path, not a
+  gateway mock. The candidate is a production `ReplicaPool` with
+  `PrefixIndex`; the control is
   the same pool with `prefix_index=None`. Both use `OpenAICompatBackend` to
   stream from real Qwen3-32B engines and `JsonlRouterLog` to retain the
   production selection reason and replica. Four independent TP2 engines occupy
@@ -960,6 +961,27 @@ over (α, β) (pure function over the dataset; no online learning).
   output digests, diagnostic output-match rate, and exact engine usage. Its
   offline verifier rehashes the raw JSONL and reconstructs the trace, routing
   contract, statistics, and manifest verdict without trusting derived fields.
+
+  The exact-source formal run retained at
+  `bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/` closes A32 and F2c.
+  All offline-replayed checks passed over 512 binding requests with zero
+  failures. Control-to-candidate pooled TTFT p95 fell from 527.957623 ms to
+  134.357747 ms: the pooled ratio was 0.2544858548, the seventh ordered ratio
+  was 0.2550841404, and the eight-round geometric mean was 0.2530080045.
+  Engine-token cache rate rose from 0.4994645560 to 0.9843917326 with every
+  round noninferior. Candidate/control SLO-goodput ratios were 0.9999979014
+  pooled, 0.9998437390 at the second ordered round, and 0.9999978783 by
+  geometric mean. Output matches were 239/256 (0.93359375), diagnostic only;
+  maximum paired receipt skew and schedule lateness were likewise diagnostic
+  at 5.182959 ms and 7.470463 ms.
+
+  The artifact binds clean source
+  `80b039b5d429c656871a480c2740740951b29b97`, runtime image
+  `kairyu-f2c@sha256:d2c01580964f461a3d3d2a02ced5303e69c681696d4a38179162084e1624121f`,
+  raw SHA-256
+  `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`,
+  and trace SHA-256
+  `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.
 
   This direct L2 fixture is the narrow F2c proof: normal HTTP session-only blank
   hints intentionally bypass cross-session `PrefixIndex`, so using that

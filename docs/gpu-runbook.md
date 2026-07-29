@@ -264,3 +264,23 @@ image, and drill are unchanged.
   `cached_tokens` rates, nearest-rank p95, crossover order statistics,
   goodput, frozen turn-2 transcript identity, diagnostic output-match rate,
   configuration, topology, and source/model provenance.
+
+  Closure evidence (2026-07-29): the exact-source formal artifact at
+  `bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/` passed the online run
+  and offline verification with all checks green, 512 binding requests, and
+  zero failures. Control-to-candidate pooled TTFT p95 was 527.957623 ms →
+  134.357747 ms; candidate/control ratios were 0.2544858548 pooled,
+  0.2550841404 at the seventh ordered round, and 0.2530080045 by geometric
+  mean. Cache rate was 0.4994645560 → 0.9843917326 with every round
+  noninferior. Goodput ratios were 0.9999979014 pooled, 0.9998437390 at the
+  second ordered round, and 0.9999978783 by geometric mean. Diagnostic output
+  agreement was 239/256 (0.93359375), with maximum paired receipt skew
+  5.182959 ms and schedule lateness 7.470463 ms.
+
+  The retained artifact pins source
+  `80b039b5d429c656871a480c2740740951b29b97`, image
+  `kairyu-f2c@sha256:d2c01580964f461a3d3d2a02ced5303e69c681696d4a38179162084e1624121f`,
+  raw SHA-256
+  `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`,
+  and trace SHA-256
+  `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.

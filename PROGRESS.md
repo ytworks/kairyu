@@ -377,15 +377,15 @@ is recorded as a failed, unmeasured item with its latency rather than a complete
 zero, so an all-empty slot carries `score: null` and cannot be compared with a
 published accuracy number.
 
-G5 F2c's first formal Qwen3-32B run stopped at round 1 family 0 on an
-over-strong cross-endpoint output-equality assertion. Targeted evidence showed
-individually repeatable but cross-endpoint-different continuations under fully
-warm caches, consistent with a BF16/TP near-tie across different
-cache-population execution shapes rather than semantic cache corruption. The
-corrected harness trace-binds a family-specific canonical assistant
-continuation, uses it as both arms' frozen turn-2 transcript after a complete
-turn-1 success barrier, and retains output match rate as diagnostic only. The
-formal performance run remains to be rerun from a clean pinned source.
+G5 F2c is closed by the retained exact-source Qwen3-32B 8-GPU artifact. All
+offline-replayed checks passed over 512 binding requests with zero failures.
+Control-to-candidate TTFT p95 fell 527.957623 → 134.357747 ms (pooled ratio
+0.2544858548; seventh ordered ratio 0.2550841404; geometric mean
+0.2530080045), cache rate rose 0.4994645560 → 0.9843917326 without a round
+regression, and goodput ratios passed at 0.9999979014 pooled, 0.9998437390
+second-order, and 0.9999978783 geometric mean. Output agreement was diagnostic
+at 239/256. Evidence is retained under
+`bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/`.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -394,6 +394,10 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [progress] F2c closes real-engine KV-aware TTFT routing
+- What: The exact-source Qwen3-32B TP2×4 formal run and independent offline verification passed every F2c check over 512 binding requests with zero failures. Control-to-candidate pooled TTFT p95 fell from 527.957623 ms to 134.357747 ms; candidate/control ratios were 0.2544858548 pooled, 0.2550841404 at the seventh ordered round, and 0.2530080045 by geometric mean. Engine-token cache rate rose from 0.4994645560 to 0.9843917326 with every round noninferior. SLO-goodput ratios were 0.9999979014 pooled, 0.9998437390 at the second ordered round, and 0.9999978783 by geometric mean. Output agreement remained diagnostic at 239/256 (0.93359375); maximum paired receipt skew and schedule lateness were diagnostic at 5.182959 ms and 7.470463 ms.
+- Refs: G5 F2c; m10 D6/A32; issue #181; source `80b039b5d429c656871a480c2740740951b29b97`; image `kairyu-f2c@sha256:d2c01580964f461a3d3d2a02ced5303e69c681696d4a38179162084e1624121f`; artifact `bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/`; raw SHA-256 `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`; trace SHA-256 `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`
 
 ### 2026-07-29 — [amendment] F2c replaces post-treatment output equality with a frozen transcript
 - What: The first formal F2c execution stopped at round 1 family 0 on the former exact cross-arm output assertion. A targeted fixed-endpoint reproduction reported fully warm prompt caches (2,544/2,546 cached tokens): each endpoint repeated its own continuation twice, yet B0 and A1 differed; a separate longer family matched between warm and cold arms. The corrected trace now predeclares one family-specific canonical assistant continuation, binds its digest and the resulting turn-2 prompt digest, waits for every turn-1 arm to succeed, and supplies that same frozen transcript to both turn-2 arms without consuming either observed output. Every output digest remains raw evidence, while cross-arm match count, total, and rate are diagnostic only. Prompt identity, paired prompt/completion work, routing, engine usage, provenance, and all formal TTFT/goodput/cache thresholds remain binding.
