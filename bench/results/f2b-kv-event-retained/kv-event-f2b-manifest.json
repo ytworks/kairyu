@@ -1,0 +1,604 @@
+{
+  "config": {
+    "churn_batch_size": 20,
+    "churn_epochs": 10,
+    "cooldown_seconds": 1.0,
+    "epoch_seconds": 1.0,
+    "freshness_limit_seconds": 0.5,
+    "heartbeat_seconds": 0.05,
+    "kill_offset_seconds": 3.25,
+    "profile": "formal",
+    "replay_buffer_steps": 4096,
+    "replicas": 200,
+    "restore_offset_seconds": 6.25,
+    "route_rate": 50.0,
+    "route_timeout_seconds": 2.0,
+    "seed": 175,
+    "source_churn_window_seconds": 10.0,
+    "source_epoch_seconds": 60.0,
+    "stale_after_seconds": 0.25,
+    "warmup_seconds": 1.0
+  },
+  "environment": {
+    "cpu_count": 4,
+    "github": {
+      "F2B_GITHUB_HEAD_SHA": "f3838065bacd986db497419e5bc5c25219ce3ec1",
+      "GITHUB_EVENT_NAME": "pull_request",
+      "GITHUB_REF": "refs/pull/271/merge",
+      "GITHUB_REPOSITORY": "ytworks/kairyu",
+      "GITHUB_RUN_ATTEMPT": "1",
+      "GITHUB_RUN_ID": "30417507859",
+      "GITHUB_SHA": "910581db7af09c079bb2eb271ff24d09fcf715d1",
+      "GITHUB_WORKFLOW": "F2b KV-event freshness and chaos",
+      "GITHUB_WORKFLOW_REF": "ytworks/kairyu/.github/workflows/f2b-kv-event-chaos.yml@refs/pull/271/merge"
+    },
+    "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+    "sched_affinity": [
+      0,
+      1,
+      2,
+      3
+    ]
+  },
+  "gate": "G5-F2b",
+  "gate_checks": {
+    "all_200_feed_identities_initialize_and_churn": true,
+    "all_planned_churn_operations_execute_once_with_new_generations": true,
+    "applied_sequence_keys_are_unique_per_replica_generation": true,
+    "approximate_oracle_seeds_are_frozen": true,
+    "binding_replay_is_contiguous_complete_and_causally_applied": true,
+    "every_exact_decision_uses_truth_younger_than_the_250ms_lease": true,
+    "every_route_after_actual_lease_expiry_uses_approximate_oracle": true,
+    "every_wire_receive_and_apply_causally_joins_an_emit": true,
+    "final_fleet_is_exactly_the_same_eligible_id_set": true,
+    "final_state_rebuilds_the_authoritative_200_replica_digest": true,
+    "first_stale_approximate_route_after_pause_is_strictly_below_500ms": true,
+    "fresh_routes_use_the_exact_oracle": true,
+    "kill_and_restore_follow_the_frozen_actual_time_schedule": true,
+    "logical_feeds_are_sequenced_synchronized_and_heartbeat_bound": true,
+    "logical_index_apply_freshness_is_strictly_below_500ms": true,
+    "max_actual_selected_route_gap_is_strictly_below_500ms": true,
+    "max_route_schedule_lateness_is_strictly_below_500ms": true,
+    "membership_audit_joins_drain_remove_and_add": true,
+    "pause_and_resume_action_lateness_is_strictly_below_500ms": true,
+    "physical_feed_rotates_once_and_is_contiguous_per_cache_lifetime": true,
+    "pool_router_index_publisher_and_subscriber_never_restart": true,
+    "publisher_reports_no_unjournaled_live_drop": true,
+    "recovery_snapshot_rebuilds_rotated_epoch_at_replay_completion": true,
+    "representative_wire_live_freshness_is_strictly_below_500ms": true,
+    "restore_recovery_completes_strictly_below_500ms": true,
+    "restored_routes_use_the_exact_oracle": true,
+    "route_oracle_inputs_recompute_from_the_frozen_trace": true,
+    "route_ticks_are_absolute_complete_and_monotonic": true,
+    "routing_overlaps_every_churn_epoch": true,
+    "schedule_matches_frozen_plan": true,
+    "topology_is_exactly_200_logical_199_in_process_1_physical": true
+  },
+  "metrics": {
+    "chaos": {
+      "first_stale_approximate_route_after_pause_ns": 251339950,
+      "max_action_lateness_ns": 1166648,
+      "recovery_authoritative_digest": "49ca9acf9be5552bb4134b8cd28f7d9386a3b6b5ced3d8a808a319b93d7871cc",
+      "recovery_convergence_ns": 50740933,
+      "recovery_index_digest": "49ca9acf9be5552bb4134b8cd28f7d9386a3b6b5ced3d8a808a319b93d7871cc",
+      "replay_event_count": 2,
+      "replay_high_sequence": 1,
+      "replay_mode": "events",
+      "replay_requested_from": 0
+    },
+    "logical_index": {
+      "apply_samples": 407,
+      "in_process_feeds": 199,
+      "max_apply_ns": 35925,
+      "replicas": 200
+    },
+    "representative_wire": {
+      "applied_events": 4,
+      "emitted_events": 4,
+      "heartbeat_samples": 180,
+      "live_apply_samples": 2,
+      "max_heartbeat_apply_ns": 50806312,
+      "max_live_apply_ns": 51454668,
+      "max_live_receive_ns": 51398473,
+      "physical_feeds": 1,
+      "received_events": 4
+    },
+    "routes": {
+      "fresh": 175,
+      "max_actual_selected_gap_ns": 21536138,
+      "max_exact_truth_age_ns": 232314498,
+      "max_schedule_lateness_ns": 3608193,
+      "restored": 185,
+      "stale": 140,
+      "total": 500
+    }
+  },
+  "passed": true,
+  "raw": {
+    "path": "kv-event-f2b-raw.jsonl",
+    "rows": 2196,
+    "sha256": "6a43544f672af438b7eb2d6cb74e35dd907cf357a0191bf42a54e8093ac0a6bb"
+  },
+  "reused_evidence": {
+    "f1a": {
+      "actions_run_id": "30374404150",
+      "artifact_digests_locally_verified": false,
+      "binding_to_f2b_kv_claims": false,
+      "claims": {
+        "churn_batch_size": 20,
+        "churn_epochs": 10,
+        "epoch_seconds": 60.0,
+        "max_withdrawal_seconds": 1.117,
+        "placement_p99_ms": 5.221,
+        "replicas": 200,
+        "request_2xx": 33000,
+        "request_total": 33000
+      },
+      "evidence_status": "external_context_only",
+      "kv_measurements_reused": false,
+      "scope": "Kind/NodePort/discovery/provenance/host-capacity and the real 200-replica 10x20 one-minute churn envelope only"
+    },
+    "f2a": {
+      "actions_run_id": "30411111758",
+      "claims": {
+        "logical_replicas": 500,
+        "worst_trace_placement_p99_ms": 0.145979
+      },
+      "commit": "c067cb8a6d1aa661c82a56a007fc325011426459",
+      "fallback_measurements_reused": false,
+      "manifest_sha256": "fb2858ed213be3f6b98463d30623e937d74403a7a7dd97356311439a7f7585f4",
+      "raw_sha256": "82bb2a2ff420dbd4e244685ce2a83f38379028604be3c1077e85daf5b31cd0f3",
+      "scope": "production ReplicaPool.generate and approximate PrefixIndex routing precedent only"
+    }
+  },
+  "schedule": [
+    {
+      "deadline_offset_s": 0.0,
+      "epoch": 0,
+      "ordinals": [
+        2,
+        38,
+        102,
+        161,
+        80,
+        59,
+        69,
+        197,
+        82,
+        15,
+        123,
+        101,
+        40,
+        155,
+        50,
+        169,
+        56,
+        64,
+        109,
+        30
+      ],
+      "source_deadline_offset_s": 0.0
+    },
+    {
+      "deadline_offset_s": 1.0,
+      "epoch": 1,
+      "ordinals": [
+        198,
+        157,
+        144,
+        149,
+        42,
+        48,
+        143,
+        103,
+        57,
+        74,
+        190,
+        12,
+        130,
+        18,
+        55,
+        112,
+        117,
+        23,
+        34,
+        41
+      ],
+      "source_deadline_offset_s": 60.0
+    },
+    {
+      "deadline_offset_s": 2.0,
+      "epoch": 2,
+      "ordinals": [
+        183,
+        189,
+        3,
+        95,
+        137,
+        156,
+        107,
+        28,
+        44,
+        164,
+        51,
+        96,
+        86,
+        188,
+        45,
+        22,
+        66,
+        1,
+        16,
+        151
+      ],
+      "source_deadline_offset_s": 120.0
+    },
+    {
+      "deadline_offset_s": 3.0,
+      "epoch": 3,
+      "ordinals": [
+        62,
+        163,
+        94,
+        35,
+        129,
+        147,
+        61,
+        134,
+        115,
+        105,
+        122,
+        84,
+        165,
+        92,
+        0,
+        75,
+        36,
+        20,
+        184,
+        135
+      ],
+      "source_deadline_offset_s": 180.0
+    },
+    {
+      "deadline_offset_s": 4.0,
+      "epoch": 4,
+      "ordinals": [
+        193,
+        39,
+        26,
+        43,
+        171,
+        148,
+        177,
+        87,
+        187,
+        78,
+        140,
+        24,
+        167,
+        108,
+        14,
+        133,
+        172,
+        179,
+        76,
+        104
+      ],
+      "source_deadline_offset_s": 240.0
+    },
+    {
+      "deadline_offset_s": 5.0,
+      "epoch": 5,
+      "ordinals": [
+        106,
+        110,
+        63,
+        170,
+        90,
+        186,
+        182,
+        178,
+        72,
+        25,
+        33,
+        85,
+        162,
+        173,
+        7,
+        121,
+        150,
+        158,
+        175,
+        6
+      ],
+      "source_deadline_offset_s": 300.0
+    },
+    {
+      "deadline_offset_s": 6.0,
+      "epoch": 6,
+      "ordinals": [
+        4,
+        67,
+        73,
+        195,
+        196,
+        126,
+        97,
+        159,
+        31,
+        79,
+        180,
+        111,
+        32,
+        29,
+        10,
+        138,
+        100,
+        192,
+        54,
+        83
+      ],
+      "source_deadline_offset_s": 360.0
+    },
+    {
+      "deadline_offset_s": 7.0,
+      "epoch": 7,
+      "ordinals": [
+        52,
+        37,
+        5,
+        71,
+        114,
+        21,
+        91,
+        17,
+        118,
+        141,
+        81,
+        68,
+        99,
+        98,
+        132,
+        93,
+        191,
+        160,
+        58,
+        166
+      ],
+      "source_deadline_offset_s": 420.0
+    },
+    {
+      "deadline_offset_s": 8.0,
+      "epoch": 8,
+      "ordinals": [
+        9,
+        11,
+        145,
+        136,
+        27,
+        120,
+        168,
+        153,
+        88,
+        174,
+        53,
+        181,
+        89,
+        199,
+        119,
+        142,
+        125,
+        47,
+        77,
+        139
+      ],
+      "source_deadline_offset_s": 480.0
+    },
+    {
+      "deadline_offset_s": 9.0,
+      "epoch": 9,
+      "ordinals": [
+        46,
+        154,
+        70,
+        8,
+        116,
+        124,
+        131,
+        127,
+        19,
+        152,
+        65,
+        49,
+        128,
+        194,
+        176,
+        146,
+        185,
+        13,
+        60,
+        113
+      ],
+      "source_deadline_offset_s": 540.0
+    }
+  ],
+  "schema_version": "kairyu.f2b.kv-event-chaos.v1",
+  "source": {
+    "commit": "f3838065bacd986db497419e5bc5c25219ce3ec1",
+    "expected_commit": "f3838065bacd986db497419e5bc5c25219ce3ec1",
+    "expected_commit_matches": true,
+    "files": [
+      {
+        "path": "kairyu/__init__.py",
+        "sha256": "2e36be880455c38999caa5e9566daca87f69d672440e7db1b138416f6a8c11e4"
+      },
+      {
+        "path": "kairyu/audit_io.py",
+        "sha256": "da5eb737f0e705e4e211a424a7136d0667f678e06503a12beaaf1247975992c7"
+      },
+      {
+        "path": "kairyu/outputs.py",
+        "sha256": "757589540074073c71cf9195a508260ab248f71e18dcbf164534f84cd5b74b7d"
+      },
+      {
+        "path": "kairyu/sampling_params.py",
+        "sha256": "9cff168b0496b5e4fe57546421255109fd314092646bb2d6b0869bddc486afd5"
+      },
+      {
+        "path": "kairyu/telemetry.py",
+        "sha256": "b81408e6dd7ef2f5b0bb009f5724c58287cea82cda19482c51a388f16bd4d0eb"
+      },
+      {
+        "path": "kairyu/engine/__init__.py",
+        "sha256": "61e5b89c863fa75a41c6ba2f93125a245c512c1d35df79c606ef6df14a69aebc"
+      },
+      {
+        "path": "kairyu/orchestration/__init__.py",
+        "sha256": "67398444ee6e80d816c9c6fbfc1d8fa81e714829b463cda8440fa30908800e17"
+      },
+      {
+        "path": "kairyu/orchestration/kv_index.py",
+        "sha256": "451ccdc8a96de3183c7a9f0ce8c010aa8638de91e68256d1dffa7c7058980a15"
+      },
+      {
+        "path": "kairyu/orchestration/kv_routing.py",
+        "sha256": "f2421ebba2cf036f50c71b252c9f41fc566ee5769d22ee549ea72cd5857847e6"
+      },
+      {
+        "path": "kairyu/orchestration/features.py",
+        "sha256": "b24d7e9f0d515d4de9be9fac90bbccb8f3fd3423c2c140edb06c354387f7c1e6"
+      },
+      {
+        "path": "kairyu/orchestration/prefix_index.py",
+        "sha256": "1483cf39b951b77bb64600740d3e64d192bbc6d21c3972d2309b4c6681294727"
+      },
+      {
+        "path": "kairyu/orchestration/replica.py",
+        "sha256": "c6be806eb1b6ae8dd143b755531f2cd5feb2f3b4bcfc1ac8bf5dd9884f5a53c1"
+      },
+      {
+        "path": "kairyu/orchestration/router.py",
+        "sha256": "59c6ad3f21e40fb1ad651ec4dcdb275a539fb8afbcde4efd8bd7cd31de30fcf2"
+      },
+      {
+        "path": "kairyu/engine/backend.py",
+        "sha256": "04918705a3d0d3dbd030804a4089f7c88920ee0f213424af374c907f8f6a45e7"
+      },
+      {
+        "path": "bench/fleet_churn_bench.py",
+        "sha256": "6fef2075f933a96f0619091f4a4b0ae9f68d930af69acefbea344fb950cb4dba"
+      },
+      {
+        "path": "bench/kv_event_f2b_bench.py",
+        "sha256": "fe66ec3557848fa4d5ed2bca7a5955421bc96ff20e1a290c43d4a67fad29850c"
+      },
+      {
+        "path": ".github/workflows/f2b-kv-event-chaos.yml",
+        "sha256": "adbbc5cedf99c603d6baacf559d68f63cf54e02eff485462aa91ced017a0c2b6"
+      },
+      {
+        "path": "pyproject.toml",
+        "sha256": "32214805f5e2614e01840db413db0c1d38137cf14feb8d11a4ce4df6d71cfc4f"
+      },
+      {
+        "path": "uv.lock",
+        "sha256": "6f53db9196b005152c7f7d856af22ad12097cfa50ed0621bd293b5b838c096c5"
+      }
+    ],
+    "git_clean_at_start": true
+  },
+  "source_end": {
+    "commit": "f3838065bacd986db497419e5bc5c25219ce3ec1",
+    "expected_commit": "f3838065bacd986db497419e5bc5c25219ce3ec1",
+    "expected_commit_matches": true,
+    "files": [
+      {
+        "path": "kairyu/__init__.py",
+        "sha256": "2e36be880455c38999caa5e9566daca87f69d672440e7db1b138416f6a8c11e4"
+      },
+      {
+        "path": "kairyu/audit_io.py",
+        "sha256": "da5eb737f0e705e4e211a424a7136d0667f678e06503a12beaaf1247975992c7"
+      },
+      {
+        "path": "kairyu/outputs.py",
+        "sha256": "757589540074073c71cf9195a508260ab248f71e18dcbf164534f84cd5b74b7d"
+      },
+      {
+        "path": "kairyu/sampling_params.py",
+        "sha256": "9cff168b0496b5e4fe57546421255109fd314092646bb2d6b0869bddc486afd5"
+      },
+      {
+        "path": "kairyu/telemetry.py",
+        "sha256": "b81408e6dd7ef2f5b0bb009f5724c58287cea82cda19482c51a388f16bd4d0eb"
+      },
+      {
+        "path": "kairyu/engine/__init__.py",
+        "sha256": "61e5b89c863fa75a41c6ba2f93125a245c512c1d35df79c606ef6df14a69aebc"
+      },
+      {
+        "path": "kairyu/orchestration/__init__.py",
+        "sha256": "67398444ee6e80d816c9c6fbfc1d8fa81e714829b463cda8440fa30908800e17"
+      },
+      {
+        "path": "kairyu/orchestration/kv_index.py",
+        "sha256": "451ccdc8a96de3183c7a9f0ce8c010aa8638de91e68256d1dffa7c7058980a15"
+      },
+      {
+        "path": "kairyu/orchestration/kv_routing.py",
+        "sha256": "f2421ebba2cf036f50c71b252c9f41fc566ee5769d22ee549ea72cd5857847e6"
+      },
+      {
+        "path": "kairyu/orchestration/features.py",
+        "sha256": "b24d7e9f0d515d4de9be9fac90bbccb8f3fd3423c2c140edb06c354387f7c1e6"
+      },
+      {
+        "path": "kairyu/orchestration/prefix_index.py",
+        "sha256": "1483cf39b951b77bb64600740d3e64d192bbc6d21c3972d2309b4c6681294727"
+      },
+      {
+        "path": "kairyu/orchestration/replica.py",
+        "sha256": "c6be806eb1b6ae8dd143b755531f2cd5feb2f3b4bcfc1ac8bf5dd9884f5a53c1"
+      },
+      {
+        "path": "kairyu/orchestration/router.py",
+        "sha256": "59c6ad3f21e40fb1ad651ec4dcdb275a539fb8afbcde4efd8bd7cd31de30fcf2"
+      },
+      {
+        "path": "kairyu/engine/backend.py",
+        "sha256": "04918705a3d0d3dbd030804a4089f7c88920ee0f213424af374c907f8f6a45e7"
+      },
+      {
+        "path": "bench/fleet_churn_bench.py",
+        "sha256": "6fef2075f933a96f0619091f4a4b0ae9f68d930af69acefbea344fb950cb4dba"
+      },
+      {
+        "path": "bench/kv_event_f2b_bench.py",
+        "sha256": "fe66ec3557848fa4d5ed2bca7a5955421bc96ff20e1a290c43d4a67fad29850c"
+      },
+      {
+        "path": ".github/workflows/f2b-kv-event-chaos.yml",
+        "sha256": "adbbc5cedf99c603d6baacf559d68f63cf54e02eff485462aa91ced017a0c2b6"
+      },
+      {
+        "path": "pyproject.toml",
+        "sha256": "32214805f5e2614e01840db413db0c1d38137cf14feb8d11a4ce4df6d71cfc4f"
+      },
+      {
+        "path": "uv.lock",
+        "sha256": "6f53db9196b005152c7f7d856af22ad12097cfa50ed0621bd293b5b838c096c5"
+      }
+    ]
+  },
+  "topology": {
+    "fault": "same-subscriber-object live socket close/reconnect",
+    "in_process_feeds": 199,
+    "logical_replicas": 200,
+    "physical_zmq_feeds": 1,
+    "representative_replica_id": "replica-193",
+    "wire_scope": "one representative production ZMQ source gates exact routing for the same 200-entry logical pool; this is not 200 physical streams",
+    "zmq_transport": "ipc"
+  }
+}

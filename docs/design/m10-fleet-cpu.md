@@ -2,8 +2,8 @@
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
 2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
-2026-07-28). Reviewed (1-reviewer panel with repo-line evidence; §6 binding;
-covers M10a+M10b).
+2026-07-28; D7/A31 amended 2026-07-28). Reviewed (1-reviewer panel with
+repo-line evidence; §6 binding; covers M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
 Depends on: m7 ReplicaPool/JsonlRouterLog, m7 deploy (spec/builder/prober),
@@ -182,9 +182,14 @@ no process-global prompt cache needs invalidation. Decision reason
 ### D7 — RadixKV events → gateway index (`radix_kv.py` event_sink + `kv_index.py`)
 
 `RadixKVCache(event_sink=...)`: emits BlockStored/BlockRemoved
-(vLLM-compatible schema) from allocate/commit/evict. ZMQ PUB publisher +
-gateway subscriber updating the trie; staleness > 500 ms → graceful
-fallback to the approximate trie (chaos test kills the publisher).
+(vLLM-compatible schema) from allocate/commit/evict. A background ZMQ
+publisher and gateway subscriber update a separate exact block-hash index.
+Only a contiguous, high-water-confirmed source epoch inside its route-time
+lease may enter exact scoring. The default lease is 400 ms and F2b uses
+250 ms; expiry at the boundary, a sequence gap, an epoch transition, or an
+inactive member makes the whole eligible request fall back to the approximate
+trie. Bounded replay or an authoritative snapshot restores exact routing
+without restarting the pool, router, index, publisher, or subscriber.
 
 **Incremental hash-chain amendment (2026-07-27, issue #220).** Event-enabled
 radix nodes retain the SHA-256 continuation state for the canonical
@@ -284,7 +289,8 @@ over (α, β) (pure function over the dataset; no online learning).
   allocate; guard the _release double-fire); BlockRemoved only from
   _ensure_free eviction; _split emits nothing; release_preempted emits
   nothing (never stored); vLLM schema fields block_hashes/parent_block_hash/
-  token_ids/block_size + ts; replay endpoint out of scope (recorded).
+  token_ids/block_size + ts. Its original replay-endpoint non-goal is
+  superseded by A31's bounded recovery protocol.
   Block hashes use the node-cached incremental SHA continuation while remaining
   exactly compatible with the original `sha256(repr(prefix))[:16]` values.
 - **A14**: drain cancellation is ownership-scoped. `_ReplicaEntry` separately
@@ -800,3 +806,73 @@ over (α, β) (pure function over the dataset; no online learning).
   0.145979 ms. The independently replayed 24,709-row artifact is retained at
   `bench/results/f2a-prefix-routing-500-2026-07-28/`; its evidence-only
   retention commit does not repeat the measurement.
+- **A31**: F2b makes exact KV-event placement a recoverable, fail-closed
+  protocol instead of treating arrival recency as cache truth. Each source
+  owns a cache-lifetime epoch and monotonically increasing sequence. The
+  publisher mirrors the authoritative hash set and appends a serialized delta
+  to a bounded replay journal before attempting non-blocking PUB delivery.
+  Heartbeats carry the current high-water mark. A subscriber that observes a
+  gap, an epoch change, or a stale lease may stage deltas but cannot use them
+  for production exact routing until a matching high-water confirmation,
+  complete replay, or authoritative snapshot proves completeness. Retired
+  epochs are retained for the process lifetime, and inactive replica
+  tombstones reject delayed frames across remove/re-add; replacing a cache
+  rotates epoch, sequence, journal, and mirror on the same publisher object
+  and socket thread. Each cache owns a
+  generation-bound publisher callback, so an old cache racing the rotation
+  cannot stamp its event with the replacement epoch. Two-frame legacy delivery
+  remains compatible for direct legacy callers but is never admitted by the
+  production atomic exact-routing surface.
+
+  Exact engine block hashes and approximate gateway text chunks remain
+  different score spaces. `KvRoutingIndex` therefore chooses one mode for the
+  entire request: it uses one `KvEventIndex.route_overlaps` observation under
+  one lock and one clock sample for every eligible replica, or it discards all
+  exact scores and follows the existing approximate `PrefixIndex` path.
+  Provider, index, lifecycle, malformed-vector, and freshness failures degrade
+  to approximate placement rather than failing generation. A failed exact
+  membership mutation quarantines that replica until a complete successful
+  forget/register reset, so a partially mutated old view cannot re-enter
+  exact scoring. While a replica is inactive, unknown epochs are rejected
+  without displacing the active epoch tombstone. Successful exact choices use
+  the distinct `kv_event_match` decision reason; approximate publication still
+  occurs only after successful completion.
+
+  The F2b formal profile reuses F1a run `30374404150` for the exact seed-175
+  200-replica, ten-by-twenty churn identity schedule and reuses F2a run
+  `30411111758` only for its production `ReplicaPool`/prefix-routing precedent.
+  Neither measurement is repeated. F2b compresses only wall pacing to one
+  second per churn epoch and exercises 200 logical feeds: 199 sequenced
+  in-process feeds plus one representative physical ZMQ PUB/SUB/replay feed.
+  Because one unavailable eligible feed makes the request globally
+  approximate, killing that representative socket binds the same 200-entry
+  routing decision without claiming 200 physical transports.
+
+  The freshness limit is strictly below 500 ms and the route-time lease is
+  250 ms, leaving explicit scheduling headroom. Gates use actual emission,
+  receipt, apply, pause, resume, replay-completion, and route-selection times;
+  absolute open-loop ticks and missing routes are replayed. Every pause/resume
+  action, offered-route start, and selected-route gap must itself remain
+  strictly below 500 ms, so an OS or event-loop stall cannot be hidden by a
+  later catch-up iteration; observed samples are never excluded or relabeled.
+  Every exact route must use authoritative logical and wire truth younger than
+  the lease. After actual expiry every route must match the independently
+  reconstructed approximate oracle, and after restore a complete replay must
+  converge to the authoritative 200-replica digest on the same process and
+  object identities in under 500 ms. Raw event, membership, kill schedule,
+  replay, route, state, source, and environment rows are independently
+  rehashed and replayed. One clean exact-source formal run is binding; an
+  evidence-only descendant may retain it without remeasurement only when every
+  frozen gate-input hash is unchanged, the recorded run resolves through the
+  GitHub Actions API to the matching completed successful workflow, and the
+  retained raw and manifest bytes equal the original Actions artifact.
+
+  Exact-source run `30417507859` at `f383806` closes F2b. Its 500 routes split
+  into 175 fresh exact, 140 stale approximate, and 185 restored exact
+  decisions. Maximum exact truth age was 232.314498 ms; the first stale
+  approximate route followed pause by 251.339950 ms; complete replay restored
+  the same process and object identities 50.740933 ms after resume. Maximum
+  offered-route lateness and selected-route gap were 3.608193 and 21.536138
+  ms. The independently replayed 2,196-row artifact is retained byte-identically
+  at `bench/results/f2b-kv-event-retained/`; its evidence-only retention does
+  not repeat the binding run.

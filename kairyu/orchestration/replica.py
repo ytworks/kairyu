@@ -46,6 +46,7 @@ from kairyu.engine.backend import (
     shutdown_all,
     shutdown_all_cancellation_safe,
 )
+from kairyu.orchestration.kv_routing import KvRoutingIndex, PreparedKvRouting
 from kairyu.orchestration.prefix_index import PrefixIndex, PreparedPrefixKeys
 from kairyu.orchestration.router import JsonlRouterLog
 
@@ -59,8 +60,7 @@ def _supports_native_prepared_prefix(index: object) -> bool:
     if not isinstance(index, PrefixIndex):
         return False
     return all(
-        getattr(getattr(index, name, None), "__func__", None)
-        is getattr(PrefixIndex, name)
+        getattr(getattr(index, name, None), "__func__", None) is getattr(PrefixIndex, name)
         for name in (
             "candidate_ids",
             "chunk_keys",
@@ -154,9 +154,7 @@ class ReplicaPool:
         if unhealthy_after < 1:
             raise ValueError(f"unhealthy_after must be >= 1, got {unhealthy_after}")
         if queue_depth_threshold < 0:
-            raise ValueError(
-                f"queue_depth_threshold must be >= 0, got {queue_depth_threshold}"
-            )
+            raise ValueError(f"queue_depth_threshold must be >= 0, got {queue_depth_threshold}")
         if isinstance(replicas, Mapping):
             items = list(replicas.items())
         else:  # legacy sequence: auto-ids match the old index labels (A1)
@@ -171,8 +169,7 @@ class ReplicaPool:
             replica_id: replica_id.encode() for replica_id in self._entries
         }
         self._ordinal_by_id = {
-            replica_id: ordinal
-            for ordinal, replica_id in enumerate(self._entries)
+            replica_id: ordinal for ordinal, replica_id in enumerate(self._entries)
         }
         self._eligible_snapshot = tuple(self._entries)
         self._log = log
@@ -183,20 +180,14 @@ class ReplicaPool:
         self._prefix_index = prefix_index
         self._prefix_alpha = prefix_alpha
         self._prefix_beta = prefix_beta
-        native_prepared = _supports_native_prepared_prefix(prefix_index)
+        native_prepared = isinstance(
+            prefix_index, KvRoutingIndex
+        ) or _supports_native_prepared_prefix(prefix_index)
         self._prefix_prepare = prefix_index.prepare if native_prepared else None
-        self._prefix_overlap_keys = (
-            prefix_index.overlap_keys if native_prepared else None
-        )
-        self._prefix_observe_prepared = (
-            prefix_index.observe_prepared if native_prepared else None
-        )
-        self._prefix_observe_root = (
-            prefix_index.observe_root if native_prepared else None
-        )
-        self._prefix_register_replica = (
-            prefix_index.register_replica if native_prepared else None
-        )
+        self._prefix_overlap_keys = prefix_index.overlap_keys if native_prepared else None
+        self._prefix_observe_prepared = prefix_index.observe_prepared if native_prepared else None
+        self._prefix_observe_root = prefix_index.observe_root if native_prepared else None
+        self._prefix_register_replica = prefix_index.register_replica if native_prepared else None
         if self._prefix_register_replica is not None:
             for replica_id in self._entries:
                 self._prefix_register_replica(replica_id)
@@ -206,6 +197,7 @@ class ReplicaPool:
             "queue_depth_fallback": 0,
             "least_outstanding": 0,
             "prefix_match": 0,
+            "kv_event_match": 0,
         }
         # m13: cached /backends payload of one replica for the gateway's own
         # /backends aggregation. Only successful probes are cached (a process's
@@ -328,8 +320,7 @@ class ReplicaPool:
         del self._entries[replica_id]
         self._encoded_replica_ids.pop(replica_id)
         self._ordinal_by_id = {
-            current_id: ordinal
-            for ordinal, current_id in enumerate(self._entries)
+            current_id: ordinal for ordinal, current_id in enumerate(self._entries)
         }
         self._refresh_eligible_snapshot()
         # drop this id's prefix history (M5): a re-added replica with the same id
@@ -557,9 +548,7 @@ class ReplicaPool:
 
     def _refresh_eligible_snapshot(self) -> None:
         self._eligible_snapshot = tuple(
-            rid
-            for rid, entry in self._entries.items()
-            if self._is_eligible(entry)
+            rid for rid, entry in self._entries.items() if self._is_eligible(entry)
         )
 
     def validate_request(self, request: GenerationRequest) -> None:
@@ -611,7 +600,7 @@ class ReplicaPool:
         self,
         request: GenerationRequest,
         *,
-        prefix_keys: str | Sequence[str] | None = None,
+        prefix_keys: str | Sequence[str] | PreparedKvRouting | None = None,
         track_prefix: bool | None = None,
     ) -> tuple[str, str, str | None]:
         """Pick a replica; returns (replica_id, reason, session_id). Pure hashing."""
@@ -626,22 +615,49 @@ class ReplicaPool:
         if track_prefix is None:
             track_prefix = self._should_track_prefix(request)
         if track_prefix:
-            best = (
-                None
-                if isinstance(prefix_keys, str)
-                or (
-                    isinstance(prefix_keys, PreparedPrefixKeys)
-                    and not prefix_keys.candidate_ids
+            prefix_reason = "prefix_match"
+            if isinstance(prefix_keys, PreparedKvRouting):
+                view = self._prefix_index.route_view(eligible, prefix_keys)
+                if view.mode == "exact":
+                    best = self._kv_event_select(
+                        eligible,
+                        view.overlaps,
+                        session_id=session_id or None,
+                    )
+                    prefix_reason = "kv_event_match"
+                else:
+                    approximate = prefix_keys.approximate
+                    best = (
+                        None
+                        if isinstance(approximate, str)
+                        or (
+                            isinstance(approximate, PreparedPrefixKeys)
+                            and not approximate.candidate_ids
+                        )
+                        else self._prefix_select(
+                            eligible,
+                            request.prompt,
+                            session_id=session_id or None,
+                            prepared_keys=approximate,
+                        )
+                    )
+            else:
+                best = (
+                    None
+                    if isinstance(prefix_keys, str)
+                    or (
+                        isinstance(prefix_keys, PreparedPrefixKeys)
+                        and not prefix_keys.candidate_ids
+                    )
+                    else self._prefix_select(
+                        eligible,
+                        request.prompt,
+                        session_id=session_id or None,
+                        prepared_keys=prefix_keys,
+                    )
                 )
-                else self._prefix_select(
-                    eligible,
-                    request.prompt,
-                    session_id=session_id or None,
-                    prepared_keys=prefix_keys,
-                )
-            )
             if best is not None:
-                return best, "prefix_match", session_id
+                return best, prefix_reason, session_id
         if session_id:
             affine = _rendezvous_winner(
                 session_id,
@@ -689,8 +705,7 @@ class ReplicaPool:
         if isinstance(prepared_keys, str):
             return None
         native_precomputed = (
-            isinstance(prepared_keys, PreparedPrefixKeys)
-            and self._prefix_overlap_keys is not None
+            isinstance(prepared_keys, PreparedPrefixKeys) and self._prefix_overlap_keys is not None
         )
         advertised: tuple[str, ...] | None = None
         if native_precomputed:
@@ -716,17 +731,14 @@ class ReplicaPool:
                         (
                             rid
                             for rid in advertised
-                            if rid in self._entries
-                            and self._is_eligible(self._entries[rid])
+                            if rid in self._entries and self._is_eligible(self._entries[rid])
                         ),
                         key=self._ordinal_by_id.__getitem__,
                     )
                 )
             else:
                 advertised_set = set(advertised)
-                score_candidates = tuple(
-                    rid for rid in eligible if rid in advertised_set
-                )
+                score_candidates = tuple(rid for rid in eligible if rid in advertised_set)
             if not score_candidates:
                 return None
         best_score: float | None = None
@@ -737,8 +749,7 @@ class ReplicaPool:
             else:
                 overlap = self._prefix_index.overlap(rid, prompt)
             score = (
-                self._prefix_alpha * overlap
-                - self._prefix_beta * self._entries[rid].outstanding
+                self._prefix_alpha * overlap - self._prefix_beta * self._entries[rid].outstanding
             )
             if best_score is None or score > best_score:
                 best_score = score
@@ -761,10 +772,53 @@ class ReplicaPool:
         )
         return selected
 
+    def _kv_event_select(
+        self,
+        eligible: tuple[str, ...],
+        overlaps: Sequence[int],
+        *,
+        session_id: str | None = None,
+    ) -> str | None:
+        """Score one immutable exact-overlap view using the existing weights."""
+
+        if len(overlaps) != len(eligible):
+            raise ValueError("exact overlap view must align with eligible replicas")
+        best_score: float | None = None
+        tied: list[tuple[str, int]] = []
+        for replica_id, overlap in zip(eligible, overlaps, strict=True):
+            score = (
+                self._prefix_alpha * overlap
+                - self._prefix_beta * self._entries[replica_id].outstanding
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                tied = [(replica_id, overlap)]
+            elif score == best_score:
+                tied.append((replica_id, overlap))
+        if best_score is None or best_score < 0:
+            return None
+        warm_tied = [replica_id for replica_id, overlap in tied if overlap > 0]
+        if not warm_tied:
+            return None
+        return (
+            warm_tied[0]
+            if session_id is None or len(warm_tied) == 1
+            else _rendezvous_winner(
+                session_id,
+                warm_tied,
+                self._encoded_replica_ids,
+            )
+        )
+
     def _place_prepared(
         self,
         request: GenerationRequest,
-    ) -> tuple[str, str, str | Sequence[str] | None, bool]:
+    ) -> tuple[
+        str,
+        str,
+        str | Sequence[str] | PreparedKvRouting | None,
+        bool,
+    ]:
         """Select/log once and retain request-local prefix work for completion."""
         from kairyu.telemetry import traced_span
 
@@ -791,9 +845,7 @@ class ReplicaPool:
         selected_at_ns = time.perf_counter_ns()
         placement_latency_ns = max(0, selected_at_ns - started_ns)
         self._decision_counts[reason] += 1
-        with traced_span(
-            "kairyu.pool.place", {"replica_id": replica_id, "reason": reason}
-        ):
+        with traced_span("kairyu.pool.place", {"replica_id": replica_id, "reason": reason}):
             pass
         if self._log is not None:
             # legacy field stays the ordinal; replica_id added alongside (A1)
@@ -814,9 +866,7 @@ class ReplicaPool:
 
     def _place(self, request: GenerationRequest) -> str:
         """Select a replica and log the decision before dispatch (m5 D4)."""
-        replica_id, _reason, _prefix_keys, _track_prefix = self._place_prepared(
-            request
-        )
+        replica_id, _reason, _prefix_keys, _track_prefix = self._place_prepared(request)
         return replica_id
 
     def _finish(self, entry: _ReplicaEntry) -> None:
@@ -848,9 +898,7 @@ class ReplicaPool:
             entry.consecutive_failures = 0
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
-        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(
-            request
-        )
+        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(request)
         entry = self._entries[replica_id]
         entry.outstanding += 1
         try:
@@ -864,25 +912,15 @@ class ReplicaPool:
             raise
         else:
             self._record_backend_success(entry)
-            if (
-                track_prefix
-                and self._entries.get(replica_id) is entry
-            ):
+            if track_prefix and self._entries.get(replica_id) is entry:
                 observe_root = self._prefix_observe_root
-                if (
-                    isinstance(prefix_keys, str)
-                    and prefix_keys
-                    and observe_root is not None
-                ):
+                if isinstance(prefix_keys, str) and prefix_keys and observe_root is not None:
                     observe_root(replica_id, prefix_keys)
-                elif (
-                    prefix_keys is not None
-                    and self._prefix_observe_prepared is not None
-                ):
+                elif prefix_keys is not None and self._prefix_observe_prepared is not None:
                     self._prefix_observe_prepared(
                         replica_id,
                         prefix_keys,
-                        reason == "prefix_match",
+                        reason in ("prefix_match", "kv_event_match"),
                     )
                 else:
                     self._prefix_index.observe(replica_id, request.prompt)
@@ -891,9 +929,7 @@ class ReplicaPool:
             self._finish(entry)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
-        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(
-            request
-        )
+        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(request)
         entry = self._entries[replica_id]
         entry.outstanding += 1  # streams stay in-flight until generator close (A2)
         try:
@@ -906,25 +942,15 @@ class ReplicaPool:
             raise
         else:
             self._record_backend_success(entry)
-            if (
-                track_prefix
-                and self._entries.get(replica_id) is entry
-            ):
+            if track_prefix and self._entries.get(replica_id) is entry:
                 observe_root = self._prefix_observe_root
-                if (
-                    isinstance(prefix_keys, str)
-                    and prefix_keys
-                    and observe_root is not None
-                ):
+                if isinstance(prefix_keys, str) and prefix_keys and observe_root is not None:
                     observe_root(replica_id, prefix_keys)
-                elif (
-                    prefix_keys is not None
-                    and self._prefix_observe_prepared is not None
-                ):
+                elif prefix_keys is not None and self._prefix_observe_prepared is not None:
                     self._prefix_observe_prepared(
                         replica_id,
                         prefix_keys,
-                        reason == "prefix_match",
+                        reason in ("prefix_match", "kv_event_match"),
                     )
                 else:
                     self._prefix_index.observe(replica_id, request.prompt)
