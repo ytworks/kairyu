@@ -7,6 +7,10 @@ the same deterministic traces and the same initial simulated cache placement.
 The selected backend, rather than a post-hoc model, reports whether the request
 hit its cache.
 
+Shared traffic opts into cross-session reuse with an exact prompt-derived root.
+Uniform traffic carries a blank root and therefore measures the production
+session-only path, where a native PrefixIndex must add no speculative work.
+
 Raw JSONL retains cache placement, request/family IDs, prompt hashes, actual
 placement decisions/timings, paired round order, and round timings.  Prompt
 bodies are deliberately absent.  ``--verify-artifact`` hashes and independently
@@ -423,8 +427,8 @@ def uniform_trace(
                 family_id=family_id,
                 prompt=_uniform_prompt(config, family_id),
                 session_id=_session_id(config, request_id),
-                # Preserve the conservative production fallback path for the
-                # no-loss trace rather than supplying a family oracle.
+                # Bind the production session-only opt-out path rather than
+                # supplying a trace-only family oracle.
                 prefix_fingerprint="",
             )
         )
@@ -1355,7 +1359,7 @@ def _replay_rows(
                 return False
             previous_dispatch_finished_ns = int(row["dispatch_finished_ns"])
             families_by_replica[expected_replica].add(item.family_id)
-            if policy == PREFIX_POLICY:
+            if policy == PREFIX_POLICY and item.prefix_fingerprint:
                 keys_by_replica[expected_replica].update(
                     prompt_keys
                     if expected_reason == "prefix_match"

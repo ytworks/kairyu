@@ -3,13 +3,15 @@
 ``ReplicaPool`` is an L2 orchestration component — a sibling of the ``Router``
 per the m5 D4 seam amendment. Placement policy, in order:
 
-1. **Prefix-aware score** when enabled — maximize
+1. **Prefix-aware score** when enabled and declared by a non-empty root hint
+   (or by a sessionless legacy caller) — maximize
    ``alpha * overlap - beta * outstanding`` over warm eligible replicas.
    Equal-score warm candidates use session HRW, or insertion order without a
    session. A warm/cold score tie prefers the reusable prefix.
 2. **Cold session affinity** — requests carrying ``cache_hint.session_id`` map
    by rendezvous (HRW) hashing over the ELIGIBLE replicas (healthy ∧ not
    draining), so removing or draining one replica only remaps its sessions.
+   A blank root hint takes this path directly without speculative prefix work.
 3. **Load-skew valve** — if the affine replica's outstanding-request count
    exceeds ``queue_depth_threshold``, fall back to least-outstanding.
 4. **Least outstanding** for cold session-less traffic (ties break to
@@ -610,6 +612,7 @@ class ReplicaPool:
         request: GenerationRequest,
         *,
         prefix_keys: str | Sequence[str] | None = None,
+        track_prefix: bool | None = None,
     ) -> tuple[str, str, str | None]:
         """Pick a replica; returns (replica_id, reason, session_id). Pure hashing."""
         eligible = self._eligible_ids()
@@ -620,7 +623,9 @@ class ReplicaPool:
                 "failures, or draining); call probe() once a replica recovers"
             )
         session_id = request.cache_hint.session_id if request.cache_hint else None
-        if self._prefix_index is not None:
+        if track_prefix is None:
+            track_prefix = self._should_track_prefix(request)
+        if track_prefix:
             best = (
                 None
                 if isinstance(prefix_keys, str)
@@ -647,6 +652,22 @@ class ReplicaPool:
                 return self._least_outstanding(eligible), "queue_depth_fallback", session_id
             return affine, "session_affinity", session_id
         return self._least_outstanding(eligible), "least_outstanding", None
+
+    def _should_track_prefix(self, request: GenerationRequest) -> bool:
+        """Whether this request declares enough affinity for native tracking.
+
+        A blank CacheHint already has session affinity but declares no reusable
+        cross-session root. Charging that common path for speculative hashing
+        and publication only lowers goodput. Sessionless callers retain the
+        legacy local-prefix discovery path, while non-empty hints opt in.
+        """
+        if self._prefix_index is None:
+            return False
+        return not (
+            self._prefix_prepare is not None
+            and request.cache_hint is not None
+            and not request.cache_hint.prefix_fingerprint
+        )
 
     def _prefix_select(
         self,
@@ -743,7 +764,7 @@ class ReplicaPool:
     def _place_prepared(
         self,
         request: GenerationRequest,
-    ) -> tuple[str, str, str | Sequence[str] | None]:
+    ) -> tuple[str, str, str | Sequence[str] | None, bool]:
         """Select/log once and retain request-local prefix work for completion."""
         from kairyu.telemetry import traced_span
 
@@ -753,19 +774,19 @@ class ReplicaPool:
             else time.perf_counter_ns()
         )
         prepare = self._prefix_prepare
-        prefix_fingerprint = (
-            request.cache_hint.prefix_fingerprint
-            if request.cache_hint is not None
-            else ""
-        )
+        track_prefix = self._should_track_prefix(request)
+        prefix_fingerprint = ""
+        if track_prefix and request.cache_hint is not None:
+            prefix_fingerprint = request.cache_hint.prefix_fingerprint
         prefix_keys = (
             prepare(request.prompt, prefix_fingerprint or None)
-            if prepare is not None
+            if prepare is not None and track_prefix
             else None
         )
         replica_id, reason, session_id = self._select(
             request,
             prefix_keys=prefix_keys,
+            track_prefix=track_prefix,
         )
         selected_at_ns = time.perf_counter_ns()
         placement_latency_ns = max(0, selected_at_ns - started_ns)
@@ -789,11 +810,13 @@ class ReplicaPool:
                 pool_size=len(self._entries),
                 eligible_size=len(self._eligible_snapshot),
             )
-        return replica_id, reason, prefix_keys
+        return replica_id, reason, prefix_keys, track_prefix
 
     def _place(self, request: GenerationRequest) -> str:
         """Select a replica and log the decision before dispatch (m5 D4)."""
-        replica_id, _reason, _prefix_keys = self._place_prepared(request)
+        replica_id, _reason, _prefix_keys, _track_prefix = self._place_prepared(
+            request
+        )
         return replica_id
 
     def _finish(self, entry: _ReplicaEntry) -> None:
@@ -825,7 +848,9 @@ class ReplicaPool:
             entry.consecutive_failures = 0
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
-        replica_id, reason, prefix_keys = self._place_prepared(request)
+        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(
+            request
+        )
         entry = self._entries[replica_id]
         entry.outstanding += 1
         try:
@@ -840,7 +865,7 @@ class ReplicaPool:
         else:
             self._record_backend_success(entry)
             if (
-                self._prefix_index is not None
+                track_prefix
                 and self._entries.get(replica_id) is entry
             ):
                 observe_root = self._prefix_observe_root
@@ -866,7 +891,9 @@ class ReplicaPool:
             self._finish(entry)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
-        replica_id, reason, prefix_keys = self._place_prepared(request)
+        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(
+            request
+        )
         entry = self._entries[replica_id]
         entry.outstanding += 1  # streams stay in-flight until generator close (A2)
         try:
@@ -880,7 +907,7 @@ class ReplicaPool:
         else:
             self._record_backend_success(entry)
             if (
-                self._prefix_index is not None
+                track_prefix
                 and self._entries.get(replica_id) is entry
             ):
                 observe_root = self._prefix_observe_root

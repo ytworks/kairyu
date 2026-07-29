@@ -162,11 +162,16 @@ the 64-bit key width is unchanged and a collision can only cause a cache miss,
 never alter generated output. Conductor carries a trusted
 `CacheHint.prefix_fingerprint` only when its shared prefix covers the complete
 default 256-character root chunk; the carried value is the exact same XXH3 key
-as local hashing. Empty or shorter shared prefixes, callers without a hint,
-malformed hints, and custom chunk sizes retain the exact local fallback. Each
-request owns one bounded, lazy hash chain shared by selection and successful
-publication. A cold success initially advertises only its root key through a
-dedicated root-publication fast path,
+as local hashing. A blank `CacheHint` declares session-only affinity and bypasses
+native prefix hashing/publication; this covers empty/short Conductor prefixes
+and normal HTTP session traffic without charging them for undeclared
+cross-session reuse. Those callers retain same-session HRW locality but do not
+learn or discover cross-session prefixes until they provide an exact root.
+Sessionless callers retain local discovery, while
+malformed non-empty hints and custom chunk sizes retain the exact local
+fallback. Each tracked request owns one bounded, lazy hash chain shared by
+selection and successful publication. A cold success initially advertises only
+its root key through a dedicated root-publication fast path,
 which is sufficient to make the next related request discoverable; a successful
 warm `prefix_match` extends that same request-local chain and promotes the entry
 to full usable depth. Thus a complete prompt chunk is hashed at most once per
@@ -743,10 +748,11 @@ over (α, β) (pure function over the dataset; no online learning).
   enter no metric. This keeps CPython's first arena allocation out of a
   steady-state goodput claim without discarding any binding sample after seeing
   its value. Uniform calibration, run-in, and binding requests deliberately
-  carry no root hint, so the no-loss claim exercises exact local XXH3 fallback
-  rather than a trace-only family oracle. Immediately before every calibration
-  and binding arm's clock, that same pool and policy also execute a declared
-  512-request uniform run-in over
+  carry blank root hints, so the no-loss claim binds the production session-only
+  opt-out/HRW path rather than general cold prefix-tracking overhead or a
+  trace-only family oracle. Immediately before every
+  calibration and binding arm's clock, that same pool and policy also execute a
+  declared 512-request uniform run-in over
   disjoint prompts. Its deterministic trace digest, completed count, and
   positive time interval remain in the arm summary and are independently bound
   before the measured interval, but none of its requests enter a gate. Per-arm

@@ -73,7 +73,7 @@ repeat the binding drill.
 
 | Gate | Target | Where proven |
 |---|---|---|
-| F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform rounds, the one-sided 95% lower bound of the <10 ms SLO-goodput ratio is ≥0.99 and ≥15/21 paired ratios are ≥0.99; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
+| F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform session-only (blank-root) rounds, the one-sided 95% lower bound of the <10 ms SLO-goodput ratio is ≥0.99 and ≥15/21 paired ratios are ≥0.99; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
 | F2b | RadixKV KV-event index: staleness <500 ms under churn; router degrades gracefully to the approximate trie when the event stream dies | CPU test + chaos fixture |
 | F2c | Real-engine validation: TTFT p95 reduction ≥30% on a multi-turn+RAG trace vs session-hashing, 4–8 GPUs | GPU testbed |
 | F2d | Placement decisions land in the JSONL decision log (`prefix_match` reason) and feed `learning/dataset.py`; bandit-tuned α/β beats hand-tuned on a replayed trace | CPU bench |
@@ -101,8 +101,11 @@ audit-only. The implementation
 carries one lazy cumulative-hash chain from placement through successful
 publication. The process-local approximate index uses versioned XXH3-64 keys;
 Conductor carries a root only when its shared prefix contains a complete
-256-character chunk, and that hint is the exact local XXH3 root. Empty/short
-prefixes, malformed hints, custom chunk sizes, and the binding uniform trace
+256-character chunk, and that hint is the exact local XXH3 root. A blank
+`CacheHint` declares session-only affinity and bypasses native prefix work;
+binding uniform traffic exercises this production opt-out/HRW path rather than
+general cold prefix-tracking overhead. Sessionless requests
+retain local discovery, while malformed non-empty hints and custom chunk sizes
 retain local hashing. Cold success admits only the root needed for later
 discovery through a dedicated fast path, while a successful warm route promotes
 the same chain to full depth. It does not claim a 500-Pod deployment.

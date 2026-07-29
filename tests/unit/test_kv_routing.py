@@ -264,7 +264,7 @@ class TestPrefixRouting:
         prompt = "aaaabbbbccccddddeeee"
         root_key = real_xxh3(b"aaaa").hexdigest()
 
-        await pool.generate(_request(prompt, session_id="cold-session"))
+        await pool.generate(_request(prompt))
 
         # Cold placement and success publish only the reusable root: one XXH3
         # object and one chunk update, not two full five-chunk passes.
@@ -276,7 +276,7 @@ class TestPrefixRouting:
 
         hash_instances = 0
         hashed_parts.clear()
-        await pool.generate(_request(prompt, session_id="warm-session"))
+        await pool.generate(_request(prompt))
 
         # The root candidate makes this a warm route. Selection lazily extends
         # the same request-local hash chain; successful promotion consumes it,
@@ -312,6 +312,7 @@ class TestPrefixRouting:
             _request(
                 "a" * 256 + "c" * 256,
                 session_id="warm-session",
+                prefix_fingerprint="not-a-root",
             )
         )
 
@@ -434,7 +435,11 @@ class TestPrefixRouting:
         expected = baseline._select(_request(prompt, session_id=session_id))[0]
 
         selected, reason, observed_session = pool._select(
-            _request(prompt, session_id=session_id)
+            _request(
+                prompt,
+                session_id=session_id,
+                prefix_fingerprint="0" * 16,
+            )
         )
 
         assert selected == expected
@@ -459,7 +464,11 @@ class TestPrefixRouting:
         )
 
         selected, reason, _observed_session = pool._select(
-            _request(prompt, session_id=session_id)
+            _request(
+                prompt,
+                session_id=session_id,
+                prefix_fingerprint="0" * 16,
+            )
         )
 
         assert selected == "a"
@@ -481,7 +490,11 @@ class TestPrefixRouting:
             )[0]
             != "a"
         )
-        request = _request(prompt, session_id=session_id)
+        request = _request(
+            prompt,
+            session_id=session_id,
+            prefix_fingerprint="0" * 16,
+        )
 
         assert pool._select(request) == baseline._select(request)
 
@@ -489,7 +502,11 @@ class TestPrefixRouting:
         index = PrefixIndex(chunk_chars=4)
         replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
         pool = ReplicaPool(replicas, prefix_index=index)
-        request = _request("shared-prefix-user", session_id="sticky-session")
+        request = _request(
+            "shared-prefix-user",
+            session_id="sticky-session",
+            prefix_fingerprint="0" * 16,
+        )
         affine, reason, _session_id = pool._select(request)
         assert reason == "session_affinity"
         warm = next(replica_id for replica_id in replicas if replica_id != affine)
@@ -503,7 +520,11 @@ class TestPrefixRouting:
 
     def test_hinted_request_without_overlap_preserves_session_affinity(self):
         replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
-        request = _request("cold-prompt", session_id="sticky-session")
+        request = _request(
+            "cold-prompt",
+            session_id="sticky-session",
+            prefix_fingerprint="0" * 16,
+        )
         baseline = ReplicaPool(replicas)
         pool = ReplicaPool(replicas, prefix_index=PrefixIndex(chunk_chars=4))
 
@@ -511,7 +532,11 @@ class TestPrefixRouting:
 
     def test_hinted_cold_request_preserves_queue_depth_fallback(self):
         replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
-        request = _request("cold-prompt", session_id="sticky-session")
+        request = _request(
+            "cold-prompt",
+            session_id="sticky-session",
+            prefix_fingerprint="0" * 16,
+        )
         baseline = ReplicaPool(replicas, queue_depth_threshold=0)
         pool = ReplicaPool(
             replicas,
@@ -558,6 +583,42 @@ class TestPrefixRouting:
         counts = pool.decision_counts
         assert counts["prefix_match"] == 5  # every follow-up hit the warm replica
         assert index.overlap(first_target, shared) > 0
+
+    @pytest.mark.asyncio
+    async def test_blank_session_hint_bypasses_native_prefix_tracking(
+        self, monkeypatch
+    ):
+        index = PrefixIndex()
+        replicas = {"a": MockBackend(), "b": MockBackend()}
+        pool = ReplicaPool(
+            replicas,
+            prefix_index=index,
+        )
+        baseline = ReplicaPool(replicas)
+        request = _request("x" * 512, session_id="session-only")
+
+        def unexpected_prefix_work(*_args, **_kwargs):
+            pytest.fail("blank native CacheHint performed prefix work")
+
+        monkeypatch.setattr(pool, "_prefix_prepare", unexpected_prefix_work)
+        monkeypatch.setattr(pool, "_prefix_select", unexpected_prefix_work)
+        monkeypatch.setattr(pool, "_prefix_observe_root", unexpected_prefix_work)
+        monkeypatch.setattr(
+            pool,
+            "_prefix_observe_prepared",
+            unexpected_prefix_work,
+        )
+        monkeypatch.setattr(index, "observe", unexpected_prefix_work)
+
+        assert pool._select(request) == baseline._select(request)
+        await pool.generate(request)
+        chunks = [chunk async for chunk in pool.stream(request)]
+
+        assert len(chunks) == 1
+        assert pool.decision_counts["session_affinity"] == 2
+        assert pool.decision_counts["prefix_match"] == 0
+        assert index._replicas_by_first_key == {}
+        assert all(not store for store in index._chunks.values())
 
     @pytest.mark.asyncio
     async def test_only_successful_generate_advertises_the_prefix(self):

@@ -89,8 +89,8 @@ class CacheHint:
 
     ``session_id`` groups requests of one orchestration. ``prefix_fingerprint``
     is an optional trusted ``xxh3-64-v1`` key for the first complete
-    256-character shared-prompt chunk; an empty value makes placement hash the
-    actual prompt locally.
+    256-character shared-prompt chunk. An empty value declares session-only
+    affinity; prefix-enabled pools do not speculate about cross-session reuse.
     """
 
     session_id: str

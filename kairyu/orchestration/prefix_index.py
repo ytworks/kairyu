@@ -31,8 +31,10 @@ def prefix_root_fingerprint(shared_prefix: str) -> str:
 
     A producer may safely compute the first prompt key ahead of placement only
     when its shared prefix covers the index's complete default text chunk.
-    Empty or shorter prefixes deliberately return no hint so the index hashes
-    the actual request prompt locally.
+    Empty or shorter prefixes deliberately return no hint. At the ReplicaPool
+    boundary, a blank CacheHint declares session-only affinity and skips native
+    prefix tracking; sessionless callers can still ask this index to hash the
+    actual request prompt locally.
     """
     if len(shared_prefix) < _DEFAULT_CHUNK_CHARS:
         return ""
