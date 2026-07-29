@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.engine.core.prefill import PrefillBatch
 from kairyu.models.attention import Attention
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, RotaryEmbedding
@@ -111,6 +112,26 @@ class DecoderLayer(nn.Module):
             positions,
             seq_lens,
             write_from,
+        )
+        return hidden + self.mlp(self.post_attention_layernorm(hidden))
+
+    def forward_prefill_batch(
+        self,
+        hidden,
+        cos,
+        sin,
+        kv_pool,
+        layer,
+        batch: PrefillBatch,
+    ):
+        """Residual layer over the flat ragged-prefill token axis."""
+        hidden = hidden + self.self_attn.forward_prefill_batch(
+            self.input_layernorm(hidden),
+            cos,
+            sin,
+            kv_pool,
+            layer,
+            batch,
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
@@ -241,6 +262,26 @@ class DenseDecoder(nn.Module):
                 position_values,
             )
         return self.model.norm(hidden)  # [B, H]
+
+    @torch.no_grad()
+    def forward_prefill_batch(
+        self,
+        batch: PrefillBatch,
+        kv_pool: PagedKVPool,
+    ) -> torch.Tensor:
+        """One model chain over a ragged cross-request prefill batch."""
+        hidden = self.model.embed_tokens(batch.token_ids)
+        cos, sin = self.model.rotary_emb(batch.positions)
+        for index, layer in enumerate(self.model.layers):
+            hidden = layer.forward_prefill_batch(
+                hidden,
+                cos,
+                sin,
+                kv_pool,
+                index,
+                batch,
+            )
+        return self.model.norm(hidden)
 
     @torch.no_grad()
     def forward_decode_tensors(

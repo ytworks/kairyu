@@ -34,7 +34,7 @@ in-place writes but not attribute rebinds) plus
 Remaining GPU-day wiring: the `PagedModelRunner` decode path consumes the padded
 tensor when the real graph backend is enabled.
 
-## C4 — batched cross-request execution (CRITICAL, **IMPLEMENTED (decode)**)
+## C4 — batched cross-request execution (CRITICAL, **IMPLEMENTED**)
 
 **Gap (fixed for decode).** `PagedModelRunner.execute` ran sequences
 sequentially; `AttentionBackend.attend(...)` was one-sequence-per-call. N
@@ -52,8 +52,20 @@ Byte/token parity, cached/shared-page preservation, and KV-write equality are
 pinned on CPU and GPU. A torch-profiler gate measures zero
 `aten::_local_scalar_dense` events at B=1 and B=8 for both the tensor path and
 the host-metadata compatibility fallback; only the audited pre-fix path grew
-with B. Remaining GPU-day work: batched PREFILL planning and on-device
-sampling/future-token fill.
+with B.
+
+**Prefill completion (#224).** Compatible prefill chunks are represented by
+one validated ragged `PrefillBatch`: flat tokens/positions plus request-local
+query indptr, page tables, sequence lengths, cached write offsets, and row
+ownership. Dense projection/RoPE/MLP run once over the flat token axis;
+`PagedKVPool.write_ragged` maps each token to its owner's physical slot without
+rewriting shared cached pages; FlashInfer builds one CSR prefill plan and runs
+it once per layer. Writable-page overlap or page-table aliasing fails before
+execution. B=1, MLA, Torch, and custom backends without an explicit native
+capability retain sequential behavior. Real SM120 profiling binds structural
+launch reduction rather than a jitter-sensitive latency threshold, and the
+formal Qwen3-32B TP8 gate gathers the exact model/plan/run counts from all
+ranks. On-device sampling/future-token fill was completed separately in #206.
 
 ## E3 — one engine loop with pluggable pipeline depth (HIGH, **IMPLEMENTED**)
 

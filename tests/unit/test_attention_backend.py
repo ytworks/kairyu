@@ -287,7 +287,7 @@ class TestFlashInferAdapterContract:
 
         assert torch.equal(batched, single)
 
-    def test_non_decode_batch_falls_back_without_batched_decode_run(self, fake_flashinfer):
+    def test_mixed_query_lengths_use_one_batched_prefill_plan(self, fake_flashinfer):
         backend = self._backend()
         pool = _pool()
         queries = [torch.randn(2, 4, 8), torch.randn(1, 4, 8)]
@@ -302,9 +302,15 @@ class TestFlashInferAdapterContract:
         )
 
         assert len(backend._prefill.runs) == 1
-        assert len(backend._decode.runs) == 1
-        decode_query, _ = backend._decode.runs[0]
-        assert decode_query.shape == (1, 4, 8)
+        assert len(backend._decode.runs) == 0
+        plan = backend._prefill.plans[0]
+        qo_indptr, kv_indptr, kv_indices, last_page_len = plan["args"][:4]
+        assert qo_indptr.tolist() == [0, 2, 3]
+        assert kv_indptr.tolist() == [0, 2, 5]
+        assert kv_indices.tolist() == [3, 1, 7, 6, 5]
+        assert last_page_len.tolist() == [2, 1]
+        run_query, _ = backend._prefill.runs[0]
+        assert run_query.shape == (3, 4, 8)
         assert [context.shape for context in contexts] == [(2, 32), (1, 32)]
 
     @pytest.mark.parametrize(

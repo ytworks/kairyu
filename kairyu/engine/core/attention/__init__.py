@@ -14,6 +14,11 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 
 
 class AttentionBackend(Protocol):
+    # True only when ``attend_batched`` performs one native cross-request
+    # prefill plan/run.  A Python loop is a valid compatibility implementation
+    # of the method, but must not opt the model runner into the fast path.
+    supports_batched_prefill: bool
+
     def attend(
         self,
         query: torch.Tensor,
@@ -38,7 +43,26 @@ class AttentionBackend(Protocol):
         """Per-sequence contexts, identical to per-sequence ``attend`` (C4).
 
         The batched seam the GPU runner needs: one call per layer per step over N
-        sequences instead of N calls. Backends may batch the kernel internally."""
+        sequences instead of N calls. Backends may batch the kernel internally;
+        native prefill implementations declare ``supports_batched_prefill``."""
+        ...
+
+    def attend_prefill(
+        self,
+        query: torch.Tensor,  # [sum(T_i), heads, head_dim]
+        kv_pool: PagedKVPool,
+        layer: int,
+        page_tables: tuple[tuple[int, ...], ...],
+        seq_lens: tuple[int, ...],
+        chunk_starts: tuple[int, ...],
+        qo_indptr: tuple[int, ...],
+    ) -> torch.Tensor:
+        """One native ragged-prefill plan/run -> [sum(T_i), heads * head_dim].
+
+        Only backends declaring ``supports_batched_prefill`` are required to
+        implement this flat entry point. Compatibility backends retain the
+        sequential ``attend`` path without split/cat staging per layer.
+        """
         ...
 
 

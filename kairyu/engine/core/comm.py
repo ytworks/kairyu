@@ -58,6 +58,10 @@ class Communicator(Protocol):
         """Broadcast ``src``'s tensor into every rank's caller-owned buffer."""
         ...
 
+    def tensor_all_gather(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Gather equal-shaped rank tensors, concatenated in rank order."""
+        ...
+
 
 class _FakeGroup:
     """State shared by every FakeCommunicator in one group."""
@@ -153,8 +157,10 @@ class FakeCommunicator:
             contributions[self._rank] = contribution
             group.condition.notify_all()
             done = group.condition.wait_for(
-                lambda: len(contributions) == self.world_size
-                or group.reduce_errors[round_index] is not None,
+                lambda: (
+                    len(contributions) == self.world_size
+                    or group.reduce_errors[round_index] is not None
+                ),
                 timeout=group.timeout_s,
             )
             error = group.reduce_errors[round_index]
@@ -234,3 +240,10 @@ class FakeCommunicator:
         received = self.broadcast(payload, src=src)
         tensor.copy_(received)
         return tensor
+
+    def tensor_all_gather(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Deterministic equal-shape gather matching the real communicator."""
+        import torch
+
+        shards = self.all_gather(tensor.detach().clone())
+        return torch.cat(shards, dim=0)

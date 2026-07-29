@@ -16,6 +16,10 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 
 class TorchAttentionBackend:
     device_agnostic = True
+    # ``attend_batched`` below is a correctness fallback around per-row SDPA.
+    # Keep the runner on its sequential path rather than claiming launch
+    # reduction that this backend does not provide.
+    supports_batched_prefill = False
 
     #: ``GraphDecodeBackend`` (m17 D1): ``attend_decode`` below is pure tensor
     #: algebra — ``gather_batched``, an ``arange`` compare and SDPA. Nothing
