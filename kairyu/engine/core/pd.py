@@ -15,18 +15,16 @@ the accounting and nothing else and is a test double, not a deployment option.
 A handoff that DEFERS (m18 D3, ``StreamCopyKVHandoff(defer=True)``) returns while
 its copy is still running. The coordinator then holds the prefill-side lease
 itself: no commit, no abort, no release, no decode-side adoption happens until
-``_settle_handover`` has gated on the copy's completion event. Without that, the
-released source page is re-allocated by the next prefill step and overwritten on
-the caller's stream while the side stream is still reading it.
+``_settle_handover`` polls the completion event as physically done and finalizes
+publication. A stream wait alone is not completion. Without the retained lease,
+the released source page could be re-allocated and overwritten while the copy
+still reads it.
 
-That settlement is deliberately PIPELINED one producer step. A gate placed at the
-end of the step that started the copy is a fence in front of every later kernel:
-the copy is still the only thing on the device, so nothing overlaps it. Holding
-the handover until the NEXT prefill step's forward has been queued is what makes
-the overlap real — the copy runs against that forward (and against the decode
-step in between), and only then is the caller's stream ordered behind it. The
-source pages stay leased for that whole window, so the extra step costs prefill
-capacity, never correctness.
+That settlement is deliberately PIPELINED one producer step. The next eligible
+prefill/decode forward is queued while the completion remains pending; only a
+successful later poll admits decode and releases source ownership. Transient
+failures retain re-enterable state. Lost completion or cleanup ownership poisons
+the handover and fails closed, so partial KV is never published or recycled.
 """
 
 from __future__ import annotations
@@ -50,6 +48,26 @@ _PREFILL_ID_SEPARATOR = "#p"
 class KVHandoffError(RuntimeError):
     """A KV transfer failed; the request may be retried on the prefill core."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        allocation: KVAllocation | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.allocation = allocation
+        self.handoff_completion: object | None = None
+
+
+class HandoffCompletionLostError(RuntimeError):
+    """Safe completion or cleanup cannot be proven; retain KV ownership."""
+
+    handoff_completion_lost = True
+
+    def __init__(self, message: str, *, allocation: object | None) -> None:
+        super().__init__(message)
+        self.allocation = allocation
+
 
 class KVHandoff(Protocol):
     def transfer(
@@ -61,6 +79,10 @@ class KVHandoff(Protocol):
         byte-extracting handoffs need them; the accounting-only LocalKVHandoff
         ignores them).
         """
+        ...
+
+    def discard(self, allocation: KVAllocation) -> None:
+        """Release a destination allocation that decode could not adopt."""
         ...
 
 
@@ -88,6 +110,10 @@ class LocalKVHandoff:
             raise KVHandoffError(f"destination cache full: {error}") from error
         self._dest.mark_computed(allocation)
         return allocation
+
+    def discard(self, allocation: KVAllocation) -> None:
+        """Release the destination lease when coordinator adoption fails."""
+        self._dest.release_preempted(allocation)
 
 
 def _geometry(pool: PagedKVPool) -> tuple:
@@ -126,7 +152,12 @@ class LocalCopyKVHandoff:
     """
 
     def __init__(
-        self, dest_kv: RadixKVCache, source_pool: PagedKVPool, dest_pool: PagedKVPool
+        self,
+        dest_kv: RadixKVCache,
+        source_pool: PagedKVPool,
+        dest_pool: PagedKVPool,
+        *,
+        defer_publish: bool = False,
     ) -> None:
         if _geometry(source_pool) != _geometry(dest_pool):
             raise ValueError(
@@ -135,12 +166,16 @@ class LocalCopyKVHandoff:
             )
         if dest_pool.page_size != dest_kv.page_size:
             raise ValueError(
-                f"pool page_size {dest_pool.page_size} != cache page_size "
-                f"{dest_kv.page_size}"
+                f"pool page_size {dest_pool.page_size} != cache page_size {dest_kv.page_size}"
             )
         self._dest = dest_kv
         self._source_pool = source_pool
         self._dest_pool = dest_pool
+        self._defer_publish = defer_publish
+
+    def manage_completion_externally(self) -> None:
+        """Let a stream wrapper own publication and failed-copy cleanup."""
+        self._defer_publish = True
 
     def transfer(
         self, tokens: tuple[int, ...], first_token: int, pages: tuple[int, ...] = ()
@@ -170,19 +205,160 @@ class LocalCopyKVHandoff:
                 raise KVHandoffError(
                     f"{len(incoming)} source pages for {len(targets)} destination slots"
                 )
-            for source_page, dest_page in zip(incoming, targets, strict=True):
-                self._copy_page(source_page, dest_page)
-            self._dest.mark_computed(allocation)
+            self._copy_pages(incoming, targets)
+            if not self._defer_publish:
+                # A bare handoff has no event owner.  Device copies can already
+                # be queued when a later operation raises, so physical
+                # completion must precede publication or destination reuse.
+                self._synchronize_copy_devices()
+                self._dest.mark_computed(allocation)
             return allocation
-        except Exception:
-            self._dest.release_preempted(allocation)
+        except Exception as error:
+            if self._defer_publish:
+                if isinstance(error, KVHandoffError):
+                    error.allocation = allocation
+                    raise
+                raise KVHandoffError(
+                    f"destination KV copy failed: {type(error).__name__}",
+                    allocation=allocation,
+                ) from error
+            self._settle_and_discard(
+                allocation,
+                "failed local KV copy could not prove completion or release "
+                "its destination allocation",
+            )
+            if isinstance(error, KVHandoffError):
+                raise
+            raise KVHandoffError(f"destination KV copy failed: {type(error).__name__}") from error
+        except BaseException as interruption:
+            # StreamCopyKVHandoff must be able to reclaim an allocation created
+            # before cancellation/termination interrupted the copy. Preserve
+            # the original BaseException while attaching that ownership.
+            try:
+                interruption.allocation = allocation  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            if not self._defer_publish:
+                self._settle_and_discard(
+                    allocation,
+                    "interrupted local KV copy could not prove completion or "
+                    "release its destination allocation",
+                )
             raise
+
+    def publish(self, allocation: KVAllocation) -> None:
+        """Expose copied pages only after their physical completion."""
+        try:
+            self._dest.mark_computed(allocation)
+        except BaseException as error:
+            if not self._defer_publish:
+                try:
+                    self._dest.release_preempted(allocation)
+                except BaseException as cleanup_error:
+                    if not allocation._freed:
+                        raise HandoffCompletionLostError(
+                            "failed local KV publication could not release its "
+                            "destination allocation",
+                            allocation=allocation,
+                        ) from cleanup_error
+            if not isinstance(error, Exception):
+                try:
+                    error.allocation = allocation  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                raise
+            raise KVHandoffError(f"destination cache publication failed: {error}") from error
+
+    def discard(self, allocation: KVAllocation) -> None:
+        """Release a failed transfer after all queued writes have completed."""
+        self._dest.release_preempted(allocation)
 
     def _copy_page(self, source_page: int, dest_page: int) -> None:
         """All layers of one logical page; ``k[:, page]`` is a strided view."""
         self._dest_pool.k[:, dest_page].copy_(self._source_pool.k[:, source_page])
         if self._dest_pool.v_head_dim:  # MLA keeps the latent in k (m15 A7)
             self._dest_pool.v[:, dest_page].copy_(self._source_pool.v[:, source_page])
+
+    def _synchronize_copy_devices(self) -> None:
+        """Prove every possibly queued device copy is physically complete."""
+        source_device = self._source_pool.k.device
+        dest_device = self._dest_pool.k.device
+        cuda_devices = tuple(
+            device
+            for device in dict.fromkeys((source_device, dest_device))
+            if device.type == "cuda"
+        )
+        if not cuda_devices:
+            return
+        import torch
+
+        for device in cuda_devices:
+            torch.cuda.synchronize(device)
+
+    def _settle_and_discard(
+        self,
+        allocation: KVAllocation,
+        message: str,
+    ) -> None:
+        """Make a bare-copy failure safe, or retain its only known owner."""
+        try:
+            self._synchronize_copy_devices()
+        except BaseException as sync_error:
+            raise HandoffCompletionLostError(
+                message,
+                allocation=allocation,
+            ) from sync_error
+        try:
+            self._dest.release_preempted(allocation)
+        except BaseException as cleanup_error:
+            if not allocation._freed:
+                raise HandoffCompletionLostError(
+                    message,
+                    allocation=allocation,
+                ) from cleanup_error
+
+    def _copy_pages(self, source_pages: tuple[int, ...], dest_pages: tuple[int, ...]) -> None:
+        source_device = self._source_pool.k.device
+        dest_device = self._dest_pool.k.device
+        if source_device == dest_device:
+            for source_page, dest_page in zip(source_pages, dest_pages, strict=True):
+                self._copy_page(source_page, dest_page)
+            return
+
+        # ``pool[:, page]`` is strided across layers.  PyTorch's cross-device
+        # copy of that view synchronizes the host (measured on the production
+        # layout), defeating the completion event before it is even recorded.
+        # A layer's consecutive page slice is contiguous, so coalesce matching
+        # source/destination runs and enqueue truly asynchronous P2P copies.
+        if not self._defer_publish and source_device.type == "cuda":
+            # The side-stream wrapper normally orders this with a source event.
+            # Its explicitly declined/bare blocking control has no such event,
+            # so wait for the producer before reading across devices.
+            import torch
+
+            torch.cuda.synchronize(source_device)
+        runs: list[tuple[int, int, int]] = []
+        for source_page, dest_page in zip(source_pages, dest_pages, strict=True):
+            if (
+                runs
+                and source_page == runs[-1][0] + runs[-1][2]
+                and dest_page == runs[-1][1] + runs[-1][2]
+            ):
+                source_start, dest_start, length = runs[-1]
+                runs[-1] = (source_start, dest_start, length + 1)
+            else:
+                runs.append((source_page, dest_page, 1))
+        for layer in range(self._source_pool.num_layers):
+            for source_start, dest_start, length in runs:
+                self._dest_pool.k[layer, dest_start : dest_start + length].copy_(
+                    self._source_pool.k[layer, source_start : source_start + length],
+                    non_blocking=True,
+                )
+                if self._dest_pool.v_head_dim:
+                    self._dest_pool.v[layer, dest_start : dest_start + length].copy_(
+                        self._source_pool.v[layer, source_start : source_start + length],
+                        non_blocking=True,
+                    )
 
 
 @dataclass
@@ -196,11 +372,20 @@ class _Handover:
     """
 
     commit: dict[str, int] = field(default_factory=dict)
-    adopt: list[tuple[EngineRequest, KVAllocation, SampledToken]] = field(default_factory=list)
-    retries: list[tuple[str, EngineRequest, int]] = field(default_factory=list)
+    adopt: list[tuple[str, EngineRequest, KVAllocation, SampledToken, int, object | None]] = field(
+        default_factory=list
+    )
+    retries: list[tuple[str, EngineRequest, int, KVAllocation | None, object | None]] = field(
+        default_factory=list
+    )
+    resumed: set[str] = field(default_factory=set)
+    adopted: set[str] = field(default_factory=set)
+    discarded: set[str] = field(default_factory=set)
+    cancelled: set[str] = field(default_factory=set)
+    poisoned: dict[str, BaseException] = field(default_factory=dict)
 
     def __bool__(self) -> bool:
-        return bool(self.commit or self.adopt or self.retries)
+        return bool(self.commit or self.adopt or self.retries or self.poisoned)
 
 
 class PDCoordinator:
@@ -234,20 +419,49 @@ class PDCoordinator:
         self._internal: dict[str, str] = {}
         # A deferring handoff (m18 D3) returns while the copy is still reading the
         # prefill-side pages, so this coordinator owns the lease on them until the
-        # copy's completion event says otherwise. Refuse one that cannot be gated
-        # rather than releasing pages under a copy we have no way to order against.
-        self._gate_pending = None
+        # copy's completion event says otherwise. A stream wait is not completion:
+        # host-visible cache publication and page release require a successful
+        # event query, as does surfacing an asynchronous transfer failure.
+        self._completion_for = None
+        self._completion_ready = None
+        self._finalize_completion = None
+        self._acknowledge_completion = None
+        self._wait_completion = None
         if getattr(handoff, "defers", False):
-            gate = getattr(handoff, "gate_pending", None)
-            if gate is None:
-                raise ValueError(
-                    "a deferring KVHandoff must expose gate_pending(); without it "
-                    "the prefill-side pages would be released under a running copy"
+            completion_for = getattr(handoff, "completion_for", None)
+            completion_ready = getattr(handoff, "completion_ready", None)
+            finalize_completion = getattr(handoff, "finalize_completion", None)
+            acknowledge_completion = getattr(
+                handoff,
+                "acknowledge_completion",
+                None,
+            )
+            wait_completion = getattr(handoff, "wait_completion", None)
+            if any(
+                item is None
+                for item in (
+                    completion_for,
+                    completion_ready,
+                    finalize_completion,
+                    acknowledge_completion,
+                    wait_completion,
                 )
-            self._gate_pending = gate
+            ):
+                raise ValueError(
+                    "a deferring KVHandoff must expose completion polling and "
+                    "finalization; stream waits alone cannot publish or release KV"
+                )
+            self._completion_for = completion_for
+            self._completion_ready = completion_ready
+            self._finalize_completion = finalize_completion
+            self._acknowledge_completion = acknowledge_completion
+            self._wait_completion = wait_completion
         # the one prefill step's worth of transfers whose copies are still in
         # flight; None with a blocking handoff, which settles inside its own step
         self._handover: _Handover | None = None
+        # If the overlap forward finishes before the previous copy does, retain
+        # its result rather than blocking the host or scheduling its clones twice.
+        self._staged_sampled: dict[str, tuple[SampledToken, ...]] | None = None
         # token 0s adopted since the driver last drained them: committed by
         # resume_with_kv, so no runner ever reports them
         self._carried: dict[str, SampledToken] = {}
@@ -290,9 +504,22 @@ class PDCoordinator:
         return tuple(self._failed)
 
     def add_request(self, request: EngineRequest) -> None:
+        if (
+            request.request_id in self._internal
+            or request.request_id in self._decode.states
+        ):
+            raise ValueError(f"duplicate request_id {request.request_id!r}")
         self._enqueue(request, attempt=0)
 
-    def _enqueue(self, request: EngineRequest, attempt: int) -> None:
+    def _enqueue(
+        self,
+        request: EngineRequest,
+        attempt: int,
+        *,
+        allow_existing: bool | None = None,
+    ) -> None:
+        if allow_existing is None:
+            allow_existing = attempt > 0
         internal_id = f"{request.request_id}{_PREFILL_ID_SEPARATOR}{attempt}"
         # request_id is the prefill scheduler's bookkeeping name; sampling_id
         # keeps the PUBLIC id as the sampling identity, so token 0 comes off the
@@ -303,9 +530,29 @@ class PDCoordinator:
             max_new_tokens=1,
             sampling_id=request.request_id,
         )
+        existing = self._prefill.states.get(internal_id)
+        if existing is not None:
+            if (
+                allow_existing
+                and existing.request == clone
+                and self._pending.get(internal_id) == (request, attempt)
+                and self._internal.get(request.request_id) == internal_id
+            ):
+                return
+            raise ValueError(f"duplicate request_id {internal_id!r}")
+        try:
+            self._prefill.add_request(clone)
+        except BaseException:
+            # A wrapper may raise after Scheduler.add_request installed the
+            # clone. Reconcile that exact state, but never overwrite unrelated
+            # bookkeeping on a pre-mutation failure.
+            installed = self._prefill.states.get(internal_id)
+            if installed is not None and installed.request == clone:
+                self._pending[internal_id] = (request, attempt)
+                self._internal[request.request_id] = internal_id
+            raise
         self._pending[internal_id] = (request, attempt)
         self._internal[request.request_id] = internal_id
-        self._prefill.add_request(clone)
 
     def _release_sampling_state(self, public_id: str) -> None:
         """Drop the prefill half's sampler state for a request (E2).
@@ -341,10 +588,60 @@ class PDCoordinator:
         if self._handover is None:
             return
         internal_id = self._internal.get(request_id)
-        held = any(original.request_id == request_id for original, _, _ in self._handover.adopt)
-        held = held or any(held_id == internal_id for held_id, _, _ in self._handover.retries)
+        held = any(
+            original.request_id == request_id for _, original, _, _, _, _ in self._handover.adopt
+        )
+        held = held or any(held_id == internal_id for held_id, _, _, _, _ in self._handover.retries)
+        held = held or (internal_id is not None and internal_id in self._handover.poisoned)
         if held:
-            self._settle_handover()
+            if internal_id is not None:
+                self._handover.cancelled.add(internal_id)
+            if internal_id is not None and internal_id in self._handover.poisoned:
+                raise RuntimeError(
+                    "cannot release a request whose handoff completion was lost"
+                ) from self._handover.poisoned[internal_id]
+            # Abort/forget are exceptional paths: wait only for this handover's
+            # completion events so its pages can be reclaimed without a race.
+            if self._wait_completion is not None:
+                for completion in self._handover_completions(self._handover):
+                    self._wait_completion(completion)
+            if not self._settle_handover():  # pragma: no cover - wait made it ready
+                raise RuntimeError("waited handoff did not become ready")
+
+    @staticmethod
+    def _handover_completions(handover: _Handover) -> tuple[object, ...]:
+        completions = [completion for *_, completion in handover.adopt if completion is not None]
+        completions.extend(
+            completion for *_, completion in handover.retries if completion is not None
+        )
+        return tuple(completions)
+
+    def _discard_or_reconcile(
+        self,
+        handover: _Handover,
+        internal_id: str,
+        allocation: KVAllocation,
+    ) -> BaseException | None:
+        """Release destination ownership and detect success-then-raise hooks.
+
+        ``discard`` is intentionally non-idempotent: calling it twice can free
+        pages now owned by another request.  A production ``KVAllocation``
+        records terminal release, so a raised hook can be reconciled only when
+        that flag proves the mutation completed.  Anything else poisons the
+        handover and fails closed.
+        """
+        try:
+            self._handoff.discard(allocation)
+        except BaseException as cleanup_error:
+            if allocation._freed:
+                return cleanup_error
+            handover.poisoned[internal_id] = cleanup_error
+            raise
+        return None
+
+    def _drop_staged(self, internal_id: str | None) -> None:
+        if internal_id is not None and self._staged_sampled is not None:
+            self._staged_sampled.pop(internal_id, None)
 
     def abort(self, request_id: str) -> None:
         """Cancel a request wherever it currently is (client disconnect).
@@ -354,15 +651,18 @@ class PDCoordinator:
         """
         self._settle_if_held(request_id)
         internal_id = self._internal.get(request_id)
+        self._drop_staged(internal_id)
         if internal_id is not None:
             self._pending.pop(internal_id, None)
             self._prefill.abort(internal_id)
+        self._release_sampling_state(request_id)
         self._decode.abort(request_id)
 
     def forget(self, request_id: str) -> None:
         """Drop every trace of a finished request across both halves (E2)."""
         self._settle_if_held(request_id)
         internal_id = self._internal.pop(request_id, None)
+        self._drop_staged(internal_id)
         if internal_id is not None:
             self._discard_clone(internal_id, request_id)
         self._decode.forget(request_id)
@@ -382,7 +682,7 @@ class PDCoordinator:
         destination pages. ``_settle_handover`` is the single place that gates
         first and performs them second.
         """
-        original, attempt = self._pending.pop(internal_id)
+        original, attempt = self._pending[internal_id]
         state = self._prefill.states.get(internal_id)
         source_pages: tuple[int, ...] = ()
         if state is not None and state.allocation is not None:
@@ -391,76 +691,251 @@ class PDCoordinator:
             allocation = self._handoff.transfer(
                 # explicit SampledToken -> int unwrap (m8 D2): KVHandoff.transfer
                 # keeps its int-typed first_token contract
-                original.prompt_token_ids, token0.token_id, source_pages
+                original.prompt_token_ids,
+                token0.token_id,
+                source_pages,
             )
-        except KVHandoffError:
-            handover.retries.append((internal_id, original, attempt))
-            return
-        handover.commit[internal_id] = token0.token_id
-        handover.adopt.append((original, allocation, token0))
-
-    def _settle_handover(self) -> None:
-        """Complete one step's transfers — never before their copies have landed.
-
-        Every release exits through here: ``update()`` finishes the
-        max_new_tokens=1 clone and ``commit_and_release`` pool-frees its tail
-        page, ``abort()`` release-preempts the whole allocation. Either way the
-        pages return to the prefill pool and the next prefill step can allocate
-        and overwrite them on the caller's stream. Adoption is gated for the
-        mirror-image reason: it is what puts the destination pages in front of
-        the decode runner.
-
-        With the blocking handoff that is free — ``transfer()`` did not return
-        until the copy finished, so the caller settles in its own step. With a
-        deferring one the gate is stream-ordered (``event.wait(current_stream)``)
-        rather than a host block, and the CALLER decides when to apply it. Doing
-        it one producer step later is what buys the overlap: everything queued in
-        between — the decode step, then the next prefill forward — runs against
-        the copy instead of behind it (m6 D4 under m18 D3's defer).
-        """
-        handover, self._handover = self._handover, None
-        if handover is None:
-            return
-        if self._gate_pending is not None:
-            self._gate_pending()
-        for internal_id, original, attempt in handover.retries:
-            # copy failed before commit: the prefill-side KV is released
-            # un-marked and the request recomputes from scratch (design m6 D4)
-            self._prefill.abort(internal_id)
-            if attempt < self._max_retries:
-                # the superseded clone's state is dead weight once its successor
-                # is queued; the surviving one stays visible so a driver can see
-                # a request that exhausted its retries finish as "abort".
-                # The sampling state goes with it: the retry re-samples token 0
-                # at position 0 from a state built under the same public id, so
-                # a fresh one is identical to the one being dropped.
-                self._discard_clone(internal_id, original.request_id)
-                self._enqueue(original, attempt + 1)
-            else:
-                # the clone itself stays visible so a driver can see the request
-                # finish as "abort"; only its sampling state is dead
-                self._release_sampling_state(original.request_id)
-                self._failed.append(original.request_id)
-        if handover.commit:
-            self._prefill.update(handover.commit)
-        for original, allocation, token0 in handover.adopt:
-            self._carry_sampler_state(original.request_id)
-            # token 0's FULL metadata, not just its id: it is the first token of
-            # the completion, so its logprob/top_logprobs belong in the stream
-            # and its grammar_terminated flag can finish the request outright
-            self._carried[original.request_id] = token0
-            finished = self._decode.resume_with_kv(original, allocation, token0.token_id)
-            if not finished and token0.grammar_terminated:
-                # the grammar completed AT token 0 (m8 D1). The decode half never
-                # sampled that token, so nothing there would ever notice — and it
-                # has to be noticed BEFORE decode plans, or the request generates
-                # one token past a finished grammar.
-                self._decode.finish_early(original.request_id)
-                finished = True
-            if finished:
-                self._outputs[original.request_id] = self._decode.output_tokens(
-                    original.request_id
+        except BaseException as error:
+            completion = getattr(error, "handoff_completion", None)
+            if getattr(error, "handoff_completion_lost", False):
+                handover.poisoned[internal_id] = error
+                raise
+            retryable = isinstance(error, KVHandoffError)
+            if retryable or completion is not None:
+                self._pending.pop(internal_id)
+                handover.retries.append(
+                    (
+                        internal_id,
+                        original,
+                        attempt,
+                        getattr(error, "allocation", None),
+                        completion,
+                    )
                 )
+                if isinstance(error, Exception):
+                    return
+            raise
+        try:
+            completion = (
+                self._completion_for(allocation) if self._completion_for is not None else None
+            )
+        except BaseException as error:
+            handover.poisoned[internal_id] = error
+            raise
+        self._pending.pop(internal_id)
+        handover.commit[internal_id] = token0.token_id
+        handover.adopt.append((internal_id, original, allocation, token0, attempt, completion))
+
+    def _settle_handover(self) -> bool:
+        """Poll and settle one step's transfers after physical completion.
+
+        Every release exits through here: ``update()`` frees source ownership,
+        retry aborts source KV, and ``resume_with_kv`` admits destination pages.
+        A stream wait only orders future work on that stream; it does not prove
+        completion or authorize host-visible radix publication.  The normal path
+        therefore returns ``False`` while any completion query is pending.
+        Unrelated decode and one next prefill forward can run during those polls.
+        """
+        handover = self._handover
+        if handover is None:
+            return True
+        if handover.poisoned:
+            internal_id, error = next(iter(handover.poisoned.items()))
+            raise RuntimeError(
+                f"handoff completion was lost for {internal_id}; "
+                "the engine must fail closed"
+            ) from error
+        if self._completion_ready is not None:
+            for completion in self._handover_completions(handover):
+                if not self._completion_ready(completion):
+                    return False
+
+        index = 0
+        while index < len(handover.adopt):
+            (
+                internal_id,
+                original,
+                allocation,
+                token0,
+                attempt,
+                completion,
+            ) = handover.adopt[index]
+            try:
+                if completion is not None and not self._finalize_completion(completion):
+                    raise RuntimeError("ready handoff completion became incomplete")
+            except KVHandoffError:
+                handover.commit.pop(internal_id, None)
+                handover.retries.append((internal_id, original, attempt, None, None))
+                handover.adopt.pop(index)
+                if completion is not None:
+                    self._acknowledge_completion(completion)
+            else:
+                handover.adopt[index] = (
+                    internal_id,
+                    original,
+                    allocation,
+                    token0,
+                    attempt,
+                    None,
+                )
+                if completion is not None:
+                    self._acknowledge_completion(completion)
+                index += 1
+
+        for index, (
+            internal_id,
+            original,
+            attempt,
+            _allocation,
+            completion,
+        ) in enumerate(tuple(handover.retries)):
+            if completion is not None:
+                try:
+                    if not self._finalize_completion(completion):
+                        raise RuntimeError("ready failed handoff became incomplete")
+                except KVHandoffError:
+                    # Expected transfer failure, surfaced only after partially
+                    # queued writes completed and destination cleanup was safe.
+                    pass
+            handover.retries[index] = (internal_id, original, attempt, None, None)
+            if completion is not None:
+                self._acknowledge_completion(completion)
+
+        # Activate and source-commit one adoption at a time. The handover stays
+        # installed until each external mutation succeeds, so an exception can
+        # resume without double-adopting an earlier request or losing its lock.
+        index = 0
+        while index < len(handover.adopt):
+            (
+                internal_id,
+                original,
+                allocation,
+                token0,
+                attempt,
+                _completion,
+            ) = handover.adopt[index]
+            if internal_id in handover.cancelled:
+                if internal_id in handover.resumed:
+                    self._decode.abort(original.request_id)
+                    # Token 0 was adopted internally but never surfaced to the
+                    # EngineLoop. Remove that decode state completely so the
+                    # abort result routes through the still-owned prefill clone
+                    # and remains an empty completion.
+                    self._decode.forget(original.request_id)
+                    self._carried.pop(original.request_id, None)
+                    self._outputs.pop(original.request_id, None)
+                elif internal_id not in handover.discarded:
+                    cleanup_error = self._discard_or_reconcile(
+                        handover,
+                        internal_id,
+                        allocation,
+                    )
+                    handover.discarded.add(internal_id)
+                    if cleanup_error is not None:
+                        raise cleanup_error
+                self._prefill.abort(internal_id)
+                handover.commit.pop(internal_id, None)
+                handover.resumed.discard(internal_id)
+                handover.adopted.discard(internal_id)
+                handover.discarded.discard(internal_id)
+                handover.adopt.pop(index)
+                continue
+
+            if internal_id not in handover.resumed:
+                try:
+                    self._decode.resume_with_kv(original, allocation, token0.token_id)
+                except BaseException as adoption_error:
+                    # ``resume_with_kv`` installs the decode state before its
+                    # terminal checks. An outer hook can therefore raise after
+                    # adoption already succeeded. Detect that ownership
+                    # transition before deciding whether discard is legal.
+                    state = self._decode.states.get(original.request_id)
+                    if state is not None and state.allocation is allocation:
+                        handover.resumed.add(internal_id)
+                        raise
+                    if not isinstance(adoption_error, Exception):
+                        raise
+                    # Completion already made this allocation safe to release.
+                    # Keep source ownership and turn the request into the normal
+                    # recompute retry path instead of leaking a destination lock.
+                    cleanup_error = self._discard_or_reconcile(
+                        handover,
+                        internal_id,
+                        allocation,
+                    )
+                    handover.commit.pop(internal_id, None)
+                    handover.retries.append((internal_id, original, attempt, None, None))
+                    handover.adopt.pop(index)
+                    if cleanup_error is not None:
+                        raise cleanup_error from adoption_error
+                    continue
+                handover.resumed.add(internal_id)
+
+            if internal_id not in handover.adopted:
+                self._carry_sampler_state(original.request_id)
+                self._carried[original.request_id] = token0
+                state = self._decode.states[original.request_id]
+                if state.finish_reason is None and token0.grammar_terminated:
+                    self._decode.finish_early(original.request_id)
+                if self._decode.finish_reason(original.request_id) is not None:
+                    self._outputs[original.request_id] = self._decode.output_tokens(
+                        original.request_id
+                    )
+                handover.adopted.add(internal_id)
+
+            if internal_id in handover.commit:
+                try:
+                    self._prefill.update({internal_id: handover.commit[internal_id]})
+                except BaseException as commit_error:
+                    source_state = self._prefill.states.get(internal_id)
+                    source_allocation = (
+                        source_state.allocation if source_state is not None else None
+                    )
+                    if (
+                        source_state is not None
+                        and source_state.finish_reason is not None
+                        and source_allocation is not None
+                        and source_allocation._freed
+                    ):
+                        # An outer hook raised after ``update`` committed and
+                        # released the clone. Record that completed phase before
+                        # propagating so re-entry cannot commit token 0 twice.
+                        handover.commit.pop(internal_id)
+                        handover.resumed.discard(internal_id)
+                        handover.adopted.discard(internal_id)
+                        handover.adopt.pop(index)
+                        raise
+                    if (
+                        source_state is not None
+                        and source_state.finish_reason is not None
+                    ):
+                        # The scheduler crossed its terminal mutation but could
+                        # not prove allocation release. Retrying update is not
+                        # legal and releasing either side could race.
+                        handover.poisoned[internal_id] = commit_error
+                    raise
+                handover.commit.pop(internal_id)
+            handover.resumed.discard(internal_id)
+            handover.adopted.discard(internal_id)
+            handover.adopt.pop(index)
+
+        while handover.retries:
+            internal_id, original, attempt, _, _ = handover.retries[0]
+            self._prefill.abort(internal_id)
+            if internal_id not in handover.cancelled:
+                if attempt < self._max_retries:
+                    self._discard_clone(internal_id, original.request_id)
+                    self._enqueue(original, attempt + 1)
+                else:
+                    self._release_sampling_state(original.request_id)
+                    if original.request_id not in self._failed:
+                        self._failed.append(original.request_id)
+            handover.retries.pop(0)
+
+        if handover.commit:  # pragma: no cover - state-machine invariant
+            raise RuntimeError(f"unsettled P-D source commits: {tuple(handover.commit)}")
+        self._handover = None
+        return True
 
     def _carry_sampler_state(self, request_id: str) -> None:
         """Move the request's sampling state from the prefill half to decode.
@@ -487,6 +962,44 @@ class PDCoordinator:
         carried, self._carried = self._carried, {}
         return carried
 
+    def _start_handover(self, sampled: Mapping[str, tuple[SampledToken, ...]]) -> None:
+        if self._handover is not None:  # pragma: no cover - state-machine guard
+            raise RuntimeError("cannot start a second P-D handover batch")
+        handover = _Handover()
+        self._handover = handover
+        items = tuple(sampled.items())
+        for index, (internal_id, tokens) in enumerate(items):
+            try:
+                self._handoff_or_retry(internal_id, tokens[0], handover)
+            except BaseException as error:
+                if getattr(error, "handoff_completion_lost", False):
+                    handover.poisoned[internal_id] = error
+                elif internal_id not in handover.poisoned:
+                    # A wrapper may raise after the current transfer registered
+                    # its adoption/retry. Stage it again only when handover does
+                    # not already own it; later sampled items are always staged.
+                    owned = (
+                        internal_id in handover.commit
+                        or any(
+                            held_id == internal_id
+                            for held_id, *_ in handover.adopt
+                        )
+                        or any(
+                            held_id == internal_id
+                            for held_id, *_ in handover.retries
+                        )
+                    )
+                    remaining = items[index + int(owned) :]
+                    self._staged_sampled = dict(remaining) if remaining else None
+                if not handover:
+                    self._handover = None
+                raise
+        if not handover:
+            self._handover = None
+        if self._completion_ready is None:
+            # Blocking handoffs synchronized and published inside transfer().
+            self._settle_handover()
+
     def step_prefill(self, *, reject_on_stall: bool = False) -> None:
         """One prefill step: schedule, execute, hand the KV off, then commit.
 
@@ -496,12 +1009,22 @@ class PDCoordinator:
         is finished rather than the whole engine — and every concurrent request
         with it — dying on a stall.
         """
+        if self._staged_sampled is not None:
+            # One overlap forward already ran.  If the older copy is still
+            # pending, return to the driver so existing decode work can progress;
+            # never schedule these completed clones a second time.
+            if not self._settle_handover():
+                return
+            sampled, self._staged_sampled = self._staged_sampled, None
+            self._start_handover(sampled)
+            return
+
         plan = self._prefill.schedule()
         if not plan.scheduled and self._handover is not None:
-            # nothing to queue alongside the outstanding copies — and their still
-            # -leased source pages are part of why. There is no overlap left to
-            # win, so settle and re-plan with the pages back.
-            self._settle_handover()
+            # Nothing remains to overlap. Poll rather than blocking the host; the
+            # driver can run decode and call us again when the event is ready.
+            if not self._settle_handover():
+                return
             plan = self._prefill.schedule()
         if not plan.scheduled:
             if not self._prefill.has_unfinished():
@@ -510,18 +1033,13 @@ class PDCoordinator:
                 return
             raise RuntimeError("P-D prefill stall: nothing schedulable")
         sampled = self._prefill_runner.execute(plan.scheduled, self._prefill.states)
-        # The gate for the PREVIOUS step's copies lands here, with this step's
-        # forward already queued in front of it — that forward, and the decode
-        # step queued before it, are what those copies overlap.
-        self._settle_handover()
-        handover = _Handover()
-        for internal_id, tokens in sampled.items():
-            self._handoff_or_retry(internal_id, tokens[0], handover)
-        self._handover = handover or None
-        if self._gate_pending is None:
-            # a blocking handoff already finished its copy inside transfer();
-            # deferring the settlement would only delay the request for nothing
-            self._settle_handover()
+        # The previous copy ran alongside this forward and the decode step queued
+        # before it. If it is still pending, retain this result and poll on later
+        # host turns: no host synchronize and no duplicate scheduling.
+        if not self._settle_handover():
+            self._staged_sampled = dict(sampled)
+            return
+        self._start_handover(sampled)
 
     def _step_decode(self) -> None:
         plan = self._decode.schedule()
@@ -538,7 +1056,11 @@ class PDCoordinator:
         """Prefill-side work, INCLUDING a handover whose copies are still in
         flight — its clones stay unfinished until the settlement commits them,
         but saying so explicitly keeps a driver from ever dropping one."""
-        return self._prefill.has_unfinished() or self._handover is not None
+        return (
+            self._prefill.has_unfinished()
+            or self._handover is not None
+            or self._staged_sampled is not None
+        )
 
     def run_to_completion(self) -> dict[str, tuple[int, ...]]:
         while self.has_prefill_work() or self._decode.has_unfinished():

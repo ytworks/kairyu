@@ -220,7 +220,41 @@ GPU-only remainder (design m5 §4.2).
   87.6725%/87.3531%; 512/512 successful requests per cell; all eight binding
   checks pass independent raw replay).
 - Gates A8–A9: `--dp-replicas 2` + `multiturn_prefix.py --replicas 2`; DP-vs-TP sweep.
-- Gate A10: `bench/pd_mixed.py` (stream-copy KVHandoff on side stream; ≤5 ms p99).
+- Gate A10 / issue #223: cross-device P-D handoff uses a dedicated source-copy
+  stream on the prefill GPU and a destination dependency/completion stream on
+  the decode GPU. Select two distinct GPUs for which CUDA peer access is
+  available; the deferred production constructor fails rather than falling
+  back when the pair cannot perform P2P. A stream wait is not completion:
+  `PDCoordinator` may publish destination KV and release the source lease only
+  after the retained physical event returns true from `event.query()`.
+  `pd_defer_handoff=false` is the serialized control and synchronizes both
+  transfer streams before publication. If completion or cleanup ownership is
+  lost, the engine must retain/poison the allocation and fail closed rather
+  than publish or reuse partial KV.
+
+  Run the formal Qwen3-32B production-path comparison from a clean committed
+  tree:
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=0,1 uv run python bench/pd_overlap_qwen.py \
+    --model-path <qwen3-32b-checkpoint> \
+    --prefill-device 0 --decode-device 1 \
+    --output bench/results/issue-223-pd-overlap-qwen3-32b-<gpu>-<date>.json \
+    --assert-gate
+  uv run python bench/pd_overlap_qwen.py \
+    --verify bench/results/issue-223-pd-overlap-qwen3-32b-<gpu>-<date>.json \
+    --assert-gate
+  ```
+
+  The artifact binds the full Qwen3-32B checkpoint and tokenizer provenance,
+  clean source hashes, the real distinct role devices, production coordinator,
+  pool and stream-provider topology, complete raw outputs, and exact
+  blocking/deferred token and text parity. Wall time, TTFT, completion latency,
+  throughput, and ratios between the two fixed-order conditions are
+  **diagnostic only**: OS scheduling, runtime launch, clock, thermal, and
+  shared-host jitter must not turn a short performance sample into a correctness
+  gate. The historical `bench/pd_mixed.py` ≤5 ms p99 target is therefore not a
+  closure criterion for #223.
 
 ## 7. M6 — 2-node day(s), IB/RoCE ≥400Gb/s (prereq: all M5 gates; goal G2 gates B1–B5)
 

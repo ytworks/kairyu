@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import re
 from collections.abc import Callable, Mapping
 from os import PathLike
 
@@ -50,6 +51,9 @@ _KAIRYU_OPTIONS = frozenset(
         "speculative_tokens",
         "model_path",
         "pd_separation",
+        "pd_prefill_device",
+        "pd_decode_device",
+        "pd_defer_handoff",
         "pipeline_depth",
         "decode_mode",
         "cuda_graph_max_batch",
@@ -77,12 +81,11 @@ _KAIRYU_PROC_OPTIONS = frozenset(
     }
 )
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
+_PD_CUDA_DEVICE = re.compile(r"cuda(?::[0-9]+)?\Z")
 
 
 def _normalized_options(options: Mapping[str, object]) -> dict[str, object]:
-    if not isinstance(options, Mapping) or any(
-        not isinstance(name, str) for name in options
-    ):
+    if not isinstance(options, Mapping) or any(not isinstance(name, str) for name in options):
         raise ValueError("backend options must be a string-keyed mapping")
     return dict(options)
 
@@ -266,29 +269,19 @@ def _validate_native_common(
         if num_pages < 2:
             raise ValueError("native backend cuda_graph decode requires at least two pages")
         if graph_pages >= num_pages:
-            raise ValueError(
-                "native backend cuda_graph_max_pages must be smaller than num_pages"
-            )
+            raise ValueError("native backend cuda_graph_max_pages must be smaller than num_pages")
 
     if pd_separation:
         if model_path is None:
             raise ValueError("native backend pd_separation requires model_path")
         if tensor_parallel_size > 1:
-            raise ValueError(
-                "native backend pd_separation does not support tensor parallelism"
-            )
+            raise ValueError("native backend pd_separation does not support tensor parallelism")
         if speculative is not None:
-            raise ValueError(
-                "native backend pd_separation does not support speculative decoding"
-            )
+            raise ValueError("native backend pd_separation does not support speculative decoding")
         if graph_decode:
-            raise ValueError(
-                "native backend pd_separation does not support cuda_graph decode"
-            )
+            raise ValueError("native backend pd_separation does not support cuda_graph decode")
     if speculative is not None and tensor_parallel_size > 1 and model_path is None:
-        raise ValueError(
-            "native backend speculative tensor parallelism requires model_path"
-        )
+        raise ValueError("native backend speculative tensor parallelism requires model_path")
 
 
 def _validate_kairyu(options: Mapping[str, object]) -> None:
@@ -302,6 +295,34 @@ def _validate_kairyu(options: Mapping[str, object]) -> None:
     pd_separation = options.get("pd_separation", False)
     if not isinstance(pd_separation, bool):
         raise ValueError("kairyu backend pd_separation must be a boolean")
+    pd_device_types: dict[str, str] = {}
+    for field in ("pd_prefill_device", "pd_decode_device"):
+        value = options.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"kairyu backend {field} must be a string or null")
+        if isinstance(value, str):
+            if value == "cpu":
+                pd_device_types[field] = "cpu"
+            elif _PD_CUDA_DEVICE.fullmatch(value):
+                pd_device_types[field] = "cuda"
+            else:
+                raise ValueError(
+                    f"kairyu backend {field} must name a CPU or CUDA device, got {value!r}"
+                )
+    if len(pd_device_types) == 2 and len(set(pd_device_types.values())) != 1:
+        raise ValueError(
+            "kairyu backend pd_prefill_device and pd_decode_device must both "
+            "be CUDA or both be CPU"
+        )
+    pd_defer_handoff = options.get("pd_defer_handoff", True)
+    if not isinstance(pd_defer_handoff, bool):
+        raise ValueError("kairyu backend pd_defer_handoff must be a boolean")
+    if not pd_separation and (
+        options.get("pd_prefill_device") is not None
+        or options.get("pd_decode_device") is not None
+        or pd_defer_handoff is not True
+    ):
+        raise ValueError("kairyu backend P-D role options require pd_separation")
     _validate_native_common(
         "kairyu",
         options,
@@ -359,9 +380,7 @@ def _validate_custom(name: str, options: Mapping[str, object]) -> None:
     try:
         signature.bind(**options)
     except TypeError:
-        raise ValueError(
-            "custom backend options do not match the registered factory"
-        ) from None
+        raise ValueError("custom backend options do not match the registered factory") from None
 
 
 def validate_backend_options(

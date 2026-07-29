@@ -26,7 +26,7 @@ import asyncio
 from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.engine.core.kv_serde import extract_pages, inject_page
 from kairyu.engine.core.kv_transport import KVTransportError, SequenceMeta
-from kairyu.engine.core.pd import KVHandoffError
+from kairyu.engine.core.pd import HandoffCompletionLostError, KVHandoffError
 from kairyu.engine.core.radix_kv import KVAllocation, KVCacheFull, RadixKVCache
 
 
@@ -66,9 +66,21 @@ class RemoteKVReceiver:
                 self.injected_pages += 1
             self._cache.mark_computed(allocation)
             return allocation
-        except Exception:
-            self._cache.release_preempted(allocation)
+        except BaseException:
+            try:
+                self._cache.release_preempted(allocation)
+            except BaseException as cleanup_error:
+                if not allocation._freed:
+                    raise HandoffCompletionLostError(
+                        "remote KV adoption failed and destination cleanup could "
+                        "not release its allocation",
+                        allocation=allocation,
+                    ) from cleanup_error
             raise
+
+    def discard(self, allocation: KVAllocation) -> None:
+        """Release an adopted allocation that the decode scheduler rejected."""
+        self._cache.release_preempted(allocation)
 
 
 class RemoteKVHandoff:
@@ -113,3 +125,7 @@ class RemoteKVHandoff:
             return asyncio.run(_round_trip())
         except (KVTransportError, OSError) as error:
             raise KVHandoffError(f"kv transfer failed: {error}") from error
+
+    def discard(self, allocation: KVAllocation) -> None:
+        """Return decode-side ownership through the receiver that allocated it."""
+        self._receiver.discard(allocation)

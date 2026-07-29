@@ -78,9 +78,7 @@ class TestMlaEquivalence:
         w_uk = torch.randn(2, 16, 8)
         w_uv = torch.randn(2, 16, 8)
         right = mla_decompress(q_nope, q_pe, c_kv, k_pe, w_uk, w_uv, mla_scale(8, 4))
-        wrong = mla_decompress(
-            q_nope, q_pe, c_kv, k_pe, w_uk, w_uv, (16 + 4) ** -0.5
-        )
+        wrong = mla_decompress(q_nope, q_pe, c_kv, k_pe, w_uk, w_uv, (16 + 4) ** -0.5)
         assert not torch.allclose(right, wrong, atol=1e-5)
 
 
@@ -151,9 +149,7 @@ class TestFlashInferAdapterContract:
 
         return FlashInferBackend(device="cpu")
 
-    def test_wrapper_workspaces_are_zero_initialized(
-        self, fake_flashinfer, monkeypatch
-    ):
+    def test_wrapper_workspaces_are_zero_initialized(self, fake_flashinfer, monkeypatch):
         real_empty = torch.empty
 
         def dirty_empty(*args, **kwargs):
@@ -217,9 +213,7 @@ class TestFlashInferAdapterContract:
         assert paged_kv[0].shape == (16, PAGE, 2, 8)  # pool.k[layer] NHD slice
         assert torch.equal(paged_kv[0], pool.k[1])
 
-    def test_batched_decode_plans_and_runs_once_with_csr_pages(
-        self, fake_flashinfer
-    ):
+    def test_batched_decode_plans_and_runs_once_with_csr_pages(self, fake_flashinfer):
         backend = self._backend()
         pool = _pool()
         queries = [torch.randn(1, 4, 8), torch.randn(1, 4, 8)]
@@ -260,9 +254,7 @@ class TestFlashInferAdapterContract:
         chunk_starts = [5, 8]
 
         for layer in range(3):
-            backend.attend_batched(
-                queries, pool, layer, page_tables, seq_lens, chunk_starts
-            )
+            backend.attend_batched(queries, pool, layer, page_tables, seq_lens, chunk_starts)
 
         assert len(backend._decode.plans) == 1
         assert len(backend._decode.runs) == 3
@@ -270,9 +262,7 @@ class TestFlashInferAdapterContract:
     def test_batched_decode_replans_after_prefill(self, fake_flashinfer):
         backend = self._backend()
         pool = _pool()
-        backend.attend(
-            torch.randn(2, 4, 8), pool, 0, [3, 1], seq_len=6, chunk_start=4
-        )
+        backend.attend(torch.randn(2, 4, 8), pool, 0, [3, 1], seq_len=6, chunk_start=4)
 
         backend.attend_batched(
             [torch.randn(1, 4, 8)],
@@ -292,16 +282,12 @@ class TestFlashInferAdapterContract:
         pool = _pool()
         query = torch.randn(1, 4, 8)
 
-        batched = backend.attend_batched(
-            [query], pool, 0, [[3, 1]], [6], [5]
-        )[0]
+        batched = backend.attend_batched([query], pool, 0, [[3, 1]], [6], [5])[0]
         single = backend.attend(query, pool, 0, [3, 1], 6, 5)
 
         assert torch.equal(batched, single)
 
-    def test_non_decode_batch_falls_back_without_batched_decode_run(
-        self, fake_flashinfer
-    ):
+    def test_non_decode_batch_falls_back_without_batched_decode_run(self, fake_flashinfer):
         backend = self._backend()
         pool = _pool()
         queries = [torch.randn(2, 4, 8), torch.randn(1, 4, 8)]
@@ -414,13 +400,9 @@ class TestFlashInferTensorDecode:
 
         # raising=False so this test class states the property even against an
         # implementation that has no capture guard at all
-        monkeypatch.setattr(
-            flashinfer_gpu, "_is_capturing", lambda: value, raising=False
-        )
+        monkeypatch.setattr(flashinfer_gpu, "_is_capturing", lambda: value, raising=False)
 
-    def test_the_capture_region_never_touches_the_host(
-        self, fake_flashinfer, monkeypatch
-    ):
+    def test_the_capture_region_never_touches_the_host(self, fake_flashinfer, monkeypatch):
         """THE regression gate, in the shape a capture really happens: warm up
         eagerly (which plans), then decode with the host off-limits.
 
@@ -437,8 +419,7 @@ class TestFlashInferTensorDecode:
         self._capturing(monkeypatch)
         _forbid_host_sync(monkeypatch)
         contexts = [
-            backend.attend_decode(query, pool, layer, page_tables, seq_lens)
-            for layer in range(2)
+            backend.attend_decode(query, pool, layer, page_tables, seq_lens) for layer in range(2)
         ]
 
         assert len(wrapper.plans) == plans_before  # planning stayed outside
@@ -460,9 +441,7 @@ class TestFlashInferTensorDecode:
         backend = self._backend()
         pool = _pool()
         query, page_tables, seq_lens = self._inputs()
-        backend.plan_decode(
-            pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype
-        )
+        backend.plan_decode(pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype)
         self._capturing(monkeypatch)
 
         with pytest.raises(RuntimeError, match="plan_decode"):
@@ -474,17 +453,13 @@ class TestFlashInferTensorDecode:
                 seq_lens[:1],
             )
 
-    def test_plan_decode_refuses_to_run_inside_a_capture(
-        self, fake_flashinfer, monkeypatch
-    ):
+    def test_plan_decode_refuses_to_run_inside_a_capture(self, fake_flashinfer, monkeypatch):
         backend = self._backend()
         query, page_tables, seq_lens = self._inputs()
         self._capturing(monkeypatch)
 
         with pytest.raises(RuntimeError, match="cannot run inside a CUDA graph"):
-            backend.plan_decode(
-                _pool(), page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype
-            )
+            backend.plan_decode(_pool(), page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype)
 
     def test_the_plan_lands_in_persistent_cudagraph_buffers(self, fake_flashinfer):
         """Plain (non-cudagraph) mode REBINDS its paged buffers on every plan, so
@@ -493,9 +468,7 @@ class TestFlashInferTensorDecode:
         pool = _pool()
         query, page_tables, seq_lens = self._inputs()
 
-        backend.plan_decode(
-            pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype
-        )
+        backend.plan_decode(pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype)
         wrapper = backend._decode_tensor_wrapper
         buffers = (
             wrapper.indptr_buffer,
@@ -510,9 +483,7 @@ class TestFlashInferTensorDecode:
 
         page_tables.copy_(torch.tensor([[5, 4], [2, 0]], dtype=torch.int32))
         seq_lens.copy_(torch.tensor([4, 8], dtype=torch.int32))
-        backend.plan_decode(
-            pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype
-        )
+        backend.plan_decode(pool, page_tables, seq_lens, num_qo_heads=4, q_dtype=query.dtype)
 
         assert backend._decode_tensor_wrapper is wrapper  # same wrapper, same shape
         assert (
@@ -602,9 +573,15 @@ class TestSelector:
     def test_gpu_tier_selects_flashinfer(self, fake_flashinfer, monkeypatch):
         from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
 
-        monkeypatch.setattr(FlashInferBackend, "__init__", lambda self, device="cuda": None)
+        selected = []
+        monkeypatch.setattr(
+            FlashInferBackend,
+            "__init__",
+            lambda self, device="cuda": selected.append(device),
+        )
         sm120 = HardwareProfile(arch="cuda", sm=120)
-        assert isinstance(select_backend(sm120), FlashInferBackend)
+        assert isinstance(select_backend(sm120, device="cuda:3"), FlashInferBackend)
+        assert selected == ["cuda:3"]
 
 
 class TestSelectBackendName:

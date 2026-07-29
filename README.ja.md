@@ -353,7 +353,9 @@ print(llm.generate(["What is paged attention?"], SamplingParams(max_tokens=64)))
 しても指定可能 — [バックエンドオプション表](#バックエンドオプション-enginesoptions)
 参照): `tokenizer`、`num_pages`、`page_size`、`max_num_batched_tokens`、
 `speculative="ngram"`、`tensor_parallel_size`、CUDA 上の
-`decode_mode="cuda_graph"`。
+`decode_mode="cuda_graph"`、prefill/decode 分離用の
+`pd_separation`／`pd_prefill_device`／`pd_decode_device`／
+`pd_defer_handoff`。
 
 **ローカル重みの代わりにホステッド API を使う** — `openai` バックエンドは任意の
 OpenAI 互換エンドポイントを指せます。API キーは `api_key_env` で指定した環境変数から
@@ -409,6 +411,34 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 テンソル並列は YAML のエンジンごとに設定します
 (`options: {tensor_parallel_size: 2}`)— serve プロセスがマルチプロセスの TP ワーカー
 グループをスポーンします(CPU では gloo、GPU では NCCL)。CLI フラグはありません。
+
+prefill/decode 分離もエンジンごとに設定します。次の例では、相互に peer access
+可能な CUDA GPU ペアへ各ロールを配置します:
+
+```yaml
+engines:
+  qwen-pd:
+    backend: kairyu
+    options:
+      model_path: /models/qwen3-32b
+      pd_separation: true
+      pd_prefill_device: cuda:0
+      pd_decode_device: cuda:1
+      pd_defer_handoff: true
+```
+
+両ロールのデバイスはともに CPU、またはともに CUDA である必要があります。異なる
+ロールデバイスは個別にプローブされ、それぞれに互換性のある attention backend が
+選択されます。stateful な backend インスタンスはデバイス間で共有されません。
+cross-device の deferred handoff には選択 GPU 間の CUDA P2P access が必須で、
+利用できなければ起動時に失敗します。コピーは送信元・送信先それぞれの専用 transfer
+stream で行いますが、物理完了 event が ready になるまで送信先 KV の公開も送信元
+page の解放も行いません。判定には `event.query()` を使用します。完了または cleanup
+を信頼できなくなった場合は、影響を受けた ownership を保持して fail-closed とし、
+partial KV の公開・再利用は行いません。直列化した比較用 control には
+`pd_defer_handoff: false` を指定します。この場合は両 transfer stream を同期して
+から公開し、correctness contract は同一です。現在の P-D path は TP=1、eager
+decode、投機的デコーディングなしを必須とします。
 
 提供エンドポイント: `/v1/chat/completions`(SSE ストリーミング、tools、logprobs、
 `n>1`、`response_format: json_schema`、vision コンテンツパーツ)、`/v1/completions`、
@@ -674,6 +704,10 @@ batch:                         # 任意の OpenAI 互換 /v1/files + /v1/batches
 | | `cuda_graph_max_batch` | 8 | capture する最大 decode batch。超過 batch は eager decode |
 | | `cuda_graph_max_pages` | 512 | capture bucket の固定 page-table 幅。より長い系列は eager decode。`num_pages` 未満が必須 |
 | | `cuda_graph_warmup_iters` | 3 | 初回 capture 前に side stream で実行する warmup 回数 |
+| | `pd_separation` | `false` | prefill と decode を別 engine として構築。現在は実 model、TP=1、eager decode、投機的デコーディングなしが必須 |
+| | `pd_prefill_device` | 自動 | prefill ロールのデバイス(`cpu` または `cuda:N`)。`pd_separation` が必須で、このデバイス用の hardware profile と attention backend を選択 |
+| | `pd_decode_device` | 自動 | decode ロールのデバイス(`cpu` または `cuda:N`)。prefill と同じ CPU/CUDA 種別が必須。cross-device CUDA の deferred 動作には P2P access が必須 |
+| | `pd_defer_handoff` | `true` | 物理 transfer 完了まで公開・解放を deferred。`false` は送信元・送信先の transfer stream を同期してから公開 |
 | `kairyu-proc` | `kairyu` と同じ | — | エンジンを別プロセスで実行(ZMQ/msgpack、クラッシュ分離) |
 | `openai` | `base_url`, `api_key`, `model` | — | 任意の OpenAI 互換エンドポイント |
 | `vllm` | vLLM エンジン kwargs | — | vllm がインストールされた Linux GPU ホストが必要 |

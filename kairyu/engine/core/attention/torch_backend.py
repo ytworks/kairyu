@@ -15,6 +15,8 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 
 
 class TorchAttentionBackend:
+    device_agnostic = True
+
     #: ``GraphDecodeBackend`` (m17 D1): ``attend_decode`` below is pure tensor
     #: algebra — ``gather_batched``, an ``arange`` compare and SDPA. Nothing
     #: reads a device value into Python, so a capture of it is sound.

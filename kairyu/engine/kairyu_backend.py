@@ -173,6 +173,9 @@ def build_engine_loop(
     speculative_tokens: int = 4,
     model_path: str | None = None,
     pd_separation: bool = False,
+    pd_prefill_device: str | None = None,
+    pd_decode_device: str | None = None,
+    pd_defer_handoff: bool = True,
     pipeline_depth: int = 1,
     decode_mode: str = "eager",
     cuda_graph_max_batch: int = 8,
@@ -219,6 +222,15 @@ def build_engine_loop(
             )
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
+    if not pd_separation and (
+        pd_prefill_device is not None
+        or pd_decode_device is not None
+        or pd_defer_handoff is not True
+    ):
+        raise ValueError(
+            "pd_prefill_device, pd_decode_device, and a non-default "
+            "pd_defer_handoff require pd_separation=True"
+        )
     if pd_separation:
         if model_path is None:
             raise ValueError("pd_separation needs a model_path")
@@ -239,6 +251,9 @@ def build_engine_loop(
             priority_age_s=priority_age_s,
             tokenizer=tokenizer,
             pipeline_depth=pipeline_depth,
+            prefill_device=pd_prefill_device,
+            decode_device=pd_decode_device,
+            defer_handoff=pd_defer_handoff,
         )
 
     if model_path is not None and tensor_parallel_size > 1:
@@ -378,6 +393,9 @@ def _build_pd_loop(
     priority_age_s: float | None,
     tokenizer: str | Tokenizer | None,
     pipeline_depth: int,
+    prefill_device: str | None,
+    decode_device: str | None,
+    defer_handoff: bool,
 ) -> tuple[EngineLoop, RadixKVCache, PDLoopAdapter]:
     """Serve through a prefill/decode pair (m18 D3, G2 stage 5.3).
 
@@ -385,6 +403,10 @@ def _build_pd_loop(
     deployment could only reach it from Python. This is the `backend: kairyu`
     option that turns it on, so `pd_separation: true` in a deployment YAML is a
     real topology rather than a config surface m2 §2.4 reserved and never wired.
+    `pd_prefill_device` and `pd_decode_device` select role GPUs;
+    `pd_defer_handoff=false` selects the synchronized control. Deferred
+    cross-device handoff requires CUDA peer access and publishes only after
+    physical event completion.
 
     The coordinator owns two schedulers and two runners; `PDLoopAdapter` is what
     makes that one scheduler and one runner from the loop's side — submissions
@@ -407,6 +429,9 @@ def _build_pd_loop(
         max_num_seqs=max_num_seqs,
         priority_age_s=priority_age_s,
         tokenizer=resolved,
+        prefill_device=prefill_device,
+        decode_device=decode_device,
+        defer_handoff=defer_handoff,
     )
     generation = load_generation_defaults(model_path)
     adapter = PDLoopAdapter(coordinator)
@@ -513,6 +538,9 @@ class KairyuBackend:
         cuda_graph_max_batch: int = 8,
         cuda_graph_max_pages: int = 512,
         cuda_graph_warmup_iters: int = 3,
+        pd_prefill_device: str | None = None,
+        pd_decode_device: str | None = None,
+        pd_defer_handoff: bool = True,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
@@ -528,6 +556,9 @@ class KairyuBackend:
             speculative_tokens=speculative_tokens,
             model_path=model_path,
             pd_separation=pd_separation,
+            pd_prefill_device=pd_prefill_device,
+            pd_decode_device=pd_decode_device,
+            pd_defer_handoff=pd_defer_handoff,
             pipeline_depth=pipeline_depth,
             decode_mode=decode_mode,
             cuda_graph_max_batch=cuda_graph_max_batch,
