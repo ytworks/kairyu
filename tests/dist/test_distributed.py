@@ -60,6 +60,15 @@ def moe_dir(tmp_path_factory):
 
 
 def _single_process_greedy(model_dir: str, prompt: list[int], max_new: int) -> list[int]:
+    return _single_process_sample(model_dir, prompt, max_new, {})
+
+
+def _single_process_sample(
+    model_dir: str,
+    prompt: list[int],
+    max_new: int,
+    sampling_kwargs: dict,
+) -> list[int]:
     from kairyu.engine.core.engine_core import EngineCore
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
@@ -75,7 +84,12 @@ def _single_process_greedy(model_dir: str, prompt: list[int], max_new: int) -> l
     pool = PagedKVPool.for_cache(cache, config)
     engine = EngineCore(scheduler, PagedModelRunner(model, pool, sampler=Sampler()))
     engine.add_request(
-        EngineRequest("a", tuple(prompt), max_new_tokens=max_new, sampling=EngineSampling())
+        EngineRequest(
+            "a",
+            tuple(prompt),
+            max_new_tokens=max_new,
+            sampling=EngineSampling(**sampling_kwargs),
+        )
     )
     return list(engine.run_to_completion()["a"])
 
@@ -86,6 +100,7 @@ def test_communicator_contract_on_gloo(spawn2):
         assert result["broadcast"] == {"step": 7}
         assert result["reduced"] == [3.0, 20.0]  # (1+2, 10+10)
         assert result["gathered"] == ["r0", "r1"]
+        assert result["token_packet"] == [17, -1, 29]
     assert results[1]["received"] == {"hello": 0}
     # rank0 keeps its row 0 + gets rank1's first 2; rank1 gets rank0's rows 1..3 + own tail
     assert results[0]["a2a"] == [0.0, 100.0, 101.0]
@@ -103,11 +118,59 @@ def test_tp2_engine_greedy_matches_single_process(spawn2, fixture_name, request)
     assert results[1]["steps"] > 0  # the worker actually executed the steps
 
 
+@pytest.mark.parametrize(
+    "sampling_kwargs",
+    [
+        {"temperature": 0.8, "top_k": 32, "top_p": 0.9, "min_p": 0.01, "seed": 17},
+        {
+            "temperature": 0.7,
+            "presence_penalty": 0.3,
+            "frequency_penalty": 0.2,
+            "repetition_penalty": 1.1,
+            "logprobs": 3,
+        },
+    ],
+    ids=("explicit-seed-filtered", "request-seed-penalties-logprobs"),
+)
+def test_tp2_rank0_sampling_matrix_matches_single_process(
+    spawn2, llama_dir, sampling_kwargs
+):
+    torch.manual_seed(97)
+    prompt = torch.randint(0, 256, (13,)).tolist()
+    reference = _single_process_sample(
+        llama_dir, prompt, max_new=10, sampling_kwargs=sampling_kwargs
+    )
+
+    first = spawn2(
+        dist_targets.tp_engine_parity,
+        llama_dir,
+        prompt,
+        10,
+        TP_VOCAB,
+        sampling_kwargs,
+    )
+    replay = spawn2(
+        dist_targets.tp_engine_parity,
+        llama_dir,
+        prompt,
+        10,
+        TP_VOCAB,
+        sampling_kwargs,
+    )
+
+    assert first[0]["outputs"] == reference
+    assert replay[0]["outputs"] == reference
+    assert first[0]["outputs"] == replay[0]["outputs"]
+    assert first[1]["steps"] > 0
+
+
 def test_tp_structured_sampling_and_release_on_every_rank(spawn2, llama_dir):
     results = spawn2(dist_targets.tp_structured_release, llama_dir, TP_VOCAB)
     for rank, result in enumerate(results):
         assert "error" not in result, f"rank {rank} failed: {result.get('error')}"
     assert results[0]["structured_completed"] is True
+    assert results[0]["sampling_owner"] is True
+    assert results[1]["sampling_owner"] is False
     assert results[0]["sampler_states"] == 0
     assert results[1]["sampler_states"] == 0
     assert results[0]["released_requests"] == 34
@@ -405,7 +468,7 @@ def test_failed_launcher_start_leaves_no_group_or_workers(llama_dir):
     assert not dist.is_initialized()
     # TINY_LLAMA has 2 kv heads, so tp=4 fails inside build_tp_runner -> tp_view,
     # i.e. after the spawn and after the group is up
-    with pytest.raises(ValueError, match="num_kv_heads"):
+    with pytest.raises(ValueError, match=r"num_(?:kv|key_value)_heads"):
         DistTPLauncher(
             llama_dir, tp=4, num_pages=64, page_size=4, vocab=TP_VOCAB, force_cpu=True
         )

@@ -43,6 +43,10 @@ class RequestSnapshot:
     num_cached_tokens: int = 0
     sampling: EngineSampling = field(default_factory=EngineSampling)
     output_epoch: int = 0
+    # Speculative target scoring replaces the scheduler completion with a draft
+    # prefix.  Runners must prefer that explicit host prefix over any retained
+    # future device token at the same position.
+    outputs_override: bool = False
     # P-D runs prefill under an internal clone id while decode uses the public
     # one, so the id a sampler keys state under is NOT always `request_id`
     # (m5 D5). The snapshot has to carry it: the overlap path and the TP workers
@@ -112,6 +116,7 @@ def _snapshot_state(state: object) -> RequestSnapshot:
         sampling=getattr(request, "sampling", EngineSampling()),
         sampling_id=getattr(request, "sampling_id", None),
         output_epoch=getattr(state, "output_epoch", 0),
+        outputs_override=getattr(state, "outputs_override", False),
     )
 
 
@@ -178,6 +183,7 @@ class StateSync:
                 or prev.page_ids != snap.page_ids
                 or prev.prompt_token_ids != snap.prompt_token_ids
                 or prev.output_epoch != snap.output_epoch
+                or prev.outputs_override != snap.outputs_override
                 or snap.outputs[: len(prev.outputs)] != prev.outputs
             ):
                 new.append(snap)

@@ -51,17 +51,112 @@ class _ToyRunner:
     """Deterministic CPU stand-in for the GPU model forward (greedy only —
     sampling params take effect with a Sampler-equipped runner, m8 D2)."""
 
+    def __init__(self, *, sampling_owner: bool = True) -> None:
+        self._sampling_owner = sampling_owner
+        self._future_tokens: dict[str, dict[int, int]] = {}
+
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> dict[str, tuple[SampledToken, ...]]:
+        if not self._sampling_owner:
+            raise RuntimeError(
+                "only rank 0 may sample in tensor-parallel execution; "
+                "followers must use execute_passive()"
+            )
         sampled: dict[str, tuple[SampledToken, ...]] = {}
         for chunk in scheduled:
             state = states[chunk.request_id]
-            if not chunk.is_prefill or state.prefill_done:
+            if self._chunk_emits_token(chunk, state):
                 seed = sum(state.request.prompt_token_ids) if state.request.prompt_token_ids else 0
                 token_id = (seed + 31 * chunk.position) % _VOCAB_SIZE
                 sampled[chunk.request_id] = (SampledToken(token_id),)
         return sampled
+
+    def execute_passive(
+        self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        """Toy has no model/KV work, but followers still enter the passive seam."""
+        return {}
+
+    @staticmethod
+    def _chunk_emits_token(chunk: ScheduledChunk, state: object) -> bool:
+        return not chunk.is_prefill or state.prefill_done
+
+    def make_sampling_token_packet(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+        sampled: Mapping[str, tuple[SampledToken, ...]] | None = None,
+    ):
+        """Build the same one-int64-per-chunk layout as ``PagedModelRunner``."""
+        import torch
+
+        chunks = tuple(scheduled)
+        packet = torch.full((len(chunks),), -1, dtype=torch.int64)
+        expected = {
+            chunk.request_id
+            for chunk in chunks
+            if self._chunk_emits_token(chunk, states[chunk.request_id])
+        }
+        if sampled is None:
+            return packet
+        actual = set(sampled)
+        if actual != expected:
+            raise RuntimeError(
+                "TP sampling owner output does not match the scheduled token "
+                f"layout: missing={sorted(expected - actual)}, "
+                f"extra={sorted(actual - expected)}"
+            )
+        for index, chunk in enumerate(chunks):
+            if chunk.request_id not in expected:
+                continue
+            records = sampled[chunk.request_id]
+            if len(records) != 1 or records[0].token_id < 0:
+                raise RuntimeError(
+                    "TP sampling owner must emit exactly one valid token for "
+                    f"{chunk.request_id!r} at position {chunk.position}"
+                )
+            packet[index] = records[0].token_id
+        return packet
+
+    def adopt_sampling_token_packet(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+        packet,
+    ) -> None:
+        """Overwrite any rank-local future ids with rank 0's canonical packet."""
+        import torch
+
+        chunks = tuple(scheduled)
+        if packet.dtype != torch.int64 or packet.ndim != 1:
+            raise RuntimeError(
+                "TP sampling packet must be a one-dimensional int64 tensor; "
+                f"got dtype={packet.dtype}, shape={tuple(packet.shape)}"
+            )
+        if packet.numel() != len(chunks):
+            raise RuntimeError(
+                "TP sampling packet length does not match the scheduled layout: "
+                f"got {packet.numel()}, expected {len(chunks)}"
+            )
+        for index, chunk in enumerate(chunks):
+            emits = self._chunk_emits_token(chunk, states[chunk.request_id])
+            token_id = int(packet[index])
+            if emits and token_id < 0:
+                raise RuntimeError(
+                    "TP sampling packet is missing the authoritative token for "
+                    f"{chunk.request_id!r} at position {chunk.position}"
+                )
+            if not emits and token_id != -1:
+                raise RuntimeError(
+                    "TP sampling packet emitted an unexpected token for partial "
+                    f"prefill {chunk.request_id!r} at position {chunk.position}"
+                )
+            if emits:
+                self._future_tokens.setdefault(chunk.request_id, {})[chunk.position] = token_id
+
+    def release(self, request_id: str) -> None:
+        self._future_tokens.pop(request_id, None)
 
 
 def build_engine_loop(
@@ -91,7 +186,8 @@ def build_engine_loop(
     unless overridden. Mutually exclusive with ``runner``. Real-model TP > 1
     spawns the ``DistTPLauncher`` group (rank 0 here, ranks 1.. as workers) and
     drives it via ``DistTPModelRunner``; the loop's ``.tp_launcher`` handle must
-    be ``shutdown()`` on serve teardown.
+    be ``shutdown()`` on serve teardown. A caller-supplied ``runner`` is a
+    single rank-local object and therefore requires ``tensor_parallel_size=1``.
     """
     if pipeline_depth < 1:
         raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
@@ -100,6 +196,12 @@ def build_engine_loop(
     if decode_mode not in _DECODE_MODES:
         known = ", ".join(sorted(_DECODE_MODES))
         raise ValueError(f"unknown decode_mode {decode_mode!r}; choose one of: {known}")
+    if runner is not None and model_path is None and tensor_parallel_size > 1:
+        raise ValueError(
+            "custom runner with tensor_parallel_size > 1 is unsupported: "
+            "tensor parallelism needs one distinct rank-local runner per rank; "
+            "use model_path for real TP or set tensor_parallel_size=1"
+        )
     graph_decode = decode_mode == "cuda_graph"
     if graph_decode:
         if model_path is None:
@@ -158,12 +260,13 @@ def build_engine_loop(
             graph_warmup_iters=cuda_graph_warmup_iters,
         )
     if speculative is not None and tensor_parallel_size > 1:
-        # the toy/FakeCommunicator TP path shares ONE runner object across every
-        # rank, so a SpeculativeRunner over it would draft once and score
-        # against itself; the real multi-process path above has no such problem
+        # The FakeCommunicator TP path has rank-local toy runners but no
+        # rank-local speculative scorers. The real multi-process path above
+        # constructs the complete stack independently on every rank.
         raise ValueError(
             "speculative decoding with tensor_parallel_size > 1 requires a real "
-            "model (model_path); the in-process TP path shares one runner"
+            "model (model_path); the in-process toy TP path has no rank-local "
+            "speculative scorers"
         )
 
     default_eos: int | None = None
@@ -241,12 +344,11 @@ def build_engine_loop(
             **graph_options,
         )
     if tensor_parallel_size > 1:
-        # CPU-testable TP path (design m5 D1/D3): deterministic rank runners
-        # over a FakeCommunicator group; outputs are identical to TP=1.
+        # CPU-testable TP path (design m5 D1/D3): rank 0 is the only sampling
+        # owner; followers enter the passive seam and adopt its fixed packet.
         active: object = TPModelRunner(
             rank_runners=tuple(
-                (runner if runner is not None else _ToyRunner())
-                for _ in range(tensor_parallel_size)
+                _ToyRunner(sampling_owner=rank == 0) for rank in range(tensor_parallel_size)
             ),
             comms=FakeCommunicator.create_group(tensor_parallel_size),
         )
@@ -450,9 +552,7 @@ class KairyuBackend:
             unsupported.append("extra_args")
         else:
             unsupported.extend(
-                f"extra_args.{key}"
-                for key in params.extra_args
-                if key != "response_format"
+                f"extra_args.{key}" for key in params.extra_args if key != "response_format"
             )
         for index, tool in enumerate(request.tools):
             function = tool.get("function")
@@ -460,8 +560,7 @@ class KairyuBackend:
                 unsupported.append(f"tools[{index}].function.strict")
         if unsupported:
             raise ValueError(
-                "Kairyu backend does not support request fields: "
-                + ", ".join(sorted(unsupported))
+                "Kairyu backend does not support request fields: " + ", ".join(sorted(unsupported))
             )
         self._loop.tokenize_prompt(request.prompt)
 

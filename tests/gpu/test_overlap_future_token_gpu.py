@@ -262,9 +262,16 @@ def test_deferred_public_output_preserves_device_logprobs():
         {"r": (record,)},
         copy_stream=torch.cuda.Stream(device=logits.device),
     )
+    assert output._copy_sources
+    # The TP sampling packet is allocated immediately after this constructor.
+    # Stress the caching allocator with the packet's sentinel; the stacked D2H
+    # source must remain owned by the deferred output until its event resolves.
+    clobber = [torch.full((1,), -1, dtype=torch.int64, device="cuda") for _ in range(64)]
 
     token = output["r"][0]
 
+    assert clobber[-1].item() == -1
+    assert output._copy_sources == ()
     assert resolved == [token]
     assert token.token_id == 1
     assert token.logprob == pytest.approx(float(raw[1].cpu()))

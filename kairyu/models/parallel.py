@@ -8,9 +8,9 @@ wrappers only ADD communication: ``RowParallelLinear`` all_reduces its output
 shards (gloo rejects unequal shapes → ``vocab_size % tp == 0`` fail-fast, A3).
 Shard-loading bounds come from the FULL config so ``get_slice`` rows align to
 whole heads. Embeddings and lm_head are REPLICATED in M16 (every rank holds
-full logits → every rank samples identically, keeping the m5 D1 invariant
-with zero gather traffic); vocab-parallel sharding is a deploy-day memory
-optimization behind the same seam.
+full logits, but rank 0 alone runs the stateful sampler and broadcasts the
+selected device-token packet); vocab-parallel sharding is a deploy-day memory
+optimization behind the same single-owner seam.
 """
 
 from __future__ import annotations

@@ -68,7 +68,7 @@ surplus result is trimmed. `OverlapEngineCore` and `PipelinedEngineCore` are
 explicitly compatibility-only; the production acceptance suite enters through
 `EngineLoop`.
 
-## TP — delta broadcast + sampling ownership (HIGH, **delta IMPLEMENTED**)
+## TP — delta broadcast + sampling ownership (HIGH, **IMPLEMENTED**)
 
 **Gap (fixed for the broadcast).** `DistTPModelRunner.execute` broadcast a full
 pickled snapshot of every active request's (growing) prompt+outputs every step.
@@ -83,10 +83,67 @@ per step instead of O(all active requests' full state). Byte-identical output:
 the `tests/dist` TP=2/EP=2/PP=2 spawn parity gates (TP=2 == TP=1) pass unchanged,
 plus `test_state_sync_delta_reconstructs_full_snapshot_each_step`.
 
-**Remaining GPU-day work.** Promote the rank-divergence check to a blocking
-runbook gate; decide rank-0-samples-and-broadcasts vs all-ranks-sample (changes
-the worker step protocol); wire `DistTPModelRunner` into `build_engine_loop`/serve
-(today real-model TP is spawn-tested but not wired into the single-process path).
+**Sampling ownership (landed, issue #225).** Rank 0 is the sole owner of RNG,
+penalty, grammar, and logprob state. Non-zero ranks run a passive model/KV path:
+eager followers skip `lm_head`, every follower skips sampling and public D2H.
+Rank 0 places one int64 token in each emitting `ScheduledChunk` slot (partial
+prefill slots are `-1`) and broadcasts that fixed-layout device packet on the
+bounded model communicator. Every rank adopts the packet-backed device scalar
+before the next step. There is no sampled-result object traffic and no rank can
+advance from an independently selected token. Missing/extra owner output,
+malformed packet layout, a follower entering a sampling path, or collective
+failure is fatal with a protocol-specific error.
+
+The choice is intentionally different from official vLLM
+`bb3b61f2fd2333ab165ebaba13f133db4210b9f2` (audited 2026-07-28).
+`v1/executor/multiproc_executor.py` dispatches sampling to every TP rank and
+returns only `output_rank`; its TP path neither broadcasts the selected token
+nor checks equality, so RNG/state skew can remain local.
+All-rank sampling in Kairyu would duplicate sampler/logprob/D2H work and still
+need a token collective to make divergence blocking. The selected protocol uses
+one tiny broadcast and centralizes every stateful sampling responsibility.
+
+**Blocking gates.** Fixed-layout, seeded/filter/penalty/logprob, partial-prefill,
+mixed-state, structured, release, speculative-overlay, and injected stale-token
+tests run on CPU/gloo. Runbook §6 adds real NCCL canonical adoption, an 8-rank
+communication gate, and a production Qwen3-32B TP1/TP8 distribution-compatibility
+gate. The real TP2 injected production test binds exact packet adoption and
+requires the next decode to consume it. The TP8 communication artifact binds
+the NCCL overwrite primitive, while the Qwen artifact separately binds complete
+rank topology and rank-0-only ownership; neither is mislabeled as a TP8
+per-rank adoption digest.
+
+Free-running TP1/TP8 continuation equality is diagnostic only: a valid change in
+TP reduction order can move one near-tie and give every later position a
+different prefix. The cross-degree gate instead binds complete, finite raw
+per-position evidence and the actual rank topology/ownership metadata. It
+compares distributions only while the two runs have an identical input prefix.
+Before the first divergence, the common selected token's logprob must remain
+within the declared tolerance. At the first divergence, the harness extracts
+both selected-token values directly from each run's full raw log-softmax and
+both reciprocal logprob deltas must remain within that tolerance. This avoids
+treating the pre-penalty public top-N set as post-penalty support. Later
+positions are retained but
+cannot be a binding distribution comparison because their prefixes differ.
+
+The communication verdict binds to exact logical traffic and a worst-rank
+CUDA-event steady-state p95 ceiling. The complete p99, maximum, and tail-count
+evidence remains diagnostic: a late host launch makes every rank's tiny
+collective event observe OS jitter, which must not decide protocol correctness.
+
+**Recorded evidence (2026-07-30).** On 8× NVIDIA RTX PRO 6000 Blackwell Server
+Edition with NCCL 2.29.7, the clean-commit protocol run retained 256 worst-rank
+samples per B=1/8/16 cell and measured rank-0 broadcast p95 of
+0.078400/0.070816/0.075648 ms. Exact overwrite/equality/divergence checks and
+stored replay all pass. The clean-commit Qwen3-32B production run retained 43
+tokens per TP degree over six mixed requests and proves TP1 local ownership
+plus TP8 gloo-control/NCCL-model topology with only rank 0 holding a sampler.
+The 41 common-prefix selected-token logprobs differ by at most 0.148189; the
+direct reciprocal cross-selected values at the first divergence differ by at
+most 0.101015, below the binding 0.25 tolerance. Free-running equality is
+41/43 and remains diagnostic. Artifacts:
+`bench/results/issue-225-tp-sampling-comm-rtxpro6000-2026-07-30.json` and
+`bench/results/issue-225-tp-sampling-qwen3-32b-rtxpro6000-2026-07-30.json`.
 
 ## KVTransport — region ownership + source-addressed recv (HIGH)
 

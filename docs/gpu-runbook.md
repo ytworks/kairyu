@@ -118,6 +118,69 @@ GPU-only remainder (design m5 §4.2).
 - 6.2 Sharded FP8 70B load (per-rank safetensors); FlashInfer paged attention under
   head-sharded KV; pool sized min-over-ranks (m5 D1).
 - 6.3 Decode CUDA-graph capture per TP topology (A4 prerequisite, m5 §3).
+- TP sampling-ownership gate (#225, blocking before TP performance claims):
+  rank 0 alone owns RNG/penalty/grammar/logprob state; every rank must adopt
+  rank 0's fixed-layout device token before another forward. Run:
+
+  ```bash
+  uv run pytest tests/unit/test_tp_sampling_authority.py tests/unit/test_tp_worker.py -q
+  uv run pytest tests/dist/test_distributed.py -k 'tp2_rank0_sampling_matrix or tp_structured_sampling' -v --no-cov
+  CUDA_VISIBLE_DEVICES=0,1 uv run pytest -m gpu tests/gpu/test_tp_sampling_owner_nccl.py -v --no-cov
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run python bench/tp_sampling_owner_bench.py \
+    --world-size 8 --assert-gate \
+    --output bench/results/issue-225-tp-sampling-comm-<gpu>-<date>.json
+  uv run python bench/tp_sampling_owner_bench.py \
+    --verify bench/results/issue-225-tp-sampling-comm-<gpu>-<date>.json --assert-gate
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run python bench/tp_sampling_owner_qwen.py \
+    --model-path /models/qwen3-32b --assert-gate \
+    --output bench/results/issue-225-tp-sampling-qwen3-32b-<gpu>-<date>.json
+  uv run python bench/tp_sampling_owner_qwen.py \
+    --verify bench/results/issue-225-tp-sampling-qwen3-32b-<gpu>-<date>.json \
+    --assert-gate
+  ```
+
+  The NCCL test injects a divergent follower-local future token, requires
+  canonical adoption before the next decode, checks TP1/TP2 seeded parity, and
+  relaunches after teardown. The microbenchmark compares the selected broadcast
+  with a valid all-rank sampling+equality protocol at B=1/8/16 in rotating order.
+  Across these gates, binding fields are exact logical bytes/collective counts,
+  exact TP2 production packet/adopted-token equality, all raw trials, clean
+  source/script provenance, and worst-rank CUDA-event broadcast steady-state
+  p95 <1 ms over at least 256 aligned samples per batch. Complete
+  p99/max/tail counts, relative latency,
+  end-to-end throughput, and wall-clock timing remain diagnostic: a late host
+  launch delays every tiny collective, so OS jitter must not decide protocol
+  correctness.
+  The Qwen3-32B gate then runs the production TP1 and TP8 runners once each over
+  the same fixed greedy/seeded/filter/penalty/logprob request matrix. It must
+  retain complete finite raw records and prove the actual topology: TP1 and TP8
+  world sizes, complete rank sets, rank 0 as the sole owner with a sampler, and
+  every TP8 follower passive without one. Free-running TP1/TP8 token equality is
+  reported but is diagnostic only.
+
+  Recorded 2026-07-30 on 8× NVIDIA RTX PRO 6000 Blackwell Server Edition:
+  `issue-225-tp-sampling-comm-rtxpro6000-2026-07-30.json` passes all binding and
+  replay checks with rank-0 broadcast p95 0.078400/0.070816/0.075648 ms at
+  B=1/8/16 (256 samples per cell). The Qwen3-32B TP1/TP8 artifact retains 43
+  tokens per degree, proves the complete owner/passive topology, and passes the
+  0.25 compatibility bound with aligned maximum 0.148189 and first-divergence
+  direct cross-selected maximum 0.101015. Free-running equality is 41/43 and is
+  diagnostic, as specified.
+
+  The binding distribution comparison uses only positions with an aligned
+  common input prefix. Before the first token divergence, the common selected
+  token's TP1/TP8 logprob delta must be at most 0.25. At the first divergence,
+  the harness retains each full raw log-softmax in memory long enough to extract
+  both selected tokens under both runs; both reciprocal logprob deltas must be
+  at most 0.25. Public top-64 membership remains diagnostic because penalties
+  are applied after that raw distribution. Positions after divergence remain
+  raw evidence but are not compared as if they had the same prefix. The fixed
+  texts are bound to the checkpoint's exact prompt-token IDs, and all
+  harness/protocol sources must be clean and identical at measurement start and
+  end. Exact adoption and next-decode use are binding in the real TP2 injection
+  test; TP8 separately binds NCCL buffer overwrite and complete owner/follower
+  topology. Both evidence files must independently replay against their
+  recorded source commit before closure.
 - Gate A1: Llama-3.1-8B, 64 fixed prompts, 16-token full continuations:
   `bench/parity_tp.py --tp 1,2 --num-prompts 64 --max-new-tokens 16
   --model-path <checkpoint>` records TP1/2 with overlap ON/OFF. Run

@@ -1,11 +1,10 @@
 """SPMD TP execution: driver-side runner + worker main (m16 D4).
 
-Rank 0 owns the scheduler/EngineCore and broadcasts the frozen ``StepInput``
-(m16 A1 snapshot); every rank executes the SAME step on its shard and samples
-identically from identical full logits (m5 D1 agreement invariant — logits
-are bitwise-deterministic through gloo/CPU collectives). Workers read rank
-0's committed tokens from the NEXT snapshot's ``outputs``. Shutdown is a
-``None`` broadcast (A11).
+Rank 0 owns the scheduler/EngineCore, broadcasts each immutable state delta,
+and is the sole sampling authority. Every rank executes the same model/KV step,
+then rank 0 broadcasts one fixed-layout device token packet over the model
+communicator. All ranks adopt that packet before advancing. Shutdown remains a
+``None`` control broadcast (A11).
 """
 
 from __future__ import annotations
@@ -40,6 +39,196 @@ class ReleaseRequest:
     request_id: str
 
 
+@dataclass(frozen=True)
+class _SamplingOwnershipProbe:
+    """Out-of-band request for rank-local TP sampling metadata."""
+
+
+_SAMPLING_OWNERSHIP_FIELDS = frozenset(
+    {
+        "rank",
+        "control_world_size",
+        "control_backend",
+        "model_world_size",
+        "model_backend",
+        "sampling_owner",
+        "sampler_present",
+        "device",
+    }
+)
+
+
+def _communicator_backend(comm) -> str:
+    """Return the real process-group backend without labeling it externally."""
+    from kairyu.engine.core.comm import FakeCommunicator
+
+    if isinstance(comm, FakeCommunicator):
+        return "fake"
+
+    import torch.distributed as dist
+
+    try:
+        backend = str(dist.get_backend(comm.group))
+    except Exception as error:
+        raise RuntimeError(
+            "cannot inspect communicator backend for "
+            f"{type(comm).__name__}; expected FakeCommunicator or a "
+            "torch.distributed communicator with a process group"
+        ) from error
+    if not backend:
+        raise RuntimeError(f"communicator backend for {type(comm).__name__} is empty")
+    return backend
+
+
+def _sampling_ownership_row(control_comm, model_comm, local_runner) -> dict[str, object]:
+    """Build one rank's JSON-serializable ownership/topology observation."""
+    control_rank = control_comm.rank
+    model_rank = model_comm.rank
+    if type(control_rank) is not int or type(model_rank) is not int:
+        raise RuntimeError(
+            "sampling ownership rank metadata must be integers: "
+            f"control={control_rank!r}, model={model_rank!r}"
+        )
+    if control_rank != model_rank:
+        raise RuntimeError(
+            "sampling ownership communicator rank mismatch: "
+            f"control rank={control_rank}, model rank={model_rank}"
+        )
+
+    sampling_owner = getattr(local_runner, "sampling_owner", None)
+    if type(sampling_owner) is not bool:
+        raise RuntimeError(
+            f"rank {control_rank} runner has malformed sampling_owner="
+            f"{sampling_owner!r}; expected bool"
+        )
+    if not hasattr(local_runner, "_sampler"):
+        raise RuntimeError(f"rank {control_rank} runner does not expose sampler ownership")
+    if not hasattr(local_runner, "_device"):
+        raise RuntimeError(f"rank {control_rank} runner does not expose its compute device")
+
+    control_world_size = control_comm.world_size
+    model_world_size = model_comm.world_size
+    if (
+        type(control_world_size) is not int
+        or control_world_size < 1
+        or type(model_world_size) is not int
+        or model_world_size < 1
+    ):
+        raise RuntimeError(
+            f"rank {control_rank} has malformed communicator world sizes: "
+            f"control={control_world_size!r}, model={model_world_size!r}"
+        )
+    device = str(local_runner._device)
+    if not device:
+        raise RuntimeError(f"rank {control_rank} runner device is empty")
+
+    return {
+        "rank": control_rank,
+        "control_world_size": control_world_size,
+        "control_backend": _communicator_backend(control_comm),
+        "model_world_size": model_world_size,
+        "model_backend": _communicator_backend(model_comm),
+        "sampling_owner": sampling_owner,
+        "sampler_present": local_runner._sampler is not None,
+        "device": device,
+    }
+
+
+def _validate_sampling_ownership_rows(
+    rows: object,
+    *,
+    control_world_size: int,
+    model_world_size: int,
+    control_backend: str,
+    model_backend: str,
+) -> tuple[dict[str, object], ...]:
+    """Reject incomplete or forged topology evidence with rank-specific errors."""
+    if not isinstance(rows, (tuple, list)):
+        raise RuntimeError(
+            "sampling ownership replies are malformed: expected a rank sequence, "
+            f"got {type(rows).__name__}"
+        )
+    if len(rows) != control_world_size:
+        reported = {
+            row.get("rank")
+            for row in rows
+            if isinstance(row, dict) and type(row.get("rank")) is int
+        }
+        missing = sorted(set(range(control_world_size)) - reported)
+        raise RuntimeError(
+            "sampling ownership reply count mismatch: "
+            f"expected {control_world_size}, received {len(rows)}; "
+            f"missing ranks={missing}"
+        )
+
+    by_rank: dict[int, dict[str, object]] = {}
+    for slot, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise RuntimeError(
+                f"sampling ownership reply in gather slot {slot} is malformed: "
+                f"expected dict, got {type(row).__name__}"
+            )
+        fields = set(row)
+        if fields != _SAMPLING_OWNERSHIP_FIELDS:
+            missing_fields = sorted(_SAMPLING_OWNERSHIP_FIELDS - fields)
+            extra_fields = sorted(fields - _SAMPLING_OWNERSHIP_FIELDS)
+            raise RuntimeError(
+                f"sampling ownership reply in gather slot {slot} has malformed "
+                f"fields: missing={missing_fields}, extra={extra_fields}"
+            )
+        rank = row["rank"]
+        if type(rank) is not int:
+            raise RuntimeError(
+                f"sampling ownership reply in gather slot {slot} has non-integer rank={rank!r}"
+            )
+        if rank in by_rank:
+            raise RuntimeError(
+                f"sampling ownership replies contain duplicate rank {rank} (gather slot {slot})"
+            )
+        if not 0 <= rank < control_world_size:
+            raise RuntimeError(
+                f"sampling ownership reply in gather slot {slot} has rank {rank}; "
+                f"expected [0, {control_world_size})"
+            )
+        typed_fields = {
+            "control_world_size": int,
+            "control_backend": str,
+            "model_world_size": int,
+            "model_backend": str,
+            "sampling_owner": bool,
+            "sampler_present": bool,
+            "device": str,
+        }
+        for name, field_type in typed_fields.items():
+            if type(row[name]) is not field_type:
+                raise RuntimeError(
+                    f"sampling ownership reply for rank {rank} has malformed "
+                    f"{name}={row[name]!r}; expected {field_type.__name__}"
+                )
+        expected = {
+            "control_world_size": control_world_size,
+            "control_backend": control_backend,
+            "model_world_size": model_world_size,
+            "model_backend": model_backend,
+        }
+        mismatches = {
+            name: (row[name], value) for name, value in expected.items() if row[name] != value
+        }
+        if mismatches:
+            raise RuntimeError(
+                f"sampling ownership reply for rank {rank} disagrees with rank 0 "
+                f"topology (reported, expected)={mismatches}"
+            )
+        if not row["device"]:
+            raise RuntimeError(f"sampling ownership reply for rank {rank} has an empty device")
+        by_rank[rank] = row
+
+    missing = sorted(set(range(control_world_size)) - set(by_rank))
+    if missing:
+        raise RuntimeError(f"sampling ownership replies are missing ranks={missing}")
+    return tuple(by_rank[rank] for rank in sorted(by_rank))
+
+
 def _config_fingerprint(model_dir: str) -> str:
     raw = json.loads((Path(model_dir) / "config.json").read_text())
     return hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:16]
@@ -64,14 +253,16 @@ def validate_handshake(handshake: dict, model_dir: str, num_pages: int, page_siz
 
 
 class DistTPModelRunner:
-    """Driver-side ModelRunner: snapshot → broadcast → local sharded execute.
+    """Driver-side ModelRunner with rank-0-authoritative sampling.
 
     Drops in where ``TPModelRunner`` sits: the driver's own rank-0 shard runs
-    inside this call, so ``execute`` returns real sampled tokens.
+    inside this call and samples once. Non-zero ranks execute the passive
+    model/KV path, then all ranks adopt rank 0's device token packet.
     """
 
-    def __init__(self, comm, local_runner) -> None:
-        self._comm = comm
+    def __init__(self, control_comm, local_runner, model_comm=None) -> None:
+        self._control_comm = control_comm
+        self._model_comm = model_comm if model_comm is not None else control_comm
         self._local = local_runner
         self._fatal_error: Exception | None = None
         # delta-broadcast state (F4): only new/finished requests + committed
@@ -87,9 +278,13 @@ class DistTPModelRunner:
         chunks = tuple(scheduled)
         delta = self._sync.diff(chunks, states)
         try:
-            self._comm.broadcast(delta, src=0)
+            self._control_comm.broadcast(delta, src=0)
             view = self._sync.apply(delta)  # reconstructs snapshot_step() exactly
-            return self._local.execute(chunks, view)
+            sampled = self._local.execute(chunks, view)
+            packet = self._local.make_sampling_token_packet(chunks, view, sampled=sampled)
+            packet = self._model_comm.tensor_broadcast(packet, src=0)
+            self._local.adopt_sampling_token_packet(chunks, view, packet)
+            return sampled
         except Exception as error:
             # Once one TP rank misses a step, retrying on the same groups can only
             # diverge their collective sequences further. Surface a fatal health
@@ -101,10 +296,41 @@ class DistTPModelRunner:
     def fatal_error(self) -> Exception | None:
         return self._fatal_error
 
+    def sampling_ownership_metadata(self) -> tuple[dict[str, object], ...]:
+        """Collect rank-observed ownership/topology outside the inference path.
+
+        This explicit diagnostic is the only place the metadata all-gather runs;
+        normal steps retain only their state and sampled-token broadcasts.
+        """
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                "tensor-parallel runner is unavailable after a fatal step failure"
+            ) from self._fatal_error
+        try:
+            delivered = self._control_comm.broadcast(_SamplingOwnershipProbe(), src=0)
+            if not isinstance(delivered, _SamplingOwnershipProbe):
+                raise RuntimeError(
+                    "sampling ownership probe broadcast returned a malformed "
+                    f"payload: {type(delivered).__name__}"
+                )
+            local = _sampling_ownership_row(self._control_comm, self._model_comm, self._local)
+            rows = self._control_comm.all_gather(local)
+            return _validate_sampling_ownership_rows(
+                rows,
+                control_world_size=local["control_world_size"],
+                model_world_size=local["model_world_size"],
+                control_backend=local["control_backend"],
+                model_backend=local["model_backend"],
+            )
+        except Exception as error:
+            failure = RuntimeError(f"TP sampling ownership metadata probe failed: {error}")
+            self._fatal_error = failure
+            raise failure from error
+
     def release(self, request_id: str) -> None:
         try:
             if self._fatal_error is None:
-                self._comm.broadcast(ReleaseRequest(request_id), src=0)
+                self._control_comm.broadcast(ReleaseRequest(request_id), src=0)
         except Exception as error:
             self._fatal_error = error
             raise
@@ -115,7 +341,7 @@ class DistTPModelRunner:
 
     def shutdown(self) -> None:
         if self._fatal_error is None:
-            self._comm.broadcast(_SHUTDOWN, src=0)
+            self._control_comm.broadcast(_SHUTDOWN, src=0)
 
     def invalidate_graphs(self) -> None:
         invalidate = getattr(self._local, "invalidate_graphs", None)
@@ -123,25 +349,37 @@ class DistTPModelRunner:
             invalidate()
 
 
-def worker_step_loop(comm, local_runner) -> int:
-    """Non-zero-rank main loop: execute broadcast steps until shutdown.
+def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
+    """Non-zero-rank main loop: execute passive steps until shutdown.
 
     Returns the number of steps executed (spawn tests assert on it).
     """
+    if model_comm is None:
+        model_comm = control_comm
     steps = 0
     sync = StateSync()
     while True:
-        payload = comm.broadcast(_SHUTDOWN, src=0)
-        if payload is _SHUTDOWN or payload is None:
-            return steps
-        if isinstance(payload, ReleaseRequest):
-            release = getattr(local_runner, "release", None)
-            if release is not None:
-                release(payload.request_id)
-            continue
-        assert isinstance(payload, StepDelta)
+        payload = control_comm.broadcast(_SHUTDOWN, src=0)
+        if not isinstance(payload, StepDelta):
+            if payload is _SHUTDOWN or payload is None:
+                return steps
+            if isinstance(payload, ReleaseRequest):
+                release = getattr(local_runner, "release", None)
+                if release is not None:
+                    release(payload.request_id)
+                continue
+            if isinstance(payload, _SamplingOwnershipProbe):
+                local = _sampling_ownership_row(control_comm, model_comm, local_runner)
+                control_comm.all_gather(local)
+                continue
+            raise RuntimeError(
+                f"TP worker received an unsupported control payload: {type(payload).__name__}"
+            )
         view = sync.apply(payload)  # same delta -> same reconstructed states
-        local_runner.execute(payload.chunks, view)
+        local_runner.execute_passive(payload.chunks, view)
+        packet = local_runner.make_sampling_token_packet(payload.chunks, view, sampled=None)
+        packet = model_comm.tensor_broadcast(packet, src=0)
+        local_runner.adopt_sampling_token_packet(payload.chunks, view, packet)
         steps += 1
 
 
@@ -330,7 +568,8 @@ def build_tp_runner(
     runner = PagedModelRunner(
         model,
         pool,
-        sampler=Sampler(vocab_provider=lambda: grammar_vocab),
+        sampler=(Sampler(vocab_provider=lambda: grammar_vocab) if rank == 0 else None),
+        sampling_owner=rank == 0,
         **graph_options,
     )
     return runner, full_config
@@ -397,7 +636,7 @@ def _tp_worker_entry(
     comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
     control_comm = TorchDistCommunicator(group=groups.control)
     try:
-        worker_step_loop(control_comm, runner)
+        worker_step_loop(control_comm, runner, comm)
     finally:
         import torch.distributed as dist
 
@@ -513,7 +752,7 @@ class DistTPLauncher:
             groups = serving_groups(placement.backend)
             self._comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
             self._control_comm = TorchDistCommunicator(group=groups.control)
-            self.runner = DistTPModelRunner(self._control_comm, runner)
+            self.runner = DistTPModelRunner(self._control_comm, runner, self._comm)
         except BaseException:
             self._abandon_start()
             raise
@@ -541,8 +780,9 @@ class DistTPLauncher:
         if dist.is_initialized():
             with contextlib.suppress(Exception):
                 self._abort_communicator()
-            with contextlib.suppress(Exception):
-                dist.destroy_process_group()
+        # Reap peers before any potentially rendezvous-like process-group
+        # destruction. This ordering remains bounded even if an older backend
+        # lacks the private abort hook or abort itself raises.
         for process in self._ctx.processes:
             if process.is_alive():
                 process.terminate()
@@ -553,14 +793,19 @@ class DistTPLauncher:
                 with contextlib.suppress(Exception):
                     process.kill()
                     process.join(timeout=5)
+        if dist.is_initialized():
+            with contextlib.suppress(Exception):
+                dist.destroy_process_group()
         with contextlib.suppress(OSError):
             os.unlink(self._init_file)
 
-    @staticmethod
-    def _abort_communicator() -> None:
-        """NCCL only: drop the communicator without waiting for peers.
+    def _abort_communicator(self) -> None:
+        """NCCL only: drop every live communicator without waiting for peers.
 
-        gloo needs none, and the hook is absent on older torch — both are
+        The operational model subgroup is a distinct NCCL communicator from the
+        startup/default group. Aborting only the latter leaves a worker stuck in
+        the sampling-token broadcast when rank 0 fails after model execution.
+        Gloo needs no abort, and the hook is absent on older torch — both are
         "nothing to abort" rather than an error.
         """
         import torch
@@ -568,11 +813,24 @@ class DistTPLauncher:
 
         if not torch.cuda.is_available():
             return
-        group = dist.distributed_c10d._get_default_group()
-        backend = group._get_backend(torch.device("cuda", torch.cuda.current_device()))
-        abort = getattr(backend, "abort", None) or getattr(backend, "_abort", None)
-        if abort is not None:
-            abort()
+        groups = []
+        model_comm = getattr(self, "_comm", None)
+        if model_comm is not None:
+            groups.append(model_comm.group)
+        groups.append(dist.distributed_c10d._get_default_group())
+        seen: set[int] = set()
+        device = torch.device("cuda", torch.cuda.current_device())
+        for group in groups:
+            if id(group) in seen:
+                continue
+            seen.add(id(group))
+            try:
+                backend = group._get_backend(device)
+            except Exception:
+                continue
+            abort = getattr(backend, "abort", None) or getattr(backend, "_abort", None)
+            if abort is not None:
+                abort()
 
     def dead_ranks(self) -> tuple[int, ...]:
         """Spawned ranks that are no longer running (rank 0 is this process).

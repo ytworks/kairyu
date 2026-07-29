@@ -30,11 +30,12 @@ from kairyu.engine.core.spec_decode import verify_greedy
 class _OverlayState:
     """Immutable view of a request state with ``outputs`` overridden."""
 
-    __slots__ = ("_base", "outputs")
+    __slots__ = ("_base", "outputs", "outputs_override")
 
     def __init__(self, base: object, outputs: tuple[int, ...]) -> None:
         self._base = base
         self.outputs = list(outputs)
+        self.outputs_override = True
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_base"), name)
