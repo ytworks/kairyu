@@ -72,6 +72,8 @@ def test_trace_and_initial_cache_are_deterministic() -> None:
     assert first == second
     assert first.replicas == 500
     assert first.prefix_hash_version == "xxh3-64-v1"
+    assert first.uniform_rounds == 9
+    assert first.uniform_sign_min_rounds == 8
     assert f2a.profile_config("formal").uniform_rounds == 21
     assert f2a.profile_config("formal").uniform_calibration_rounds == 1
     assert (
@@ -209,9 +211,34 @@ def test_independent_replay_accepts_the_frozen_smoke_artifact(
         == shared["hrw_request_hits"] * 4
     )
     assert (
-        result["metrics"]["uniform"]["paired_ratio_lcb95"]
+        result["metrics"]["uniform"][
+            "paired_ratio_exact_median_lcb95"
+        ]
         >= 0.99
     )
+    assert (
+        result["metrics"]["uniform"]["paired_ratio_geometric_mean"]
+        >= 0.99
+    )
+
+
+def test_exact_median_lower_bound_uses_the_frozen_binomial_order_statistic():
+    formal_values = [float(value) for value in range(1, 22)]
+    smoke_values = [float(value) for value in range(1, 10)]
+
+    formal_lcb, formal_rank, formal_coverage = (
+        f2a._exact_median_lower_bound(formal_values)
+    )
+    smoke_lcb, smoke_rank, smoke_coverage = (
+        f2a._exact_median_lower_bound(smoke_values)
+    )
+
+    assert (formal_lcb, formal_rank) == (7.0, 7)
+    assert formal_coverage == 0.9608230590820312
+    assert (smoke_lcb, smoke_rank) == (2.0, 2)
+    assert smoke_coverage == 0.98046875
+    assert 21 - formal_rank + 1 == 15
+    assert 9 - smoke_rank + 1 == 8
 
 
 def test_replay_rejects_raw_tampering_even_if_attacker_updates_the_hash(
@@ -468,8 +495,9 @@ def test_thresholds_use_exact_ratio_p99_and_one_percent_noninferiority() -> None
         },
         "placement": {"prefix_worst_trace_p99_ms": 9.999999},
         "uniform": {
-            "paired_ratio_lcb95": 0.99,
-            "rounds_at_or_above_noninferiority_floor": 2,
+            "paired_ratio_exact_median_lcb95": 0.99,
+            "paired_ratio_geometric_mean": 0.99,
+            "rounds_at_or_above_noninferiority_floor": 8,
         },
     }
     failing = {
@@ -480,8 +508,9 @@ def test_thresholds_use_exact_ratio_p99_and_one_percent_noninferiority() -> None
         },
         "placement": {"prefix_worst_trace_p99_ms": 10.0},
         "uniform": {
-            "paired_ratio_lcb95": 0.989999,
-            "rounds_at_or_above_noninferiority_floor": 1,
+            "paired_ratio_exact_median_lcb95": 0.989999,
+            "paired_ratio_geometric_mean": 0.989999,
+            "rounds_at_or_above_noninferiority_floor": 7,
         },
     }
 

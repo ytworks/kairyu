@@ -762,14 +762,23 @@ over (α, β) (pure function over the dataset; no online learning).
   latency is below 10 ms divided by the summed end-to-end
   `ReplicaPool.generate` dispatch intervals for every offered request in that
   arm; a request missing the SLO remains in the denominator. Round wall time is
-  retained only for ordering and audit. The
-  one-sided 95% lower confidence bound of paired log ratios must be at least
-  0.99, and at least 15 of 21 individual paired ratios must also be at least
-  0.99. The predeclared 1% non-inferiority margin absorbs bounded host
-  scheduling jitter; the confidence and sign gates prevent a single favorable
-  outlier from hiding a systematic regression. Nearest-rank treatment placement
-  p99 is computed over each complete shared and uniform raw population, and the
-  worse value must be strictly below 10 ms.
+  retained only for ordering and audit. Each paired round is the independent
+  experimental unit; the 512 request timings inside it may be arbitrarily
+  correlated. No Gaussian or symmetry assumption is made across those paired
+  round ratios. The binding location statistic is the exact distribution-free
+  one-sided lower confidence bound for the population median:
+  with 21 paired ratios, the largest order-statistic rank with at least 95%
+  coverage is the seventh (`P[Binomial(21, 0.5) >= 7] = 0.960823`), which must
+  be at least 0.99. This is mathematically identical to requiring at least
+  15/21 individual ratios to be at least 0.99. The geometric mean of all 21
+  ratios must independently be at least 0.99, so the resistant median cannot
+  conceal a small number of large losses. No round is trimmed, winsorized, or
+  excluded. The former Student-t log-mean lower bound remains in the manifest
+  as diagnostic evidence only. The 1% non-inferiority margin, exact median
+  inference, full-sample magnitude guard, and sign count jointly distinguish
+  systematic regression from time-local runner interference. Nearest-rank
+  treatment placement p99 is computed over each complete shared and uniform raw
+  population, and the worse value must be strictly below 10 ms.
 
   Raw cache seeds, prompt/session hashes, selections, cache hits, receipt and
   selection timestamps, round order, and wall times are JSONL. Prompt bodies

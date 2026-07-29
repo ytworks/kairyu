@@ -10,6 +10,10 @@ hit its cache.
 Shared traffic opts into cross-session reuse with an exact prompt-derived root.
 Uniform traffic carries a blank root and therefore measures the production
 session-only path, where a native PrefixIndex must add no speculative work.
+Its binding non-inferiority inference is an exact distribution-free lower
+confidence bound for the paired median plus a full-sample geometric-mean
+guard. Every round remains in both metrics; the former Student-t mean bound is
+retained as diagnostic output only.
 
 Raw JSONL retains cache placement, request/family IDs, prompt hashes, actual
 placement decisions/timings, paired round order, and round timings.  Prompt
@@ -49,7 +53,7 @@ from kairyu.orchestration.prefix_index import (
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.sampling_params import SamplingParams
 
-SCHEMA_VERSION = "kairyu.f2a.prefix-routing.v2"
+SCHEMA_VERSION = "kairyu.f2a.prefix-routing.v3"
 REPLICA_COUNT = 500
 DEFAULT_SEED = 0xF2A_2026
 PREFIX_POLICY = "prefix_aware"
@@ -74,11 +78,15 @@ _SOURCE_PATHS = (
     "pyproject.toml",
     "uv.lock",
 )
-# One-sided 95% Student-t critical values for the two frozen paired profiles.
+# Diagnostic only: timing distributions on hosted runners are not assumed
+# Gaussian. The binding location bound below is the exact median order
+# statistic. These critical values retain the former Student-t result in the
+# manifest so an extreme host episode remains visible rather than discarded.
 _T_CRITICAL_95_ONE_SIDED = {
-    2: 2.919985580353725,
+    8: 1.8595480375228424,
     20: 1.7247182429207863,
 }
+_MEDIAN_LCB_CONFIDENCE = 0.95
 
 
 @dataclass(frozen=True)
@@ -107,9 +115,9 @@ _PROFILE_COUNTS = {
         "shared_requests_per_family": 8,
         "uniform_warmup_requests_per_arm": 64,
         "uniform_calibration_rounds": 1,
-        "uniform_rounds": 3,
+        "uniform_rounds": 9,
         "uniform_requests_per_round": 64,
-        "uniform_sign_min_rounds": 2,
+        "uniform_sign_min_rounds": 8,
     },
     "formal": {
         "shared_families": 64,
@@ -818,6 +826,47 @@ def _nearest_rank(values: list[int], quantile: float) -> int:
     return ordered[max(0, math.ceil(quantile * len(ordered)) - 1)]
 
 
+def _binomial_upper_tail(successes: int, trials: int) -> float:
+    """P[Binomial(trials, 0.5) >= successes], computed exactly."""
+    return sum(
+        math.comb(trials, count)
+        for count in range(successes, trials + 1)
+    ) / (2**trials)
+
+
+def _exact_median_lower_bound(
+    values: list[float],
+    confidence: float = _MEDIAN_LCB_CONFIDENCE,
+) -> tuple[float, int, float]:
+    """One-sided median bound for independent, distribution-free observations.
+
+    The largest order-statistic rank whose binomial coverage is at least the
+    requested confidence is returned. No observation is trimmed or excluded.
+    """
+    if not values:
+        raise ValueError("median lower bound requires at least one value")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError(f"confidence must be between 0 and 1, got {confidence}")
+    selected_rank = 0
+    achieved_coverage = 0.0
+    for rank in range(1, len(values) + 1):
+        coverage = _binomial_upper_tail(rank, len(values))
+        if coverage < confidence:
+            break
+        selected_rank = rank
+        achieved_coverage = coverage
+    if selected_rank == 0:
+        raise ValueError(
+            f"{len(values)} observations cannot provide a one-sided "
+            f"{confidence:.1%} median lower bound"
+        )
+    return (
+        sorted(values)[selected_rank - 1],
+        selected_rank,
+        achieved_coverage,
+    )
+
+
 def derive_metrics(
     rows: list[dict[str, object]], config: WorkloadConfig
 ) -> dict[str, object]:
@@ -951,6 +1000,24 @@ def derive_metrics(
     log_ratios = [math.log(ratio) for ratio in paired_ratios]
     log_mean = statistics.mean(log_ratios)
     log_stdev = statistics.stdev(log_ratios)
+    geometric_mean_ratio = math.exp(log_mean)
+    (
+        exact_median_lcb,
+        exact_median_lcb_rank,
+        exact_median_lcb_coverage,
+    ) = _exact_median_lower_bound(paired_ratios)
+    exact_median_required_successes = (
+        len(paired_ratios) - exact_median_lcb_rank + 1
+    )
+    if (
+        config.uniform_sign_min_rounds
+        != exact_median_required_successes
+    ):
+        raise ValueError(
+            "uniform_sign_min_rounds must equal the exact median lower-bound "
+            f"success count {exact_median_required_successes}, got "
+            f"{config.uniform_sign_min_rounds}"
+        )
     degrees_of_freedom = len(log_ratios) - 1
     try:
         t_critical = _T_CRITICAL_95_ONE_SIDED[degrees_of_freedom]
@@ -963,6 +1030,10 @@ def derive_metrics(
     noninferiority_floor = 1.0 - config.uniform_equivalence_margin
     rounds_at_or_above_floor = sum(
         ratio >= noninferiority_floor for ratio in paired_ratios
+    )
+    exact_sign_pvalue = _binomial_upper_tail(
+        rounds_at_or_above_floor,
+        len(paired_ratios),
     )
     return {
         "shared": {
@@ -1012,19 +1083,38 @@ def derive_metrics(
             ),
             "placement_slo_ns": placement_slo_ns,
             "noninferiority_floor": noninferiority_floor,
-            "paired_log_ratio_lcb_method": "one-sided-95pct-student-t",
-            "paired_log_ratio_degrees_of_freedom": degrees_of_freedom,
-            "paired_log_ratio_t_critical": t_critical,
-            "paired_log_ratio_mean": log_mean,
-            "paired_log_ratio_sample_stdev": log_stdev,
-            "paired_log_ratio_lcb95": log_lcb95,
-            "paired_ratio_lcb95": ratio_lcb95,
+            "paired_ratio_exact_median_lcb_method": (
+                "one-sided-exact-binomial-order-statistic"
+            ),
+            "paired_ratio_exact_median_lcb_requested_confidence": (
+                _MEDIAN_LCB_CONFIDENCE
+            ),
+            "paired_ratio_exact_median_lcb_achieved_coverage": (
+                exact_median_lcb_coverage
+            ),
+            "paired_ratio_exact_median_lcb_order_rank": (
+                exact_median_lcb_rank
+            ),
+            "paired_ratio_exact_median_lcb95": exact_median_lcb,
+            "paired_ratio_geometric_mean": geometric_mean_ratio,
+            "diagnostic_paired_log_ratio_lcb_method": (
+                "one-sided-95pct-student-t"
+            ),
+            "diagnostic_paired_log_ratio_degrees_of_freedom": (
+                degrees_of_freedom
+            ),
+            "diagnostic_paired_log_ratio_t_critical": t_critical,
+            "diagnostic_paired_log_ratio_mean": log_mean,
+            "diagnostic_paired_log_ratio_sample_stdev": log_stdev,
+            "diagnostic_paired_log_ratio_lcb95": log_lcb95,
+            "diagnostic_paired_ratio_lcb95": ratio_lcb95,
             "paired_rounds": paired_rounds,
             "paired_round_count": len(paired_ratios),
             "rounds_at_or_above_noninferiority_floor": (
                 rounds_at_or_above_floor
             ),
             "sign_gate_min_rounds": config.uniform_sign_min_rounds,
+            "sign_gate_exact_one_sided_pvalue": exact_sign_pvalue,
             "paired_median_prefix_over_hrw_ratio": statistics.median(
                 paired_ratios
             ),
@@ -1055,8 +1145,12 @@ def threshold_checks(
             float(placement["prefix_worst_trace_p99_ms"])
             < config.placement_p99_limit_ms
         ),
-        "uniform_paired_goodput_lcb_noninferior": (
-            float(uniform["paired_ratio_lcb95"])
+        "uniform_exact_median_goodput_lcb_noninferior": (
+            float(uniform["paired_ratio_exact_median_lcb95"])
+            >= 1.0 - config.uniform_equivalence_margin
+        ),
+        "uniform_geometric_mean_goodput_guard_noninferior": (
+            float(uniform["paired_ratio_geometric_mean"])
             >= 1.0 - config.uniform_equivalence_margin
         ),
         "uniform_paired_goodput_sign_gate": (

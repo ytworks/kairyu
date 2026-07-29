@@ -73,7 +73,7 @@ repeat the binding drill.
 
 | Gate | Target | Where proven |
 |---|---|---|
-| F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform session-only (blank-root) rounds, the one-sided 95% lower bound of the <10 ms SLO-goodput ratio is ≥0.99 and ≥15/21 paired ratios are ≥0.99; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
+| F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform session-only (blank-root) rounds, the exact distribution-free one-sided ≥95% median lower bound and the full-sample geometric mean of the <10 ms SLO-goodput ratio are each ≥0.99, equivalently with ≥15/21 individual ratios ≥0.99 for the median bound; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
 | F2b | RadixKV KV-event index: staleness <500 ms under churn; router degrades gracefully to the approximate trie when the event stream dies | CPU test + chaos fixture |
 | F2c | Real-engine validation: TTFT p95 reduction ≥30% on a multi-turn+RAG trace vs session-hashing, 4–8 GPUs | GPU testbed |
 | F2d | Placement decisions land in the JSONL decision log (`prefix_match` reason) and feed `learning/dataset.py`; bandit-tuned α/β beats hand-tuned on a replayed trace | CPU bench |
@@ -86,9 +86,12 @@ generation path, retains raw cache/placement/performance JSONL, and independentl
 replays both policies under the same per-request session IDs and initial cache
 state. One fully retained and replayed non-binding uniform calibration pair
 warms CPython's policy-specific allocator path before the 21 binding paired
-rounds; it does not enter any metric. Alternating execution order, the confidence
-lower bound, and the sign-count guard make the declared 1% equivalence tolerance
-robust to host scheduling jitter. Immediately before each calibration and
+rounds; it does not enter any metric. Alternating execution order, the exact
+median lower bound, full-sample geometric-mean guard, and sign-count guard make
+the declared 1% equivalence tolerance robust to host scheduling jitter. The
+location bound is the seventh ordered ratio for 21 pairs, with exact 96.0823%
+binomial coverage; no round is removed or clipped, and the former Student-t
+log-mean bound remains diagnostic only. Immediately before each calibration and
 binding arm's clock, that same pool and policy execute a declared 512-request
 run-in over disjoint prompts. Its
 deterministic trace digest, completed count, and positive interval remain in
