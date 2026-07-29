@@ -222,7 +222,7 @@ def _backend(
     )
 
 
-@pytest.mark.parametrize("sm", [80, 90])
+@pytest.mark.parametrize("sm", [80, 86, 89, 90])
 def test_fa3_paged_api_preserves_page_identity_gqa_and_causal_contract(sm):
     pool, page_table, query = _case()
     module = _FakeFA3()
@@ -393,11 +393,15 @@ def test_model_config_validation_fails_before_serving_unsupported_shapes():
         num_key_value_heads=8,
         head_dim=128,
         kv_cache_v_head_dim=128,
+        dtype="bfloat16",
     )
-    backend.validate_model_config(valid)
+    backend.validate_model_config(valid, dtype=torch.bfloat16)
 
     with pytest.raises(ValueError, match="MLA"):
-        backend.validate_model_config(SimpleNamespace(**{**vars(valid), "is_mla": True}))
+        backend.validate_model_config(
+            SimpleNamespace(**{**vars(valid), "is_mla": True}),
+            dtype=torch.bfloat16,
+        )
     with pytest.raises(ValueError, match="GQA"):
         backend.validate_model_config(
             SimpleNamespace(
@@ -406,7 +410,8 @@ def test_model_config_validation_fails_before_serving_unsupported_shapes():
                     "num_attention_heads": 30,
                     "num_key_value_heads": 8,
                 }
-            )
+            ),
+            dtype=torch.bfloat16,
         )
     with pytest.raises(ValueError, match="head_dim=256"):
         backend.validate_model_config(
@@ -416,8 +421,11 @@ def test_model_config_validation_fails_before_serving_unsupported_shapes():
                     "head_dim": 256,
                     "kv_cache_v_head_dim": 256,
                 }
-            )
+            ),
+            dtype=torch.bfloat16,
         )
+    with pytest.raises(ValueError, match="fp16 or bf16"):
+        backend.validate_model_config(valid, dtype=torch.float32)
 
 
 @pytest.mark.parametrize(

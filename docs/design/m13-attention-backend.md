@@ -2,8 +2,10 @@
 
 Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS (1-reviewer panel with web
 verification of the FlashInfer 0.6.x API and the DeepSeek-V2 MLA paper,
-2026-07-03; amendments below are binding). Extended for FlashAttention-3/4 by
-issue #277 (2026-07-29).
+2026-07-03; amendments below are binding). The issue #277 FlashAttention-3/4
+extension (2026-07-29) is implemented on an unmerged branch and FA4 is
+validated on SM120, but completion is blocked because this host has no
+representative FA3 SM8x/SM90 device.
 Milestone: M13 (roadmap Track E1 GPU-path-local; kernel-adapter pattern setter
 for M14/M18)
 Date: 2026-07-03
@@ -110,7 +112,14 @@ never mislabeled as a monolithic backend.
 single timing sample is faster. Promotion requires retained evidence for the
 exact model/dtype/shape/GPU profile: correctness parity plus interleaved warm
 samples whose execution order and OS-jitter observations are recorded. With
-no qualifying evidence, the stable fallback above is intentional.
+no qualifying evidence, the stable fallback above is intentional. If that
+profile-selected optional implementation cannot be constructed, `auto` alone
+falls back to torch and retains the sanitized failure type in its actual
+decision. Explicit selections never fall back. The constructed decision is
+carried by the backend/runner/engine and is what `/backends` reports; health
+inspection does not re-infer a different implementation from environment
+state. TP startup includes the resolved backend in its rank handshake, so a
+rank-local fallback cannot silently create a mixed-kernel group.
 
 ### D6 — FlashAttention phase adapters (`flashattention_gpu.py`)
 
@@ -122,7 +131,7 @@ and `kv_mode` components.
 - **FA3:** supported through the official upstream `hopper/` package, pinned
   to tag `fa4-v4.0.0.beta24`, commit
   `849f660f73b176e5ad5670e7f822c7fa9f3eaf8b`. It is the non-Blackwell
-  FlashAttention path for SM80/SM90; its fake-module contract keeps the adapter
+  FlashAttention path for SM8x/SM90; its fake-module contract keeps the adapter
   testable without representative hardware.
 - **FA4:** the optional `flashattention4` install extra pins
   `flash-attn-4==4.0.0b24`. SM100/SM110 use FA4's direct paged-KV interface.
@@ -163,14 +172,19 @@ and `kv_mode` components.
 - Selector: env override, CPU→torch, fa2/full→flashinfer (constructed lazily —
   no import unless selected).
 - Selector/Helm: all five public values render and resolve; invalid or
-  unavailable explicit selections fail without fallback; empty Helm default
-  omits the environment variable and therefore uses `auto`.
+  unavailable explicit selections fail without fallback; an unavailable
+  profile-selected optional backend falls from `auto` to torch and the actual
+  decision is reported; empty Helm default omits the environment variable and
+  therefore uses `auto`.
 - FA3/FA4 fakes: import/version/architecture/shape errors; GQA and bottom-right
   causal arguments; direct-paged versus D2D-materialized page identity; hybrid
   phase report.
-- GPU: FA3 Hopper and FA4 profile matrices compare against torch/FlashInfer
-  oracles. Auto-promotion evidence uses interleaved warm samples and retains
-  order plus jitter metadata with the result.
+- GPU on the available host: FA4 on SM120 compares against the FlashInfer
+  oracle and serves Qwen3-32B at TP8. Auto-promotion evidence uses interleaved
+  warm samples and retains order plus jitter metadata with the result. FA3 has
+  fake-module/API-contract coverage only in this environment; no Ampere/Hopper
+  device or performance result is claimed, and that contract coverage does not
+  complete issue #277 under the current hardware-validation policy.
 
 ## 6. Review record (binding amendments)
 
@@ -232,8 +246,20 @@ The retained SM120 Qwen3-32B prefill artifact is
 24 alternating AB/BA pairs for both TP4-local (16 Q / 2 KV heads) and TP8-local
 (8 Q / 1 KV head) shapes, including every `perf_counter_ns` timestamp. Output
 parity passed with maximum absolute error 0.0009765625. FlashInfer was faster
-in all 24 pairs for both shapes: median latency was 0.111741 ms versus
-0.265901 ms at TP4-local and 0.0844625 ms versus 0.2634905 ms at TP8-local.
+in all 24 pairs for both shapes: median latency was 0.108619 ms versus
+0.2637465 ms at TP4-local and 0.083225 ms versus 0.2617595 ms at TP8-local.
 The exact one-sided paired sign test therefore supplies no FA4-promotion
 evidence, so SM120 `auto` keeps FlashInfer. No effect-size cutoff or discarded
 jitter sample is used.
+
+The companion TP8 serving artifact is
+`bench/results/attention-backends-serving-qwen3-32b-sm120-2026-07-29.json`.
+The same exact-source image and pinned Qwen3-32B revision returned an identical
+deterministic response and usage under explicit FlashInfer and FA4 selection.
+It retains every request timing and token count from balanced BA/AB ordering:
+two runs per backend, eight concurrent requests, and 32 output tokens per
+request. Median-of-run throughput was 115.795 versus 116.45 output token/s and
+mean TPOT was 39.9785 versus 40.213 ms/token for FlashInfer versus FA4. The
+large within/order variation and two-run sample make this diagnostic evidence
+of executable serving only, not a backend-performance conclusion; the 24-pair
+kernel artifact above remains the binding `auto` decision.

@@ -285,7 +285,7 @@ cd hopper
 python setup.py install
 ```
 
-This upstream FA3 build provides SM80/SM90 kernels and requires CUDA 12.3 or
+This upstream FA3 build provides SM8x/SM90 kernels and requires CUDA 12.3 or
 newer. Selecting FA3 on another GPU is a configuration error; it does not
 silently fall back.
 
@@ -719,7 +719,10 @@ components. FA4 consumes paged KV directly on SM100/SM110. On SM90/SM120 it
 preserves page identity while materializing the selected pages device-to-device
 for prefill. `auto` uses the stable hardware-profile fallback (FlashInfer on
 supported GPU tiers, otherwise torch) and promotes neither FA3 nor FA4 unless
-retained, profile-specific correctness and performance evidence exists.
+retained, profile-specific correctness and performance evidence exists. If an
+optional profile-selected backend cannot be constructed, `auto` alone falls
+back to torch and `/backends` reports that actual fallback and its sanitized
+failure type; an explicit selection still fails startup.
 
 ### HTTP surface
 

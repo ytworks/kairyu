@@ -44,13 +44,20 @@ def load_generation_defaults(model_dir: str) -> GenerationDefaults:
 
 
 def build_model(
-    config: ModelConfig, attention_backend=None, linear_factory=None
+    config: ModelConfig,
+    attention_backend=None,
+    linear_factory=None,
+    *,
+    dtype: torch.dtype | None = None,
 ) -> DenseDecoder:
     """Registry: architecture -> module (one builder covers the dense family)."""
     if config.architecture not in _SUPPORTED_BUILDERS:
         raise ValueError(f"no builder for architecture {config.architecture!r}")
     return DenseDecoder(
-        config, attention_backend=attention_backend, linear_factory=linear_factory
+        config,
+        attention_backend=attention_backend,
+        linear_factory=linear_factory,
+        dtype=dtype,
     )
 
 
@@ -77,6 +84,7 @@ def load_model(
         config,
         attention_backend=attention_backend,
         linear_factory=linear_factory(quant),
+        dtype=dtype,
     )
     reader = CheckpointReader(directory)
     state: dict[str, torch.Tensor] = {}

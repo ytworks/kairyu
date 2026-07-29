@@ -337,6 +337,7 @@ def build_tp_model(
         local_config,
         attention_backend=attention_backend,
         linear_factory=linear_factory(quant),
+        dtype=dtype,
     )
     reader = CheckpointReader(model_dir)
     # dtype is applied while loading, so a bf16 target never materializes the

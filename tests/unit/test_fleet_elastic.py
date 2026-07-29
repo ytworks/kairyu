@@ -1560,7 +1560,7 @@ async def test_helm_attention_backend_values_schema_and_template_are_strict():
     template = (chart_dir / "templates/deployment.yaml").read_text()
 
     assert defaults["attentionBackend"] == ""
-    assert gpu_values["attentionBackend"] == "torch"
+    assert gpu_values["attentionBackend"] == "auto"
     assert schema["properties"]["attentionBackend"] == {
         "type": "string",
         "enum": [

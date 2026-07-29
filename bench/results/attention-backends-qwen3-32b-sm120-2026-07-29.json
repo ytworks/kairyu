@@ -1,0 +1,1208 @@
+{
+  "artifact_sha256": "4c3bdf5dd54888a1909daa0ad0c97bd151b2d655d8db6dcc69517cfc35e5bd33",
+  "backend_contract": {
+    "decode_delegation": "flashattention4 is measured for prefill only; decode remains delegated to flashinfer",
+    "flashattention4": {
+      "decode": "flashinfer",
+      "kv_mode": "paged-materialized",
+      "prefill": "flashattention4"
+    },
+    "flashinfer": {
+      "decode": "flashinfer",
+      "kv_mode": "paged-direct",
+      "prefill": "flashinfer"
+    }
+  },
+  "benchmark": "qwen3-32b-sm120-attention-prefill-ab",
+  "environment": {
+    "cuda": {
+      "cudnn_version": 92000,
+      "torch_cuda_version": "13.0"
+    },
+    "device": "cuda",
+    "gpu": {
+      "compute_capability": [
+        12,
+        0
+      ],
+      "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "sm": 120,
+      "total_memory_bytes": 101975851008
+    },
+    "packages": {
+      "flash-attn-4": "4.0.0b24",
+      "flashinfer": "0.6.14",
+      "torch": "2.12.1"
+    }
+  },
+  "geometry": {
+    "chunk_tokens": 512,
+    "context_tokens": 2048,
+    "dtype": "bfloat16",
+    "head_dim": 128,
+    "model": "Qwen/Qwen3-32B",
+    "num_layers": 1,
+    "page_size": 16,
+    "scenarios": [
+      {
+        "head_dim": 128,
+        "name": "qwen3-32b-tp4",
+        "num_kv_heads": 2,
+        "num_pages": 160,
+        "num_query_heads": 16,
+        "output_shape": [
+          512,
+          2048
+        ],
+        "query_shape": [
+          512,
+          16,
+          128
+        ],
+        "sequence_tokens": 2560,
+        "tensor_parallel_size": 4
+      },
+      {
+        "head_dim": 128,
+        "name": "qwen3-32b-tp8",
+        "num_kv_heads": 1,
+        "num_pages": 160,
+        "num_query_heads": 8,
+        "output_shape": [
+          512,
+          1024
+        ],
+        "query_shape": [
+          512,
+          8,
+          128
+        ],
+        "sequence_tokens": 2560,
+        "tensor_parallel_size": 8
+      }
+    ],
+    "seed": 277
+  },
+  "methodology": {
+    "clock": "time.perf_counter_ns",
+    "inference": {
+      "alpha": {
+        "denominator": 20,
+        "numerator": 1
+      },
+      "alternative": "flashattention4 is faster",
+      "test": "exact one-sided paired sign test",
+      "ties": "excluded"
+    },
+    "latency_summary": "median and nearest-rank p99 over raw elapsed_ns",
+    "order": "AB on even blocks and BA on odd blocks; A=flashinfer, B=flashattention4",
+    "paired_blocks": 24,
+    "paired_ratio": "flashinfer elapsed_ns / flashattention4 elapsed_ns; values above 1 favor flashattention4",
+    "recommendation_rule": "recommend flashattention4 only when output parity passes and the exact one-sided paired sign test favors it at alpha=0.05 in every required scenario; there is no minimum effect-size threshold",
+    "synchronization": "torch.cuda.synchronize immediately before and after every timed call",
+    "warmups": {
+      "calls_per_backend": 5,
+      "kind": "disjoint per backend and scenario"
+    }
+  },
+  "provenance": {
+    "generated_at_utc": "2026-07-29T11:04:36.845725+00:00",
+    "platform": "Linux-6.8.0-134-generic-x86_64-with-glibc2.39",
+    "python_version": "3.12.3",
+    "source": {
+      "commit": "b6d358b2409b9aa47d54556e4fc89cfb79a70fab",
+      "dirty": false,
+      "script_sha256": "60fe78ac9e82a600a9c1adab457ad78bb5a8c096951ea07d455bba0163ecd479",
+      "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "recommendation": {
+    "decode_backend": "flashinfer",
+    "minimum_effect_size_threshold": null,
+    "prefill_backend": "flashinfer",
+    "reason": "stable_flashinfer_without_unanimous_paired_evidence",
+    "required_scenarios": [
+      "qwen3-32b-tp4",
+      "qwen3-32b-tp8"
+    ],
+    "scenario_evidence": [
+      {
+        "fa4_faster_by_exact_paired_evidence": false,
+        "name": "qwen3-32b-tp4",
+        "parity_passed": true
+      },
+      {
+        "fa4_faster_by_exact_paired_evidence": false,
+        "name": "qwen3-32b-tp8",
+        "parity_passed": true
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "geometry": {
+        "head_dim": 128,
+        "name": "qwen3-32b-tp4",
+        "num_kv_heads": 2,
+        "num_pages": 160,
+        "num_query_heads": 16,
+        "output_shape": [
+          512,
+          2048
+        ],
+        "query_shape": [
+          512,
+          16,
+          128
+        ],
+        "sequence_tokens": 2560,
+        "tensor_parallel_size": 4
+      },
+      "measurements": [
+        {
+          "backend": "flashinfer",
+          "block": 0,
+          "elapsed_ns": 317533,
+          "finished_ns": 1813953531872714,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953531555181
+        },
+        {
+          "backend": "flashattention4",
+          "block": 0,
+          "elapsed_ns": 442783,
+          "finished_ns": 1813953532331841,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953531889058
+        },
+        {
+          "backend": "flashattention4",
+          "block": 1,
+          "elapsed_ns": 295164,
+          "finished_ns": 1813953532642000,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953532346836
+        },
+        {
+          "backend": "flashinfer",
+          "block": 1,
+          "elapsed_ns": 130011,
+          "finished_ns": 1813953532784468,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953532654457
+        },
+        {
+          "backend": "flashinfer",
+          "block": 2,
+          "elapsed_ns": 108636,
+          "finished_ns": 1813953532905258,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953532796622
+        },
+        {
+          "backend": "flashattention4",
+          "block": 2,
+          "elapsed_ns": 291151,
+          "finished_ns": 1813953533206367,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953532915216
+        },
+        {
+          "backend": "flashattention4",
+          "block": 3,
+          "elapsed_ns": 267739,
+          "finished_ns": 1813953533487212,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953533219473
+        },
+        {
+          "backend": "flashinfer",
+          "block": 3,
+          "elapsed_ns": 116968,
+          "finished_ns": 1813953533615683,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953533498715
+        },
+        {
+          "backend": "flashinfer",
+          "block": 4,
+          "elapsed_ns": 105347,
+          "finished_ns": 1813953533732142,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953533626795
+        },
+        {
+          "backend": "flashattention4",
+          "block": 4,
+          "elapsed_ns": 276717,
+          "finished_ns": 1813953534018664,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953533741947
+        },
+        {
+          "backend": "flashattention4",
+          "block": 5,
+          "elapsed_ns": 264065,
+          "finished_ns": 1813953534294803,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953534030738
+        },
+        {
+          "backend": "flashinfer",
+          "block": 5,
+          "elapsed_ns": 117557,
+          "finished_ns": 1813953534424019,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953534306462
+        },
+        {
+          "backend": "flashinfer",
+          "block": 6,
+          "elapsed_ns": 110844,
+          "finished_ns": 1813953534546280,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953534435436
+        },
+        {
+          "backend": "flashattention4",
+          "block": 6,
+          "elapsed_ns": 286124,
+          "finished_ns": 1813953534841784,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953534555660
+        },
+        {
+          "backend": "flashattention4",
+          "block": 7,
+          "elapsed_ns": 272473,
+          "finished_ns": 1813953535125749,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953534853276
+        },
+        {
+          "backend": "flashinfer",
+          "block": 7,
+          "elapsed_ns": 114423,
+          "finished_ns": 1813953535249899,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953535135476
+        },
+        {
+          "backend": "flashinfer",
+          "block": 8,
+          "elapsed_ns": 104584,
+          "finished_ns": 1813953535364663,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953535260079
+        },
+        {
+          "backend": "flashattention4",
+          "block": 8,
+          "elapsed_ns": 269925,
+          "finished_ns": 1813953535644142,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953535374217
+        },
+        {
+          "backend": "flashattention4",
+          "block": 9,
+          "elapsed_ns": 256478,
+          "finished_ns": 1813953535911710,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953535655232
+        },
+        {
+          "backend": "flashinfer",
+          "block": 9,
+          "elapsed_ns": 109998,
+          "finished_ns": 1813953536032208,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953535922210
+        },
+        {
+          "backend": "flashinfer",
+          "block": 10,
+          "elapsed_ns": 105188,
+          "finished_ns": 1813953536148167,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953536042979
+        },
+        {
+          "backend": "flashattention4",
+          "block": 10,
+          "elapsed_ns": 279015,
+          "finished_ns": 1813953536436354,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953536157339
+        },
+        {
+          "backend": "flashattention4",
+          "block": 11,
+          "elapsed_ns": 260610,
+          "finished_ns": 1813953536708316,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953536447706
+        },
+        {
+          "backend": "flashinfer",
+          "block": 11,
+          "elapsed_ns": 110392,
+          "finished_ns": 1813953536828737,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953536718345
+        },
+        {
+          "backend": "flashinfer",
+          "block": 12,
+          "elapsed_ns": 101565,
+          "finished_ns": 1813953536940663,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953536839098
+        },
+        {
+          "backend": "flashattention4",
+          "block": 12,
+          "elapsed_ns": 270078,
+          "finished_ns": 1813953537220282,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953536950204
+        },
+        {
+          "backend": "flashattention4",
+          "block": 13,
+          "elapsed_ns": 254471,
+          "finished_ns": 1813953537485911,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953537231440
+        },
+        {
+          "backend": "flashinfer",
+          "block": 13,
+          "elapsed_ns": 109645,
+          "finished_ns": 1813953537606131,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953537496486
+        },
+        {
+          "backend": "flashinfer",
+          "block": 14,
+          "elapsed_ns": 102291,
+          "finished_ns": 1813953537718298,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953537616007
+        },
+        {
+          "backend": "flashattention4",
+          "block": 14,
+          "elapsed_ns": 260635,
+          "finished_ns": 1813953537987469,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953537726834
+        },
+        {
+          "backend": "flashattention4",
+          "block": 15,
+          "elapsed_ns": 259669,
+          "finished_ns": 1813953538257744,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953537998075
+        },
+        {
+          "backend": "flashinfer",
+          "block": 15,
+          "elapsed_ns": 108372,
+          "finished_ns": 1813953538375946,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953538267574
+        },
+        {
+          "backend": "flashinfer",
+          "block": 16,
+          "elapsed_ns": 102040,
+          "finished_ns": 1813953538487792,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953538385752
+        },
+        {
+          "backend": "flashattention4",
+          "block": 16,
+          "elapsed_ns": 258940,
+          "finished_ns": 1813953538755771,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953538496831
+        },
+        {
+          "backend": "flashattention4",
+          "block": 17,
+          "elapsed_ns": 255434,
+          "finished_ns": 1813953539022307,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953538766873
+        },
+        {
+          "backend": "flashinfer",
+          "block": 17,
+          "elapsed_ns": 110873,
+          "finished_ns": 1813953539143402,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953539032529
+        },
+        {
+          "backend": "flashinfer",
+          "block": 18,
+          "elapsed_ns": 101415,
+          "finished_ns": 1813953539255364,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953539153949
+        },
+        {
+          "backend": "flashattention4",
+          "block": 18,
+          "elapsed_ns": 268113,
+          "finished_ns": 1813953539532314,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953539264201
+        },
+        {
+          "backend": "flashattention4",
+          "block": 19,
+          "elapsed_ns": 252610,
+          "finished_ns": 1813953539795963,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953539543353
+        },
+        {
+          "backend": "flashinfer",
+          "block": 19,
+          "elapsed_ns": 108602,
+          "finished_ns": 1813953539914796,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953539806194
+        },
+        {
+          "backend": "flashinfer",
+          "block": 20,
+          "elapsed_ns": 101378,
+          "finished_ns": 1813953540025731,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953539924353
+        },
+        {
+          "backend": "flashattention4",
+          "block": 20,
+          "elapsed_ns": 260295,
+          "finished_ns": 1813953540294937,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953540034642
+        },
+        {
+          "backend": "flashattention4",
+          "block": 21,
+          "elapsed_ns": 263428,
+          "finished_ns": 1813953540568628,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953540305200
+        },
+        {
+          "backend": "flashinfer",
+          "block": 21,
+          "elapsed_ns": 110847,
+          "finished_ns": 1813953540688818,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953540577971
+        },
+        {
+          "backend": "flashinfer",
+          "block": 22,
+          "elapsed_ns": 104061,
+          "finished_ns": 1813953540802961,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953540698900
+        },
+        {
+          "backend": "flashattention4",
+          "block": 22,
+          "elapsed_ns": 261810,
+          "finished_ns": 1813953541073563,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953540811753
+        },
+        {
+          "backend": "flashattention4",
+          "block": 23,
+          "elapsed_ns": 254495,
+          "finished_ns": 1813953541338630,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953541084135
+        },
+        {
+          "backend": "flashinfer",
+          "block": 23,
+          "elapsed_ns": 108215,
+          "finished_ns": 1813953541456464,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953541348249
+        }
+      ],
+      "name": "qwen3-32b-tp4",
+      "parity": {
+        "atol": 0.02,
+        "candidate": "flashattention4",
+        "candidate_sha256": "55d82159a8ff36ae9c42f7d275b845a7c67eb9a9a128cf0f0707f67662a0a925",
+        "candidate_shape": [
+          512,
+          2048
+        ],
+        "max_abs_error": 0.0009765625,
+        "max_normalized_error": 0.0434027798473835,
+        "passed": true,
+        "reference": "flashinfer",
+        "reference_sha256": "3936aa179f8f8c2392ea1e9c7ff1e3c7dc048a4019ee1e5d7827cd647da97f21",
+        "rtol": 0.02,
+        "shape": [
+          512,
+          2048
+        ]
+      },
+      "statistics": {
+        "exact_paired_sign_test": {
+          "alpha": {
+            "denominator": 20,
+            "numerator": 1
+          },
+          "alternative": "flashattention4_faster",
+          "losses": 24,
+          "non_tied_pairs": 24,
+          "one_sided_p_value": 1.0,
+          "significant": false,
+          "tail_denominator": 16777216,
+          "tail_numerator": 16777216,
+          "ties": 0,
+          "wins": 0
+        },
+        "latency_ns": {
+          "flashattention4": {
+            "median": 263746.5,
+            "p99_nearest_rank": 442783
+          },
+          "flashinfer": {
+            "median": 108619.0,
+            "p99_nearest_rank": 317533
+          }
+        },
+        "paired_ratio_flashinfer_over_flashattention4": {
+          "geometric_mean": 0.41713688405241184,
+          "median": 0.41864461274117515,
+          "values": [
+            0.7171300614522238,
+            0.44047038256697973,
+            0.3731259724335482,
+            0.43687322354980035,
+            0.38070302872609924,
+            0.44518205744797684,
+            0.3873984705931694,
+            0.41994252641546137,
+            0.387455774752246,
+            0.42887889019720987,
+            0.3769976524559612,
+            0.4235908061854879,
+            0.3760580276808922,
+            0.4308742450023775,
+            0.3924683944980528,
+            0.417346699066889,
+            0.3940681238897042,
+            0.4340573298777766,
+            0.3782546911190431,
+            0.42991963896916197,
+            0.38947348201079546,
+            0.42078670452647404,
+            0.3974676291967457,
+            0.4252146407591505
+          ]
+        },
+        "sample_count_per_backend": 24
+      }
+    },
+    {
+      "geometry": {
+        "head_dim": 128,
+        "name": "qwen3-32b-tp8",
+        "num_kv_heads": 1,
+        "num_pages": 160,
+        "num_query_heads": 8,
+        "output_shape": [
+          512,
+          1024
+        ],
+        "query_shape": [
+          512,
+          8,
+          128
+        ],
+        "sequence_tokens": 2560,
+        "tensor_parallel_size": 8
+      },
+      "measurements": [
+        {
+          "backend": "flashinfer",
+          "block": 0,
+          "elapsed_ns": 140836,
+          "finished_ns": 1813953548443851,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953548303015
+        },
+        {
+          "backend": "flashattention4",
+          "block": 0,
+          "elapsed_ns": 515392,
+          "finished_ns": 1813953548969595,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953548454203
+        },
+        {
+          "backend": "flashattention4",
+          "block": 1,
+          "elapsed_ns": 318917,
+          "finished_ns": 1813953549302991,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953548984074
+        },
+        {
+          "backend": "flashinfer",
+          "block": 1,
+          "elapsed_ns": 105694,
+          "finished_ns": 1813953549420312,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953549314618
+        },
+        {
+          "backend": "flashinfer",
+          "block": 2,
+          "elapsed_ns": 82208,
+          "finished_ns": 1813953549513534,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953549431326
+        },
+        {
+          "backend": "flashattention4",
+          "block": 2,
+          "elapsed_ns": 273509,
+          "finished_ns": 1813953549796400,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953549522891
+        },
+        {
+          "backend": "flashattention4",
+          "block": 3,
+          "elapsed_ns": 264228,
+          "finished_ns": 1813953550072528,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953549808300
+        },
+        {
+          "backend": "flashinfer",
+          "block": 3,
+          "elapsed_ns": 90705,
+          "finished_ns": 1813953550174097,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953550083392
+        },
+        {
+          "backend": "flashinfer",
+          "block": 4,
+          "elapsed_ns": 78362,
+          "finished_ns": 1813953550263028,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953550184666
+        },
+        {
+          "backend": "flashattention4",
+          "block": 4,
+          "elapsed_ns": 270119,
+          "finished_ns": 1813953550542912,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953550272793
+        },
+        {
+          "backend": "flashattention4",
+          "block": 5,
+          "elapsed_ns": 256964,
+          "finished_ns": 1813953550811792,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953550554828
+        },
+        {
+          "backend": "flashinfer",
+          "block": 5,
+          "elapsed_ns": 87069,
+          "finished_ns": 1813953550908954,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953550821885
+        },
+        {
+          "backend": "flashinfer",
+          "block": 6,
+          "elapsed_ns": 77961,
+          "finished_ns": 1813953550996964,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953550919003
+        },
+        {
+          "backend": "flashattention4",
+          "block": 6,
+          "elapsed_ns": 265098,
+          "finished_ns": 1813953551274335,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953551009237
+        },
+        {
+          "backend": "flashattention4",
+          "block": 7,
+          "elapsed_ns": 251865,
+          "finished_ns": 1813953551537110,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953551285245
+        },
+        {
+          "backend": "flashinfer",
+          "block": 7,
+          "elapsed_ns": 84017,
+          "finished_ns": 1813953551631300,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953551547283
+        },
+        {
+          "backend": "flashinfer",
+          "block": 8,
+          "elapsed_ns": 77095,
+          "finished_ns": 1813953551717794,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953551640699
+        },
+        {
+          "backend": "flashattention4",
+          "block": 8,
+          "elapsed_ns": 260290,
+          "finished_ns": 1813953551987060,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953551726770
+        },
+        {
+          "backend": "flashattention4",
+          "block": 9,
+          "elapsed_ns": 262203,
+          "finished_ns": 1813953552259717,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953551997514
+        },
+        {
+          "backend": "flashinfer",
+          "block": 9,
+          "elapsed_ns": 88725,
+          "finished_ns": 1813953552359255,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953552270530
+        },
+        {
+          "backend": "flashinfer",
+          "block": 10,
+          "elapsed_ns": 77406,
+          "finished_ns": 1813953552446987,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953552369581
+        },
+        {
+          "backend": "flashattention4",
+          "block": 10,
+          "elapsed_ns": 262075,
+          "finished_ns": 1813953552717570,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953552455495
+        },
+        {
+          "backend": "flashattention4",
+          "block": 11,
+          "elapsed_ns": 253641,
+          "finished_ns": 1813953552982369,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953552728728
+        },
+        {
+          "backend": "flashinfer",
+          "block": 11,
+          "elapsed_ns": 92237,
+          "finished_ns": 1813953553084768,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953552992531
+        },
+        {
+          "backend": "flashinfer",
+          "block": 12,
+          "elapsed_ns": 77392,
+          "finished_ns": 1813953553172249,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953553094857
+        },
+        {
+          "backend": "flashattention4",
+          "block": 12,
+          "elapsed_ns": 261444,
+          "finished_ns": 1813953553442719,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953553181275
+        },
+        {
+          "backend": "flashattention4",
+          "block": 13,
+          "elapsed_ns": 252095,
+          "finished_ns": 1813953553705879,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953553453784
+        },
+        {
+          "backend": "flashinfer",
+          "block": 13,
+          "elapsed_ns": 83770,
+          "finished_ns": 1813953553799551,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953553715781
+        },
+        {
+          "backend": "flashinfer",
+          "block": 14,
+          "elapsed_ns": 75810,
+          "finished_ns": 1813953553885324,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953553809514
+        },
+        {
+          "backend": "flashattention4",
+          "block": 14,
+          "elapsed_ns": 266051,
+          "finished_ns": 1813953554160162,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953553894111
+        },
+        {
+          "backend": "flashattention4",
+          "block": 15,
+          "elapsed_ns": 252469,
+          "finished_ns": 1813953554423470,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953554171001
+        },
+        {
+          "backend": "flashinfer",
+          "block": 15,
+          "elapsed_ns": 84564,
+          "finished_ns": 1813953554518078,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953554433514
+        },
+        {
+          "backend": "flashinfer",
+          "block": 16,
+          "elapsed_ns": 77001,
+          "finished_ns": 1813953554605219,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953554528218
+        },
+        {
+          "backend": "flashattention4",
+          "block": 16,
+          "elapsed_ns": 271257,
+          "finished_ns": 1813953554885379,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953554614122
+        },
+        {
+          "backend": "flashattention4",
+          "block": 17,
+          "elapsed_ns": 258943,
+          "finished_ns": 1813953555154841,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953554895898
+        },
+        {
+          "backend": "flashinfer",
+          "block": 17,
+          "elapsed_ns": 85234,
+          "finished_ns": 1813953555250058,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953555164824
+        },
+        {
+          "backend": "flashinfer",
+          "block": 18,
+          "elapsed_ns": 76908,
+          "finished_ns": 1813953555337104,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953555260196
+        },
+        {
+          "backend": "flashattention4",
+          "block": 18,
+          "elapsed_ns": 263036,
+          "finished_ns": 1813953555608331,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953555345295
+        },
+        {
+          "backend": "flashattention4",
+          "block": 19,
+          "elapsed_ns": 253549,
+          "finished_ns": 1813953555872555,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953555619006
+        },
+        {
+          "backend": "flashinfer",
+          "block": 19,
+          "elapsed_ns": 83661,
+          "finished_ns": 1813953555966030,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953555882369
+        },
+        {
+          "backend": "flashinfer",
+          "block": 20,
+          "elapsed_ns": 80686,
+          "finished_ns": 1813953556056617,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953555975931
+        },
+        {
+          "backend": "flashattention4",
+          "block": 20,
+          "elapsed_ns": 259776,
+          "finished_ns": 1813953556325094,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953556065318
+        },
+        {
+          "backend": "flashattention4",
+          "block": 21,
+          "elapsed_ns": 249232,
+          "finished_ns": 1813953556584759,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953556335527
+        },
+        {
+          "backend": "flashinfer",
+          "block": 21,
+          "elapsed_ns": 82789,
+          "finished_ns": 1813953556676742,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953556593953
+        },
+        {
+          "backend": "flashinfer",
+          "block": 22,
+          "elapsed_ns": 75192,
+          "finished_ns": 1813953556762039,
+          "pair_order": "AB",
+          "position": 0,
+          "started_ns": 1813953556686847
+        },
+        {
+          "backend": "flashattention4",
+          "block": 22,
+          "elapsed_ns": 257507,
+          "finished_ns": 1813953557028381,
+          "pair_order": "AB",
+          "position": 1,
+          "started_ns": 1813953556770874
+        },
+        {
+          "backend": "flashattention4",
+          "block": 23,
+          "elapsed_ns": 275245,
+          "finished_ns": 1813953557313986,
+          "pair_order": "BA",
+          "position": 0,
+          "started_ns": 1813953557038741
+        },
+        {
+          "backend": "flashinfer",
+          "block": 23,
+          "elapsed_ns": 93768,
+          "finished_ns": 1813953557418321,
+          "pair_order": "BA",
+          "position": 1,
+          "started_ns": 1813953557324553
+        }
+      ],
+      "name": "qwen3-32b-tp8",
+      "parity": {
+        "atol": 0.02,
+        "candidate": "flashattention4",
+        "candidate_sha256": "7f939dca247eb41b94a18c7539ad02318bb89a78c278fc4315e942394a0b5810",
+        "candidate_shape": [
+          512,
+          1024
+        ],
+        "max_abs_error": 0.0009765625,
+        "max_normalized_error": 0.0434027798473835,
+        "passed": true,
+        "reference": "flashinfer",
+        "reference_sha256": "db80f3544adda0a3e8dc851607c9b646e9db67b59f0825d387375f9304556f28",
+        "rtol": 0.02,
+        "shape": [
+          512,
+          1024
+        ]
+      },
+      "statistics": {
+        "exact_paired_sign_test": {
+          "alpha": {
+            "denominator": 20,
+            "numerator": 1
+          },
+          "alternative": "flashattention4_faster",
+          "losses": 24,
+          "non_tied_pairs": 24,
+          "one_sided_p_value": 1.0,
+          "significant": false,
+          "tail_denominator": 16777216,
+          "tail_numerator": 16777216,
+          "ties": 0,
+          "wins": 0
+        },
+        "latency_ns": {
+          "flashattention4": {
+            "median": 261759.5,
+            "p99_nearest_rank": 515392
+          },
+          "flashinfer": {
+            "median": 83225.0,
+            "p99_nearest_rank": 140836
+          }
+        },
+        "paired_ratio_flashinfer_over_flashattention4": {
+          "geometric_mean": 0.313977824376256,
+          "median": 0.31987980282288514,
+          "values": [
+            0.27325996523034896,
+            0.331415383940022,
+            0.3005678058126058,
+            0.34328307370906946,
+            0.29010176996064696,
+            0.3388373468657088,
+            0.2940836973496594,
+            0.3335794969527326,
+            0.2961888662645511,
+            0.3383828560313955,
+            0.2953581989888391,
+            0.36365177554102057,
+            0.2960175027921849,
+            0.33229536484261885,
+            0.2849453676174869,
+            0.33494805302829256,
+            0.2838673287693958,
+            0.3291612439803354,
+            0.29238583311790023,
+            0.32995988940993654,
+            0.31059836166543486,
+            0.3321764460422418,
+            0.2919998291308586,
+            0.34067103852931024
+          ]
+        },
+        "sample_count_per_backend": 24
+      }
+    }
+  ],
+  "schema_version": 1
+}

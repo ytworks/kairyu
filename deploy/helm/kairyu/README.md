@@ -46,9 +46,10 @@ to the actual gateway instance. The chart does not create or own PostgreSQL.
 
 ### Attention backend
 
-The checked-in `pcie-gddr` overlay targets RTX PRO 6000 Blackwell (SM120) nodes and keeps
-`attentionBackend: torch` as its portable baseline. Operators can render any public
-backend explicitly:
+The checked-in `pcie-gddr` overlay targets RTX PRO 6000 Blackwell (SM120) nodes and uses
+`attentionBackend: auto`. Retained Qwen3-32B TP4/TP8 evidence currently resolves that
+profile to FlashInfer; keeping the overlay on `auto` leaves the profile policy in one
+place. Operators can render any public backend explicitly:
 
 ```console
 helm install kairyu deploy/helm/kairyu \
@@ -61,10 +62,10 @@ The strict schema accepts these values:
 | value | behavior |
 |---|---|
 | `""` | Chart default. Omit `KAIRYU_ATTENTION_BACKEND`; runtime selection behaves as `auto`. |
-| `auto` | Emit the automatic policy explicitly. It uses the stable profile fallback unless retained profile-specific evidence justifies promotion. |
+| `auto` | Emit the automatic policy explicitly. It uses the stable profile choice unless retained profile-specific evidence justifies promotion, and falls back to torch if that optional choice cannot be constructed. |
 | `torch` | Portable torch implementation for prefill and decode. |
 | `flashinfer` | FlashInfer paged prefill and decode. |
-| `flashattention3` | Official Hopper FA3 prefill plus FlashInfer paged decode. |
+| `flashattention3` | Official upstream FA3 SM8x/SM90 prefill plus FlashInfer paged decode. |
 | `flashattention4` | FA4 prefill plus FlashInfer paged decode. |
 
 Explicit selections are strict. A missing package, unsupported GPU, or unsupported tensor

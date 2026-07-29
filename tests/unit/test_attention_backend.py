@@ -607,6 +607,44 @@ class TestSelector:
         sm120 = HardwareProfile(arch="cuda", sm=120)
         assert isinstance(select_backend(sm120), FlashInferBackend)
 
+    def test_auto_gpu_falls_back_to_torch_when_flashinfer_cannot_construct(
+        self, monkeypatch
+    ):
+        from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
+
+        monkeypatch.delenv("KAIRYU_ATTENTION_BACKEND", raising=False)
+
+        def unavailable(self, device="cuda"):
+            raise ModuleNotFoundError("flashinfer is not installed")
+
+        monkeypatch.setattr(FlashInferBackend, "__init__", unavailable)
+        backend = select_backend(HardwareProfile(arch="cuda", sm=120))
+
+        assert isinstance(backend, TorchAttentionBackend)
+        decision = backend.selection_decision
+        assert decision.requested == "auto"
+        assert decision.resolved == "torch"
+        assert decision.components == {
+            "prefill": "torch",
+            "decode": "torch",
+            "kv_mode": "tensor-gather",
+        }
+        assert "ModuleNotFoundError" in decision.rationale
+
+    def test_explicit_flashinfer_constructor_failure_remains_strict(
+        self, monkeypatch
+    ):
+        from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
+
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashinfer")
+
+        def unavailable(self, device="cuda"):
+            raise ModuleNotFoundError("flashinfer is not installed")
+
+        monkeypatch.setattr(FlashInferBackend, "__init__", unavailable)
+        with pytest.raises(ModuleNotFoundError, match="not installed"):
+            select_backend(HardwareProfile(arch="cuda", sm=120))
+
 
 class TestSelectBackendName:
     """select_backend_name mirrors select_backend's precedence but returns the

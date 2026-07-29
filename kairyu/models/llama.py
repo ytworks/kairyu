@@ -122,7 +122,14 @@ class DecoderLayer(nn.Module):
 class _Backbone(nn.Module):
     """The HF ``model.*`` subtree."""
 
-    def __init__(self, config: ModelConfig, backend=None, linear_factory=None) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        backend=None,
+        linear_factory=None,
+        *,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         super().__init__()
         # Optional backend preflight: experimental kernels must reject model
         # shapes they cannot serve before weights are loaded or a request is
@@ -130,7 +137,7 @@ class _Backbone(nn.Module):
         # construction path.
         validate_model_config = getattr(backend, "validate_model_config", None)
         if callable(validate_model_config):
-            validate_model_config(config)
+            validate_model_config(config, dtype=dtype)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         # ONE backend instance shared across layers (m13: FlashInfer workspace
         # and plan cache are per-instance — sharing is load-bearing)
@@ -147,11 +154,23 @@ class _Backbone(nn.Module):
 class DenseDecoder(nn.Module):
     """Paged incremental decoder; covers the m12 dense family via config."""
 
-    def __init__(self, config: ModelConfig, attention_backend=None, linear_factory=None) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        attention_backend=None,
+        linear_factory=None,
+        *,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         super().__init__()
         self.config = config
         # projections only — embeddings, norms and lm_head stay unquantized
-        self.model = _Backbone(config, backend=attention_backend, linear_factory=linear_factory)
+        self.model = _Backbone(
+            config,
+            backend=attention_backend,
+            linear_factory=linear_factory,
+            dtype=dtype,
+        )
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight

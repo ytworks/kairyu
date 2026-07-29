@@ -1,5 +1,6 @@
 """Distributed TP driver/worker control protocol."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -7,7 +8,12 @@ import pytest
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.step_input import StepDelta
-from kairyu.engine.core.worker import DistTPModelRunner, worker_step_loop
+from kairyu.engine.core.worker import (
+    DistTPModelRunner,
+    make_handshake,
+    validate_handshake,
+    worker_step_loop,
+)
 
 
 class _ReleaseRunner:
@@ -37,6 +43,32 @@ def test_serving_groups_keep_control_off_the_model_backend(monkeypatch):
     ]
     assert groups.control == "group-1-gloo"
     assert groups.model == "group-2-nccl"
+
+
+def test_startup_handshake_requires_the_same_resolved_attention_backend(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "test"}))
+    handshake = make_handshake(
+        str(tmp_path),
+        num_pages=64,
+        page_size=16,
+        attention_backend="flashinfer",
+    )
+
+    validate_handshake(
+        handshake,
+        str(tmp_path),
+        num_pages=64,
+        page_size=16,
+        attention_backend="flashinfer",
+    )
+    with pytest.raises(RuntimeError, match="worker mismatch"):
+        validate_handshake(
+            handshake,
+            str(tmp_path),
+            num_pages=64,
+            page_size=16,
+            attention_backend="torch",
+        )
 
 
 def test_dist_release_reaches_driver_and_idle_worker():

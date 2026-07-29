@@ -28,7 +28,9 @@ import torch
 
 from kairyu.engine.core.kv_pool import PagedKVPool
 
-_FA3_SUPPORTED_SMS = frozenset({80, 90})
+# The pinned upstream dispatches its Ampere/Ada path for every capability from
+# SM80 through SM89 (``enable_sm80_to_sm89``), then its Hopper path on SM90.
+_FA3_SUPPORTED_SMS = frozenset(range(80, 91))
 _FA4_SUPPORTED_SMS = frozenset({90, 100, 110, 120})
 _FA4_DIRECT_PAGED_SMS = frozenset({100, 110})
 
@@ -228,11 +230,21 @@ class FlashAttentionBackend:
         # through 192 with the beta24 tile choices.
         return head_dim <= 192
 
-    def validate_model_config(self, config: object) -> None:
+    def validate_model_config(
+        self,
+        config: object,
+        *,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         """Fail before model construction for shapes this adapter cannot serve."""
         if bool(getattr(config, "is_mla", False)):
             raise ValueError(
                 f"flashattention{self.generation} MHA adapter does not support MLA models"
+            )
+        if dtype is not None and dtype not in {torch.float16, torch.bfloat16}:
+            raise ValueError(
+                f"flashattention{self.generation} requires an fp16 or bf16 "
+                f"compute dtype, got {dtype}"
             )
         num_qo_heads = int(config.num_attention_heads)
         num_kv_heads = int(config.num_key_value_heads)
@@ -303,6 +315,14 @@ class FlashAttentionBackend:
             raise ValueError(
                 "FlashAttention query/K/V dtypes must match "
                 f"({query.dtype}, {kv_pool.k.dtype}, {kv_pool.v.dtype})"
+            )
+        if query.device.type == "cuda" and query.dtype not in {
+            torch.float16,
+            torch.bfloat16,
+        }:
+            raise ValueError(
+                f"flashattention{self.generation} requires fp16 or bf16 CUDA "
+                f"tensors, got {query.dtype}"
             )
         if query.device != kv_pool.k.device or query.device != kv_pool.v.device:
             raise ValueError(

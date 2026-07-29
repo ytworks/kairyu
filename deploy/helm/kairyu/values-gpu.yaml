@@ -12,8 +12,9 @@ resources:
 nodeSelector:
   kairyu.dev/gpu-profile: pcie-gddr
 runtimeClassName: nvidia
-# FlashInfer has no Blackwell/sm_120 kernels yet; pin the supported fallback.
-attentionBackend: torch
+# Keep the backend policy centralized. Retained Qwen3-32B SM120 evidence
+# currently resolves auto to FlashInfer; explicit alternatives stay opt-in.
+attentionBackend: auto
 modelStorage:
   enabled: true
   pvcName: ""

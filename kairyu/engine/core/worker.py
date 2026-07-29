@@ -45,17 +45,36 @@ def _config_fingerprint(model_dir: str) -> str:
     return hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def make_handshake(model_dir: str, num_pages: int, page_size: int) -> dict:
+def make_handshake(
+    model_dir: str,
+    num_pages: int,
+    page_size: int,
+    attention_backend: str | None = None,
+) -> dict:
     """Rank 0 broadcasts this before the step loop; workers validate (A11)."""
-    return {
+    handshake = {
         "num_pages": num_pages,
         "page_size": page_size,
         "config": _config_fingerprint(model_dir),
     }
+    if attention_backend is not None:
+        handshake["attention_backend"] = attention_backend
+    return handshake
 
 
-def validate_handshake(handshake: dict, model_dir: str, num_pages: int, page_size: int) -> None:
-    expected = make_handshake(model_dir, num_pages, page_size)
+def validate_handshake(
+    handshake: dict,
+    model_dir: str,
+    num_pages: int,
+    page_size: int,
+    attention_backend: str | None = None,
+) -> None:
+    expected = make_handshake(
+        model_dir,
+        num_pages,
+        page_size,
+        attention_backend,
+    )
     if handshake != expected:
         raise RuntimeError(
             f"TP worker mismatch: driver={handshake} worker={expected} — "
@@ -294,6 +313,9 @@ def build_tp_runner(
 
     if placement is None:
         placement = TPPlacement("cpu", torch.float32, "gloo")
+    attention_backend = select_backend(
+        probe() if placement.device != "cpu" else None
+    )
     model, local_config, full_config = build_tp_model(
         model_dir,
         tp,
@@ -303,7 +325,7 @@ def build_tp_runner(
         device=placement.device,
         # keyed off the PLACEMENT, not the raw probe: a CPU-placed rank on a GPU
         # box would otherwise get the flashinfer kernel and hand it fp32 tensors
-        attention_backend=select_backend(probe() if placement.device != "cpu" else None),
+        attention_backend=attention_backend,
     )
     pool = PagedKVPool(
         num_layers=local_config.num_hidden_layers,
@@ -333,6 +355,7 @@ def build_tp_runner(
         sampler=Sampler(vocab_provider=lambda: grammar_vocab),
         **graph_options,
     )
+    runner.attention_backend_decision = attention_backend.selection_decision
     return runner, full_config
 
 
@@ -392,7 +415,13 @@ def _tp_worker_entry(
     # the handshake is the collective that absorbs load skew, so it — and only it
     # — runs on the long-timeout startup group
     handshake = startup_comm.broadcast(None, src=0)
-    validate_handshake(handshake, model_dir, num_pages, page_size)
+    validate_handshake(
+        handshake,
+        model_dir,
+        num_pages,
+        page_size,
+        runner.attention_backend_decision.resolved,
+    )
     groups = serving_groups(placement.backend)
     comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
     control_comm = TorchDistCommunicator(group=groups.control)
@@ -505,8 +534,17 @@ class DistTPLauncher:
                 graph_max_pages,
                 graph_warmup_iters,
             )
+            self.attention_backend_decision = runner.attention_backend_decision
             # the one collective that legitimately absorbs load skew
-            startup_comm.broadcast(make_handshake(model_dir, num_pages, page_size), src=0)
+            startup_comm.broadcast(
+                make_handshake(
+                    model_dir,
+                    num_pages,
+                    page_size,
+                    self.attention_backend_decision.resolved,
+                ),
+                src=0,
+            )
             # Every failure-prone step is done: now the step loop gets bounded
             # operational groups.  Python state deltas stay on gloo; the model
             # wrappers use only the tensor/NCCL group.

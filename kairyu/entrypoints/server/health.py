@@ -191,18 +191,30 @@ def add_health_routes(
             override = os.environ.get("KAIRYU_ATTENTION_BACKEND")
             decision = AttentionBackendDecision(
                 requested=override or "auto",
-                resolved="torch",
+                resolved="unavailable",
                 source="env" if override else "hw_profile",
-                components={
-                    "prefill": "torch",
-                    "decode": "torch",
-                    "kv_mode": "tensor-gather",
-                },
+                components={},
                 rationale=(
-                    "safe reporting fallback after attention selection raised "
+                    "attention selection is unavailable after "
                     f"{type(error).__name__}"
                 ),
             )
+
+        # A real local engine retains the backend decision that was actually
+        # constructed, including an ``auto`` dependency fallback. Prefer that
+        # over re-evaluating env/profile state at inspection time. Engines with
+        # no native model (mocks, remote gateways) have no such decision and
+        # keep the configured process-level report above.
+        actual_decisions = [
+            actual
+            for engine in engines.values()
+            if isinstance(
+                actual := getattr(engine, "attention_backend_decision", None),
+                AttentionBackendDecision,
+            )
+        ]
+        if actual_decisions:
+            decision = actual_decisions[0]
         attention = decision.resolved
 
         def _pkg_version(*names: str) -> str | None:
@@ -231,12 +243,22 @@ def add_health_routes(
         engine_list = []
         for name, engine in engines.items():
             label = _ENGINE_LABELS.get(type(engine).__name__, type(engine).__name__)
+            actual = getattr(engine, "attention_backend_decision", None)
+            engine_decision = (
+                actual
+                if isinstance(actual, AttentionBackendDecision)
+                else decision
+            )
             entry: dict = {
                 "model": name,
                 "engine_backend": label,
-                "attention_backend": attention if label in _LOCAL_ATTENTION_BACKENDS else None,
+                "attention_backend": (
+                    engine_decision.resolved
+                    if label in _LOCAL_ATTENTION_BACKENDS
+                    else None
+                ),
                 "attention_components": (
-                    dict(decision.components)
+                    dict(engine_decision.components)
                     if label in _LOCAL_ATTENTION_BACKENDS
                     else None
                 ),

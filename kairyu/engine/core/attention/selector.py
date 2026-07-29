@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from kairyu.engine.core.attention_selector import select_backend_name
+from kairyu.engine.core.attention_selector import (
+    AttentionBackendDecision,
+    select_backend_decision,
+)
+from kairyu.engine.core.attention_selector import select_backend_name as select_backend_name
 from kairyu.engine.core.hw_profile import HardwareProfile
 
 
-def select_backend(profile: HardwareProfile | None = None):
-    """Env override wins; else the profile's kernel tier; CPU -> torch."""
-    name = select_backend_name(profile)
+def _construct_backend(name: str, profile: HardwareProfile | None):
     if name == "flashinfer":
         from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
 
@@ -23,3 +25,43 @@ def select_backend(profile: HardwareProfile | None = None):
     from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
 
     return TorchAttentionBackend()
+
+
+def _record_decision(backend, decision: AttentionBackendDecision):
+    # Attention backends are intentionally plain objects rather than
+    # ``nn.Module`` instances (m13 seam safety), so this process-level
+    # selection metadata cannot enter a model state_dict.
+    backend.selection_decision = decision
+    return backend
+
+
+def select_backend(profile: HardwareProfile | None = None):
+    """Construct the selected backend and retain the decision actually used.
+
+    Explicit selections are strict. ``auto`` alone may fall back to torch when
+    the profile-selected optional backend cannot be constructed; the sanitized
+    failure type remains reportable through ``/backends``.
+    """
+    decision = select_backend_decision(profile)
+    try:
+        backend = _construct_backend(decision.resolved, profile)
+    except Exception as error:
+        if decision.requested != "auto" or decision.resolved == "torch":
+            raise
+        fallback = AttentionBackendDecision(
+            requested=decision.requested,
+            resolved="torch",
+            source=decision.source,
+            components={
+                "prefill": "torch",
+                "decode": "torch",
+                "kv_mode": "tensor-gather",
+            },
+            rationale=(
+                f"{decision.rationale}; automatic torch fallback after "
+                f"{decision.resolved} construction raised "
+                f"{type(error).__name__}"
+            ),
+        )
+        return _record_decision(_construct_backend("torch", profile), fallback)
+    return _record_decision(backend, decision)
