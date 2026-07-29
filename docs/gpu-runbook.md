@@ -151,6 +151,11 @@ GPU-only remainder (design m5 §4.2).
   `bench/results/g2-a7-kv-hit-qwen3-32b-<gpu>-<date>/`; the verifier must
   recompute each strict >80% verdict from raw engine prompt-token usage and
   validate the fixed trace, configs, `/backends`, and physical topology.
+  Closure evidence:
+  `bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`
+  (TP4 direct/gateway 87.6725%/87.3531%; TP8 direct/gateway
+  87.6725%/87.3531%; 512/512 successful requests per cell; all eight binding
+  checks pass independent raw replay).
 - Gates A8–A9: `--dp-replicas 2` + `multiturn_prefix.py --replicas 2`; DP-vs-TP sweep.
 - Gate A10: `bench/pd_mixed.py` (stream-copy KVHandoff on side stream; ≤5 ms p99).
 

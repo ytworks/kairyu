@@ -38,11 +38,11 @@ then measures engine-originated prompt-token cache usage independently at TP4
 and TP8 through both the direct replica and a single-replica gateway. Only
 complete HTTP/usage evidence, exact TP/path topology, replayable provenance, and
 the written strict >80% rates are binding; latency, OS jitter, output equality,
-repeat count, and gateway affinity counters are not. Formal GPU evidence is the
-remaining step. The first formal TP4 direct cell completed 512/512 requests at
-87.6725%. The first gateway attempt exposed its generic 200k-token tenant quota
-rather than a KV failure; the fixed trace is being rerun after explicitly sizing
-that guard for its 562,608 gateway-path tokens.
+repeat count, and gateway affinity counters are not. A7 is closed on Qwen3-32B
+and 8× RTX PRO 6000: TP4 direct/gateway measured 87.6725%/87.3531%, and TP8
+direct/gateway measured the identical 87.6725%/87.3531%, with 512/512 successful
+requests per cell and all eight binding checks passing independent raw replay
+(`bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`).
 The device-side half of m2 §2.2 is now closed for grammar-free CUDA sampling:
 greedy, filtered stochastic sampling, penalties, and logprobs keep the selected
 token on-device, patch the next decode slot D2D, and defer one batched public
@@ -430,6 +430,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [progress] G2 A7 closes on real Qwen3-32B TP4/8 evidence
+- What: Retain the four-cell Qwen3-32B result on 8× RTX PRO 6000: TP4 direct/gateway 87.6725%/87.3531% and TP8 direct/gateway 87.6725%/87.3531%, each with 512/512 successful requests. The independent verifier re-hashes 2,058 raw rows and passes all eight binding trace, usage, topology, and provenance checks.
+- Why: Matching engine-token accounting at TP4 and TP8 proves the issue #157 KV-hit invariant through both the replica and production gateway without importing latency, OS-jitter, output, affinity, or repeat-count criteria.
+- Refs: issue #157; G2 A7; m5 D1/D6; `bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`; measurement commit `b5bcaf10df99ee60e92a291afd4a2764c232a1f2`
 
 ### 2026-07-29 — [progress] G2 A7 gateway admits its declared trace
 - What: Pin the example gateway's default tenant to a 600,000-token one-run burst after the first formal TP4 gateway arm reached the generic 200,000-token capacity at request 406; retain its sustained 200,000-token/minute rate and rerun from a fresh engine.

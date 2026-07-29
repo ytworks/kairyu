@@ -75,6 +75,12 @@ results are ever reported (goal acceptance criteria, carried from G1).
 | A6 (vLLM comparison) | vs vLLM TP=4 and TP=8, ShareGPT @128 conc: goodput ≥ 0.95× vLLM AND TTFT p99 ≤ vLLM. On the 50%-shared-prefix multi-turn trace: TTFT p50 ≥20% better than vLLM (radix-KV structural edge — the G1 claim, preserved where it is defensible) | saturation |
 | A7 (KV invariance) | On the fixed 50%-shared-prefix trace, the real native engine's prompt-token KV hit rate (`sum(cached_tokens) / sum(prompt_tokens)`, recomputed from engine-originated response usage) is strictly >80% independently at TP=4 and TP=8, both against the replica directly and through a single-replica gateway. `bench/tp_kv_hit_g2_a7_bench.py` verifies the committed raw trace, config, and physical topology; routing counters are diagnostic and never cache-hit truth | — |
 
+**A7 closure (2026-07-29):** the retained Qwen3-32B artifact records
+TP4 direct/gateway at 87.6725%/87.3531% and TP8 direct/gateway at
+87.6725%/87.3531%, with 512/512 successful requests in every cell. Independent
+raw replay passes all eight binding checks:
+`bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`.
+
 ### Stage 5.2 — DP replicas + routing (blocked on 5.1)
 
 | Gate | Target | Regime |

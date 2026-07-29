@@ -214,6 +214,12 @@ Same split as M2 §3. CPU now, GPU session later:
 | A8, A9 | `bench/serving_bench.py --dp-replicas 2` + `multiturn_prefix.py --replicas 2` | goodput, router p99, affinity hit retention; DP-vs-TP sweep |
 | A10 | `bench/pd_mixed.py` (new) | long-prefill + decode-SLO mix; handoff p99 |
 
+A7 closed on Qwen3-32B and 8× RTX PRO 6000 on 2026-07-29. TP4 and TP8
+produced the same engine-token accounting at each path: direct 87.6725% and
+gateway 87.3531%, with 512/512 successful requests per cell. The committed
+raw/manifest pair independently replays all eight binding checks from
+`bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`.
+
 ## 7. Review record
 
 Agent design-review panel, 2026-07-02 — three parallel reviewers (engine correctness

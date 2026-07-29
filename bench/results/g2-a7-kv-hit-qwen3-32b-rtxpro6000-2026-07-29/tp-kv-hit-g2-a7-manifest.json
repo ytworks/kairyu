@@ -1,0 +1,138 @@
+{
+  "checks": {
+    "all_requests_successful": true,
+    "backends_topology_exact": true,
+    "every_pooled_engine_cache_rate_strictly_above_0_80": true,
+    "every_scenario_has_512_requests": true,
+    "exact_engine_usage_complete": true,
+    "provenance_start_end_and_cross_scenario_exact": true,
+    "required_tp_path_matrix_exact": true,
+    "trace_identity_and_fixed_geometry_exact": true
+  },
+  "diagnostics": {
+    "affinity_is_binding": false,
+    "gateway_session_affinity_by_scenario": {
+      "tp4-direct": {
+        "after": null,
+        "before": null,
+        "delta": null
+      },
+      "tp4-gateway": {
+        "after": {
+          "error_type": null,
+          "http_status": 200,
+          "relevant_lines": [
+            "kairyu_pool_decisions_total{pool=\"qwen3-32b\",reason=\"session_affinity\"} 512.0"
+          ],
+          "value": 512.0
+        },
+        "before": {
+          "error_type": null,
+          "http_status": 200,
+          "relevant_lines": [
+            "kairyu_pool_decisions_total{pool=\"qwen3-32b\",reason=\"session_affinity\"} 0.0"
+          ],
+          "value": 0.0
+        },
+        "delta": 512.0
+      },
+      "tp8-direct": {
+        "after": null,
+        "before": null,
+        "delta": null
+      },
+      "tp8-gateway": {
+        "after": {
+          "error_type": null,
+          "http_status": 200,
+          "relevant_lines": [
+            "kairyu_pool_decisions_total{pool=\"qwen3-32b\",reason=\"session_affinity\"} 512.0"
+          ],
+          "value": 512.0
+        },
+        "before": {
+          "error_type": null,
+          "http_status": 200,
+          "relevant_lines": [
+            "kairyu_pool_decisions_total{pool=\"qwen3-32b\",reason=\"session_affinity\"} 0.0"
+          ],
+          "value": 0.0
+        },
+        "delta": 512.0
+      }
+    },
+    "latency_is_binding": false,
+    "output_equality_is_binding": false,
+    "repeat_count_is_binding": false,
+    "routing_proxy_is_binding": false
+  },
+  "gate": "G2-A7",
+  "passed": true,
+  "raw": {
+    "name": "tp-kv-hit-g2-a7-raw.jsonl",
+    "row_count": 2058,
+    "sha256": "a8049a5211bc703e336cac5fb6b6b283078ac9e55688225021d18dc82e84de0c"
+  },
+  "scenarios": {
+    "tp4-direct": {
+      "cached_tokens": 491008,
+      "definition": "sum(engine cached_tokens) / sum(engine prompt_tokens)",
+      "path": "direct",
+      "pooled_engine_cache_rate": 0.8767248521555295,
+      "prompt_tokens": 560048,
+      "request_count": 512,
+      "success_count": 512,
+      "tensor_parallel_size": 4
+    },
+    "tp4-gateway": {
+      "cached_tokens": 491008,
+      "definition": "sum(engine cached_tokens) / sum(engine prompt_tokens)",
+      "path": "gateway",
+      "pooled_engine_cache_rate": 0.873530500128092,
+      "prompt_tokens": 562096,
+      "request_count": 512,
+      "success_count": 512,
+      "tensor_parallel_size": 4
+    },
+    "tp8-direct": {
+      "cached_tokens": 491008,
+      "definition": "sum(engine cached_tokens) / sum(engine prompt_tokens)",
+      "path": "direct",
+      "pooled_engine_cache_rate": 0.8767248521555295,
+      "prompt_tokens": 560048,
+      "request_count": 512,
+      "success_count": 512,
+      "tensor_parallel_size": 8
+    },
+    "tp8-gateway": {
+      "cached_tokens": 491008,
+      "definition": "sum(engine cached_tokens) / sum(engine prompt_tokens)",
+      "path": "gateway",
+      "pooled_engine_cache_rate": 0.873530500128092,
+      "prompt_tokens": 562096,
+      "request_count": 512,
+      "success_count": 512,
+      "tensor_parallel_size": 8
+    }
+  },
+  "schema_version": "kairyu.g2.a7.tp-kv-hit.v1",
+  "workload": {
+    "cache_rate_threshold": {
+      "operator": ">",
+      "value": 0.8
+    },
+    "ignore_eos": true,
+    "max_tokens": 1,
+    "min_tokens": 1,
+    "model": "qwen3-32b",
+    "request_count": 512,
+    "seed": 42,
+    "sessions": 64,
+    "shared_prefix_tokens": 512,
+    "temperature": 0.0,
+    "theoretical_cached_tokens": 491008,
+    "theoretical_prompt_tokens": 557056,
+    "turn_tokens": 128,
+    "turns_per_session": 8
+  }
+}
