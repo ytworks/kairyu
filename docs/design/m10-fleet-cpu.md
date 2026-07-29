@@ -2,7 +2,8 @@
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
 2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
-2026-07-28; D7/A31 amended 2026-07-28; D6/A32 amended 2026-07-29).
+2026-07-28; D7/A31 amended 2026-07-28; D6/A32 amended 2026-07-29;
+D8/A33 amended 2026-07-29).
 Reviewed (1-reviewer panel with repo-line evidence; §6 binding; covers
 M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
@@ -206,8 +207,24 @@ no hashers and perform no SHA work. Reproduce the long-prefix comparison with
 
 ### D8 — Learning placement
 
-Placement decisions + TTFT into `learning/dataset.py`; offline bandit grid
-over (α, β) (pure function over the dataset; no online learning).
+Production `JsonlRouterLog` placement rows (`kind=replica`) are joined
+one-to-one by request ID with benchmark `placement_outcome` rows carrying TTFT,
+then consumed by `learning/dataset.py`. The former chosen-action-agreement
+grid is withdrawn: scoring each candidate only where it agrees with the
+logging policy selects a different observed subset for each candidate and
+does not reveal the counterfactual TTFT of its unchosen actions.
+
+For the prefix score `α * prefix - β * load`, multiplying both weights by the
+same positive constant preserves every score ordering, zero threshold, and
+tie. Only `λ = β / α` is identifiable, so offline policy candidates normalize
+`α=1`; the declared production baseline is `λ=0.25`. Tuning uses complete
+stateful episode replay from the same frozen initial cache/background-load
+state for every candidate, with training and held-out request families
+disjoint. Every declared candidate is evaluated on training episodes, the
+minimum-mean-TTFT candidate is frozen, and held-out episodes compare only that
+frozen candidate with the baseline on the same trace from the same frozen
+initial state. This remains deterministic offline policy selection, not
+online learning or the M4 request-family bandit.
 
 ## 4. Non-goals
 
@@ -990,3 +1007,53 @@ over (α, β) (pure function over the dataset; no online learning).
   requires a tokenizer-compatible block-hash provider plus subscriber and
   publisher lifecycle ownership; adding it here would mix a separate
   deployment responsibility into the D6 routing performance experiment.
+
+- **A33 (closed, 2026-07-29)**: F2d replaces chosen-action agreement with
+  complete policy replay. The production decision source is
+  `JsonlRouterLog`: each `kind=replica` row must join exactly once by
+  `request_id` to a `placement_outcome` row containing the request TTFT, and
+  `learning/dataset.py` must reject missing, duplicate, or ambiguous joins.
+  Those joined rows retain the observed production evidence, but are not
+  treated as counterfactual rewards for actions the logging policy did not
+  take.
+
+  The candidate family is the declared grid over `λ = β / α` with `α=1`;
+  positive common rescaling cannot change a placement, so searching redundant
+  `(α, β)` pairs would claim distinctions the policy cannot identify. The
+  fixed hand-tuned baseline is `λ=0.25`. Request families are partitioned
+  before execution into disjoint training and held-out sets; every request
+  and every state transition from one family remains in exactly one split.
+  Every declared candidate runs every complete training episode from the same
+  frozen initial cache/background-load state. The candidate with the
+  lowest mean training TTFT is frozen before any held-out result is inspected.
+
+  Held-out execution runs only the frozen candidate and `λ=0.25`. Each pair
+  receives the same complete trace and frozen initial state, with no cache,
+  load, or queue state carried from another candidate or prior episode.
+  Replay advances deterministic virtual time, so arm execution order is
+  neither a gate nor a retained diagnostic. The binding performance result is
+  only strict improvement in held-out mean TTFT by the frozen candidate.
+  There is no additional 10% improvement threshold and no p95 acceptance
+  gate; p95 and action-selection differences are retained as diagnostics.
+
+  The proof also binds complete planned-request accounting, zero failed or
+  non-terminal requests, balanced family/work allocation, exact one-to-one
+  decision/outcome joins, split isolation, and trace, configuration, source,
+  and result integrity. Raw JSONL and a hash-bound manifest are retained. An
+  independent offline verifier reconstructs both splits, replays every state
+  transition and policy decision, recomputes all joins and means from raw
+  rows, and reaches the manifest verdict without trusting derived fields.
+
+  The exact-source formal artifact at
+  `86dde278d0f2a093bde64f5d1d9cba9aca9e1221` passed this contract. Seven
+  normalized policies replayed 768 requests each over 48 training families;
+  the tuner froze `λ=1.0`. On 16 disjoint held-out families, mean TTFT for the
+  same 256 requests was 4.43359375 virtual ticks under the frozen policy versus
+  8.5 under `λ=0.25`. All 5,888 production placement rows joined exactly once
+  to successful outcomes and independently replayed. The retained artifact is
+  `bench/results/f2d-prefix-weight-replay-2026-07-29/`, with manifest SHA-256
+  `3205721922fd8c013ae6336aaa4ffcb0a1938a40059e70acb500b5acba86ac3c`,
+  raw SHA-256
+  `1ccc5ab012e5ee6677f96709ec60cc15ea5db32cefb72360941238ca505c75eb`,
+  and production-router SHA-256
+  `3296fdd000aede574ea5c3a152ff1ef0f54e204545bfb1f9aa61f7b47c83546f`.

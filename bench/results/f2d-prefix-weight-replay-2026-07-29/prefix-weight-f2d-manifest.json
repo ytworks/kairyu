@@ -1,0 +1,303 @@
+{
+  "config": {
+    "alpha": 1.0,
+    "baseline_lambda": 0.25,
+    "chunk_chars": 256,
+    "families": 64,
+    "heldout_families": 16,
+    "lambdas": [
+      0.0,
+      0.0625,
+      0.125,
+      0.25,
+      0.5,
+      1.0,
+      2.0
+    ],
+    "prefix_chunks": 4,
+    "profile": "formal",
+    "queue_depth_threshold": 8,
+    "replicas": 200,
+    "requests_per_family": 16,
+    "seed": 254418982,
+    "train_families": 48,
+    "virtual_tick_seconds": 1.0
+  },
+  "environment": {
+    "cpu_count": 128,
+    "note": "host timing is diagnostic only; all F2d metrics use integer virtual ticks",
+    "platform": "Linux-6.8.0-134-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]"
+  },
+  "gate": "G5-F2d",
+  "gate_checks": {
+    "all_replayed_requests_succeeded": true,
+    "all_train_outcomes_precede_tuning_and_all_heldout_follow": true,
+    "dataset_tuner_recomputes_frozen_selection_from_train": true,
+    "every_policy_state_and_virtual_ttft_replays": true,
+    "families_are_disjoint_between_train_and_heldout": true,
+    "heldout_contains_only_tuned_and_baseline_on_identical_trace": true,
+    "heldout_mean_ttft_strictly_improves": true,
+    "no_extra_or_missing_measured_requests": true,
+    "production_log_contains_prefix_match": true,
+    "production_routes_join_outcomes_one_to_one": true,
+    "train_policy_panel_is_exactly_balanced": true
+  },
+  "inputs": {
+    "all_pinned_digests_match": true,
+    "f2a_trace_contract": {
+      "families": 64,
+      "requests_per_family": 16,
+      "seed": 254418982,
+      "source_profile": "formal"
+    },
+    "f2b_final_eligible_count": 200,
+    "f2b_final_eligible_digest": "e858c2ec36e82761553ab1138a5be761965420816652c4f36e38a9f92581eb5c",
+    "files": {
+      "f2a_manifest": {
+        "path": "bench/results/f2a-prefix-routing-500-2026-07-28/prefix-routing-f2a-manifest.json",
+        "pinned_sha256": "fb2858ed213be3f6b98463d30623e937d74403a7a7dd97356311439a7f7585f4",
+        "sha256": "fb2858ed213be3f6b98463d30623e937d74403a7a7dd97356311439a7f7585f4"
+      },
+      "f2a_raw": {
+        "path": "bench/results/f2a-prefix-routing-500-2026-07-28/prefix-routing-f2a-raw.jsonl",
+        "pinned_sha256": "82bb2a2ff420dbd4e244685ce2a83f38379028604be3c1077e85daf5b31cd0f3",
+        "sha256": "82bb2a2ff420dbd4e244685ce2a83f38379028604be3c1077e85daf5b31cd0f3"
+      },
+      "f2b_manifest": {
+        "path": "bench/results/f2b-kv-event-retained/kv-event-f2b-manifest.json",
+        "pinned_sha256": "e83f44dc1bac2338691b20aba4470aed6317dc51e6af45029b005cdbdeae7c43",
+        "sha256": "e83f44dc1bac2338691b20aba4470aed6317dc51e6af45029b005cdbdeae7c43"
+      },
+      "f2b_raw": {
+        "path": "bench/results/f2b-kv-event-retained/kv-event-f2b-raw.jsonl",
+        "pinned_sha256": "6a43544f672af438b7eb2d6cb74e35dd907cf357a0191bf42a54e8093ac0a6bb",
+        "sha256": "6a43544f672af438b7eb2d6cb74e35dd907cf357a0191bf42a54e8093ac0a6bb"
+      }
+    }
+  },
+  "metrics": {
+    "baseline": {
+      "alpha": 1.0,
+      "beta": 0.25
+    },
+    "heldout": {
+      "action_disagreement_count": 176,
+      "action_disagreement_rate": 0.6875,
+      "baseline": {
+        "cached_prompt_chunks": 1024,
+        "mean_ttft_ticks": 8.5,
+        "p95_ttft_ticks": 16.0,
+        "prefix_match_count": 256,
+        "queue_depth_fallback_count": 0,
+        "requests": 256,
+        "session_affinity_count": 0,
+        "successes": 256,
+        "total_ttft_ticks": 2176
+      },
+      "mean_ttft_improvement_ticks": 4.06640625,
+      "mean_ttft_ratio": 0.5215992647058824,
+      "tuned": {
+        "cached_prompt_chunks": 320,
+        "mean_ttft_ticks": 4.43359375,
+        "p95_ttft_ticks": 5.0,
+        "prefix_match_count": 80,
+        "queue_depth_fallback_count": 0,
+        "requests": 256,
+        "session_affinity_count": 176,
+        "successes": 256,
+        "total_ttft_ticks": 1135
+      }
+    },
+    "selected": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "train": {
+      "0": {
+        "cached_prompt_chunks": 3072,
+        "mean_ttft_ticks": 8.5,
+        "p95_ttft_ticks": 16.0,
+        "prefix_match_count": 768,
+        "queue_depth_fallback_count": 0,
+        "requests": 768,
+        "session_affinity_count": 0,
+        "successes": 768,
+        "total_ttft_ticks": 6528
+      },
+      "0.0625": {
+        "cached_prompt_chunks": 3072,
+        "mean_ttft_ticks": 8.5,
+        "p95_ttft_ticks": 16.0,
+        "prefix_match_count": 768,
+        "queue_depth_fallback_count": 0,
+        "requests": 768,
+        "session_affinity_count": 0,
+        "successes": 768,
+        "total_ttft_ticks": 6528
+      },
+      "0.125": {
+        "cached_prompt_chunks": 3072,
+        "mean_ttft_ticks": 8.5,
+        "p95_ttft_ticks": 16.0,
+        "prefix_match_count": 768,
+        "queue_depth_fallback_count": 0,
+        "requests": 768,
+        "session_affinity_count": 0,
+        "successes": 768,
+        "total_ttft_ticks": 6528
+      },
+      "0.25": {
+        "cached_prompt_chunks": 3072,
+        "mean_ttft_ticks": 8.5,
+        "p95_ttft_ticks": 16.0,
+        "prefix_match_count": 768,
+        "queue_depth_fallback_count": 0,
+        "requests": 768,
+        "session_affinity_count": 0,
+        "successes": 768,
+        "total_ttft_ticks": 6528
+      },
+      "0.5": {
+        "cached_prompt_chunks": 1728,
+        "mean_ttft_ticks": 5.013020833333333,
+        "p95_ttft_ticks": 9.0,
+        "prefix_match_count": 432,
+        "queue_depth_fallback_count": 2,
+        "requests": 768,
+        "session_affinity_count": 334,
+        "successes": 768,
+        "total_ttft_ticks": 3850
+      },
+      "1": {
+        "cached_prompt_chunks": 968,
+        "mean_ttft_ticks": 4.423177083333333,
+        "p95_ttft_ticks": 5.0,
+        "prefix_match_count": 240,
+        "queue_depth_fallback_count": 0,
+        "requests": 768,
+        "session_affinity_count": 528,
+        "successes": 768,
+        "total_ttft_ticks": 3397
+      },
+      "2": {
+        "cached_prompt_chunks": 584,
+        "mean_ttft_ticks": 4.513020833333333,
+        "p95_ttft_ticks": 5.0,
+        "prefix_match_count": 144,
+        "queue_depth_fallback_count": 0,
+        "requests": 768,
+        "session_affinity_count": 624,
+        "successes": 768,
+        "total_ttft_ticks": 3466
+      }
+    }
+  },
+  "pass_contract": "manifest.passed is the online gate+source verdict; offline acceptance additionally requires every artifact-integrity check",
+  "passed": true,
+  "raw": {
+    "path": "prefix-weight-f2d-raw.jsonl",
+    "rows": 5954,
+    "sha256": "1ccc5ab012e5ee6677f96709ec60cc15ea5db32cefb72360941238ca505c75eb"
+  },
+  "router": {
+    "path": "prefix-weight-f2d-router.jsonl",
+    "rows": 5888,
+    "sha256": "3296fdd000aede574ea5c3a152ff1ef0f54e204545bfb1f9aa61f7b47c83546f"
+  },
+  "schema_version": "kairyu.f2d.prefix-weight-replay.v1",
+  "source": {
+    "commit": "86dde278d0f2a093bde64f5d1d9cba9aca9e1221",
+    "expected_commit": "86dde278d0f2a093bde64f5d1d9cba9aca9e1221",
+    "expected_commit_matches": true,
+    "files": [
+      {
+        "path": "bench/prefix_weight_f2d_bench.py",
+        "sha256": "8416e6a29f2929a492a1757229aee04d6f9b0eded3ade8cca637dd138ab9d42a"
+      },
+      {
+        "path": "bench/prefix_routing_f2a_bench.py",
+        "sha256": "aa8858f4702215e4cbcfad8dd81f8a0b8a2377d2a238e691c9ad71aa88cf542e"
+      },
+      {
+        "path": "bench/kv_event_f2b_bench.py",
+        "sha256": "fe66ec3557848fa4d5ed2bca7a5955421bc96ff20e1a290c43d4a67fad29850c"
+      },
+      {
+        "path": "kairyu/orchestration/learning/dataset.py",
+        "sha256": "3896c2cb298c091d48af457169e5992a06ece11a7aef7adf86b61e394b1d6a4c"
+      },
+      {
+        "path": "kairyu/orchestration/replica.py",
+        "sha256": "c6be806eb1b6ae8dd143b755531f2cd5feb2f3b4bcfc1ac8bf5dd9884f5a53c1"
+      },
+      {
+        "path": "kairyu/orchestration/prefix_index.py",
+        "sha256": "1483cf39b951b77bb64600740d3e64d192bbc6d21c3972d2309b4c6681294727"
+      },
+      {
+        "path": "kairyu/orchestration/router.py",
+        "sha256": "59c6ad3f21e40fb1ad651ec4dcdb275a539fb8afbcde4efd8bd7cd31de30fcf2"
+      },
+      {
+        "path": "kairyu/engine/backend.py",
+        "sha256": "04918705a3d0d3dbd030804a4089f7c88920ee0f213424af374c907f8f6a45e7"
+      },
+      {
+        "path": "kairyu/sampling_params.py",
+        "sha256": "9cff168b0496b5e4fe57546421255109fd314092646bb2d6b0869bddc486afd5"
+      }
+    ],
+    "git_clean_at_start": true
+  },
+  "source_end": {
+    "commit": "86dde278d0f2a093bde64f5d1d9cba9aca9e1221",
+    "expected_commit": "86dde278d0f2a093bde64f5d1d9cba9aca9e1221",
+    "expected_commit_matches": true,
+    "files": [
+      {
+        "path": "bench/prefix_weight_f2d_bench.py",
+        "sha256": "8416e6a29f2929a492a1757229aee04d6f9b0eded3ade8cca637dd138ab9d42a"
+      },
+      {
+        "path": "bench/prefix_routing_f2a_bench.py",
+        "sha256": "aa8858f4702215e4cbcfad8dd81f8a0b8a2377d2a238e691c9ad71aa88cf542e"
+      },
+      {
+        "path": "bench/kv_event_f2b_bench.py",
+        "sha256": "fe66ec3557848fa4d5ed2bca7a5955421bc96ff20e1a290c43d4a67fad29850c"
+      },
+      {
+        "path": "kairyu/orchestration/learning/dataset.py",
+        "sha256": "3896c2cb298c091d48af457169e5992a06ece11a7aef7adf86b61e394b1d6a4c"
+      },
+      {
+        "path": "kairyu/orchestration/replica.py",
+        "sha256": "c6be806eb1b6ae8dd143b755531f2cd5feb2f3b4bcfc1ac8bf5dd9884f5a53c1"
+      },
+      {
+        "path": "kairyu/orchestration/prefix_index.py",
+        "sha256": "1483cf39b951b77bb64600740d3e64d192bbc6d21c3972d2309b4c6681294727"
+      },
+      {
+        "path": "kairyu/orchestration/router.py",
+        "sha256": "59c6ad3f21e40fb1ad651ec4dcdb275a539fb8afbcde4efd8bd7cd31de30fcf2"
+      },
+      {
+        "path": "kairyu/engine/backend.py",
+        "sha256": "04918705a3d0d3dbd030804a4089f7c88920ee0f213424af374c907f8f6a45e7"
+      },
+      {
+        "path": "kairyu/sampling_params.py",
+        "sha256": "9cff168b0496b5e4fe57546421255109fd314092646bb2d6b0869bddc486afd5"
+      }
+    ]
+  },
+  "trace": {
+    "families": 64,
+    "heldout_families": 16,
+    "requests": 1024,
+    "sha256": "2fbf01f161587507aeef074f760968873863ad9983fdcda1cdeb1222b3c5babb",
+    "train_families": 48
+  }
+}

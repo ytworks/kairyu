@@ -14,7 +14,6 @@ from kairyu.engine.backend import (
 )
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.orchestration.kv_index import KvEventIndex, ZmqKvEventSubscriber
-from kairyu.orchestration.learning.dataset import PlacementRecord, tune_prefix_weights
 from kairyu.orchestration.prefix_index import (
     PREFIX_HASH_VERSION,
     PrefixIndex,
@@ -1383,17 +1382,3 @@ class TestZmqTransport:
         clock["t"] = 1.0
         assert index.overlap("r1", ["h1"]) is None
         subscriber.close()
-
-
-class TestOfflineTuning:
-    def test_grid_prefers_weights_matching_good_outcomes(self):
-        records = [
-            PlacementRecord("a", "prefix_match", overlap_chunks=4, outstanding=1, ttft_s=0.05),
-            PlacementRecord("a", "prefix_match", overlap_chunks=3, outstanding=2, ttft_s=0.06),
-            PlacementRecord("b", "least_outstanding", overlap_chunks=0, outstanding=0, ttft_s=0.30),
-            PlacementRecord("b", "least_outstanding", overlap_chunks=0, outstanding=1, ttft_s=0.28),
-        ]
-        alpha, beta = tune_prefix_weights(records)
-        assert alpha > 0
-        with pytest.raises(ValueError):
-            tune_prefix_weights([])

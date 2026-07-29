@@ -76,7 +76,7 @@ repeat the binding drill.
 | F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform session-only (blank-root) rounds, the exact distribution-free one-sided ≥95% median lower bound and the full-sample geometric mean of the <10 ms SLO-goodput ratio are each ≥0.99, equivalently with ≥15/21 individual ratios ≥0.99 for the median bound; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
 | F2b | RadixKV KV-event index: every exact route uses truth <250 ms old and therefore strictly <500 ms under formal churn; killing one binding physical feed makes the full 200-entry route use the approximate oracle; restoring it converges by complete replay without process restart in <500 ms | replayable CPU chaos fixture (m10 A31) |
 | F2c | Real-engine validation: candidate/control nearest-rank TTFT p95 ratio ≤0.70 pooled, at the seventh ordered ratio of eight crossover rounds, and by geometric mean on a multi-turn+RAG trace; SLO-goodput ratio ≥0.99 pooled, at the second ordered ratio, and by geometric mean; pooled engine-token cache rate strictly improves without a per-round regression | **Closed** by retained 8-GPU artifact (m10 A32; 2026-07-29) |
-| F2d | Placement decisions land in the JSONL decision log (`prefix_match` reason) and feed `learning/dataset.py`; bandit-tuned α/β beats hand-tuned on a replayed trace | CPU bench |
+| F2d | Production `kind=replica` decisions join exactly once to `placement_outcome` TTFT rows and feed `learning/dataset.py`; after disjoint-family training selects and freezes one normalized `λ=β/α` policy (`α=1`) by minimum mean TTFT, complete held-out deterministic virtual-time replay from the same frozen initial state must show strictly lower mean TTFT than the declared `λ=0.25` baseline, with complete, zero-failure, balanced, independently replayable evidence. p95 and action differences are diagnostic only | **Closed** by retained CPU replay artifact (m10 A33; 2026-07-29) |
 
 F2a reuses F1a run `30374404150` only for its kind deployment, ingress clock,
 discovery, placement-log, provenance, and hosted-runner precedents. It does not
@@ -209,6 +209,24 @@ raw SHA-256
 `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`,
 and trace SHA-256
 `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.
+
+F2d is closed under m10 A33 by the exact-source deterministic full-policy
+replay at `86dde278d0f2a093bde64f5d1d9cba9aca9e1221`. Seven normalized
+policies replayed all 768 requests in each arm over 48 training families from
+fresh identical state; `learning/dataset.py` selected `λ=1.0` before held-out
+execution. On 16 family-disjoint held-out episodes, both the frozen winner and
+declared `λ=0.25` baseline replayed the same 256 requests from fresh identical
+state. Mean TTFT was 4.43359375 versus 8.5 virtual ticks, all 5,888 production
+placement rows joined one-to-one to successful outcomes, and the offline
+verifier independently reconstructed every decision, queue state, TTFT, split,
+selection, metric, hash, and verdict. p95 and 176/256 action differences remain
+diagnostic only. The retained evidence is
+`bench/results/f2d-prefix-weight-replay-2026-07-29/`, with manifest SHA-256
+`3205721922fd8c013ae6336aaa4ffcb0a1938a40059e70acb500b5acba86ac3c`,
+raw SHA-256
+`1ccc5ab012e5ee6677f96709ec60cc15ea5db32cefb72360941238ca505c75eb`,
+and production-router SHA-256
+`3296fdd000aede574ea5c3a152ff1ef0f54e204545bfb1f9aa61f7b47c83546f`.
 
 ### Stage F3 — NIC KV transfer + P/D pools (needs RDMA hardware)
 

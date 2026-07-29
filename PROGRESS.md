@@ -387,6 +387,16 @@ second-order, and 0.9999978783 geometric mean. Output agreement was diagnostic
 at 239/256. Evidence is retained under
 `bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/`.
 
+G5 F2d is closed by the exact-source deterministic full-policy replay under
+A33. The balanced 48-family training panel selected normalized `λ=1.0` over
+the declared `λ=0.25` baseline before any held-out outcome existed. On 16
+disjoint held-out families (256 requests per policy), mean TTFT fell from
+8.5 to 4.43359375 virtual ticks. All 5,888 production placement rows joined
+one-to-one to successful outcomes and independently replayed from the frozen
+trace and initial state. p95 and 176/256 action differences remain diagnostic;
+neither enters acceptance. Evidence is retained under
+`bench/results/f2d-prefix-weight-replay-2026-07-29/`.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -394,6 +404,15 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [progress] F2d closes unbiased prefix-weight replay
+- What: The exact-source A33 formal artifact and independent offline verifier passed every source, retained-input, split-isolation, complete-policy replay, production-route join, balanced-panel, train-only selection, frozen-held-out, success, and integrity check. Seven normalized policies replayed every request in 48 training families; the tuner selected `λ=1.0` before held-out execution. Against the declared `λ=0.25` baseline on 16 disjoint held-out families (256 requests per arm), mean TTFT was 4.43359375 versus 8.5 deterministic virtual ticks. All 5,888 production placement rows joined one-to-one to successful outcomes. p95 and 176/256 action differences remain diagnostic only.
+- Refs: G5 F2d; m10 D8/A33; issue #182; source `86dde278d0f2a093bde64f5d1d9cba9aca9e1221`; artifact `bench/results/f2d-prefix-weight-replay-2026-07-29/`; manifest SHA-256 `3205721922fd8c013ae6336aaa4ffcb0a1938a40059e70acb500b5acba86ac3c`; raw SHA-256 `1ccc5ab012e5ee6677f96709ec60cc15ea5db32cefb72360941238ca505c75eb`; router SHA-256 `3296fdd000aede574ea5c3a152ff1ef0f54e204545bfb1f9aa61f7b47c83546f`
+
+### 2026-07-29 — [amendment] F2d replaces chosen-action agreement with full-policy replay
+- What: Added m10 D8/A33 and froze the pre-results F2d method. Production `JsonlRouterLog` `kind=replica` decisions join exactly once to `placement_outcome` TTFT rows through `learning/dataset.py`. The policy grid now fixes `α=1`, tunes only the identifiable `λ=β/α`, and declares `λ=0.25` as the baseline. Every candidate replays complete episodes from the same frozen initial cache/background-load state over disjoint training families; the minimum-mean-TTFT candidate is frozen, then only it and the baseline receive identical held-out traces from that state under deterministic virtual time. Closure binds strict held-out mean-TTFT improvement plus complete, zero-failure, balanced-work, one-to-one joined, split-isolated, hash-bound evidence and independent raw replay. Arm execution order is neither binding nor diagnostic. The former extra 10% threshold and p95 gate do not apply; p95 and action differences are diagnostic. F2d remains in progress with no result claimed.
+- Why: Candidate-specific chosen-action agreement changes the evaluated request subset and observes only the logging policy's outcomes, so it is selection-biased and cannot estimate unchosen placement rewards; a coverage penalty cannot restore the missing counterfactual state. Queue, load, and cache decisions also alter later requests, making the complete stateful episode—not an isolated placement row—the valid replay unit. Positive common scaling preserves the score ordering, threshold, and ties, so separate `(α, β)` magnitudes are unidentifiable. Family-level train/held-out isolation and a frozen winner prevent evaluation leakage, while deterministic virtual-time replay from the same frozen initial state and evidence-integrity gates preserve an objective CPU acceptance criterion without imposing an unsupported effect size or tail-latency requirement.
+- Refs: G5 F2d; m10 D8/A33; issue #182; `kairyu/orchestration/learning/dataset.py`; `kairyu/orchestration/replica.py`; `kairyu/orchestration/router.py`
 
 ### 2026-07-29 — [progress] F2c closes real-engine KV-aware TTFT routing
 - What: The exact-source Qwen3-32B TP2×4 formal run and independent offline verification passed every F2c check over 512 binding requests with zero failures. Control-to-candidate pooled TTFT p95 fell from 527.957623 ms to 134.357747 ms; candidate/control ratios were 0.2544858548 pooled, 0.2550841404 at the seventh ordered round, and 0.2530080045 by geometric mean. Engine-token cache rate rose from 0.4994645560 to 0.9843917326 with every round noninferior. SLO-goodput ratios were 0.9999979014 pooled, 0.9998437390 at the second ordered round, and 0.9999978783 by geometric mean. Output agreement remained diagnostic at 239/256 (0.93359375); maximum paired receipt skew and schedule lateness were diagnostic at 5.182959 ms and 7.470463 ms.
