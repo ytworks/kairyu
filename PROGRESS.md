@@ -77,8 +77,10 @@ replace one exact suffix, and client-generated internal request/stream
 generations isolate cancelled public-ID reuse. The default sampling seed remains
 derived from the public ID, preserving deterministic output. Legacy clients and
 services remain mutually compatible. Long process parity and deterministic
-msgpack byte-volume gates are implemented; the clean-source retained artifact
-is the remaining #212 closure step.
+msgpack byte-volume gates pass. The retained clean-source artifact
+`bench/results/proc-wire-delta-2026-07-29.json` binds to implementation commit
+`5c634ee` and records 31,012,271 legacy bytes versus 356,199 v2 bytes at
+1,024 tokens, with empirical exponents 1.97–1.99 versus 1.01–1.02.
 Streaming detokenization is now truly incremental on the supported native
 paths. `HFTokenizer` delegates arriving deltas to the Rust `DecodeStream`, Toy
 joins only new IDs, and unknown/overridden tokenizer implementations retain the
@@ -439,6 +441,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [evidence] m8 D6 process wire is linear in output length
+- What: Retained `bench/results/proc-wire-delta-2026-07-29.json` from clean implementation commit `5c634ee`. Across 128/256/512/1,024 output tokens, legacy cumulative frames total 504,382/1,972,335/7,798,943/31,012,271 bytes while wire v2 totals 43,419/87,559/177,099/356,199 bytes. Legacy doubling ratios are 3.910/3.954/3.976 (empirical exponent 1.97–1.99); v2 ratios are 2.017/2.023/2.011 (exponent 1.01–1.02). Every token, text character, id logprob, and rich logprob item appears exactly once in v2. Artifact SHA-256: `02054d9def30281f493c50ac6a774069b51f9eaca6178374609e3aa31021fb0f`.
+- Why: Exact msgpack frame bytes prove the requested O(output length) boundary independently of wall-clock scheduling and OS jitter, while the legacy production encoder remains the quadratic control. The source/dirty checks and exact payload oracle prevent a smaller-but-incomplete delta from passing.
+- Refs: issue #212; m8 D6; `bench/proc_wire_bench.py`; `bench/results/proc-wire-delta-2026-07-29.json`; `tests/bench/test_proc_wire_bench.py`
 
 ### 2026-07-29 — [amendment] m8 D6 negotiates a linear process-result wire
 - What: Replaced `kairyu-proc`'s per-step cumulative output/text/logprob retransmission with per-request wire v2: one sequence-0 snapshot followed by offset-checked deltas. Empty non-terminal events are suppressed; terminal exact detokenization may replace one suffix; generate reconstructs all deltas without materializing cumulative text until terminal, while stream materializes only at its cumulative public yield. A client-generated internal wire request ID and `stream_id` bind add/abort/result/error generations and prevent stale v1 or v2 events from crossing immediate public-ID reuse. An omitted sampling seed is made explicit from that public ID, retaining deterministic output. Missing version retains the cumulative v1 path in both rolling-upgrade directions. Added long process parity, malformed sequence/offset/version/metadata, cancellation/reuse, and deterministic msgpack byte-volume coverage.

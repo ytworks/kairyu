@@ -15,7 +15,12 @@ gate. It encodes the same cumulative generation trace through the legacy and
 versioned-delta `kairyu-proc` msgpack paths, retains every frame size, and
 asserts linear v2 byte growth versus the legacy quadratic control. Serialized
 bytes are binding; wall time is deliberately absent so OS jitter cannot change
-the result.
+the result. The retained issue #212 closure artifact is
+`bench/results/proc-wire-delta-2026-07-29.json` (source `5c634ee`, artifact
+SHA-256 `02054d9def30281f493c50ac6a774069b51f9eaca6178374609e3aa31021fb0f`).
+At 1,024 output tokens it records 31,012,271 legacy bytes versus 356,199 v2
+bytes; doubling output produces 3.91–3.98x legacy growth and 2.01–2.03x v2
+growth.
 
 `bench/frontier_compare.py` requests OpenAI-compatible streaming usage and defines
 token TPOT as `(last content chunk time - first content chunk time) /

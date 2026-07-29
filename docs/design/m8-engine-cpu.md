@@ -423,7 +423,11 @@ through both msgpack encoders and retains every frame size. Its gate uses exact
 serialized byte counts, not timing: protocol v2 must grow approximately 2x
 when output length doubles, while the legacy cumulative control must expose
 its approximately 4x growth. Long-generation process parity covers tokens,
-text, usage, finish state, id-keyed logprobs, and rich logprob content.
+text, usage, finish state, id-keyed logprobs, and rich logprob content. The
+retained clean-source result is
+`bench/results/proc-wire-delta-2026-07-29.json`: at 1,024 tokens it measures
+31,012,271 legacy bytes versus 356,199 v2 bytes, with empirical growth
+exponents 1.97–1.99 versus 1.01–1.02.
 
 ## 3. What M8 does not include (explicit non-goals)
 
