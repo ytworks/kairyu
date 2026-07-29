@@ -1008,7 +1008,7 @@ online learning or the M4 request-family bandit.
   publisher lifecycle ownership; adding it here would mix a separate
   deployment responsibility into the D6 routing performance experiment.
 
-- **A33 (pre-results, 2026-07-29)**: F2d replaces chosen-action agreement with
+- **A33 (closed, 2026-07-29)**: F2d replaces chosen-action agreement with
   complete policy replay. The production decision source is
   `JsonlRouterLog`: each `kind=replica` row must join exactly once by
   `request_id` to a `placement_outcome` row containing the request TTFT, and
@@ -1042,6 +1042,18 @@ online learning or the M4 request-family bandit.
   and result integrity. Raw JSONL and a hash-bound manifest are retained. An
   independent offline verifier reconstructs both splits, replays every state
   transition and policy decision, recomputes all joins and means from raw
-  rows, and reaches the manifest verdict without trusting derived fields. A33
-  freezes this pre-results method only; F2d remains in progress until one
-  conforming held-out artifact passes it.
+  rows, and reaches the manifest verdict without trusting derived fields.
+
+  The exact-source formal artifact at
+  `86dde278d0f2a093bde64f5d1d9cba9aca9e1221` passed this contract. Seven
+  normalized policies replayed 768 requests each over 48 training families;
+  the tuner froze `λ=1.0`. On 16 disjoint held-out families, mean TTFT for the
+  same 256 requests was 4.43359375 virtual ticks under the frozen policy versus
+  8.5 under `λ=0.25`. All 5,888 production placement rows joined exactly once
+  to successful outcomes and independently replayed. The retained artifact is
+  `bench/results/f2d-prefix-weight-replay-2026-07-29/`, with manifest SHA-256
+  `3205721922fd8c013ae6336aaa4ffcb0a1938a40059e70acb500b5acba86ac3c`,
+  raw SHA-256
+  `1ccc5ab012e5ee6677f96709ec60cc15ea5db32cefb72360941238ca505c75eb`,
+  and production-router SHA-256
+  `3296fdd000aede574ea5c3a152ff1ef0f54e204545bfb1f9aa61f7b47c83546f`.
