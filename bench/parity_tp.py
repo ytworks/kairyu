@@ -45,7 +45,13 @@ _SEED = 20260702
 class _ToyRunner:
     """Deterministic CPU forward (kairyu_backend's toy runner)."""
 
+    def __init__(self, *, sampling_owner: bool = True) -> None:
+        self._sampling_owner = sampling_owner
+        self._future_tokens: dict[str, dict[int, int]] = {}
+
     def execute(self, scheduled, states):
+        if not self._sampling_owner:
+            raise RuntimeError("only rank 0 may sample in tensor-parallel execution")
         sampled = {}
         for chunk in scheduled:
             state = states[chunk.request_id]
@@ -53,6 +59,29 @@ class _ToyRunner:
                 seed = sum(state.request.prompt_token_ids)
                 sampled[chunk.request_id] = (SampledToken((seed + 31 * chunk.position) % _VOCAB),)
         return sampled
+
+    def execute_passive(self, scheduled, states):
+        return {}
+
+    def make_sampling_token_packet(self, scheduled, states, sampled=None):
+        import torch
+
+        packet = torch.full((len(scheduled),), -1, dtype=torch.int64)
+        if sampled is None:
+            return packet
+        for index, chunk in enumerate(scheduled):
+            state = states[chunk.request_id]
+            if not chunk.is_prefill or state.prefill_done:
+                packet[index] = sampled[chunk.request_id][0].token_id
+        return packet
+
+    def adopt_sampling_token_packet(self, scheduled, states, packet):
+        for index, chunk in enumerate(scheduled):
+            state = states[chunk.request_id]
+            if not chunk.is_prefill or state.prefill_done:
+                self._future_tokens.setdefault(chunk.request_id, {})[
+                    chunk.position
+                ] = int(packet[index])
 
 
 def _fixed_prompts(count: int, max_new: int) -> list[EngineRequest]:
@@ -77,7 +106,12 @@ def _make_runner(tp: int):
         return _ToyRunner()
     validate_tp_degree(tp)
     comms = FakeCommunicator.create_group(tp)
-    return TPModelRunner(rank_runners=tuple(_ToyRunner() for _ in range(tp)), comms=comms)
+    return TPModelRunner(
+        rank_runners=tuple(
+            _ToyRunner(sampling_owner=rank == 0) for rank in range(tp)
+        ),
+        comms=comms,
+    )
 
 
 def _model_vocab_size(model_path: str) -> int:

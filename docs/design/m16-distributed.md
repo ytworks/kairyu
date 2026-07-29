@@ -126,6 +126,32 @@ carries outputs/sampling/num_cached_tokens — extended there.
 non-final stages run their layer slice and `tensor_send` hidden states +
 positions; the final stage recvs, finishes, samples.
 
+> **Amended 2026-07-29 (issue #225).** “Rank 0 samples” is now an enforced
+> ownership protocol rather than a return-value convention. Followers execute
+> `PagedModelRunner.execute_passive`, then receive one fixed-layout int64 token
+> packet on the model communicator. All ranks adopt the packet into their
+> future-token device state before returning to the control receive. Followers
+> are constructed with `sampling_owner=False`; entering any sampling path is a
+> fatal error. The in-process `TPModelRunner` remains a compatibility/test
+> facade rather than the production SPMD transport, but enforces the same
+> rank-0 execute / follower-passive / canonical-packet-adoption contract.
+>
+> The production closure gate separates two invariants. A real TP2 injection
+> gate requires exact rank-0 packet adoption and verifies that the next decode
+> consumes it; TP8 evidence separately binds the NCCL overwrite primitive and
+> full rank-0-owner/passive-follower topology. Across TP1 and TP8, exact
+> free-running continuation equality is diagnostic:
+> a BF16 reduction-order near-tie can choose a different valid token and thereby
+> change every later autoregressive prefix. Binding cross-degree evidence must
+> instead contain finite raw records plus the actual world size, complete
+> rank set, rank-0 owner/sampler identity, and passive follower identities. It
+> compares distributions only at positions reached from a common prefix. Before
+> divergence, the common selected token is checked within the declared logprob
+> tolerance; at the first divergence, both selected tokens are directly scored
+> under each run's full raw distribution and both reciprocal deltas must remain
+> within that tolerance. No later
+> different-prefix position enters the compatibility verdict.
+
 > **Amended 2026-07-26 (issue #148, corrected after the #150 hardware
 > rerun).** TP serving has two operational groups, created in the same order on
 > every rank after the startup handshake:
@@ -262,11 +288,24 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   RowParallel(all_reduce) since linear_factory can't tell call sites apart;
   shard-loading bounds computed from the FULL config; validate_tp_degree with
   the config's real kv heads.
-- **A3 (BLOCKING)**: sampling needs FULL logits — vocab-parallel lm_head
-  all_gathers logits shards (gloo rejects unequal shapes: fail-fast
-  `vocab_size % tp == 0`); EVERY rank samples identically (keeps the m5 D1
-  agreement invariant; rank-0-only sampling buys nothing at TP=2); sharded
-  loader re-ties lm_head to the LOCAL embed shard after assign-load.
+- **A3 (BLOCKING, amended by issue #225)**: row-parallel reductions leave a
+  replicated hidden state and the current TP builder keeps a replicated
+  `lm_head`, so rank 0 owns sampling from the full logits. Non-zero ranks run
+  the same attention/MLP/KV work but do not own RNG, penalties, grammar,
+  logprobs, or a public StepOutput; eager followers also skip `lm_head`.
+  Rank 0 broadcasts a fixed `ScheduledChunk`-ordered int64 device-token packet
+  on the model communicator and every rank adopts it before the next forward.
+  This replaces the earlier all-rank-sampling amendment: that scheme duplicated
+  stateful work and still required result comparison to prevent divergence.
+  Exact adopted-token equality and next-decode use are binding in the real TP2
+  injection gate. TP8 separately binds communicator overwrite and complete
+  ownership topology. TP1/TP8 free-running sequence equality is diagnostic
+  only; cross-degree compatibility is evaluated from complete finite raw
+  evidence on common-prefix positions, including direct cross-selected logprob
+  tolerance at the first divergence, and must be accompanied by verified
+  rank/ownership topology.
+  A future vocab-sharded head may gather non-greedy logits to rank 0 (or reduce
+  greedy value/index pairs), but must preserve this single-owner token contract.
 - **A4**: column-parallel slices bias with the same bounds; row-parallel adds
   its replicated bias ONCE, after the all_reduce; TP parity includes a Qwen2
   fixture (biases).

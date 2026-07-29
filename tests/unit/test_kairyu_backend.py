@@ -10,7 +10,7 @@ from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
-from kairyu.engine.kairyu_backend import KairyuBackend
+from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
 
@@ -159,9 +159,7 @@ async def test_stream_yields_incremental_partials():
 
 async def test_stream_abandonment_aborts_engine_work():
     backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
-    stream = backend.stream(
-        _request("abandoned", "keep generating", max_tokens=10_000)
-    )
+    stream = backend.stream(_request("abandoned", "keep generating", max_tokens=10_000))
     first = await anext(stream)
     assert first.finished is False
 
@@ -247,9 +245,7 @@ async def test_request_submitted_during_failure_purge_is_pumped():
 
 async def test_duplicate_request_id_is_rejected_without_disrupting_active_request():
     backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
-    first = asyncio.create_task(
-        backend.generate(_request("duplicate", "first", 10_000))
-    )
+    first = asyncio.create_task(backend.generate(_request("duplicate", "first", 10_000)))
     for _ in range(100):
         if "duplicate" in backend._loop._active_request_ids:
             break
@@ -370,9 +366,7 @@ async def test_duplicate_rejected_after_fatal_purge_before_failure_delivery():
 
 async def test_multi_stream_reserves_all_sub_ids_before_submit():
     backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
-    blocker = asyncio.create_task(
-        backend.generate(_request("atomic#c1", "blocker", 10_000))
-    )
+    blocker = asyncio.create_task(backend.generate(_request("atomic#c1", "blocker", 10_000)))
     for _ in range(100):
         if "atomic#c1" in backend._loop._active_request_ids:
             break
@@ -495,8 +489,7 @@ async def test_multi_generate_reserves_each_sub_for_aggregate_lifetime():
     with pytest.raises(ValueError, match="duplicate request_id"):
         await backend.generate(request)
     assert all(
-        backend._queues[request_id] is queue
-        for request_id, queue in original_queues.items()
+        backend._queues[request_id] is queue for request_id, queue in original_queues.items()
     )
 
     first.cancel()
@@ -538,6 +531,23 @@ def test_registered_as_kairyu_backend():
 def test_tensor_parallel_size_recorded():
     backend = KairyuBackend(num_pages=64, tensor_parallel_size=2)
     assert backend.tensor_parallel_size == 2
+
+
+def test_custom_runner_requires_one_distinct_runner_per_tp_rank():
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"custom runner.*one distinct rank-local runner per rank.*"
+            r"model_path.*tensor_parallel_size=1"
+        ),
+    ):
+        build_engine_loop(runner=object(), tensor_parallel_size=2)
+
+
+def test_custom_runner_remains_supported_at_tp1():
+    custom = object()
+    loop, _cache, _scheduler = build_engine_loop(runner=custom)
+    assert loop._runner is custom
 
 
 @pytest.mark.parametrize("degree", [0, 3])

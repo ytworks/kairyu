@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    import torch
 
 _DEFAULT_TIMEOUT_S = 5.0
 
@@ -49,6 +52,10 @@ class Communicator(Protocol):
 
     def recv(self, src: int) -> object:
         """Receive the next object sent from ``src`` to this rank."""
+        ...
+
+    def tensor_broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
+        """Broadcast ``src``'s tensor into every rank's caller-owned buffer."""
         ...
 
 
@@ -215,3 +222,15 @@ class FakeCommunicator:
                     f"recv timeout: rank {self._rank} waited for a message from src {src}"
                 )
             return fifo.popleft()
+
+    def tensor_broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
+        """Deterministic tensor broadcast used by rank-authoritative sampling.
+
+        Keep the same caller-owned-buffer contract as ``torch.distributed``:
+        receivers allocate the fixed-layout packet locally and this operation
+        overwrites it with a snapshot of rank 0's packet.
+        """
+        payload = tensor.detach().clone() if self._rank == src else None
+        received = self.broadcast(payload, src=src)
+        tensor.copy_(received)
+        return tensor

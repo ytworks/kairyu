@@ -49,6 +49,21 @@ token on-device, patch the next decode slot D2D, and defer one batched public
 D2H copy to the late EOS/streaming boundary. The isolated steady-decode
 profiler records zero host-sync events. Structured xgrammar remains an explicit
 stateful CPU compatibility path.
+Tensor-parallel sampling now has one ownership contract across the production
+SPMD runner and in-process facade: rank 0 alone advances RNG, penalties,
+grammar, logprobs, and public D2H state; followers execute passive model/KV
+work and adopt one fixed `ScheduledChunk`-ordered device-token packet before
+another forward. The sampled-result send/recv path is removed. Real NCCL gates
+cover eager/CUDA-graph TP1/2 parity, injected follower-token overwrite,
+post-model rank-0 failure teardown, and same-GPU relaunch. The clean-commit
+Qwen3-32B TP1/8 and eight-rank protocol artifacts remain to be recorded before
+issue #225 closes. Qwen free-running cross-degree equality will be diagnostic;
+the binding gate requires complete finite raw evidence, verified rank/ownership
+topology, common-prefix distribution compatibility, and reciprocal
+cross-selected logprob tolerance from direct full-distribution probes at the
+first divergence. Exact packet adoption/next-decode use is binding in the real
+TP2 injected production gate; separate TP8 evidence binds NCCL overwrite,
+rank topology, and rank-0-only ownership without claiming a per-rank digest.
 Penalty-active requests now maintain lazy per-device prompt/seen/count rows and
 an append-only committed shadow; a scheduler-owned epoch makes normal sampling
 skip retained-history copies and comparisons. Exact pending commits require no
@@ -298,7 +313,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete** (2026-07-03, `docs/design/m13-attention-backend.md`): fake-pinned FlashInfer contract + tests/gpu mirror; MLA two-form equivalence oracle. 514 tests. |
 | M14 — Quant compute (FP8/INT8/AWQ/GPTQ/NVFP4 CPU oracles + fused/native GPU kernels) | **GPU-validated** (2026-07-27, `docs/design/m14-quant-compute.md`): all five schemes production-dispatch on CUDA without a full dequantized weight, pass per-kernel and full-engine GPU gates, and fail loudly outside their supported capability/layout. CPU format proofs remain pinned vs live Hub checkpoints. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
-| M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26). |
+| M16 — Distributed execution (gloo-tested TP/EP/PP; NCCL by constructor) | **Complete** (2026-07-03, `docs/design/m16-distributed.md`): TP=2/EP=2/PP=2 spawn parity gates green in the default suite. 553 tests. Amended: `tensor_reduce_scatter` measured on 8x RTX PRO 6000 (D1, 2026-07-25); opt-in sequence parallelism `build_tp_model(sequence_parallel=True)` for dense TP, off by default, wins activation memory not comm time (D6, 2026-07-26); A3 makes rank 0 the sole sampling owner and broadcasts one canonical device-token packet before any rank advances (2026-07-29). |
 | M17 — StepExecutor (CUDA-graph seam) + EAGLE-3/MTP drafts | **Complete and production-enabled** (2026-07-26, `docs/design/m17-graphs-drafts.md`): explicit eager/graph serving mode, production builder wiring, real single-GPU/TP2 capture-replay parity, TP8 Qwen3-32B measurement and clean graph/NCCL teardown; fake-graph lifecycle suite; perfect-draft e2e ≡ greedy; corrected EAGLE-3/MTP formats. |
 | M18 — KV transport (serde/remote handoff/NIXL adapter) + 2-process P-D | **Complete** (2026-07-03, `docs/design/m18-kv-transport.md`): TCP byte-parity E2E green. 584 tests. |
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
@@ -441,6 +456,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [amendment] m16 A3 makes rank 0 the sole TP sampling owner
+- What: Replaced all-rank sampling and sampled-result comparison with one protocol in both the production SPMD runner and in-process facade. Rank 0 alone owns RNG, penalties, grammar, logprobs, and public output materialization. Followers execute a passive model/KV path, receive one fixed int64 token slot per scheduled chunk on the model communicator, and adopt its device scalar before returning to the next control receive. Eager followers skip the replicated `lm_head`; every follower skips sampler state and public D2H. The packet retains partial-prefill sentinels, seeded/mixed/structured/speculative state, and fatal protocol diagnostics. A model-subgroup abort plus peer-first reap bounds post-model/pre-packet rank-0 failure teardown. The real TP2 injection gate binds packet adoption and use by the next decode; TP8 evidence independently binds NCCL overwrite plus complete rank-0-owner/passive-follower topology. Cross-degree Qwen evidence treats free-running TP1/TP8 equality as diagnostic and instead binds complete finite raw records, verified rank/ownership topology, common-prefix distribution compatibility, and direct reciprocal cross-selected logprob tolerance at the first divergence.
+- Why: Independent rank sampling duplicates stateful work and can advance future KV/model state from a locally divergent token before a later Python result comparison detects it. Rank-0 authority makes one token canonical by construction, removes sampled-result object traffic, keeps the decode dependency device-side, and remains compatible with a future vocab-sharded head. Cross-degree free-running equality is not a correctness invariant because one reduction-order near-tie changes every later prefix; distribution comparisons are meaningful only while prefixes remain aligned. A worst-rank p95 sanity ceiling is binding for the tiny collective; p99/max/tail counts remain visible but non-binding because late host launch jitter affects every aligned CUDA event and is not protocol correctness.
+- Refs: issue #225; m16 A3/D4; `kairyu/engine/core/{model_runner,worker,tp_runner}.py`; `bench/tp_sampling_owner_{bench,qwen}.py`; `tests/{unit,dist,gpu}/`
 
 ### 2026-07-29 — [evidence] m8 D6 process wire is linear in output length
 - What: Retained `bench/results/proc-wire-delta-2026-07-29.json` from clean implementation commit `5c634ee`. Across 128/256/512/1,024 output tokens, legacy cumulative frames total 504,382/1,972,335/7,798,943/31,012,271 bytes while wire v2 totals 43,419/87,559/177,099/356,199 bytes. Legacy doubling ratios are 3.910/3.954/3.976 (empirical exponent 1.97–1.99); v2 ratios are 2.017/2.023/2.011 (exponent 1.01–1.02). Every token, text character, id logprob, and rich logprob item appears exactly once in v2. Artifact SHA-256: `02054d9def30281f493c50ac6a774069b51f9eaca6178374609e3aa31021fb0f`.

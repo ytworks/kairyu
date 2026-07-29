@@ -102,6 +102,10 @@ class TorchDistCommunicator:
 
     # -- tensor extension (m16 D1) -------------------------------------------
 
+    def tensor_broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
+        dist.broadcast(tensor, src=src, group=self._group)
+        return tensor
+
     def tensor_all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(tensor, group=self._group)
         return tensor

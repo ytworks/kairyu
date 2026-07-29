@@ -114,6 +114,19 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
             for record in pending
             if record.sample.logprob is not None
         ]
+        device_logprob_tensor = (
+            torch.stack(device_logprobs) if device_logprobs else None
+        )
+        # These stacked staging tensors are the actual async-copy sources. The
+        # scalar DeviceSamples retained in ``_records`` do not retain a stack's
+        # separate storage. Keep it alive until the copy event is synchronized;
+        # otherwise an immediately allocated TP token packet can reuse the
+        # storage and overwrite a public token with its ``-1`` sentinel.
+        self._copy_sources = tuple(
+            source
+            for source in (device_tokens, device_logprob_tensor)
+            if source is not None
+        )
         host_logprobs = (
             torch.empty(
                 len(device_logprobs),
@@ -134,9 +147,9 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
         def enqueue_copies() -> None:
             if device_tokens is not None and host_tokens is not None:
                 host_tokens.copy_(device_tokens, non_blocking=has_cuda)
-            if device_logprobs and host_logprobs is not None:
+            if device_logprob_tensor is not None and host_logprobs is not None:
                 host_logprobs.copy_(
-                    torch.stack(device_logprobs), non_blocking=has_cuda
+                    device_logprob_tensor, non_blocking=has_cuda
                 )
             for record in pending:
                 sample = record.sample
@@ -214,6 +227,7 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
             resolved[request_id] = tuple(host_values)
         self._resolved = resolved
         self._records.clear()
+        self._copy_sources = ()
         self._event = None
         return resolved
 
@@ -233,6 +247,20 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
 
     def values(self):
         return self._resolve().values()
+
+    def raw_records(
+        self,
+    ) -> Mapping[str, tuple[SampledToken | _PendingDeviceToken, ...]]:
+        """Return token records without forcing the deferred D2H boundary.
+
+        Tensor-parallel rank 0 needs the already-sampled device ids for the
+        canonical-token broadcast.  Resolving this mapping here would put the
+        public host materialization back on the critical decode dependency
+        chain that #206 removed.
+        """
+        if self._resolved is not None:
+            return self._resolved
+        return self._records
 
 
 def _tensor_decode_gap(model: DenseDecoder) -> str | None:
@@ -287,6 +315,7 @@ class PagedModelRunner:
         graph_max_batch: int = 0,
         graph_max_pages: int = 0,
         graph_scratch_page: int | None = None,
+        sampling_owner: bool = True,
     ) -> None:
         if cache is not None:  # fail-fast sizing agreement (m12 D3)
             if pool.num_pages != cache.num_pages or pool.page_size != cache.page_size:
@@ -299,6 +328,7 @@ class PagedModelRunner:
         self._model = model
         self._pool = pool
         self._sampler = sampler
+        self._sampling_owner = sampling_owner
         # Input tensors (token ids, positions) must be built on the model's device
         # so the GPU forward never mixes CPU inputs with on-device weights/KV.
         self._device = next(model.parameters()).device
@@ -314,9 +344,10 @@ class PagedModelRunner:
         # position N directly when building input N+1; host materialization is
         # deliberately not on that dependency chain.
         self._future_device_tokens: dict[str, dict[int, torch.Tensor]] = {}
-        # Worker ranks may discard their StepOutput, while its pinned D2H copy is
-        # still in flight.  Retain such outputs until a non-blocking event query
-        # says the transfer completed; rank 0's normal commit resolves them.
+        # Rank 0 may outlive a public StepOutput while its pinned D2H copy is
+        # still in flight under schedule-ahead. Retain such outputs until a
+        # non-blocking event query says the transfer completed. Passive TP
+        # followers never construct a StepOutput or enqueue this copy.
         self._deferred_outputs: deque[_DeferredStepOutput] = deque()
         self._output_copy_stream = (
             torch.cuda.Stream(device=self._device)
@@ -427,6 +458,18 @@ class PagedModelRunner:
         """The per-request sampling state a P-D handoff has to carry across."""
         return self._sampler
 
+    @property
+    def sampling_owner(self) -> bool:
+        """Whether this runner is allowed to advance sampling state."""
+        return getattr(self, "_sampling_owner", True)
+
+    def _require_sampling_owner(self) -> None:
+        if not self.sampling_owner:
+            raise RuntimeError(
+                "this tensor-parallel rank is a passive sampling follower; "
+                "only rank 0 may sample"
+            )
+
     def release(self, request_id: str) -> None:
         """Drop per-request sampler state (seeds + grammar enforcer) on finish (E2)."""
         if self._sampler is not None:
@@ -435,6 +478,7 @@ class PagedModelRunner:
         self._future_device_tokens.pop(request_id, None)
 
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
+        self._require_sampling_owner()
         if self._sampler is None:
             return SampledToken(int(torch.argmax(logits).item()))
         return self._sampler.sample(
@@ -494,6 +538,7 @@ class PagedModelRunner:
     def _sample_device(
         self, state: object, logits: torch.Tensor, position: int
     ) -> _PendingDeviceToken:
+        self._require_sampling_owner()
         if self._sampler is None:
             sample = DeviceSample(torch.argmax(logits).to(dtype=torch.int64))
         else:
@@ -540,6 +585,7 @@ class PagedModelRunner:
         rows can then argmax on-device.  Their ids patch the next decode inputs
         device-to-device; one deferred D2H carries the public StepOutput later.
         """
+        self._require_sampling_owner()
         if logits.device.type == "cuda" and all(
             self._can_sample_device(states[chunk.request_id], logits[index])
             for index, chunk in enumerate(chunks)
@@ -630,10 +676,30 @@ class PagedModelRunner:
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> Mapping[str, tuple[SampledToken, ...]]:
+        return self._execute(scheduled, states, sample=True)
+
+    def execute_passive(
+        self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
+    ) -> Mapping[str, tuple[SampledToken, ...]]:
+        """Run this TP shard's model/KV work without owning sampling.
+
+        Non-zero TP ranks consume rank 0's canonical device-token packet after
+        this method returns.  They therefore must not advance RNG/grammar state,
+        build logprobs, or enqueue a StepOutput D2H copy of their own.
+        """
+        return self._execute(scheduled, states, sample=False)
+
+    def _execute(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+        *,
+        sample: bool,
+    ) -> Mapping[str, tuple[SampledToken, ...]]:
         self._reap_deferred_outputs()
-        sampled: dict[
-            str, tuple[SampledToken | _PendingDeviceToken, ...]
-        ] = {}
+        sampled: (
+            dict[str, tuple[SampledToken | _PendingDeviceToken, ...]] | None
+        ) = {} if sample else None
         decodes = [chunk for chunk in scheduled if not chunk.is_prefill]
         for chunk in scheduled:
             if chunk.is_prefill:
@@ -652,6 +718,8 @@ class PagedModelRunner:
         else:
             for chunk in decodes:
                 self._execute_decode(chunk, states[chunk.request_id], sampled)
+        if sampled is None:
+            return {}
         if any(
             isinstance(token, _PendingDeviceToken)
             for tokens in sampled.values()
@@ -667,11 +735,141 @@ class PagedModelRunner:
             for request_id, tokens in sampled.items()
         }
 
+    @staticmethod
+    def _chunk_emits_token(chunk: ScheduledChunk, state: object) -> bool:
+        """Whether this scheduled slot produces one sampled token."""
+        if not chunk.is_prefill:
+            return True
+        prompt = state.request.prompt_token_ids
+        return state.prefill_done and state.computed_prompt == len(prompt)
+
+    def make_sampling_token_packet(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+        sampled: Mapping[str, tuple[SampledToken, ...]] | None = None,
+    ) -> torch.Tensor:
+        """Build the fixed-layout rank-0 token packet or a follower receive buffer.
+
+        One int64 slot corresponds to one ``ScheduledChunk``.  Partial-prefill
+        slots carry ``-1``; every emitting slot carries exactly one token id.
+        Keeping the shape tied to the already-broadcast chunk tuple means all
+        ranks enter the same tensor collective even for mixed prefill/decode
+        batches, without request-id or Python-result traffic.
+        """
+        chunks = tuple(scheduled)
+        packet = torch.full(
+            (len(chunks),), -1, dtype=torch.int64, device=self._device
+        )
+        expected = [
+            chunk.request_id
+            for chunk in chunks
+            if self._chunk_emits_token(chunk, states[chunk.request_id])
+        ]
+        if len(expected) != len(set(expected)):
+            raise RuntimeError(
+                "TP sampling packet cannot represent more than one emitted token "
+                "for the same request in one model step"
+            )
+        if sampled is None:
+            return packet
+
+        actual = set(sampled)
+        expected_set = set(expected)
+        if actual != expected_set:
+            missing = sorted(expected_set - actual)
+            extra = sorted(actual - expected_set)
+            raise RuntimeError(
+                "TP sampling owner output does not match the scheduled token "
+                f"layout: missing={missing}, extra={extra}"
+            )
+        records: Mapping[
+            str, tuple[SampledToken | _PendingDeviceToken, ...]
+        ]
+        if isinstance(sampled, _DeferredStepOutput):
+            records = sampled.raw_records()
+        else:
+            records = sampled
+        for index, chunk in enumerate(chunks):
+            state = states[chunk.request_id]
+            if not self._chunk_emits_token(chunk, state):
+                continue
+            values = records[chunk.request_id]
+            if len(values) != 1:
+                raise RuntimeError(
+                    "TP sampling owner must emit exactly one token for "
+                    f"{chunk.request_id!r} at position {chunk.position}; "
+                    f"got {len(values)}"
+                )
+            record = values[0]
+            if isinstance(record, _PendingDeviceToken):
+                packet[index].copy_(record.sample.token_id)
+            elif isinstance(record, SampledToken):
+                if record.token_id < 0:
+                    raise RuntimeError(
+                        f"TP sampling owner emitted invalid token id {record.token_id} "
+                        f"for {chunk.request_id!r} at position {chunk.position}"
+                    )
+                packet[index] = record.token_id
+            else:  # pragma: no cover - a malformed internal StepOutput
+                raise TypeError(
+                    "TP sampling owner returned an unsupported token record "
+                    f"{type(record).__name__}"
+                )
+        return packet
+
+    def adopt_sampling_token_packet(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+        packet: torch.Tensor,
+    ) -> None:
+        """Adopt rank 0's device ids before this rank can execute another step."""
+        chunks = tuple(scheduled)
+        if packet.dtype != torch.int64 or packet.ndim != 1:
+            raise RuntimeError(
+                "TP sampling packet must be a one-dimensional int64 tensor; "
+                f"got dtype={packet.dtype}, shape={tuple(packet.shape)}"
+            )
+        if packet.numel() != len(chunks):
+            raise RuntimeError(
+                "TP sampling packet length does not match the scheduled layout: "
+                f"got {packet.numel()}, expected {len(chunks)}"
+            )
+        if packet.device != self._device:
+            raise RuntimeError(
+                "TP sampling packet is on the wrong device: "
+                f"got {packet.device}, expected {self._device}"
+            )
+        for index, chunk in enumerate(chunks):
+            state = states[chunk.request_id]
+            emits = self._chunk_emits_token(chunk, state)
+            if self._device.type == "cpu":
+                value = int(packet[index])
+                if emits and value < 0:
+                    raise RuntimeError(
+                        "TP sampling packet is missing the authoritative token for "
+                        f"{chunk.request_id!r} at position {chunk.position}"
+                    )
+                if not emits and value != -1:
+                    raise RuntimeError(
+                        "TP sampling packet emitted an unexpected token for partial "
+                        f"prefill {chunk.request_id!r} at position {chunk.position}"
+                    )
+            if emits:
+                # Retain the packet-backed scalar itself: the next decode input
+                # consumes it D2D on the same stream, with no host scalar sync.
+                self._remember_device(
+                    chunk.request_id, chunk.position, packet[index]
+                )
+
     def _reap_deferred_outputs(self) -> None:
         while self._deferred_outputs and self._deferred_outputs[0].ready():
             self._deferred_outputs.popleft()
 
-    def _execute_prefill(self, chunk: ScheduledChunk, state, sampled: dict) -> None:
+    def _execute_prefill(
+        self, chunk: ScheduledChunk, state, sampled: dict | None
+    ) -> None:
         prompt = state.request.prompt_token_ids
         page_table = list(state.allocation.pages) + list(state.decode_pages)
         cached = state.allocation.num_cached_tokens if state.allocation else 0
@@ -682,7 +880,7 @@ class PagedModelRunner:
             torch.arange(start, end, device=self._device),
             self._pool, page_table, seq_len=end, write_from=cached,
         )
-        if state.prefill_done and end == len(prompt):
+        if sampled is not None and state.prefill_done and end == len(prompt):
             logits = self._model.logits(hidden[-1])
             token = self._sample_record(state, logits, position=0)
             if isinstance(token, SampledToken):
@@ -731,12 +929,18 @@ class PagedModelRunner:
         would otherwise still hold.
         """
         index = position - 1
+        outputs = state.outputs
+        # Speculative target scoring deliberately overlays the scheduler's
+        # committed completion with a draft prefix.  That explicit overlay must
+        # beat a target token retained from the preceding score; normal overlap
+        # snapshots keep the device-first fast path below.
+        if getattr(state, "outputs_override", False) and index < len(outputs):
+            return outputs[index]
         device_pending = self._future_device_tokens.get(
             state.request.request_id, {}
         )
         if index in device_pending:
             return device_pending[index]
-        outputs = state.outputs
         if index < len(outputs):
             return outputs[index]
         pending = self._future_tokens.get(state.request.request_id, {})
@@ -848,7 +1052,9 @@ class PagedModelRunner:
             copy_done.record()
         return self._decode_slots[:size], self._decode_positions[:size]
 
-    def _execute_decode(self, chunk: ScheduledChunk, state, sampled: dict) -> None:
+    def _execute_decode(
+        self, chunk: ScheduledChunk, state, sampled: dict | None
+    ) -> None:
         input_token, absolute, page_table, cached = self._decode_inputs(chunk, state)
         # the single-request path uses the SAME slots as the batched one: a
         # workload that drops to one request must not fall back to rebuilding a
@@ -858,6 +1064,8 @@ class PagedModelRunner:
             token_slot, position_slot,
             self._pool, page_table, seq_len=absolute + 1, write_from=cached,
         )
+        if sampled is None:
+            return
         logits = self._model.logits(hidden[-1])
         token = self._sample_record(state, logits, position=chunk.position)
         if isinstance(token, SampledToken):
@@ -927,10 +1135,15 @@ class PagedModelRunner:
             write_from=write_from,
             device=self._device,
         )
+        hidden = self._eager_tensor_hidden(batch)
+        return self._model.logits(hidden)
+
+    def _eager_tensor_hidden(self, batch) -> torch.Tensor:
+        """Run eager tensor decode through KV write, without forcing lm_head."""
         self._model.plan_decode_tensors(
             self._pool, batch.page_tables, batch.seq_lens
         )
-        hidden = self._model.forward_decode_tensors(
+        return self._model.forward_decode_tensors(
             batch.token_ids,
             batch.positions,
             self._pool,
@@ -938,10 +1151,12 @@ class PagedModelRunner:
             batch.seq_lens,
             batch.write_from,
         )
-        return self._model.logits(hidden)
 
     def _execute_decode_batch(
-        self, chunks: list[ScheduledChunk], states: Mapping[str, object], sampled: dict
+        self,
+        chunks: list[ScheduledChunk],
+        states: Mapping[str, object],
+        sampled: dict | None,
     ) -> None:
         tokens, positions, page_tables, seq_lens, write_from = [], [], [], [], []
         for chunk in chunks:
@@ -962,16 +1177,32 @@ class PagedModelRunner:
                 token_slots, position_slots, page_tables, seq_lens, write_from
             )
         elif self._tensor_decode_supported:
-            logits = self._eager_tensor_logits(
-                token_slots, position_slots, page_tables, seq_lens, write_from
+            from kairyu.engine.core.step_executor import build_decode_batch
+
+            batch = build_decode_batch(
+                token_ids=token_slots,
+                positions=position_slots,
+                page_lists=page_tables,
+                seq_lens=seq_lens,
+                max_pages=max(len(table) for table in page_tables),
+                scratch_page=None,
+                write_from=write_from,
+                device=self._device,
             )
+            hidden = self._eager_tensor_hidden(batch)
+            logits = self._model.logits(hidden) if sampled is not None else None
         else:
             hidden = self._model.forward_decode_batch(
                 token_slots, position_slots,
                 self._pool, page_tables, seq_lens, write_from,
                 position_values=positions,
             )
-            logits = self._model.logits(hidden)  # [B, vocab]
+            logits = (
+                self._model.logits(hidden) if sampled is not None else None
+            )  # [B, vocab]
+        if sampled is None:
+            return
+        assert logits is not None
         tokens = self._sample_rows(chunks, states, logits)
         for chunk, token in zip(chunks, tokens, strict=True):
             if isinstance(token, SampledToken):

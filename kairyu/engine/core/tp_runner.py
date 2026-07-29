@@ -1,16 +1,17 @@
-"""TP driver facade over per-rank ModelRunners (design m5 D1/D2/D3).
+"""In-process TP facade over per-rank ModelRunners (design m5 D1/D2/D3).
 
 ``TPModelRunner`` implements the existing ``ModelRunner`` protocol, so the
 Scheduler / RadixKV / step loop above it are unchanged (design D1: KV
 accounting is rank-invariant and stays on the driver). Per step, the driver
 builds one immutable ``StepInput`` snapshot, broadcasts it through the
-``Communicator`` seam, runs every rank on the snapshot, gathers each rank's
-sampled ids over send/recv, and enforces rank agreement — TP ranks execute
-the same step and must sample identically.
+``Communicator`` seam, lets rank 0 execute and sample, and runs every follower
+through its passive model/KV path. Rank 0 then broadcasts one fixed-layout
+device-token packet; every rank adopts those authoritative ids before the
+next step. No follower produces a public result or advances sampling state.
 
-The CPU-testable configuration uses deterministic rank runners and a
-``FakeCommunicator`` group; the GPU phase swaps in ``NcclCommunicator`` and
-sharded model processes behind the same seams.
+This legacy CPU-testable facade uses deterministic rank runners and a
+``FakeCommunicator`` group. Real sharded model processes use
+``DistTPModelRunner`` but share this sampling-ownership protocol.
 """
 
 from __future__ import annotations
@@ -25,6 +26,12 @@ from kairyu.engine.core.step_input import snapshot_step
 # Both G2 contract models (Llama-3.1-8B, Llama-3.3-70B) have 8 KV heads (GQA).
 _CONTRACT_NUM_KV_HEADS = 8
 _DRIVER_RANK = 0
+_RANK_RUNNER_METHODS = (
+    "execute",
+    "execute_passive",
+    "make_sampling_token_packet",
+    "adopt_sampling_token_packet",
+)
 
 
 def validate_tp_degree(
@@ -69,6 +76,26 @@ class TPModelRunner:
                     f"comm at index {expected_rank} has rank {comm.rank}; "
                     "comms must be ordered by rank"
                 )
+        identities: dict[int, int] = {}
+        for rank, runner in enumerate(rank_runners):
+            previous_rank = identities.setdefault(id(runner), rank)
+            if previous_rank != rank:
+                raise ValueError(
+                    "rank_runners must contain one distinct runner instance per "
+                    f"rank; ranks {previous_rank} and {rank} share an instance"
+                )
+            missing = [
+                method
+                for method in _RANK_RUNNER_METHODS
+                if not callable(getattr(runner, method, None))
+            ]
+            if missing:
+                raise TypeError(
+                    f"rank runner {rank} does not support rank-0-authoritative TP "
+                    f"sampling; missing callable methods: {', '.join(missing)}. "
+                    "Use tensor_parallel_size=1 or implement the passive "
+                    "execution and sampling-token packet protocol."
+                )
         self._rank_runners = tuple(rank_runners)
         self._comms = tuple(comms)
 
@@ -82,35 +109,39 @@ class TPModelRunner:
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> dict[str, tuple]:
-        """Snapshot once, broadcast, run every rank, gather, and check agreement.
-
-        Agreement compares token ids only (m8 D2 review): the m5 D1 invariant
-        is about tokens; logprob float equality would be brittle on GPU. Rank
-        0's full StepOutput (with logprobs) is what the driver returns.
-        """
+        """Sample on rank 0, broadcast its fixed token packet, and adopt it."""
         step_input = snapshot_step(scheduled, states)
         driver_comm = self._comms[_DRIVER_RANK]
         sent = driver_comm.broadcast(step_input, src=_DRIVER_RANK)
-        for rank, (runner, comm) in enumerate(
-            zip(self._rank_runners, self._comms, strict=True)
-        ):
-            received = sent if rank == _DRIVER_RANK else comm.broadcast(None, src=_DRIVER_RANK)
-            sampled = runner.execute(received.chunks, received.states_view())
-            comm.send(_DRIVER_RANK, dict(sampled))
-        reference: dict[str, tuple] = driver_comm.recv(_DRIVER_RANK)
-        reference_ids = _agreement_view(reference)
-        for rank in range(1, len(self._comms)):
-            candidate = driver_comm.recv(rank)
-            if _agreement_view(candidate) != reference_ids:
-                raise RuntimeError(
-                    f"TP rank {rank} sampled {candidate!r} but rank 0 sampled "
-                    f"{reference!r}; TP ranks must agree (design m5 D1)"
-                )
-        return reference
+        received = [
+            sent
+            if rank == _DRIVER_RANK
+            else comm.broadcast(None, src=_DRIVER_RANK)
+            for rank, comm in enumerate(self._comms)
+        ]
 
+        owner = self._rank_runners[_DRIVER_RANK]
+        owner_input = received[_DRIVER_RANK]
+        owner_states = owner_input.states_view()
+        sampled = owner.execute(owner_input.chunks, owner_states)
+        packet = owner.make_sampling_token_packet(
+            owner_input.chunks, owner_states, sampled=sampled
+        )
+        packet = driver_comm.tensor_broadcast(packet, src=_DRIVER_RANK)
+        owner.adopt_sampling_token_packet(owner_input.chunks, owner_states, packet)
 
-def _agreement_view(step_output: dict[str, tuple]) -> dict[str, tuple[int, ...]]:
-    return {
-        request_id: tuple(token.token_id for token in tokens)
-        for request_id, tokens in step_output.items()
-    }
+        for rank in range(1, len(self._rank_runners)):
+            runner = self._rank_runners[rank]
+            rank_input = received[rank]
+            rank_states = rank_input.states_view()
+            runner.execute_passive(rank_input.chunks, rank_states)
+            receive_packet = runner.make_sampling_token_packet(
+                rank_input.chunks, rank_states, sampled=None
+            )
+            receive_packet = self._comms[rank].tensor_broadcast(
+                receive_packet, src=_DRIVER_RANK
+            )
+            runner.adopt_sampling_token_packet(
+                rank_input.chunks, rank_states, receive_packet
+            )
+        return sampled

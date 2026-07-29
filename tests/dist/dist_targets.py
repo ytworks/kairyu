@@ -40,6 +40,17 @@ class _ReleaseRecordingRunner:
     def execute(self, scheduled, states):
         return self.runner.execute(scheduled, states)
 
+    def execute_passive(self, scheduled, states):
+        return self.runner.execute_passive(scheduled, states)
+
+    def make_sampling_token_packet(self, scheduled, states, sampled=None):
+        return self.runner.make_sampling_token_packet(
+            scheduled, states, sampled=sampled
+        )
+
+    def adopt_sampling_token_packet(self, scheduled, states, packet) -> None:
+        self.runner.adopt_sampling_token_packet(scheduled, states, packet)
+
     def release(self, request_id: str) -> None:
         self.released.append(request_id)
         self.runner.release(request_id)
@@ -100,6 +111,12 @@ def comm_contract(rank: int, world_size: int, init_file: str, out_dir: str) -> N
     broadcasted = comm.broadcast({"step": 7} if rank == 0 else None, src=0)
     reduced = comm.all_reduce((float(rank + 1), 10.0))
     gathered = comm.all_gather(f"r{rank}")
+    token_packet = (
+        torch.tensor([17, -1, 29], dtype=torch.int64)
+        if rank == 0
+        else torch.empty(3, dtype=torch.int64)
+    )
+    comm.tensor_broadcast(token_packet, src=0)
     if rank == 0:
         comm.send(1, {"hello": rank})
         received = None
@@ -115,6 +132,7 @@ def comm_contract(rank: int, world_size: int, init_file: str, out_dir: str) -> N
         "broadcast": broadcasted,
         "reduced": list(reduced),
         "gathered": list(gathered),
+        "token_packet": token_packet.tolist(),
         "received": received,
         "a2a": out.tolist(),
     })
@@ -122,7 +140,7 @@ def comm_contract(rank: int, world_size: int, init_file: str, out_dir: str) -> N
 
 def tp_engine_parity(rank: int, world_size: int, init_file: str, out_dir: str,
                      model_dir: str, prompt: list[int], max_new: int,
-                     vocab: list[str]) -> None:
+                     vocab: list[str], sampling_kwargs: dict | None = None) -> None:
     """Rank 0 drives EngineCore via DistTPModelRunner; rank 1 runs the worker loop."""
     from kairyu.engine.core.worker import (
         DistTPModelRunner,
@@ -154,7 +172,7 @@ def tp_engine_parity(rank: int, world_size: int, init_file: str, out_dir: str,
         engine = EngineCore(scheduler, dist_runner)
         engine.add_request(
             EngineRequest("a", tuple(prompt), max_new_tokens=max_new,
-                          sampling=EngineSampling())
+                          sampling=EngineSampling(**(sampling_kwargs or {})))
         )
         outputs = engine.run_to_completion()["a"]
         dist_runner.shutdown()
@@ -281,7 +299,10 @@ def tp_structured_release(
             except Exception:
                 pass
 
-    payload["sampler_states"] = len(runner._sampler._states)
+    payload["sampling_owner"] = runner.sampling_owner
+    payload["sampler_states"] = (
+        0 if runner._sampler is None else len(runner._sampler._states)
+    )
     payload["released_requests"] = len(recording.released)
     _finish(out_dir, rank, payload)
 
