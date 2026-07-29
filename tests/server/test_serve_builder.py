@@ -165,18 +165,16 @@ embeddings:
     assert len(large.json()["data"][0]["embedding"]) == 9
 
 
-def test_builder_rejects_unknown_embedding_backend():
-    spec = load_deployment_spec(
-        """
+def test_schema_rejects_unknown_embedding_backend():
+    with pytest.raises(ValueError):
+        load_deployment_spec(
+            """
 engines:
   chat: { backend: mock }
 embeddings:
   embed: { backend: does-not-exist, dimensions: 4 }
 """
-    )
-
-    with pytest.raises(ValueError, match="unknown embedding backend"):
-        build_app_from_spec(spec)
+        )
 
 
 async def test_header_session_takes_precedence_over_user():

@@ -236,6 +236,8 @@ def resolve_openai_capabilities(
         return base
     if not isinstance(overrides, Mapping):
         raise ValueError("capabilities must be a mapping or OpenAIRequestCapabilities")
+    if any(not isinstance(key, str) for key in overrides):
+        raise ValueError("capability override keys must be strings")
     unknown_keys = set(overrides) - _OVERRIDE_KEYS
     if unknown_keys:
         raise ValueError(f"unknown capability override keys: {sorted(unknown_keys)}")

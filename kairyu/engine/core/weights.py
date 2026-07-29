@@ -10,7 +10,7 @@ full tensor.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 
@@ -64,6 +64,31 @@ class CheckpointReader:
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._name_to_shard))
+
+    def shapes(self, names: Iterable[str]) -> dict[str, tuple[int, ...]]:
+        """Read tensor shapes from shard headers without materializing tensors."""
+
+        names_by_shard: dict[str, list[str]] = {}
+        for name in names:
+            shard_name = self._name_to_shard.get(name)
+            if shard_name is None:
+                raise KeyError(f"tensor {name!r} not in checkpoint")
+            names_by_shard.setdefault(shard_name, []).append(name)
+        shapes: dict[str, tuple[int, ...]] = {}
+        for shard_name, shard_names in names_by_shard.items():
+            shard_path = self._shards[shard_name]
+            with self._safe_open(
+                shard_path,
+                framework=self._framework,
+            ) as reader:
+                actual = set(reader.keys())
+                for name in shard_names:
+                    if name not in actual:
+                        raise KeyError(
+                            f"tensor {name!r} not in shard {shard_name!r}"
+                        )
+                    shapes[name] = tuple(reader.get_slice(name).get_shape())
+        return shapes
 
     def __contains__(self, name: str) -> bool:
         return name in self._name_to_shard

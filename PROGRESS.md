@@ -403,6 +403,15 @@ maps eight of them explicitly into runtime `ServerSettings`. Existing keys,
 defaults, and round trips are unchanged; runtime-only additions can no longer
 silently enter or be ignored by DeploymentSpec.
 
+M7 deployment preflight is now available through `kairyu validate`. The command
+deterministically checks the DeploymentSpec and its declared local
+orchestrator, chat-template, native-model, tokenizer, and backend-capability
+inputs without reading credentials, constructing runtime resources, loading
+weights, contacting the network, or probing hardware. Metadata-only model shapes
+and checkpoint headers validate the tensors runtime will consume without
+materializing them. It aggregates independent schema/filesystem errors and
+leaves network/hardware readiness to deployment gates.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -410,6 +419,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [amendment] D3 adds credential-free offline deployment preflight
+- What: Added `kairyu validate <deployment.yaml>` with stable 0/1 exit status and deterministic aggregation of DeploymentSpec, backend capability, linked orchestrator/DAG, `.jinja`, native model metadata/checkpoint tensor-shape, and tokenizer errors. The validation-only loader context retains tenant topology checks without resolving API-key environment values; network and hardware remain explicit skipped/indeterminate classes. Backend constructors, server startup, tensor materialization, model execution, subprocesses, and probes are never invoked. The command covers only artifact links the current DeploymentSpec can declare; standalone adapter, grammar, and benchmark links remain not applicable rather than being invented.
+- Why: Operators otherwise discovered cross-file and backend mismatches only after serving began to construct resources. A credential-free, side-effect-free preflight catches the safely knowable failures before rollout while preserving runtime ownership of secrets, remote reachability, and hardware acceptance.
+- Refs: m7 D3; issue #230; `kairyu/deploy/validation.py`; `kairyu/deploy/spec.py`; `kairyu/entrypoints/cli.py`; `docs/deployment.md`; `tests/unit/test_{deployment_validation,validate_cli}.py`
 
 ### 2026-07-29 — [amendment] Deployment server schema stops inheriting runtime settings
 - What: Amended m7 D3 so the versioned DeploymentSpec `ServerSection` independently declares its ten existing YAML fields, forbids unknown keys, and translates the eight runtime fields explicitly to `ServerSettings`. Builder and tenant preflight use that one mapping. Schema/default snapshots, full-key YAML round-trip, default/runtime parity, unknown-key rejection, and builder lifecycle tests preserve current artifacts while making future runtime-only additions an explicit design choice.

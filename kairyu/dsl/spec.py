@@ -50,7 +50,7 @@ class BudgetSpec(BaseModel):
 class OrchestratorSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    workers: tuple[WorkerSpec, ...]
+    workers: tuple[WorkerSpec, ...] = Field(min_length=1)
     roles: tuple[RoleNodeSpec, ...] = ()
     budget: BudgetSpec = BudgetSpec()
     shared_prefix: str = ""
@@ -60,7 +60,10 @@ class OrchestratorSpec(BaseModel):
 
     @model_validator(mode="after")
     def _roles_reference_known_workers(self) -> OrchestratorSpec:
-        known = {worker.name for worker in self.workers}
+        worker_names = [worker.name for worker in self.workers]
+        known = set(worker_names)
+        if len(known) != len(worker_names):
+            raise ValueError("worker names must be unique")
         for role in self.roles:
             if role.worker not in known:
                 raise ValueError(
