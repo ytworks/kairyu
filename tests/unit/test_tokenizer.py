@@ -1,5 +1,7 @@
 """Tokenizer seam: protocol impls + incremental detokenizer (design m8 D1)."""
 
+import json
+
 import pytest
 
 from kairyu.engine.tokenizer import (
@@ -10,6 +12,28 @@ from kairyu.engine.tokenizer import (
     grammar_vocabulary,
     resolve_tokenizer,
 )
+
+
+def _write_word_level_tokenizer(path, config):
+    """Write a small tokenizer whose EOS candidates have stable IDs."""
+    from tokenizers import Tokenizer, models
+
+    raw = Tokenizer(
+        models.WordLevel(
+            vocab={
+                "[UNK]": 0,
+                "</s>": 1,
+                "<｜end▁of▁sentence｜>": 2,
+            },
+            unk_token="[UNK]",
+        )
+    )
+    raw.save(str(path / "tokenizer.json"))
+    (path / "tokenizer_config.json").write_text(
+        json.dumps(config, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
 
 
 @pytest.fixture(scope="module")
@@ -75,6 +99,70 @@ class TestHFTokenizer:
         tok = HFTokenizer(hf_tokenizer_dir)
         assert tok.eos_token_id is not None
         assert tok.vocab()[tok.eos_token_id] == "</s>"
+
+    def test_eos_from_added_token_config(self, tmp_path):
+        path = _write_word_level_tokenizer(
+            tmp_path,
+            {
+                "eos_token": {
+                    "__type": "AddedToken",
+                    "content": "<｜end▁of▁sentence｜>",
+                    "lstrip": False,
+                    "normalized": False,
+                    "rstrip": False,
+                    "single_word": False,
+                }
+            },
+        )
+
+        tok = HFTokenizer(path)
+
+        assert tok.eos_token_id == 2
+        assert tok.vocab()[tok.eos_token_id] == "<｜end▁of▁sentence｜>"
+
+    @pytest.mark.parametrize("config", [{}, {"eos_token": None}])
+    def test_missing_or_null_eos_probes_common_tokens(self, tmp_path, config):
+        tok = HFTokenizer(_write_word_level_tokenizer(tmp_path, config))
+
+        assert tok.eos_token_id == 1
+
+    @pytest.mark.parametrize(
+        "eos_token",
+        [
+            {"__type": "AddedToken"},
+            {"content": 7},
+            {"content": ""},
+            7,
+            ["</s>"],
+        ],
+    )
+    def test_rejects_malformed_eos_config(self, tmp_path, eos_token):
+        path = _write_word_level_tokenizer(tmp_path, {"eos_token": eos_token})
+
+        with pytest.raises(ValueError, match="eos_token"):
+            HFTokenizer(path)
+
+    def test_explicit_eos_takes_precedence_over_added_token_config(self, tmp_path):
+        path = _write_word_level_tokenizer(
+            tmp_path,
+            {"eos_token": {"content": "<｜end▁of▁sentence｜>"}},
+        )
+
+        tok = HFTokenizer(path, eos_token="</s>")
+
+        assert tok.eos_token_id == 1
+
+    def test_rejects_non_object_tokenizer_config(self, tmp_path):
+        path = _write_word_level_tokenizer(tmp_path, [])
+
+        with pytest.raises(ValueError, match="must contain a JSON object"):
+            HFTokenizer(path)
+
+    def test_rejects_non_string_explicit_eos(self, tmp_path):
+        path = _write_word_level_tokenizer(tmp_path, {})
+
+        with pytest.raises(TypeError, match="eos_token must be a string or None"):
+            HFTokenizer(path, eos_token={"content": "</s>"})  # type: ignore[arg-type]
 
     def test_accepts_direct_file_path(self, hf_tokenizer_dir):
         tok = HFTokenizer(hf_tokenizer_dir / "tokenizer.json")
