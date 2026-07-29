@@ -98,12 +98,14 @@ packages = ["kairyu"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-# gpu/hf_hub are deselected by default (deploy-day / opt-in networked suites);
-# escape hatch: `pytest -m gpu` / `pytest -m hf_hub` (CLI -m overrides addopts)
-addopts = "--cov=kairyu --cov-report=term-missing --strict-markers -m 'not gpu and not hf_hub'"
+# gpu/hf_hub/docker_exec are deselected by default (deploy-day / opt-in suites);
+# dedicated jobs run each environment-dependent gate without treating a skip as
+# a pass. CLI `-m` overrides this expression.
+addopts = "--cov=kairyu --cov-report=term-missing --strict-markers -m 'not gpu and not hf_hub and not docker_exec'"
 markers = [
     "gpu: requires CUDA hardware (runs on deploy day via scripts/gpu_gates)",
     "hf_hub: downloads real weights from the HF Hub (opt-in, networked)",
+    "docker_exec: requires Docker and a pinned KAIRYU_BENCH_EXEC_IMAGE",
     "dist: spawns torch.distributed multi-process workers (slower)",
 ]
 

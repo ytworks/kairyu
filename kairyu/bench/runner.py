@@ -47,7 +47,7 @@ _FINGERPRINT_EXCLUSIONS = frozenset(
 )
 
 
-def _environment() -> dict:
+def _environment(*, execution_runner=None) -> dict:
     try:
         commit = (
             subprocess.run(
@@ -65,12 +65,20 @@ def _environment() -> dict:
         kairyu_version = version("kairyu")
     except PackageNotFoundError:
         kairyu_version = "unknown"
-    return {
+    environment = {
         "git_commit": commit,
         "kairyu_version": kairyu_version,
         "python": platform.python_version(),
         "created_at": utc_now(),
     }
+    if execution_runner is not None:
+        available, detail = execution_runner.availability()
+        environment["execution"] = {
+            **execution_runner.metadata(),
+            "available": available,
+            "availability_detail": detail,
+        }
+    return environment
 
 
 def _default_run_id() -> str:
@@ -188,6 +196,9 @@ class SuiteRunner:
 
     def _build_context(self, cache: BenchCache, run_id: str = "") -> RunContext:
         config = self.config
+        from kairyu.bench.execution import build_execution_runner
+
+        execution_runner = build_execution_runner(config.execution)
         limit = config.limit
         if config.smoke:
             limit = min(limit or SMOKE_LIMIT, SMOKE_LIMIT)
@@ -216,6 +227,7 @@ class SuiteRunner:
             offline_fixtures=config.offline_fixtures,
             smoke=config.smoke,
             docker=docker,
+            execution_runner=execution_runner,
             progress=self._progress,
             exec_semaphore=asyncio.Semaphore(max(1, (os.cpu_count() or 4) - 1)),
         )
@@ -280,7 +292,7 @@ class SuiteRunner:
         ]
         identity = _run_identity(config, adapter_identities)
         fingerprint = _run_fingerprint(identity)
-        environment = _environment()
+        environment = _environment(execution_runner=ctx.execution_runner)
         store.initialize_run(
             {
                 "fingerprint": fingerprint,

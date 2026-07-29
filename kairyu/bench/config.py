@@ -101,6 +101,27 @@ def build_config(args) -> BenchConfig:
     if judge:
         data["judge"] = JudgeConfig(**judge).model_dump()
 
+    execution = dict(data.get("execution") or {})
+    exec_runner = getattr(args, "exec_runner", None)
+    if exec_runner == "local":
+        # Selecting local on the CLI replaces a Docker block from YAML instead
+        # of retaining an image that is invalid (and meaningless) for local
+        # execution.
+        execution = {"runner": "local"}
+    elif exec_runner is not None:
+        execution["runner"] = exec_runner
+    execution_overrides = {
+        "image": getattr(args, "exec_image", None),
+        "cpus": getattr(args, "exec_cpus", None),
+        "pids_limit": getattr(args, "exec_pids_limit", None),
+        "disk_mb": getattr(args, "exec_disk_mb", None),
+    }
+    for key, value in execution_overrides.items():
+        if value is not None:
+            execution[key] = value
+    if execution:
+        data["execution"] = execution
+
     overrides = {
         "suite": args.suite,
         "limit": args.limit,

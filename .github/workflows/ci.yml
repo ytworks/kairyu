@@ -37,6 +37,31 @@ jobs:
       - name: WebUI Kairyu smoke
         run: ./scripts/webui_smoke.sh
 
+  bench-exec-container:
+    # Issue #210: the real isolation/conformance gate is mandatory here. The
+    # test fails (never skips) if Docker or the exact pinned image is absent.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync --dev
+      - name: Build and pin execution image
+        run: |
+          iidfile="$RUNNER_TEMP/kairyu-bench-exec-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.iid"
+          docker build \
+            --iidfile "$iidfile" \
+            -f deploy/bench/Dockerfile.exec \
+            deploy/bench
+          image_id="$(tr -d '\r\n' < "$iidfile")"
+          test "${image_id#sha256:}" != "$image_id"
+          echo "KAIRYU_BENCH_EXEC_IMAGE=$image_id" >> "$GITHUB_ENV"
+      - name: Real Docker runner conformance
+        run: uv run pytest -m docker_exec tests/bench/test_bench_exec_docker.py -v --no-cov
+
   kind-smoke:
     runs-on: ubuntu-latest
     needs: test

@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+#
+# Trusted runtime for `kairyu bench --exec-runner docker`.
+# The runner accepts only an immutable digest at execution time; the tag used
+# while building this image is never a valid benchmark configuration value.
+FROM python@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
+
+COPY requirements.exec.txt /tmp/requirements.exec.txt
+RUN python -m pip install \
+      --disable-pip-version-check \
+      --no-cache-dir \
+      --require-hashes \
+      --requirement /tmp/requirements.exec.txt \
+    && rm /tmp/requirements.exec.txt
+
+# DockerExecutionRunner also sets this explicitly. Keeping the image non-root
+# makes an accidental invocation outside that runner fail closed as well.
+USER 65534:65534
+WORKDIR /work

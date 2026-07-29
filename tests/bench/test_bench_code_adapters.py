@@ -6,13 +6,18 @@ import pickle
 import zlib
 
 import httpx
-from conftest import make_config
+from conftest import make_config, make_target
 
 from kairyu.bench.adapters.base import RunContext
-from kairyu.bench.adapters.livecodebench import decode_private_tests, grade_code
+from kairyu.bench.adapters.livecodebench import (
+    LiveCodeBenchAdapter,
+    decode_private_tests,
+    grade_code,
+)
 from kairyu.bench.adapters.scicode import SciCodeAdapter
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.runner import SuiteRunner
+from kairyu.bench.sandbox import ExecResult
 from kairyu.bench.store import ResultStore
 from kairyu.bench.types import BenchItem
 
@@ -24,6 +29,59 @@ FUNCTIONAL_TESTS = [
     {"input": "4\n5", "output": "9", "testtype": "functional"},
     {"input": "-2\n2", "output": "0", "testtype": "functional"},
 ]
+
+
+class _RecordingExecutionRunner:
+    def __init__(
+        self,
+        *,
+        modules: tuple[str, ...] = ("numpy",),
+        available: tuple[bool, str] = (True, ""),
+        stdout: str = "5\n",
+    ) -> None:
+        self.modules = set(modules)
+        self.available = available
+        self.stdout = stdout
+        self.calls: list[dict] = []
+        self.module_probes: list[str] = []
+
+    def run_python(
+        self,
+        code: str,
+        *,
+        stdin: str = "",
+        timeout_s: float = 30.0,
+        memory_mb: int = 4096,
+        files: dict[str, bytes] | None = None,
+    ) -> ExecResult:
+        self.calls.append(
+            {
+                "code": code,
+                "stdin": stdin,
+                "timeout_s": timeout_s,
+                "memory_mb": memory_mb,
+                "files": dict(files or {}),
+            }
+        )
+        return ExecResult(
+            returncode=0,
+            stdout=self.stdout,
+            stderr="",
+            timed_out=False,
+        )
+
+    def has_module(self, name: str) -> bool:
+        self.module_probes.append(name)
+        return name in self.modules
+
+    def metadata(self) -> dict:
+        return {
+            "identity": "recording-test-runner",
+            "limits": {"network": "none", "filesystem": "ephemeral"},
+        }
+
+    def availability(self) -> tuple[bool, str]:
+        return self.available
 
 
 def test_grade_code_stdin_pass_and_fail():
@@ -53,6 +111,23 @@ def test_grade_code_crash_and_timeout_reported():
 
     passed, detail = grade_code("import time; time.sleep(30)", STDIN_TESTS[:1], None)
     assert not passed and "timeout" in detail
+
+
+def test_grade_code_uses_the_injected_execution_runner():
+    execution_runner = _RecordingExecutionRunner()
+
+    passed, detail = grade_code(
+        "print('the fake runner owns execution')",
+        STDIN_TESTS[:1],
+        None,
+        runner=execution_runner,
+    )
+
+    assert passed and detail == ""
+    assert len(execution_runner.calls) == 1
+    assert "fake runner owns execution" in execution_runner.calls[0]["code"]
+    assert execution_runner.calls[0]["timeout_s"] == 6.0
+    assert execution_runner.calls[0]["memory_mb"] == 4096
 
 
 def test_decode_private_tests_both_encodings():
@@ -122,7 +197,11 @@ async def test_livecodebench_end_to_end_with_correct_model(tmp_path):
     pair = ResultStore(tmp_path / "results", "test-run").load_pair("livecodebench", "m")
     assert pair.status == "completed"
     assert pair.score == 1.0
-    assert "sandbox" in pair.methodology["execution"]
+    assert isinstance(pair.methodology["execution"]["runner"], dict)
+    assert pair.methodology["execution"]["per_test_limits"] == {
+        "timeout_s": 6.0,
+        "memory_mb": 4096,
+    }
 
 
 async def test_livecodebench_mock_gateway_scores_zero_not_crash(tmp_path, http_factory):
@@ -171,12 +250,15 @@ async def test_livecodebench_empty_completions_are_failed_not_scored_zero(tmp_pa
     assert all(item.latency_s is not None for item in pair.items)
 
 
-def _scicode_ctx(tmp_path) -> RunContext:
-    return RunContext(
+def _scicode_ctx(tmp_path, execution_runner=None) -> RunContext:
+    kwargs = dict(
         cache=BenchCache(tmp_path / "cache"),
         http_factory=lambda: httpx.AsyncClient(),
         offline_fixtures=True,
     )
+    if execution_runner is not None:
+        kwargs["execution_runner"] = execution_runner
+    return RunContext(**kwargs)
 
 
 async def test_scicode_scores_correct_step(tmp_path):
@@ -202,6 +284,78 @@ async def test_scicode_scores_correct_step(tmp_path):
 
     result = await adapter.score(item, "```python\ndef vector_norm(v):\n    return 0\n```", ctx)
     assert result.score == 0.0
+
+
+async def test_adapters_use_and_disclose_the_selected_execution_runner(tmp_path):
+    execution_runner = _RecordingExecutionRunner()
+    ctx = _scicode_ctx(tmp_path, execution_runner)
+    lcb_item = BenchItem(
+        id="lcb-fx",
+        payload={
+            "tests": STDIN_TESTS[:1],
+            "fn_name": None,
+        },
+    )
+    lcb_result = await LiveCodeBenchAdapter().score(
+        lcb_item,
+        "```python\nprint('selected runner')\n```",
+        ctx,
+    )
+    scicode_item = BenchItem(
+        id="scicode-fx.1",
+        payload={
+            "step_id": "fx.1",
+            "dependencies": "",
+            "prior_code": "",
+            "test_cases": ["assert selected_runner_was_used()"],
+        },
+    )
+
+    scicode_result = await SciCodeAdapter().score(
+        scicode_item,
+        "```python\ndef selected_runner_was_used():\n    return True\n```",
+        ctx,
+    )
+
+    assert lcb_result.status == "completed" and lcb_result.score == 1.0
+    assert scicode_result.status == "completed" and scicode_result.score == 1.0
+    assert len(execution_runner.calls) == 2
+    assert "selected runner" in execution_runner.calls[0]["code"]
+    assert "selected_runner_was_used" in execution_runner.calls[1]["code"]
+    assert SciCodeAdapter().methodology(ctx)["execution"]["runner"] == (
+        execution_runner.metadata()
+    )
+    assert LiveCodeBenchAdapter().methodology(ctx)["execution"]["runner"] == (
+        execution_runner.metadata()
+    )
+
+
+def test_scicode_probes_the_selected_runners_modules(tmp_path):
+    execution_runner = _RecordingExecutionRunner(modules=())
+    ctx = _scicode_ctx(tmp_path, execution_runner)
+
+    reason = SciCodeAdapter().check_preconditions(make_target(), ctx)
+
+    assert execution_runner.module_probes == ["numpy"]
+    assert reason == "selected execution runner lacks numpy (pip install numpy)"
+
+
+def test_execution_adapters_fail_closed_when_the_selected_runner_is_unavailable(
+    tmp_path,
+):
+    execution_runner = _RecordingExecutionRunner(
+        available=(False, "container runtime is down")
+    )
+    ctx = _scicode_ctx(tmp_path, execution_runner)
+
+    lcb_reason = LiveCodeBenchAdapter().check_preconditions(make_target(), ctx)
+    scicode_reason = SciCodeAdapter().check_preconditions(make_target(), ctx)
+
+    assert lcb_reason == (
+        "selected execution runner unavailable (container runtime is down)"
+    )
+    assert scicode_reason == lcb_reason
+    assert execution_runner.module_probes == []
 
 
 async def test_scicode_target_tests_without_golden_data_are_unjudged(tmp_path):
