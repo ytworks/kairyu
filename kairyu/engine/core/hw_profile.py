@@ -80,19 +80,34 @@ def _formats_for_sm(sm: int) -> tuple[str, ...]:
     return ("bf16",)
 
 
-def probe() -> HardwareProfile:
-    """Probe this machine; CPU profile when torch/CUDA is unavailable."""
+def probe(device: object | None = None) -> HardwareProfile:
+    """Probe one device; CPU profile when torch/CUDA is unavailable.
+
+    ``device=None`` preserves the historical GPU-0 probe.  Role-specific
+    placement passes ``cuda:N`` so heterogeneous hosts never select kernels
+    from another GPU's compute capability.
+    """
     try:
         import torch
     except ImportError:
         return HardwareProfile(arch="cpu")
+    requested = None if device is None else torch.device(device)
+    if requested is not None and requested.type == "cpu":
+        return HardwareProfile(arch="cpu")
+    if requested is not None and requested.type != "cuda":
+        raise ValueError(
+            f"hardware probing supports only CPU or CUDA devices, got {requested}"
+        )
     if not torch.cuda.is_available():
         return HardwareProfile(arch="cpu")
-    return _probe_cuda(torch)
+    selected = 0 if requested is None else requested
+    if isinstance(selected, torch.device) and selected.index is None:
+        selected = torch.device("cuda", torch.cuda.current_device())
+    return _probe_cuda(torch, selected)
 
 
-def _probe_cuda(torch) -> HardwareProfile:  # pragma: no cover - needs CUDA hardware
-    properties = torch.cuda.get_device_properties(0)
+def _probe_cuda(torch, device=0) -> HardwareProfile:  # pragma: no cover - needs CUDA hardware
+    properties = torch.cuda.get_device_properties(device)
     sm = properties.major * 10 + properties.minor
     return HardwareProfile(
         arch="cuda",

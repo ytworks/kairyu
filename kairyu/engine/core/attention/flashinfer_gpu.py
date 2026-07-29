@@ -61,16 +61,17 @@ class FlashInferBackend:
     #: still cannot be captured and the eager list paths still sync to the host.
     supports_graph_capture = True
 
-    def __init__(self, device: str = "cuda") -> None:
+    def __init__(self, device: object = "cuda") -> None:
         import flashinfer  # deferred: not installable on macOS; [gpu] extra
 
         self._flashinfer = flashinfer
-        self._device = device
-        workspace = torch.zeros(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+        selected = torch.device(device)
+        if selected.type == "cuda" and selected.index is None:
+            selected = torch.device("cuda", torch.cuda.current_device())
+        self._device = selected
+        workspace = torch.zeros(_WORKSPACE_BYTES, dtype=torch.uint8, device=selected)
         self._workspace = workspace
-        self._prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            workspace, kv_layout="NHD"
-        )
+        self._prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="NHD")
         self._decode = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             workspace, kv_layout="NHD", use_tensor_cores=True
         )
@@ -85,17 +86,18 @@ class FlashInferBackend:
         self._decode_tensor_key: tuple | None = None
         self._decode_tensor_layers: set[int] = set()
 
+    @property
+    def device(self) -> torch.device:
+        """The explicit device owning this stateful backend's workspace."""
+        return self._device
+
     def _paged_arrays(
         self, page_table: list[int], seq_len: int, page_size: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_pages = -(-seq_len // page_size)
         indptr = torch.tensor([0, num_pages], dtype=torch.int32)  # host
-        indices = torch.tensor(
-            page_table[:num_pages], dtype=torch.int32, device=self._device
-        )
-        last_page_len = torch.tensor(
-            [(seq_len - 1) % page_size + 1], dtype=torch.int32
-        )  # host
+        indices = torch.tensor(page_table[:num_pages], dtype=torch.int32, device=self._device)
+        last_page_len = torch.tensor([(seq_len - 1) % page_size + 1], dtype=torch.int32)  # host
         return indptr, indices, last_page_len
 
     def _paged_batch_arrays(
@@ -138,9 +140,7 @@ class FlashInferBackend:
         is_decode = chunk_len == 1
         if key == self._plan_key and is_decode == self._planned_decode:
             return is_decode
-        indptr, indices, last_page_len = self._paged_arrays(
-            page_table, seq_len, kv_pool.page_size
-        )
+        indptr, indices, last_page_len = self._paged_arrays(page_table, seq_len, kv_pool.page_size)
         if is_decode:
             self._decode.plan(
                 indptr,
@@ -275,9 +275,9 @@ class FlashInferBackend:
                 "plan_decode() once per decode step BEFORE capture/replay"
             )
         page_size = kv_pool.page_size
-        pages_per_row = torch.div(
-            seq_lens + page_size - 1, page_size, rounding_mode="floor"
-        ).to(torch.int32)
+        pages_per_row = torch.div(seq_lens + page_size - 1, page_size, rounding_mode="floor").to(
+            torch.int32
+        )
         indptr = torch.zeros(
             pages_per_row.shape[0] + 1, dtype=torch.int32, device=pages_per_row.device
         )
@@ -288,9 +288,7 @@ class FlashInferBackend:
         indices = page_tables[used].to(torch.int32)
         last_page_len = ((seq_lens - 1) % page_size + 1).to(torch.int32)
 
-        wrapper = self._graph_decode_wrapper(
-            int(page_tables.shape[0]), int(page_tables.shape[1])
-        )
+        wrapper = self._graph_decode_wrapper(int(page_tables.shape[0]), int(page_tables.shape[1]))
         wrapper.plan(
             indptr,
             indices,
@@ -329,9 +327,7 @@ class FlashInferBackend:
         step (detected by a layer being revisited), so this stays a drop-in for
         ``TorchAttentionBackend.attend_decode``.
         """
-        key = self._decode_shape_key(
-            kv_pool, page_tables, int(query.shape[1]), query.dtype
-        )
+        key = self._decode_shape_key(kv_pool, page_tables, int(query.shape[1]), query.dtype)
         if _is_capturing():
             if self._decode_tensor_key != key:
                 raise RuntimeError(
@@ -374,8 +370,7 @@ class FlashInferBackend:
         if len(set(lengths.values())) != 1:
             details = ", ".join(f"{name}={length}" for name, length in lengths.items())
             raise ValueError(
-                "FlashInfer parallel batch inputs must have the same length "
-                f"({details})"
+                f"FlashInfer parallel batch inputs must have the same length ({details})"
             )
         if not queries:
             return []
@@ -394,9 +389,7 @@ class FlashInferBackend:
                 )
             ]
 
-        for query, seq_len, chunk_start in zip(
-            queries, seq_lens, chunk_starts, strict=True
-        ):
+        for query, seq_len, chunk_start in zip(queries, seq_lens, chunk_starts, strict=True):
             chunk_len = query.shape[0]
             assert chunk_start + chunk_len == seq_len, (
                 "FlashInfer causal=True is bottom-right aligned: the chunk must be "

@@ -344,7 +344,9 @@ config. Key constructor options (also available as `options:` in a DeploymentSpe
 the [backend options table](#backend-options-enginesoptions)): `tokenizer`, `num_pages`,
 `page_size`, `max_num_batched_tokens`, `speculative="ngram"`, `tensor_parallel_size`,
 `pipeline_depth` (1 is synchronous compatibility; 2 enables schedule/device
-overlap), and `decode_mode="cuda_graph"` on CUDA.
+overlap), `decode_mode="cuda_graph"` on CUDA, and
+`pd_separation`/`pd_prefill_device`/`pd_decode_device`/`pd_defer_handoff` for
+prefill/decode separation.
 
 **Hosted API instead of local weights** — the `openai` backend points at any
 OpenAI-compatible endpoint; the API key is read from the environment variable named by
@@ -401,6 +403,34 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 Tensor parallelism is configured per engine in the YAML
 (`options: {tensor_parallel_size: 2}`) — the serve process spawns a multi-process TP
 worker group (gloo on CPU, NCCL on GPU). There is no CLI flag for it.
+
+Prefill/decode separation is also configured per engine. This example places
+the roles on a peer-accessible CUDA pair:
+
+```yaml
+engines:
+  qwen-pd:
+    backend: kairyu
+    options:
+      model_path: /models/qwen3-32b
+      pd_separation: true
+      pd_prefill_device: cuda:0
+      pd_decode_device: cuda:1
+      pd_defer_handoff: true
+```
+
+Both role devices must be CPU or both CUDA. Each distinct role device is probed
+and gets its own compatible attention backend; stateful backend instances are
+not shared across devices. Deferred cross-device handoff requires CUDA P2P
+access between the selected GPUs and fails at startup when it is unavailable.
+It copies on dedicated source and destination transfer streams, but publishes
+destination KV and releases source pages only after the physical completion
+event returns ready from `event.query()`. If completion or cleanup can no
+longer be established, the engine retains the affected ownership and fails
+closed instead of publishing or reusing partial KV. Set
+`pd_defer_handoff: false` for the serialized control: both transfer streams are
+synchronized before publication, with the same correctness contract. The
+current P-D path requires TP=1, eager decode, and no speculative decoding.
 
 Endpoints served: `/v1/chat/completions` (SSE streaming, tools, logprobs, `n>1`,
 `response_format: json_schema`, vision content parts), `/v1/completions`, `/v1/models`,
@@ -679,6 +709,10 @@ gateways, install `--extra fleet` and select `store: postgres`,
 | | `cuda_graph_max_batch` | 8 | largest captured decode batch; larger batches use eager decode |
 | | `cuda_graph_max_pages` | 512 | fixed page-table width per captured bucket; longer sequences use eager decode; must be smaller than `num_pages` |
 | | `cuda_graph_warmup_iters` | 3 | side-stream warmup iterations before first capture |
+| | `pd_separation` | `false` | build separate prefill and decode engines; currently requires a real model, TP=1, eager decode, and no speculative decoding |
+| | `pd_prefill_device` | auto | prefill role device (`cpu` or `cuda:N`); requires `pd_separation`; its hardware profile and attention backend are selected for this device |
+| | `pd_decode_device` | auto | decode role device (`cpu` or `cuda:N`); must have the same CPU/CUDA type as the prefill role; deferred cross-device CUDA requires P2P access |
+| | `pd_defer_handoff` | `true` | defer publication/release until physical transfer completion; `false` synchronizes the source and destination transfer streams before publication |
 | `kairyu-proc` | same as `kairyu` | — | runs the engine in a separate process over ZMQ/msgpack (crash isolation) |
 | `openai` | `base_url`, `api_key`, `model` | — | any OpenAI-compatible endpoint |
 | `vllm` | vLLM engine kwargs | — | needs a Linux GPU host with vllm installed |

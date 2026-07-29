@@ -20,7 +20,7 @@ from kairyu.engine.core.kv_transport import (
     PageFrame,
     SequenceMeta,
 )
-from kairyu.engine.core.pd import KVHandoffError
+from kairyu.engine.core.pd import HandoffCompletionLostError, KVHandoffError
 from kairyu.engine.core.pd_remote import RemoteKVHandoff, RemoteKVReceiver
 from kairyu.engine.core.radix_kv import RadixKVCache
 
@@ -123,6 +123,30 @@ class TestRemoteHandoff:
                 )
         assert receiver.injected_pages == 3
 
+    def test_discard_releases_the_receiver_allocation(self):
+        prefill_pool = _filled_pool()
+        decode_pool = PagedKVPool(2, 16, PAGE, 2, 8)
+        decode_cache = RadixKVCache(num_pages=16, page_size=PAGE)
+        prefill_transport, decode_transport = self._pair()
+        receiver = RemoteKVReceiver(decode_cache, decode_pool)
+        handoff = RemoteKVHandoff(
+            prefill_transport,
+            "decode",
+            prefill_pool,
+            receiver,
+            decode_transport,
+            "prefill",
+        )
+        allocation = handoff.transfer(
+            tuple(range(9)),
+            first_token=42,
+            pages=(1, 3, 5),
+        )
+
+        handoff.discard(allocation)
+
+        assert allocation._freed is True
+
     def test_receiver_dedup_skips_cached_pages(self):
         prefill_pool = _filled_pool()
         decode_pool = PagedKVPool(2, 16, PAGE, 2, 8)
@@ -175,6 +199,84 @@ class TestRemoteHandoff:
         allocation = cache.allocate(tokens)
         assert allocation.num_cached_tokens == 0
         cache.release_preempted(allocation)
+
+    def test_injection_interruption_releases_the_unpublished_allocation(
+        self,
+        monkeypatch,
+    ):
+        import kairyu.engine.core.pd_remote as pd_remote
+
+        source = _filled_pool()
+        pool = PagedKVPool(2, 16, PAGE, 2, 8)
+        cache = RadixKVCache(num_pages=16, page_size=PAGE)
+        receiver = RemoteKVReceiver(cache, pool)
+        tokens = tuple(range(5))
+        frames = tuple(extract_page(source, page) for page in (0, 1))
+        allocations = []
+        original_allocate = cache.allocate
+
+        def capture_allocate(*args, **kwargs):
+            allocation = original_allocate(*args, **kwargs)
+            allocations.append(allocation)
+            return allocation
+
+        def interrupt_injection(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        cache.allocate = capture_allocate
+        monkeypatch.setattr(pd_remote, "inject_page", interrupt_injection)
+        with pytest.raises(KeyboardInterrupt):
+            receiver.adopt(
+                frames,
+                SequenceMeta(token_ids=tokens, first_token=42),
+            )
+
+        assert allocations[0]._freed is True
+        allocation = cache.allocate(tokens)
+        assert allocation.num_cached_tokens == 0
+        cache.release_preempted(allocation)
+
+    def test_interruption_plus_cleanup_failure_retains_remote_ownership(
+        self,
+        monkeypatch,
+    ):
+        import kairyu.engine.core.pd_remote as pd_remote
+
+        source = _filled_pool()
+        pool = PagedKVPool(2, 16, PAGE, 2, 8)
+        cache = RadixKVCache(num_pages=16, page_size=PAGE)
+        receiver = RemoteKVReceiver(cache, pool)
+        tokens = tuple(range(5))
+        frames = tuple(extract_page(source, page) for page in (0, 1))
+        allocations = []
+        original_allocate = cache.allocate
+
+        def capture_allocate(*args, **kwargs):
+            allocation = original_allocate(*args, **kwargs)
+            allocations.append(allocation)
+            return allocation
+
+        def interrupt_injection(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        def fail_cleanup(_allocation):
+            raise RuntimeError("injected cleanup failure")
+
+        cache.allocate = capture_allocate
+        cache.release_preempted = fail_cleanup
+        monkeypatch.setattr(pd_remote, "inject_page", interrupt_injection)
+
+        with pytest.raises(
+            HandoffCompletionLostError,
+            match="cleanup",
+        ) as caught:
+            receiver.adopt(
+                frames,
+                SequenceMeta(token_ids=tokens, first_token=42),
+            )
+
+        assert caught.value.allocation is allocations[0]
+        assert allocations[0]._freed is False
 
     def test_event_sink_failure_does_not_publish_cache(self):
         source = _filled_pool()

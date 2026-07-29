@@ -51,6 +51,55 @@ def test_native_cuda_graph_without_model_is_rejected_before_import():
         validate_backend_options("kairyu", {"decode_mode": "cuda_graph"})
 
 
+def test_cross_device_pd_options_pass_preflight_without_runtime_import():
+    validate_backend_options(
+        "kairyu",
+        {
+            "model_path": "/models/qwen3-32b",
+            "pd_separation": True,
+            "pd_prefill_device": "cuda:0",
+            "pd_decode_device": "cuda:1",
+            "pd_defer_handoff": False,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefill", "decode"),
+    [
+        ("cpu", "cuda:0"),
+        ("mps", "mps"),
+        ("not-a-device", "not-a-device"),
+    ],
+)
+def test_pd_device_pair_fails_static_preflight(prefill, decode):
+    with pytest.raises(ValueError, match="CPU or CUDA|both be CUDA"):
+        validate_backend_options(
+            "kairyu",
+            {
+                "model_path": "/models/qwen3-32b",
+                "pd_separation": True,
+                "pd_prefill_device": prefill,
+                "pd_decode_device": decode,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"pd_prefill_device": 0},
+        {"pd_decode_device": False},
+        {"pd_defer_handoff": "false"},
+        {"pd_prefill_device": "cuda:0"},
+        {"pd_defer_handoff": False},
+    ],
+)
+def test_invalid_or_inactive_pd_role_options_fail_preflight(options):
+    with pytest.raises(ValueError, match="P-D|pd_"):
+        validate_backend_options("kairyu", options)
+
+
 def test_vllm_non_priority_policy_is_rejected_before_import():
     with pytest.raises(ValueError, match="scheduling_policy"):
         validate_backend_options(

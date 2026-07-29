@@ -81,6 +81,10 @@ class TestHardwareProfile:
             assert profile.arch == "cpu"
             assert profile.kernel_tier == "torch"
 
+    def test_probe_rejects_a_non_cpu_non_cuda_device(self):
+        with pytest.raises(ValueError, match="only CPU or CUDA"):
+            probe("mps")
+
     def test_best_format_matrix(self):
         sm120 = HardwareProfile(
             arch="cuda", sm=120, formats=("bf16", "fp8", "int8", "nvfp4")

@@ -208,6 +208,51 @@ a recording fake.
 >   which `EngineLoop` drains and prepends to the request's metadata; grammar
 >   termination at token 0 finishes the request at adoption, before decode is
 >   planned, which is where the ordinary path's `finish_early` sits too.
+>
+> **Amended 2026-07-30 (#223; supersedes the 2026-07-26 stream-gate
+> settlement description above).** A CUDA stream wait orders work that will be
+> submitted to that stream; it does **not** prove that a transfer is physically
+> complete and therefore cannot authorize host-visible radix publication or
+> release of the source-page lease. The production coordinator retains an
+> opaque completion for every transfer, polls its CUDA event with
+> `event.query()`, and performs destination publication/adoption and source
+> commit/release only after the query reports completion. One subsequent
+> prefill forward may be submitted while the copy is live; if settlement is
+> still pending, that forward's result is staged rather than starting another
+> producer step or publishing incomplete KV. `gate_pending()` remains a
+> low-level stream-ordering operation, not the production completion
+> authority.
+>
+> Cross-device CUDA handoff owns two dedicated transfer streams. A source-copy
+> stream on the prefill GPU waits for a producer-readiness event, while a
+> destination dependency/completion stream on the decode GPU receives an
+> explicit bridge from the source tail. The final destination event is
+> downstream of both halves, so its query covers producer readiness, P2P copy,
+> and destination completion without putting the copy on either role's compute
+> stream. Deferred cross-device handoff is accepted only when CUDA reports peer
+> access for the selected pair; unsupported pairs fail at construction rather
+> than silently falling back to a serialized or staged path.
+>
+> Serving exposes the role placement as `pd_prefill_device` and
+> `pd_decode_device` under `pd_separation: true`. Both roles must be CPU or both
+> CUDA. Each distinct device is probed independently and receives a backend
+> selected for that role. A stateful attention-backend instance may be shared
+> on one device, but cross-device roles receive distinct instances and an
+> explicitly supplied backend bound to the wrong device is rejected.
+>
+> `pd_defer_handoff: false` is the supported blocking control. It keeps the same
+> byte-moving handoff and, for cross-device CUDA, synchronizes both the source
+> and destination transfer streams before publication. It is a correctness
+> comparison and fault-isolation control, not a different publication
+> contract. The default deferred path and this blocking path must produce
+> identical tokens and text.
+>
+> Completion ownership is fail-closed. If recording a trustworthy completion
+> fails, the implementation first attempts to synchronize and clean up. If
+> physical completion or cleanup still cannot be established, the destination
+> allocation and source ownership are retained/poisoned, a fatal completion-loss
+> error is surfaced, and neither partial KV publication nor page reuse/retry is
+> permitted.
 
 ### D4 — `kv_transport_nixl_gpu.py`: NIXL adapter
 
