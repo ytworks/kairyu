@@ -75,7 +75,7 @@ repeat the binding drill.
 |---|---|---|
 | F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform session-only (blank-root) rounds, the exact distribution-free one-sided ≥95% median lower bound and the full-sample geometric mean of the <10 ms SLO-goodput ratio are each ≥0.99, equivalently with ≥15/21 individual ratios ≥0.99 for the median bound; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
 | F2b | RadixKV KV-event index: every exact route uses truth <250 ms old and therefore strictly <500 ms under formal churn; killing one binding physical feed makes the full 200-entry route use the approximate oracle; restoring it converges by complete replay without process restart in <500 ms | replayable CPU chaos fixture (m10 A31) |
-| F2c | Real-engine validation: TTFT p95 reduction ≥30% on a multi-turn+RAG trace vs session-hashing, 4–8 GPUs | GPU testbed |
+| F2c | Real-engine validation: candidate/control nearest-rank TTFT p95 ratio ≤0.70 pooled, at the seventh ordered ratio of eight crossover rounds, and by geometric mean on a multi-turn+RAG trace; SLO-goodput ratio ≥0.99 pooled, at the second ordered ratio, and by geometric mean; pooled engine-token cache rate strictly improves without a per-round regression | **Closed** by retained 8-GPU artifact (m10 A32; 2026-07-29) |
 | F2d | Placement decisions land in the JSONL decision log (`prefix_match` reason) and feed `learning/dataset.py`; bandit-tuned α/β beats hand-tuned on a replayed trace | CPU bench |
 
 F2a reuses F1a run `30374404150` only for its kind deployment, ingress clock,
@@ -155,6 +155,60 @@ so no catch-up execution hid an OS scheduling stall. The independently
 replayed 2,196-row artifact is retained byte-identically at
 `bench/results/f2b-kv-event-retained/`; F1a and F2a were not rerun, and this
 evidence-only retention does not repeat F2b.
+
+F2c uses the production `ReplicaPool` plus streaming
+`OpenAICompatBackend` path against four independent Qwen3-32B TP2 endpoints on
+all eight GPUs. Two cache-disjoint, two-replica cohorts run candidate
+`PrefixIndex` and session-HRW control simultaneously and exchange policies
+across eight rounds. A recorded, single-use namespace keeps smoke and retry
+roots disjoint. Each round has 16 unique 2,048-word RAG families: a cold seed
+targets one logical replica, while the measured session hashes to the
+opposite replica. Paired policies receive identical session/prefix hints,
+prompts, and fixed eight-token generation. Each family predeclares a canonical
+assistant continuation whose digest and resulting turn-2 prompt digest are
+trace-bound. Turn 1 must succeed on both arms before turn 2, but neither
+post-treatment output is reused; both arms receive the same frozen transcript.
+Production decisions must be `prefix_match` versus `session_affinity`, and
+paired prompt tokens and completion work must agree while each arm's exact
+engine usage remains retained. Nearest-rank p95, the seventh ordered TTFT
+ratio, pooled ratio, and geometric mean bind the 30% gain.
+Goodput binds a 0.99 pooled, second-order, and geometric-mean floor; exact
+`cached_tokens / prompt_tokens` must improve pooled without a round
+regression. Raw scheduling skew and lateness remain replayed diagnostics
+without an arbitrary fail cutoff. Per-request output digests remain raw
+evidence, while their cross-arm match count, total, and rate are diagnostic
+only. The first formal attempt stopped on the former exact-output assertion;
+a fixed-endpoint reproduction found individually repeatable but cross-endpoint
+different continuations despite fully warm caches. This is consistent with a
+BF16/TP near-tie under different cache-population execution shapes, including
+possible chunk/prefill-history differences; it does not establish semantic
+cache corruption or a physical GPU-pair effect. Per G2's free-running
+precedent, it is not a routing correctness gate. Router JSONL, topology,
+configuration, model/source hashes, and all raw request evidence are
+independently replayed.
+This intentionally does not broaden F2c into DeploymentSpec exact-KV-event
+wiring, whose hash-provider and subscriber lifecycle are a separate D7 product
+responsibility.
+
+F2c is closed by the exact-source formal artifact retained at
+`bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/`. Its offline verifier
+accepted every check over 512 binding requests with zero failures. Pooled
+control-to-candidate TTFT p95 was 527.957623 ms → 134.357747 ms, with
+candidate/control ratios of 0.2544858548 pooled, 0.2550841404 at the seventh
+ordered round, and 0.2530080045 by geometric mean. Engine-token cache rate was
+0.4994645560 → 0.9843917326 with all rounds noninferior. SLO-goodput ratios
+were 0.9999979014 pooled, 0.9998437390 at the second ordered round, and
+0.9999978783 by geometric mean. Output agreement remained diagnostic at
+239/256 (0.93359375); paired-receipt skew and schedule lateness maxima were
+5.182959 ms and 7.470463 ms.
+
+The retained evidence binds source
+`80b039b5d429c656871a480c2740740951b29b97`, image
+`kairyu-f2c@sha256:d2c01580964f461a3d3d2a02ced5303e69c681696d4a38179162084e1624121f`,
+raw SHA-256
+`4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`,
+and trace SHA-256
+`51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.
 
 ### Stage F3 — NIC KV transfer + P/D pools (needs RDMA hardware)
 

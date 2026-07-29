@@ -205,3 +205,82 @@ image, and drill are unchanged.
   requires a clean source tree and records the source/config/benchmark hashes,
   model revision, image digests, `/backends` topology, and GPU inventory. Save
   the raw JSON under `bench/results/`.
+- 9.6 G5 F2c KV-aware TTFT: provision the external
+  `kairyu-qwen3-32b_qwen3-32b` volume with the pinned Qwen3-32B revision, and
+  make an image built from the clean expected source available locally by its
+  immutable `repository@sha256:...` digest. Its
+  `org.opencontainers.image.revision` label must equal that source commit.
+  The Compose profile assigns TP2 replicas A0/A1/B0/B1 to host GPU pairs
+  0–1/2–3/4–5/6–7 and exposes them on ports 8100–8103:
+
+  ```bash
+  export KAIRYU_F2C_IMAGE='repository@sha256:<64-lowercase-hex>'
+  docker image inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$KAIRYU_F2C_IMAGE"
+  examples/qwen3-32b-multi-gpu/f2c-stack.sh config
+  examples/qwen3-32b-multi-gpu/f2c-stack.sh up -d --wait
+  curl -fsS http://127.0.0.1:8100/readyz
+  curl -fsS http://127.0.0.1:8101/readyz
+  curl -fsS http://127.0.0.1:8102/readyz
+  curl -fsS http://127.0.0.1:8103/readyz
+  ```
+
+  Run only the changed-scope smoke needed to establish the harness. Smoke
+  binds evidence integrity, routing, usage, prompt identity, valid output
+  digests, and provenance; its performance metrics are diagnostic only. The
+  cross-arm output-match count, total, and rate are also diagnostic in both
+  profiles. Each trace family predeclares a canonical assistant continuation;
+  after both turn-1 requests succeed, both arms use that frozen common
+  transcript for turn 2 rather than either observed output. If that smoke
+  generates tokens, recreate all four containers before the formal run so its
+  per-round roots begin with empty independent caches. Run the one binding
+  profile from a clean pinned commit; the harness records `nvidia-smi`
+  inventory/topology and defaults to the four endpoints above:
+
+  ```bash
+  uv run python bench/kv_aware_ttft_f2c_bench.py \
+    --profile formal \
+    --output-dir bench/results/f2c-kv-aware-ttft-qwen3-32b-<date> \
+    --model qwen3-32b \
+    --model-revision <40-hex-model-revision> \
+    --trace-namespace issue181-run1-<date> \
+    --model-digest weights-rollup=<64-hex-sha256> \
+    --expected-commit <40-hex-source-commit> \
+    --assert-gate
+
+  uv run python bench/kv_aware_ttft_f2c_bench.py \
+    --verify-artifact bench/results/f2c-kv-aware-ttft-qwen3-32b-<date> \
+    --assert-gate
+
+  examples/qwen3-32b-multi-gpu/f2c-stack.sh down
+  ```
+
+  A trace namespace is single-use for a live cache set. Choose a new
+  lower-case namespace for a technical retry, or recreate all four containers
+  first; never replay a measured namespace against its warmed caches.
+  Retain both generated JSON files. The offline command rehashes the raw JSONL
+  and recomputes the trace, production routing decisions, exact engine
+  `cached_tokens` rates, nearest-rank p95, crossover order statistics,
+  goodput, frozen turn-2 transcript identity, diagnostic output-match rate,
+  configuration, topology, and source/model provenance.
+
+  Closure evidence (2026-07-29): the exact-source formal artifact at
+  `bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/` passed the online run
+  and offline verification with all checks green, 512 binding requests, and
+  zero failures. Control-to-candidate pooled TTFT p95 was 527.957623 ms →
+  134.357747 ms; candidate/control ratios were 0.2544858548 pooled,
+  0.2550841404 at the seventh ordered round, and 0.2530080045 by geometric
+  mean. Cache rate was 0.4994645560 → 0.9843917326 with every round
+  noninferior. Goodput ratios were 0.9999979014 pooled, 0.9998437390 at the
+  second ordered round, and 0.9999978783 by geometric mean. Diagnostic output
+  agreement was 239/256 (0.93359375), with maximum paired receipt skew
+  5.182959 ms and schedule lateness 7.470463 ms.
+
+  The retained artifact pins source
+  `80b039b5d429c656871a480c2740740951b29b97`, image
+  `kairyu-f2c@sha256:d2c01580964f461a3d3d2a02ced5303e69c681696d4a38179162084e1624121f`,
+  raw SHA-256
+  `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`,
+  and trace SHA-256
+  `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.

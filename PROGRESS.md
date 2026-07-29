@@ -377,6 +377,16 @@ is recorded as a failed, unmeasured item with its latency rather than a complete
 zero, so an all-empty slot carries `score: null` and cannot be compared with a
 published accuracy number.
 
+G5 F2c is closed by the retained exact-source Qwen3-32B 8-GPU artifact. All
+offline-replayed checks passed over 512 binding requests with zero failures.
+Control-to-candidate TTFT p95 fell 527.957623 → 134.357747 ms (pooled ratio
+0.2544858548; seventh ordered ratio 0.2550841404; geometric mean
+0.2530080045), cache rate rose 0.4994645560 → 0.9843917326 without a round
+regression, and goodput ratios passed at 0.9999979014 pooled, 0.9998437390
+second-order, and 0.9999978783 geometric mean. Output agreement was diagnostic
+at 239/256. Evidence is retained under
+`bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/`.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -384,6 +394,20 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [progress] F2c closes real-engine KV-aware TTFT routing
+- What: The exact-source Qwen3-32B TP2×4 formal run and independent offline verification passed every F2c check over 512 binding requests with zero failures. Control-to-candidate pooled TTFT p95 fell from 527.957623 ms to 134.357747 ms; candidate/control ratios were 0.2544858548 pooled, 0.2550841404 at the seventh ordered round, and 0.2530080045 by geometric mean. Engine-token cache rate rose from 0.4994645560 to 0.9843917326 with every round noninferior. SLO-goodput ratios were 0.9999979014 pooled, 0.9998437390 at the second ordered round, and 0.9999978783 by geometric mean. Output agreement remained diagnostic at 239/256 (0.93359375); maximum paired receipt skew and schedule lateness were diagnostic at 5.182959 ms and 7.470463 ms.
+- Refs: G5 F2c; m10 D6/A32; issue #181; source `80b039b5d429c656871a480c2740740951b29b97`; image `kairyu-f2c@sha256:d2c01580964f461a3d3d2a02ced5303e69c681696d4a38179162084e1624121f`; artifact `bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/`; raw SHA-256 `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`; trace SHA-256 `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`
+
+### 2026-07-29 — [amendment] F2c replaces post-treatment output equality with a frozen transcript
+- What: The first formal F2c execution stopped at round 1 family 0 on the former exact cross-arm output assertion. A targeted fixed-endpoint reproduction reported fully warm prompt caches (2,544/2,546 cached tokens): each endpoint repeated its own continuation twice, yet B0 and A1 differed; a separate longer family matched between warm and cold arms. The corrected trace now predeclares one family-specific canonical assistant continuation, binds its digest and the resulting turn-2 prompt digest, waits for every turn-1 arm to succeed, and supplies that same frozen transcript to both turn-2 arms without consuming either observed output. Every output digest remains raw evidence, while cross-arm match count, total, and rate are diagnostic only. Prompt identity, paired prompt/completion work, routing, engine usage, provenance, and all formal TTFT/goodput/cache thresholds remain binding.
+- Why: The fixed-endpoint result is consistent with a BF16/TP near-tie under different cross-endpoint and cache-population execution shapes; A1/B0 prefix KV may have been formed through different chunk/prefill histories, so it neither establishes semantic cache corruption nor isolates a physical GPU-pair effect. G2 already establishes that free-running greedy sequence equality is not a correctness gate because one moved near-tie changes every later autoregressive prefix. Reusing the observed turn-1 output also made a post-treatment result part of later workload construction. A predeclared common transcript preserves identical turn-2 work and the routing-performance causal comparison without conflating it with free-running numerical identity.
+- Refs: m10 D6/A32; G5 F2c; G2 free-running correctness amendment; issue #181; `bench/kv_aware_ttft_f2c_bench.py`; `tests/bench/test_kv_aware_ttft_f2c_bench.py`; `docs/gpu-runbook.md`
+
+### 2026-07-29 — [amendment] F2c freezes a real-engine paired crossover
+- What: Added m10 A32 and the pre-results F2c method. The production `ReplicaPool`/`OpenAICompatBackend` path compares `PrefixIndex` with session HRW on four independent Qwen3-32B TP2 endpoints across all eight GPUs. Two disjoint two-replica cohorts run simultaneously and exchange policies for eight rounds; a recorded single-use namespace separates smoke/retry cache roots, and each round uses 16 unique 2,048-word RAG families, cold seeds opposite the measured HRW target, identical paired hints/prompts/outputs, actual turn-1 output in turn 2, and exact eight-token work. Nearest-rank TTFT p95 must improve by at least 30% pooled, at the seventh ordered round ratio, and by geometric mean. SLO-goodput must retain at least 0.99 pooled, at the second ordered ratio, and by geometric mean; engine-token cache rate must improve strictly pooled without a per-round regression. Raw router decisions, engine usage, topology, configuration, model/source hashes, and timing diagnostics are independently replayed.
+- Why: Simultaneous cache-disjoint arms plus cohort crossover separate the routing policy from fixed GPU/NUMA and time-order effects, while exact seven-of-eight order statistics and full-sample geometric means remain robust without deleting observations or imposing an arbitrary OS scheduling-skew cutoff. TP2 preserves a validated Qwen3-32B weight/KV/runtime memory margin and still supplies two independently cached replicas per policy. Direct L2 execution proves the D6 production placement path; adding DeploymentSpec exact-KV hash-provider and subscriber lifecycle wiring would conflate the separate D7 product responsibility with this performance gate.
+- Refs: m10 D6/A32; G5 F2c; issue #181; `bench/kv_aware_ttft_f2c_bench.py`; `examples/qwen3-32b-multi-gpu/f2c-compose.yaml`; `docs/gpu-runbook.md`
 
 ### 2026-07-29 — [progress] F2b closes KV-event freshness and chaos fallback
 - What: Exact-source Actions run `30417507859` at `f383806` passed every independently replayed source, runner/Actions provenance, 200-replica ten-by-twenty churn, epoch/sequence, atomic routing, freshness, stream-kill fallback, same-object recovery, and final-state gate. All 500 offered routes were observed: 175 fresh exact, 140 stale approximate, and 185 restored exact. Maximum exact truth age was 232.314498 ms under the 250 ms lease; maximum logical apply, live-wire apply, heartbeat apply, route lateness, selected-route gap, and chaos-action lateness were respectively 0.035925, 51.454668, 50.806312, 3.608193, 21.536138, and 1.166648 ms. The first stale approximate route arrived 251.339950 ms after pause, and complete replay restored the same process and objects in 50.740933 ms after resume. The original Actions artifact and its completed-success run metadata independently replayed green; its 2,196 raw rows are retained byte-identically under `bench/results/f2b-kv-event-retained/`.

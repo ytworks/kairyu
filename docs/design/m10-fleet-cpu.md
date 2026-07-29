@@ -2,8 +2,9 @@
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
 2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
-2026-07-28; D7/A31 amended 2026-07-28). Reviewed (1-reviewer panel with
-repo-line evidence; §6 binding; covers M10a+M10b).
+2026-07-28; D7/A31 amended 2026-07-28; D6/A32 amended 2026-07-29).
+Reviewed (1-reviewer panel with repo-line evidence; §6 binding; covers
+M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
 Depends on: m7 ReplicaPool/JsonlRouterLog, m7 deploy (spec/builder/prober),
@@ -876,3 +877,116 @@ over (α, β) (pure function over the dataset; no online learning).
   ms. The independently replayed 2,196-row artifact is retained byte-identically
   at `bench/results/f2b-kv-event-retained/`; its evidence-only retention does
   not repeat the binding run.
+- **A32 (closed 2026-07-29)**: F2c measures the real D6 placement path, not a
+  gateway mock. The candidate is a production `ReplicaPool` with
+  `PrefixIndex`; the control is
+  the same pool with `prefix_index=None`. Both use `OpenAICompatBackend` to
+  stream from real Qwen3-32B engines and `JsonlRouterLog` to retain the
+  production selection reason and replica. Four independent TP2 engines occupy
+  all eight GPUs. Endpoints A0/A1 form one two-replica cohort and B0/B1 form a
+  second cache-disjoint cohort. Candidate and control run concurrently, then
+  exchange cohorts every round for eight rounds so GPU, NUMA, thermal, and
+  time-order effects cannot remain attached to one policy.
+
+  TP2 is the deliberate memory/capacity point for this proof. On the measured
+  95.59 GiB Blackwell GPUs, each TP2 rank carries approximately 31.96 GiB of
+  Qwen3-32B weights and 16 GiB of KV pages at the frozen 8,192-page capacity,
+  leaving approximately 47.6 GiB for graphs, workspaces, and runtime
+  allocations. TP1 would carry the complete approximately 65.5 GB checkpoint
+  on one device and discard most of that validated margin. TP2 also fills all
+  eight GPUs while retaining the two independently cached replicas that each
+  policy needs; a single TP8 engine would not test routing.
+
+  Each run carries a recorded namespace, and each round creates 16 unique
+  2,048-word RAG families whose namespaced identities differ inside the first
+  256 characters. Smoke and formal namespaces must differ, and a namespace is
+  never reused against persistent caches. A non-binding cold seed uses a session whose
+  production HRW target alternates between logical replicas; the measured
+  session hashes to the opposite replica. Thus successful seeding makes the
+  candidate's `prefix_match` return to the warm engine, while the control's
+  `session_affinity` selects the deliberately cold opposite engine. Every
+  candidate/control pair receives byte-identical prompt content, session and
+  prefix hints, greedy sampling, and exactly eight output tokens
+  (`min_tokens=max_tokens=8`, `ignore_eos=true`). Each family predeclares one
+  canonical assistant continuation as trace input; the trace descriptor binds
+  both its digest and the resulting turn-2 prompt digest. Turn 1 must complete
+  successfully on both policies before phase 2 begins, but neither observed
+  output becomes input to a later request. Both arms instead receive the same
+  frozen canonical transcript in turn 2. Missing, failed, duplicate,
+  non-terminal, prompt/transcript-mismatched, invalid-output-digest, or
+  inexact-usage rows fail the proof. Cross-arm output digest matches are
+  retained as a count, total, and rate, but remain diagnostic only.
+
+  The first formal execution stopped at round 1 family 0 on the former exact
+  output-equality assertion. A targeted fixed-endpoint reproduction left both
+  endpoints fully warm (2,544/2,546 cached prompt tokens): each endpoint
+  repeated its own continuation twice, but B0 and A1 differed. A separate
+  longer family matched between the warm and cold arms. The result is
+  consistent with a BF16/TP near-tie under different cross-endpoint and
+  cache-population execution shapes; A1/B0 prefix KV may have been formed
+  through different chunk/prefill histories, so it does not establish semantic
+  cache corruption or isolate a physical GPU-pair effect. This is the
+  numerical behavior already covered by G2's rule that free-running greedy
+  sequence equality is not a correctness gate: one moved near-tie changes the
+  later autoregressive prefix without proving a broken route or cache. The
+  frozen transcript preserves identical post-turn-1 work and removes
+  post-treatment output dependence without weakening routing, engine-usage,
+  or performance evidence.
+
+  TTFT uses nearest-rank p95 with no interpolation, trimming, or exclusion.
+  Candidate/control p95 must be at most 0.70 in the pooled population, in the
+  geometric mean of all eight round ratios, and at the seventh ordered round
+  ratio. The last condition has 96.484375% one-sided binomial coverage for the
+  median and is equivalent to at least seven of eight rounds meeting the 30%
+  reduction. Goodput counts every successful request at or below the frozen
+  60-second TTFT SLO over the arm's first-receipt-to-last-terminal interval;
+  every planned request remains in scope. Its candidate/control ratio must be
+  at least 0.99 pooled, at the second ordered round ratio, and in the geometric
+  mean, likewise requiring at least seven non-regressing rounds. Cache truth is
+  the token-weighted engine usage
+  `sum(cached_tokens) / sum(prompt_tokens)`, not a router-derived hit label: the
+  candidate must improve it strictly when pooled and be no lower in any round.
+
+  Paired receipt skew and absolute-schedule lateness are retained with
+  monotonic timestamps and recomputed as diagnostics. They have no arbitrary
+  millisecond fail cutoff; simultaneous disjoint arms, cohort crossover, the
+  seven-of-eight order statistics, and full-sample geometric means are the
+  controls for ordinary OS jitter. The short changed-scope smoke binds only
+  evidence integrity and production-path semantics; it retains but does not
+  gate on the formal performance statistics. The formal profile alone binds
+  the thresholds above. The artifact still binds every planned
+  request, route decision, selected replica, topology and GPU identity, exact
+  configuration, model revision and weight digests, clean expected source
+  commit, relevant source/config hashes, prompt identities, valid per-request
+  output digests, diagnostic output-match rate, and exact engine usage. Its
+  offline verifier rehashes the raw JSONL and reconstructs the trace, routing
+  contract, statistics, and manifest verdict without trusting derived fields.
+
+  The exact-source formal run retained at
+  `bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/` closes A32 and F2c.
+  All offline-replayed checks passed over 512 binding requests with zero
+  failures. Control-to-candidate pooled TTFT p95 fell from 527.957623 ms to
+  134.357747 ms: the pooled ratio was 0.2544858548, the seventh ordered ratio
+  was 0.2550841404, and the eight-round geometric mean was 0.2530080045.
+  Engine-token cache rate rose from 0.4994645560 to 0.9843917326 with every
+  round noninferior. Candidate/control SLO-goodput ratios were 0.9999979014
+  pooled, 0.9998437390 at the second ordered round, and 0.9999978783 by
+  geometric mean. Output matches were 239/256 (0.93359375), diagnostic only;
+  maximum paired receipt skew and schedule lateness were likewise diagnostic
+  at 5.182959 ms and 7.470463 ms.
+
+  The artifact binds clean source
+  `80b039b5d429c656871a480c2740740951b29b97`, runtime image
+  `kairyu-f2c@sha256:d2c01580964f461a3d3d2a02ced5303e69c681696d4a38179162084e1624121f`,
+  raw SHA-256
+  `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`,
+  and trace SHA-256
+  `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.
+
+  This direct L2 fixture is the narrow F2c proof: normal HTTP session-only blank
+  hints intentionally bypass cross-session `PrefixIndex`, so using that
+  gateway path would compare HRW with itself. It does not add
+  DeploymentSpec/builder wiring for D7 exact KV events. That product path also
+  requires a tokenizer-compatible block-hash provider plus subscriber and
+  publisher lifecycle ownership; adding it here would mix a separate
+  deployment responsibility into the D6 routing performance experiment.

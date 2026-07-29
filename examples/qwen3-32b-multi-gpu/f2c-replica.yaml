@@ -1,0 +1,26 @@
+# G5 F2c real-engine replica.  The companion Compose stack runs four copies of
+# this exact DeploymentSpec; each process owns an independent RadixKV cache.
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  max_concurrency: 64
+
+engines:
+  qwen3-32b:
+    backend: kairyu
+    options:
+      model_path: /models/qwen3-32b
+      tensor_parallel_size: 2
+      # This is the already validated Qwen3-32B serving capacity from
+      # kairyu.template.yaml.  Keeping 8,192 pages also leaves the F2c RAG
+      # prefixes resident instead of turning the comparison into an eviction
+      # benchmark.
+      num_pages: 8192
+      max_num_batched_tokens: 1024
+      max_num_seqs: 16
+      priority_age_s: 60.0
+      decode_mode: cuda_graph
+      cuda_graph_max_batch: 8
+      cuda_graph_max_pages: 512
+      cuda_graph_warmup_iters: 3
