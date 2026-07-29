@@ -8,6 +8,8 @@ revisit triggers fire — k8s is adopted as the machine layer (G5 F1); D6 gains
 prefix-aware placement then KV tiering as its recorded revisit path (G5 F2/F4);
 D8's no-OTel stance flips now that a tracing consumer exists (G5 F1d). Everything
 shipped here remains the per-node baseline; see `docs/roadmap.md` §5.
+**Amended 2026-07-29** (D3): the deployment-owned `ServerSection` explicitly
+translates to runtime `ServerSettings` instead of inheriting its schema.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
@@ -81,6 +83,16 @@ pools:              # name -> ReplicaPool of backends
 orchestrator: { spec: agent_pool.yaml }   # optional, reuses DSL loader
 batch: { data_dir: /var/lib/kairyu/batch, max_concurrency: 4 }  # optional
 ```
+
+`ServerSection` independently owns this durable deployment vocabulary and
+explicitly translates it to the runtime `ServerSettings` value. It does not
+inherit the runtime model: adding a runtime-only setting therefore cannot
+silently add a key or change the generated DeploymentSpec schema. Existing
+deployment keys and defaults remain backward-compatible; a new public YAML
+setting must be added and mapped deliberately in `ServerSection`.
+`ServerSection` validates the durable YAML artifact; `ServerSettings` remains
+the internal value validated for direct serve-layer callers and owns
+environment-backed API/admin key resolution.
 
 ### D4 — Health/readiness/metrics live in the serve layer; the pool stays passive
 
@@ -169,6 +181,10 @@ multi-region. GPU bring-up of the topology is `docs/gpu-runbook.md` §9.
    `ReplicaPool` (G3 §5). Logged in PROGRESS.md.
 2. **m5 D4 "no background tasks"** — unchanged for the pool itself; the
    prober is a serve-layer lifespan task calling `probe()` (D4).
+3. **m7 D3 server-schema ownership** — `ServerSection` is a frozen,
+   extra-forbidden DeploymentSpec model with an explicit conversion to
+   `ServerSettings`. Runtime settings remain internal unless the external YAML
+   vocabulary deliberately adopts and maps them.
 
 ## 5. Verification
 

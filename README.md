@@ -587,7 +587,7 @@ Everything a deployment can set, in one place. The single source of truth is the
 ### DeploymentSpec (YAML)
 
 ```yaml
-server:                        # ServerSection = bind address + ServerSettings
+server:                        # versioned deployment schema; explicitly maps to runtime
   host: 0.0.0.0
   port: 8000
   api_keys_env: KAIRYU_KEYS    # env var with comma-separated keys; null = keyless
@@ -598,6 +598,7 @@ server:                        # ServerSection = bind address + ServerSettings
   access_log: true             # one JSON line per request (X-Request-ID echoed)
   tracing: false               # OTel spans (needs the otel extra; no-op without)
   usage_ledger_path: null      # JSONL usage ledger; enables GET /admin/usage
+  admin_keys_env: null         # env var for /admin/* mutation keys
 
 tenants:                       # optional authenticated API-key -> tenant mapping
   default_tenant: default      # resolved keys omitted below use this tenant

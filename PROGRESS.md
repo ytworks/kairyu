@@ -397,6 +397,12 @@ trace and initial state. p95 and 176/256 action differences remain diagnostic;
 neither enters acceptance. Evidence is retained under
 `bench/results/f2d-prefix-weight-replay-2026-07-29/`.
 
+Deployment configuration now has an explicit schema boundary: the frozen,
+extra-forbidden `ServerSection` owns the ten existing public YAML fields and
+maps eight of them explicitly into runtime `ServerSettings`. Existing keys,
+defaults, and round trips are unchanged; runtime-only additions can no longer
+silently enter or be ignored by DeploymentSpec.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -404,6 +410,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-29 — [amendment] Deployment server schema stops inheriting runtime settings
+- What: Amended m7 D3 so the versioned DeploymentSpec `ServerSection` independently declares its ten existing YAML fields, forbids unknown keys, and translates the eight runtime fields explicitly to `ServerSettings`. Builder and tenant preflight use that one mapping. Schema/default snapshots, full-key YAML round-trip, default/runtime parity, unknown-key rejection, and builder lifecycle tests preserve current artifacts while making future runtime-only additions an explicit design choice.
+- Why: Inheriting the runtime settings model coupled an external deployment artifact to internal API evolution: a runtime-only field could silently change the accepted/generated YAML schema. An independently owned model plus enumerated conversion preserves compatibility while forcing any future public configuration change to be deliberate and reviewable.
+- Refs: m7 D3; issue #231; `kairyu/deploy/spec.py`; `kairyu/deploy/builder.py`; `tests/unit/test_deployment_spec.py`; `tests/server/test_serve_builder.py`
 
 ### 2026-07-29 — [progress] F2d closes unbiased prefix-weight replay
 - What: The exact-source A33 formal artifact and independent offline verifier passed every source, retained-input, split-isolation, complete-policy replay, production-route join, balanced-panel, train-only selection, frozen-held-out, success, and integrity check. Seven normalized policies replayed every request in 48 training families; the tuner selected `λ=1.0` before held-out execution. Against the declared `λ=0.25` baseline on 16 disjoint held-out families (256 requests per arm), mean TTFT was 4.43359375 versus 8.5 deterministic virtual ticks. All 5,888 production placement rows joined one-to-one to successful outcomes. p95 and 176/256 action differences remain diagnostic only.

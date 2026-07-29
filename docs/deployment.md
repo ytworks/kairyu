@@ -82,6 +82,9 @@ compose service.
 Both roles run the same image (`Dockerfile` at the repo root); the mounted
 DeploymentSpec decides what the process is. Working CPU examples live in
 `deploy/compose/` and are exercised by `scripts/compose_smoke.sh` in CI.
+The flat `server:` mapping is a versioned deployment schema and is translated
+explicitly to runtime server settings. Runtime-only settings do not
+automatically become accepted YAML keys.
 
 Replica node (GPU):
 

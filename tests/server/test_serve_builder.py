@@ -9,7 +9,7 @@ from prometheus_client.parser import text_string_to_metric_families
 
 import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_config, build_app_from_spec
-from kairyu.deploy.spec import load_deployment_spec
+from kairyu.deploy.spec import ServerSection, load_deployment_spec
 from kairyu.dsl.loader import load_spec
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.settings import ServerSettings
@@ -370,14 +370,14 @@ tenants:
     settings_calls = 0
     api_key_resolutions = 0
     admin_key_resolutions = 0
-    real_server_settings = builder_module._server_settings
+    real_to_server_settings = ServerSection.to_server_settings
     real_resolve_api_keys = ServerSettings.resolve_api_keys
     real_resolve_admin_keys = ServerSettings.resolve_admin_keys
 
-    def recording_server_settings(deployment_spec):
+    def recording_server_settings(section):
         nonlocal settings_calls
         settings_calls += 1
-        return real_server_settings(deployment_spec)
+        return real_to_server_settings(section)
 
     def recording_resolve_api_keys(settings):
         nonlocal api_key_resolutions
@@ -389,7 +389,11 @@ tenants:
         admin_key_resolutions += 1
         return real_resolve_admin_keys(settings)
 
-    monkeypatch.setattr(builder_module, "_server_settings", recording_server_settings)
+    monkeypatch.setattr(
+        ServerSection,
+        "to_server_settings",
+        recording_server_settings,
+    )
     monkeypatch.setattr(
         ServerSettings,
         "resolve_api_keys",
