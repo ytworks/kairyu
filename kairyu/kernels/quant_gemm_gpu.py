@@ -479,8 +479,8 @@ def _grid(m_size: int, n_size: int):
     )
 
 
-def _bias(module, output: torch.Tensor):
-    return module.bias if module.bias is not None else output
+def _bias(module, output: torch.Tensor, add_bias: bool):
+    return module.bias if add_bias and module.bias is not None else output
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -549,6 +549,8 @@ def fp8_linear_forward(
     x: torch.Tensor,
     module,
     activation_scale: torch.Tensor | None = None,
+    *,
+    add_bias: bool = True,
 ) -> torch.Tensor:
     flat, output = _prepare(x, module, "fp8")
     # Dynamic per-token W8A8 activation quantization. Materializing this [M,K]
@@ -575,7 +577,7 @@ def fp8_linear_forward(
             out_dtype=x.dtype,
             use_fast_accum=False,
         )
-        if module.bias is not None:
+        if add_bias and module.bias is not None:
             output = output + module.bias
         return output.reshape(*x.shape[:-1], module.out_features)
     _fp8_w8a8_kernel[_grid(flat.shape[0], module.out_features)](
@@ -583,7 +585,7 @@ def fp8_linear_forward(
         module.weight,
         x_scale,
         module.weight_scale,
-        _bias(module, output),
+        _bias(module, output, add_bias),
         output,
         flat.shape[0],
         module.out_features,
@@ -594,7 +596,7 @@ def fp8_linear_forward(
         module.weight.stride(1),
         output.stride(0),
         output.stride(1),
-        HAS_BIAS=module.bias is not None,
+        HAS_BIAS=add_bias and module.bias is not None,
         PER_CHANNEL=per_channel,
         BLOCK_M=16,
         BLOCK_N=32,
@@ -604,7 +606,12 @@ def fp8_linear_forward(
     return output.reshape(*x.shape[:-1], module.out_features)
 
 
-def int8_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
+def int8_linear_forward(
+    x: torch.Tensor,
+    module,
+    *,
+    add_bias: bool = True,
+) -> torch.Tensor:
     flat, output = _prepare(x, module, "int8")
     x_quant, x_scale = _quantize_activation(flat, torch.int8, 127.0)
     _int8_w8a8_kernel[_grid(flat.shape[0], module.out_features)](
@@ -612,7 +619,7 @@ def int8_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
         module.weight,
         x_scale,
         module.weight_scale,
-        _bias(module, output),
+        _bias(module, output, add_bias),
         output,
         flat.shape[0],
         module.out_features,
@@ -623,7 +630,7 @@ def int8_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
         module.weight.stride(1),
         output.stride(0),
         output.stride(1),
-        HAS_BIAS=module.bias is not None,
+        HAS_BIAS=add_bias and module.bias is not None,
         BLOCK_M=16,
         BLOCK_N=32,
         BLOCK_K=32,
@@ -632,14 +639,19 @@ def int8_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
     return output.reshape(*x.shape[:-1], module.out_features)
 
 
-def awq_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
+def awq_linear_forward(
+    x: torch.Tensor,
+    module,
+    *,
+    add_bias: bool = True,
+) -> torch.Tensor:
     flat, output = _prepare(x, module, "awq")
     _awq_w4a16_kernel[_grid(flat.shape[0], module.out_features)](
         flat,
         module.qweight,
         module.qzeros,
         module.scales,
-        _bias(module, output),
+        _bias(module, output, add_bias),
         output,
         flat.shape[0],
         module.out_features,
@@ -655,7 +667,7 @@ def awq_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
         output.stride(0),
         output.stride(1),
         GROUP_SIZE=module.group_size,
-        HAS_BIAS=module.bias is not None,
+        HAS_BIAS=add_bias and module.bias is not None,
         X_IS_BF16=x.dtype is torch.bfloat16,
         BLOCK_M=16,
         BLOCK_N=32,
@@ -665,7 +677,12 @@ def awq_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
     return output.reshape(*x.shape[:-1], module.out_features)
 
 
-def gptq_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
+def gptq_linear_forward(
+    x: torch.Tensor,
+    module,
+    *,
+    add_bias: bool = True,
+) -> torch.Tensor:
     flat, output = _prepare(x, module, "gptq")
     _gptq_w4a16_kernel[_grid(flat.shape[0], module.out_features)](
         flat,
@@ -673,7 +690,7 @@ def gptq_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
         module.qzeros,
         module.scales,
         module.g_idx,
-        _bias(module, output),
+        _bias(module, output, add_bias),
         output,
         flat.shape[0],
         module.out_features,
@@ -688,7 +705,7 @@ def gptq_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
         module.scales.stride(1),
         output.stride(0),
         output.stride(1),
-        HAS_BIAS=module.bias is not None,
+        HAS_BIAS=add_bias and module.bias is not None,
         X_IS_BF16=x.dtype is torch.bfloat16,
         BLOCK_M=16,
         BLOCK_N=32,
@@ -732,7 +749,12 @@ def _prepare_nvfp4_weight(module, device: torch.device):
     return weight, scale
 
 
-def nvfp4_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
+def nvfp4_linear_forward(
+    x: torch.Tensor,
+    module,
+    *,
+    add_bias: bool = True,
+) -> torch.Tensor:
     flat, _ = _prepare(x, module, "nvfp4")
     try:
         from flashinfer import SfLayout, mm_fp4, nvfp4_quantize
@@ -763,14 +785,19 @@ def nvfp4_linear_forward(x: torch.Tensor, module) -> torch.Tensor:
         out_dtype=x.dtype,
         backend="auto",
     )
-    if module.bias is not None:
+    if add_bias and module.bias is not None:
         output = output[:, : module.out_features] + module.bias
     else:
         output = output[:, : module.out_features]
     return output.reshape(*x.shape[:-1], module.out_features)
 
 
-def linear_forward(x: torch.Tensor, module) -> torch.Tensor:
+def linear_forward(
+    x: torch.Tensor,
+    module,
+    *,
+    add_bias: bool = True,
+) -> torch.Tensor:
     scheme = getattr(module, "quant_scheme", None)
     dispatch = {
         "fp8": fp8_linear_forward,
@@ -781,4 +808,4 @@ def linear_forward(x: torch.Tensor, module) -> torch.Tensor:
     }
     if scheme not in dispatch:
         raise RuntimeError(f"no fused GPU kernel registered for {scheme!r}")
-    return dispatch[scheme](x, module)
+    return dispatch[scheme](x, module, add_bias=add_bias)

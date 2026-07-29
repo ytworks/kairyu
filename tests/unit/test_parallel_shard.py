@@ -7,9 +7,8 @@ from kairyu.engine.core.pp_worker import stage_layer_bounds
 from kairyu.models.config import parse_model_config
 from kairyu.models.parallel import (
     RowParallelLinear,
+    checkpoint_member_specs,
     shard_bounds,
-    shard_dim_for,
-    tp_shard_spec,
     tp_view,
 )
 
@@ -73,13 +72,25 @@ class TestShardMath:
             tp_view(parse_model_config(mla_raw), 2, 0)
 
     def test_shard_spec_dims(self):
-        spec = tp_shard_spec(parse_model_config(TINY))
-        assert shard_dim_for("model.layers.0.self_attn.q_proj.weight", spec) == 0
-        assert shard_dim_for("model.layers.0.self_attn.q_proj.bias", spec) == 0
-        assert shard_dim_for("model.layers.1.self_attn.o_proj.weight", spec) == 1
-        assert shard_dim_for("model.layers.0.mlp.down_proj.weight", spec) == 1
-        assert shard_dim_for("model.norm.weight", spec) is None
-        assert shard_dim_for("lm_head.weight", spec) is None  # replicated
+        from kairyu.engine.core.quant_config import QuantConfig, QuantMethod
+        from kairyu.models.llama import DenseDecoder
+        from kairyu.quant.linear import linear_factory
+
+        config = parse_model_config(TINY)
+        model = DenseDecoder(
+            tp_view(config, 2, 0),
+            linear_factory=linear_factory(
+                QuantConfig(QuantMethod.NONE),
+                tensor_parallel_size=2,
+                tensor_parallel_rank=0,
+            ),
+        )
+        spec = checkpoint_member_specs(model)
+        assert spec["model.layers.0.self_attn.q_proj.weight"].shard_dim == 0
+        assert spec["model.layers.1.self_attn.o_proj.weight"].shard_dim == 1
+        assert spec["model.layers.0.mlp.down_proj.weight"].shard_dim == 1
+        assert spec["model.norm.weight"].shard_dim is None
+        assert spec["lm_head.weight"].shard_dim is None  # replicated
 
     def test_stage_layer_bounds_early_stages_take_remainder(self):
         assert stage_layer_bounds(5, 2, 0) == (0, 3)
@@ -92,8 +103,10 @@ class TestRowParallelLinear:
         torch.manual_seed(0)
         linear = torch.nn.Linear(8, 4, bias=True)
         expected = linear(torch.ones(2, 8))
+        bias = linear.bias
         wrapped = RowParallelLinear(linear, _FakeTensorComm())
-        assert linear.bias is None  # detached from the local matmul
+        assert wrapped is linear
+        assert linear.bias is bias  # canonical owner stays on the projection
         out = wrapped(torch.ones(2, 8))
         assert torch.allclose(out, expected)
 
@@ -220,8 +233,8 @@ class TestTp1Equivalence:
         )
         q0 = rank0.model.layers[0].self_attn.q_proj
         q1 = rank1.model.layers[0].self_attn.q_proj
-        o0 = rank0.model.layers[0].self_attn.o_proj.local
-        o1 = rank1.model.layers[0].self_attn.o_proj.local
+        o0 = rank0.model.layers[0].self_attn.o_proj
+        o1 = rank1.model.layers[0].self_attn.o_proj
         assert all(isinstance(layer, Fp8Linear) for layer in (q0, q1, o0, o1))
 
         reader = CheckpointReader(target)

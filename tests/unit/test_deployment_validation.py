@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from kairyu.deploy import validation as validation_module
 from kairyu.deploy.validation import validate_deployment
 from kairyu.engine import registry as registry_module
@@ -15,6 +17,8 @@ def _write_tiny_model_checkpoint(
     *,
     extra_missing_shard=False,
     fp8_per_tensor=False,
+    quant_scheme=None,
+    raw_config=None,
 ):
     from safetensors.torch import save_file
     from tokenizers import Tokenizer
@@ -25,17 +29,26 @@ def _write_tiny_model_checkpoint(
     from kairyu.models.loader import build_model
     from kairyu.quant.linear import linear_factory
 
-    raw_config = {
-        "architectures": ["Qwen3ForCausalLM"],
-        "hidden_size": 16,
-        "num_hidden_layers": 1,
-        "num_attention_heads": 2,
-        "num_key_value_heads": 2,
-        "intermediate_size": 32,
-        "vocab_size": 64,
-        "tie_word_embeddings": True,
-    }
+    raw_config = dict(
+        raw_config
+        or {
+            "architectures": ["Qwen3ForCausalLM"],
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "intermediate_size": 32,
+            "vocab_size": 64,
+            "tie_word_embeddings": True,
+        }
+    )
+    if quant_scheme is not None:
+        from tests.quant_checkpoint_fixtures import QUANT_CONFIGS
+
+        raw_config["quantization_config"] = QUANT_CONFIGS[quant_scheme]
     if fp8_per_tensor:
+        if quant_scheme is not None:
+            raise ValueError("fp8_per_tensor and quant_scheme are mutually exclusive")
         raw_config["quantization_config"] = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -45,8 +58,9 @@ def _write_tiny_model_checkpoint(
         json.dumps(raw_config),
         encoding="utf-8",
     )
+    model_config = parse_model_config(raw_config)
     model = build_model(
-        parse_model_config(raw_config),
+        model_config,
         linear_factory=linear_factory(detect_quantization(raw_config)),
     )
     state = {
@@ -56,7 +70,10 @@ def _write_tiny_model_checkpoint(
             else tensor.contiguous()
         )
         for name, tensor in model.state_dict().items()
-        if name != "lm_head.weight"
+        if not (
+            name == "lm_head.weight"
+            and model_config.tie_word_embeddings
+        )
     }
     shard = "model.safetensors"
     save_file(state, path / shard)
@@ -523,6 +540,88 @@ engines:
     )
 
     assert validate_deployment(deployment).valid
+
+
+@pytest.mark.parametrize(
+    "quant_scheme",
+    [
+        pytest.param(None, id="dense"),
+        pytest.param("fp8", id="fp8"),
+        pytest.param("int8", id="int8"),
+        pytest.param("awq", id="awq"),
+        pytest.param("gptq", id="gptq"),
+        pytest.param("nvfp4", id="nvfp4"),
+    ],
+)
+def test_validation_accepts_runtime_checkpoint_member_contract(
+    tmp_path,
+    quant_scheme,
+):
+    model = tmp_path / (quant_scheme or "dense")
+    _write_tiny_model_checkpoint(model, quant_scheme=quant_scheme)
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        f"""
+engines:
+  local:
+    backend: kairyu
+    options:
+      model_path: {model}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert report.valid, report.render_text()
+
+
+def test_validation_accepts_deepseek_router_correction_buffer(tmp_path):
+    model = tmp_path / "deepseek"
+    _write_tiny_model_checkpoint(
+        model,
+        raw_config={
+            "architectures": ["DeepseekV3ForCausalLM"],
+            "hidden_size": 32,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "intermediate_size": 64,
+            "vocab_size": 64,
+            "kv_lora_rank": 8,
+            "q_lora_rank": None,
+            "qk_nope_head_dim": 4,
+            "qk_rope_head_dim": 4,
+            "v_head_dim": 6,
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 2,
+            "moe_intermediate_size": 16,
+            "n_group": 2,
+            "topk_group": 1,
+            "n_shared_experts": 1,
+            "first_k_dense_replace": 0,
+        },
+    )
+    index = json.loads(
+        (model / "model.safetensors.index.json").read_text(encoding="utf-8")
+    )
+    correction = "model.layers.0.mlp.gate.e_score_correction_bias"
+    assert correction in index["weight_map"]
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        f"""
+engines:
+  local:
+    backend: kairyu
+    options:
+      model_path: {model}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert report.valid, report.render_text()
 
 
 def test_validation_matches_runtime_fp8_scale_shape_contract(tmp_path):

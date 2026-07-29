@@ -1,11 +1,13 @@
-"""Tensor-parallel sharding: pre-sharded config + communication wrappers (m16 D2).
+"""Tensor-parallel sharding: pre-sharded config + canonical bindings (m16 D2).
 
 Shard ownership (review A2): the rank model is built from ``tp_view(config,
 tp, rank)`` — heads/kv-heads/intermediate divided — so every module comes out
 rank-local for free (Attention's reshapes, the kv pool sizing). The parallel
-wrappers only ADD communication: ``RowParallelLinear`` all_reduces its output
-(bias added ONCE, after the reduce — A4); the TP logits head all_gathers vocab
-shards (gloo rejects unequal shapes → ``vocab_size % tp == 0`` fail-fast, A3).
+bindings only ADD communication on the original parameter-owning modules:
+``RowParallelLinear`` all_reduces an unbiased local output and then adds the
+canonical bias exactly once (A4); the TP logits head
+all_gathers vocab shards (gloo rejects unequal shapes →
+``vocab_size % tp == 0`` fail-fast, A3).
 Shard-loading bounds come from the FULL config so ``get_slice`` rows align to
 whole heads. Embeddings and lm_head are REPLICATED in M16 (every rank holds
 full logits, but rank 0 alone runs the stateful sampler and broadcasts the
@@ -16,6 +18,7 @@ optimization behind the same single-owner seam.
 from __future__ import annotations
 
 import dataclasses
+from types import MethodType
 
 import torch
 from torch import nn
@@ -49,30 +52,153 @@ def tp_view(config: ModelConfig, tp: int, rank: int) -> ModelConfig:
     )
 
 
-# name -> (shard dim, sizing) rules against the FULL config; None = replicated
-def tp_shard_spec(config: ModelConfig) -> dict[str, int | None]:
-    """Parameter-name suffix -> shard dim (0 = out/vocab rows, 1 = in columns)."""
-    return {
-        "self_attn.q_proj.weight": 0,
-        "self_attn.q_proj.bias": 0,
-        "self_attn.k_proj.weight": 0,
-        "self_attn.k_proj.bias": 0,
-        "self_attn.v_proj.weight": 0,
-        "self_attn.v_proj.bias": 0,
-        "self_attn.o_proj.weight": 1,  # row-parallel: shard in_features
-        # o_proj.bias replicated: added once after the all_reduce (A4)
-        "mlp.gate_proj.weight": 0,
-        "mlp.up_proj.weight": 0,
-        "mlp.down_proj.weight": 1,
-        # embed_tokens / lm_head replicated (full logits on every rank)
+@dataclasses.dataclass(frozen=True)
+class ParallelShardInfo:
+    """Rank-local checkpoint ownership attached to parallelized modules."""
+
+    kind: str
+    rank: int
+    world_size: int
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"tensor", "expert"}:
+            raise ValueError(f"unknown parallel shard kind {self.kind!r}")
+        if self.world_size < 1:
+            raise ValueError("parallel shard world_size must be positive")
+        if not 0 <= self.rank < self.world_size:
+            raise ValueError(
+                f"parallel shard rank {self.rank} is outside world_size {self.world_size}"
+            )
+
+
+class UnsupportedParallelSerializationError(RuntimeError):
+    """A rank-local tensor set was requested as a complete HF checkpoint."""
+
+    def __init__(
+        self,
+        mode: str,
+        topology: tuple[tuple[str, ParallelShardInfo], ...],
+    ) -> None:
+        self.mode = mode
+        self.topology = topology
+        details = ", ".join(
+            f"{info.kind}@{name}:rank={info.rank}/{info.world_size}"
+            for name, info in topology
+        )
+        super().__init__(
+            f"{mode} serialization is unsupported from one parallel rank "
+            f"({details}); use mode='rank-local' for a same-topology "
+            "round-trip or gather canonical shards from every rank"
+        )
+
+
+def parallel_shard_info(
+    model: nn.Module,
+) -> tuple[tuple[str, ParallelShardInfo], ...]:
+    """Return deterministic rank-local ownership metadata for introspection."""
+
+    found = []
+    for name, module in model.named_modules():
+        info = getattr(module, "_kairyu_parallel_shard", None)
+        if isinstance(info, ParallelShardInfo):
+            found.append((name or "<root>", info))
+    return tuple(found)
+
+
+def parallel_state_dict(
+    model: nn.Module,
+    *,
+    mode: str = "rank-local",
+    keep_vars: bool = False,
+) -> dict[str, torch.Tensor]:
+    """Enumerate canonical state with an explicit serialization boundary.
+
+    ``rank-local`` is loadable only into the same rank/topology and preserves
+    native HF names. A complete ``full-hf`` export needs TP concatenation, EP
+    union, replicated-value checks, and tied-weight restoration; until that
+    collective exporter exists, returning one rank's shards would be data
+    corruption and therefore fails deterministically.
+    """
+
+    if mode not in {"rank-local", "full-hf"}:
+        raise ValueError("parallel state mode must be 'rank-local' or 'full-hf'")
+    topology = parallel_shard_info(model)
+    sharded = tuple(item for item in topology if item[1].world_size > 1)
+    if mode == "full-hf" and sharded:
+        raise UnsupportedParallelSerializationError(mode, sharded)
+    return model.state_dict(keep_vars=keep_vars)
+
+
+@dataclasses.dataclass(frozen=True)
+class CheckpointMemberSpec:
+    """Canonical source and physical shard axis for one rank-local tensor."""
+
+    source_name: str
+    shard_dim: int | None
+
+
+def checkpoint_member_specs(model: nn.Module) -> dict[str, CheckpointMemberSpec]:
+    """Derive checkpoint slicing from each projection's typed #228 context.
+
+    No layer-name suffix table participates. The canonical projection identity
+    and TP placement live on the parameter-owning module itself, so arbitrary
+    model prefixes, quantization metadata, post-bind loading, and adapters all
+    agree on one native module tree. Unknown persistent members on a
+    contextual projection fail closed instead of being silently replicated.
+    """
+
+    from kairyu.quant.linear import QuantizedLinearBase
+
+    expected = model.state_dict()
+    specs = {
+        name: CheckpointMemberSpec(name, None)
+        for name in expected
     }
+    for module_name, module in model.named_modules():
+        context = getattr(module, "linear_context", None)
+        if context is None:
+            continue
+        canonical = context.qualified_name
+        if module_name != canonical:
+            raise RuntimeError(
+                "parallel projection path disagrees with its checkpoint identity: "
+                f"module={module_name!r}, canonical={canonical!r}"
+            )
+        prefix = f"{module_name}." if module_name else ""
+        direct_members = {
+            name[len(prefix) :]
+            for name in expected
+            if name.startswith(prefix) and "." not in name[len(prefix) :]
+        }
+        if isinstance(module, QuantizedLinearBase):
+            layouts = module.checkpoint_member_layouts()
+        else:
+            from kairyu.quant.linear import CheckpointMemberLayout
 
+            layouts = {
+                "weight": CheckpointMemberLayout(column_dim=0, row_dim=1),
+                "bias": CheckpointMemberLayout(column_dim=0, row_dim=None),
+            }
+        layouts = {
+            **layouts,
+            **getattr(module, "_kairyu_checkpoint_member_layouts", {}),
+        }
+        unknown = sorted(direct_members - layouts.keys())
+        if unknown:
+            raise RuntimeError(
+                f"contextual projection {canonical!r} has no checkpoint "
+                f"shard contract for persistent members {unknown}"
+            )
 
-def shard_dim_for(name: str, spec: dict[str, int | None]) -> int | None:
-    for suffix, dim in spec.items():
-        if name.endswith(suffix):
-            return dim
-    return None
+        placement = context.tensor_parallel
+        for member in direct_members:
+            shard_dim = layouts[member].shard_dim(placement.mode)
+            state_name = f"{prefix}{member}"
+            specs[state_name] = CheckpointMemberSpec(
+                f"{canonical}.{member}",
+                shard_dim,
+            )
+    return specs
 
 
 class SequenceParallelContext:
@@ -131,111 +257,168 @@ class SequenceParallelContext:
         return self.comm.tensor_reduce_scatter(x.contiguous())
 
 
-class SequenceParallelNorm(nn.Module):
-    """Norm on the token shard, then all_gather for the TP region.
+class _SequenceOutputBinding:
+    """Forward behavior attached to a canonical embedding/norm module."""
 
-    RMSNorm/LayerNorm are per-token, so running them on a shard is exactly the
-    same arithmetic — that is what makes the sharded residual stream valid.
-    """
+    def __init__(self, context: SequenceParallelContext, *, scatter: bool) -> None:
+        self.context = context
+        self.scatter = scatter
 
-    def __init__(self, norm: nn.Module, context: SequenceParallelContext) -> None:
-        super().__init__()
-        self.norm = norm
-        self._context = context
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._context.gather(self.norm(x))
-
-
-class ScatterAfterEmbedding(nn.Module):
-    """Entry to the sequence-parallel region: full embedding -> token shard."""
-
-    def __init__(self, embedding: nn.Module, context: SequenceParallelContext) -> None:
-        super().__init__()
-        self.embedding = embedding
-        self._context = context
-
-    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        return self._context.scatter(self.embedding(token_ids))
-
-    @property
-    def weight(self) -> torch.Tensor:  # tie_word_embeddings reads this
-        return self.embedding.weight
+    def __call__(
+        self,
+        _module: nn.Module,
+        _inputs: tuple[object, ...],
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.context.scatter(output) if self.scatter else self.context.gather(output)
 
 
-class GatherBeforeNorm(nn.Module):
-    """Exit: the final norm sees the whole sequence again, for the lm_head."""
+class _SequenceInputBinding:
+    """Gather a sequence shard before the canonical final norm runs."""
 
-    def __init__(self, norm: nn.Module, context: SequenceParallelContext) -> None:
-        super().__init__()
-        self.norm = norm
-        self._context = context
+    def __init__(self, context: SequenceParallelContext) -> None:
+        self.context = context
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._context.gather(self.norm(x))
+    def __call__(
+        self,
+        _module: nn.Module,
+        inputs: tuple[object, ...],
+    ) -> tuple[object, ...]:
+        if not inputs or not isinstance(inputs[0], torch.Tensor):
+            raise TypeError("sequence-parallel norm expects a tensor input")
+        return (self.context.gather(inputs[0]), *inputs[1:])
 
 
-class RowParallelLinear(nn.Module):
-    """Wraps a rank-local Linear: reduce the partial output, bias once.
+def _bind_sequence_output(
+    module: nn.Module,
+    context: SequenceParallelContext,
+    *,
+    scatter: bool,
+) -> nn.Module:
+    marker = "_kairyu_sequence_scatter" if scatter else "_kairyu_sequence_gather"
+    if getattr(module, marker, None) is not None:
+        raise ValueError(f"{type(module).__name__} already has {marker} behavior")
+    binding = _SequenceOutputBinding(context, scatter=scatter)
+    module.register_forward_hook(binding)
+    object.__setattr__(module, marker, binding)
+    return module
 
-    ``context`` switches the reduction from all_reduce to reduce_scatter, which
-    both sums across ranks AND re-shards along tokens — the exit from the TP
-    region back into the sequence-parallel one.
-    """
+
+def SequenceParallelNorm(
+    norm: nn.Module,
+    context: SequenceParallelContext,
+) -> nn.Module:
+    """Bind post-norm all-gather without inserting a synthetic child path."""
+
+    return _bind_sequence_output(norm, context, scatter=False)
+
+
+def ScatterAfterEmbedding(
+    embedding: nn.Module,
+    context: SequenceParallelContext,
+) -> nn.Module:
+    """Bind embedding scatter while keeping ``embed_tokens.weight`` canonical."""
+
+    return _bind_sequence_output(embedding, context, scatter=True)
+
+
+def GatherBeforeNorm(
+    norm: nn.Module,
+    context: SequenceParallelContext,
+) -> nn.Module:
+    """Bind pre-norm gather while keeping the final norm at its HF path."""
+
+    marker = "_kairyu_sequence_gather_input"
+    if getattr(norm, marker, None) is not None:
+        raise ValueError(f"{type(norm).__name__} already has {marker} behavior")
+    binding = _SequenceInputBinding(context)
+    norm.register_forward_pre_hook(binding)
+    object.__setattr__(norm, marker, binding)
+    return norm
+
+
+class _RowParallelBinding:
+    """Reduce a projection output while the projection keeps tensor ownership."""
 
     def __init__(
-        self, local: nn.Module, comm, context: SequenceParallelContext | None = None
+        self,
+        comm,
+        context: SequenceParallelContext | None,
     ) -> None:
-        super().__init__()
-        self.local = local
-        self._comm = comm
-        self._context = context
-        # detach bias from the local matmul: it must be added AFTER the reduce
-        self._bias = local.bias
-        local.bias = None
+        self.comm = comm
+        self.context = context
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        from kairyu.quant.linear import Fp8Linear
-
-        if isinstance(self.local, Fp8Linear) and self.local.activation_dynamic:
-            # A row-parallel rank sees only its input-feature shard. Dynamic
-            # W8A8 quantization must nevertheless use the same per-token scale
-            # the unsharded activation would use; rank-local scales change the
-            # numeric contract with TP degree. Synchronize only the M amax
-            # values, then quantize each local feature shard with that global
-            # scale (the extra collective is tiny relative to the output sum).
-            local_amax = self.local.activation_amax(x).contiguous()
-            global_amax = self._comm.tensor_all_reduce_max(local_amax)
-            activation_scale = (global_amax / 448.0).clamp(min=1e-12)
-            partial = self.local.forward_with_activation_scale(x, activation_scale)
+    def __call__(
+        self,
+        module: nn.Module,
+        _inputs: tuple[object, ...],
+        partial: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.context is None:
+            reduced = self.comm.tensor_all_reduce(partial.contiguous())
         else:
-            partial = self.local(x)
-        if self._context is None:
-            reduced = self._comm.tensor_all_reduce(partial.contiguous())
-        else:
-            reduced = self._context.reduce_scatter(partial)
-        if self._bias is not None:
-            reduced = reduced + self._bias
+            reduced = self.context.reduce_scatter(partial)
+        # The canonical bias stays registered on the projection so state_dict,
+        # named_parameters, and adapters all see ``...proj.bias``. Its local
+        # forward omits bias, preserving the established numerical contract:
+        # reduce unbiased partials, then add one bias copy.
+        bias = getattr(module, "bias", None)
+        if bias is not None:
+            reduced = reduced + bias
         return reduced
 
 
-def _checkpoint_shard_dim(
-    name: str,
-    spec: dict[str, int | None],
-    quant: QuantConfig,
-) -> int | None:
-    """Resolve the checkpoint tensor axis owned by one TP rank.
+def _dense_row_parallel_forward(
+    module: nn.Linear,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """Dense local GEMM without bias; the reduction binding owns bias add."""
 
-    FP8 weights follow the dense projection axis. Their per-output-channel
-    scale follows a column-parallel weight (dim 0), but is replicated for a
-    row-parallel weight (dim 1) because every rank still produces every output
-    channel.
+    return nn.functional.linear(x, module.weight, None)
+
+
+def RowParallelLinear(
+    local: nn.Module,
+    comm,
+    context: SequenceParallelContext | None = None,
+) -> nn.Module:
+    """Bind row-parallel execution to the canonical projection module.
+
+    This compatibility constructor intentionally returns ``local`` itself.
+    Registering it as a wrapper child would change every checkpoint,
+    ``named_*`` and adapter path to ``...proj.local.*``. Dynamic FP8 keeps its
+    global per-token scale through the communicator bound here.
     """
-    dim = shard_dim_for(name, spec)
-    if quant.method is QuantMethod.FP8 and name.endswith(".weight_scale"):
-        weight_dim = shard_dim_for(name.removesuffix("_scale"), spec)
-        return 0 if weight_dim == 0 else None
-    return dim
+
+    if getattr(local, "_kairyu_row_parallel", None) is not None:
+        raise ValueError(f"{type(local).__name__} is already row-parallel")
+
+    bias = getattr(local, "bias", None)
+    if bias is not None:
+        from kairyu.quant.linear import QuantizedLinearBase
+
+        if type(local) is nn.Linear:
+            object.__setattr__(
+                local,
+                "forward",
+                MethodType(_dense_row_parallel_forward, local),
+            )
+        elif isinstance(local, QuantizedLinearBase):
+            object.__setattr__(local, "_kairyu_row_parallel_omit_bias", True)
+        else:
+            raise TypeError(
+                f"{type(local).__name__} cannot omit its local bias for "
+                "row-parallel reduction"
+            )
+    binding = _RowParallelBinding(comm, context)
+    local.register_forward_hook(binding)
+    object.__setattr__(local, "_kairyu_row_parallel", binding)
+
+    from kairyu.quant.linear import Fp8Linear
+
+    if isinstance(local, Fp8Linear) and local.activation_dynamic:
+        object.__setattr__(local, "_row_parallel_comm", comm)
+    return local
 
 
 def load_tp_shard(
@@ -255,9 +438,9 @@ def load_tp_shard(
     and biases are replicated.
     """
     quant = quant or QuantConfig(QuantMethod.NONE)
-    spec = tp_shard_spec(config)
     state: dict[str, torch.Tensor] = {}
     expected = model.state_dict()
+    member_specs = checkpoint_member_specs(model)
     quantized_buffer_dtypes = {
         (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
         for module_name, module in model.named_modules()
@@ -267,10 +450,11 @@ def load_tp_shard(
     for name, current in expected.items():
         if name == "lm_head.weight" and config.tie_word_embeddings:
             continue  # re-tied to the LOCAL embed shard after load (A3)
-        source = name
+        member = member_specs[name]
+        source = member.source_name
         if source not in reader:
             raise KeyError(f"checkpoint missing tensor {source!r}")
-        dim = _checkpoint_shard_dim(name, spec, quant)
+        dim = member.shard_dim
         if dim is None:
             tensor = reader.tensor(source)
         else:
@@ -309,7 +493,7 @@ def build_tp_model(
     linear_capabilities=None,
     linear_selection_policy=None,
 ):
-    """Rank-sharded DenseDecoder: tp_view config + row-parallel/gathered wrappers.
+    """Rank-sharded DenseDecoder: tp_view config + canonical TP/SP bindings.
 
     ``dtype``/``device`` place the shard exactly like the single-process path
     places the whole model (bf16 on-device for GPU, fp32 on host for CPU); the
@@ -344,6 +528,26 @@ def build_tp_model(
             selection_policy=linear_selection_policy,
         ),
     )
+    # Bind execution behavior before loading. Parameter-owning modules stay at
+    # their HF/checkpoint paths, so post-bind state enumeration and canonical
+    # checkpoint slicing use exactly the same tree.
+    context = SequenceParallelContext(comm) if sequence_parallel else None
+    for layer in model.model.layers:
+        RowParallelLinear(layer.self_attn.o_proj, comm, context)
+        RowParallelLinear(layer.mlp.down_proj, comm, context)
+        if context is not None:
+            # Norms run on the token shard and gather on the way into TP.
+            SequenceParallelNorm(layer.input_layernorm, context)
+            SequenceParallelNorm(layer.post_attention_layernorm, context)
+    if context is not None:
+        ScatterAfterEmbedding(model.model.embed_tokens, context)
+        GatherBeforeNorm(model.model.norm, context)
+    object.__setattr__(
+        model,
+        "_kairyu_parallel_shard",
+        ParallelShardInfo("tensor", rank, tp),
+    )
+
     reader = CheckpointReader(model_dir)
     # dtype is applied while loading, so a bf16 target never materializes the
     # fp32 shard on the host first
@@ -356,19 +560,4 @@ def build_tp_model(
         dtype=dtype,
         quant=quant,
     )
-    # add communication: o_proj/down_proj partial sums (lm_head replicated)
-    context = SequenceParallelContext(comm) if sequence_parallel else None
-    for layer in model.model.layers:
-        layer.self_attn.o_proj = RowParallelLinear(layer.self_attn.o_proj, comm, context)
-        layer.mlp.down_proj = RowParallelLinear(layer.mlp.down_proj, comm, context)
-        if context is not None:
-            # norms run on the shard and gather on the way into the TP region
-            layer.input_layernorm = SequenceParallelNorm(layer.input_layernorm, context)
-            layer.post_attention_layernorm = SequenceParallelNorm(
-                layer.post_attention_layernorm, context
-            )
-    if context is not None:
-        model.model.embed_tokens = ScatterAfterEmbedding(model.model.embed_tokens, context)
-        model.model.norm = GatherBeforeNorm(model.model.norm, context)
-    # after the wrappers, so RowParallelLinear's detached bias moves too
     return model.to(device), local_config, full_config
