@@ -56,17 +56,17 @@ work and adopt one fixed `ScheduledChunk`-ordered device-token packet before
 another forward. The sampled-result send/recv path is removed. Real NCCL gates
 cover eager/CUDA-graph TP1/2 parity, injected follower-token overwrite,
 post-model rank-0 failure teardown, and same-GPU relaunch. The clean-commit
-Qwen3-32B TP1/8 and eight-rank protocol artifacts remain to be recorded before
-issue #225 closes. Qwen free-running cross-degree equality will be diagnostic;
-the binding gate requires complete finite raw evidence, verified rank/ownership
-topology, common-prefix distribution compatibility, and reciprocal
-cross-selected logprob tolerance from direct full-distribution probes at the
-first divergence. The formal runner exposes build helpers installed beside its
-active Python executable so direct venv execution can JIT FlashInfer without
-changing the GPU-visible launch path. Exact packet adoption/next-decode use is
-binding in the real TP2 injected production gate; separate TP8 evidence binds
-NCCL overwrite, rank topology, and rank-0-only ownership without claiming a
-per-rank digest.
+Qwen3-32B TP1/8 and eight-rank protocol artifacts are recorded on 8× RTX PRO
+6000. All binding checks and stored replay pass. Broadcast worst-rank p95 is
+0.0784/0.0708/0.0756 ms at B=1/8/16. Qwen retains 43 tokens per degree;
+41 common-prefix selected tokens have maximum logprob delta 0.1482 and the
+first-divergence reciprocal cross-selected maximum is 0.1010, both below 0.25.
+Free-running cross-degree equality remains diagnostic. The formal runner
+exposes build helpers installed beside its active Python executable so direct
+venv execution can JIT FlashInfer without changing the GPU-visible launch
+path. Exact packet adoption/next-decode use is binding in the real TP2
+injected production gate; separate TP8 evidence binds NCCL overwrite, rank
+topology, and rank-0-only ownership without claiming a per-rank digest.
 Penalty-active requests now maintain lazy per-device prompt/seen/count rows and
 an append-only committed shadow; a scheduler-owned epoch makes normal sampling
 skip retained-history copies and comparisons. Exact pending commits require no
@@ -459,6 +459,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [evidence] m16 A3 TP sampling ownership closes on real TP2/TP8 and Qwen3-32B
+- What: Retained two independently replayed artifacts from clean source commits on 8× NVIDIA RTX PRO 6000 Blackwell Server Edition. The TP8 NCCL protocol artifact from `dcd641a` records 256 worst-rank samples per B=1/8/16 cell, exact raw overwrite/equality/divergence behavior, unique UUID/PCI provenance, and rank-0 broadcast p95 of 0.078400/0.070816/0.075648 ms against the fixed 1 ms ceiling. The production Qwen3-32B artifact from `70b887f` records complete TP1/TP8 output and raw logprob evidence for six mixed requests and 43 tokens per degree, plus the post-generation topology: TP1 local owner/sampler; TP8 gloo control, NCCL model group, rank 0 owner/sampler, and seven passive sampler-free followers. Free-running equality is 41/43 and remains diagnostic. The binding 41-token common-prefix selected-logprob maximum is 0.148189 and the first-divergence direct reciprocal cross-selected maximum is 0.101015, both below 0.25. Every binding check and stored replay passes. Artifact SHA-256: protocol `6b9e9df9b5f67b4542c9529abc08bc5b6bfd3a2f4cef08d0db455a2e5436de90`; Qwen `2180ef16cd2c5891b43abdfac99e7161ef3c1afa9ae44668cc986901dfa5e6a0`.
+- Why: These artifacts prove the chosen single-owner protocol on the actual eight-rank NCCL topology and the deployment checkpoint without turning scheduler jitter or BF16 reduction-order near-ties into false failures. The separate real TP2 injected test remains the binding proof that every rank adopts the canonical packet and consumes it on the next decode.
+- Refs: issue #225; m16 A3/D4; `bench/results/issue-225-tp-sampling-{comm-rtxpro6000,qwen3-32b-rtxpro6000}-2026-07-30.json`; `tests/gpu/test_tp_sampling_owner_nccl.py`
 
 ### 2026-07-29 — [amendment] m16 A3 makes rank 0 the sole TP sampling owner
 - What: Replaced all-rank sampling and sampled-result comparison with one protocol in both the production SPMD runner and in-process facade. Rank 0 alone owns RNG, penalties, grammar, logprobs, and public output materialization. Followers execute a passive model/KV path, receive one fixed int64 token slot per scheduled chunk on the model communicator, and adopt its device scalar before returning to the next control receive. Eager followers skip the replicated `lm_head`; every follower skips sampler state and public D2H. The packet retains partial-prefill sentinels, seeded/mixed/structured/speculative state, and fatal protocol diagnostics. A model-subgroup abort plus peer-first reap bounds post-model/pre-packet rank-0 failure teardown. The real TP2 injection gate binds packet adoption and use by the next decode; TP8 evidence independently binds NCCL overwrite plus complete rank-0-owner/passive-follower topology. Cross-degree Qwen evidence treats free-running TP1/TP8 equality as diagnostic and instead binds complete finite raw records, verified rank/ownership topology, common-prefix distribution compatibility, and direct reciprocal cross-selected logprob tolerance at the first divergence. Its direct-venv launch path discovers `ninja` beside the active Python executable before FlashInfer JIT, avoiding a shell wrapper that changes GPU visibility.

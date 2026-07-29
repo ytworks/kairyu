@@ -304,6 +304,11 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   evidence on common-prefix positions, including direct cross-selected logprob
   tolerance at the first divergence, and must be accompanied by verified
   rank/ownership topology.
+  Recorded 2026-07-30 on 8× RTX PRO 6000: the TP8 NCCL broadcast p95 is
+  0.078400/0.070816/0.075648 ms for B=1/8/16 over 256 samples per cell; the
+  Qwen3-32B TP1/TP8 gate retains 43 tokens per degree, with binding aligned and
+  first-divergence cross-selected maxima of 0.148189 and 0.101015 versus the
+  0.25 limit. Both artifacts and their stored replay pass.
   A future vocab-sharded head may gather non-greedy logits to rank 0 (or reduce
   greedy value/index pairs), but must preserve this single-owner token contract.
 - **A4**: column-parallel slices bias with the same bounds; row-parallel adds

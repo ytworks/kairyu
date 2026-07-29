@@ -131,6 +131,20 @@ CUDA-event steady-state p95 ceiling. The complete p99, maximum, and tail-count
 evidence remains diagnostic: a late host launch makes every rank's tiny
 collective event observe OS jitter, which must not decide protocol correctness.
 
+**Recorded evidence (2026-07-30).** On 8× NVIDIA RTX PRO 6000 Blackwell Server
+Edition with NCCL 2.29.7, the clean-commit protocol run retained 256 worst-rank
+samples per B=1/8/16 cell and measured rank-0 broadcast p95 of
+0.078400/0.070816/0.075648 ms. Exact overwrite/equality/divergence checks and
+stored replay all pass. The clean-commit Qwen3-32B production run retained 43
+tokens per TP degree over six mixed requests and proves TP1 local ownership
+plus TP8 gloo-control/NCCL-model topology with only rank 0 holding a sampler.
+The 41 common-prefix selected-token logprobs differ by at most 0.148189; the
+direct reciprocal cross-selected values at the first divergence differ by at
+most 0.101015, below the binding 0.25 tolerance. Free-running equality is
+41/43 and remains diagnostic. Artifacts:
+`bench/results/issue-225-tp-sampling-comm-rtxpro6000-2026-07-30.json` and
+`bench/results/issue-225-tp-sampling-qwen3-32b-rtxpro6000-2026-07-30.json`.
+
 ## KVTransport — region ownership + source-addressed recv (HIGH)
 
 **Gap.** `PageFrame.fragments: tuple[bytes,...]` and `register(num_pages)` carry

@@ -158,6 +158,15 @@ GPU-only remainder (design m5 §4.2).
   every TP8 follower passive without one. Free-running TP1/TP8 token equality is
   reported but is diagnostic only.
 
+  Recorded 2026-07-30 on 8× NVIDIA RTX PRO 6000 Blackwell Server Edition:
+  `issue-225-tp-sampling-comm-rtxpro6000-2026-07-30.json` passes all binding and
+  replay checks with rank-0 broadcast p95 0.078400/0.070816/0.075648 ms at
+  B=1/8/16 (256 samples per cell). The Qwen3-32B TP1/TP8 artifact retains 43
+  tokens per degree, proves the complete owner/passive topology, and passes the
+  0.25 compatibility bound with aligned maximum 0.148189 and first-divergence
+  direct cross-selected maximum 0.101015. Free-running equality is 41/43 and is
+  diagnostic, as specified.
+
   The binding distribution comparison uses only positions with an aligned
   common input prefix. Before the first token divergence, the common selected
   token's TP1/TP8 logprob delta must be at most 0.25. At the first divergence,
