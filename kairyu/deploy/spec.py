@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 from yaml.resolver import BaseResolver
 
@@ -25,6 +32,15 @@ from kairyu.pricing import PriceSheet
 _DEFAULT_PORT = 8000
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 _MERGE_KEY_IDENTITY = object()
+
+
+class _DuplicateKeyError(ValueError):
+    """Duplicate-key error retaining lossless path segments for safe rendering."""
+
+    def __init__(self, key: object, path: tuple[str, ...]) -> None:
+        location = ".".join(path) or "<root>"
+        super().__init__(f"duplicate mapping key {key!r} at {location}")
+        self.path = path
 
 
 class BackendSpec(BaseModel):
@@ -211,7 +227,7 @@ class OrchestratorSection(BaseModel):
 class EmbeddingSection(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    backend: str = Field(min_length=1)
+    backend: Literal["mock"]
     dimensions: int = Field(default=64, ge=1)
 
 
@@ -304,7 +320,7 @@ class DeploymentSpec(BaseModel):
     pricing: PriceSheet | None = None
 
     @model_validator(mode="after")
-    def _validate(self) -> DeploymentSpec:
+    def _validate(self, info: ValidationInfo) -> DeploymentSpec:
         if not self.engines and not self.pools:
             raise ValueError("deployment spec must declare at least one engine or pool")
         overlap = self.engines.keys() & self.pools.keys()
@@ -352,6 +368,15 @@ class DeploymentSpec(BaseModel):
                 "engines:/pools:/orchestrators: names; served model names must be unique"
             )
         if self.tenants is not None:
+            resolve_credentials = (
+                info.context is None
+                or info.context.get("resolve_credentials", True)
+            )
+            resolved_api_keys = (
+                self.server.to_server_settings().resolve_api_keys()
+                if resolve_credentials
+                else frozenset(self.tenants.key_tenants)
+            )
             TenantConfig.from_mapping(
                 key_tenants=self.tenants.key_tenants,
                 limits={
@@ -367,7 +392,7 @@ class DeploymentSpec(BaseModel):
                     for tenant, section in self.tenants.limits.items()
                 },
                 default_tenant=self.tenants.default_tenant,
-                resolved_api_keys=self.server.to_server_settings().resolve_api_keys(),
+                resolved_api_keys=resolved_api_keys,
             )
         if self.pricing is not None:
             if self.server.usage_ledger_path is None:
@@ -431,8 +456,7 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
                     except TypeError:
                         duplicate = False
                     if duplicate:
-                        location = ".".join(path) or "<root>"
-                        raise ValueError(f"duplicate mapping key {display_key!r} at {location}")
+                        raise _DuplicateKeyError(display_key, path)
                 segment = key_node.value if isinstance(key_node, ScalarNode) else "<key>"
                 self._index_paths(value_node, (*path, segment), visited)
         elif isinstance(node, SequenceNode):
@@ -456,8 +480,10 @@ def _construct_unique_mapping(
         except TypeError:
             continue
         if duplicate:
-            path = ".".join(loader._mapping_paths.get(id(node), ())) or "<root>"
-            raise ValueError(f"duplicate mapping key {key!r} at {path}")
+            raise _DuplicateKeyError(
+                key,
+                loader._mapping_paths.get(id(node), ()),
+            )
     mapping: dict[object, object] = {}
     yield mapping
     mapping.update(yaml.SafeLoader.construct_mapping(loader, node, deep=deep))
@@ -469,8 +495,17 @@ _UniqueKeySafeLoader.add_constructor(
 )
 
 
-def load_deployment_spec(source: str | Path) -> DeploymentSpec:
-    """Load a DeploymentSpec from a YAML file path or a YAML string."""
+def load_deployment_spec(
+    source: str | Path,
+    *,
+    resolve_credentials: bool = True,
+) -> DeploymentSpec:
+    """Load a DeploymentSpec from a YAML file path or a YAML string.
+
+    ``resolve_credentials=False`` retains tenant topology validation without
+    reading API-key environment variables. Serving keeps the default credential
+    resolution behavior.
+    """
     if isinstance(source, Path) or (
         isinstance(source, str) and "\n" not in source.strip() and Path(source).exists()
     ):
@@ -480,4 +515,7 @@ def load_deployment_spec(source: str | Path) -> DeploymentSpec:
     data = yaml.load(text, Loader=_UniqueKeySafeLoader)
     if not isinstance(data, dict):
         raise ValueError("deployment spec YAML must be a mapping at the top level")
-    return DeploymentSpec.model_validate(data)
+    return DeploymentSpec.model_validate(
+        data,
+        context={"resolve_credentials": resolve_credentials},
+    )

@@ -145,6 +145,41 @@ class ModelConfig:
     _attention_bias: bool = False
 
 
+def validate_tensor_parallel_config(config: ModelConfig, tp: int) -> None:
+    """Validate the pure model-shape constraints used by TP shard construction."""
+
+    if tp < 1:
+        raise ValueError(f"tensor_parallel_size must be >= 1, got {tp}")
+    if config.num_key_value_heads < 1:
+        raise ValueError(
+            f"num_key_value_heads must be >= 1, got {config.num_key_value_heads}"
+        )
+    if config.num_key_value_heads % tp != 0:
+        raise ValueError(
+            f"num_key_value_heads={config.num_key_value_heads} "
+            f"not divisible by tp={tp}"
+        )
+    if config.num_attention_heads % tp != 0:
+        raise ValueError(
+            f"num_attention_heads={config.num_attention_heads} "
+            f"not divisible by tp={tp}"
+        )
+    if config.intermediate_size % tp != 0:
+        raise ValueError(
+            f"intermediate_size={config.intermediate_size} not divisible by tp={tp}"
+        )
+    if config.vocab_size % tp != 0:
+        raise ValueError(f"vocab_size={config.vocab_size} not divisible by tp={tp}")
+    if tp == 1:
+        return
+    if config.is_mla:
+        raise ValueError("TP for MLA models is not supported (attention-DP, m16 §3)")
+    if config.moe is not None:
+        raise ValueError(
+            "TP for MoE models is not supported; use expert parallelism (m16 EP)"
+        )
+
+
 def _rope_fields(config: dict) -> tuple[float, RopeScaling | None]:
     """Both generations: rope_parameters (nested theta) or rope_scaling + theta."""
     parameters = config.get("rope_parameters") or config.get("rope_scaling") or {}
@@ -233,6 +268,25 @@ def _mla_fields(config: dict, architecture: str) -> MlaConfig | None:
     )
 
 
+def _required_int(
+    config: dict,
+    field: str,
+    *,
+    minimum: int | None = None,
+) -> int:
+    value = config[field]
+    if type(value) is not int or (
+        minimum is not None and value < minimum
+    ):
+        constraint = (
+            "an integer"
+            if minimum is None
+            else f"an integer >= {minimum}"
+        )
+        raise ValueError(f"{field} must be {constraint}")
+    return value
+
+
 def parse_model_config(config: dict) -> ModelConfig:
     architectures = config.get("architectures") or []
     architecture = architectures[0] if architectures else ""
@@ -243,8 +297,14 @@ def parse_model_config(config: dict) -> ModelConfig:
         )
     if config.get("sliding_window") and config.get("use_sliding_window", True):
         raise ValueError("sliding-window attention is not supported (m12 §3)")
-    hidden_size = config["hidden_size"]
-    heads = config["num_attention_heads"]
+    hidden_size = _required_int(config, "hidden_size", minimum=1)
+    heads = _required_int(config, "num_attention_heads", minimum=1)
+    num_hidden_layers = _required_int(config, "num_hidden_layers")
+    num_key_value_heads = config.get("num_key_value_heads", heads)
+    if type(num_key_value_heads) is not int or num_key_value_heads < 1:
+        raise ValueError("num_key_value_heads must be an integer >= 1")
+    intermediate_size = _required_int(config, "intermediate_size", minimum=1)
+    vocab_size = _required_int(config, "vocab_size", minimum=1)
     rope_theta, rope_scaling = _rope_fields(config)
     mla = _mla_fields(config, architecture)
     # A7: DeepSeek saved configs carry head_dim == qk_rope_head_dim; hub
@@ -253,15 +313,17 @@ def parse_model_config(config: dict) -> ModelConfig:
     head_dim = config.get("head_dim") or hidden_size // heads
     if mla is not None:
         head_dim = mla.qk_head_dim
+    if type(head_dim) is not int or head_dim < 1:
+        raise ValueError("head_dim must be an integer >= 1")
     model_config = ModelConfig(
         architecture=architecture,
         hidden_size=hidden_size,
-        num_hidden_layers=config["num_hidden_layers"],
+        num_hidden_layers=num_hidden_layers,
         num_attention_heads=heads,
-        num_key_value_heads=config.get("num_key_value_heads", heads),
+        num_key_value_heads=num_key_value_heads,
         head_dim=head_dim,
-        intermediate_size=config["intermediate_size"],
-        vocab_size=config["vocab_size"],
+        intermediate_size=intermediate_size,
+        vocab_size=vocab_size,
         rms_norm_eps=config.get("rms_norm_eps", 1e-6),
         rope_theta=rope_theta,
         rope_scaling=rope_scaling,

@@ -86,6 +86,30 @@ The flat `server:` mapping is a versioned deployment schema and is translated
 explicitly to runtime server settings. Runtime-only settings do not
 automatically become accepted YAML keys.
 
+Validate a deployment graph before rollout without starting a server:
+
+```bash
+kairyu validate /etc/kairyu/deployment.yaml
+```
+
+Validation is always deterministic and offline. It checks the DeploymentSpec
+schema and declared local filesystem references: orchestrator specs, `.jinja`
+chat templates, and local `kairyu`/`kairyu-proc` model and tokenizer artifacts.
+Orchestrator and `.jinja` paths resolve from the deployment file's directory;
+native model and tokenizer paths retain the serve process's working-directory
+semantics.
+It does not read credential environment variables, expose secret values,
+construct a backend, materialize model tensors, contact an endpoint, or probe
+a GPU. Model compatibility is derived from metadata-only `meta` shapes, and
+checkpoint tensor data is never read. Network
+checks are therefore skipped and hardware checks remain indeterminate; those
+belong to the readiness and deployment acceptance gates. A valid graph exits
+`0`, a validation failure exits `1`, and argparse usage errors exit `2`.
+
+The current DeploymentSpec has no standalone adapter, grammar, or benchmark
+artifact references, so `validate` does not invent checks for them. Their
+request-, benchmark-, and runtime-owned validation remains unchanged.
+
 Replica node (GPU):
 
 ```yaml

@@ -10,14 +10,20 @@ without touching this body.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 
-from kairyu.engine.core.quant_config import QuantMethod, detect_quantization
+from kairyu.engine.core.quant_config import (
+    detect_quantization,
+    validate_model_quantization,
+)
 from kairyu.engine.core.weights import CheckpointReader
 from kairyu.models.config import ModelConfig, parse_model_config
+from kairyu.models.generation import (
+    GenerationDefaults,
+    parse_generation_defaults,
+)
 from kairyu.models.llama import DenseDecoder
 
 _SUPPORTED_BUILDERS = (
@@ -29,34 +35,12 @@ _SUPPORTED_BUILDERS = (
 )
 
 
-@dataclass(frozen=True)
-class GenerationDefaults:
-    """From generation_config.json: HF eos may be a LIST (Llama-3 Instruct) —
-    the first entry becomes eos_token_id, the rest stop_token_ids (m12 D5)."""
-
-    eos_token_id: int | None = None
-    stop_token_ids: tuple[int, ...] = ()
-
-
-def _generation_defaults(directory: Path, config: dict) -> GenerationDefaults:
-    eos: object = config.get("eos_token_id")
-    generation_file = directory / "generation_config.json"
-    if generation_file.is_file():
-        eos = json.loads(generation_file.read_text()).get("eos_token_id", eos)
-    if eos is None:
-        return GenerationDefaults()
-    if isinstance(eos, list):
-        ids = [int(token) for token in eos]
-        return GenerationDefaults(eos_token_id=ids[0], stop_token_ids=tuple(ids[1:]))
-    return GenerationDefaults(eos_token_id=int(eos))
-
-
 def load_generation_defaults(model_dir: str) -> GenerationDefaults:
     """Public: eos/stop-token defaults from a checkpoint dir (used by the TP
     serve path, which shards the model but still needs the stop config)."""
     directory = Path(model_dir)
     config = json.loads((directory / "config.json").read_text())
-    return _generation_defaults(directory, config)
+    return parse_generation_defaults(directory, config)
 
 
 def build_model(
@@ -84,12 +68,11 @@ def load_model(
     raw_config = json.loads(config_file.read_text())
     quant = detect_quantization(raw_config)
     config = parse_model_config(raw_config)
-    if config.is_mla and quant.method is not QuantMethod.NONE:
-        raise ValueError(
-            f"{config.architecture} MLA does not support {quant.method.value} "
-            "checkpoints: its absorbed KV projection requires an unquantized "
-            "kv_b_proj weight"
-        )
+    validate_model_quantization(
+        quant,
+        is_mla=config.is_mla,
+        architecture=config.architecture,
+    )
     model = build_model(
         config,
         attention_backend=attention_backend,
@@ -136,4 +119,4 @@ def load_model(
         # assign=True replaces the embedding tensor; restore the tie
         model.lm_head.weight = model.model.embed_tokens.weight
     model.eval()
-    return model, config, _generation_defaults(directory, raw_config)
+    return model, config, parse_generation_defaults(directory, raw_config)

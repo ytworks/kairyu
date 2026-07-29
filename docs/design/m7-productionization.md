@@ -10,6 +10,9 @@ D8's no-OTel stance flips now that a tracing consumer exists (G5 F1d). Everythin
 shipped here remains the per-node baseline; see `docs/roadmap.md` §5.
 **Amended 2026-07-29** (D3): the deployment-owned `ServerSection` explicitly
 translates to runtime `ServerSettings` instead of inheriting its schema.
+**Amended 2026-07-29** (D3, issue #230): `kairyu validate` performs a
+deterministic offline preflight of the deployment schema and its declared local
+artifact graph without starting serving or model execution.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
@@ -93,6 +96,20 @@ setting must be added and mapped deliberately in `ServerSection`.
 `ServerSection` validates the durable YAML artifact; `ServerSettings` remains
 the internal value validated for direct serve-layer callers and owns
 environment-backed API/admin key resolution.
+
+`kairyu validate <deployment.yaml>` is the validation-only boundary. It checks
+the DeploymentSpec schema plus declared local orchestrator specs, `.jinja`
+templates, and `kairyu`/`kairyu-proc` model and tokenizer references. The
+command is always offline: it reads no credential environment values, reveals
+no secrets, constructs no backend, materializes no model tensors, starts no
+server, performs no network access, and probes no hardware. Metadata-only
+model shapes and checkpoint headers are sufficient for the local compatibility
+checks. Schema and local-filesystem failures are binding; network checks are
+skipped and hardware checks are indeterminate.
+Exit status is `0` for a valid graph, `1` for validation failure, and argparse's
+`2` for CLI misuse. The current DeploymentSpec declares no standalone adapter,
+grammar, or benchmark artifact links, so those surfaces are explicitly outside
+this command rather than represented by speculative checks.
 
 ### D4 — Health/readiness/metrics live in the serve layer; the pool stays passive
 

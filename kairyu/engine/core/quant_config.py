@@ -150,3 +150,29 @@ def detect_quantization(hf_config: dict) -> QuantConfig:
         )
     supported = ", ".join(m.value for m in _SUPPORTED)
     raise ValueError(f"unsupported quant_method {method!r}; supported: {supported}")
+
+
+def validate_tensor_parallel_quantization(quant: QuantConfig) -> None:
+    """Validate the quantization formats implemented by the TP shard loader."""
+
+    if quant.method not in (QuantMethod.NONE, QuantMethod.FP8):
+        raise ValueError(
+            "tensor parallelism currently supports dense and FP8 checkpoints; "
+            f"got {quant.method.value}"
+        )
+
+
+def validate_model_quantization(
+    quant: QuantConfig,
+    *,
+    is_mla: bool,
+    architecture: str,
+) -> None:
+    """Validate quantization combinations rejected before model construction."""
+
+    if is_mla and quant.method is not QuantMethod.NONE:
+        raise ValueError(
+            f"{architecture} MLA does not support {quant.method.value} "
+            "checkpoints: its absorbed KV projection requires an unquantized "
+            "kv_b_proj weight"
+        )

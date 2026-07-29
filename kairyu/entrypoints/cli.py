@@ -1,4 +1,4 @@
-"""`kairyu` console entrypoint: `serve` (design m7 D3) and `bench` (goal G6 P-C1)."""
+"""``kairyu`` console entrypoint: serve, validate, and benchmark commands."""
 
 from __future__ import annotations
 
@@ -7,9 +7,6 @@ import sys
 from pathlib import Path
 
 from kairyu.bench.cli import add_bench_parser
-from kairyu.deploy.builder import build_app_from_config
-from kairyu.deploy.spec import load_deployment_spec
-from kairyu.entrypoints.server.middleware import configure_json_logging
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -25,6 +22,12 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("config", type=Path, help="Path to a DeploymentSpec YAML")
     serve.add_argument("--host", default=None, help="Override server.host")
     serve.add_argument("--port", type=int, default=None, help="Override server.port")
+    validate = subparsers.add_parser(
+        "validate",
+        help="Validate a DeploymentSpec and its local linked artifacts without "
+        "starting a server.",
+    )
+    validate.add_argument("config", type=Path, help="Path to a DeploymentSpec YAML")
     add_bench_parser(subparsers)
     return parser
 
@@ -33,6 +36,10 @@ def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     if args.command == "serve":
         import uvicorn
+
+        from kairyu.deploy.builder import build_app_from_config
+        from kairyu.deploy.spec import load_deployment_spec
+        from kairyu.entrypoints.server.middleware import configure_json_logging
 
         configure_json_logging()
         spec = load_deployment_spec(args.config)
@@ -47,6 +54,13 @@ def main(argv: list[str] | None = None) -> None:
             # makes ServerSettings.access_log=False ineffective.
             access_log=False,
         )
+    elif args.command == "validate":
+        from kairyu.deploy.validation import validate_deployment
+
+        report = validate_deployment(args.config)
+        print(report.render_text())
+        if not report.valid:
+            sys.exit(1)
     elif args.command == "bench":
         from kairyu.bench.cli import handle
 

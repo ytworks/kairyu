@@ -51,6 +51,22 @@ def test_role_referencing_unknown_worker_rejected():
         load_spec(bad)
 
 
+def test_orchestrator_requires_at_least_one_worker():
+    with pytest.raises(ValidationError, match="workers"):
+        load_spec("workers: []")
+
+
+def test_duplicate_worker_names_are_rejected():
+    with pytest.raises(ValidationError, match="worker names must be unique"):
+        load_spec(
+            """
+workers:
+  - {name: repeated, backend: mock}
+  - {name: repeated, backend: mock}
+"""
+        )
+
+
 def test_decorator_pool_builds_equivalent_spec():
     pool = AgentPool(shared_prefix="SYS\n", moa_samples=3)
     pool.worker("tier1", backend="mock")

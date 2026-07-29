@@ -688,6 +688,55 @@ engines:
     assert spec.tenants is None
 
 
+def test_loader_can_skip_credential_resolution(monkeypatch):
+    calls = 0
+
+    def fail_if_called(_settings):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("credential resolver must not run")
+
+    monkeypatch.setattr(ServerSettings, "resolve_api_keys", fail_if_called)
+
+    spec = load_deployment_spec(
+        """
+server:
+  api_keys_env: KAIRYU_UNREAD_KEYS
+engines:
+  m: {backend: mock}
+tenants:
+  key_tenants: {key-a: team-a}
+  limits:
+    team-a: {requests_per_minute: 60}
+""",
+        resolve_credentials=False,
+    )
+
+    assert calls == 0
+    assert spec.tenants is not None
+    assert spec.tenants.key_tenants == {"key-a": "team-a"}
+
+
+def test_credential_free_loader_retains_tenant_structure_validation():
+    with pytest.raises(
+        ValueError,
+        match="limits reference unknown tenant 'orphan'",
+    ):
+        load_deployment_spec(
+            """
+server:
+  api_keys_env: KAIRYU_UNREAD_KEYS
+engines:
+  m: {backend: mock}
+tenants:
+  key_tenants: {key-a: team-a}
+  limits:
+    orphan: {requests_per_minute: 60}
+""",
+            resolve_credentials=False,
+        )
+
+
 def test_health_url_derived_from_base_url():
     entry = BackendSpec(
         backend="openai", options={"base_url": "http://gpu-0:8000/v1", "model": "m"}

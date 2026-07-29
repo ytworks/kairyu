@@ -20,9 +20,13 @@ import dataclasses
 import torch
 from torch import nn
 
-from kairyu.engine.core.quant_config import QuantConfig, QuantMethod, detect_quantization
-from kairyu.engine.core.tp_runner import validate_tp_degree
-from kairyu.models.config import ModelConfig
+from kairyu.engine.core.quant_config import (
+    QuantConfig,
+    QuantMethod,
+    detect_quantization,
+    validate_tensor_parallel_quantization,
+)
+from kairyu.models.config import ModelConfig, validate_tensor_parallel_config
 
 
 def shard_bounds(total: int, world_size: int, rank: int) -> tuple[int, int]:
@@ -36,26 +40,7 @@ def shard_bounds(total: int, world_size: int, rank: int) -> tuple[int, int]:
 
 def tp_view(config: ModelConfig, tp: int, rank: int) -> ModelConfig:
     """The rank-local config (A2): the whole model tree sizes itself from it."""
-    validate_tp_degree(tp, num_kv_heads=config.num_key_value_heads)
-    if config.num_attention_heads % tp != 0:
-        raise ValueError(
-            f"num_attention_heads={config.num_attention_heads} not divisible by tp={tp}"
-        )
-    if config.intermediate_size % tp != 0:
-        raise ValueError(
-            f"intermediate_size={config.intermediate_size} not divisible by tp={tp}"
-        )
-    if config.vocab_size % tp != 0:
-        raise ValueError(f"vocab_size={config.vocab_size} not divisible by tp={tp}")
-    if config.is_mla:
-        raise ValueError("TP for MLA models is not supported (attention-DP, m16 §3)")
-    if config.moe is not None:
-        # sparse MoE layers have no `mlp.down_proj` to row-parallelize (M4); MoE
-        # is distributed by expert parallelism, not this dense-MLP TP path — fail
-        # fast instead of loading every shard and then AttributeError-ing
-        raise ValueError(
-            "TP for MoE models is not supported; use expert parallelism (m16 EP)"
-        )
+    validate_tensor_parallel_config(config, tp)
     return dataclasses.replace(
         config,
         num_attention_heads=config.num_attention_heads // tp,
@@ -341,11 +326,7 @@ def build_tp_model(
 
     raw = json.loads((Path(model_dir) / "config.json").read_text())
     quant = detect_quantization(raw)
-    if quant.method not in (QuantMethod.NONE, QuantMethod.FP8):
-        raise ValueError(
-            "tensor parallelism currently supports dense and FP8 checkpoints; "
-            f"got {quant.method.value}"
-        )
+    validate_tensor_parallel_quantization(quant)
     full_config = parse_model_config(raw)
     local_config = tp_view(full_config, tp, rank)
     if sequence_parallel and tp < 2:
