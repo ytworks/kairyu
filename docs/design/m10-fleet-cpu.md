@@ -2,8 +2,9 @@
 
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
 2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
-2026-07-28; D7/A31 amended 2026-07-28). Reviewed (1-reviewer panel with
-repo-line evidence; §6 binding; covers M10a+M10b).
+2026-07-28; D7/A31 amended 2026-07-28; D6/A32 amended 2026-07-29).
+Reviewed (1-reviewer panel with repo-line evidence; §6 binding; covers
+M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
 Date: 2026-07-03
 Depends on: m7 ReplicaPool/JsonlRouterLog, m7 deploy (spec/builder/prober),
@@ -876,3 +877,74 @@ over (α, β) (pure function over the dataset; no online learning).
   ms. The independently replayed 2,196-row artifact is retained byte-identically
   at `bench/results/f2b-kv-event-retained/`; its evidence-only retention does
   not repeat the binding run.
+- **A32**: F2c measures the real D6 placement path, not a gateway mock. The
+  candidate is a production `ReplicaPool` with `PrefixIndex`; the control is
+  the same pool with `prefix_index=None`. Both use `OpenAICompatBackend` to
+  stream from real Qwen3-32B engines and `JsonlRouterLog` to retain the
+  production selection reason and replica. Four independent TP2 engines occupy
+  all eight GPUs. Endpoints A0/A1 form one two-replica cohort and B0/B1 form a
+  second cache-disjoint cohort. Candidate and control run concurrently, then
+  exchange cohorts every round for eight rounds so GPU, NUMA, thermal, and
+  time-order effects cannot remain attached to one policy.
+
+  TP2 is the deliberate memory/capacity point for this proof. On the measured
+  95.59 GiB Blackwell GPUs, each TP2 rank carries approximately 31.96 GiB of
+  Qwen3-32B weights and 16 GiB of KV pages at the frozen 8,192-page capacity,
+  leaving approximately 47.6 GiB for graphs, workspaces, and runtime
+  allocations. TP1 would carry the complete approximately 65.5 GB checkpoint
+  on one device and discard most of that validated margin. TP2 also fills all
+  eight GPUs while retaining the two independently cached replicas that each
+  policy needs; a single TP8 engine would not test routing.
+
+  Each run carries a recorded namespace, and each round creates 16 unique
+  2,048-word RAG families whose namespaced identities differ inside the first
+  256 characters. Smoke and formal namespaces must differ, and a namespace is
+  never reused against persistent caches. A non-binding cold seed uses a session whose
+  production HRW target alternates between logical replicas; the measured
+  session hashes to the opposite replica. Thus successful seeding makes the
+  candidate's `prefix_match` return to the warm engine, while the control's
+  `session_affinity` selects the deliberately cold opposite engine. Every
+  candidate/control pair receives byte-identical prompt content, session and
+  prefix hints, greedy sampling, and exactly eight output tokens
+  (`min_tokens=max_tokens=8`, `ignore_eos=true`). Turn 1 completes on both
+  policies and its output digest must agree before either turn-2 request is
+  constructed; the actual turn-1 output is then included in both identical
+  turn-2 prompts. Missing, failed, duplicate, non-terminal, unequal-output, or
+  inexact-usage rows fail the proof.
+
+  TTFT uses nearest-rank p95 with no interpolation, trimming, or exclusion.
+  Candidate/control p95 must be at most 0.70 in the pooled population, in the
+  geometric mean of all eight round ratios, and at the seventh ordered round
+  ratio. The last condition has 96.484375% one-sided binomial coverage for the
+  median and is equivalent to at least seven of eight rounds meeting the 30%
+  reduction. Goodput counts every successful request at or below the frozen
+  60-second TTFT SLO over the arm's first-receipt-to-last-terminal interval;
+  every planned request remains in scope. Its candidate/control ratio must be
+  at least 0.99 pooled, at the second ordered round ratio, and in the geometric
+  mean, likewise requiring at least seven non-regressing rounds. Cache truth is
+  the token-weighted engine usage
+  `sum(cached_tokens) / sum(prompt_tokens)`, not a router-derived hit label: the
+  candidate must improve it strictly when pooled and be no lower in any round.
+
+  Paired receipt skew and absolute-schedule lateness are retained with
+  monotonic timestamps and recomputed as diagnostics. They have no arbitrary
+  millisecond fail cutoff; simultaneous disjoint arms, cohort crossover, the
+  seven-of-eight order statistics, and full-sample geometric means are the
+  controls for ordinary OS jitter. The short changed-scope smoke binds only
+  evidence integrity and production-path semantics; it retains but does not
+  gate on the formal performance statistics. The formal profile alone binds
+  the thresholds above. The artifact still binds every planned
+  request, route decision, selected replica, topology and GPU identity, exact
+  configuration, model revision and weight digests, clean expected source
+  commit, relevant source/config hashes, prompt/output identities, and exact
+  engine usage. Its offline verifier rehashes the raw JSONL and reconstructs
+  the trace, routing contract, statistics, and manifest verdict without
+  trusting derived fields.
+
+  This direct L2 fixture is the narrow F2c proof: normal HTTP session-only blank
+  hints intentionally bypass cross-session `PrefixIndex`, so using that
+  gateway path would compare HRW with itself. It does not add
+  DeploymentSpec/builder wiring for D7 exact KV events. That product path also
+  requires a tokenizer-compatible block-hash provider plus subscriber and
+  publisher lifecycle ownership; adding it here would mix a separate
+  deployment responsibility into the D6 routing performance experiment.

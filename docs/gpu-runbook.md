@@ -205,3 +205,57 @@ image, and drill are unchanged.
   requires a clean source tree and records the source/config/benchmark hashes,
   model revision, image digests, `/backends` topology, and GPU inventory. Save
   the raw JSON under `bench/results/`.
+- 9.6 G5 F2c KV-aware TTFT: provision the external
+  `kairyu-qwen3-32b_qwen3-32b` volume with the pinned Qwen3-32B revision, and
+  make an image built from the clean expected source available locally by its
+  immutable `repository@sha256:...` digest. Its
+  `org.opencontainers.image.revision` label must equal that source commit.
+  The Compose profile assigns TP2 replicas A0/A1/B0/B1 to host GPU pairs
+  0–1/2–3/4–5/6–7 and exposes them on ports 8100–8103:
+
+  ```bash
+  export KAIRYU_F2C_IMAGE='repository@sha256:<64-lowercase-hex>'
+  docker image inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$KAIRYU_F2C_IMAGE"
+  examples/qwen3-32b-multi-gpu/f2c-stack.sh config
+  examples/qwen3-32b-multi-gpu/f2c-stack.sh up -d --wait
+  curl -fsS http://127.0.0.1:8100/readyz
+  curl -fsS http://127.0.0.1:8101/readyz
+  curl -fsS http://127.0.0.1:8102/readyz
+  curl -fsS http://127.0.0.1:8103/readyz
+  ```
+
+  Run only the changed-scope smoke needed to establish the harness. Smoke
+  binds evidence integrity, routing, usage, output, and provenance; its
+  performance metrics are diagnostic only. If that smoke generates tokens,
+  recreate all four containers before the formal run so its per-round roots
+  begin with empty independent caches. Run the one binding profile from a
+  clean pinned commit; the harness records `nvidia-smi` inventory/topology and
+  defaults to the four endpoints above:
+
+  ```bash
+  uv run python bench/kv_aware_ttft_f2c_bench.py \
+    --profile formal \
+    --output-dir bench/results/f2c-kv-aware-ttft-qwen3-32b-<date> \
+    --model qwen3-32b \
+    --model-revision <40-hex-model-revision> \
+    --trace-namespace issue181-run1-<date> \
+    --model-digest weights-rollup=<64-hex-sha256> \
+    --expected-commit <40-hex-source-commit> \
+    --assert-gate
+
+  uv run python bench/kv_aware_ttft_f2c_bench.py \
+    --verify-artifact bench/results/f2c-kv-aware-ttft-qwen3-32b-<date> \
+    --assert-gate
+
+  examples/qwen3-32b-multi-gpu/f2c-stack.sh down
+  ```
+
+  A trace namespace is single-use for a live cache set. Choose a new
+  lower-case namespace for a technical retry, or recreate all four containers
+  first; never replay a measured namespace against its warmed caches.
+  Retain both generated JSON files. The offline command rehashes the raw JSONL
+  and recomputes the trace, production routing decisions, exact engine
+  `cached_tokens` rates, nearest-rank p95, crossover order statistics,
+  goodput, configuration, topology, and source/model provenance.

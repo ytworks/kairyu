@@ -1,0 +1,103 @@
+name: kairyu-qwen3-32b-f2c
+
+# Four independent Qwen3-32B/TP2 processes provide two isolated two-replica
+# cohorts for the F2c crossover.  `device_ids` are HOST GPU ordinals.  A formal
+# run must record `nvidia-smi --query-gpu=index,pci.bus_id,uuid` and verify that
+# these ordinals still describe the intended physical/NUMA topology; Compose
+# ordinals alone are not topology evidence.
+#
+# KAIRYU_F2C_IMAGE must be an immutable repository@sha256:... reference built
+# from the source under test.  The required interpolation deliberately makes
+# even `docker compose config` fail when it is absent.
+x-f2c-replica: &f2c-replica
+  image: ${KAIRYU_F2C_IMAGE:?set KAIRYU_F2C_IMAGE to an immutable repository@sha256 digest}
+  pull_policy: never
+  restart: "no"
+  shm_size: 1gb
+  ulimits:
+    memlock: -1
+  volumes:
+    - ./f2c-replica.yaml:/etc/kairyu/config.yaml:ro
+    - qwen3-32b:/models:ro
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+    interval: 5s
+    timeout: 5s
+    retries: 180
+    start_period: 5m
+
+services:
+  # Cohort A: two independent caches on the first four host GPUs.
+  replica-a0:
+    <<: *f2c-replica
+    cpuset: "0-15,64-79"
+    ports:
+      - "127.0.0.1:8100:8000"
+    labels:
+      com.kairyu.f2c.cohort: a
+      com.kairyu.f2c.replica: a0
+      com.kairyu.f2c.host-gpu-ordinals: "0,1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
+
+  replica-a1:
+    <<: *f2c-replica
+    cpuset: "16-31,80-95"
+    ports:
+      - "127.0.0.1:8101:8000"
+    labels:
+      com.kairyu.f2c.cohort: a
+      com.kairyu.f2c.replica: a1
+      com.kairyu.f2c.host-gpu-ordinals: "2,3"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["2", "3"]
+              capabilities: [gpu]
+
+  # Cohort B: identical policy capacity with isolated caches.
+  replica-b0:
+    <<: *f2c-replica
+    cpuset: "32-47,96-111"
+    ports:
+      - "127.0.0.1:8102:8000"
+    labels:
+      com.kairyu.f2c.cohort: b
+      com.kairyu.f2c.replica: b0
+      com.kairyu.f2c.host-gpu-ordinals: "4,5"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["4", "5"]
+              capabilities: [gpu]
+
+  replica-b1:
+    <<: *f2c-replica
+    cpuset: "48-63,112-127"
+    ports:
+      - "127.0.0.1:8103:8000"
+    labels:
+      com.kairyu.f2c.cohort: b
+      com.kairyu.f2c.replica: b1
+      com.kairyu.f2c.host-gpu-ordinals: "6,7"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["6", "7"]
+              capabilities: [gpu]
+
+volumes:
+  qwen3-32b:
+    external: true
+    name: kairyu-qwen3-32b_qwen3-32b
