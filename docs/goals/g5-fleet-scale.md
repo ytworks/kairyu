@@ -76,7 +76,7 @@ repeat the binding drill.
 | F2a | Prefix-trie scorer: on an identical cross-session shared-prefix trace against 500 mock replicas with independently simulated cache state, backend-truth cached prompt-work rate is ≥2× the non-zero session-hashing baseline; on 21 alternating paired uniform session-only (blank-root) rounds, the exact distribution-free one-sided ≥95% median lower bound and the full-sample geometric mean of the <10 ms SLO-goodput ratio are each ≥0.99, equivalently with ≥15/21 individual ratios ≥0.99 for the median bound; shared and uniform placement p99 are each <10 ms | replayable CPU bench (m10 A30) |
 | F2b | RadixKV KV-event index: every exact route uses truth <250 ms old and therefore strictly <500 ms under formal churn; killing one binding physical feed makes the full 200-entry route use the approximate oracle; restoring it converges by complete replay without process restart in <500 ms | replayable CPU chaos fixture (m10 A31) |
 | F2c | Real-engine validation: candidate/control nearest-rank TTFT p95 ratio ≤0.70 pooled, at the seventh ordered ratio of eight crossover rounds, and by geometric mean on a multi-turn+RAG trace; SLO-goodput ratio ≥0.99 pooled, at the second ordered ratio, and by geometric mean; pooled engine-token cache rate strictly improves without a per-round regression | **Closed** by retained 8-GPU artifact (m10 A32; 2026-07-29) |
-| F2d | Placement decisions land in the JSONL decision log (`prefix_match` reason) and feed `learning/dataset.py`; bandit-tuned α/β beats hand-tuned on a replayed trace | CPU bench |
+| F2d | Production `kind=replica` decisions join exactly once to `placement_outcome` TTFT rows and feed `learning/dataset.py`; after disjoint-family training selects and freezes one normalized `λ=β/α` policy (`α=1`) by minimum mean TTFT, complete held-out deterministic virtual-time replay from the same frozen initial state must show strictly lower mean TTFT than the declared `λ=0.25` baseline, with complete, zero-failure, balanced, independently replayable evidence. p95 and action differences are diagnostic only | **Pre-results / in progress** CPU replay (m10 A33) |
 
 F2a reuses F1a run `30374404150` only for its kind deployment, ingress clock,
 discovery, placement-log, provenance, and hosted-runner precedents. It does not
@@ -209,6 +209,20 @@ raw SHA-256
 `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`,
 and trace SHA-256
 `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.
+
+F2d remains pre-results and in progress under m10 A33. Its former
+chosen-action-agreement tuner is withdrawn because candidate-specific
+agreement subsets are selection-biased and contain no counterfactual TTFT for
+unchosen replicas. Only `λ=β/α` is identifiable, so `α=1` is fixed and
+`λ=0.25` is the baseline. All candidate policies replay complete episodes from
+the same frozen initial cache/background-load state over disjoint training
+families; the lowest-mean-TTFT candidate is then frozen. Only that candidate
+and the baseline run the same held-out trace from the same frozen initial
+state under deterministic virtual time. Arm execution order is neither
+binding nor diagnostic. Closure requires strict held-out mean-TTFT improvement
+plus complete, zero-failure, balanced-work, one-to-one joined, split-isolated,
+hash-bound evidence that independently replays. No extra 10% threshold or p95
+gate applies; p95 and action differences remain diagnostic.
 
 ### Stage F3 — NIC KV transfer + P/D pools (needs RDMA hardware)
 
