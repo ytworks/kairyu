@@ -1439,7 +1439,10 @@ def test_helm_chart_renders_placement_and_runtime_controls(tmp_path):
     assert pod_spec["affinity"] == affinity
 
 
-@pytest.mark.parametrize("attention_backend", ["torch", "flashinfer"])
+@pytest.mark.parametrize(
+    "attention_backend",
+    ["auto", "torch", "flashinfer", "flashattention3", "flashattention4"],
+)
 @pytest.mark.helm
 async def test_helm_chart_renders_supported_attention_backend(
     tmp_path, attention_backend
@@ -1557,7 +1560,14 @@ async def test_helm_attention_backend_values_schema_and_template_are_strict():
     assert gpu_values["attentionBackend"] == "torch"
     assert schema["properties"]["attentionBackend"] == {
         "type": "string",
-        "enum": ["", "torch", "flashinfer"],
+        "enum": [
+            "",
+            "auto",
+            "torch",
+            "flashinfer",
+            "flashattention3",
+            "flashattention4",
+        ],
     }
     assert "attentionBackend" in schema["required"]
     assert "{{- with .Values.attentionBackend }}" in template

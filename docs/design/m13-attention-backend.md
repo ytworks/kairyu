@@ -1,8 +1,9 @@
-# M13 Design: AttentionBackend Seam — Torch, MLA Reference, FlashInfer Adapter
+# M13 Design: AttentionBackend Seam — Torch, MLA, FlashInfer, FlashAttention 3/4
 
 Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS (1-reviewer panel with web
 verification of the FlashInfer 0.6.x API and the DeepSeek-V2 MLA paper,
-2026-07-03; amendments below are binding).
+2026-07-03; amendments below are binding). Extended for FlashAttention-3/4 by
+issue #277 (2026-07-29).
 Milestone: M13 (roadmap Track E1 GPU-path-local; kernel-adapter pattern setter
 for M14/M18)
 Date: 2026-07-03
@@ -105,10 +106,47 @@ sequence, and the version is pinned in the `[gpu]` extra.
 ### D5 — Selector (`selector.py`)
 
 `select_backend(profile: HardwareProfile | None) -> AttentionBackend`:
-`KAIRYU_ATTENTION_BACKEND` env override (`torch` | `flashinfer`) wins; else
-`profile.kernel_tier` — `torch` for CPU/unknown, `flashinfer` for `fa2`/`full`
-tiers. `build_engine_loop(model_path=...)` calls it with `probe()` so deploy
-day is config-free; CPU environments keep getting the torch backend.
+`KAIRYU_ATTENTION_BACKEND` accepts `auto`, `torch`, `flashinfer`,
+`flashattention3`, and `flashattention4`. An explicit backend is strict:
+dependency, architecture, and tensor-shape validation happens before the
+replica serves, and a failure names the unmet requirement rather than silently
+falling back. `auto` uses `profile.kernel_tier` — `torch` for CPU/unknown and
+the stable FlashInfer path for `fa2`/`full` tiers. `build_engine_loop(
+model_path=...)` calls it with `probe()` so deploy day remains config-free.
+
+Selection produces a reportable decision, not only an implementation name:
+requested and resolved names, source (`env` or hardware profile), rationale,
+and phase components. `/backends` exposes this decision so a hybrid path is
+never mislabeled as a monolithic backend.
+
+`auto` does not promote FA3 or FA4 merely because the package imports or a
+single timing sample is faster. Promotion requires retained evidence for the
+exact model/dtype/shape/GPU profile: correctness parity plus interleaved warm
+samples whose execution order and OS-jitter observations are recorded. With
+no qualifying evidence, the stable fallback above is intentional.
+
+### D6 — FlashAttention phase adapters (`flashattention_gpu.py`)
+
+FA3 and FA4 own prefill only. FlashInfer continues to own paged decode and its
+CUDA-graph-safe plan/replay contract. This separation is selected for measured
+serving behavior and is made explicit in the decision's `prefill`, `decode`,
+and `kv_mode` components.
+
+- **FA3:** supported through the official upstream `hopper/` package, pinned
+  to tag `fa4-v4.0.0.beta24`, commit
+  `849f660f73b176e5ad5670e7f822c7fa9f3eaf8b`. It is the non-Blackwell
+  FlashAttention path for SM80/SM90; its fake-module contract keeps the adapter
+  testable without representative hardware.
+- **FA4:** the optional `flashattention4` install extra pins
+  `flash-attn-4==4.0.0b24`. SM100/SM110 use FA4's direct paged-KV interface.
+  SM90/SM120 keep the original page table as the source of truth and perform an
+  explicit device-to-device page materialization for FA4 prefill; no host
+  gather is allowed.
+- **Shared semantics:** both adapters preserve GQA head grouping,
+  bottom-right rectangular causality, page identity, dtype, and the existing
+  CUDA-graph boundary. Unsupported architectures and shapes are rejected
+  before serving. Prefill failures are not allowed to change decode ownership
+  or trigger an implicit torch/FlashInfer fallback.
 
 ## 3. Non-goals and fallbacks
 
@@ -121,6 +159,7 @@ day is config-free; CPU environments keep getting the torch backend.
   prefill chain first and then the existing eager/graph decode chain.
 - Ragged prefill CUDA-graph capture is not claimed: FlashInfer planning is a
   host phase and ragged shapes vary. Decode graph capture remains unchanged.
+- Automatic FA3/FA4 promotion without retained profile-specific evidence.
 
 ## 4. Phasing
 
@@ -129,6 +168,8 @@ day is config-free; CPU environments keep getting the torch backend.
 2. MLA reference math + equivalence gate.
 3. FlashInfer adapter + fake-module contract tests + `tests/gpu/` mirror.
 4. Selector + wiring (`build_engine_loop` uses `probe()`).
+5. Issue #277: FA3/FA4 prefill adapters, hybrid phase reporting, strict
+   validation, packaging, Helm selection, and retained-evidence policy.
 
 ## 5. Verification
 
@@ -143,6 +184,15 @@ day is config-free; CPU environments keep getting the torch backend.
   instead of one chain per request; Qwen3-32B TP8 all-rank structural evidence.
   Fixed wall-clock thresholds are diagnostic only because OS jitter must not
   decide this gate.
+- Selector/Helm: all five public values render and resolve; invalid or
+  unavailable explicit selections fail without fallback; empty Helm default
+  omits the environment variable and therefore uses `auto`.
+- FA3/FA4 fakes: import/version/architecture/shape errors; GQA and bottom-right
+  causal arguments; direct-paged versus D2D-materialized page identity; hybrid
+  phase report.
+- GPU: FA3 Hopper and FA4 profile matrices compare against torch/FlashInfer
+  oracles. Auto-promotion evidence uses interleaved warm samples and retains
+  order plus jitter metadata with the result.
 
 ## 6. Review record (binding amendments)
 
@@ -185,3 +235,27 @@ Seam safety: backends are plain objects, NEVER nn.Module (a workspace buffer
 submodule would corrupt state_dict names); no shared-instance default arg
 (`backend or TorchAttentionBackend()`); positions-contiguity assumption
 documented on the protocol; invalid env override fails loudly.
+
+Issue #277 extension (2026-07-29):
+- Public selection values are exactly `auto`, `torch`, `flashinfer`,
+  `flashattention3`, and `flashattention4`; explicit means strict, while only
+  `auto` may use a fallback.
+- FA3/FA4 are composite serving decisions: FlashAttention prefill and
+  FlashInfer decode. Health output must expose both components, dependency
+  versions, GPU architecture decision, and selection source.
+- FA4's SM100/SM110 direct-paged path and SM90/SM120 device-materialized path
+  are separate contracts. Neither may renumber or mutate Kairyu's page table.
+- An auto-policy promotion is a release artifact backed by retained,
+  profile-specific correctness/performance evidence, not a runtime
+  opportunistic benchmark.
+
+The retained SM120 Qwen3-32B prefill artifact is
+`bench/results/attention-backends-qwen3-32b-sm120-2026-07-29.json`. It records
+24 alternating AB/BA pairs for both TP4-local (16 Q / 2 KV heads) and TP8-local
+(8 Q / 1 KV head) shapes, including every `perf_counter_ns` timestamp. Output
+parity passed with maximum absolute error 0.0009765625. FlashInfer was faster
+in all 24 pairs for both shapes: median latency was 0.111741 ms versus
+0.265901 ms at TP4-local and 0.0844625 ms versus 0.2634905 ms at TP8-local.
+The exact one-sided paired sign test therefore supplies no FA4-promotion
+evidence, so SM120 `auto` keeps FlashInfer. No effect-size cutoff or discarded
+jitter sample is used.

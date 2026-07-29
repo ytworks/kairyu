@@ -9,6 +9,7 @@ import torch
 from kairyu.engine.core.attention import (
     TorchAttentionBackend,
     select_backend,
+    select_backend_decision,
     select_backend_name,
 )
 from kairyu.engine.core.attention.mla_torch import mla_absorbed, mla_decompress, mla_scale
@@ -607,8 +608,61 @@ class TestSelectBackendName:
         assert select_backend_name(HardwareProfile(arch="cuda", sm=120)) == "torch"
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashinfer")
         assert select_backend_name(HardwareProfile(arch="cpu")) == "flashinfer"
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention3")
+        assert (
+            select_backend_name(HardwareProfile(arch="cuda", sm=90))
+            == "flashattention3"
+        )
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
+        assert (
+            select_backend_name(HardwareProfile(arch="cuda", sm=120))
+            == "flashattention4"
+        )
+
+    def test_explicit_auto_uses_the_profile_policy(self, monkeypatch):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "auto")
+        assert select_backend_name(HardwareProfile(arch="cpu")) == "torch"
+        assert (
+            select_backend_name(HardwareProfile(arch="cuda", sm=120))
+            == "flashinfer"
+        )
 
     def test_invalid_env_fails_loudly(self, monkeypatch):
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "bogus")
         with pytest.raises(ValueError, match="bogus"):
             select_backend_name(None)
+
+
+class TestBackendDecision:
+    def test_sm120_fa4_materialization_and_decode_delegate_are_visible(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
+
+        decision = select_backend_decision(
+            HardwareProfile(arch="cuda", sm=120)
+        )
+
+        assert decision.requested == decision.resolved == "flashattention4"
+        assert decision.source == "env"
+        assert decision.components == {
+            "prefill": "flashattention4",
+            "decode": "flashinfer",
+            "kv_mode": "paged-materialized",
+        }
+
+    def test_sm100_fa4_uses_direct_paged_kv(self, monkeypatch):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
+        decision = select_backend_decision(
+            HardwareProfile(arch="cuda", sm=100)
+        )
+        assert decision.components["kv_mode"] == "paged-direct"
+
+    def test_automatic_selection_reports_stable_fallback_reason(self):
+        decision = select_backend_decision(
+            HardwareProfile(arch="cuda", sm=120)
+        )
+        assert decision.requested == "auto"
+        assert decision.resolved == "flashinfer"
+        assert decision.source == "hw_profile"
+        assert "stable" in decision.rationale

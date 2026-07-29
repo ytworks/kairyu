@@ -169,6 +169,13 @@ class _Backbone(nn.Module):
 
     def __init__(self, config: ModelConfig, backend=None, linear_factory=None) -> None:
         super().__init__()
+        # Optional backend preflight: experimental kernels must reject model
+        # shapes they cannot serve before weights are loaded or a request is
+        # admitted.  Stable backends without this hook retain their existing
+        # construction path.
+        validate_model_config = getattr(backend, "validate_model_config", None)
+        if callable(validate_model_config):
+            validate_model_config(config)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         # ONE backend instance shared across layers (m13: FlashInfer workspace
         # and plan cache are per-instance — sharing is load-bearing)

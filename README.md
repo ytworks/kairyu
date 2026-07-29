@@ -204,7 +204,7 @@ The custom engine behind backend name `kairyu` (`kairyu/engine/core/`):
 | Step loop | `engine_core.py`, `overlap.py`, `pipeline.py` | `ModelRunner` protocol + `StepOutput` contract; `OverlapEngineCore` plans step N+1 while the device runs step N; `PipelinedEngineCore` adds inter-step pipeline parallelism. |
 | Model runner + sampler | `model_runner.py`, `sampler.py` | Paged forward over real checkpoints; sampler with a fixed op order (logprobs → xgrammar grammar mask → penalties → temperature → min-p/top-k/top-p → seeded sample) and deterministic splitmix64 seeding so TP ranks sample identically. |
 | Speculative decoding | `spec_runner.py`, `draft.py` | `SpeculativeRunner` wraps any `ModelRunner`: n-gram prompt-lookup drafts by default, `ModelDraftSource` for EAGLE-3 / MTP heads (`kairyu/models/eagle.py`, `mtp.py`); greedy verification with a tested output-identical invariant. |
-| Attention backends | `attention/` | `AttentionBackend` protocol: `torch` (device-agnostic paged attention), FlashInfer adapter (contract-pinned), MLA reference math for DeepSeek; selected from the hardware profile or `KAIRYU_ATTENTION_BACKEND`. |
+| Attention backends | `attention/` | `AttentionBackend` protocol: `torch` (device-agnostic paged attention), FlashInfer, FlashAttention-3/4 prefill adapters, and MLA reference math for DeepSeek; selected from the hardware profile or `KAIRYU_ATTENTION_BACKEND`. |
 | CUDA-graph seam | `step_executor.py`, `graph_buckets.py` | Capture-once-per-bucket replay with static device buffers, pinned on CPU against a fake graph backend; only `cuda_graph_gpu.py` touches CUDA. |
 | Distributed | `worker.py`, `dist_comm.py`, `pp_worker.py` | TP (rank 0 drives the scheduler, snapshot broadcast, per-rank sharded safetensors loading), EP (MoE all-to-all), PP (stage slices) — parity-gated with gloo in the default test suite; NCCL is a constructor argument. |
 | P-D separation + KV transport | `pd.py`, `pd_remote.py`, `kv_serde.py`, `kv_transport*.py` | Prefill/decode disaggregation in-process or across two real processes with byte-parity KV transfer over TCP; NIXL/RDMA adapter ready. |
@@ -267,9 +267,27 @@ Everything heavier is opt-in:
 | `--extra fleet` | pyzmq, msgpack, psycopg | process-split engine, KV event transport, shared PostgreSQL BatchStore |
 | `--extra otel` | opentelemetry-sdk | tracing spans (no-op without it) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU kernels/fabric (Linux-only markers; macOS `uv sync` skips them) |
+| `--extra flashattention4` | flash-attn-4 4.0.0 beta 24 | opt-in FlashAttention-4 prefill kernels (Linux only; included by `Dockerfile.cuda`) |
 | `--extra bench` | datasets, huggingface_hub, pillow, h5py | `kairyu bench download` dataset fetching |
 | `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker-based agentic benchmarks |
 | `--group dev` | pytest, ruff, transformers, openai, … | test suite + parity goldens |
+
+FlashAttention-3 is built from the official upstream source tree. The
+supported build is pinned to the same immutable upstream snapshot as the FA4
+package, tag `fa4-v4.0.0.beta24`:
+
+```bash
+git clone https://github.com/Dao-AILab/flash-attention.git
+cd flash-attention
+git checkout 849f660f73b176e5ad5670e7f822c7fa9f3eaf8b
+git submodule update --init --recursive
+cd hopper
+python setup.py install
+```
+
+This upstream FA3 build provides SM80/SM90 kernels and requires CUDA 12.3 or
+newer. Selecting FA3 on another GPU is a configuration error; it does not
+silently fall back.
 
 vLLM is only needed for the `vllm` backend on a Linux GPU host (install it in the same
 environment).
@@ -722,11 +740,20 @@ gateways, install `--extra fleet` and select `store: postgres`,
 
 | variable | effect |
 |---|---|
-| `KAIRYU_ATTENTION_BACKEND` | `torch` \| `flashinfer` — overrides the hw-profile kernel selection (invalid values fail loudly) |
+| `KAIRYU_ATTENTION_BACKEND` | `auto` \| `torch` \| `flashinfer` \| `flashattention3` \| `flashattention4` — selects the attention backend |
 | value of `server.api_keys_env` | comma-separated API keys |
 | `KAIRYU_BENCH_CACHE` | benchmark dataset cache dir (default `~/.cache/kairyu/benchmarks`) |
 | `KAIRYU_MODEL_DIR` | model volume for `docker-compose.gpu.yaml` |
 | `GLOO_SOCKET_IFNAME` | set `lo0` on macOS if gloo rendezvous fails (dist tests) |
+
+Explicit selections are strict: a missing package, unsupported GPU, or
+unsupported tensor shape fails startup with an actionable error. FA3 and FA4
+own prefill while FlashInfer owns paged decode; `/backends` reports both
+components. FA4 consumes paged KV directly on SM100/SM110. On SM90/SM120 it
+preserves page identity while materializing the selected pages device-to-device
+for prefill. `auto` uses the stable hardware-profile fallback (FlashInfer on
+supported GPU tiers, otherwise torch) and promotes neither FA3 nor FA4 unless
+retained, profile-specific correctness and performance evidence exists.
 
 ### HTTP surface
 

@@ -46,22 +46,39 @@ to the actual gateway instance. The chart does not create or own PostgreSQL.
 
 ### Attention backend
 
-The checked-in `pcie-gddr` overlay targets RTX PRO 6000 Blackwell (SM120) nodes and pins
-`attentionBackend: torch`. Kairyu's automatic `fa2` selection currently reaches
-FlashInfer, which does not yet provide SM120 kernels. The chart renders this value as
-`KAIRYU_ATTENTION_BACKEND=torch` so the documented overlay uses the supported fallback.
-
-Operators on hardware with an appropriate FlashInfer build may select it explicitly:
+The checked-in `pcie-gddr` overlay targets RTX PRO 6000 Blackwell (SM120) nodes and keeps
+`attentionBackend: torch` as its portable baseline. Operators can render any public
+backend explicitly:
 
 ```console
 helm install kairyu deploy/helm/kairyu \
   -f deploy/helm/kairyu/values-gpu.yaml \
-  --set-string attentionBackend=flashinfer
+  --set-string attentionBackend=flashattention4
 ```
 
-The strict chart schema accepts only `torch`, `flashinfer`, or the empty CPU default.
-Leaving it empty omits the environment variable and preserves Kairyu's automatic backend
-selection.
+The strict schema accepts these values:
+
+| value | behavior |
+|---|---|
+| `""` | Chart default. Omit `KAIRYU_ATTENTION_BACKEND`; runtime selection behaves as `auto`. |
+| `auto` | Emit the automatic policy explicitly. It uses the stable profile fallback unless retained profile-specific evidence justifies promotion. |
+| `torch` | Portable torch implementation for prefill and decode. |
+| `flashinfer` | FlashInfer paged prefill and decode. |
+| `flashattention3` | Official Hopper FA3 prefill plus FlashInfer paged decode. |
+| `flashattention4` | FA4 prefill plus FlashInfer paged decode. |
+
+Explicit selections are strict. A missing package, unsupported GPU, or unsupported tensor
+shape makes the replica fail before serving instead of silently choosing another backend.
+The `/backends` response exposes the resolved prefill/decode components and selection
+source.
+
+FA4 consumes Kairyu's page table directly on SM100/SM110. Its SM90/SM120 path preserves the
+same page identities and materializes only the selected pages device-to-device before
+prefill. Images built with `Dockerfile.cuda` include the pinned
+`flash-attn-4==4.0.0b24` extra. FA3 images must build the official upstream
+`hopper/` package at tag `fa4-v4.0.0.beta24`, commit
+`849f660f73b176e5ad5670e7f822c7fa9f3eaf8b`; see the repository README for
+the exact build commands.
 
 ## Model storage
 

@@ -40,6 +40,12 @@ gpu = [
     "triton>=3.0; sys_platform == 'linux'",
     "nixl>=0.2; sys_platform == 'linux'",
 ]
+# FlashAttention-4 is currently an upstream beta and pins a prerelease CuTe
+# DSL. Keep it opt-in for generic installs; the SM120 production image enables
+# this extra so operators can explicitly compare it with FlashInfer.
+flashattention4 = [
+    "flash-attn-4==4.0.0b24; sys_platform == 'linux'",
+]
 # Process-split engine service and fleet transports (m8 D6, G5).
 fleet = [
     "pyzmq>=26",
