@@ -849,16 +849,32 @@ class ReplicaPool:
             if prepare is not None and track_prefix
             else None
         )
-        replica_id, reason, session_id = self._select(
-            request,
-            prefix_keys=prefix_keys,
-            track_prefix=track_prefix,
-        )
-        selected_at_ns = time.perf_counter_ns()
-        placement_latency_ns = max(0, selected_at_ns - started_ns)
+        with traced_span(
+            "kairyu.pool.place",
+            {
+                "kairyu.request_id": request.request_id,
+                "kairyu.pool.size": len(self._entries),
+                "kairyu.pool.eligible_size": len(self._eligible_snapshot),
+            },
+        ) as span:
+            replica_id, reason, session_id = self._select(
+                request,
+                prefix_keys=prefix_keys,
+                track_prefix=track_prefix,
+            )
+            selected_at_ns = time.perf_counter_ns()
+            placement_latency_ns = max(0, selected_at_ns - started_ns)
+            if span is not None:
+                # Preserve the original short keys for existing consumers.
+                span.set_attribute("replica_id", replica_id)
+                span.set_attribute("reason", reason)
+                span.set_attribute("kairyu.replica.id", replica_id)
+                span.set_attribute("kairyu.placement.reason", reason)
+                span.set_attribute(
+                    "kairyu.placement.latency_ns",
+                    placement_latency_ns,
+                )
         self._decision_counts[reason] += 1
-        with traced_span("kairyu.pool.place", {"replica_id": replica_id, "reason": reason}):
-            pass
         if self._log is not None:
             # legacy field stays the ordinal; replica_id added alongside (A1)
             self._log.record_replica(
@@ -920,7 +936,21 @@ class ReplicaPool:
         entry = self._entries[replica_id]
         entry.outstanding += 1
         try:
-            result = await entry.backend.generate(request)
+            from kairyu.telemetry import traced_span
+
+            with traced_span(
+                "kairyu.replica.call",
+                {
+                    "kairyu.request_id": request.request_id,
+                    "kairyu.replica.id": replica_id,
+                    "kairyu.backend.type": type(entry.backend).__name__,
+                    "kairyu.stream": False,
+                },
+                kind="client",
+            ) as span:
+                result = await entry.backend.generate(request)
+                if span is not None:
+                    span.set_attribute("kairyu.call.status", "success")
         except UpstreamClientError:
             # a bad client request (4xx) is not a replica health signal: do NOT
             # count it, or one misbehaving client would eject the whole pool (O1)
@@ -956,8 +986,22 @@ class ReplicaPool:
         entry = self._entries[replica_id]
         entry.outstanding += 1  # streams stay in-flight until generator close (A2)
         try:
-            async for chunk in entry.backend.stream(request):
-                yield chunk
+            from kairyu.telemetry import traced_span
+
+            with traced_span(
+                "kairyu.replica.call",
+                {
+                    "kairyu.request_id": request.request_id,
+                    "kairyu.replica.id": replica_id,
+                    "kairyu.backend.type": type(entry.backend).__name__,
+                    "kairyu.stream": True,
+                },
+                kind="client",
+            ) as span:
+                async for chunk in entry.backend.stream(request):
+                    yield chunk
+                if span is not None:
+                    span.set_attribute("kairyu.call.status", "success")
         except UpstreamClientError:
             raise  # client-side 4xx, not a replica failure (O1)
         except Exception:

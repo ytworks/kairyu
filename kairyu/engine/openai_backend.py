@@ -432,6 +432,12 @@ class OpenAICompatBackend:
                     f"invalid scheduling class {request.scheduling_class!r}"
                 )
             headers["X-Kairyu-Scheduling-Class"] = request.scheduling_class
+        # Propagate only W3C traceparent/tracestate. The helper is a deferred
+        # no-op when tracing or OpenTelemetry is unavailable and intentionally
+        # does not forward baggage, prompts, outputs, or credentials.
+        from kairyu.telemetry import inject_trace_context
+
+        inject_trace_context(headers)
         return headers
 
     def _get_client(self) -> httpx.AsyncClient:

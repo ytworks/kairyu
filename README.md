@@ -715,6 +715,16 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
   max_concurrency: 4
 ```
 
+For distributed tracing, install `--extra otel` and set
+`server.tracing: true`. Kairyu propagates W3C `traceparent`/`tracestate` only,
+does not propagate baggage, and does not replace the process-global tracer
+provider. An embedding application may use its existing provider or inject a
+private one through `configure_tracing`. The Compose validation path uses
+`OTEL_TRACES_EXPORTER=console` with a distinct `OTEL_SERVICE_NAME` per service;
+its compact `KAIRYU_OTEL_SPAN` records are a deployed-smoke proof, not the
+recommended production exporter. Kairyu does not put exception text, stack
+traces, prompts, or outputs in its span attributes or exception events.
+
 The shown batch block is the single-gateway filesystem default. For multiple
 gateways, install `--extra fleet` and select `store: postgres`,
 `dsn_env: KAIRYU_BATCH_POSTGRES_DSN`, and a common `store_id`; see
@@ -755,6 +765,8 @@ gateways, install `--extra fleet` and select `store: postgres`,
 | `KAIRYU_BENCH_CACHE` | benchmark dataset cache dir (default `~/.cache/kairyu/benchmarks`) |
 | `KAIRYU_MODEL_DIR` | model volume for `docker-compose.gpu.yaml` |
 | `GLOO_SOCKET_IFNAME` | set `lo0` on macOS if gloo rendezvous fails (dist tests) |
+| `OTEL_TRACES_EXPORTER` | `console` enables Kairyu's private compact smoke exporter when tracing is enabled; omit for an application-owned provider |
+| `OTEL_SERVICE_NAME` | service identity used by the compact smoke exporter |
 
 Explicit selections are strict: a missing package, unsupported GPU, or
 unsupported tensor shape fails startup with an actionable error. FA3 and FA4

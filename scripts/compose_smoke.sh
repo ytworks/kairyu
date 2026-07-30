@@ -7,7 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/deploy/compose/docker-compose.yaml"
 COMPOSE_VALIDATOR="$REPO_ROOT/scripts/validate_compose_binds.py"
+TRACE_VERIFIER="$REPO_ROOT/scripts/verify_otel_trace.py"
 BASE_URL="${BASE_URL:-http://localhost:8000}"
+TRACE_HEADERS="${TMPDIR:-/tmp}/kairyu-otel-headers.$$"
+TRACE_BODY="${TMPDIR:-/tmp}/kairyu-otel-body.$$"
+TRACE_LOGS="${TMPDIR:-/tmp}/kairyu-otel-logs.$$"
+TRACE_ERROR="${TMPDIR:-/tmp}/kairyu-otel-error.$$"
 # Docker BuildKit inherits the invoking process's descriptor ceiling. The
 # default 1024 on some developer hosts is insufficient for uv bytecode
 # compilation; inability to raise it is harmless because the build still fails
@@ -15,7 +20,10 @@ BASE_URL="${BASE_URL:-http://localhost:8000}"
 ulimit -n 65536 2>/dev/null || true
 compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
 
-cleanup() { compose down --volumes --remove-orphans >/dev/null 2>&1 || true; }
+cleanup() {
+  compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  rm -f "$TRACE_HEADERS" "$TRACE_BODY" "$TRACE_LOGS" "$TRACE_ERROR"
+}
 
 fail() { echo "SMOKE FAIL: $1" >&2; compose logs --tail 30 gateway >&2 || true; exit 1; }
 
@@ -60,6 +68,38 @@ wait_for "$BASE_URL/readyz" '"ready"' 60 || fail "gateway never became ready"
 echo "== non-stream completion =="
 [[ "$(chat alice)" == 200 ]] || fail "completion returned $(cat /tmp/smoke_body)"
 grep -q '"chat.completion"' /tmp/smoke_body || fail "unexpected completion body"
+
+echo "== deployed OTel gateway-to-replica trace (gate F1d) =="
+TRACE_PROMPT="otel-prompt-canary-f1d-2140f56d"
+trace_status=$(curl -sS -D "$TRACE_HEADERS" -o "$TRACE_BODY" -w '%{http_code}' \
+  -X POST "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"llama\",\"messages\":[{\"role\":\"user\",\"content\":\"$TRACE_PROMPT\"}]}")
+[[ "$trace_status" == 200 ]] || fail "OTel canary returned HTTP $trace_status"
+trace_request_id=$(
+  awk 'tolower($1) == "x-request-id:" {gsub("\r", "", $2); print $2}' \
+    "$TRACE_HEADERS" | tail -1
+)
+[[ -n "$trace_request_id" ]] || fail "OTel canary response omitted X-Request-ID"
+trace_verified=
+for _ in $(seq 1 20); do
+  compose logs --no-color --no-log-prefix >"$TRACE_LOGS"
+  if uv run --frozen --project "$REPO_ROOT" --no-dev \
+    python "$TRACE_VERIFIER" \
+      --logs "$TRACE_LOGS" \
+      --request-id "$trace_request_id" \
+      --response-body "$TRACE_BODY" \
+      --forbidden "$TRACE_PROMPT" \
+      2>"$TRACE_ERROR"; then
+    trace_verified=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ -z "$trace_verified" ]]; then
+  cat "$TRACE_ERROR" >&2
+  fail "deployed OTel trace did not satisfy F1d"
+fi
 
 echo "== SSE stream =="
 curl -sN -X POST "$BASE_URL/v1/chat/completions" \

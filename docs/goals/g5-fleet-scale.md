@@ -51,7 +51,7 @@ SLO vocabulary used by every gate below:
 | F1a | ReplicaPool dynamic membership: kind cluster, 1 gateway + 200 mock replicas, 10%/min churn for 10 min → zero 5xx, placement p99 <10 ms | kind CI job |
 | F1b | Drain-first partitioned StatefulSet restart of exactly 100 mock replicas via one `kubectl rollout restart`: retry=0, zero failed requests, no human/operator repair, exact old/new UID and revision joins, and independently replayed raw rollout/request/readiness evidence (C7 lineage) | dedicated formal kind CI job; PR smoke is non-acceptance |
 | F1c | 3 gateways behind an LB with consistent-hash session partitioning pass the C1 affinity assertion; batch jobs complete with the shared `BatchStore` | kind CI job |
-| F1d | One request produces one end-to-end OTel trace (gateway route → pool place → replica call); Conductor runs show per-stage spans | trace fixture test |
+| F1d | One request produces one end-to-end OTel trace (gateway route → pool place → replica call); Conductor runs show per-stage spans | **Closed** by deterministic fixture + separate-container Compose smoke (m10 A34; 2026-07-31) |
 
 F1a and F1b are closed by retained exact-head Actions runs `30374404150` and
 `30387260062`. F1c reuses their kind-runner capacity, image/source provenance,
@@ -68,6 +68,14 @@ successful batch lines, and byte-identical output through every gateway. The
 complete raw and replay artifact is retained in
 `bench/results/f1c-three-gateway/`. The evidence-only closure commit does not
 repeat the binding drill.
+
+F1d is closed under m10 A34. A deterministic in-memory fixture proves the
+gateway, route, pool-placement, replica-call, remote-server, and per-stage
+Conductor parentage as well as success, error, cancellation, stream lifetime,
+and privacy. The mandatory Compose CI smoke proves the same W3C trace crosses
+real gateway and replica containers, joins records by request/trace/span/parent
+IDs rather than log order or timing, observes the final response body, and
+rejects prompt/output canaries from every span.
 
 ### Stage F2 — KV-aware routing (CPU-first, then 4–8 GPU testbed)
 

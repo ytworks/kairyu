@@ -19,6 +19,7 @@ WEBUI_CONFIG = COMPOSE_DIR / "config.yaml"
 CONTAINER_CONFIG = "/etc/kairyu/config.yaml"
 VALIDATOR = Path("scripts/validate_compose_binds.py").resolve()
 COMPOSE_SMOKE = Path("scripts/compose_smoke.sh")
+OTEL_TRACE_VERIFIER = Path("scripts/verify_otel_trace.py")
 WEBUI_SMOKE = Path("scripts/webui_smoke.sh")
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
 DOCKERFILE = Path("Dockerfile")
@@ -448,6 +449,29 @@ def test_cpu_image_bounds_uv_install_concurrency_for_high_core_builders():
 
     assert "UV_COMPILE_BYTECODE=1" in dockerfile
     assert "UV_CONCURRENT_INSTALLS=8" in dockerfile
+
+
+def test_compose_smoke_runs_real_cross_process_otel_trace_gate():
+    compose = _load_yaml(COMPOSE_DIR / "docker-compose.yaml")
+    services = compose["services"]
+    for name in ("gateway", "replica-1", "replica-2", "replica-3"):
+        environment = services[name]["environment"]
+        assert environment["OTEL_TRACES_EXPORTER"] == "console"
+        assert environment["OTEL_SERVICE_NAME"] == f"kairyu-{name}"
+
+    assert load_deployment_spec(COMPOSE_DIR / "gateway.yaml").server.tracing
+    assert load_deployment_spec(COMPOSE_DIR / "replica.yaml").server.tracing
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert dockerfile.count("--extra fleet --extra otel") == 2
+
+    smoke = COMPOSE_SMOKE.read_text(encoding="utf-8")
+    assert OTEL_TRACE_VERIFIER.is_file()
+    assert str(OTEL_TRACE_VERIFIER) in smoke
+    assert "deployed OTel gateway-to-replica trace (gate F1d)" in smoke
+    assert "--request-id" in smoke
+    assert "--response-body" in smoke
+    assert "--forbidden" in smoke
+    assert "compose logs --no-color --no-log-prefix" in smoke
 
 
 def test_compose_validator_imports_without_engine_extra():
