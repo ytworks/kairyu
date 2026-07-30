@@ -83,6 +83,11 @@ async def run_one(
     prompt: str,
     max_tokens: int,
     request_usage: bool = True,
+    *,
+    temperature: float | None = None,
+    seed: int | None = None,
+    min_tokens: int | None = None,
+    ignore_eos: bool = False,
 ) -> RequestMetrics:
     body = {
         "model": model,
@@ -90,6 +95,14 @@ async def run_one(
         "max_tokens": max_tokens,
         "stream": True,
     }
+    if temperature is not None:
+        body["temperature"] = temperature
+    if seed is not None:
+        body["seed"] = seed
+    if min_tokens is not None:
+        body["min_tokens"] = min_tokens
+    if ignore_eos:
+        body["ignore_eos"] = True
     if request_usage:
         body["stream_options"] = {"include_usage": True}
     start = time.perf_counter()
@@ -99,7 +112,17 @@ async def run_one(
     async with client.stream("POST", "/v1/chat/completions", json=body) as response:
         if response.status_code == 400 and request_usage:
             # target rejects stream_options: retry once without (labeled fallback)
-            return await run_one(client, model, prompt, max_tokens, request_usage=False)
+            return await run_one(
+                client,
+                model,
+                prompt,
+                max_tokens,
+                request_usage=False,
+                temperature=temperature,
+                seed=seed,
+                min_tokens=min_tokens,
+                ignore_eos=ignore_eos,
+            )
         response.raise_for_status()
         async for line in response.aiter_lines():
             if not line.startswith(_SSE_PREFIX) or line == f"{_SSE_PREFIX}[DONE]":
@@ -140,6 +163,10 @@ def build_run_config(args: argparse.Namespace) -> dict:
         "num_requests": args.num_requests,
         "concurrency": args.concurrency,
         "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "seed": args.seed,
+        "min_tokens": args.min_tokens,
+        "ignore_eos": args.ignore_eos,
         "ttft_slo_s": args.ttft_slo_s,
         "tensor_parallel": args.tensor_parallel,
         "dp_replicas": args.dp_replicas,
@@ -213,7 +240,16 @@ async def run_benchmark(args: argparse.Namespace) -> None:
 
         async def bounded(prompt: str) -> RequestMetrics:
             async with semaphore:
-                return await run_one(client, args.model, prompt, args.max_tokens)
+                return await run_one(
+                    client,
+                    args.model,
+                    prompt,
+                    args.max_tokens,
+                    temperature=args.temperature,
+                    seed=args.seed,
+                    min_tokens=args.min_tokens,
+                    ignore_eos=args.ignore_eos,
+                )
 
         wall_start_ns = time.perf_counter_ns()
         results = await asyncio.gather(*(bounded(p) for p in prompts))
@@ -269,6 +305,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-requests", type=int, default=128)
     parser.add_argument("--concurrency", type=int, default=128)
     parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Explicit sampling temperature (omitted by default)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Explicit per-request sampling seed (omitted by default)",
+    )
+    parser.add_argument(
+        "--min-tokens",
+        type=int,
+        default=None,
+        help="Minimum completion length (omitted by default)",
+    )
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Force generation to the requested max_tokens",
+    )
     parser.add_argument("--ttft-slo-s", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--api-key", default=None,

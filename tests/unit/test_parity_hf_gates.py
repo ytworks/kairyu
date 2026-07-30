@@ -226,6 +226,31 @@ def test_a_reference_with_too_few_logprob_rows_is_rejected(tmp_path):
         parity_hf._load_reference(path, _provenance())
 
 
+def test_teacher_forced_batches_never_mix_nested_prefixes():
+    from bench.parity_hf import _teacher_forced_waves
+
+    reference = _entries(3, 4)
+    waves = list(_teacher_forced_waves(reference))
+
+    assert len(waves) == 4
+    assert sum(map(len, waves)) == 12
+    for position, wave in enumerate(waves):
+        assert {name for name, _position, _tokens in wave} == {
+            "p0",
+            "p1",
+            "p2",
+        }
+        assert {_position for _name, _position, _tokens in wave} == {
+            position
+        }
+        assert all(
+            tokens
+            == tuple(reference[name]["prompt_ids"])
+            + tuple(reference[name]["continuation"][:position])
+            for name, _position, tokens in wave
+        )
+
+
 def test_a_cache_from_other_weights_is_rejected(tmp_path):
     """config.json alone does not identify a checkpoint — a fine-tune hashes the
     same. The weight fingerprint is what separates them."""

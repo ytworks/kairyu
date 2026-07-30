@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import weakref
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
     prompt_with_tool_intent,
+    validate_native_request_surface,
 )
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.pd_loop import PDLoopAdapter
@@ -33,7 +36,12 @@ from kairyu.engine.core.sampling_types import SampledToken, mix_seed
 from kairyu.engine.core.scheduler import ScheduledChunk, Scheduler
 from kairyu.engine.core.spec_runner import SpeculativeRunner
 from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
-from kairyu.engine.engine_loop import EngineLoop, StreamUpdate
+from kairyu.engine.engine_loop import (
+    EngineLoop,
+    PreparedPrompt,
+    StreamUpdate,
+    _validate_max_model_len,
+)
 from kairyu.engine.prompt import supplied_prompt_token_ids
 from kairyu.engine.registry import register_backend
 from kairyu.engine.tokenizer import (
@@ -211,6 +219,7 @@ def build_engine_loop(
     page_size: int = 16,
     max_num_batched_tokens: int = 2048,
     max_num_seqs: int = 256,
+    max_model_len: int | None = None,
     priority_age_s: float | None = 60.0,
     runner: object | None = None,
     tensor_parallel_size: int = 1,
@@ -238,6 +247,7 @@ def build_engine_loop(
     be ``shutdown()`` on serve teardown. A caller-supplied ``runner`` is a
     single rank-local object and therefore requires ``tensor_parallel_size=1``.
     """
+    _validate_max_model_len(max_model_len)
     if pipeline_depth < 1:
         raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
     if speculative is not None and speculative != "ngram":
@@ -294,6 +304,7 @@ def build_engine_loop(
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
+            max_model_len=max_model_len,
             priority_age_s=priority_age_s,
             tokenizer=tokenizer,
             pipeline_depth=pipeline_depth,
@@ -310,6 +321,7 @@ def build_engine_loop(
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
+            max_model_len=max_model_len,
             priority_age_s=priority_age_s,
             tokenizer=tokenizer,
             speculative=speculative,
@@ -439,6 +451,7 @@ def build_engine_loop(
         default_eos_token_id=default_eos,
         default_stop_token_ids=default_stop_ids,
         pipeline_depth=pipeline_depth,
+        max_model_len=max_model_len,
     )
     loop.tp_launcher = None  # single-process: nothing to tear down
     loop.attention_backend_decision = attention_backend_decision
@@ -452,6 +465,7 @@ def _build_pd_loop(
     page_size: int,
     max_num_batched_tokens: int,
     max_num_seqs: int,
+    max_model_len: int | None,
     priority_age_s: float | None,
     tokenizer: str | Tokenizer | None,
     pipeline_depth: int,
@@ -504,6 +518,7 @@ def _build_pd_loop(
         default_eos_token_id=generation.eos_token_id,
         default_stop_token_ids=generation.stop_token_ids,
         pipeline_depth=pipeline_depth,
+        max_model_len=max_model_len,
     )
     loop.tp_launcher = None
     loop.pd_coordinator = coordinator
@@ -521,6 +536,7 @@ def _build_dist_tp_loop(
     page_size: int,
     max_num_batched_tokens: int,
     max_num_seqs: int,
+    max_model_len: int | None,
     priority_age_s: float | None,
     tokenizer: str | Tokenizer | None,
     speculative: str | None = None,
@@ -584,6 +600,7 @@ def _build_dist_tp_loop(
         default_eos_token_id=generation.eos_token_id,
         default_stop_token_ids=generation.stop_token_ids,
         pipeline_depth=pipeline_depth,
+        max_model_len=max_model_len,
     )
     loop.tp_launcher = launcher  # serve teardown must call launcher.shutdown()
     loop.attention_backend_decision = launcher.attention_backend_decision
@@ -613,6 +630,7 @@ class KairyuBackend:
         pd_prefill_device: str | None = None,
         pd_decode_device: str | None = None,
         pd_defer_handoff: bool = True,
+        max_model_len: int | None = None,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
@@ -620,6 +638,7 @@ class KairyuBackend:
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
+            max_model_len=max_model_len,
             priority_age_s=priority_age_s,
             runner=runner,
             tensor_parallel_size=tensor_parallel_size,
@@ -644,31 +663,92 @@ class KairyuBackend:
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
         self._engine_error: Exception | None = None  # last step failure, for readiness()
+        self._shutdown_started = False
+        self._shutdown_task: asyncio.Task[None] | None = None
+        # A native HTTP preflight resolves text to enforce max_model_len before
+        # response headers. Keep that result only for this exact request object
+        # and consume it on submit; this is not a cross-request prompt cache.
+        self._prepared_requests: dict[
+            int,
+            tuple[weakref.ReferenceType[GenerationRequest], PreparedPrompt],
+        ] = {}
+        self._prepared_requests_lock = threading.Lock()
+
+    def _peek_prepared_request(
+        self,
+        request: GenerationRequest,
+    ) -> PreparedPrompt | None:
+        key = id(request)
+        with self._prepared_requests_lock:
+            cached = self._prepared_requests.get(key)
+            if cached is None:
+                return None
+            if cached[0]() is request:
+                return cached[1]
+            # Defensive against delayed weakref callbacks and object-ID reuse.
+            self._prepared_requests.pop(key, None)
+        return None
+
+    def _retain_prepared_request(
+        self,
+        request: GenerationRequest,
+        prepared: PreparedPrompt,
+    ) -> PreparedPrompt:
+        key = id(request)
+        backend_ref = weakref.ref(self)
+
+        def discard(request_ref: weakref.ReferenceType[GenerationRequest]) -> None:
+            backend = backend_ref()
+            if backend is None:
+                return
+            with backend._prepared_requests_lock:
+                current = backend._prepared_requests.get(key)
+                if current is not None and current[0] is request_ref:
+                    backend._prepared_requests.pop(key, None)
+
+        request_ref = weakref.ref(request, discard)
+        with self._prepared_requests_lock:
+            cached = self._prepared_requests.get(key)
+            if cached is not None and cached[0]() is request:
+                return cached[1]
+            self._prepared_requests[key] = (request_ref, prepared)
+        return prepared
+
+    def _take_prepared_request(
+        self,
+        request: GenerationRequest,
+    ) -> PreparedPrompt | None:
+        key = id(request)
+        with self._prepared_requests_lock:
+            cached = self._prepared_requests.get(key)
+            if cached is None:
+                return None
+            if cached[0]() is request:
+                self._prepared_requests.pop(key, None)
+                return cached[1]
+            self._prepared_requests.pop(key, None)
+        return None
+
+    def _prepare_request(self, request: GenerationRequest) -> PreparedPrompt:
+        return self._loop.prepare_prompt(
+            prompt_with_tool_intent(request),
+            request.sampling_params,
+        )
+
+    def _take_or_prepare_request(
+        self,
+        request: GenerationRequest,
+    ) -> PreparedPrompt:
+        prepared = self._take_prepared_request(request)
+        if prepared is not None:
+            return prepared
+        return self._prepare_request(request)
 
     def validate_request(self, request: GenerationRequest) -> None:
-        params = request.sampling_params
-        unsupported: list[str] = []
-        if params.best_of is not None:
-            unsupported.append("best_of")
-        if params.prompt_logprobs is not None:
-            unsupported.append("prompt_logprobs")
-        if not params.skip_special_tokens:
-            unsupported.append("skip_special_tokens")
-        if not isinstance(params.extra_args, Mapping):
-            unsupported.append("extra_args")
-        else:
-            unsupported.extend(
-                f"extra_args.{key}" for key in params.extra_args if key != "response_format"
-            )
-        for index, tool in enumerate(request.tools):
-            function = tool.get("function")
-            if isinstance(function, Mapping) and function.get("strict") is True:
-                unsupported.append(f"tools[{index}].function.strict")
-        if unsupported:
-            raise ValueError(
-                "Kairyu backend does not support request fields: " + ", ".join(sorted(unsupported))
-            )
-        self._loop.resolve_prompt_token_ids(prompt_with_tool_intent(request))
+        validate_native_request_surface(request)
+        if self._peek_prepared_request(request) is None:
+            prepared = self._prepare_request(request)
+            self._retain_prepared_request(request, prepared)
 
     def scheduler_priority_metrics(self) -> dict[str, dict]:
         """Expose bounded native scheduler counters to the serve collector."""
@@ -678,44 +758,164 @@ class KairyuBackend:
             return {}
         return snapshot()
 
-    async def _pump(self) -> None:
-        restart_after_exit = False
+    def _publish_step(
+        self,
+        updates: list[tuple[str, StreamUpdate]],
+    ) -> None:
+        """Deliver one completed step on the owning asyncio event loop."""
+
+        # A completed step is the only proof the engine still runs, so it also
+        # clears a previous transient failure without cross-thread state writes.
+        self._engine_error = None
+        for request_id, update in updates:
+            queue = self._queues.get(request_id)
+            if queue is not None:
+                queue.put_nowait(update)
+
+    @staticmethod
+    def _mark_delivery_drained(delivery_drained: asyncio.Future) -> None:
+        if not delivery_drained.done():
+            delivery_drained.set_result(None)
+
+    def _step_worker(
+        self,
+        event_loop: asyncio.AbstractEventLoop,
+        stop: threading.Event,
+        delivery_drained: asyncio.Future,
+    ) -> Exception | None:
+        """Own ``EngineLoop.step`` until idle or stopped at a step boundary."""
+
+        error: Exception | None = None
         try:
-            while self._loop.has_work():
-                updates = await asyncio.to_thread(self._loop.step)
-                # a completed step is the only proof the engine still runs, so it
-                # is also what clears a previous failure (transient faults must
-                # not strand the node out of rotation forever)
-                self._engine_error = None
-                for request_id, update in updates:
-                    queue = self._queues.get(request_id)
-                    if queue is not None:
-                        queue.put_nowait(update)
-        except Exception as error:
-            logger.exception("engine step failed")
-            # recorded FIRST: purge itself runs through the same broken transport
-            # that just failed, and when it raises too the original error escapes
-            # as an unretrieved task exception and nothing observes the fault
-            self._engine_error = error
-            request_ids = tuple(self._queues)
-            try:
-                await asyncio.to_thread(self._loop.purge, request_ids)
-            except Exception:  # noqa: BLE001 - already failing; report the first cause
-                pass
-            failure = StreamUpdate((), "", True, None, error)
-            for request_id in request_ids:
-                queue = self._queues.get(request_id)
-                if queue is not None:
-                    queue.put_nowait(failure)
-            # A generic runner exception can be request-local and recover on the
-            # next step. A TP step failure is different: one missed collective
-            # permanently invalidates the group, so a hot restart loop only floods
-            # logs and burns a CPU while every request receives the same 502.
-            restart_after_exit = self._loop.has_work() and self.readiness().ready
+            while not stop.is_set():
+                if not self._loop.has_work() or stop.is_set():
+                    break
+                updates = self._loop.step()
+                event_loop.call_soon_threadsafe(self._publish_step, updates)
+        except Exception as caught:  # noqa: BLE001 - returned to the event loop
+            error = caught
         finally:
-            self._pump_task = None
-            if restart_after_exit:
+            # This marker is queued after every step publication from this
+            # worker. Awaiting it prevents a later failure from overtaking a
+            # previously completed step's stream update.
+            event_loop.call_soon_threadsafe(
+                self._mark_delivery_drained,
+                delivery_drained,
+            )
+        return error
+
+    @staticmethod
+    async def _settle_worker(worker: asyncio.Task) -> Exception | None:
+        """Wait through repeated pump cancellation until the step boundary."""
+
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        return worker.result()
+
+    @staticmethod
+    async def _settle_delivery(delivery_drained: asyncio.Future) -> None:
+        while not delivery_drained.done():
+            try:
+                await asyncio.shield(delivery_drained)
+            except asyncio.CancelledError:
+                continue
+
+    async def _report_step_failure(self, error: Exception) -> None:
+        logger.exception(
+            "engine step failed",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        # Record FIRST: purge itself runs through the same broken transport that
+        # just failed, and when it raises too the original error must still reach
+        # every public request.
+        self._engine_error = error
+        request_ids = tuple(self._queues)
+        cancelled: asyncio.CancelledError | None = None
+        purge = asyncio.create_task(asyncio.to_thread(self._loop.purge, request_ids))
+        try:
+            await asyncio.shield(purge)
+        except asyncio.CancelledError as caught:
+            cancelled = caught
+            while not purge.done():
+                try:
+                    await asyncio.shield(purge)
+                except asyncio.CancelledError:
+                    continue
+            try:
+                purge.result()
+            except Exception:  # noqa: BLE001 - preserve the step failure
+                pass
+        except Exception:  # noqa: BLE001 - already failing; report the first cause
+            pass
+        failure = StreamUpdate((), "", True, None, error)
+        for request_id in request_ids:
+            queue = self._queues.get(request_id)
+            if queue is not None:
+                queue.put_nowait(failure)
+        if cancelled is not None:
+            raise cancelled
+
+    async def _pump(self) -> None:
+        event_loop = asyncio.get_running_loop()
+        stop = threading.Event()
+        delivery_drained = event_loop.create_future()
+        worker = event_loop.create_task(
+            asyncio.to_thread(
+                self._step_worker,
+                event_loop,
+                stop,
+                delivery_drained,
+            )
+        )
+        cancelled: asyncio.CancelledError | None = None
+        worker_error: Exception | None = None
+        failure_reported = False
+        try:
+            try:
+                worker_error = await asyncio.shield(worker)
+                await asyncio.shield(delivery_drained)
+            except asyncio.CancelledError as error:
+                cancelled = error
+                stop.set()
+                worker_error = await self._settle_worker(worker)
+                await self._settle_delivery(delivery_drained)
+            if worker_error is not None and not self._shutdown_started:
+                failure_reported = True
+                await self._report_step_failure(worker_error)
+        except asyncio.CancelledError as error:
+            if cancelled is None:
+                cancelled = error
+            stop.set()
+        finally:
+            stop.set()
+            if not worker.done():
+                worker_error = await self._settle_worker(worker)
+            await self._settle_delivery(delivery_drained)
+            if (
+                worker_error is not None
+                and not failure_reported
+                and not self._shutdown_started
+            ):
+                await self._report_step_failure(worker_error)
+            current = asyncio.current_task()
+            if self._pump_task is current:
+                self._pump_task = None
+            # A producer can append an op after the worker's final has_work()
+            # snapshot. Re-check on the event loop after clearing the old task.
+            # Explicit cancellation waits for a later submit/abort to restart;
+            # fatal TP state and shutdown never hot-loop.
+            if (
+                cancelled is None
+                and not self._shutdown_started
+                and self._loop.has_work()
+                and self.readiness().ready
+            ):
                 self._ensure_pump()
+        if cancelled is not None:
+            raise cancelled
 
     def readiness(self) -> EngineReadiness:
         """Cheap liveness for `/readyz`: KNOWN-FATAL state only, no probe.
@@ -757,10 +957,17 @@ class KairyuBackend:
         return f"last step error: {type(self._engine_error).__name__}"
 
     def _ensure_pump(self) -> None:
+        if self._shutdown_started:
+            return
+        task = self._pump_task
+        if task is not None and not task.done():
+            return
+        # EngineLoop.has_work() includes scheduler and in-flight pipeline state.
+        # Read it only after the previous worker has settled; producers otherwise
+        # race a live step thread for scheduler-owned containers.
         if not self._loop.has_work():
             return
-        if self._pump_task is None or self._pump_task.done():
-            self._pump_task = asyncio.get_running_loop().create_task(self._pump())
+        self._pump_task = asyncio.get_running_loop().create_task(self._pump())
 
     def _abort(self, *request_ids: str) -> None:
         for request_id in request_ids:
@@ -776,6 +983,8 @@ class KairyuBackend:
             task.add_done_callback(lambda _task: self._ensure_pump())
 
     def _reserve_request_ids(self, request_ids: tuple[str, ...]) -> None:
+        if self._shutdown_started:
+            raise RuntimeError("Kairyu backend is shut down")
         reserved: set[str] = set()
         for request_id in request_ids:
             if (
@@ -794,25 +1003,33 @@ class KairyuBackend:
         if self._queues.get(request_id) is queue:
             del self._queues[request_id]
 
-    def _submit(self, request: GenerationRequest, *, pre_reserved: bool = False) -> asyncio.Queue:
+    def _submit(
+        self,
+        request: GenerationRequest,
+        *,
+        pre_reserved: bool = False,
+        prepared_prompt: PreparedPrompt | None = None,
+    ) -> asyncio.Queue:
         request_id = request.request_id
         if not pre_reserved:
             self._reserve_request_ids((request_id,))
         submitted = False
         queue: asyncio.Queue | None = None
         try:
+            if prepared_prompt is None:
+                prepared_prompt = self._take_or_prepare_request(request)
             self._loop.submit(
                 request_id,
-                prompt_with_tool_intent(request),
+                prepared_prompt.prompt,
                 request.sampling_params,
                 priority=request.priority,
                 scheduling_class=request.scheduling_class,
+                prepared_prompt=prepared_prompt,
             )
             submitted = True
             queue = asyncio.Queue()
             self._queues[request_id] = queue
-            if self._pump_task is None:
-                self._pump_task = asyncio.get_running_loop().create_task(self._pump())
+            self._ensure_pump()
             return queue
         except BaseException:
             try:
@@ -911,9 +1128,17 @@ class KairyuBackend:
         )
 
     async def _generate_one(
-        self, request: GenerationRequest, *, pre_reserved: bool = False
+        self,
+        request: GenerationRequest,
+        *,
+        pre_reserved: bool = False,
+        prepared_prompt: PreparedPrompt | None = None,
     ) -> GenerationResult:
-        queue = self._submit(request, pre_reserved=pre_reserved)
+        queue = self._submit(
+            request,
+            pre_reserved=pre_reserved,
+            prepared_prompt=prepared_prompt,
+        )
         finished_cleanly = False
         pump_failed = False
         try:
@@ -940,8 +1165,16 @@ class KairyuBackend:
         self._reserve_request_ids(request_ids)
         tasks: list[asyncio.Task] = []
         try:
+            prepared_prompt = self._take_or_prepare_request(request)
             tasks = [
-                asyncio.create_task(self._generate_one(sub, pre_reserved=True)) for sub in subs
+                asyncio.create_task(
+                    self._generate_one(
+                        sub,
+                        pre_reserved=True,
+                        prepared_prompt=prepared_prompt,
+                    )
+                )
+                for sub in subs
             ]
             results = await asyncio.gather(*tasks)
         except BaseException:
@@ -1009,8 +1242,13 @@ class KairyuBackend:
         finished: set[int] = set()
         pump_failed = False
         try:
+            prepared_prompt = self._take_or_prepare_request(request)
             for index, sub in enumerate(subs):
-                queues[index] = self._submit(sub, pre_reserved=True)
+                queues[index] = self._submit(
+                    sub,
+                    pre_reserved=True,
+                    prepared_prompt=prepared_prompt,
+                )
             pending = {index: asyncio.ensure_future(queue.get()) for index, queue in queues.items()}
             while len(finished) < len(subs):
                 done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED)
@@ -1040,14 +1278,53 @@ class KairyuBackend:
                 self._remove_queue(subs[index].request_id, queue)
             self._release_request_ids(request_ids)
 
+    async def _shutdown_impl(self) -> None:
+        pump = self._pump_task
+        try:
+            try:
+                if pump is not None:
+                    pump.cancel()
+                    try:
+                        await pump
+                    except asyncio.CancelledError:
+                        pass
+            finally:
+                await asyncio.to_thread(self._loop.close)
+        finally:
+            with self._prepared_requests_lock:
+                self._prepared_requests.clear()
+            # Stop spawned TP ranks even if settling the pump or loop fails.
+            launcher = getattr(self._loop, "tp_launcher", None)
+            if launcher is not None:
+                await asyncio.to_thread(launcher.shutdown)
+
+    @staticmethod
+    async def _await_shutdown_task(task: asyncio.Task[None]) -> None:
+        """Finish the one owned cleanup before propagating caller cancellation."""
+
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as cancelled:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            try:
+                task.result()
+            except BaseException as cleanup_error:
+                raise cancelled from cleanup_error
+            raise
+
     async def shutdown(self) -> None:
-        if self._pump_task is not None:
-            self._pump_task.cancel()
-        await asyncio.to_thread(self._loop.close)
-        # stop the spawned TP worker ranks (no-op unless --tp N launched them)
-        launcher = getattr(self._loop, "tp_launcher", None)
-        if launcher is not None:
-            await asyncio.to_thread(launcher.shutdown)
+        task = self._shutdown_task
+        if task is None:
+            # Terminal before the first await: no producer may submit work while
+            # the shared cleanup task settles the current step and GPU owners.
+            self._shutdown_started = True
+            task = asyncio.create_task(self._shutdown_impl())
+            self._shutdown_task = task
+        await self._await_shutdown_task(task)
 
 
 register_backend("kairyu", KairyuBackend)

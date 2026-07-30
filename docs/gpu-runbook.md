@@ -88,7 +88,7 @@ scheduler protocol §2.1.
 
 | Criterion | Where measured |
 |---|---|
-| TTFT ≥20% better vs vLLM @128 conc (or p99 win at equal tput) | `serving_bench.py`, step 2 |
+| A6 ShareGPT goodput ≥0.95× vLLM **and** TTFT p99 ≤ vLLM; shared-prefix TTFT p50 ≤0.80× vLLM | `g2_a6_vllm_bench.py`, §6 |
 | KV hit >80% @50% shared prefix | `tp_kv_hit_g2_a7_bench.py` on the real native engine at TP4/8, direct and through the gateway; the existing 88.1% KV-manager result is diagnostic only |
 | Router −40% cost @97% quality | needs serving traffic + judge; pipeline ready (`m4-router-learning.md`) |
 | vLLM API compat pytest | already green; re-run with vLLM installed to un-skip cross-checks |
@@ -231,7 +231,52 @@ GPU-only remainder (design m5 §4.2).
   degree; all ten assembler checks pass).
 - Gates A3–A5: `bench/serving_bench.py --sweep-tp 2,4,8` (TP=2 base in same file;
   conc-64 report-only point).
-- Gate A6: vs pinned vLLM TP=4/8 (ShareGPT@128 + shared-prefix trace).
+- Gate A6: prepare the pinned trace bundle with
+  `.venv/bin/python bench/g2_a6_vllm_bench.py prepare-traces
+  --tokenizer /tmp/kairyu-a7-qwen3-32b-tokenizer.json
+  --dataset /tmp/ShareGPT_V3_unfiltered_cleaned_split.json
+  --output /tmp/a6-traces/g2-a6-traces.json`, then run
+  `.venv/bin/python bench/run_g2_a6_formal.py --dry-run` and
+  `.venv/bin/python bench/run_g2_a6_formal.py` from a clean committed tree
+  against
+  Qwen3-32B and pinned stock vLLM 0.26.0 at TP4/8. Collect all four paired
+  K/V, V/K, V/K, K/V fresh-server rounds for both the 128-request c128
+  ShareGPT burst and the serialized 64-session × 8-turn shared-prefix trace.
+  Sampling, batching, usable cache capacity (8,193 allocated on each arm;
+  Kairyu scratch reservation 1, vLLM `BlockPool` null reservation 1; 8,192
+  usable on each), model/tokenizer/dataset identities,
+  full live-checkpoint hashes, GPU UUID/PCI assignments, HTTP runtime packages,
+  launch argv, and resolved runtime backends must match the G2 2026-07-30
+  amendment. Launch every cell by its preflight-resolved immutable image ID and
+  retain the post-start container/image IDs, mounts, host resource config,
+  imported engine hashes, exact Kairyu YAML bytes/parsed object, and raw vLLM
+  startup messages. Each fresh server must retain the unique-prompt synchronized
+  B=1/2/4/8/16 graph-size request warmup before formal requests. This validates
+  request geometry and discloses configured/captured graph status; it is not
+  evidence that each request actually dispatched through a graph. Collect
+  the predeclared 1/2/4/8/16 rps open-loop shards separately as report-only
+  saturation evidence. Assemble raw JSONL plus manifest and run the independent
+  verifier with `--assert-gate`; no retry, failed row, missing usage, post-hoc
+  SLO/rate selection, or trimmed sample can pass.
+  The four exact per-repeat Kairyu/vLLM ratios and median/MAD are non-binding
+  order/variability diagnostics. The verdict remains the three pooled A6
+  thresholds. After a passing verification, publish the complete artifact
+  before closing the issue:
+
+  ```bash
+  cp -a /tmp/g2-a6-formal/artifact \
+    bench/results/g2-a6-vllm-qwen3-32b-<gpu>-<date>
+  .venv/bin/python bench/g2_a6_vllm_bench.py verify \
+    --artifact bench/results/g2-a6-vllm-qwen3-32b-<gpu>-<date> \
+    --assert-gate
+  sha256sum /tmp/g2-a6-formal/artifact/g2-a6-vllm-manifest.json \
+    bench/results/g2-a6-vllm-qwen3-32b-<gpu>-<date>/g2-a6-vllm-manifest.json
+  git add bench/results/g2-a6-vllm-qwen3-32b-<gpu>-<date>
+  git diff --cached --check
+  ```
+
+  The two manifest hashes must be identical. Commit the verified raw JSONL and
+  manifest together; do not publish only a summary.
 - Gate A7: run `bench/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
   and TP8, once through each replica's direct endpoint and once through its
   single-replica gateway. Assemble

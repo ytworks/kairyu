@@ -1373,6 +1373,7 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
         "pd_prefill_device",
         "pd_decode_device",
         "pd_defer_handoff",
+        "max_model_len",
     )
 
 

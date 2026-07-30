@@ -5,12 +5,15 @@ import); tests end via the clean shutdown op so the child flushes coverage.
 """
 
 import asyncio
+import gc
 import multiprocessing
 import os
 import signal
 import threading
 import time
+import weakref
 
+import httpx
 import pytest
 
 from kairyu import SamplingParams
@@ -27,14 +30,17 @@ from kairyu.engine.prompt import (
     MultimodalItem,
     MultimodalPrompt,
     PromptInput,
+    TextPrompt,
     TokensPrompt,
 )
 from kairyu.engine.registry import create_backend
+from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.engine.zmq_backend import (
     EngineServiceError,
     ZmqEngineBackend,
     _decision_from_startup_frame,
 )
+from kairyu.entrypoints.server.app import create_app
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
@@ -96,6 +102,30 @@ def _fake_slow_starting_engine_service(port_pipe, _config):
     time.sleep(60)
 
 
+def _fake_max_model_len_engine_service(port_pipe, config):
+    port_pipe.send(43214)
+    if config.get("max_model_len") != 8192:
+        port_pipe.send(
+            {
+                "startup_wire_version": STARTUP_WIRE_VERSION,
+                "status": "error",
+                "error_type": "AssertionError",
+                "error": "max_model_len did not cross the spawn boundary",
+            }
+        )
+        port_pipe.close()
+        return
+    port_pipe.send(
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": None,
+        }
+    )
+    port_pipe.close()
+    time.sleep(60)
+
+
 @pytest.fixture(scope="module")
 def zmq_backend():
     backend = ZmqEngineBackend(num_pages=256)
@@ -109,6 +139,15 @@ def _request(request_id: str, prompt: PromptInput, **sampling) -> GenerationRequ
         prompt=prompt,
         sampling_params=SamplingParams(**sampling),
     )
+
+
+class _CountingTokenizer(ToyTokenizer):
+    def __init__(self) -> None:
+        self.encoded: list[str] = []
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        self.encoded.append(text)
+        return super().encode(text)
 
 
 async def test_generate_parity_with_in_process(zmq_backend):
@@ -348,15 +387,81 @@ async def test_registered_as_kairyu_proc():
 
 
 async def test_rejects_non_string_tokenizer():
-    from kairyu.engine.tokenizer import ToyTokenizer
-
     with pytest.raises(ValueError, match="string tokenizer"):
         ZmqEngineBackend(tokenizer=ToyTokenizer())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("sampling", "tools", "field"),
+    [
+        ({"best_of": 2}, (), "best_of"),
+        ({"prompt_logprobs": 1}, (), "prompt_logprobs"),
+        ({"skip_special_tokens": False}, (), "skip_special_tokens"),
+        ({"extra_args": {"unsupported": True}}, (), "extra_args.unsupported"),
+        (
+            {},
+            (
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "strict_tool",
+                        "strict": True,
+                    },
+                },
+            ),
+            "tools[0].function.strict",
+        ),
+    ],
+)
+async def test_native_process_layouts_reject_the_same_unsupported_surface(
+    sampling,
+    tools,
+    field,
+):
+    request = GenerationRequest(
+        request_id=f"unsupported-{field}",
+        prompt="surface parity",
+        sampling_params=SamplingParams(**sampling),
+        tools=tools,
+    )
+    in_process = KairyuBackend(num_pages=64)
+    process_split = ZmqEngineBackend(num_pages=64)
+    try:
+        errors = []
+        for backend in (in_process, process_split):
+            with pytest.raises(ValueError) as caught:
+                backend.validate_request(request)
+            errors.append(str(caught.value))
+
+        assert errors[0] == errors[1]
+        assert field in errors[0]
+        assert process_split._process is None
+    finally:
+        await in_process.shutdown()
+        await process_split.shutdown()
+
+
+async def test_native_process_layouts_accept_response_format_extension():
+    request = _request(
+        "response-format-parity",
+        "surface parity",
+        max_tokens=1,
+        extra_args={"response_format": {"type": "json_object"}},
+    )
+    in_process = KairyuBackend(num_pages=64)
+    process_split = ZmqEngineBackend(num_pages=64)
+    try:
+        in_process.validate_request(request)
+        process_split.validate_request(request)
+    finally:
+        await in_process.shutdown()
+        await process_split.shutdown()
 
 
 async def test_cuda_graph_serving_options_cross_the_process_boundary():
     backend = ZmqEngineBackend(
         model_path="/models/tiny",
+        max_model_len=8192,
         pipeline_depth=2,
         decode_mode="cuda_graph",
         cuda_graph_max_batch=4,
@@ -364,11 +469,177 @@ async def test_cuda_graph_serving_options_cross_the_process_boundary():
         cuda_graph_warmup_iters=1,
     )
 
+    assert backend._config["max_model_len"] == 8192
     assert backend._config["pipeline_depth"] == 2
     assert backend._config["decode_mode"] == "cuda_graph"
     assert backend._config["cuda_graph_max_batch"] == 4
     assert backend._config["cuda_graph_max_pages"] == 32
     assert backend._config["cuda_graph_warmup_iters"] == 1
+
+
+async def test_max_model_len_8192_reaches_the_spawned_child(monkeypatch):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_max_model_len_engine_service,
+    )
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=8192)
+    try:
+        port = await asyncio.to_thread(backend._spawn)
+
+        assert port == 43214
+        assert backend.attention_backend_decision is None
+    finally:
+        await backend._reset_dead_locked()
+
+
+async def test_parent_preflight_enforces_context_limit_without_starting_child():
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=5)
+    oversized = _request(
+        "context-retry",
+        TokensPrompt((1, 2, 3, 4)),
+        max_tokens=2,
+    )
+
+    try:
+        with pytest.raises(ValueError, match="exceed max_model_len"):
+            backend.validate_request(oversized)
+
+        assert backend._process is None
+        assert backend._active_request_ids == set()
+        assert backend._queues == {}
+        assert backend._prepared_requests == {}
+
+        boundary = await backend.generate(
+            _request(
+                "context-retry",
+                TokensPrompt((1, 2, 3)),
+                max_tokens=2,
+            )
+        )
+        assert boundary.finished
+        assert boundary.usage is not None
+        assert boundary.usage.prompt_tokens + boundary.usage.completion_tokens == 5
+    finally:
+        await backend.shutdown()
+
+
+async def test_abandoned_parent_preflight_does_not_retain_request():
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    request = _request("abandoned-preflight", "fits", max_tokens=1)
+    backend.validate_request(request)
+    request_ref = weakref.ref(request)
+
+    assert len(backend._prepared_requests) == 1
+    del request
+    gc.collect()
+
+    assert request_ref() is None
+    assert backend._prepared_requests == {}
+    await backend.shutdown()
+
+
+@pytest.mark.parametrize(
+    "wire_prompt",
+    [
+        "one two",
+        [1, 2],
+    ],
+)
+async def test_streaming_context_rejection_is_http_400_before_sse_headers(
+    wire_prompt,
+):
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=3)
+    app = create_app(engines={"limited-proc": backend})
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/v1/completions",
+                json={
+                    "model": "limited-proc",
+                    "prompt": wire_prompt,
+                    "max_tokens": 2,
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 400
+        assert "exceed max_model_len" in response.json()["error"]["message"]
+        assert not response.headers["content-type"].startswith("text/event-stream")
+        assert backend._process is None
+        assert backend._prepared_requests == {}
+    finally:
+        await backend.shutdown()
+
+
+async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
+    monkeypatch,
+):
+    import msgpack
+
+    class CapturingSocket:
+        payload = None
+
+        async def send(self, payload):
+            self.payload = payload
+
+    tokenizer = _CountingTokenizer()
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.resolve_tokenizer",
+        lambda _source: tokenizer,
+    )
+    backend = ZmqEngineBackend(
+        num_pages=64,
+        tokenizer="counting",
+        max_model_len=512,
+    )
+    request = GenerationRequest(
+        request_id="prepared-tool",
+        prompt=TextPrompt("use a tool"),
+        sampling_params=SamplingParams(max_tokens=2),
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                },
+            },
+        ),
+        tool_choice="required",
+    )
+    socket = CapturingSocket()
+
+    async def already_started():
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_started", already_started)
+    backend._socket = socket
+    backend._live_generation = 1
+
+    backend.validate_request(request)
+    backend.validate_request(request)
+    queue = await backend._submit(request)
+
+    assert socket.payload is not None
+    message = msgpack.unpackb(socket.payload)
+    assert message["prompt"]["kind"] == "tokens"
+    assert len(tokenizer.encoded) == 1
+    assert "Available functions:" in tokenizer.encoded[0]
+    assert "You must call one of the available functions." in tokenizer.encoded[0]
+    assert message["prompt"]["prompt"] == tokenizer.encoded[0]
+    assert tuple(message["prompt"]["prompt_token_ids"]) == ToyTokenizer().encode(
+        tokenizer.encoded[0]
+    )
+    assert backend._prepared_requests == {}
+    assert backend._queues.pop(request.request_id) is queue
+    backend._release_wire_route(request.request_id)
+    backend._socket = None
+    backend._live_generation = None
+    await backend.shutdown()
 
 
 async def test_startup_hook_ensures_the_service_once(monkeypatch):

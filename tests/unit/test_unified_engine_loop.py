@@ -16,11 +16,12 @@ from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.core.pipeline import PipelinedModelRunner
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import SampledToken
-from kairyu.engine.core.scheduler import Scheduler
+from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 from kairyu.engine.core.spec_runner import SpeculativeRunner
 from kairyu.engine.core.step_input import RequestSnapshot
 from kairyu.engine.engine_loop import EngineLoop, StreamUpdate
 from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
+from kairyu.engine.prompt import TokensPrompt
 
 
 class _CharTokenizer:
@@ -138,6 +139,225 @@ def test_depth_two_schedules_next_snapshot_before_oldest_execute_finishes() -> N
 
     assert events.index("scheduled:1") < events.index("executed:0")
     loop.close()
+
+
+def test_terminal_cohort_drains_before_fragmented_prefill_admission() -> None:
+    class _RecordingRunner(_PositionRunner):
+        def __init__(self) -> None:
+            super().__init__(base=1000)
+            self.prefill_batches: list[tuple[str, ...]] = []
+
+        def execute(self, scheduled, states):
+            prefill_ids = tuple(
+                chunk.request_id for chunk in scheduled if chunk.is_prefill
+            )
+            if prefill_ids:
+                self.prefill_batches.append(prefill_ids)
+            return super().execute(scheduled, states)
+
+    class _NoCohortDrainScheduler(Scheduler):
+        def should_drain_before_admission(self) -> bool:
+            return False
+
+    def run(scheduler_type):
+        cache = RadixKVCache(num_pages=64, page_size=4)
+        scheduler = scheduler_type(
+            cache,
+            max_num_batched_tokens=2,
+            max_num_seqs=2,
+            page_size=4,
+        )
+        runner = _RecordingRunner()
+        loop, _ = _loop(2, runner, scheduler=scheduler)
+        prompt_lengths = (2, 1, 1, 1, 1)
+        for index, prompt_length in enumerate(prompt_lengths):
+            loop.submit(
+                f"request-{index}",
+                TokensPrompt(tuple(range(1, prompt_length + 1))),
+                SamplingParams(max_tokens=1, ignore_eos=True),
+            )
+        updates = _drive(loop)
+        finals = {
+            request_id: update.outputs
+            for request_id, update in updates
+            if update.finished
+        }
+        loop.close()
+        return runner.prefill_batches, finals
+
+    baseline_batches, baseline = run(_NoCohortDrainScheduler)
+    optimized_batches, optimized = run(Scheduler)
+
+    assert optimized == baseline
+    assert baseline_batches == [
+        ("request-0",),
+        ("request-1",),
+        ("request-2",),
+        ("request-3",),
+        ("request-4",),
+    ]
+    assert optimized_batches == [
+        ("request-0",),
+        ("request-1", "request-2"),
+        ("request-3", "request-4"),
+    ]
+
+
+def test_terminal_cohort_drain_never_delays_an_outranking_waiter() -> None:
+    def build(waiting_priority: int) -> Scheduler:
+        cache = RadixKVCache(num_pages=64, page_size=4)
+        scheduler = Scheduler(
+            cache,
+            max_num_batched_tokens=2,
+            max_num_seqs=2,
+            page_size=4,
+            priority_age_s=60.0,
+        )
+        scheduler.add_request(
+            EngineRequest("running-a", (1,), max_new_tokens=1, priority=0)
+        )
+        scheduler.add_request(
+            EngineRequest("running-b", (2,), max_new_tokens=1, priority=0)
+        )
+        first = scheduler.schedule()
+        scheduler.schedule()
+        scheduler.update({first.scheduled[0].request_id: (1000,)})
+        scheduler.add_request(
+            EngineRequest(
+                "waiting-a",
+                (3,),
+                max_new_tokens=1,
+                priority=waiting_priority,
+            )
+        )
+        scheduler.add_request(
+            EngineRequest(
+                "waiting-b",
+                (4,),
+                max_new_tokens=1,
+                priority=waiting_priority,
+            )
+        )
+        return scheduler
+
+    assert build(waiting_priority=0).should_drain_before_admission() is True
+    assert build(waiting_priority=-1).should_drain_before_admission() is False
+
+
+def test_terminal_cohort_drain_preserves_cached_prefix_admission_order() -> None:
+    def build(*, cached_waiters: bool) -> Scheduler:
+        cache = RadixKVCache(num_pages=64, page_size=4)
+        if cached_waiters:
+            allocation = cache.allocate((9, 9, 9, 9))
+            cache.mark_computed(allocation)
+            cache.free(allocation)
+        scheduler = Scheduler(
+            cache,
+            max_num_batched_tokens=10,
+            max_num_seqs=2,
+            page_size=4,
+        )
+        scheduler.add_request(EngineRequest("running-a", (1,), max_new_tokens=1))
+        scheduler.add_request(EngineRequest("running-b", (2,), max_new_tokens=1))
+        first = scheduler.schedule()
+        scheduler.schedule()
+        scheduler.update({first.scheduled[0].request_id: (1000,)})
+        prefix = (9, 9, 9, 9) if cached_waiters else (7, 7, 7, 7)
+        scheduler.add_request(
+            EngineRequest("waiting-a", prefix + (3,), max_new_tokens=1)
+        )
+        scheduler.add_request(
+            EngineRequest("waiting-b", prefix + (4,), max_new_tokens=1)
+        )
+        return scheduler
+
+    assert build(cached_waiters=False).should_drain_before_admission() is True
+    assert build(cached_waiters=True).should_drain_before_admission() is False
+
+
+def test_terminal_cohort_does_not_drain_when_token_budget_cannot_grow_batch() -> None:
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=4,
+        max_num_seqs=2,
+        page_size=4,
+    )
+    scheduler.add_request(EngineRequest("running-a", (1,), max_new_tokens=1))
+    scheduler.add_request(EngineRequest("running-b", (2,), max_new_tokens=1))
+    first = scheduler.schedule()
+    scheduler.update({first.scheduled[0].request_id: (1000,)})
+    scheduler.add_request(
+        EngineRequest("waiting-a", tuple(range(10, 18)), max_new_tokens=1)
+    )
+    scheduler.add_request(
+        EngineRequest("waiting-b", tuple(range(20, 28)), max_new_tokens=1)
+    )
+
+    # One long prefill consumes the whole token budget with or without the
+    # terminal slot, so draining would only make the pipeline shallower.
+    assert scheduler.should_drain_before_admission() is False
+    plan = scheduler.schedule()
+    assert [chunk.request_id for chunk in plan.scheduled] == ["waiting-a"]
+    assert plan.scheduled[0].num_tokens == 4
+
+
+def test_terminal_cohort_priority_probe_is_bounded_for_large_waiting_queue(
+    monkeypatch,
+) -> None:
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=2,
+        max_num_seqs=2,
+        page_size=4,
+        priority_age_s=60.0,
+        clock=lambda: 0.0,
+    )
+    scheduler.add_request(
+        EngineRequest("running-a", (1,), max_new_tokens=1, priority=-100)
+    )
+    scheduler.add_request(
+        EngineRequest("running-b", (2,), max_new_tokens=1, priority=-100)
+    )
+    first = scheduler.schedule()
+    scheduler.update({first.scheduled[0].request_id: (1000,)})
+    for index in range(10_000):
+        priority = (
+            1
+            if index == 9_876
+            else 2
+            if index == 8_765
+            else 1_000 + index
+        )
+        scheduler.add_request(
+            EngineRequest(
+                f"waiting-{index:05d}",
+                (10_000 + index,),
+                max_new_tokens=1,
+                priority=priority,
+            )
+        )
+
+    probes: list[tuple[int, ...]] = []
+    original_probe = cache.peek_cached_tokens
+
+    def counted_probe(tokens):
+        probes.append(tokens)
+        return original_probe(tokens)
+
+    def fail_full_iteration(_queue):
+        raise AssertionError("terminal cohort must not enumerate the full queue")
+
+    def fail_sort(*_args, **_kwargs):
+        raise AssertionError("terminal cohort must not sort the full queue")
+
+    monkeypatch.setattr(cache, "peek_cached_tokens", counted_probe)
+    monkeypatch.setattr(type(scheduler._waiting), "__iter__", fail_full_iteration)
+    monkeypatch.setattr("builtins.sorted", fail_sort)
+
+    assert scheduler.should_drain_before_admission() is True
+    assert probes == [(19_876,), (18_765,)]
 
 
 def test_stop_holdback_finishes_stream_before_late_surplus_is_reclaimed() -> None:
@@ -270,6 +490,10 @@ def test_preemption_and_chunked_prefill_drain_through_unified_loop() -> None:
 
 
 def test_native_pipeline_runner_uses_same_production_loop() -> None:
+    class _NativePipelineScheduler(Scheduler):
+        def should_drain_before_admission(self) -> bool:
+            raise AssertionError("native pipeline admission must remain unchanged")
+
     class _Stage:
         def __init__(self, sampler=None) -> None:
             self.sampler = sampler
@@ -281,7 +505,13 @@ def test_native_pipeline_runner_uses_same_production_loop() -> None:
 
     target = _PositionRunner(base=1000)
     runner = PipelinedModelRunner((_Stage(), _Stage(target)))
-    loop, scheduler = _loop(2, runner, budget=8)
+    scheduler = _NativePipelineScheduler(
+        RadixKVCache(num_pages=64, page_size=4),
+        max_num_batched_tokens=8,
+        max_num_seqs=8,
+        page_size=4,
+    )
+    loop, scheduler = _loop(2, runner, scheduler=scheduler)
     loop.submit("pp", "one two three four", SamplingParams(max_tokens=16))
 
     updates = _drive(loop)

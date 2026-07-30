@@ -230,8 +230,10 @@ FlashInfer/driver; disclose that vLLM V1 runs CUDA graphs by default while kairy
 none (M3 closes this); define goodput's SLO threshold explicitly; measure TTFT at first
 streamed token including tokenize+queueing; ≥3 runs with p50/p99 across runs, fixed seeds,
 warmup excluded; add an open-loop arrival-rate sweep, not just fixed concurrency; include
-SGLang as a baseline on the shared-prefix benchmark (its radix cache is the direct
-competitor there).
+SGLang as an optional diagnostic baseline on the shared-prefix benchmark (its
+radix cache is the direct competitor there). G2 A6's binding matrix remains the
+explicit Kairyu-versus-pinned-vLLM comparison; an unavailable or differently
+configured SGLang run cannot block or substitute for that gate.
 
 ## 6. Review record
 

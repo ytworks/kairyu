@@ -140,12 +140,16 @@ class RequestDelta:
 class StepDelta:
     """Delta-broadcast step (F4): full snapshots only for first-seen (or
     re-allocated) requests; small field deltas for the rest; dropped ids leave
-    the peer's state. Reconstructs snapshot_step()'s StepInput exactly."""
+    the peer's step state. Finished-request cleanup is batched into the next
+    step so every TP rank releases it at the same protocol boundary without a
+    separate control collective. Reconstructs snapshot_step()'s StepInput
+    exactly."""
 
     chunks: tuple[ScheduledChunk, ...]
     new: tuple[RequestSnapshot, ...]
     updates: tuple[RequestDelta, ...]
     dropped: tuple[str, ...]
+    released_ids: tuple[str, ...] = ()
 
 
 class StateSync:
@@ -156,11 +160,23 @@ class StateSync:
     def __init__(self) -> None:
         self._states: dict[str, RequestSnapshot] = {}
 
+    def discard(self, request_ids: tuple[str, ...]) -> None:
+        """Forget completed request identities before a possible immediate reuse."""
+        for request_id in request_ids:
+            self._states.pop(request_id, None)
+
     def diff(
         self,
         chunks: tuple[ScheduledChunk, ...],
         states: Mapping[str, object],
+        *,
+        released_ids: tuple[str, ...] = (),
     ) -> StepDelta:
+        # A request id may be reused immediately after release. Compare it as
+        # first-seen so an identical prompt/allocation still crosses as a full
+        # snapshot, but do not mutate driver state until the control broadcast
+        # succeeds and apply() commits the delta on every rank.
+        released = set(released_ids)
         active: list[str] = []
         seen: set[str] = set()
         for chunk in chunks:
@@ -171,7 +187,7 @@ class StateSync:
         updates: list[RequestDelta] = []
         for rid in active:
             snap = _snapshot_state(states[rid])
-            prev = self._states.get(rid)
+            prev = None if rid in released else self._states.get(rid)
             # A delta may only ever APPEND. Comparing the retained prefix rather
             # than just its length is what makes that true: a preempted request
             # can change pages/prompt, and a rejected speculative draft replaces
@@ -200,10 +216,15 @@ class StateSync:
                 )
         dropped = tuple(rid for rid in self._states if rid not in seen)
         return StepDelta(
-            chunks=chunks, new=tuple(new), updates=tuple(updates), dropped=dropped
+            chunks=chunks,
+            new=tuple(new),
+            updates=tuple(updates),
+            dropped=dropped,
+            released_ids=released_ids,
         )
 
     def apply(self, delta: StepDelta) -> dict[str, RequestSnapshot]:
+        self.discard(delta.released_ids)
         for rid in delta.dropped:
             self._states.pop(rid, None)
         for snap in delta.new:

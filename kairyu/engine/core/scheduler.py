@@ -177,6 +177,48 @@ class _IndexedWaitingQueue:
         )
         yield from (request_id for _key, _sequence, request_id in ordered)
 
+    def peek_prefix(self, limit: int) -> tuple[str, ...]:
+        """Return at most ``limit`` queue heads without sorting the live queue.
+
+        FIFO mode walks only the requested prefix.  Priority mode performs a
+        best-first traversal of the existing heap: a heap child's key cannot
+        precede its parent, so the small frontier yields live entries in exactly
+        the same order as ``popleft()`` without copying or sorting every waiter.
+        Lazy-removal tombstones are skipped just as they are at the queue head.
+        """
+
+        if limit <= 0:
+            return ()
+        if not self.priority_enabled:
+            prefix: list[str] = []
+            for request_id in self._fifo:
+                prefix.append(request_id)
+                if len(prefix) >= limit:
+                    break
+            return tuple(prefix)
+
+        self._drop_stale_head()
+        if not self._heap:
+            return ()
+        # ``frontier`` stores (heap entry, source index).  Expanding only a
+        # popped entry's children is the standard k-smallest traversal of a
+        # binary heap and avoids the O(W log W) ``__iter__`` materialization.
+        frontier: list[tuple[tuple[int, int, str], int]] = [
+            (self._heap[0], 0)
+        ]
+        prefix = []
+        while frontier and len(prefix) < limit:
+            (key, sequence, request_id), index = heapq.heappop(frontier)
+            if self._priority_entries.get(request_id) == (key, sequence):
+                prefix.append(request_id)
+            left = 2 * index + 1
+            right = left + 1
+            if left < len(self._heap):
+                heapq.heappush(frontier, (self._heap[left], left))
+            if right < len(self._heap):
+                heapq.heappush(frontier, (self._heap[right], right))
+        return tuple(prefix)
+
     def _priority_key(self, priority: int, arrival: float) -> int:
         """Exact signed-integer rank with nanosecond-resolution aging.
 
@@ -458,6 +500,88 @@ class Scheduler:
     @property
     def waiting_ids(self) -> tuple[str, ...]:
         return tuple(self._waiting)
+
+    def should_drain_before_admission(self) -> bool:
+        """Whether committing terminal in-flight work can form a fuller cohort.
+
+        Schedule-ahead can leave a partially free sequence window while every
+        remaining runner has already reserved its final token. Admitting into
+        those few slots immediately fragments the next prefill cohort even
+        though the pending device handles are guaranteed to release the rest.
+        The engine loop may therefore commit first and re-evaluate admission.
+
+        This is deliberately a read-only predicate. It never reorders the
+        waiting queue, never delays an outranking request, and is disabled for
+        speculative chunks whose accepted length is not known until commit.
+        It drains only when the prefill token budget can admit more requests
+        after the terminal slots are released than it can admit right now.
+        """
+
+        if self._spec_k or not self._waiting or not self._running:
+            return False
+        free_slots = self._max_seqs - len(self._running)
+        if free_slots <= 0 or len(self._waiting) <= free_slots:
+            return False
+
+        running_states = [self._states[request_id] for request_id in self._running]
+        if not all(
+            state.status is _Status.RUNNING
+            and state.prefill_done
+            and state.in_flight > 0
+            and len(state.outputs) + state.in_flight
+            >= state.request.max_new_tokens
+            for state in running_states
+        ):
+            return False
+
+        if self._waiting.priority_enabled:
+            waiting_key = self._priority_key_for(self._waiting.peek())
+            if any(
+                waiting_key < self._priority_key_for(request_id)
+                for request_id in self._running
+            ):
+                return False
+
+        # One admitted prefill always spends at least one token because the last
+        # prompt token is recomputed even on a complete radix hit.  Therefore no
+        # plan can inspect/admit more than min(max_seqs, token_budget) waiters.
+        # ``peek_prefix`` preserves priority/FIFO order without sorting a large
+        # priority queue merely to inspect this bounded cohort.
+        candidate_limit = min(
+            len(self._waiting),
+            self._max_seqs,
+            self._budget,
+        )
+        candidates = self._waiting.peek_prefix(candidate_limit)
+        budget = self._budget
+        admitted = 0
+        for request_id in candidates:
+            state = self._states[request_id]
+            prompt_len = state.prompt_len
+            if prompt_len < 1:
+                # Let normal schedule() reject an invalid head immediately.
+                return False
+            required_pages = -(-prompt_len // self._page_size)
+            if required_pages > self._kv.num_pages:
+                # Likewise, do not delay rejection of an impossible prompt.
+                return False
+            cached_tokens = self._kv.peek_cached_tokens(
+                state.request.prompt_token_ids
+            )
+            # Requests that fit the currently free window retain their existing
+            # immediate cached-prefix admission.  A cached request deeper than
+            # that window is not admissible until a terminal slot is released,
+            # so draining does not postpone it.
+            if admitted < free_slots and cached_tokens > 0:
+                return False
+            uncached_tokens = prompt_len - min(cached_tokens, prompt_len - 1)
+            budget -= min(uncached_tokens, budget)
+            admitted += 1
+            if admitted > free_slots:
+                return True
+            if budget <= 0:
+                break
+        return False
 
     def _release_without_commit(self, state: _RequestState) -> None:
         if state.allocation is not None:
@@ -751,8 +875,6 @@ class Scheduler:
             state.computed_prompt += chunk
             if state.prefill_done:
                 state.in_flight += 1  # the prompt-completing chunk samples token 0
-                if state.allocation is not None:
-                    self._kv.mark_computed(state.allocation)
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
             budget -= chunk
         return budget
@@ -877,7 +999,6 @@ class Scheduler:
             state.computed_prompt = cached + chunk
             if state.prefill_done:
                 state.in_flight += 1  # prompt-completing chunk samples token 0
-                self._kv.mark_computed(state.allocation)
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
             self._priority_events[(state.request.scheduling_class, "admit")] += 1
             budget -= chunk
@@ -966,6 +1087,12 @@ class Scheduler:
                 if not state.prefill_done or state.in_flight < 1:
                     raise ValueError(f"request {request_id!r} is not awaiting a sampled token")
                 state.in_flight -= 1
+                if not state.outputs and state.allocation is not None:
+                    # The prompt KV becomes shareable only after the device
+                    # result that proves its prompt-completing forward finished.
+                    # Publishing during schedule() lets a depth>1 plan reuse
+                    # pages that are still queued on the device executor.
+                    self._kv.mark_computed(state.allocation)
                 state.outputs.append(token_id)
                 committed_here += 1
                 reason = self._terminal_reason(state, token_id)

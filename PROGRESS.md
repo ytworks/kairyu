@@ -32,6 +32,26 @@ substantive differences. The ten-check assembler pins all 15 weight digests,
 the 64×16 raw rows, clean measurement commit, CUDA 13.0/NCCL 2.29.7, and
 physical PCIe topology
 (`bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json`).
+G2 A6 now has an implemented, fail-closed formal operator for the Qwen3-32B
+PCIe-GDDR closure profile. It regenerates pinned traces before execution,
+hashes the complete live checkpoint before and after all 52 fresh-server
+scenarios, and binds raw environment-session ownership, exact container
+launch/backend/package/GPU identities, 31 unique synchronized graph warmups,
+and equal 8,192-block usable KV capacity into independently replayed evidence.
+The first clean TP4 ShareGPT pair completed but did not meet A6: Kairyu
+measured 0.466x vLLM SLO-goodput and 1.628x vLLM TTFT p99. The remaining
+matrix is intentionally deferred while the performance gap is closed; A6
+remains executable but not closed, and its three pooled thresholds are
+unchanged. A direct-engine rerun removed the depth-1 comparison confound:
+the same TP4 ShareGPT token trace measured 495.811 token/s at depth 1 and
+674.181 token/s at depth 5 (+35.98%), versus pinned vLLM at 798.057 token/s.
+The resulting 0.845x ratio is diagnostic rather than the HTTP A6 verdict.
+Steady decode is already approximately equal (Kairyu 19.9 ms versus vLLM
+20.1 ms). Ragged paged-KV writes no longer specialize request-dependent
+token, row, or page-table shapes: after the first compile, previously unseen
+table widths fell from 63.81–67.53 ms to 0.11–0.20 ms with exact K/V output.
+The full TP4/8 HTTP matrix remains an open hard performance gate while the
+verified depth-5 implementation proceeds independently.
 G2 A7 now has an executable real-engine gate. Its Qwen3-32B trace reuses the
 fixed 64-session × 8-turn, 512-token shared-prefix plus 128-token turn geometry,
 then measures engine-originated prompt-token cache usage independently at TP4
@@ -580,6 +600,120 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] Ragged KV writes remove per-request shape compilation
+- What: made ragged token, row, page-table-width, and leading-stride bounds
+  non-specializing Triton runtime arguments while retaining pool geometry,
+  page size, head shape, and payload block as compile-time constants. A
+  structural GPU regression protects that boundary. In fresh-cache probes,
+  the former kernel compiled again for unseen table widths 61, 64, and 65 in
+  67.525/65.437/63.807 ms; the selected kernel handled them after one initial
+  compile in 0.199/0.126/0.112 ms. Every K/V write was exact.
+- Why: a real 1,024-token prefill trace contained a 70.487 ms GPU-idle interval
+  immediately before the first ragged write. The steady kernel itself is about
+  0.11 ms, so specializing request-dependent shapes made compile latency, not
+  write execution, the dominant cost. Runtime bounds preserve Kairyu's native
+  L1 path without copying vLLM's scheduler or execution architecture.
+- Refs: issue #156; G2 A6; `kairyu/kernels/paged_kv_write_gpu.py`;
+  `tests/gpu/test_paged_kv_write_gpu.py`
+
+### 2026-07-31 — [progress] G2 A6 depth 5 removes the serialized-run comparison confound
+- What: the exact TP4 direct-engine ShareGPT token trace measured 674.181
+  output token/s at pipeline depth 5 versus the prior 495.811 at depth 1
+  (+35.98%). Pinned vLLM remains 798.057 token/s, so the diagnostic ratio is
+  now 0.845x and still below the 0.95 target. Kairyu steady decode is already
+  approximately equal to vLLM; the measured remaining candidate is L1 prefill
+  compile/launch. The HTTP TP4/TP8 matrix remains the binding A6 verdict.
+- Why: depth 1 measured a serialized host/device execution policy against
+  vLLM's asynchronous in-flight execution, so it could not support a causal
+  claim that Kairyu's L3/L2/L1 responsibility split caused the whole gap.
+  Matching a useful in-flight depth preserves the product architecture and
+  limits further convergence to independently proven L1 mechanisms.
+- Refs: issue #156; G2 A6; `bench/g2_a6_vllm_bench.py`;
+  `examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml`
+
+### 2026-07-30 — [progress] G2 A6 first matched TP4 pair isolates a steady-decode gap
+- What: The first clean Qwen3-32B TP4 ShareGPT pair completed all 128 requests
+  per arm. Kairyu measured 1.452571 SLO-goodput versus vLLM 3.117408
+  (0.466x), TTFT p99 29.614074 s versus 18.188697 s (1.628x), and a
+  33.044848 s measurement window versus 20.529874 s. The remaining matrix was
+  stopped before spending GPU time on a result that could not meet the pooled
+  gate. Fixed-B16 evidence attributes the largest controlled gap to the GPU
+  model path rather than tokenization, HTTP, attention, or an OS-jitter rule.
+  A stride-aware joint Q/K RMSNorm now preserves the existing BF16 boundary in
+  one CUDA-graph-safe launch; focused GPU tests are bit-exact and the real TP4
+  teacher-forced Qwen gate remains 252/256 with zero substantive
+  disagreements. A packed gate/up candidate was discarded after it reduced
+  whole-graph time by only about 0.008 ms and failed the same quality gate at
+  249/256 with one substantive disagreement.
+- Why: The issue's pooled performance thresholds remain the only binding
+  verdict. Stopping a clearly failing matrix and rejecting a numerically unsafe
+  low-yield transform preserves both GPU time and product quality without
+  inventing a single-run or OS-jitter completion condition.
+- Refs: issue #156; G2 A6; `kairyu/kernels/rms_norm_gpu.py`;
+  `kairyu/models/attention.py`; `tests/gpu/test_rms_norm_gpu.py`;
+  `tests/unit/test_joint_qk_rms_norm.py`
+
+### 2026-07-30 — [progress] G2 A6 live preflight corrects the immutable vLLM identity
+- What: The first real formal preflight stopped before any vLLM measurement
+  because the immutable CUDA image installs `vllm==0.26.0+cu129` while its
+  release tag and startup label are `v0.26.0`. The next fresh vLLM startup
+  exposed its exact resolved-backend message as
+  `Using AttentionBackendEnum.FLASH_ATTN backend.` alongside the separately
+  retained `Using FlashAttention version 2` marker. The operator and replay
+  schema now pin those observed immutable-image values; regression fixtures use
+  the real message shape. The completed first Kairyu shard remains
+  hash-protected for safe resume, and no failed vLLM measurement row exists.
+- Why: Package local-version suffixes and enum-qualified logger output are
+  provenance facts, not performance requirements. Binding the actual image
+  content prevents both false rejection and a weaker tag-only claim without
+  changing any of A6's three pooled performance thresholds.
+- Refs: issue #156; G2 A6;
+  `bench/run_g2_a6_formal.py`; `bench/g2_a6_vllm_bench.py`;
+  `tests/bench/test_run_g2_a6_formal.py`
+
+### 2026-07-30 — [progress] G2 A6 performance candidate reaches formal-run readiness
+- What: Added canonical-name-preserving packed dense Q/K/V execution, guarded
+  SM120 fused RMSNorm, RoPE, and paged-KV-write kernels with exact fallbacks,
+  and a long-lived native engine step worker. Native HTTP and process backends
+  now tokenize each request once while rejecting unsupported fields and
+  `max_model_len` overflow before response headers. The serving stack pins
+  uvloop/httptools on Linux, propagates the context limit through TP and P-D
+  construction, and preserves shutdown, cancellation, checkpoint, quantized,
+  and replacement-module behavior.
+- Why: The earlier native path paid repeated projection launches, Python
+  thread-pool and tokenization overhead, and avoidable elementwise/KV-write
+  launches that stock vLLM does not pay. The guarded execution views retain the
+  public module and checkpoint contracts while allowing the measured Qwen3-32B
+  path to remove those costs.
+- Refs: issue #156; G2 A6; m2 D1; m5 D6;
+  `kairyu/models/packed_linear.py`; `kairyu/kernels/rms_norm_gpu.py`;
+  `kairyu/kernels/rope_gpu.py`; `kairyu/kernels/paged_kv_write_gpu.py`;
+  `kairyu/engine/engine_loop.py`; `kairyu/engine/kairyu_backend.py`;
+  `kairyu/engine/zmq_backend.py`
+
+### 2026-07-30 — [amendment] G2 A6 formal comparison becomes replayable and fail closed
+- What: Added the committed `bench/run_g2_a6_formal.py` operator and hardened
+  `bench/g2_a6_vllm_bench.py` to regenerate the complete pinned trace, verify
+  the full live checkpoint before and after execution, retain 31 unique
+  synchronized graph warmups per cell, and bind raw environment-session,
+  post-start launch/backend/package/GPU, logging, CUDA Graph, and cache-capacity
+  evidence. Both arms allocate 8,193 pages: Kairyu reserves one graph scratch
+  page and stock vLLM reserves its mandatory null page, leaving 8,192 usable
+  pages on each at Kairyu `pipeline_depth=1`. Stock vLLM has explicit async
+  scheduling, multiprocessing TP, compile mode 3, disabled custom
+  all-reduce/access/request logging, and an actual FlashAttention 2 startup
+  marker retained from the SM120 process.
+- Why: A performance ratio is not attributable or replayable when trace
+  construction, checkpoint bytes, effective KV capacity, runtime HTTP stack,
+  resolved backend, graph preparation, or measurement-session identity can
+  differ without invalidating the artifact.
+- Refs: issue #156; G2 A6; m5 D6;
+  `bench/run_g2_a6_formal.py`; `bench/g2_a6_vllm_bench.py`;
+  `examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml`;
+  `tests/bench/test_g2_a6_vllm_bench.py`;
+  `tests/bench/test_run_g2_a6_formal.py`;
+  `bench/results/env-2026-07-30.json`
 
 ### 2026-07-30 — [amendment] M13 pins upstream execution identities and actual process reporting
 - What: Corrected the public FA3 capability to the officially supported SM90

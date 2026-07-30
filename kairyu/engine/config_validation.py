@@ -43,6 +43,7 @@ _KAIRYU_OPTIONS = frozenset(
         "page_size",
         "max_num_batched_tokens",
         "max_num_seqs",
+        "max_model_len",
         "priority_age_s",
         "runner",
         "tensor_parallel_size",
@@ -67,6 +68,7 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "page_size",
         "max_num_batched_tokens",
         "max_num_seqs",
+        "max_model_len",
         "priority_age_s",
         "tokenizer",
         "speculative",
@@ -217,6 +219,14 @@ def _validate_native_common(
         options.get("max_num_seqs", 256),
         1,
     )
+    max_model_len = options.get("max_model_len")
+    if max_model_len is not None:
+        _require_int_at_least(
+            backend,
+            "max_model_len",
+            max_model_len,
+            1,
+        )
     _require_int_at_least(
         backend,
         "pipeline_depth",

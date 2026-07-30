@@ -64,6 +64,31 @@ def test_cross_device_pd_options_pass_preflight_without_runtime_import():
     )
 
 
+@pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
+@pytest.mark.parametrize("max_model_len", [0, -1, True, 8192.0, "8192"])
+def test_native_max_model_len_rejects_non_positive_or_non_integer_values(
+    backend,
+    max_model_len,
+):
+    with pytest.raises(ValueError, match="max_model_len.*positive integer"):
+        validate_backend_options(
+            backend,
+            {"max_model_len": max_model_len},
+        )
+
+
+@pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
+@pytest.mark.parametrize("max_model_len", [None, 8192])
+def test_native_max_model_len_accepts_none_or_positive_integer(
+    backend,
+    max_model_len,
+):
+    validate_backend_options(
+        backend,
+        {"max_model_len": max_model_len},
+    )
+
+
 @pytest.mark.parametrize(
     ("prefill", "decode"),
     [

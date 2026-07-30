@@ -1,11 +1,14 @@
 import asyncio
+import gc
 import threading
 import time
+import weakref
 from collections.abc import Mapping
 
 import httpx
 import pytest
 
+import kairyu.engine.kairyu_backend as kairyu_backend_module
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.core.sampling_types import SampledToken
@@ -32,6 +35,30 @@ class _SlowRunner:
         states: Mapping[str, object],
     ) -> dict[str, tuple[SampledToken, ...]]:
         time.sleep(0.01)
+        return {
+            chunk.request_id: (SampledToken(7),)
+            for chunk in scheduled
+            if not chunk.is_prefill or states[chunk.request_id].prefill_done
+        }
+
+
+class _StepGateRunner:
+    def __init__(self, gated_call: int) -> None:
+        self.gated_call = gated_call
+        self.calls = 0
+        self.entered = threading.Event()
+        self.allow_step = threading.Event()
+
+    def execute(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> dict[str, tuple[SampledToken, ...]]:
+        self.calls += 1
+        if self.calls == self.gated_call:
+            self.entered.set()
+            if not self.allow_step.wait(timeout=2):
+                raise TimeoutError("test did not release the gated engine step")
         return {
             chunk.request_id: (SampledToken(7),)
             for chunk in scheduled
@@ -94,9 +121,53 @@ async def test_zero_token_prompt_is_rejected_before_backend_state():
     assert result.finished is True
 
 
+async def test_context_limit_rejects_before_backend_state_and_allows_boundary_retry():
+    backend = KairyuBackend(
+        tokenizer=ToyTokenizer(),
+        num_pages=64,
+        max_model_len=5,
+    )
+    oversized = GenerationRequest(
+        request_id="context",
+        prompt=TokensPrompt((1, 2, 3, 4)),
+        sampling_params=SamplingParams(max_tokens=2),
+    )
+
+    with pytest.raises(ValueError, match="exceed max_model_len"):
+        backend.validate_request(oversized)
+    with pytest.raises(ValueError, match="exceed max_model_len"):
+        await backend.generate(oversized)
+
+    assert backend._active_request_ids == set()
+    assert backend._loop._active_request_ids == set()
+    assert backend._queues == {}
+    assert backend._scheduler.states == {}
+
+    boundary = GenerationRequest(
+        request_id="context",
+        prompt=TokensPrompt((1, 2, 3)),
+        sampling_params=SamplingParams(max_tokens=2),
+    )
+    result = await backend.generate(boundary)
+
+    assert result.finished
+    assert result.usage is not None
+    assert result.usage.prompt_tokens + result.usage.completion_tokens == 5
+    await backend.shutdown()
+
+
 class _NoEncodeTokenizer(ToyTokenizer):
     def encode(self, text: str) -> tuple[int, ...]:
         raise AssertionError("pre-tokenized prompts must not call encode")
+
+
+class _CountingTokenizer(ToyTokenizer):
+    def __init__(self) -> None:
+        self.encoded_texts: list[str] = []
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        self.encoded_texts.append(text)
+        return super().encode(text)
 
 
 async def test_token_prompt_bypasses_encode_and_reports_exact_input_ids():
@@ -113,6 +184,67 @@ async def test_token_prompt_bypasses_encode_and_reports_exact_input_ids():
     assert result.prompt_token_ids == (7, 11, 13)
     assert result.usage is not None
     assert result.usage.prompt_tokens == 3
+
+
+async def test_validated_tool_request_reuses_exact_prepared_tokens_for_n_choices():
+    tokenizer = _CountingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=256)
+    request = GenerationRequest(
+        request_id="prepared-tools",
+        prompt="find the weather",
+        sampling_params=SamplingParams(max_tokens=2, n=3, temperature=0),
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                },
+            },
+        ),
+        tool_choice="required",
+    )
+
+    backend.validate_request(request)
+    backend.validate_request(request)
+    result = await backend.generate(request)
+
+    assert len(tokenizer.encoded_texts) == 1
+    assert "Available functions:" in tokenizer.encoded_texts[0]
+    assert "You must call one of the available functions." in tokenizer.encoded_texts[0]
+    assert len(result.completions) == 3
+    assert all(completion.finish_reason == "length" for completion in result.completions)
+    assert backend._prepared_requests == {}
+    await backend.shutdown()
+
+
+async def test_direct_generate_without_preflight_still_tokenizes_once():
+    tokenizer = _CountingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+
+    result = await backend.generate(_request("direct", "direct request", max_tokens=1))
+
+    assert result.finished
+    assert tokenizer.encoded_texts == ["direct request"]
+    assert backend._prepared_requests == {}
+    await backend.shutdown()
+
+
+def test_abandoned_validated_request_releases_prepared_tokens():
+    tokenizer = _CountingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    request = _request("abandoned-validation", "validate but never submit")
+    request_ref = weakref.ref(request)
+
+    backend.validate_request(request)
+    assert len(backend._prepared_requests) == 1
+
+    del request
+    gc.collect()
+
+    assert request_ref() is None
+    assert backend._prepared_requests == {}
+    backend._loop.close()
 
 
 async def test_text_and_equivalent_token_prompt_share_native_radix_cache():
@@ -261,6 +393,156 @@ async def test_stream_yields_incremental_partials():
     assert lengths == sorted(lengths)  # monotonically growing
 
 
+async def test_generation_uses_one_long_lived_step_worker(monkeypatch):
+    real_to_thread = asyncio.to_thread
+    invocations = []
+
+    async def counted_to_thread(function, /, *args, **kwargs):
+        invocations.append(function)
+        return await real_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(kairyu_backend_module.asyncio, "to_thread", counted_to_thread)
+    backend = KairyuBackend(num_pages=256)
+
+    result = await backend.generate(_request("one-worker", "prompt", max_tokens=64))
+
+    assert len(result.completions[0].token_ids) == 64
+    worker_invocations = [
+        function
+        for function in invocations
+        if (
+            getattr(function, "__self__", None) is backend
+            and getattr(function, "__func__", None) is KairyuBackend._step_worker
+        )
+    ]
+    assert len(worker_invocations) == 1
+    await backend.shutdown()
+
+
+async def test_long_lived_worker_publishes_each_step_before_it_exits():
+    runner = _StepGateRunner(gated_call=2)
+    backend = KairyuBackend(num_pages=256, runner=runner)
+    stream = backend.stream(_request("cadence", "prompt", max_tokens=3))
+    partials = []
+    try:
+        first = await asyncio.wait_for(anext(stream), timeout=1)
+        partials.append(first)
+        for _ in range(100):
+            if runner.entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+
+        assert runner.entered.is_set()
+        assert first.finished is False
+        assert len(first.completions[0].token_ids) == 1
+        assert backend._pump_task is not None
+        assert not backend._pump_task.done()
+
+        runner.allow_step.set()
+        async for partial in stream:
+            partials.append(partial)
+    finally:
+        runner.allow_step.set()
+        await stream.aclose()
+        await backend.shutdown()
+
+    assert [len(partial.completions[0].token_ids) for partial in partials] == [
+        1,
+        2,
+        3,
+    ]
+    assert partials[-1].finished is True
+
+
+async def test_submit_after_worker_idle_snapshot_restarts_without_stranding():
+    backend = KairyuBackend(num_pages=256)
+    original_has_work = backend._loop.has_work
+    worker_saw_idle = threading.Event()
+    release_idle_worker = threading.Event()
+    event_loop_thread = threading.get_ident()
+
+    def pause_idle_worker() -> bool:
+        has_work = original_has_work()
+        if (
+            threading.get_ident() != event_loop_thread
+            and not has_work
+            and not worker_saw_idle.is_set()
+        ):
+            worker_saw_idle.set()
+            if not release_idle_worker.wait(timeout=2):
+                raise TimeoutError("test did not release idle step worker")
+        return has_work
+
+    backend._loop.has_work = pause_idle_worker
+    try:
+        first = await backend.generate(_request("before-idle", "first", max_tokens=1))
+        assert first.finished
+        for _ in range(100):
+            if worker_saw_idle.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert worker_saw_idle.is_set()
+
+        second_task = asyncio.create_task(
+            backend.generate(_request("after-idle", "second", max_tokens=2))
+        )
+        await asyncio.sleep(0)
+        assert not second_task.done()
+        release_idle_worker.set()
+
+        second = await asyncio.wait_for(second_task, timeout=2)
+        assert second.finished
+    finally:
+        release_idle_worker.set()
+        await backend.shutdown()
+
+
+async def test_submit_while_worker_steps_does_not_read_scheduler_from_event_loop():
+    runner = _StepGateRunner(gated_call=1)
+    backend = KairyuBackend(num_pages=256, runner=runner)
+    original_has_work = backend._loop.has_work
+    event_loop_thread = threading.get_ident()
+    concurrent_event_loop_reads = 0
+
+    def record_has_work() -> bool:
+        nonlocal concurrent_event_loop_reads
+        if (
+            threading.get_ident() == event_loop_thread
+            and runner.entered.is_set()
+            and not runner.allow_step.is_set()
+        ):
+            concurrent_event_loop_reads += 1
+        return original_has_work()
+
+    backend._loop.has_work = record_has_work
+    first = asyncio.create_task(
+        backend.generate(_request("active-worker", "first", max_tokens=2))
+    )
+    try:
+        assert await asyncio.to_thread(runner.entered.wait, 2)
+        second = asyncio.create_task(
+            backend.generate(_request("submitted-during-step", "second", max_tokens=2))
+        )
+        await asyncio.sleep(0)
+
+        assert not second.done()
+        assert concurrent_event_loop_reads == 0
+
+        runner.allow_step.set()
+        first_result, second_result = await asyncio.wait_for(
+            asyncio.gather(first, second),
+            timeout=2,
+        )
+        assert first_result.finished
+        assert second_result.finished
+    finally:
+        runner.allow_step.set()
+        if not first.done():
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+        await backend.shutdown()
+
+
 async def test_stream_abandonment_aborts_engine_work():
     backend = KairyuBackend(num_pages=256, runner=_SlowRunner())
     stream = backend.stream(_request("abandoned", "keep generating", max_tokens=10_000))
@@ -308,7 +590,19 @@ async def test_multi_completion_abandonment_aborts_all_siblings():
     } & set(backend._scheduler.states)
 
 
-async def test_pump_failure_purges_requests_and_backend_recovers():
+async def test_pump_failure_purges_requests_and_backend_recovers(monkeypatch):
+    real_to_thread = asyncio.to_thread
+    worker_invocations = 0
+
+    async def counted_to_thread(function, /, *args, **kwargs):
+        nonlocal worker_invocations
+        if (
+            getattr(function, "__func__", None) is KairyuBackend._step_worker
+        ):
+            worker_invocations += 1
+        return await real_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(kairyu_backend_module.asyncio, "to_thread", counted_to_thread)
     backend = KairyuBackend(num_pages=256, runner=_FailOnceRunner())
     with pytest.raises(RuntimeError, match="injected runner failure"):
         await backend.generate(_request("failed", "first", 2))
@@ -317,6 +611,102 @@ async def test_pump_failure_purges_requests_and_backend_recovers():
     assert "failed" not in backend._scheduler.states
     recovered = await backend.generate(_request("recovered", "second", 2))
     assert recovered.finished
+    assert worker_invocations == 2
+    await backend.shutdown()
+
+
+async def test_shutdown_waits_for_step_boundary_and_stops_worker():
+    runner = _StepGateRunner(gated_call=1)
+    backend = KairyuBackend(num_pages=256, runner=runner)
+    generation = asyncio.create_task(
+        backend.generate(_request("shutdown", "prompt", max_tokens=10_000))
+    )
+    for _ in range(100):
+        if runner.entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert runner.entered.is_set()
+
+    shutdown = asyncio.create_task(backend.shutdown())
+    await asyncio.sleep(0.01)
+    assert not shutdown.done()
+
+    runner.allow_step.set()
+    await asyncio.wait_for(shutdown, timeout=2)
+
+    assert runner.calls == 1
+    assert backend._pump_task is None
+    assert backend._loop.has_work() is False
+    generation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await generation
+    with pytest.raises(RuntimeError, match="shut down"):
+        await backend.generate(_request("after-shutdown", "prompt", max_tokens=1))
+
+
+async def test_shutdown_is_shared_and_cancellation_safe_through_all_cleanup():
+    backend = KairyuBackend(num_pages=256)
+    close_started = threading.Event()
+    allow_close = threading.Event()
+    launcher_started = threading.Event()
+    allow_launcher = threading.Event()
+    real_close = backend._loop.close
+    close_calls = 0
+
+    def blocking_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_started.set()
+        if not allow_close.wait(timeout=2):
+            raise TimeoutError("test did not release engine-loop close")
+        real_close()
+
+    class _BlockingLauncher:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            launcher_started.set()
+            if not allow_launcher.wait(timeout=2):
+                raise TimeoutError("test did not release TP launcher shutdown")
+
+    launcher = _BlockingLauncher()
+    backend._loop.close = blocking_close
+    backend._loop.tp_launcher = launcher
+
+    first = asyncio.create_task(backend.shutdown())
+    try:
+        assert await asyncio.to_thread(close_started.wait, 2)
+        second = asyncio.create_task(backend.shutdown())
+        await asyncio.sleep(0)
+        assert not second.done()
+
+        first.cancel()
+        await asyncio.sleep(0)
+        assert not first.done()
+        assert not second.done()
+
+        allow_close.set()
+        assert await asyncio.to_thread(launcher_started.wait, 2)
+        first.cancel()
+        await asyncio.sleep(0)
+        assert not first.done()
+        assert not second.done()
+
+        allow_launcher.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, timeout=2)
+        await asyncio.wait_for(second, timeout=2)
+    finally:
+        allow_close.set()
+        allow_launcher.set()
+
+    assert close_calls == 1
+    assert launcher.shutdown_calls == 1
+    await backend.shutdown()
+    assert close_calls == 1
+    assert launcher.shutdown_calls == 1
 
 
 async def test_request_submitted_during_failure_purge_is_pumped():
@@ -324,6 +714,9 @@ async def test_request_submitted_during_failure_purge_is_pumped():
     purge_started = threading.Event()
     allow_purge = threading.Event()
     original_purge = backend._loop.purge
+    original_has_work = backend._loop.has_work
+    event_loop_thread = threading.get_ident()
+    concurrent_event_loop_reads = 0
 
     def delayed_purge(request_ids: tuple[str, ...]) -> None:
         purge_started.set()
@@ -331,7 +724,18 @@ async def test_request_submitted_during_failure_purge_is_pumped():
             raise TimeoutError("test did not release purge")
         original_purge(request_ids)
 
+    def record_has_work() -> bool:
+        nonlocal concurrent_event_loop_reads
+        if (
+            threading.get_ident() == event_loop_thread
+            and purge_started.is_set()
+            and not allow_purge.is_set()
+        ):
+            concurrent_event_loop_reads += 1
+        return original_has_work()
+
     backend._loop.purge = delayed_purge
+    backend._loop.has_work = record_has_work
     failed = asyncio.create_task(backend.generate(_request("failed", "first", 2)))
     assert await asyncio.to_thread(purge_started.wait, 2)
 
@@ -339,6 +743,7 @@ async def test_request_submitted_during_failure_purge_is_pumped():
         backend.generate(_request("submitted-during-purge", "second", 2))
     )
     await asyncio.sleep(0)
+    assert concurrent_event_loop_reads == 0
     allow_purge.set()
 
     with pytest.raises(RuntimeError, match="injected runner failure"):
@@ -512,6 +917,7 @@ async def test_multi_stream_partial_submit_failure_rolls_back_all_sub_ids():
         params,
         priority=0,
         scheduling_class="interactive",
+        prepared_prompt=None,
     ):
         nonlocal submit_count
         submit_count += 1
@@ -523,6 +929,7 @@ async def test_multi_stream_partial_submit_failure_rolls_back_all_sub_ids():
             params,
             priority=priority,
             scheduling_class=scheduling_class,
+            prepared_prompt=prepared_prompt,
         )
 
     backend._loop.submit = fail_second_submit
@@ -560,6 +967,7 @@ async def test_single_submit_failure_rolls_back_public_id_reservation():
         params,
         priority=0,
         scheduling_class="interactive",
+        prepared_prompt=None,
     ):
         raise RuntimeError("injected submit failure")
 
@@ -683,6 +1091,43 @@ def test_registry_forwards_tensor_parallel_size():
     assert backend.tensor_parallel_size == 4
 
 
+def test_registry_forwards_server_max_model_len_option():
+    backend = create_backend("kairyu", num_pages=64, max_model_len=8192)
+
+    assert isinstance(backend, KairyuBackend)
+    assert backend._loop.max_model_len == 8192
+    backend._loop.close()
+
+
+@pytest.mark.parametrize(
+    ("builder_name", "options"),
+    [
+        ("_build_dist_tp_loop", {"model_path": "/unused", "tensor_parallel_size": 2}),
+        ("_build_pd_loop", {"model_path": "/unused", "pd_separation": True}),
+    ],
+)
+def test_context_limit_crosses_tp_and_pd_builders(
+    monkeypatch,
+    builder_name,
+    options,
+):
+    captured = None
+    sentinel = (object(), object(), object())
+
+    def fake_builder(**kwargs):
+        nonlocal captured
+        captured = kwargs
+        return sentinel
+
+    monkeypatch.setattr(kairyu_backend_module, builder_name, fake_builder)
+
+    result = build_engine_loop(max_model_len=8192, **options)
+
+    assert result is sentinel
+    assert captured is not None
+    assert captured["max_model_len"] == 8192
+
+
 async def test_full_stack_openai_server_over_engine_core():
     app = create_app(engines={"kairyu-cpu": KairyuBackend(num_pages=256)})
     transport = httpx.ASGITransport(app=app)
@@ -699,6 +1144,38 @@ async def test_full_stack_openai_server_over_engine_core():
     data = response.json()
     assert data["choices"][0]["message"]["content"]
     assert data["choices"][0]["finish_reason"] == "length"
+
+
+async def test_openai_server_enforces_configured_context_limit():
+    backend = KairyuBackend(num_pages=64, max_model_len=5)
+    app = create_app(engines={"limited": backend})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        oversized = await client.post(
+            "/v1/completions",
+            json={
+                "model": "limited",
+                "prompt": [1, 2, 3, 4],
+                "max_tokens": 2,
+            },
+        )
+        boundary = await client.post(
+            "/v1/completions",
+            json={
+                "model": "limited",
+                "prompt": [1, 2, 3],
+                "max_tokens": 2,
+            },
+        )
+
+    assert oversized.status_code == 400
+    assert "exceed max_model_len" in oversized.json()["error"]["message"]
+    assert boundary.status_code == 200
+    usage = boundary.json()["usage"]
+    assert usage["prompt_tokens"] == 3
+    assert usage["completion_tokens"] == 2
+    assert usage["total_tokens"] == 5
+    await backend.shutdown()
 
 
 class _AlwaysFailRunner:

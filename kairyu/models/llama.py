@@ -20,6 +20,16 @@ from kairyu.models.moe import build_mlp
 from kairyu.quant.linear import LinearRole, ModelScope, make_linear
 
 
+def _refresh_dense_packs_after_load(
+    module: nn.Module,
+    _incompatible_keys,
+) -> None:
+    """Root post-load hook: ``assign=True`` replaces canonical parameters."""
+
+    assert isinstance(module, DenseDecoder)
+    module.refresh_dense_packs()
+
+
 class DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -232,6 +242,25 @@ class DenseDecoder(nn.Module):
         )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
+        # Packing at construction gives direct models the optimized path;
+        # assign-load and device/dtype conversion rebuild it below.
+        self.refresh_dense_packs()
+        self.register_load_state_dict_post_hook(_refresh_dense_packs_after_load)
+
+    def refresh_dense_packs(self) -> None:
+        """Pack compatible dense QKV projections in every layer."""
+
+        for layer in self.model.layers:
+            refresh_attention = getattr(layer.self_attn, "refresh_dense_pack", None)
+            if callable(refresh_attention):
+                refresh_attention()
+
+    def _apply(self, fn, recurse: bool = True):
+        """Keep packed storage coherent across ``to()``, ``cuda()``, and casts."""
+
+        result = super()._apply(fn, recurse=recurse)
+        self.refresh_dense_packs()
+        return result
 
     @torch.no_grad()
     def forward_tokens(

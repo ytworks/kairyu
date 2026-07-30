@@ -39,8 +39,21 @@ async def test_run_one_reads_usage_chunk_for_token_tpot():
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-        metrics = await serving_bench.run_one(client, "m", "bench me please", max_tokens=6)
+        metrics = await serving_bench.run_one(
+            client,
+            "m",
+            "bench me please",
+            max_tokens=6,
+            temperature=0.0,
+            seed=7,
+            min_tokens=6,
+            ignore_eos=True,
+        )
     assert calls[0]["stream_options"] == {"include_usage": True}
+    assert calls[0]["temperature"] == 0.0
+    assert calls[0]["seed"] == 7
+    assert calls[0]["min_tokens"] == 6
+    assert calls[0]["ignore_eos"] is True
     assert metrics.completion_tokens == 6  # from the include_usage final chunk
     assert metrics.token_granular is True
     assert metrics.tpot_s >= 0.0
@@ -67,9 +80,26 @@ async def test_run_one_falls_back_when_target_rejects_stream_options():
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-        metrics = await serving_bench.run_one(client, "m", "fallback", max_tokens=4)
+        metrics = await serving_bench.run_one(
+            client,
+            "m",
+            "fallback",
+            max_tokens=4,
+            temperature=0.0,
+            seed=11,
+            min_tokens=4,
+            ignore_eos=True,
+        )
     assert metrics.token_granular is False  # labeled chunk-granularity fallback
     assert len(calls) == 2  # retried once without stream_options
+    assert "stream_options" not in calls[1]
+    for field, value in {
+        "temperature": 0.0,
+        "seed": 11,
+        "min_tokens": 4,
+        "ignore_eos": True,
+    }.items():
+        assert calls[1][field] == value
 
 
 def test_summary_retains_raw_request_timings_and_token_throughput():

@@ -2,6 +2,7 @@
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -369,6 +370,239 @@ def test_dist_release_reaches_driver_and_idle_worker():
         assert worker.result(timeout=2) == 0
     assert local[0].released == ["finished"]
     assert local[1].released == ["finished"]
+
+
+def test_idle_shutdown_batches_and_deduplicates_releases_exactly_once():
+    comms = FakeCommunicator.create_group(2)
+    local = (_ReleaseRunner(), _ReleaseRunner())
+    driver = DistTPModelRunner(comms[0], local[0])
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = pool.submit(worker_step_loop, comms[1], local[1])
+        driver.release("first")
+        driver.release("first")
+        driver.release("second")
+        driver.release("second")
+        driver.shutdown()
+        assert worker.result(timeout=2) == 0
+
+    assert local[0].released == ["first", "second"]
+    assert local[1].released == ["first", "second"]
+
+
+class _RecordingControl:
+    def __init__(self, comm) -> None:
+        self._comm = comm
+        self.payloads: list[object] = []
+
+    def __getattr__(self, name):
+        return getattr(self._comm, name)
+
+    def broadcast(self, payload, src):
+        self.payloads.append(payload)
+        return self._comm.broadcast(payload, src)
+
+
+class _BlockingStepControl:
+    def __init__(self) -> None:
+        self.step_entered = Event()
+        self.continue_step = Event()
+        self.non_step_payload_entered = Event()
+        self.payloads: list[object] = []
+
+    def broadcast(self, payload, src):
+        self.payloads.append(payload)
+        if isinstance(payload, StepDelta):
+            self.step_entered.set()
+            if not self.continue_step.wait(timeout=5):
+                raise RuntimeError("test did not release the blocked step")
+        else:
+            self.non_step_payload_entered.set()
+        return payload
+
+    def tensor_broadcast(self, tensor, src):
+        return tensor
+
+
+def test_out_of_band_control_waits_for_the_active_step_transaction():
+    control = _BlockingStepControl()
+    local = _DiagnosticRunner(
+        (),
+        sampling_owner=True,
+        sampler_present=True,
+        device="cpu",
+    )
+    driver = DistTPModelRunner(control, local)
+    toggle_started = Event()
+
+    def toggle() -> None:
+        toggle_started.set()
+        driver.set_batched_prefill_enabled(False)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        execute = pool.submit(driver.execute, (), {})
+        assert control.step_entered.wait(timeout=5)
+        pending_toggle = pool.submit(toggle)
+        assert toggle_started.wait(timeout=5)
+        try:
+            # The toggle thread is running, but its control payload cannot be
+            # inserted between StepDelta and the model/token collectives.
+            assert not control.non_step_payload_entered.wait(timeout=0.1)
+            assert len(control.payloads) == 1
+        finally:
+            control.continue_step.set()
+        execute.result(timeout=5)
+        pending_toggle.result(timeout=5)
+
+    assert control.non_step_payload_entered.is_set()
+    assert len(control.payloads) == 2
+    assert local.batched_prefill_enabled is False
+    driver.shutdown()
+
+
+def test_same_id_release_after_snapshot_survives_the_older_ack():
+    control = _BlockingStepControl()
+    local = _ReleaseRunner()
+    driver = DistTPModelRunner(control, local)
+    driver.release("reused")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        execute = pool.submit(driver.execute, (), {})
+        assert control.step_entered.wait(timeout=5)
+        try:
+            # This is a newer release generation than the one in the blocked
+            # StepDelta. Its matching-generation ack must leave it pending.
+            driver.release("reused")
+        finally:
+            control.continue_step.set()
+        execute.result(timeout=5)
+
+    assert local.released == ["reused"]
+    driver.shutdown()
+    assert local.released == ["reused", "reused"]
+    assert control.payloads[0].released_ids == ("reused",)
+    assert control.payloads[1].released_ids == ("reused",)
+
+
+class _ReleaseOrderRunner(_AuthorityRunner):
+    def __init__(
+        self,
+        authoritative: tuple[int, ...],
+        *,
+        block_first_execute: bool = False,
+    ) -> None:
+        super().__init__(authoritative)
+        self.events: list[str] = []
+        self.first_execute_entered = Event()
+        self.continue_first_execute = Event()
+        self._block_first_execute = block_first_execute
+
+    def execute(self, scheduled, states):
+        request_id = scheduled[0].request_id
+        self.events.append(f"execute:{request_id}")
+        if self._block_first_execute and len(self.events) == 1:
+            self.first_execute_entered.set()
+            if not self.continue_first_execute.wait(timeout=5):
+                raise RuntimeError("test did not release the blocked execute")
+        return super().execute(scheduled, states)
+
+    def execute_passive(self, scheduled, states):
+        self.events.append(f"execute-passive:{scheduled[0].request_id}")
+        return super().execute_passive(scheduled, states)
+
+    def release(self, request_id: str) -> None:
+        self.events.append(f"release:{request_id}")
+        super().release(request_id)
+
+
+def test_release_returns_during_execute_and_piggybacks_on_the_next_step():
+    control = FakeCommunicator.create_group(2)
+    model = FakeCommunicator.create_group(2)
+    recorded_control = _RecordingControl(control[0])
+    local = (
+        _ReleaseOrderRunner((17,), block_first_execute=True),
+        _ReleaseOrderRunner((999,)),
+    )
+    driver = DistTPModelRunner(recorded_control, local[0], model[0])
+    chunks = (ScheduledChunk("reused", 1, True, 0),)
+    states = {"reused": _snapshot("reused")}
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        worker = pool.submit(worker_step_loop, control[1], local[1], model[1])
+        first_execute = pool.submit(driver.execute, chunks, states)
+        assert local[0].first_execute_entered.wait(timeout=5)
+        release = pool.submit(driver.release, "reused")
+        try:
+            # release() neither waits for the active protocol transaction nor
+            # inserts a second control broadcast underneath it.
+            release.result(timeout=1)
+            assert len(recorded_control.payloads) == 1
+            assert local[0].released == []
+            assert local[1].released == []
+        finally:
+            local[0].continue_first_execute.set()
+        first_execute.result(timeout=5)
+
+        # Reusing the same id with an identical snapshot must still be a full
+        # "new" entry, and both ranks release old local state before executing it.
+        driver.execute(chunks, states)
+        driver.shutdown()
+        assert worker.result(timeout=5) == 2
+
+    step_deltas = [
+        payload for payload in recorded_control.payloads if isinstance(payload, StepDelta)
+    ]
+    assert len(step_deltas) == 2
+    assert step_deltas[0].released_ids == ()
+    assert step_deltas[1].released_ids == ("reused",)
+    assert [snapshot.request_id for snapshot in step_deltas[1].new] == ["reused"]
+    assert step_deltas[1].updates == ()
+    assert local[0].events == [
+        "execute:reused",
+        "release:reused",
+        "execute:reused",
+    ]
+    assert local[1].events == [
+        "execute-passive:reused",
+        "release:reused",
+        "execute-passive:reused",
+    ]
+
+
+class _BlockingShutdownControl:
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.continue_shutdown = Event()
+        self.payloads: list[object] = []
+
+    def broadcast(self, payload, src):
+        self.payloads.append(payload)
+        self.entered.set()
+        if not self.continue_shutdown.wait(timeout=5):
+            raise RuntimeError("test did not release the blocked shutdown")
+        return payload
+
+
+def test_release_racing_shutdown_is_included_or_rejected():
+    control = _BlockingShutdownControl()
+    local = _ReleaseRunner()
+    driver = DistTPModelRunner(control, local)
+    driver.release("before-fence")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        shutdown = pool.submit(driver.shutdown)
+        assert control.entered.wait(timeout=5)
+        try:
+            with pytest.raises(RuntimeError, match="shutting down"):
+                driver.release("after-fence")
+        finally:
+            control.continue_shutdown.set()
+        shutdown.result(timeout=5)
+
+    # Shutdown is idempotent and does not open a second race window.
+    driver.shutdown()
+    assert len(control.payloads) == 1
+    assert control.payloads[0].released_ids == ("before-fence",)
+    assert local.released == ["before-fence"]
 
 
 def test_rank_zero_samples_once_and_workers_adopt_its_fixed_packet():
@@ -784,11 +1018,32 @@ class _BrokenComm:
         raise RuntimeError("control transport broke")
 
 
+def test_pending_release_survives_diff_failure_until_fatal_shutdown():
+    comm = _BrokenComm()
+    local = _ReleaseRunner()
+    driver = DistTPModelRunner(comm, local)
+
+    driver.release("queued-before-diff")
+    with pytest.raises(KeyError):
+        driver.execute(
+            (ScheduledChunk("missing", 1, True, 0),),
+            {},
+        )
+    assert isinstance(driver.fatal_error, KeyError)
+
+    driver.release("queued-after-diff")
+    driver.shutdown()
+
+    assert comm.broadcasts == 0
+    assert local.released == ["queued-before-diff", "queued-after-diff"]
+
+
 def test_dist_runner_marks_a_failed_step_fatal_and_stops_collectives():
     comm = _BrokenComm()
     local = _ReleaseRunner()
     driver = DistTPModelRunner(comm, local)
 
+    driver.release("queued-before-failure")
     with pytest.raises(RuntimeError, match="control transport broke"):
         driver.execute((), {})
     assert isinstance(driver.fatal_error, RuntimeError)
@@ -799,7 +1054,7 @@ def test_dist_runner_marks_a_failed_step_fatal_and_stops_collectives():
     driver.shutdown()
 
     assert comm.broadcasts == 1
-    assert local.released == ["request"]
+    assert local.released == ["queued-before-failure", "request"]
 
 
 class _BrokenTensorComm:

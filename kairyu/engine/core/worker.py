@@ -3,8 +3,9 @@
 Rank 0 owns the scheduler/EngineCore, broadcasts each immutable state delta,
 and is the sole sampling authority. Every rank executes the same model/KV step,
 then rank 0 broadcasts one fixed-layout device token packet over the model
-communicator. All ranks adopt that packet before advancing. Shutdown remains a
-``None`` control broadcast (A11).
+communicator. All ranks adopt that packet before advancing. Finished-request
+cleanup is piggybacked on the next step (or shutdown) so the steady path does
+not spend a separate control collective per request.
 """
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
+from threading import Lock
 
 from kairyu.engine.core.step_input import StateSync, StepDelta
 from kairyu.engine.tokenizer import GrammarVocabulary
@@ -40,8 +43,10 @@ _PAGE_TABLE_STATS_PACKET_BYTES = 4096
 
 
 @dataclass(frozen=True)
-class ReleaseRequest:
-    request_id: str
+class _ShutdownRequest:
+    """Terminal control payload carrying cleanup not consumed by another step."""
+
+    released_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -731,6 +736,26 @@ def validate_handshake(
         )
 
 
+def _release_runner_requests(local_runner, request_ids: tuple[str, ...]) -> None:
+    """Apply one ordered release batch to a rank-local runner."""
+    release = getattr(local_runner, "release", None)
+    if release is None:
+        return
+    for request_id in request_ids:
+        release(request_id)
+
+
+def _serialized_protocol(method):
+    """Hold one rank-0 transaction across all of its ordered collectives."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._protocol_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 class DistTPModelRunner:
     """Driver-side ModelRunner with rank-0-authoritative sampling.
 
@@ -748,6 +773,35 @@ class DistTPModelRunner:
         # tokens cross the wire each step, not a full pickled snapshot of every
         # active request's (growing) prompt/outputs
         self._sync = StateSync()
+        # A control broadcast is only the first operation in a TP transaction:
+        # execute continues through model collectives and packet adoption.  A
+        # concurrent release/shutdown must not insert another control payload
+        # before that transaction is complete.
+        self._protocol_lock = Lock()
+        # ``release`` is called by the EngineLoop thread while a later device
+        # step may already be running. Queueing is the only safe non-blocking
+        # operation here; the next device transaction snapshots the ordered,
+        # deduped batch and carries it in its existing StepDelta broadcast.
+        self._pending_release_lock = Lock()
+        self._pending_releases: dict[str, int] = {}
+        self._release_generation = 0
+        self._shutdown_started = False
+
+    def _snapshot_pending_releases(self) -> tuple[tuple[str, int], ...]:
+        with self._pending_release_lock:
+            if self._shutdown_started:
+                raise RuntimeError("tensor-parallel runner is shutting down")
+            return tuple(self._pending_releases.items())
+
+    def _ack_pending_releases(
+        self,
+        released: tuple[tuple[str, int], ...],
+    ) -> None:
+        """Remove only the exact release generations applied by this transaction."""
+        with self._pending_release_lock:
+            for request_id, generation in released:
+                if self._pending_releases.get(request_id) == generation:
+                    del self._pending_releases[request_id]
 
     @property
     def supports_batched_verification(self) -> bool:
@@ -755,31 +809,47 @@ class DistTPModelRunner:
         return getattr(self._local, "supports_batched_verification", False) is True
 
     def execute(self, scheduled, states) -> dict:
-        if self._fatal_error is not None:
-            raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
-            ) from self._fatal_error
-        chunks = tuple(scheduled)
-        delta = self._sync.diff(chunks, states)
-        try:
-            self._control_comm.broadcast(delta, src=0)
-            view = self._sync.apply(delta)  # reconstructs snapshot_step() exactly
-            sampled = self._local.execute(chunks, view)
-            packet = self._local.make_sampling_token_packet(chunks, view, sampled=sampled)
-            packet = self._model_comm.tensor_broadcast(packet, src=0)
-            self._local.adopt_sampling_token_packet(chunks, view, packet)
-            return sampled
-        except Exception as error:
-            # Once one TP rank misses a step, retrying on the same groups can only
-            # diverge their collective sequences further. Surface a fatal health
-            # state and require process replacement.
-            self._fatal_error = error
-            raise
+        with self._protocol_lock:
+            if self._fatal_error is not None:
+                raise RuntimeError(
+                    "tensor-parallel runner is unavailable after a fatal step failure"
+                ) from self._fatal_error
+            chunks = tuple(scheduled)
+            pending_releases = self._snapshot_pending_releases()
+            released_ids = tuple(request_id for request_id, _ in pending_releases)
+            try:
+                delta = self._sync.diff(
+                    chunks,
+                    states,
+                    released_ids=released_ids,
+                )
+                self._control_comm.broadcast(delta, src=0)
+                # Match the worker ordering: stale per-request local state and
+                # StateSync identity are gone before a new snapshot with the
+                # same request id is installed or executed.
+                _release_runner_requests(self._local, released_ids)
+                view = self._sync.apply(delta)  # reconstructs snapshot_step() exactly
+                # Keep pending entries durable across a failed broadcast/local
+                # cleanup. Acknowledge only after both rank protocols have
+                # accepted the batch and rank 0 has applied it.
+                self._ack_pending_releases(pending_releases)
+                sampled = self._local.execute(chunks, view)
+                packet = self._local.make_sampling_token_packet(chunks, view, sampled=sampled)
+                packet = self._model_comm.tensor_broadcast(packet, src=0)
+                self._local.adopt_sampling_token_packet(chunks, view, packet)
+                return sampled
+            except Exception as error:
+                # Once one TP rank misses a step, retrying on the same groups can only
+                # diverge their collective sequences further. Surface a fatal health
+                # state and require process replacement.
+                self._fatal_error = error
+                raise
 
     @property
     def fatal_error(self) -> Exception | None:
         return self._fatal_error
 
+    @_serialized_protocol
     def sampling_ownership_metadata(self) -> tuple[dict[str, object], ...]:
         """Collect rank-observed ownership/topology outside the inference path.
 
@@ -811,6 +881,7 @@ class DistTPModelRunner:
             self._fatal_error = failure
             raise failure from error
 
+    @_serialized_protocol
     def set_batched_prefill_enabled(self, enabled: bool) -> None:
         """Apply the matched-A/B/rollback switch to every TP rank."""
         if type(enabled) is not bool:
@@ -829,6 +900,7 @@ class DistTPModelRunner:
             self._fatal_error = error
             raise
 
+    @_serialized_protocol
     def prefill_execution_stats(self, *, reset: bool = False) -> tuple[dict[str, object], ...]:
         """Gather structural counters from every TP rank outside inference."""
         if type(reset) is not bool:
@@ -858,6 +930,7 @@ class DistTPModelRunner:
             self._fatal_error = failure
             raise failure from error
 
+    @_serialized_protocol
     def set_batched_verification_enabled(self, enabled: bool) -> None:
         """Apply the speculative-verification mode switch to every TP rank."""
         if type(enabled) is not bool:
@@ -878,6 +951,7 @@ class DistTPModelRunner:
             self._fatal_error = error
             raise
 
+    @_serialized_protocol
     def verification_execution_stats(
         self,
         *,
@@ -913,6 +987,7 @@ class DistTPModelRunner:
             self._fatal_error = failure
             raise failure from error
 
+    @_serialized_protocol
     def set_decode_page_table_cache_enabled(self, enabled: bool) -> None:
         """Apply the decode page-table cache mode to every TP rank."""
         if type(enabled) is not bool:
@@ -933,6 +1008,7 @@ class DistTPModelRunner:
             self._fatal_error = error
             raise
 
+    @_serialized_protocol
     def decode_page_table_cache_stats(
         self,
         *,
@@ -969,20 +1045,35 @@ class DistTPModelRunner:
             raise failure from error
 
     def release(self, request_id: str) -> None:
-        try:
-            if self._fatal_error is None:
-                self._control_comm.broadcast(ReleaseRequest(request_id), src=0)
-        except Exception as error:
-            self._fatal_error = error
-            raise
-        finally:
-            release = getattr(self._local, "release", None)
-            if release is not None:
-                release(request_id)
+        """Queue cleanup for the next all-rank transaction without blocking it."""
+        with self._pending_release_lock:
+            if self._shutdown_started:
+                raise RuntimeError("tensor-parallel runner is shutting down")
+            self._release_generation += 1
+            # Reinsert duplicates at their newest position. The generation
+            # prevents an execute transaction from acknowledging a same-id
+            # release that arrived after its snapshot.
+            self._pending_releases.pop(request_id, None)
+            self._pending_releases[request_id] = self._release_generation
 
     def shutdown(self) -> None:
-        if self._fatal_error is None:
-            self._control_comm.broadcast(_SHUTDOWN, src=0)
+        with self._protocol_lock:
+            with self._pending_release_lock:
+                if self._shutdown_started:
+                    return
+                self._shutdown_started = True
+                pending_releases = tuple(self._pending_releases.items())
+            released_ids = tuple(request_id for request_id, _ in pending_releases)
+            self._sync.discard(released_ids)
+            try:
+                if self._fatal_error is None:
+                    self._control_comm.broadcast(
+                        _ShutdownRequest(released_ids),
+                        src=0,
+                    )
+            finally:
+                _release_runner_requests(self._local, released_ids)
+                self._ack_pending_releases(pending_releases)
 
     def invalidate_graphs(self) -> None:
         invalidate = getattr(self._local, "invalidate_graphs", None)
@@ -1004,11 +1095,10 @@ def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
         if not isinstance(payload, StepDelta):
             if payload is _SHUTDOWN or payload is None:
                 return steps
-            if isinstance(payload, ReleaseRequest):
-                release = getattr(local_runner, "release", None)
-                if release is not None:
-                    release(payload.request_id)
-                continue
+            if isinstance(payload, _ShutdownRequest):
+                _release_runner_requests(local_runner, payload.released_ids)
+                sync.discard(payload.released_ids)
+                return steps
             if isinstance(payload, _SamplingOwnershipProbe):
                 local = _sampling_ownership_row(control_comm, model_comm, local_runner)
                 control_comm.all_gather(local)
@@ -1052,6 +1142,7 @@ def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
             raise RuntimeError(
                 f"TP worker received an unsupported control payload: {type(payload).__name__}"
             )
+        _release_runner_requests(local_runner, payload.released_ids)
         view = sync.apply(payload)  # same delta -> same reconstructed states
         local_runner.execute_passive(payload.chunks, view)
         packet = local_runner.make_sampling_token_packet(payload.chunks, view, sampled=None)

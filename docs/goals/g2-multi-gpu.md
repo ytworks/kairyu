@@ -39,7 +39,10 @@ results are ever reported (goal acceptance criteria, carried from G1).
   anchor: compressed-tensors FP8 E4M3 per-output-channel weights, dynamic
   per-token FP8 activations, and BF16 model/KV dtype. Llama-3.1-8B is the
   correctness stepping stone and the only model that fits TP=1 on the original
-  80 GB profile.
+  80 GB profile. For A6 on the PCIe-GDDR/SM120 profile, the executable closure
+  model is `Qwen/Qwen3-32B@9216db5781bf21249d130ec9da846c4624c16137`
+  with BF16 weights and KV (2026-07-30 amendment below). This profile result is
+  not a performance extrapolation to the 70B anchor.
 - **Memory arithmetic (fixes the baseline)**: 70B FP8 weights ≈ 70 GB. A single 80 GB
   H100 cannot hold them with usable KV headroom, so **TP=1 is not a valid 70B config;
   TP=2 is the minimal viable config and the base for all scaling-efficiency ratios.**
@@ -60,6 +63,20 @@ results are ever reported (goal acceptance criteria, carried from G1).
 - **vLLM baseline rule**: vLLM V1, pinned version, same box, same model/dtype/TP degree,
   same `max_num_batched_tokens`, same trace, prefix caching on. CUDA-graph parity status
   disclosed (m2 §5 carry-over).
+- **A6 aggregation**: four paired rounds use server-start order
+  Kairyu/vLLM, vLLM/Kairyu, vLLM/Kairyu, Kairyu/vLLM. Each arm therefore has
+  four runs, and all raw request samples are pooled without trimming or outlier
+  removal. Percentiles use nearest rank (`ceil(p*N)-1`). Exact per-repeat
+  Kairyu/vLLM ratios plus their median and MAD disclose order effects and
+  variability, but are non-binding diagnostics; only the issue-specified pooled
+  thresholds determine the verdict. The binding ShareGPT
+  point is one synchronized 128-request/concurrency-128 burst; a predeclared
+  `{1,2,4,8,16}` request/s open-loop sweep is retained as saturation
+  diagnostics and cannot replace or select the binding point after measurement.
+  A request contributes to goodput only after an exact successful completion and
+  TTFT at or below the predeclared 10 s Qwen serving SLO. The 10 s value is
+  fixed before A6 measurement and reuses the retained Qwen serving gate's SLO;
+  it is not fitted to either arm's observed latency.
 
 ## 4. M5 — Intra-node (8×H100)
 
@@ -72,7 +89,7 @@ results are ever reported (goal acceptance criteria, carried from G1).
 | A3 (TTFT scaling) | TTFT p50 at TP=8 ≤ ⅓ × TP=2 on 4k-token prompts (≥75% efficiency; prefill is compute-bound and parallelizes near-linearly over NVLink) | latency-bound |
 | A4 (TPOT scaling) | TPOT p50 at TP=8 ≤ ½ × TP=2 (≥50% efficiency; decode is bandwidth-bound and all-reduce latency does not shrink with N — linear TPOT scaling is not a defensible promise) | latency-bound |
 | A5 (throughput scaling) | Output tokens/s at TP=8 ≥ 2.8 × TP=2 (≥70% efficiency) | saturation |
-| A6 (vLLM comparison) | vs vLLM TP=4 and TP=8, ShareGPT @128 conc: goodput ≥ 0.95× vLLM AND TTFT p99 ≤ vLLM. On the 50%-shared-prefix multi-turn trace: TTFT p50 ≥20% better than vLLM (radix-KV structural edge — the G1 claim, preserved where it is defensible) | saturation |
+| A6 (vLLM comparison) | `bench/g2_a6_vllm_bench.py` independently verifies the complete TP=4/8 matched matrix against pinned stock vLLM. ShareGPT @128 conc: goodput ≥ 0.95× vLLM AND TTFT p99 ≤ vLLM. On the 50%-shared-prefix multi-turn trace: TTFT p50 ≥20% better than vLLM (radix-KV structural edge — the G1 claim, preserved where it is defensible) | saturation |
 | A7 (KV invariance) | On the fixed 50%-shared-prefix trace, the real native engine's prompt-token KV hit rate (`sum(cached_tokens) / sum(prompt_tokens)`, recomputed from engine-originated response usage) is strictly >80% independently at TP=4 and TP=8, both against the replica directly and through a single-replica gateway. `bench/tp_kv_hit_g2_a7_bench.py` verifies the committed raw trace, config, and physical topology; routing counters are diagnostic and never cache-hit truth | — |
 
 **A7 closure (2026-07-29):** the retained Qwen3-32B artifact records
@@ -294,6 +311,79 @@ The result retains agreeing-position maximum logprob deltas
 0.56900/0.54147/0.25563 as diagnostics; they are not a third A2 criterion
 beyond the two binding amended criteria above.
 
+### Amendment (2026-07-30, A6 PCIe-GDDR closure profile and measurement contract)
+
+A6 remains binding on every hardware profile, but its performance result must
+name the model actually measured. The RTX PRO 6000 Blackwell closure profile
+uses the already correctness-reviewed
+`Qwen/Qwen3-32B@9216db5781bf21249d130ec9da846c4624c16137` checkpoint with BF16
+weights/KV. The Llama-3.3-70B FP8 dense anchor remains unchanged; no Qwen result
+is reported as 70B evidence.
+
+The comparison sends identical UTF-8 text through `/v1/completions`, so TTFT
+continues to include server tokenization and queueing. The pinned tokenizer's
+precomputed token IDs, lengths, and hashes travel with every prompt and must
+agree with response usage. ShareGPT is pinned to
+`anon8231489123/ShareGPT_Vicuna_unfiltered@745745adf6cd15b84e4f1c4a5a051fb4304f9342`,
+file `ShareGPT_V3_unfiltered_cleaned_split.json` (SHA-256
+`35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4`).
+Selection follows the upstream vLLM shape: seed-0 shuffle, at least two turns,
+first user turn, 4–1024 prompt tokens, first 128 qualifying rows. The
+shared-prefix arm reuses A7's fixed 64-session × 8-turn geometry and identical
+round-trippable text in both engines.
+
+Both arms use greedy seed 0, `ignore_eos=true`, and exact lengths (128 ShareGPT
+output tokens, one shared-prefix output token). They share TP degree,
+`max_num_batched_tokens=1024`, `max_num_seqs=16`, 8,192-token context,
+16-token cache blocks, 131,072 KV-token capacity, chunked prefill, and prefix
+caching. Qwen's usable local BF16 KV footprint is 8 GiB/GPU at TP4 and
+4 GiB/GPU at TP8. Each arm allocates one additional reserved block:
+1 MiB/rank at TP4 and 512 KiB/rank at TP8. Stock vLLM is
+`vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404`, build
+`ffd46bfab2128bb84146050e98b51a617c6575ab`, whose installed distribution is
+`vllm==0.26.0+cu129`; alternate common-path settings are diagnostic only. Decode
+CUDA Graphs are enabled on both arms, while the artifact must separately
+disclose Kairyu's decode-only capture envelope and vLLM's actual compile/capture
+mode and sizes rather than claiming identical full-graph strategies.
+
+The formal closure uses `bench/run_g2_a6_formal.py`, not an uncommitted
+operator. Before any server starts it regenerates the complete trace bundle
+from the pinned dataset and tokenizer and requires byte-equivalent descriptors,
+then full-hashes all 17 live weight shards, the safetensors index, model
+metadata, tokenizer files, and Hugging Face revision metadata. It repeats the
+checkpoint attestation after all 52 fresh-server cells and rejects any change.
+The environment artifact supplies its own measurement-session ID and
+nanosecond timestamp; the runner never invents either field.
+
+Every cell retains four serialized workload warmups plus 31 graph-size request
+warmups: unique 64-token prompts released synchronously at B=1,2,4,8,16, each
+producing exactly two tokens. This proves the synchronized request geometry and
+records each arm's configured/captured graph status; it does not by itself
+claim that a particular request used a graph dispatch. These rows are verified
+but excluded from performance aggregates. Both arms allocate 8,193 pages.
+Kairyu reserves one graph scratch page and no null page; stock vLLM reserves
+its mandatory `BlockPool` null page and no graph scratch page. Both therefore
+expose exactly 8,192 usable KV blocks. Kairyu pins `pipeline_depth=5`, the
+production in-flight setting selected before formal closure after the exact
+TP4 token trace improved from 495.811 token/s at depth 1 to 674.181 token/s at
+depth 5. This removes a serialized-execution comparison confound without
+changing any workload, batching, cache, quality, or verdict threshold. Stock
+vLLM explicitly enables async scheduling,
+multiprocessing TP, FlashAttention, and `VLLM_COMPILE` mode 3 with
+`FULL_AND_PIECEWISE` graphs. Both disable custom all-reduce and access/request
+logging, and both pin uvloop 0.22.1 plus httptools 0.8.0. Each launch uses the
+immutable image ID resolved at preflight, then post-start evidence binds the
+actual container ID and image ID, complete argv/environment, working directory,
+read-only mounts, GPU/IPC/memlock/port host config, imported engine source
+paths/hashes, and container-visible GPU UUIDs/PCI addresses. Kairyu additionally
+retains the exact mounted YAML bytes, SHA-256, and parsed object; vLLM retains
+the raw V1 config and FlashAttention startup messages from which its markers
+are recomputed, including the SM120-resolved
+`Using FlashAttention version 2` kernel-version message. Package versions and
+Kairyu `/backends` are also retained. The
+only permitted clean-tree exception is an untracked path exactly at or below
+`.claude/worktrees/`; every other porcelain status record fails closed.
+
 ## 8. Evidence and reporting rules
 
 G1 rules carried forward verbatim, plus:
@@ -310,7 +400,11 @@ G1 rules carried forward verbatim, plus:
   workload-geometry source and KV-manager sanity check. Formal A7 real-engine
   evidence is collected and independently replayed by
   `bench/tp_kv_hit_g2_a7_bench.py`; `bench/router_latency.py` remains reusable for
-  A8.
+  A8. Formal A6 evidence is collected as one fresh-server shard per scenario by
+  `bench/g2_a6_vllm_bench.py`; its assembler requires the exact 32-run binding
+  matrix and its verifier replays raw nanosecond timings, failures, prompt
+  identity, server generations, matched cache/batching configuration, and
+  provenance before accepting any ratio.
 - Latency/throughput/goodput claims use ≥3 runs, fixed seeds, warmup excluded,
   open-loop sweeps for saturation claims, a stated goodput SLO, pinned
   vLLM/NCCL/driver versions, and disclosed CUDA-graph parity (m2 §5 controls).

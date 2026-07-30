@@ -35,6 +35,10 @@ def test_serve_runs_uvicorn_with_spec_address(monkeypatch, config):
     assert captured["port"] == 8123
     assert captured["app"].title == "kairyu"
     assert captured["access_log"] is False
+    assert captured["loop"] == ("uvloop" if cli.sys.platform == "linux" else "auto")
+    assert captured["http"] == (
+        "httptools" if cli.sys.platform == "linux" else "auto"
+    )
     assert logging.getLogger("httpx").level == logging.WARNING
 
 

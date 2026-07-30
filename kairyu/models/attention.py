@@ -16,6 +16,7 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.engine.core.prefill import PrefillBatch
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, apply_rope
+from kairyu.models.packed_linear import DenseLinearPack
 from kairyu.quant.linear import LinearRole, ModelScope, make_linear
 
 
@@ -44,6 +45,8 @@ class Attention(nn.Module):
         self.num_heads = heads
         self.num_kv_heads = kv_heads
         self.head_dim = dim
+        self.rope_theta = config.rope_theta
+        self.rope_scaling = config.rope_scaling
         self.q_proj = make_linear(
             linear_factory,
             config.hidden_size,
@@ -94,6 +97,77 @@ class Attention(nn.Module):
         else:
             self.q_norm = None
             self.k_norm = None
+        # Preserve canonical q/k/v modules and checkpoint members while using
+        # one GEMM for compatible dense projections.
+        object.__setattr__(
+            self,
+            "_qkv_pack",
+            DenseLinearPack.create((self.q_proj, self.k_proj, self.v_proj)),
+        )
+
+    def refresh_dense_pack(self) -> None:
+        """Rebuild the execution view after assign-load or module ``to()``."""
+
+        object.__setattr__(
+            self,
+            "_qkv_pack",
+            DenseLinearPack.create((self.q_proj, self.k_proj, self.v_proj)),
+        )
+
+    def _project_qkv(
+        self,
+        hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        packed = getattr(self, "_qkv_pack", None)
+        projections = (self.q_proj, self.k_proj, self.v_proj)
+        if (
+            packed is not None
+            and packed.matches(projections)
+            and packed.is_current()
+        ):
+            query, keys, values = packed(hidden)
+            return query, keys, values
+        return tuple(projection(hidden) for projection in projections)
+
+    def _normalize_qk(
+        self,
+        query: torch.Tensor,
+        keys: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.q_norm is None:
+            return query, keys
+        assert self.k_norm is not None
+        # Exact modules with unobserved forwards can use the joint CUDA
+        # execution path. Replacements and hooks retain normal nn.Module
+        # semantics through the separate fallback below.
+        can_fuse = (
+            type(self.q_norm) is RMSNorm
+            and type(self.k_norm) is RMSNorm
+            and self.q_norm.eps == self.k_norm.eps
+            and "forward" not in self.q_norm.__dict__
+            and "forward" not in self.k_norm.__dict__
+            and not self.q_norm._forward_hooks
+            and not self.q_norm._forward_pre_hooks
+            and not self.q_norm._backward_hooks
+            and not self.q_norm._backward_pre_hooks
+            and not self.k_norm._forward_hooks
+            and not self.k_norm._forward_pre_hooks
+            and not self.k_norm._backward_hooks
+            and not self.k_norm._backward_pre_hooks
+        )
+        if can_fuse:
+            from kairyu.kernels.rms_norm_gpu import try_joint_qk_rms_norm
+
+            joint = try_joint_qk_rms_norm(
+                query,
+                keys,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.q_norm.eps,
+            )
+            if joint is not None:
+                return joint
+        return self.q_norm(query), self.k_norm(keys)
 
     def forward(
         self,
@@ -108,13 +182,20 @@ class Attention(nn.Module):
         write_from: int,
     ) -> torch.Tensor:
         chunk_len = hidden.shape[0]
-        query = self.q_proj(hidden).view(chunk_len, self.num_heads, self.head_dim)
-        keys = self.k_proj(hidden).view(chunk_len, self.num_kv_heads, self.head_dim)
-        values = self.v_proj(hidden).view(chunk_len, self.num_kv_heads, self.head_dim)
-        if self.q_norm is not None:
-            query = self.q_norm(query)
-            keys = self.k_norm(keys)
-        query, keys = apply_rope(query, keys, cos, sin)
+        query, keys, values = self._project_qkv(hidden)
+        query = query.view(chunk_len, self.num_heads, self.head_dim)
+        keys = keys.view(chunk_len, self.num_kv_heads, self.head_dim)
+        values = values.view(chunk_len, self.num_kv_heads, self.head_dim)
+        query, keys = self._normalize_qk(query, keys)
+        query, keys = apply_rope(
+            query,
+            keys,
+            cos,
+            sin,
+            positions=positions,
+            rope_theta=self.rope_theta,
+            rope_scaling=self.rope_scaling,
+        )
         # KV-write skip (m12 D4, BLOCKING amendment): positions below
         # num_cached_tokens already hold valid (possibly SHARED) KV — never
         # rewrite them; recomputing their Q is enough.
@@ -177,13 +258,20 @@ class Attention(nn.Module):
         to be there at capture time.
         """
         batch = hidden.shape[0]
-        query = self.q_proj(hidden).view(batch, self.num_heads, self.head_dim)
-        keys = self.k_proj(hidden).view(batch, self.num_kv_heads, self.head_dim)
-        values = self.v_proj(hidden).view(batch, self.num_kv_heads, self.head_dim)
-        if self.q_norm is not None:
-            query = self.q_norm(query)
-            keys = self.k_norm(keys)
-        query, keys = apply_rope(query, keys, cos, sin)
+        query, keys, values = self._project_qkv(hidden)
+        query = query.view(batch, self.num_heads, self.head_dim)
+        keys = keys.view(batch, self.num_kv_heads, self.head_dim)
+        values = values.view(batch, self.num_kv_heads, self.head_dim)
+        query, keys = self._normalize_qk(query, keys)
+        query, keys = apply_rope(
+            query,
+            keys,
+            cos,
+            sin,
+            positions=positions,
+            rope_theta=self.rope_theta,
+            rope_scaling=self.rope_scaling,
+        )
         kv_pool.write_batched(layer, page_tables, positions, keys, values, write_from=write_from)
         context = self.backend.attend_decode(query, kv_pool, layer, page_tables, seq_lens)
         return self.o_proj(context)
@@ -205,19 +293,20 @@ class Attention(nn.Module):
         cached positions so shared radix pages remain byte-identical.
         """
         tokens = hidden.shape[0]
-        query = self.q_proj(hidden).view(
-            tokens, self.num_heads, self.head_dim
+        query, keys, values = self._project_qkv(hidden)
+        query = query.view(tokens, self.num_heads, self.head_dim)
+        keys = keys.view(tokens, self.num_kv_heads, self.head_dim)
+        values = values.view(tokens, self.num_kv_heads, self.head_dim)
+        query, keys = self._normalize_qk(query, keys)
+        query, keys = apply_rope(
+            query,
+            keys,
+            cos,
+            sin,
+            positions=batch.positions,
+            rope_theta=self.rope_theta,
+            rope_scaling=self.rope_scaling,
         )
-        keys = self.k_proj(hidden).view(
-            tokens, self.num_kv_heads, self.head_dim
-        )
-        values = self.v_proj(hidden).view(
-            tokens, self.num_kv_heads, self.head_dim
-        )
-        if self.q_norm is not None:
-            query = self.q_norm(query)
-            keys = self.k_norm(keys)
-        query, keys = apply_rope(query, keys, cos, sin)
         kv_pool.write_ragged(
             layer,
             batch.page_tables,
@@ -256,13 +345,20 @@ class Attention(nn.Module):
         per-sequence via ``attend_batched`` — output is IDENTICAL, row by row, to
         running each sequence through ``forward``."""
         batch = hidden.shape[0]
-        query = self.q_proj(hidden).view(batch, self.num_heads, self.head_dim)
-        keys = self.k_proj(hidden).view(batch, self.num_kv_heads, self.head_dim)
-        values = self.v_proj(hidden).view(batch, self.num_kv_heads, self.head_dim)
-        if self.q_norm is not None:
-            query = self.q_norm(query)
-            keys = self.k_norm(keys)
-        query, keys = apply_rope(query, keys, cos, sin)  # cos/sin [B, d] broadcast over heads
+        query, keys, values = self._project_qkv(hidden)
+        query = query.view(batch, self.num_heads, self.head_dim)
+        keys = keys.view(batch, self.num_kv_heads, self.head_dim)
+        values = values.view(batch, self.num_kv_heads, self.head_dim)
+        query, keys = self._normalize_qk(query, keys)
+        query, keys = apply_rope(
+            query,
+            keys,
+            cos,
+            sin,
+            positions=positions,
+            rope_theta=self.rope_theta,
+            rope_scaling=self.rope_scaling,
+        )
         if position_values is None:
             if positions.device.type != "cpu":
                 raise ValueError(
