@@ -129,6 +129,46 @@ class Attention(nn.Module):
             return query, keys, values
         return tuple(projection(hidden) for projection in projections)
 
+    def _normalize_qk(
+        self,
+        query: torch.Tensor,
+        keys: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.q_norm is None:
+            return query, keys
+        assert self.k_norm is not None
+        # Exact modules with unobserved forwards can use the joint CUDA
+        # execution path. Replacements and hooks retain normal nn.Module
+        # semantics through the separate fallback below.
+        can_fuse = (
+            type(self.q_norm) is RMSNorm
+            and type(self.k_norm) is RMSNorm
+            and self.q_norm.eps == self.k_norm.eps
+            and "forward" not in self.q_norm.__dict__
+            and "forward" not in self.k_norm.__dict__
+            and not self.q_norm._forward_hooks
+            and not self.q_norm._forward_pre_hooks
+            and not self.q_norm._backward_hooks
+            and not self.q_norm._backward_pre_hooks
+            and not self.k_norm._forward_hooks
+            and not self.k_norm._forward_pre_hooks
+            and not self.k_norm._backward_hooks
+            and not self.k_norm._backward_pre_hooks
+        )
+        if can_fuse:
+            from kairyu.kernels.rms_norm_gpu import try_joint_qk_rms_norm
+
+            joint = try_joint_qk_rms_norm(
+                query,
+                keys,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.q_norm.eps,
+            )
+            if joint is not None:
+                return joint
+        return self.q_norm(query), self.k_norm(keys)
+
     def forward(
         self,
         hidden: torch.Tensor,
@@ -146,9 +186,7 @@ class Attention(nn.Module):
         query = query.view(chunk_len, self.num_heads, self.head_dim)
         keys = keys.view(chunk_len, self.num_kv_heads, self.head_dim)
         values = values.view(chunk_len, self.num_kv_heads, self.head_dim)
-        if self.q_norm is not None:
-            query = self.q_norm(query)
-            keys = self.k_norm(keys)
+        query, keys = self._normalize_qk(query, keys)
         query, keys = apply_rope(
             query,
             keys,
@@ -224,9 +262,7 @@ class Attention(nn.Module):
         query = query.view(batch, self.num_heads, self.head_dim)
         keys = keys.view(batch, self.num_kv_heads, self.head_dim)
         values = values.view(batch, self.num_kv_heads, self.head_dim)
-        if self.q_norm is not None:
-            query = self.q_norm(query)
-            keys = self.k_norm(keys)
+        query, keys = self._normalize_qk(query, keys)
         query, keys = apply_rope(
             query,
             keys,
@@ -261,9 +297,7 @@ class Attention(nn.Module):
         query = query.view(tokens, self.num_heads, self.head_dim)
         keys = keys.view(tokens, self.num_kv_heads, self.head_dim)
         values = values.view(tokens, self.num_kv_heads, self.head_dim)
-        if self.q_norm is not None:
-            query = self.q_norm(query)
-            keys = self.k_norm(keys)
+        query, keys = self._normalize_qk(query, keys)
         query, keys = apply_rope(
             query,
             keys,
@@ -315,9 +349,7 @@ class Attention(nn.Module):
         query = query.view(batch, self.num_heads, self.head_dim)
         keys = keys.view(batch, self.num_kv_heads, self.head_dim)
         values = values.view(batch, self.num_kv_heads, self.head_dim)
-        if self.q_norm is not None:
-            query = self.q_norm(query)
-            keys = self.k_norm(keys)
+        query, keys = self._normalize_qk(query, keys)
         query, keys = apply_rope(
             query,
             keys,

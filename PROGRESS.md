@@ -38,8 +38,11 @@ hashes the complete live checkpoint before and after all 52 fresh-server
 scenarios, and binds raw environment-session ownership, exact container
 launch/backend/package/GPU identities, 31 unique synchronized graph warmups,
 and equal 8,192-block usable KV capacity into independently replayed evidence.
-The dry-run and focused CPU checks pass; the real TP4/8 comparison remains
-to be measured from a clean committed tree, so A6 is executable but not closed.
+The first clean TP4 ShareGPT pair completed but did not meet A6: Kairyu
+measured 0.466x vLLM SLO-goodput and 1.628x vLLM TTFT p99. The remaining
+matrix is intentionally deferred while the measured steady-decode gap is
+closed; A6 remains executable but not closed, and its three pooled thresholds
+are unchanged.
 G2 A7 now has an executable real-engine gate. Its Qwen3-32B trace reuses the
 fixed 64-session × 8-turn, 512-token shared-prefix plus 128-token turn geometry,
 then measures engine-originated prompt-token cache usage independently at TP4
@@ -588,6 +591,28 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [progress] G2 A6 first matched TP4 pair isolates a steady-decode gap
+- What: The first clean Qwen3-32B TP4 ShareGPT pair completed all 128 requests
+  per arm. Kairyu measured 1.452571 SLO-goodput versus vLLM 3.117408
+  (0.466x), TTFT p99 29.614074 s versus 18.188697 s (1.628x), and a
+  33.044848 s measurement window versus 20.529874 s. The remaining matrix was
+  stopped before spending GPU time on a result that could not meet the pooled
+  gate. Fixed-B16 evidence attributes the largest controlled gap to the GPU
+  model path rather than tokenization, HTTP, attention, or an OS-jitter rule.
+  A stride-aware joint Q/K RMSNorm now preserves the existing BF16 boundary in
+  one CUDA-graph-safe launch; focused GPU tests are bit-exact and the real TP4
+  teacher-forced Qwen gate remains 252/256 with zero substantive
+  disagreements. A packed gate/up candidate was discarded after it reduced
+  whole-graph time by only about 0.008 ms and failed the same quality gate at
+  249/256 with one substantive disagreement.
+- Why: The issue's pooled performance thresholds remain the only binding
+  verdict. Stopping a clearly failing matrix and rejecting a numerically unsafe
+  low-yield transform preserves both GPU time and product quality without
+  inventing a single-run or OS-jitter completion condition.
+- Refs: issue #156; G2 A6; `kairyu/kernels/rms_norm_gpu.py`;
+  `kairyu/models/attention.py`; `tests/gpu/test_rms_norm_gpu.py`;
+  `tests/unit/test_joint_qk_rms_norm.py`
 
 ### 2026-07-30 — [progress] G2 A6 live preflight corrects the immutable vLLM identity
 - What: The first real formal preflight stopped before any vLLM measurement
