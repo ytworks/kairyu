@@ -1631,7 +1631,7 @@ def test_helm_gpu_values_render_real_engine_and_model_storage():
     assert container["env"] == [
         {
             "name": "KAIRYU_ATTENTION_BACKEND",
-            "value": "torch",
+            "value": "auto",
         }
     ]
     model_mount = next(
