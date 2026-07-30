@@ -43,6 +43,7 @@ from kairyu.entrypoints.server.chat_service import (
     chat_error_from_upstream_client_error,
     completion_response,
     execute_chat,
+    parallel_tool_calls_is_satisfied,
     sampling_params_from,
     tool_choice_is_satisfied,
     validate_chat_input,
@@ -1698,6 +1699,29 @@ def create_app(
                     "upstream model did not satisfy tool_choice",
                     status_code=502,
                     code="tool_choice_not_satisfied",
+                    error_type="upstream_error",
+                )
+                return JSONResponse(
+                    status_code=error.status_code,
+                    content={"error": error.payload()},
+                )
+            if not parallel_tool_calls_is_satisfied(
+                response.choices,
+                request.parallel_tool_calls,
+            ):
+                _record_usage(
+                    http_request,
+                    request.model,
+                    response.usage,
+                    prompt=prompt,
+                    completions=completions,
+                    usage_exact=False,
+                )
+                error = ChatRequestError(
+                    "upstream model emitted multiple calls while "
+                    "parallel_tool_calls=false",
+                    status_code=502,
+                    code="parallel_tool_calls_not_satisfied",
                     error_type="upstream_error",
                 )
                 return JSONResponse(

@@ -2129,6 +2129,103 @@ async def test_named_tool_choice_filters_multi_call_output(stream):
     )
 
 
+@pytest.mark.parametrize("stream", [False, True])
+async def test_parallel_tool_calls_false_rejects_multiple_calls_before_streaming(
+    stream,
+):
+    search_text = '<tool_call>{"name":"search","arguments":{"q":"rain"}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
+    app = create_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL, search_tool],
+        parallel_tool_calls=False,
+        stream=stream,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "parallel_tool_calls_not_satisfied"
+    assert not response.headers["content-type"].startswith("text/event-stream")
+    assert "Call at most one function" in engine.requests[0].prompt
+
+
+async def test_parallel_tool_calls_false_is_enforced_per_choice_not_across_n():
+    engine = MultiChoiceToolBackend((TOOL_CALL_TEXT, TOOL_CALL_TEXT))
+    app = create_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        parallel_tool_calls=False,
+        n=2,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert [
+        len(choice["message"]["tool_calls"])
+        for choice in response.json()["choices"]
+    ] == [1, 1]
+
+
+async def test_parallel_tool_calls_true_accepts_multiple_calls():
+    search_text = '<tool_call>{"name":"search","arguments":{"q":"rain"}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
+    app = create_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL, search_tool],
+        parallel_tool_calls=True,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert len(response.json()["choices"][0]["message"]["tool_calls"]) == 2
+
+
+async def test_orchestrated_parallel_tool_calls_false_rejects_multiple_calls():
+    search_text = '<tool_call>{"name":"search","arguments":{"q":"rain"}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
+    app = create_app(
+        engines={},
+        orchestrators={"auto": Orchestrator({"tier1": engine})},
+    )
+    body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "weather"}],
+        "tools": [_WEATHER_TOOL, search_tool],
+        "parallel_tool_calls": False,
+    }
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "parallel_tool_calls_not_satisfied"
+    assert "Call at most one function" in engine.requests[0].prompt
+
+
 @pytest.mark.parametrize(
     ("text", "tool_choice"),
     [

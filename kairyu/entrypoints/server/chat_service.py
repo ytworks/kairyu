@@ -259,6 +259,18 @@ def render_prompt(
         # omitted optional fields stay undefined, while an explicit null stays
         # present. Pydantic extras remain included as sent.
         messages.append(message.model_dump(exclude_unset=True))
+    if (
+        request.parallel_tool_calls is False
+        and request.tools
+        and request.tool_choice != "none"
+    ):
+        messages.insert(
+            0,
+            {
+                "role": "system",
+                "content": "Call at most one function in this response.",
+            },
+        )
     tools = None if request.tool_choice == "none" else request.tools
     if template is None:
         if request.model not in (legacy_chat_models or ()):
@@ -510,6 +522,17 @@ async def execute_chat(validated: ValidatedChatRequest) -> ExecutedChat:
             error_type="upstream_error",
             execution=execution,
         )
+    if not parallel_tool_calls_is_satisfied(
+        response.choices,
+        validated.input.request.parallel_tool_calls,
+    ):
+        raise ChatRequestError(
+            "upstream model emitted multiple calls while parallel_tool_calls=false",
+            status_code=502,
+            code="parallel_tool_calls_not_satisfied",
+            error_type="upstream_error",
+            execution=execution,
+        )
     return execution
 
 
@@ -678,3 +701,14 @@ def tool_choice_is_satisfied(choices: Sequence[Choice], tool_choice: NormalizedT
     if tool_choice.mode not in {"required", "named"}:
         return True
     return bool(choices) and all(choice.message.tool_calls for choice in choices)
+
+
+def parallel_tool_calls_is_satisfied(
+    choices: Sequence[Choice],
+    parallel_tool_calls: bool | None,
+) -> bool:
+    """Enforce the limit per alternative; ``n`` choices are not parallel calls."""
+
+    if parallel_tool_calls is not False:
+        return True
+    return all(len(choice.message.tool_calls or ()) <= 1 for choice in choices)
