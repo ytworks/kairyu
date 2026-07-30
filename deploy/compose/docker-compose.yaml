@@ -19,12 +19,27 @@ x-replica: &replica
     retries: 15
 
 services:
-  replica-1: *replica
-  replica-2: *replica
-  replica-3: *replica
+  replica-1:
+    <<: *replica
+    environment:
+      OTEL_TRACES_EXPORTER: console
+      OTEL_SERVICE_NAME: kairyu-replica-1
+  replica-2:
+    <<: *replica
+    environment:
+      OTEL_TRACES_EXPORTER: console
+      OTEL_SERVICE_NAME: kairyu-replica-2
+  replica-3:
+    <<: *replica
+    environment:
+      OTEL_TRACES_EXPORTER: console
+      OTEL_SERVICE_NAME: kairyu-replica-3
   gateway:
     build:
       context: ../..
+    environment:
+      OTEL_TRACES_EXPORTER: console
+      OTEL_SERVICE_NAME: kairyu-gateway
     volumes:
       - ./gateway.yaml:/etc/kairyu/config.yaml:ro
     ports:

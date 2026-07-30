@@ -3,7 +3,7 @@
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
 2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
 2026-07-28; D7/A31 amended 2026-07-28; D6/A32 amended 2026-07-29;
-D8/A33 amended 2026-07-29).
+D8/A33 amended 2026-07-29; D4/A34 amended 2026-07-31).
 Reviewed (1-reviewer panel with repo-line evidence; §6 binding; covers
 M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
@@ -1057,3 +1057,27 @@ online learning or the M4 request-family bandit.
   `1ccc5ab012e5ee6677f96709ec60cc15ea5db32cefb72360941238ca505c75eb`,
   and production-router SHA-256
   `3296fdd000aede574ea5c3a152ff1ef0f54e204545bfb1f9aa61f7b47c83546f`.
+
+- **A34 (closed, 2026-07-31)**: F1d now binds one distributed W3C Trace
+  Context tree rather than isolated local spans. The gateway SERVER request
+  span is held through the final ASGI response body; route, actual pool
+  selection, replica CLIENT call, remote replica SERVER request, and every
+  Conductor stage remain descendants of that request. Only `traceparent` and
+  `tracestate` cross the process boundary; baggage is neither extracted nor
+  injected.
+
+  Tracing remains optional and disabled by default. Kairyu never replaces the
+  process-global provider: an application may inject a private provider, use
+  its existing global provider, or opt into a private compact console exporter
+  for the deployed smoke. Automatic OpenTelemetry exception events and status
+  descriptions are disabled because they can contain prompt or output text.
+  Failed and cancelled spans retain only the exception type, cancellation
+  marker, and description-free ERROR status.
+
+  The deterministic in-memory fixture proves the complete span tree,
+  attributes, success, error, cancellation, streaming lifetime, and privacy
+  contract. The mandatory separate-container Compose smoke additionally joins
+  gateway and replica records by response request ID plus trace, span, and
+  parent IDs, checks distinct service identities and the final response, and
+  rejects prompt/output canaries in every exported span. Log order, timing,
+  and randomly generated IDs are not acceptance inputs.

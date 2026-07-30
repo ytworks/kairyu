@@ -383,9 +383,15 @@ complete independently replayable artifact is retained under
 closure commit does not repeat F1c. Disposable live runs now write to
 `bench/results/f1c-three-gateway-live/`, so they cannot mutate the retained
 artifact or dirty the clean-source attestation.
+G5 F1d is closed by m10 A34. A deterministic fixture proves the complete
+gateway/route/pool/client/remote-server/Conductor span tree, final-body
+lifetime, error/cancellation semantics, and privacy. The mandatory
+separate-container Compose smoke joins the response request ID and W3C
+trace/span/parent IDs across distinct gateway and replica services and rejects
+prompt/output canaries; it does not infer success from log order or timing.
 Production/fabric drills remain untouched.**
 
-_Last updated: 2026-07-30_
+_Last updated: 2026-07-31_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -414,7 +420,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | G4 — MoE engine (fused experts, EP, MTP, NVFP4, MLA) | Goal defined (`docs/goals/g4-moe-engine.md`); lifts the G2 MoE non-goal. Design doc + review required before implementation. |
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
-| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** retained exact-head run `30374404150`, PR #266, issue #175. **F1b is closed:** retained exact-head run `30387260062`, PR #267, issue #176. **F1c is closed:** exact-head source run `30399229234` at `be40b97` passed all 26 independently replayed three-gateway affinity, shared PostgreSQL BatchStore, fenced owner-Pod failover, output, and provenance checks; the complete artifact is retained under `bench/results/f1c-three-gateway/`. F1a/F1b were not rerun and the evidence-only closure commit does not repeat F1c. **F2a is closed:** exact-source run `30411111758` at `c067cb8` passed every source, replay, cache, statistical, and p99 gate. Shared cached prompt-work improved 37.9259x; across 21 blank-root paired rounds the goodput-ratio median was 1.002142, exact median LCB 0.999512, full-sample geometric mean 1.008610, and 21/21 ratios met 0.99. Worst-trace placement p99 was 0.145979 ms. The 24,709-row artifact is retained under `bench/results/f2a-prefix-routing-500-2026-07-28/`; the evidence-only closure commit does not repeat F2a. **F2b is closed:** exact-source run `30417507859` at `f383806` passed every source, Actions provenance, replay, 200-replica churn, freshness, fallback, and recovery gate. Across 500 routes, maximum exact truth age was 232.314498 ms, first stale approximate fallback was 251.339950 ms after pause, and same-process complete-replay recovery was 50.740933 ms after resume. The 2,196-row artifact is retained under `bench/results/f2b-kv-event-retained/`; F1a/F2a were not rerun and the evidence-only closure commit does not repeat F2b. |
+| G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** retained exact-head run `30374404150`, PR #266, issue #175. **F1b is closed:** retained exact-head run `30387260062`, PR #267, issue #176. **F1c is closed:** exact-head source run `30399229234` at `be40b97` passed all 26 independently replayed three-gateway affinity, shared PostgreSQL BatchStore, fenced owner-Pod failover, output, and provenance checks; the complete artifact is retained under `bench/results/f1c-three-gateway/`. F1a/F1b were not rerun and the evidence-only closure commit does not repeat F1c. **F1d is closed:** m10 A34's deterministic fixture proves the complete span contract, and the separate-container Compose smoke proves W3C parentage across distinct gateway and replica services while rejecting prompt/output canaries. **F2a is closed:** exact-source run `30411111758` at `c067cb8` passed every source, replay, cache, statistical, and p99 gate. Shared cached prompt-work improved 37.9259x; across 21 blank-root paired rounds the goodput-ratio median was 1.002142, exact median LCB 0.999512, full-sample geometric mean 1.008610, and 21/21 ratios met 0.99. Worst-trace placement p99 was 0.145979 ms. The 24,709-row artifact is retained under `bench/results/f2a-prefix-routing-500-2026-07-28/`; the evidence-only closure commit does not repeat F2a. **F2b is closed:** exact-source run `30417507859` at `f383806` passed every source, Actions provenance, replay, 200-replica churn, freshness, fallback, and recovery gate. Across 500 routes, maximum exact truth age was 232.314498 ms, first stale approximate fallback was 251.339950 ms after pause, and same-process complete-replay recovery was 50.740933 ms after resume. The 2,196-row artifact is retained under `bench/results/f2b-kv-event-retained/`; F1a/F2a were not rerun and the evidence-only closure commit does not repeat F2b. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
 | G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
 
@@ -600,6 +606,23 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [amendment] F1d closes the cross-process OTel trace
+- What: amended m10 D4/A34 and completed an optional W3C-only trace from the
+  gateway SERVER request through routing, actual pool selection, replica CLIENT
+  call, remote replica SERVER request, and each Conductor stage. The request
+  span stays open through the final body; failures retain only exception type,
+  cancellation state, and description-free ERROR status. A deterministic
+  in-memory fixture and a mandatory separate-container Compose validator prove
+  the tree by request/trace/span/parent IDs, service identity, response
+  completion, and prompt/output-canary absence.
+- Why: isolated local spans did not prove propagation through a deployed
+  gateway/replica boundary, while OpenTelemetry's default exception event and
+  status description can copy application text into telemetry.
+- Refs: issue #178; G5 F1d; m10 D4/A34; `kairyu/telemetry.py`;
+  `kairyu/entrypoints/server/middleware.py`;
+  `kairyu/orchestration/{orchestrator,conductor,replica}.py`;
+  `scripts/verify_otel_trace.py`; `scripts/compose_smoke.sh`
 
 ### 2026-07-31 — [progress] Ragged KV writes remove per-request shape compilation
 - What: made ragged token, row, page-table-width, and leading-stride bounds

@@ -303,19 +303,77 @@ class TracingMiddleware:
         if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
             await self.app(scope, receive, send)
             return
-        from kairyu.telemetry import traced_span
+        from kairyu.telemetry import (
+            extract_trace_context,
+            mark_span_error,
+            traced_span,
+        )
 
-        status = {"code": 500}
+        status = {"code": 500, "complete": False, "disconnected": False}
+
+        async def wrapped_receive() -> dict:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                status["disconnected"] = True
+            return message
 
         async def wrapped_send(message: dict) -> None:
+            try:
+                await send(message)
+            except OSError:
+                # ASGI 2.4+ reports a disconnected client from send(); older
+                # servers expose the same condition through http.disconnect.
+                status["disconnected"] = True
+                raise
             if message["type"] == "http.response.start":
                 status["code"] = message["status"]
-            await send(message)
+            elif (
+                message["type"] == "http.response.body"
+                and not message.get("more_body", False)
+            ):
+                # Complete means the downstream server accepted the final
+                # body, not merely that the application attempted to send it.
+                status["complete"] = True
 
+        attributes: dict[str, str] = {
+            # Keep the legacy names for existing dashboards while also
+            # emitting the current HTTP semantic-convention spelling.
+            "http.route": scope["path"],
+            "http.method": scope.get("method", ""),
+            "http.request.method": scope.get("method", ""),
+        }
+        request_id = _state(scope).get("request_id")
+        if isinstance(request_id, str):
+            attributes["kairyu.request_id"] = request_id
+        carrier = {
+            key.decode("latin-1"): value.decode("latin-1")
+            for key, value in scope.get("headers", ())
+        }
         with traced_span(
             "kairyu.request",
-            {"http.route": scope["path"], "http.method": scope.get("method", "")},
+            attributes,
+            context=extract_trace_context(carrier),
+            kind="server",
         ) as span:
-            await self.app(scope, receive, wrapped_send)
-            if span is not None:
-                span.set_attribute("http.status_code", status["code"])
+            try:
+                await self.app(scope, wrapped_receive, wrapped_send)
+            finally:
+                if span is not None:
+                    span.set_attribute("http.status_code", status["code"])
+                    span.set_attribute("http.response.status_code", status["code"])
+                    span.set_attribute(
+                        "kairyu.response.complete",
+                        status["complete"],
+                    )
+                    if not status["complete"]:
+                        mark_span_error(
+                            span,
+                            error_type=(
+                                "ClientDisconnect"
+                                if status["disconnected"]
+                                else "incomplete_response"
+                            ),
+                            cancelled=status["disconnected"],
+                        )
+                    elif status["code"] >= 500:
+                        mark_span_error(span, error_type=str(status["code"]))

@@ -364,13 +364,29 @@ class Conductor:
             raise _BudgetRefused
         run.budget = reserved
         started_at = utc_now_iso()
+        from kairyu.telemetry import traced_span
+
         try:
-            result = await backend.generate(request)
-            actual_cost = self._cost_model(request, result)
-            reconciled = run.budget.reconcile_success(
-                cost=actual_cost,
-                unknown_cost=unknown_cost,
-            )
+            with traced_span(
+                "kairyu.conductor.stage",
+                {
+                    "kairyu.request_id": request.request_id,
+                    "kairyu.stage.name": event_spec.name,
+                    "kairyu.stage.role": event_spec.role_type,
+                    "kairyu.stage.worker": worker,
+                    "kairyu.stage.operation": operation,
+                    "kairyu.stage.attempt": attempt,
+                    "kairyu.stream": False,
+                },
+            ) as span:
+                result = await backend.generate(request)
+                actual_cost = self._cost_model(request, result)
+                reconciled = run.budget.reconcile_success(
+                    cost=actual_cost,
+                    unknown_cost=unknown_cost,
+                )
+                if span is not None:
+                    span.set_attribute("kairyu.stage.status", "success")
         except Exception as error:
             run.budget = run.budget.release(unknown_cost=unknown_cost)
             run.trace.append(
@@ -662,33 +678,49 @@ class Conductor:
         last_result: GenerationResult | None = None
         latest_usage = None
         first_token_at = None
+        from kairyu.telemetry import traced_span
+
         try:
-            async for partial in backend.stream(request):
-                last_result = partial
-                if partial.usage is not None:
-                    latest_usage = partial.usage
-                    self._observe_usage(run, latest_usage)
-                text = partial.text
-                if not text.startswith(run.outputs.get(spec.name, "")):
-                    raise RuntimeError(
-                        "final worker stream must emit cumulative, prefix-stable text"
+            with traced_span(
+                "kairyu.conductor.stage",
+                {
+                    "kairyu.request_id": request.request_id,
+                    "kairyu.stage.name": spec.name,
+                    "kairyu.stage.role": spec.role_type,
+                    "kairyu.stage.worker": spec.worker,
+                    "kairyu.stage.operation": "generation",
+                    "kairyu.stage.attempt": 0,
+                    "kairyu.stream": True,
+                },
+            ) as span:
+                async for partial in backend.stream(request):
+                    last_result = partial
+                    if partial.usage is not None:
+                        latest_usage = partial.usage
+                        self._observe_usage(run, latest_usage)
+                    text = partial.text
+                    if not text.startswith(run.outputs.get(spec.name, "")):
+                        raise RuntimeError(
+                            "final worker stream must emit cumulative, prefix-stable text"
+                        )
+                    run.outputs[spec.name] = text
+                    if first_token_at is None and partial.completions:
+                        first_token_at = utc_now_iso()
+                    yield ConductorEvent(
+                        kind="delta",
+                        text=text[emitted:],
+                        completions=partial.completions,
                     )
-                run.outputs[spec.name] = text
-                if first_token_at is None and partial.completions:
-                    first_token_at = utc_now_iso()
-                yield ConductorEvent(
-                    kind="delta",
-                    text=text[emitted:],
-                    completions=partial.completions,
+                    emitted = len(text)
+                if last_result is None:
+                    raise RuntimeError("final worker stream produced no result")
+                actual_cost = self._cost_model(request, last_result)
+                reconciled = run.budget.reconcile_success(
+                    cost=actual_cost,
+                    unknown_cost=unknown_cost,
                 )
-                emitted = len(text)
-            if last_result is None:
-                raise RuntimeError("final worker stream produced no result")
-            actual_cost = self._cost_model(request, last_result)
-            reconciled = run.budget.reconcile_success(
-                cost=actual_cost,
-                unknown_cost=unknown_cost,
-            )
+                if span is not None:
+                    span.set_attribute("kairyu.stage.status", "success")
         except Exception as error:
             run.budget = run.budget.release(unknown_cost=unknown_cost)
             trace_usage = None

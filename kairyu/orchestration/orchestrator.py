@@ -584,8 +584,17 @@ class Orchestrator:
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
         trace_started_at = utc_now_iso()
         route_started_at = utc_now_iso()
-        decision = self._router.route(query)
-        self._validate_call(call, decision)
+        from kairyu.telemetry import traced_span
+
+        with traced_span(
+            "kairyu.route",
+            {"kairyu.request_id": request_id},
+        ) as route_span:
+            decision = self._router.route(query)
+            self._validate_call(call, decision)
+            if route_span is not None:
+                route_span.set_attribute("kairyu.route.target", decision.target)
+                route_span.set_attribute("kairyu.route.confidence", decision.confidence)
         route_completed_at = utc_now_iso()
         notes: list[str] = [f"route: {decision.target} ({decision.reason})"]
         trace_events = [
@@ -947,8 +956,17 @@ class Orchestrator:
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
         trace_started_at = utc_now_iso()
         route_started_at = utc_now_iso()
-        decision = self._router.route(prompt)
-        self._validate_call(call, decision)
+        from kairyu.telemetry import traced_span
+
+        with traced_span(
+            "kairyu.route",
+            {"kairyu.request_id": request_id},
+        ) as route_span:
+            decision = self._router.route(prompt)
+            self._validate_call(call, decision)
+            if route_span is not None:
+                route_span.set_attribute("kairyu.route.target", decision.target)
+                route_span.set_attribute("kairyu.route.confidence", decision.confidence)
         route_completed_at = utc_now_iso()
         notes = [f"route: {decision.target} ({decision.reason})"]
         trace_events = [
