@@ -35,6 +35,7 @@ _CONTROL_IDLE_TIMEOUT_S = 365 * 24 * 60 * 60.0
 # Diagnostic rows are tiny, but a fixed packet keeps the collective shape
 # identical on every rank and lets it run on the bounded model communicator.
 _PREFILL_STATS_PACKET_BYTES = 4096
+_VERIFICATION_STATS_PACKET_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,20 @@ class _BatchedPrefillMode:
 @dataclass(frozen=True)
 class _PrefillStatsProbe:
     """Out-of-band request for rank-local structural prefill counters."""
+
+    reset: bool = False
+
+
+@dataclass(frozen=True)
+class _BatchedVerificationMode:
+    """Out-of-band, all-rank speculative-verification toggle."""
+
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class _VerificationStatsProbe:
+    """Out-of-band request for rank-local speculative-verification counters."""
 
     reset: bool = False
 
@@ -285,6 +300,144 @@ def _validate_prefill_stats_rows(rows: object, *, world_size: int) -> tuple[dict
     return tuple(by_rank[rank] for rank in range(world_size))
 
 
+def _verification_stats_row(control_comm, local_runner, *, reset: bool) -> dict[str, object]:
+    getter = getattr(local_runner, "verification_execution_stats", None)
+    if not callable(getter):
+        raise RuntimeError(
+            f"rank {control_comm.rank} runner has no verification_execution_stats"
+        )
+    stats = getter(reset=reset)
+    if not isinstance(stats, dict):
+        raise RuntimeError(f"rank {control_comm.rank} verification stats must be a dict")
+    device = str(getattr(local_runner, "_device", ""))
+    if not device:
+        raise RuntimeError(f"rank {control_comm.rank} runner has no compute device")
+    return {
+        "rank": control_comm.rank,
+        "world_size": control_comm.world_size,
+        "device": device,
+        "stats": stats,
+    }
+
+
+def _verification_stats_packet(control_comm, model_comm, local_runner, *, reset: bool):
+    """Serialize one verification-stats row while every rank enters the gather."""
+    import torch
+
+    try:
+        envelope: dict[str, object] = {
+            "ok": True,
+            "row": _verification_stats_row(control_comm, local_runner, reset=reset),
+        }
+        raw = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
+    except Exception as error:
+        envelope = {
+            "ok": False,
+            "rank": control_comm.rank,
+            "error": (f"{type(error).__name__}: {error}")[:1024],
+        }
+        raw = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
+    capacity = _VERIFICATION_STATS_PACKET_BYTES - 2
+    if len(raw) > capacity:
+        raw = json.dumps(
+            {
+                "ok": False,
+                "rank": control_comm.rank,
+                "error": (f"serialized verification stats exceed {capacity} bytes"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    device = getattr(model_comm, "_device", None)
+    packet = torch.zeros(
+        _VERIFICATION_STATS_PACKET_BYTES,
+        dtype=torch.uint8,
+        device=device,
+    )
+    packet[0] = len(raw) & 0xFF
+    packet[1] = len(raw) >> 8
+    packet[2 : 2 + len(raw)].copy_(torch.tensor(tuple(raw), dtype=torch.uint8, device=device))
+    return packet
+
+
+def _decode_verification_stats_packets(
+    gathered,
+    *,
+    world_size: int,
+) -> tuple[dict[str, object], ...]:
+    """Decode a bounded tensor gather and surface every rank-local error."""
+    import torch
+
+    if (
+        not isinstance(gathered, torch.Tensor)
+        or gathered.dtype != torch.uint8
+        or gathered.ndim != 1
+        or gathered.numel() != world_size * _VERIFICATION_STATS_PACKET_BYTES
+    ):
+        raise RuntimeError("verification stats tensor gather has malformed shape or dtype")
+    packets = gathered.reshape(world_size, _VERIFICATION_STATS_PACKET_BYTES).cpu()
+    rows: list[object] = []
+    failures: list[str] = []
+    for rank, packet in enumerate(packets):
+        length = int(packet[0]) | (int(packet[1]) << 8)
+        if not 0 < length <= _VERIFICATION_STATS_PACKET_BYTES - 2:
+            failures.append(f"rank {rank}: malformed packet length {length}")
+            continue
+        try:
+            envelope = json.loads(bytes(packet[2 : 2 + length].tolist()))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            failures.append(f"rank {rank}: invalid JSON: {error}")
+            continue
+        if not isinstance(envelope, dict):
+            failures.append(f"rank {rank}: envelope is not an object")
+        elif envelope.get("ok") is True:
+            rows.append(envelope.get("row"))
+        else:
+            failures.append(f"rank {rank}: {envelope.get('error', 'unknown error')}")
+    if failures:
+        raise RuntimeError("verification stats rank failures: " + "; ".join(failures))
+    return _validate_verification_stats_rows(rows, world_size=world_size)
+
+
+def _validate_verification_stats_rows(
+    rows: object,
+    *,
+    world_size: int,
+) -> tuple[dict[str, object], ...]:
+    if not isinstance(rows, (tuple, list)) or len(rows) != world_size:
+        raise RuntimeError(
+            "verification stats reply count mismatch: "
+            f"expected {world_size}, got "
+            f"{len(rows) if isinstance(rows, (tuple, list)) else type(rows).__name__}"
+        )
+    by_rank: dict[int, dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "rank",
+            "world_size",
+            "device",
+            "stats",
+        }:
+            raise RuntimeError("verification stats reply is malformed")
+        rank = row["rank"]
+        if (
+            type(rank) is not int
+            or rank in by_rank
+            or row["world_size"] != world_size
+            or not isinstance(row["device"], str)
+            or not isinstance(row["stats"], dict)
+        ):
+            raise RuntimeError(f"verification stats reply has invalid rank data: {row!r}")
+        by_rank[rank] = row
+    expected = set(range(world_size))
+    if set(by_rank) != expected:
+        raise RuntimeError(
+            "verification stats ranks are incomplete: "
+            f"expected={sorted(expected)}, got={sorted(by_rank)}"
+        )
+    return tuple(by_rank[rank] for rank in range(world_size))
+
+
 def _validate_sampling_ownership_rows(
     rows: object,
     *,
@@ -421,6 +574,14 @@ class DistTPModelRunner:
         # active request's (growing) prompt/outputs
         self._sync = StateSync()
 
+    @property
+    def supports_batched_verification(self) -> bool:
+        """Advertise the capability only when the rank-local runner has it."""
+        return (
+            getattr(self._local, "supports_batched_verification", False)
+            is True
+        )
+
     def execute(self, scheduled, states) -> dict:
         if self._fatal_error is not None:
             raise RuntimeError(
@@ -525,6 +686,61 @@ class DistTPModelRunner:
             self._fatal_error = failure
             raise failure from error
 
+    def set_batched_verification_enabled(self, enabled: bool) -> None:
+        """Apply the speculative-verification mode switch to every TP rank."""
+        if type(enabled) is not bool:
+            raise TypeError("batched verification enabled flag must be bool")
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                "tensor-parallel runner is unavailable after a fatal step failure"
+            ) from self._fatal_error
+        try:
+            payload = _BatchedVerificationMode(enabled)
+            delivered = self._control_comm.broadcast(payload, src=0)
+            if delivered != payload:
+                raise RuntimeError(
+                    "batched verification mode broadcast returned a malformed payload"
+                )
+            self._local.set_batched_verification_enabled(enabled)
+        except Exception as error:
+            self._fatal_error = error
+            raise
+
+    def verification_execution_stats(
+        self,
+        *,
+        reset: bool = False,
+    ) -> tuple[dict[str, object], ...]:
+        """Gather speculative-verification counters from every TP rank."""
+        if type(reset) is not bool:
+            raise TypeError("verification stats reset flag must be bool")
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                "tensor-parallel runner is unavailable after a fatal step failure"
+            ) from self._fatal_error
+        try:
+            probe = _VerificationStatsProbe(reset)
+            delivered = self._control_comm.broadcast(probe, src=0)
+            if delivered != probe:
+                raise RuntimeError(
+                    "verification stats probe broadcast returned a malformed payload"
+                )
+            packet = _verification_stats_packet(
+                self._control_comm,
+                self._model_comm,
+                self._local,
+                reset=reset,
+            )
+            gathered = self._model_comm.tensor_all_gather(packet)
+            return _decode_verification_stats_packets(
+                gathered,
+                world_size=self._control_comm.world_size,
+            )
+        except Exception as error:
+            failure = RuntimeError(f"TP verification stats probe failed: {error}")
+            self._fatal_error = failure
+            raise failure from error
+
     def release(self, request_id: str) -> None:
         try:
             if self._fatal_error is None:
@@ -575,6 +791,18 @@ def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
                 continue
             if isinstance(payload, _PrefillStatsProbe):
                 packet = _prefill_stats_packet(
+                    control_comm,
+                    model_comm,
+                    local_runner,
+                    reset=payload.reset,
+                )
+                model_comm.tensor_all_gather(packet)
+                continue
+            if isinstance(payload, _BatchedVerificationMode):
+                local_runner.set_batched_verification_enabled(payload.enabled)
+                continue
+            if isinstance(payload, _VerificationStatsProbe):
+                packet = _verification_stats_packet(
                     control_comm,
                     model_comm,
                     local_runner,

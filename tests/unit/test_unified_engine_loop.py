@@ -61,7 +61,10 @@ class _PositionRunner:
         if self.delay_s:
             time.sleep(self.delay_s)
         sampled = {
-            chunk.request_id: (SampledToken(self.base + chunk.position),)
+            chunk.request_id: tuple(
+                SampledToken(self.base + chunk.position + offset)
+                for offset in range(1 if chunk.is_prefill else chunk.num_tokens)
+            )
             for chunk in scheduled
             if not chunk.is_prefill or states[chunk.request_id].prefill_done
         }

@@ -39,6 +39,14 @@ def grammar_finished(
 
 
 class ModelRunner(Protocol):
+    """One-step execution protocol.
+
+    ``supports_batched_verification`` is an optional capability flag rather
+    than a required protocol member. Implementations that explicitly expose it
+    as ``True`` accept non-prefill chunks whose ``num_tokens > 1`` and return
+    one target record per position; omission preserves the one-token contract.
+    """
+
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> StepOutput:

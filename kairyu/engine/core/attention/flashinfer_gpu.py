@@ -89,6 +89,8 @@ class FlashInferBackend:
         self._decode_tensor_layers: set[int] = set()
         self._prefill_plan_calls = 0
         self._prefill_run_calls = 0
+        self._decode_plan_calls = 0
+        self._decode_run_calls = 0
 
     @property
     def device(self) -> torch.device:
@@ -107,6 +109,20 @@ class FlashInferBackend:
         if reset:
             self._prefill_plan_calls = 0
             self._prefill_run_calls = 0
+        return result
+
+    def decode_execution_stats(
+        self, *, reset: bool = False
+    ) -> dict[str, object]:
+        """Native decode plan/run counts for structural verification evidence."""
+        result = {
+            "type": type(self).__name__,
+            "plans": self._decode_plan_calls,
+            "runs": self._decode_run_calls,
+        }
+        if reset:
+            self._decode_plan_calls = 0
+            self._decode_run_calls = 0
         return result
 
     def _paged_arrays(
@@ -171,6 +187,7 @@ class FlashInferBackend:
                 q_data_type=query.dtype,
                 kv_data_type=kv_pool.k.dtype,
             )
+            self._decode_plan_calls += 1
         else:
             qo_indptr = torch.tensor([0, chunk_len], dtype=torch.int32)  # host
             self._prefill.plan(
@@ -209,6 +226,7 @@ class FlashInferBackend:
             # single-sequence decode path has B=1, so pass the [1, H, D] query
             # as-is (the batched path in attend_batched already does this).
             out = wrapper.run(query, paged_kv)  # decode: [B=1, H, D] query
+            self._decode_run_calls += 1
             return out.reshape(1, -1)
         out = wrapper.run(query, paged_kv)  # [T, H, D]
         self._prefill_run_calls += 1
@@ -320,6 +338,7 @@ class FlashInferBackend:
             q_data_type=q_dtype,
             kv_data_type=kv_pool.k.dtype,
         )
+        self._decode_plan_calls += 1
         self._decode_tensor_wrapper = wrapper
         self._decode_tensor_key = self._decode_shape_key(
             kv_pool, page_tables, num_qo_heads, q_dtype
@@ -370,6 +389,7 @@ class FlashInferBackend:
         out = self._decode_tensor_wrapper.run(  # type: ignore[union-attr]
             query, (kv_pool.k[layer], kv_pool.v[layer])
         )
+        self._decode_run_calls += 1
         return out.reshape(query.shape[0], -1)
 
     def attend_batched(
@@ -454,12 +474,14 @@ class FlashInferBackend:
                 q_data_type=first.dtype,
                 kv_data_type=kv_pool.k.dtype,
             )
+            self._decode_plan_calls += 1
             self._plan_key = key
             self._planned_decode = True
 
         query_batch = torch.cat(queries, dim=0)
         paged_kv = (kv_pool.k[layer], kv_pool.v[layer])
         out = self._decode.run(query_batch, paged_kv)
+        self._decode_run_calls += 1
         contexts = out.reshape(query_batch.shape[0], -1)
         return list(torch.split(contexts, query_lens, dim=0))
 

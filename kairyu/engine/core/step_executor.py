@@ -205,12 +205,34 @@ class GraphStepExecutor:
         # along. Defaults to cpu so the FakeGraphBackend tests are unchanged.
         self._device = torch.device(device)
         self._captured: dict[int, tuple[object, DecodeBatch]] = {}
+        self._graph_executions = 0
+        self._eager_fallbacks = 0
+
+    def can_execute_graph(self, batch: DecodeBatch) -> bool:
+        """Whether ``batch`` fits one configured static graph bucket."""
+        return (
+            bucket_for(batch.batch_size, self._buckets) is not None
+            and batch.max_pages <= self._max_pages
+        )
+
+    def execution_stats(self, *, reset: bool = False) -> dict[str, object]:
+        """Structural dispatch counts, independent of wall-clock jitter."""
+        result = {
+            "graph_executions": self._graph_executions,
+            "eager_fallbacks": self._eager_fallbacks,
+            "captured_buckets": tuple(sorted(self._captured)),
+        }
+        if reset:
+            self._graph_executions = 0
+            self._eager_fallbacks = 0
+        return result
 
     def execute_decode(self, batch: DecodeBatch) -> torch.Tensor:
         bucket = bucket_for(batch.batch_size, self._buckets)
         # oversize batch OR a page table wider than the captured static buffer:
         # never crash, run eager (D2)
         if bucket is None or batch.max_pages > self._max_pages:
+            self._eager_fallbacks += 1
             self._plan(batch)  # eager still needs a live plan for THESE buffers
             return self._decode_fn(batch)
         if bucket not in self._captured:
@@ -223,6 +245,7 @@ class GraphStepExecutor:
         # the PREVIOUS step. This ordering is the whole point of the hook.
         self._plan(static)
         out = replayable.replay()
+        self._graph_executions += 1
         return out[: batch.batch_size]  # padding rows dropped
 
     def invalidate(self) -> None:
