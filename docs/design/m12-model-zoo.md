@@ -178,8 +178,9 @@ time doesn't eat the spawn timeout.
   transformers (run manually before deploy day; catches config-parsing gaps
   tiny synthetic configs miss).
 - **Cross-cutting mechanics land here** (used by all of M12–M19):
-  pytest markers registered in pyproject (`gpu`, `hf_hub`, `dist`) with
-  `addopts` deselecting `gpu`/`hf_hub` by default **+ `--strict-markers`**
+  pytest markers registered in pyproject (`gpu`, `hf_hub`, `docker_exec`,
+  `helm`, `postgres`, `vllm`, `dist`) with `addopts` deselecting
+  environment-dependent suites by default **+ `--strict-markers`**
   (typo'd marks must not silently always-run); `pytest -m hf_hub` documented
   as the escape hatch. Coverage omit globs already exist (m8 D6).
   **Oracle pinning (amended, verified)**: transformers v5 honors checkpoint

@@ -4,7 +4,6 @@ reconciler, tracing spans, helm render."""
 import asyncio
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -26,8 +25,6 @@ from kairyu.engine.backend import (
 )
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.orchestration.replica import ReplicaPool
-
-pytestmark = pytest.mark.asyncio
 
 
 class MockBackend:
@@ -1346,7 +1343,7 @@ async def test_ci_has_explicit_single_source_helm_schema_and_gpu_template_gate()
     assert "helm template" not in workflow
 
 
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.helm
 def test_helm_chart_renders():
     rendered = subprocess.run(
         ["helm", "template", "kairyu", "deploy/helm/kairyu"],
@@ -1374,7 +1371,7 @@ def test_helm_chart_renders():
     assert all(volume["name"] != "model-storage" for volume in pod_spec["volumes"])
 
 
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.helm
 def test_helm_chart_renders_placement_and_runtime_controls(tmp_path):
     node_selector = {
         "kairyu.ai/accelerator": "nvidia",
@@ -1443,7 +1440,7 @@ def test_helm_chart_renders_placement_and_runtime_controls(tmp_path):
 
 
 @pytest.mark.parametrize("attention_backend", ["torch", "flashinfer"])
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.helm
 async def test_helm_chart_renders_supported_attention_backend(
     tmp_path, attention_backend
 ):
@@ -1596,7 +1593,7 @@ async def test_helm_shared_batch_store_uses_secret_dsn_and_immutable_pod_uid():
     assert "fieldPath: metadata.uid" in template
 
 
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.helm
 def test_helm_gpu_values_render_real_engine_and_model_storage():
     rendered = subprocess.run(
         [
@@ -1645,7 +1642,7 @@ def test_helm_gpu_values_render_real_engine_and_model_storage():
     assert model_path.is_relative_to(PurePosixPath(model_mount["mountPath"]))
 
 
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.helm
 def test_helm_model_storage_can_render_an_existing_pvc(tmp_path):
     pvc_values = tmp_path / "pvc-model-storage.yaml"
     pvc_values.write_text(
@@ -1714,7 +1711,7 @@ def test_helm_model_storage_can_render_an_existing_pvc(tmp_path):
     ],
     ids=["without-source", "pvc-and-host-path"],
 )
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.helm
 def test_helm_schema_rejects_invalid_model_storage(tmp_path, model_storage):
     invalid_values = tmp_path / "invalid-model-storage.yaml"
     invalid_values.write_text(yaml.safe_dump({"modelStorage": model_storage}))

@@ -25,10 +25,7 @@ from kairyu.batch.postgres_store import (
 from kairyu.batch.store import FileTooLargeError
 
 _POSTGRES_DSN = os.environ.get("KAIRYU_TEST_POSTGRES_DSN")
-pytestmark = pytest.mark.skipif(
-    not _POSTGRES_DSN,
-    reason="KAIRYU_TEST_POSTGRES_DSN is required for PostgreSQL integration",
-)
+pytestmark = pytest.mark.postgres
 
 if _POSTGRES_DSN:
     psycopg = pytest.importorskip("psycopg")

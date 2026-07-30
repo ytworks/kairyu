@@ -585,7 +585,7 @@ fi
 
 ulimit -n 65536 2>/dev/null || true
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1b-uv-cache}
-"$UV" run python bench/fleet_rollout_bench.py \
+"$UV" run --frozen python bench/fleet_rollout_bench.py \
   --profile "$PROFILE" \
   --gateway-url "$GATEWAY_URL" \
   --kubectl "$KUBECTL" \
@@ -613,7 +613,7 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1b-uv-cache}
   --output "$OUTPUT" \
   --assert-gate
 
-"$UV" run python bench/fleet_rollout_bench.py \
+"$UV" run --frozen python bench/fleet_rollout_bench.py \
   --verify-artifact "$OUTPUT" \
   --assert-gate >"$VERIFIER_OUTPUT"
 echo "F1b ${PROFILE} zero-failure rollout gate passed: ${OUTPUT}"

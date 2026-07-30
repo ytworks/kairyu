@@ -10,7 +10,7 @@ Environment overrides:
   KIND, KUBECTL, DOCKER, UV, GIT, TAR, TIMEOUT, CURL
   F1C_CLUSTER_NAME, F1C_RESULTS_DIR
 
-This is the one binding CPU-only F1c drill. It intentionally does not rerun
+This is the one binding CPU-only F1c integration test. It intentionally does not rerun
 F1a churn, F1b rollout, a GPU workload, or a latency threshold.
 EOF
 }

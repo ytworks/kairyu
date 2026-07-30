@@ -2,7 +2,6 @@ name: F1c three-gateway shared BatchStore
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
     paths:
       - ".github/workflows/f1c-gateway.yml"
       - "scripts/kind_gateway_gate.sh"
@@ -21,21 +20,7 @@ permissions:
   contents: read
 
 jobs:
-  require-label:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require the binding-drill label on pull requests
-        if: github.event_name == 'pull_request'
-        shell: bash
-        run: test '${{ contains(github.event.pull_request.labels.*.name, 'run-f1c') }}' = true
-
   gateway:
-    # The label is applied once the PR head is final. This prevents every
-    # implementation push from repeating the one binding kind measurement.
-    if: >-
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'run-f1c')
-    needs: require-label
     concurrency:
       group: f1c-three-gateway-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'manual' }}
       cancel-in-progress: true
@@ -58,7 +43,7 @@ jobs:
           install_only: true
           version: v0.32.0
           kubectl_version: v1.36.3
-      - name: Run the one binding F1c kind drill
+      - name: Run the F1c Kubernetes integration test
         shell: bash
         run: bash scripts/kind_gateway_gate.sh
       - name: Upload raw evidence and offline replay
@@ -69,14 +54,3 @@ jobs:
           path: bench/results/f1c-three-gateway-live
           if-no-files-found: error
           retention-days: 30
-
-  required:
-    if: always()
-    needs: [require-label, gateway]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require the exact-head binding drill
-        shell: bash
-        run: |
-          test '${{ needs.require-label.result }}' = success
-          test '${{ needs.gateway.result }}' = success

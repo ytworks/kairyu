@@ -54,7 +54,6 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  actions: read
   contents: read
 
 jobs:
@@ -63,12 +62,8 @@ jobs:
     timeout-minutes: 10
     env:
       F2B_RESULTS_DIR: bench/results/f2b-kv-event-live
-      F2B_RETAINED_DIR: bench/results/f2b-kv-event-retained
-      REQUESTED_MODE: ${{ inputs.mode }}
       PROFILE: ${{ github.event_name == 'pull_request' && 'formal' || inputs.profile }}
       REPLAY_DIR: ${{ inputs.evidence_dir }}
-      F2B_EXPECTED_COMMIT: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      F2B_GITHUB_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -78,89 +73,37 @@ jobs:
         with:
           python-version: "3.12"
       - name: Sync development dependencies
-        run: uv sync --dev
+        run: uv sync --frozen --dev
       - name: Run focused replay/verifier tests
         run: >-
-          uv run pytest tests/bench/test_kv_event_f2b_bench.py
+          uv run --frozen pytest --fail-on-skip
+          tests/bench/test_kv_event_f2b_bench.py
           -q --no-cov
-      - name: Select one measurement or evidence-only replay
-        id: mode
-        shell: bash
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
-            if [[ "${REQUESTED_MODE}" == "replay" ]]; then
-              uv run python -m bench.kv_event_f2b_bench \
-                --check-current-source "${REPLAY_DIR}" \
-                --required-profile formal
-            fi
-            echo "mode=${REQUESTED_MODE}" >> "${GITHUB_OUTPUT}"
-            echo "replay_dir=${REPLAY_DIR}" >> "${GITHUB_OUTPUT}"
-          elif [[ -f "${F2B_RETAINED_DIR}/kv-event-f2b-manifest.json" ]] &&
-            uv run python -m bench.kv_event_f2b_bench \
-              --check-current-source "${F2B_RETAINED_DIR}" \
-              --required-profile formal; then
-            echo "mode=replay" >> "${GITHUB_OUTPUT}"
-            echo "replay_dir=${F2B_RETAINED_DIR}" >> "${GITHUB_OUTPUT}"
-          else
-            echo "mode=measure" >> "${GITHUB_OUTPUT}"
-            echo "replay_dir=${F2B_RESULTS_DIR}" >> "${GITHUB_OUTPUT}"
-          fi
-      - name: Run one F2b measurement
-        if: steps.mode.outputs.mode == 'measure'
+      - name: Run a fresh F2b measurement
+        if: github.event_name == 'pull_request' || inputs.mode == 'measure'
         run: >-
-          uv run python -m bench.kv_event_f2b_bench
+          uv run --frozen python -m bench.kv_event_f2b_bench
           --profile "${PROFILE}"
           --output-dir "${F2B_RESULTS_DIR}"
       - name: Replay freshly emitted evidence without remeasurement
-        if: steps.mode.outputs.mode == 'measure'
+        if: github.event_name == 'pull_request' || inputs.mode == 'measure'
         run: >-
-          uv run python -m bench.kv_event_f2b_bench
+          uv run --frozen python -m bench.kv_event_f2b_bench
           --verify-artifact "${F2B_RESULTS_DIR}"
           --required-profile "${PROFILE}"
           --require-current-source
           --require-current-runner-context
-      - name: Fetch retained evidence Actions provenance
-        if: steps.mode.outputs.mode == 'replay'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RETAINED_ARTIFACT_DIR: ${{ steps.mode.outputs.replay_dir }}
-        run: |
-          manifest="${RETAINED_ARTIFACT_DIR}/kv-event-f2b-manifest.json"
-          run_id="$(
-            jq -er \
-              '.environment.github.GITHUB_RUN_ID | strings | select(test("^[1-9][0-9]*$"))' \
-              "${manifest}"
-          )"
-          if [[ ! "${run_id}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "artifact GITHUB_RUN_ID must be a positive decimal" >&2
-            exit 1
-          fi
-          gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
-            > "${RUNNER_TEMP}/f2b-retained-actions-run.json"
-          source_artifact_dir="${RUNNER_TEMP}/f2b-source-artifact"
-          gh run download "${run_id}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --name "f2b-kv-event-formal-${run_id}" \
-            --dir "${source_artifact_dir}"
-          cmp -- \
-            "${RETAINED_ARTIFACT_DIR}/kv-event-f2b-raw.jsonl" \
-            "${source_artifact_dir}/kv-event-f2b-raw.jsonl"
-          cmp -- \
-            "${RETAINED_ARTIFACT_DIR}/kv-event-f2b-manifest.json" \
-            "${source_artifact_dir}/kv-event-f2b-manifest.json"
-      - name: Replay retained evidence only
-        if: steps.mode.outputs.mode == 'replay'
+      - name: Replay a manually selected local artifact
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'replay'
         run: >-
-          uv run python -m bench.kv_event_f2b_bench
-          --verify-artifact "${{ steps.mode.outputs.replay_dir }}"
+          uv run --frozen python -m bench.kv_event_f2b_bench
+          --verify-artifact "${REPLAY_DIR}"
           --required-profile formal
           --require-current-source
-          --actions-run-provenance
-          "${RUNNER_TEMP}/f2b-retained-actions-run.json"
       - name: Upload live raw and manifest
-        if: always() && steps.mode.outputs.mode == 'measure'
+        if: >-
+          always() &&
+          (github.event_name == 'pull_request' || inputs.mode == 'measure')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: f2b-kv-event-${{ env.PROFILE }}-${{ github.run_id }}

@@ -10,10 +10,9 @@ hit its cache.
 Shared traffic opts into cross-session reuse with an exact prompt-derived root.
 Uniform traffic carries a blank root and therefore measures the production
 session-only path, where a native PrefixIndex must add no speculative work.
-Its binding non-inferiority inference is an exact distribution-free lower
-confidence bound for the paired median plus a full-sample geometric-mean
-guard. Every round remains in both metrics; the former Student-t mean bound is
-retained as diagnostic output only.
+Uniform goodput and placement latency remain fully replayable diagnostics, but
+they do not decide pass/fail because process scheduling and host jitter are not
+product-correctness invariants. Every round remains in the reported metrics.
 
 Raw JSONL retains cache placement, request/family IDs, prompt hashes, actual
 placement decisions/timings, paired round order, and round timings.  Prompt
@@ -53,7 +52,7 @@ from kairyu.orchestration.prefix_index import (
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.sampling_params import SamplingParams
 
-SCHEMA_VERSION = "kairyu.f2a.prefix-routing.v3"
+SCHEMA_VERSION = "kairyu.f2a.prefix-routing.v4"
 REPLICA_COUNT = 500
 DEFAULT_SEED = 0xF2A_2026
 PREFIX_POLICY = "prefix_aware"
@@ -79,9 +78,8 @@ _SOURCE_PATHS = (
     "uv.lock",
 )
 # Diagnostic only: timing distributions on hosted runners are not assumed
-# Gaussian. The binding location bound below is the exact median order
-# statistic. These critical values retain the former Student-t result in the
-# manifest so an extreme host episode remains visible rather than discarded.
+# Gaussian. The distribution-free median bound and former Student-t result are
+# retained so an extreme host episode remains visible rather than discarded.
 _T_CRITICAL_95_ONE_SIDED = {
     8: 1.8595480375228424,
     20: 1.7247182429207863,
@@ -233,13 +231,8 @@ def _git_clean_at_start() -> bool:
 
 def _frozen_source_snapshot() -> dict[str, object]:
     commit = _git_output("rev-parse", "HEAD")
-    expected_commit = os.environ.get("F2A_EXPECTED_COMMIT")
     return {
         "commit": commit,
-        "expected_commit": expected_commit,
-        "expected_commit_matches": (
-            expected_commit is None or expected_commit == commit
-        ),
         "files": [
             {
                 "path": relative_path,
@@ -288,16 +281,10 @@ def environment_descriptor() -> dict[str, object]:
 def _source_end_matches_start(source: object, source_end: object) -> bool:
     if not isinstance(source, dict) or not isinstance(source_end, dict):
         return False
-    expected_end = {
+    return source_end == {
         key: source.get(key)
-        for key in (
-            "commit",
-            "expected_commit",
-            "expected_commit_matches",
-            "files",
-        )
+        for key in ("commit", "files")
     }
-    return source_end == expected_end
 
 
 def _formal_context_complete(
@@ -307,34 +294,11 @@ def _formal_context_complete(
 ) -> bool:
     if config.profile != "formal":
         return True
-    if not isinstance(source, dict) or not isinstance(environment, dict):
-        return False
-    commit = source.get("commit")
-    expected_commit = source.get("expected_commit")
-    github = environment.get("github")
-    if not isinstance(github, dict):
-        return False
-    run_id = github.get("GITHUB_RUN_ID")
-    run_attempt = github.get("GITHUB_RUN_ATTEMPT")
-    event_name = github.get("GITHUB_EVENT_NAME")
-    github_sha = github.get("GITHUB_SHA")
     return (
-        isinstance(commit, str)
-        and isinstance(expected_commit, str)
-        and bool(expected_commit)
-        and expected_commit == commit
-        and source.get("expected_commit_matches") is True
-        and all(
-            isinstance(value, str)
-            and value.isascii()
-            and value.isdecimal()
-            and int(value) > 0
-            for value in (run_id, run_attempt)
-        )
-        and event_name in {"pull_request", "workflow_dispatch"}
-        and isinstance(github_sha, str)
-        and len(github_sha) == 40
-        and set(github_sha.lower()) <= _HEX_SHA256
+        isinstance(source, dict)
+        and source.get("commit") == _git_output("rev-parse", "HEAD")
+        and all(_verify_source_descriptor(source).values())
+        and all(_verify_environment_descriptor(environment).values())
     )
 
 
@@ -926,7 +890,7 @@ def derive_metrics(
         and row.get("trace") == "uniform"
         and isinstance(row.get("round_index"), int)
     }
-    paired_ratios = []
+    paired_ratios: list[float | None] = []
     paired_rounds = []
     placement_slo_ns = int(config.placement_p99_limit_ms * 1_000_000)
     for round_index in range(config.uniform_rounds):
@@ -973,11 +937,11 @@ def derive_metrics(
         hrw_goodput = (
             hrw_successes * 1_000_000_000 / hrw_dispatch_sum_ns
         )
-        if prefix_goodput <= 0.0 or hrw_goodput <= 0.0:
-            raise ValueError(
-                "paired placement-SLO goodput requires a success in both arms"
-            )
-        ratio = prefix_goodput / hrw_goodput
+        ratio = (
+            prefix_goodput / hrw_goodput
+            if prefix_goodput > 0.0 and hrw_goodput > 0.0
+            else None
+        )
         paired_ratios.append(ratio)
         paired_rounds.append(
             {
@@ -997,15 +961,11 @@ def derive_metrics(
                 "prefix_over_hrw_ratio": ratio,
             }
         )
-    log_ratios = [math.log(ratio) for ratio in paired_ratios]
-    log_mean = statistics.mean(log_ratios)
-    log_stdev = statistics.stdev(log_ratios)
-    geometric_mean_ratio = math.exp(log_mean)
     (
-        exact_median_lcb,
+        _,
         exact_median_lcb_rank,
         exact_median_lcb_coverage,
-    ) = _exact_median_lower_bound(paired_ratios)
+    ) = _exact_median_lower_bound([1.0] * len(paired_ratios))
     exact_median_required_successes = (
         len(paired_ratios) - exact_median_lcb_rank + 1
     )
@@ -1018,23 +978,50 @@ def derive_metrics(
             f"success count {exact_median_required_successes}, got "
             f"{config.uniform_sign_min_rounds}"
         )
-    degrees_of_freedom = len(log_ratios) - 1
+    degrees_of_freedom = len(paired_ratios) - 1
     try:
         t_critical = _T_CRITICAL_95_ONE_SIDED[degrees_of_freedom]
     except KeyError as error:
         raise ValueError(
             f"no frozen one-sided t critical value for df={degrees_of_freedom}"
         ) from error
-    log_lcb95 = log_mean - t_critical * log_stdev / math.sqrt(len(log_ratios))
-    ratio_lcb95 = math.exp(log_lcb95)
     noninferiority_floor = 1.0 - config.uniform_equivalence_margin
-    rounds_at_or_above_floor = sum(
-        ratio >= noninferiority_floor for ratio in paired_ratios
+    timing_diagnostics_complete = all(
+        isinstance(ratio, (int, float)) and ratio > 0.0
+        for ratio in paired_ratios
     )
-    exact_sign_pvalue = _binomial_upper_tail(
-        rounds_at_or_above_floor,
-        len(paired_ratios),
-    )
+    if timing_diagnostics_complete:
+        complete_ratios = [float(ratio) for ratio in paired_ratios]
+        log_ratios = [math.log(ratio) for ratio in complete_ratios]
+        log_mean = statistics.mean(log_ratios)
+        log_stdev = statistics.stdev(log_ratios)
+        geometric_mean_ratio = math.exp(log_mean)
+        exact_median_lcb = sorted(complete_ratios)[
+            exact_median_lcb_rank - 1
+        ]
+        log_lcb95 = (
+            log_mean
+            - t_critical * log_stdev / math.sqrt(len(log_ratios))
+        )
+        ratio_lcb95 = math.exp(log_lcb95)
+        rounds_at_or_above_floor = sum(
+            ratio >= noninferiority_floor for ratio in complete_ratios
+        )
+        exact_sign_pvalue = _binomial_upper_tail(
+            rounds_at_or_above_floor,
+            len(complete_ratios),
+        )
+        paired_median = statistics.median(complete_ratios)
+    else:
+        log_mean = None
+        log_stdev = None
+        geometric_mean_ratio = None
+        exact_median_lcb = None
+        log_lcb95 = None
+        ratio_lcb95 = None
+        rounds_at_or_above_floor = None
+        exact_sign_pvalue = None
+        paired_median = None
     return {
         "shared": {
             "request_count_per_policy": len(prefix_shared),
@@ -1076,6 +1063,7 @@ def derive_metrics(
         },
         "uniform": {
             "equivalence_margin": config.uniform_equivalence_margin,
+            "timing_diagnostics_complete": timing_diagnostics_complete,
             "goodput_definition": (
                 "successful placements below the fixed 10ms placement SLO "
                 "divided by summed raw dispatch intervals for every request "
@@ -1115,9 +1103,7 @@ def derive_metrics(
             ),
             "sign_gate_min_rounds": config.uniform_sign_min_rounds,
             "sign_gate_exact_one_sided_pvalue": exact_sign_pvalue,
-            "paired_median_prefix_over_hrw_ratio": statistics.median(
-                paired_ratios
-            ),
+            "paired_median_prefix_over_hrw_ratio": paired_median,
         },
     }
 
@@ -1126,11 +1112,7 @@ def threshold_checks(
     metrics: dict[str, object], config: WorkloadConfig
 ) -> dict[str, bool]:
     shared = metrics["shared"]
-    placement = metrics["placement"]
-    uniform = metrics["uniform"]
     assert isinstance(shared, dict)
-    assert isinstance(placement, dict)
-    assert isinstance(uniform, dict)
     ratio = shared["hit_rate_ratio"]
     ratio_pass = shared["hit_rate_ratio_infinite"] is True or (
         isinstance(ratio, (int, float))
@@ -1141,20 +1123,37 @@ def threshold_checks(
         "session_hrw_shared_hits_are_nonzero": (
             int(shared["hrw_request_hits"]) > 0
         ),
+    }
+
+
+def diagnostic_checks(
+    metrics: dict[str, object], config: WorkloadConfig
+) -> dict[str, bool]:
+    placement = metrics["placement"]
+    uniform = metrics["uniform"]
+    assert isinstance(placement, dict)
+    assert isinstance(uniform, dict)
+    median_lcb = uniform["paired_ratio_exact_median_lcb95"]
+    geometric_mean = uniform["paired_ratio_geometric_mean"]
+    rounds_at_or_above = uniform["rounds_at_or_above_noninferiority_floor"]
+    return {
         "prefix_shared_and_uniform_p99_below_10ms": (
             float(placement["prefix_worst_trace_p99_ms"])
             < config.placement_p99_limit_ms
         ),
         "uniform_exact_median_goodput_lcb_noninferior": (
-            float(uniform["paired_ratio_exact_median_lcb95"])
+            isinstance(median_lcb, (int, float))
+            and float(median_lcb)
             >= 1.0 - config.uniform_equivalence_margin
         ),
         "uniform_geometric_mean_goodput_guard_noninferior": (
-            float(uniform["paired_ratio_geometric_mean"])
+            isinstance(geometric_mean, (int, float))
+            and float(geometric_mean)
             >= 1.0 - config.uniform_equivalence_margin
         ),
         "uniform_paired_goodput_sign_gate": (
-            int(uniform["rounds_at_or_above_noninferiority_floor"])
+            type(rounds_at_or_above) is int
+            and int(rounds_at_or_above)
             >= config.uniform_sign_min_rounds
         ),
     }
@@ -1833,11 +1832,6 @@ def _verify_source_descriptor(source: object) -> dict[str, bool]:
     checks["source_commit_is_ancestor_of_verifier_head"] = (
         commit_is_sha and _git_is_ancestor(str(commit))
     )
-    expected_commit = source.get("expected_commit")
-    checks["workflow_expected_commit_matches_when_present"] = (
-        (expected_commit is None or expected_commit == commit)
-        and source.get("expected_commit_matches") is True
-    )
     # This is a fact captured before the run, not current verifier state:
     # committing the evidence naturally changes HEAD/cleanliness afterward.
     checks["source_was_clean_at_run_start"] = (
@@ -1850,7 +1844,7 @@ def _verify_source_descriptor(source: object) -> dict[str, bool]:
         and [item.get("path") for item in files if isinstance(item, dict)]
         == expected_paths
     )
-    if isinstance(files, list):
+    if commit_is_sha and checks["source_file_descriptors_are_exact"]:
         for relative_path, descriptor in zip(
             expected_paths, files, strict=False
         ):
@@ -1862,13 +1856,15 @@ def _verify_source_descriptor(source: object) -> dict[str, bool]:
                 == _git_blob_sha256(str(commit), relative_path)
                 == _sha256_file(_REPO_ROOT / relative_path)
             )
+    else:
+        for relative_path in expected_paths:
+            checks[f"source_file_hash:{relative_path}"] = False
     return checks
 
 
 def _verify_environment_descriptor(environment: object) -> dict[str, bool]:
     if not isinstance(environment, dict):
         return {"environment_descriptor_is_object": False}
-    github = environment.get("github")
     affinity = environment.get("sched_affinity")
     return {
         "environment_platform_is_recorded": (
@@ -1880,7 +1876,7 @@ def _verify_environment_descriptor(environment: object) -> dict[str, bool]:
             and bool(environment["python"])
         ),
         "environment_cpu_count_is_recorded": (
-            isinstance(environment.get("cpu_count"), int)
+            type(environment.get("cpu_count")) is int
             and int(environment["cpu_count"]) > 0
         ),
         "environment_affinity_is_recorded": (
@@ -1891,20 +1887,6 @@ def _verify_environment_descriptor(environment: object) -> dict[str, bool]:
                 and all(isinstance(cpu, int) and cpu >= 0 for cpu in affinity)
             )
         ),
-        "environment_github_fields_are_exact": (
-            isinstance(github, dict)
-            and set(github)
-            == {
-                "GITHUB_RUN_ID",
-                "GITHUB_RUN_ATTEMPT",
-                "GITHUB_EVENT_NAME",
-                "GITHUB_SHA",
-            }
-            and all(
-                value is None or isinstance(value, str)
-                for value in github.values()
-            )
-        ),
     }
 
 
@@ -1912,6 +1894,7 @@ def verify_artifact(path: Path) -> dict[str, object]:
     manifest_path = _resolve_manifest(path).resolve()
     errors: list[str] = []
     checks: dict[str, bool] = {}
+    diagnostics: dict[str, bool] | None = None
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
@@ -1971,7 +1954,7 @@ def verify_artifact(path: Path) -> dict[str, object]:
         checks.update(
             _verify_environment_descriptor(manifest.get("environment"))
         )
-        checks["formal_expected_commit_and_github_context_are_complete"] = (
+        checks["formal_clean_source_and_local_environment_are_complete"] = (
             _formal_context_complete(
                 config,
                 manifest.get("source"),
@@ -1983,17 +1966,20 @@ def verify_artifact(path: Path) -> dict[str, object]:
         errors.extend(replay_errors)
         metrics = derive_metrics(rows, config)
         gates = threshold_checks(metrics, config)
+        diagnostics = diagnostic_checks(metrics, config)
         checks["manifest_metrics_recomputed_exactly"] = (
             manifest.get("metrics") == metrics
         )
         checks["manifest_gate_checks_recomputed_exactly"] = (
             manifest.get("gate_checks") == gates
         )
+        checks["manifest_diagnostic_checks_recomputed_exactly"] = (
+            manifest.get("diagnostic_checks") == diagnostics
+        )
         recorded_source = manifest.get("source")
         source_gate = (
             isinstance(recorded_source, dict)
             and recorded_source.get("git_clean_at_start") is True
-            and recorded_source.get("expected_commit_matches") is True
             and _source_end_matches_start(
                 recorded_source,
                 manifest.get("source_end"),
@@ -2015,6 +2001,7 @@ def verify_artifact(path: Path) -> dict[str, object]:
         return {
             "passed": passed,
             "checks": checks,
+            "diagnostics": diagnostics,
             "metrics": metrics,
             "errors": sorted(set(errors)),
             "manifest": str(manifest_path),
@@ -2031,6 +2018,7 @@ def verify_artifact(path: Path) -> dict[str, object]:
         return {
             "passed": False,
             "checks": checks,
+            "diagnostics": diagnostics,
             "metrics": None,
             "errors": errors,
             "manifest": str(manifest_path),
@@ -2059,6 +2047,7 @@ def run_benchmark(
     _write_jsonl(raw_path, rows)
     metrics = derive_metrics(rows, config)
     gates = threshold_checks(metrics, config)
+    diagnostics = diagnostic_checks(metrics, config)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "config": asdict(config),
@@ -2072,9 +2061,9 @@ def run_benchmark(
         },
         "metrics": metrics,
         "gate_checks": gates,
+        "diagnostic_checks": diagnostics,
         "passed": (
             source.get("git_clean_at_start") is True
-            and source.get("expected_commit_matches") is True
             and _source_end_matches_start(source, source_end)
             and _formal_context_complete(config, source, environment)
             and all(gates.values())

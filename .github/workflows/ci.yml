@@ -7,7 +7,9 @@ on:
 
 jobs:
   test:
+    name: Portable CPU tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -17,25 +19,38 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Sync dependencies
-        run: uv sync --dev
+        run: uv sync --frozen --dev
+      - name: Verify required test dependencies
+        run: >-
+          uv run --frozen python scripts/test_prerequisites.py
+          --require-module torch
+          --require-module transformers
+          --require-module xgrammar
+          --require-module zmq
+          --require-module yaml
       - name: Lint
-        run: uv run ruff check kairyu tests bench
+        run: uv run --frozen ruff check .
       - name: Test with coverage gate
-        run: uv run pytest --cov=kairyu --cov-fail-under=80
+        run: >-
+          uv run --frozen pytest --fail-on-skip -ra
+          --cov=kairyu --cov-fail-under=80
 
   compose-smoke:
     # Black-box gate C3 (goal G3): gateway + 3 mock replicas from a cold
-    # docker compose up, incl. the kill/recover drill. Outside the coverage gate.
+    # docker compose up, including the kill/recover test. Outside coverage.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Validate Compose bind sources
-        run: uv run --no-dev python scripts/validate_compose_binds.py deploy/compose/docker-compose*.yaml
-      - name: Compose smoke drill
+        run: uv run --frozen --no-dev python scripts/validate_compose_binds.py deploy/compose/docker-compose*.yaml
+      - name: Compose integration test
         run: ./scripts/compose_smoke.sh
       - name: WebUI Kairyu smoke
         run: ./scripts/webui_smoke.sh
+      - name: PostgreSQL integration tests
+        run: bash scripts/postgres_integration.sh
 
   bench-exec-container:
     # Issue #210: the real isolation/conformance gate is mandatory here. The
@@ -48,7 +63,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Sync dependencies
-        run: uv sync --dev
+        run: uv sync --frozen --dev
       - name: Build and pin execution image
         run: |
           iidfile="$RUNNER_TEMP/kairyu-bench-exec-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.iid"
@@ -60,17 +75,23 @@ jobs:
           test "${image_id#sha256:}" != "$image_id"
           echo "KAIRYU_BENCH_EXEC_IMAGE=$image_id" >> "$GITHUB_ENV"
       - name: Real Docker runner conformance
-        run: uv run pytest -m docker_exec tests/bench/test_bench_exec_docker.py -v --no-cov
+        run: >-
+          uv run --frozen pytest --fail-on-skip
+          -m docker_exec tests/bench/test_bench_exec_docker.py -v --no-cov
 
   kind-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: test
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
       - uses: helm/kind-action@v1
         with:
           install_only: true
       - name: Helm schema and GPU template gate
         run: bash scripts/kind_smoke.sh --helm-check
+      - name: Run Helm integration tests
+        run: bash scripts/helm_integration.sh
       - name: kind smoke (m10a D5)
         run: bash scripts/kind_smoke.sh

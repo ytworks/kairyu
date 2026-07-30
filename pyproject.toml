@@ -98,14 +98,20 @@ packages = ["kairyu"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-# gpu/hf_hub/docker_exec are deselected by default (deploy-day / opt-in suites);
-# dedicated jobs run each environment-dependent gate without treating a skip as
-# a pass. CLI `-m` overrides this expression.
-addopts = "--cov=kairyu --cov-report=term-missing --strict-markers -m 'not gpu and not hf_hub and not docker_exec'"
+# Environment-dependent suites are deselected from the portable CPU suite.
+# Dedicated jobs/scripts select applicable gates only after checking their
+# prerequisites, and reject selected skips. CLI `-m` overrides this expression.
+addopts = "--cov=kairyu --cov-report=term-missing --strict-markers -m 'not gpu and not hf_hub and not docker_exec and not helm and not postgres and not vllm'"
+# Pytest's built-in default ignores every directory named `dist`, including
+# tests/dist. Keep build outputs ignored without hiding distributed tests.
+norecursedirs = [".git", ".tox", ".venv", "build"]
 markers = [
     "gpu: requires CUDA hardware (runs on deploy day via scripts/gpu_gates)",
     "hf_hub: downloads real weights from the HF Hub (opt-in, networked)",
     "docker_exec: requires Docker and a pinned KAIRYU_BENCH_EXEC_IMAGE",
+    "helm: requires the Helm executable (runs in the kind CI job)",
+    "postgres: requires KAIRYU_TEST_POSTGRES_DSN for a real PostgreSQL server",
+    "vllm: requires an installed real vLLM package",
     "dist: spawns torch.distributed multi-process workers (slower)",
 ]
 

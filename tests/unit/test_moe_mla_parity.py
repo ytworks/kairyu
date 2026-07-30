@@ -105,15 +105,26 @@ def _build(kind: str):
     return model
 
 
-@pytest.fixture(
-    scope="module", params=["qwen3moe", "dsv3", "dsv3-noqlora", "dsv3-yarn"]
-)
-def arch(request, tmp_path_factory):
-    hf_model = _build(request.param)
-    path = tmp_path_factory.mktemp(f"moe-{request.param}")
+ARCH_KINDS = ("qwen3moe", "dsv3", "dsv3-noqlora", "dsv3-yarn")
+DEEPSEEK_ARCH_KINDS = ("dsv3", "dsv3-noqlora", "dsv3-yarn")
+
+
+def _saved_arch(kind, tmp_path_factory):
+    hf_model = _build(kind)
+    path = tmp_path_factory.mktemp(f"moe-{kind}")
     hf_model.save_pretrained(path, safe_serialization=True)
     ours, config, _ = load_model(path)
-    return request.param, hf_model, ours, config
+    return kind, hf_model, ours, config
+
+
+@pytest.fixture(scope="module", params=ARCH_KINDS)
+def arch(request, tmp_path_factory):
+    return _saved_arch(request.param, tmp_path_factory)
+
+
+@pytest.fixture(scope="module", params=DEEPSEEK_ARCH_KINDS)
+def deepseek_arch(request, tmp_path_factory):
+    return _saved_arch(request.param, tmp_path_factory)
 
 
 def _our_logits(ours, config, prompt: list[int]) -> torch.Tensor:
@@ -182,10 +193,8 @@ def test_dsv3_yarn_softmax_scale_is_amplified():
     assert amplified > plain
 
 
-def test_dense_layers_and_shared_experts_present(arch):
-    name, _, ours, config = arch
-    if not name.startswith("dsv3"):
-        pytest.skip("deepseek only")
+def test_dense_layers_and_shared_experts_present(deepseek_arch):
+    _, _, ours, _ = deepseek_arch
     from kairyu.models.layers import SwiGluMlp
     from kairyu.models.moe import DeepseekV3MoeBlock
 
@@ -195,10 +204,8 @@ def test_dense_layers_and_shared_experts_present(arch):
     assert layers[1].mlp.shared_experts is not None
 
 
-def test_mla_pool_shape(arch):
-    name, _, _, config = arch
-    if not name.startswith("dsv3"):
-        pytest.skip("deepseek only")
+def test_mla_pool_shape(deepseek_arch):
+    _, _, _, config = deepseek_arch
     cache = RadixKVCache(num_pages=8, page_size=PAGE)
     pool = PagedKVPool.for_cache(cache, config)
     assert pool.num_kv_heads == 1

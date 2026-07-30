@@ -35,6 +35,16 @@ credentials, or response body. Both the preflight and benchmark use the same
 `KAIRYU_BENCH_MODEL` value. Unit, source, and dry-run tests pin the response
 contract, command ordering, real helper path, and default/override propagation.
 
+### D3 amendment — truthful test prerequisites and outcomes (2026-07-30)
+
+Every environment-dependent gate checks its declared modules, executables,
+hardware count/capability, and model paths before selecting tests. A missing
+prerequisite exits nonzero as `not-run`; every selected pytest invocation uses
+`--fail-on-skip`. The portable CPU suite explicitly excludes environment
+suites, while locally runnable Helm and pinned-PostgreSQL scripts execute those
+tests in their applicable CI jobs. Pytest's default `dist` directory exclusion
+is overridden so `tests/dist/` is part of normal collection.
+
 ## Acceptance (plan §final)
 
 (a) macOS `uv sync` clean; (b) default suite green; (c) all gate scripts

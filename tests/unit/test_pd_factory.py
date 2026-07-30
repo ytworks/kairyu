@@ -1108,6 +1108,7 @@ def test_a_host_pool_coordinator_does_not_pretend_to_defer(model_dir):
     assert coordinator._completion_ready is None
 
 
+@pytest.mark.gpu
 def test_the_production_coordinator_enables_and_settles_the_deferred_copy(model_dir):
     """The finding this closes: nothing enabled or waited on the deferred path.
 
@@ -1128,6 +1129,7 @@ def test_the_production_coordinator_enables_and_settles_the_deferred_copy(model_
     assert coordinator._completion_ready is not None
 
 
+@pytest.mark.gpu
 def test_the_deferred_copy_can_be_declined(model_dir):
     from kairyu.engine.core.pd_factory import build_pd_coordinator
 
@@ -1142,6 +1144,7 @@ def test_the_deferred_copy_can_be_declined(model_dir):
     assert coordinator._completion_ready is None
 
 
+@pytest.mark.gpu
 def test_the_deferred_and_blocking_copies_generate_the_same_tokens(model_dir):
     """The end-to-end gate: this runs the real deferred handoff through
     `PDCoordinator` against device pools, and overlap must not change the answer.
@@ -1170,6 +1173,7 @@ def test_the_deferred_and_blocking_copies_generate_the_same_tokens(model_dir):
     assert _generate(True) == _generate(False)
 
 
+@pytest.mark.gpu
 def test_the_deferred_copy_decodes_from_the_transferred_kv_on_device(model_dir):
     """The strongest gate this PR can offer: a REAL `LocalCopyKVHandoff` page
     copy, deferred onto a side stream, with the source pages released only behind
@@ -1213,6 +1217,7 @@ def test_the_factory_wires_the_copying_handoff(model_dir):
     assert isinstance(coordinator._handoff, LocalCopyKVHandoff)
 
 
+@pytest.mark.gpu
 def test_the_deferred_wrapper_still_wraps_the_copying_handoff(model_dir):
     """The lease work must compose with #140's copy, not replace it: there is one
     copying handoff in the stack, and the side stream only wraps it."""

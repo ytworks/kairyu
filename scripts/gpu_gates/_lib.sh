@@ -10,3 +10,9 @@ run() {
   echo "+ $*"
   if [ "$DRY_RUN" -eq 0 ]; then "$@"; fi
 }
+preflight() {
+  run uv run --frozen python scripts/test_prerequisites.py "$@"
+}
+pytest_no_skip() {
+  run uv run --frozen pytest --fail-on-skip "$@"
+}
