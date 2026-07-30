@@ -193,8 +193,8 @@ output (DeepSeek convention).
 - **A17 (eager policy by measurement):** the selected eager implementation is
   flattened tensor decode, shared with the graph path. On the pinned full
   Qwen3-32B checkpoint and the same 8-request/32-position/page/write geometry,
-  warmed alternating measurements gave median CUDA time 58.218 ms versus
-  73.711 ms for native ragged prefill (`flattened/native = 0.7898`), with all
+  warmed alternating measurements gave median CUDA time 59.004 ms versus
+  75.561 ms for native ragged prefill (`flattened/native = 0.7809`), with all
   32 selected tokens equal. Cross-kernel BF16 KV numerical distance is retained
   as a diagnostic rather than an equality gate; production correctness remains
   bound directly against sequential target scoring. Timing never decides the

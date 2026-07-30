@@ -57,9 +57,11 @@ sampling packets are pinned against the former sequential path. CUDA Graph
 cells dispatch one graph with no fallback; MLA/DeepSeek and undeclared custom
 runners retain a capability-selected pre-call sequential compatibility path.
 On the full Qwen3-32B checkpoint, the selected flattened eager path preserved
-all 32 compared target tokens and measured 58.218 ms median CUDA time versus
-73.711 ms for native ragged prefill (0.7898x); timing and cross-kernel BF16 KV
-distance remain diagnostic rather than correctness gates.
+all 32 compared target tokens and measured 59.004 ms median CUDA time versus
+75.561 ms for native ragged prefill (0.7809x); timing and cross-kernel BF16 KV
+distance remain diagnostic rather than correctness gates. The clean-source
+TP8 artifact passes all 16 live checks and all 21 independent replay checks
+(`bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-2026-07-30.json`).
 Tensor-parallel sampling now has one ownership contract across the production
 SPMD runner and in-process facade: rank 0 alone advances RNG, penalties,
 grammar, logprobs, and public D2H state; followers execute passive model/KV
@@ -513,9 +515,14 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-30 — [progress] m17 A13-A17 close on real Qwen3-32B TP8 evidence
+- What: Retained the 220,596-byte formal artifact from clean implementation commit `5dc7dd1591b37b8685fa7c6df6a94c8b8481574d` on 8× RTX PRO 6000 Blackwell. All 16 live gates and all 21 independent replay gates pass: exact source/checkpoint/hardware/tokenizer provenance, all-rank target/model/backend counts, eager and CUDA Graph OFF/ON ABBA/BAAB completeness, zero graph fallback, end-to-end plus fixed-target token parity, and poisoned-slot KV write coverage. Artifact SHA-256: `58ec81de2a7a1e89dbf7ced1d6f223039037c80be34cf743c1f4939aa10e66c9`.
+- Why: Structural counts prove that 32 fixed target positions collapse from 32 model calls to one on every rank without weakening correctness. Diagnostic end-to-end throughput rose from 12.95 to 260.16 token/s in eager and 12.40 to 387.48 token/s with CUDA Graph. The objective eager microcomparison retained all 32 selected tokens and measured 59.004 ms flattened versus 75.561 ms native ragged CUDA time (0.7809x); none of these timing values decides the verdict.
+- Refs: issue #215; m3 §4.1; m17 A13-A17; commit `5dc7dd1591b37b8685fa7c6df6a94c8b8481574d`; `bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-2026-07-30.json`
+
 ### 2026-07-30 — [amendment] m17 A13-A17 close batched speculative target verification
 - What: Compatible `ModelRunner`s now score every draft plus bonus/correction position across a scheduler step in one flattened decode-shaped model invocation. The paged runner validates unique physical KV writes, uses total target rows for CUDA Graph buckets, and carries every target position through a fixed variable-width rank-0 TP packet. MLA/DeepSeek and undeclared custom runners select the former sequential path before execution. Acceptance tests bind logical KV/rollback/shortfall behavior, while structural counters and a clean-source Qwen3-32B TP8 runner bind target/output parity, all-rank call counts, and zero graph fallback; timing and cross-kernel BF16 distance are diagnostic.
-- Why: The previous Python loop performed one complete target model call per draft position, eliminating most speculative-decoding value. Flattened tensor decode is also the objective eager choice on this hardware: over the identical full-Qwen 8-request/32-position geometry it preserved all selected tokens and measured 58.218 ms median CUDA time versus 73.711 ms for native ragged prefill (0.7898x). Explicit capability selection avoids regressing MLA or caller-supplied one-token runners, while non-binding timing prevents OS jitter from deciding correctness.
+- Why: The previous Python loop performed one complete target model call per draft position, eliminating most speculative-decoding value. Flattened tensor decode is also the objective eager choice on this hardware: over the identical full-Qwen 8-request/32-position geometry it preserved all selected tokens and measured 59.004 ms median CUDA time versus 75.561 ms for native ragged prefill (0.7809x). Explicit capability selection avoids regressing MLA or caller-supplied one-token runners, while non-binding timing prevents OS jitter from deciding correctness.
 - Refs: issue #215; m3 §4.1; m17 A13-A17; `kairyu/engine/core/{spec_runner,model_runner,torch_runner,worker,step_executor}.py`; `kairyu/engine/core/attention/flashinfer_gpu.py`; `kairyu/engine/kairyu_backend.py`; `bench/batched_spec_verify_qwen.py`; `tests/{unit,gpu,dist}/`
 
 ### 2026-07-30 — [amendment] Fugu code scoring gains a content-addressed container boundary

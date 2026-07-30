@@ -431,3 +431,16 @@ image, and drill are unchanged.
   fallback, source/checkpoint drift, unwritten/non-finite target KV slot, or
   stored-verdict mismatch is a failure. It is never recorded as a pass merely
   because the local environment cannot execute it.
+
+  Closure evidence (2026-07-30): the clean-source artifact at
+  `bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-2026-07-30.json`
+  passes all 16 live checks and all 21 independent replay checks against
+  implementation commit
+  `5dc7dd1591b37b8685fa7c6df6a94c8b8481574d`. The fixed 32-position cell
+  reports 32 sequential model calls versus one grouped call on every rank and
+  zero graph fallback. Diagnostic median throughput was 12.95 → 260.16 token/s
+  in eager and 12.40 → 387.48 token/s with CUDA Graph. The full-model strategy
+  comparison selected flattened decode at 59.004 ms versus 75.561 ms native
+  ragged CUDA time (0.7809x), with 32/32 selected tokens equal and all poisoned
+  target KV slots overwritten with finite values. Artifact SHA-256:
+  `58ec81de2a7a1e89dbf7ced1d6f223039037c80be34cf743c1f4939aa10e66c9`.
