@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from kairyu.sampling_params import PROMPT_OWNED_EXTRA_ARGS
+
 SAMPLING_FIELD_NAMES = frozenset(
     {
         "best_of",
@@ -27,6 +29,7 @@ SAMPLING_FIELD_NAMES = frozenset(
         "top_p",
     }
 )
+PROMPT_KINDS = frozenset({"text", "tokens", "multimodal"})
 
 _OPENAI_CORE = frozenset(
     {
@@ -58,7 +61,6 @@ _VLLM_EXTENSIONS = frozenset(
 # backend and may never be allowlisted as vendor extensions.
 RESERVED_EXTRA_ARGS = frozenset(
     {
-        "messages",
         "model",
         "stream",
         "stream_options",
@@ -69,6 +71,7 @@ RESERVED_EXTRA_ARGS = frozenset(
         "prompt_logprobs",
         "priority",
         *SAMPLING_FIELD_NAMES,
+        *PROMPT_OWNED_EXTRA_ARGS,
     }
 )
 
@@ -92,6 +95,10 @@ class OpenAIRequestCapabilities:
     forward_neutral_fields: frozenset[str] = frozenset()
     strict_tools: bool = False
     priority: bool = False
+    # The current adapter targets Chat Completions, whose portable request
+    # contract is text-only. Keeping prompt kinds in the immutable validation
+    # key makes future modality/token support an explicit capability change.
+    prompt_kinds: frozenset[str] = frozenset({"text"})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -101,11 +108,18 @@ class OpenAIRequestCapabilities:
             "forward_neutral_fields",
             frozenset(self.forward_neutral_fields),
         )
+        object.__setattr__(self, "prompt_kinds", frozenset(self.prompt_kinds))
         if not isinstance(self.upstream, str) or not self.upstream:
             raise ValueError("upstream must be a non-empty string")
         unknown = self.sampling_fields - SAMPLING_FIELD_NAMES
         if unknown:
             raise ValueError(f"unknown OpenAI sampling capability fields: {sorted(unknown)}")
+        unknown_prompt_kinds = self.prompt_kinds - PROMPT_KINDS
+        if unknown_prompt_kinds:
+            raise ValueError(
+                "unknown OpenAI prompt capability kinds: "
+                f"{sorted(unknown_prompt_kinds)}"
+            )
         invalid_neutral = self.forward_neutral_fields - self.sampling_fields
         if invalid_neutral:
             raise ValueError(

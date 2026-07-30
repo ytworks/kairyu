@@ -20,6 +20,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
 )
+from kairyu.engine.prompt import prompt_kind, prompt_text
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.orchestration.trace import (
@@ -47,7 +48,11 @@ def chars_cost_model(usd_per_1k_chars: float) -> CostModel:
     """Approximate cost from prompt+completion character volume."""
 
     def estimate(request: GenerationRequest, result: GenerationResult) -> float:
-        chars = len(request.prompt) + sum(len(c.text) for c in result.completions)
+        if prompt_kind(request.prompt) != "text":
+            raise ValueError("character cost estimation supports text prompts only")
+        text = prompt_text(request.prompt)
+        assert text is not None
+        chars = len(text) + sum(len(c.text) for c in result.completions)
         return chars / 1000 * usd_per_1k_chars
 
     return estimate

@@ -10,6 +10,8 @@ Wire protocol (msgpack maps):
   client → service: {"op": "add", "request_id", "prompt", "sampling": {...},
                      "priority": int, "scheduling_class": str,
                      "wire_version": 2}
+                    Typed text/token prompts add ``prompt_wire_version: 1`` and
+                    a strict tagged ``prompt`` map; legacy strings stay raw.
                     {"op": "abort", "request_id"} | {"op": "ping"} | {"op": "shutdown"}
   service → v2 client: one cumulative ``snapshot`` followed by sequenced
                     ``delta`` events carrying only new token IDs, visible text,
@@ -30,6 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from kairyu.engine.prompt import prompt_from_wire
 from kairyu.sampling_params import SamplingParams
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -39,6 +42,7 @@ _POLL_IDLE_MS = 50
 LEGACY_WIRE_VERSION = 1
 WIRE_VERSION = 2
 _SUPPORTED_WIRE_VERSIONS = frozenset({LEGACY_WIRE_VERSION, WIRE_VERSION})
+_PROMPT_WIRE_VERSION = 1
 
 
 @dataclass
@@ -324,9 +328,25 @@ def run_engine_service(port_pipe, config: dict) -> None:
                             raise ValueError(
                                 "engine wire v2 add requires a non-empty stream_id"
                             )
+                        prompt_wire_version = message.get("prompt_wire_version")
+                        if prompt_wire_version is None:
+                            prompt = message["prompt"]
+                            if not isinstance(prompt, str):
+                                raise ValueError(
+                                    "legacy engine prompt wire requires a string; "
+                                    "typed prompts require prompt_wire_version=1"
+                                )
+                        elif prompt_wire_version == _PROMPT_WIRE_VERSION:
+                            prompt = prompt_from_wire(message["prompt"])
+                        else:
+                            raise ValueError(
+                                "unsupported engine prompt wire version "
+                                f"{prompt_wire_version!r}; supported version is "
+                                f"{_PROMPT_WIRE_VERSION}"
+                            )
                         engine_loop.submit(
                             request_id,
-                            message["prompt"],
+                            prompt,
                             sampling_params_from_wire(message["sampling"]),
                             priority=message.get("priority", 0),
                             scheduling_class=message.get(

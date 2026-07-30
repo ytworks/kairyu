@@ -6,6 +6,13 @@ import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine import vllm_backend
+from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.prompt import (
+    MultimodalItem,
+    MultimodalPrompt,
+    TextPrompt,
+    TokensPrompt,
+)
 from kairyu.engine.vllm_backend import VLLMBackend, to_vllm_sampling_kwargs
 
 
@@ -68,6 +75,42 @@ def _install_fake_vllm(monkeypatch) -> dict:
     return captured
 
 
+class _CapturingEngine:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def generate(self, prompt, params, request_id, *, priority):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "params": params,
+                "request_id": request_id,
+                "priority": priority,
+            }
+        )
+        yield types.SimpleNamespace(
+            outputs=[
+                types.SimpleNamespace(
+                    index=0,
+                    text="done",
+                    token_ids=[7],
+                    cumulative_logprob=0.0,
+                    finish_reason="length",
+                    stop_reason=None,
+                )
+            ],
+            finished=True,
+        )
+
+
+def _capturing_backend(monkeypatch) -> tuple[VLLMBackend, _CapturingEngine]:
+    _install_fake_vllm(monkeypatch)
+    backend = VLLMBackend(model="m")
+    engine = _CapturingEngine()
+    backend._engine = engine
+    return backend, engine
+
+
 def test_tensor_parallel_size_reaches_vllm_engine_args(monkeypatch):
     captured = _install_fake_vllm(monkeypatch)
     VLLMBackend(model="m", tensor_parallel_size=4)
@@ -120,11 +163,112 @@ def test_instantiation_without_vllm_raises_clear_error(monkeypatch):
         VLLMBackend(model="meta-llama/Llama-3.1-8B")
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "legacy text",
+        TextPrompt(prompt="legacy text"),
+    ],
+)
+async def test_vllm_backend_forwards_text_variants_as_strings(monkeypatch, prompt):
+    backend, engine = _capturing_backend(monkeypatch)
+    await backend.generate(
+        GenerationRequest(
+            request_id="text",
+            prompt=prompt,
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+    )
+    assert engine.calls[0]["prompt"] == "legacy text"
+    assert isinstance(engine.calls[0]["prompt"], str)
+
+
+async def test_vllm_backend_forwards_token_ids_without_using_display_text(monkeypatch):
+    backend, engine = _capturing_backend(monkeypatch)
+    result = await backend.generate(
+        GenerationRequest(
+            request_id="tokens",
+            prompt=TokensPrompt(
+                prompt_token_ids=(11, 17, 23),
+                prompt="display text must not be tokenized or forwarded",
+            ),
+            sampling_params=SamplingParams(max_tokens=1),
+            priority=-4,
+        )
+    )
+    assert engine.calls == [
+        {
+            "prompt": {"prompt_token_ids": [11, 17, 23]},
+            "params": {
+                "n": 1,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "min_p": 0.0,
+                "seed": None,
+                "stop": [],
+                "stop_token_ids": [],
+                "max_tokens": 1,
+                "min_tokens": 0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0,
+                "repetition_penalty": 1.0,
+                "ignore_eos": False,
+                "skip_special_tokens": True,
+            },
+            "request_id": "tokens",
+            "priority": -4,
+        }
+    ]
+    assert result.prompt == TokensPrompt(
+        prompt_token_ids=(11, 17, 23),
+        prompt="display text must not be tokenized or forwarded",
+    )
+    assert result.prompt_token_ids == (11, 17, 23)
+
+
+async def test_vllm_backend_rejects_multimodal_before_engine_dispatch(monkeypatch):
+    backend, engine = _capturing_backend(monkeypatch)
+    request = GenerationRequest(
+        request_id="mm",
+        prompt=MultimodalPrompt(
+            base=TextPrompt(prompt="describe this image"),
+            items=(
+                MultimodalItem(
+                    modality="image",
+                    encoding="uri",
+                    data="https://example.test/image.png",
+                ),
+            ),
+        ),
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+    with pytest.raises(ValueError, match="does not support multimodal"):
+        await backend.generate(request)
+    assert engine.calls == []
+
+
+def test_vllm_backend_rejects_unrendered_tool_intent_for_token_prompt(monkeypatch):
+    backend, _ = _capturing_backend(monkeypatch)
+    request = GenerationRequest(
+        request_id="tokens-tools",
+        prompt=TokensPrompt(prompt_token_ids=(1, 2, 3)),
+        sampling_params=SamplingParams(max_tokens=1),
+        tools=(
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"type": "object"}},
+            },
+        ),
+    )
+    with pytest.raises(ValueError, match="tool"):
+        backend.validate_request(request)
+
+
 @pytest.mark.vllm
 @pytest.mark.hf_hub
 async def test_generate_roundtrip_with_real_vllm():
     backend = VLLMBackend(model="facebook/opt-125m")
-    from kairyu.engine.backend import GenerationRequest
 
     result = await backend.generate(
         GenerationRequest(

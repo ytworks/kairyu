@@ -5,7 +5,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 
-from kairyu.engine.backend import GenerationRequest, GenerationResult, GenerationUsage
+from kairyu.engine.backend import (
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+    prompt_with_tool_intent,
+)
+from kairyu.engine.prompt import (
+    PromptInput,
+    prompt_kind,
+    prompt_text,
+    supplied_prompt_token_ids,
+)
 from kairyu.outputs import CompletionOutput
 
 _ECHO_TAIL_CHARS = 48
@@ -33,10 +44,10 @@ class MockBackend:
         self._latency_s = latency_s
         # recorded (not acted on) so tests can assert plumbing, design m5 D3
         self.tensor_parallel_size = tensor_parallel_size
-        self._prompts_seen: list[str] = []
+        self._prompts_seen: list[PromptInput] = []
 
     @property
-    def prompts_seen(self) -> tuple[str, ...]:
+    def prompts_seen(self) -> tuple[PromptInput, ...]:
         return tuple(self._prompts_seen)
 
     def _text_for(self, prompt: str, sample_index: int) -> str:
@@ -46,11 +57,30 @@ class MockBackend:
         )
         return base if sample_index == 0 else f"{base} #{sample_index}"
 
+    @staticmethod
+    def _execution_text(request: GenerationRequest) -> str:
+        prompt = prompt_with_tool_intent(request)
+        if prompt_kind(prompt) == "multimodal":
+            raise ValueError(
+                "MockBackend does not support multimodal prompts; "
+                "modality data was not dispatched"
+            )
+        token_ids = supplied_prompt_token_ids(prompt)
+        if token_ids is not None:
+            return "tokens:" + ",".join(str(token_id) for token_id in token_ids)
+        text = prompt_text(prompt)
+        assert text is not None
+        return text
+
+    def validate_request(self, request: GenerationRequest) -> None:
+        self._execution_text(request)
+
     def _result_for(self, request: GenerationRequest) -> GenerationResult:
+        execution_text = self._execution_text(request)
         completions = tuple(
             CompletionOutput(
                 index=i,
-                text=(text := self._text_for(request.prompt, i)),
+                text=(text := self._text_for(execution_text, i)),
                 token_ids=_fake_token_ids(text),
                 cumulative_logprob=0.0,
                 finish_reason="stop",
@@ -62,13 +92,22 @@ class MockBackend:
             prompt=request.prompt,
             completions=completions,
             usage=GenerationUsage(
-                prompt_tokens=len(request.prompt.split()),
+                prompt_tokens=(
+                    len(token_ids)
+                    if (token_ids := supplied_prompt_token_ids(request.prompt))
+                    is not None
+                    else len(execution_text.split())
+                ),
                 completion_tokens=sum(len(c.token_ids) for c in completions),
                 cached_tokens=0,
             ),
+            prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
         )
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
+        # Capability rejection precedes latency and call-log mutation so an
+        # unsupported modality is never observable as dispatched work.
+        self.validate_request(request)
         if self._latency_s > 0:
             await asyncio.sleep(self._latency_s)
         self._prompts_seen.append(request.prompt)
@@ -92,6 +131,7 @@ class MockBackend:
                 prompt=request.prompt,
                 completions=partials,
                 finished=False,
+                prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
             )
         yield final
 

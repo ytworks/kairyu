@@ -6,6 +6,12 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from kairyu.engine.backend import GenerationUsage
+from kairyu.engine.prompt import (
+    PromptInput,
+    prompt_kind,
+    prompt_text,
+    supplied_prompt_token_ids,
+)
 from kairyu.entrypoints.server.protocol import Usage
 from kairyu.outputs import CompletionOutput
 
@@ -45,16 +51,30 @@ def _approx_tokens(text: str) -> int:
     return len(text.split())
 
 
+def _fallback_prompt_tokens(prompt: PromptInput) -> int:
+    if prompt_kind(prompt) == "multimodal":
+        raise ValueError(
+            "a multimodal backend must report exact prompt usage after media "
+            "processing; Kairyu will not guess modality token counts"
+        )
+    token_ids = supplied_prompt_token_ids(prompt)
+    if token_ids is not None:
+        return len(token_ids)
+    text = prompt_text(prompt)
+    assert text is not None
+    return _approx_tokens(text)
+
+
 def resolve_usage_counts(
     usage: GenerationUsage | Usage | None,
     *,
-    prompt: str,
+    prompt: PromptInput,
     completions: Sequence[CompletionOutput],
 ) -> tuple[int, int]:
     """Return backend/wire counts, or derive the existing wire approximation."""
     if usage is not None:
         return usage.prompt_tokens, usage.completion_tokens
-    prompt_tokens = _approx_tokens(prompt)
+    prompt_tokens = _fallback_prompt_tokens(prompt)
     completion_tokens = sum(
         len(completion.token_ids)
         if completion.token_ids
@@ -134,7 +154,7 @@ class StreamUsageOwner:
         *,
         tenant: str,
         model: str,
-        prompt: str,
+        prompt: PromptInput,
         ledger: UsageLedgerSink | None = None,
         metrics: UsageMetricsSink | None = None,
         limiter: TokenLimiterSink | None = None,
@@ -213,7 +233,7 @@ def stream_usage_owner_from_state(
     *,
     tenant: str,
     model: str,
-    prompt: str,
+    prompt: PromptInput,
     reservation: TokenReservationSink | None = None,
     usage_exact: bool = True,
 ) -> StreamUsageOwner:

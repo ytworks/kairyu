@@ -9,6 +9,8 @@ from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.engine.prompt import TokensPrompt
+from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
@@ -227,6 +229,295 @@ async def test_completions_invalid_sampling_returns_400(app):
         )
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        pytest.param(
+            {"type": "input_audio", "input_audio": {"data": "AA=="}},
+            id="unknown-audio",
+        ),
+        pytest.param(
+            {"type": "video_url", "video_url": {"url": "https://example.test/video"}},
+            id="unknown-video",
+        ),
+        pytest.param({"type": "text"}, id="missing-text"),
+        pytest.param(
+            {
+                "type": "text",
+                "text": "ambiguous",
+                "image_url": {"url": "https://example.test/image"},
+            },
+            id="conflicting-fields",
+        ),
+        pytest.param(
+            {"type": "text", "text": "hello", "unparsed": {"future": True}},
+            id="extra-field",
+        ),
+        pytest.param(
+            {"type": "image_url", "image_url": {}},
+            id="missing-image-url",
+        ),
+    ],
+)
+async def test_invalid_chat_content_parts_are_rejected_before_dispatch(part):
+    backend = MockBackend()
+    app = create_app(engines={"parts": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "parts",
+                "messages": [{"role": "user", "content": [part]}],
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]
+    assert backend.prompts_seen == ()
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        {"prompt_token_ids": [1, 2, 3]},
+        {"input_audio": {"data": "AA=="}},
+        {"multi_modal_data": {"image": "opaque"}},
+    ],
+)
+async def test_chat_message_alternate_prompt_carriers_are_rejected_before_dispatch(
+    carrier,
+):
+    backend = MockBackend()
+    app = create_app(engines={"chat": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "chat",
+                "messages": [{"role": "user", "content": "hello", **carrier}],
+            },
+        )
+
+    assert response.status_code == 400
+    assert "messages[0] has unsupported fields" in response.json()["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
+async def test_chat_tool_call_transcript_remains_supported():
+    backend = MockBackend()
+    app = create_app(engines={"chat": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "chat",
+                "messages": [
+                    {"role": "user", "content": "weather?"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "arguments": '{"city":"Tokyo"}',
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "content": '{"temp":21}',
+                        "tool_call_id": "call_1",
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert "<tool_call>" in backend.prompts_seen[0]
+
+
+async def test_absent_tool_calls_does_not_change_template_message_shape():
+    template = ChatTemplate(
+        "{{ 'tool_calls' in messages[0] }}|{{ messages[0].content }}"
+    )
+    backend = MockBackend()
+    app = create_app(
+        engines={"shape": backend},
+        chat_templates={"shape": template},
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "shape",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == ("False|hello",)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_completion_token_prompt_is_dispatched_losslessly(stream):
+    backend = MockBackend()
+    app = create_app(engines={"tokens": backend})
+    body = {
+        "model": "tokens",
+        "prompt": [7, 11, 13],
+        "stream": stream,
+    }
+    if stream:
+        body["stream_options"] = {"include_usage": True}
+
+    async with _client(app) as client:
+        response = await client.post("/v1/completions", json=body)
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == (TokensPrompt((7, 11, 13)),)
+    if stream:
+        chunks = [
+            json.loads(line[len("data: "):])
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        assert chunks[-1]["choices"] == []
+        assert chunks[-1]["usage"]["prompt_tokens"] == 3
+    else:
+        assert response.json()["usage"]["prompt_tokens"] == 3
+
+
+async def test_completion_token_batch_preserves_prompt_and_choice_order():
+    backend = MockBackend()
+    app = create_app(engines={"tokens": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "tokens", "prompt": [[2, 3], [17], [5, 8, 13]]},
+        )
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == (
+        TokensPrompt((2, 3)),
+        TokensPrompt((17,)),
+        TokensPrompt((5, 8, 13)),
+    )
+    choices = response.json()["choices"]
+    assert [choice["index"] for choice in choices] == [0, 1, 2]
+    assert [choice["text"] for choice in choices] == [
+        "mock:tokens:2,3",
+        "mock:tokens:17",
+        "mock:tokens:5,8,13",
+    ]
+
+
+async def test_completion_token_prompt_missing_usage_uses_exact_id_count():
+    class TokenBackend(StubBackend):
+        def validate_request(self, request):
+            if not isinstance(request.prompt, TokensPrompt):
+                raise ValueError("test backend requires token IDs")
+
+    backend = TokenBackend(text="derived completion words", usage=None)
+    app = create_app(engines={"tokens": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "tokens", "prompt": [3, 5, 8, 13]},
+        )
+
+    assert response.status_code == 200
+    assert backend.requests[0].prompt == TokensPrompt((3, 5, 8, 13))
+    assert response.json()["usage"]["prompt_tokens"] == 4
+
+
+async def test_token_prompt_requires_an_explicit_backend_capability():
+    backend = StubBackend()
+    app = create_app(engines={"legacy": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "legacy", "prompt": [1, 2, 3]},
+        )
+
+    assert response.status_code == 400
+    assert "does not declare support for tokens prompts" in response.json()["error"]["message"]
+    assert backend.calls == 0
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        {"prompt_token_ids": [1, 2, 3]},
+        {"prompt_embeds": [[0.1, 0.2]]},
+        {"multi_modal_data": {"image": "opaque"}},
+    ],
+)
+async def test_completion_alternate_prompt_carriers_are_never_silently_ignored(
+    carrier,
+):
+    backend = StubBackend()
+    app = create_app(engines={"legacy": backend})
+    body = {"model": "legacy", "prompt": "text authority", **carrier}
+
+    async with _client(app) as client:
+        response = await client.post("/v1/completions", json=body)
+
+    assert response.status_code == 400
+    assert "unsupported request fields" in response.json()["error"]["message"]
+    assert backend.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected_status"),
+    [
+        pytest.param([], 400, id="empty"),
+        pytest.param([1, "2"], 422, id="mixed"),
+        pytest.param([1, True], 422, id="boolean"),
+        pytest.param([1, -1], 422, id="negative"),
+    ],
+)
+async def test_invalid_completion_token_prompts_are_rejected_before_dispatch(
+    prompt, expected_status
+):
+    backend = StubBackend()
+    app = create_app(engines={"tokens": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "tokens", "prompt": prompt},
+        )
+
+    assert response.status_code == expected_status
+    assert backend.calls == 0
+
+
+async def test_completion_text_batch_remains_compatible():
+    backend = MockBackend()
+    app = create_app(engines={"text": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/completions",
+            json={"model": "text", "prompt": ["first", "second"]},
+        )
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == ("first", "second")
+    assert [choice["index"] for choice in response.json()["choices"]] == [0, 1]
 
 
 class StubBackend:
@@ -1822,6 +2113,28 @@ async def test_chat_sampling_extensions_are_typed_and_preserved_to_engine():
     assert params.prompt_logprobs == 2
     assert params.skip_special_tokens is False
     assert params.extra_args == {"vendor_cache": {"mode": "ephemeral"}}
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        {"prompt_token_ids": [1, 2, 3]},
+        {"prompt_embeds": [[0.1, 0.2]]},
+        {"input_image": {"image_url": "https://example.test/image"}},
+        {"multi_modal_data": {"image": "opaque"}},
+    ],
+)
+async def test_chat_extra_args_cannot_smuggle_an_alternate_prompt_carrier(carrier):
+    engine = StubBackend()
+    app = create_app(engines={"stub": engine})
+    body = _chat_body("text authority", model="stub", extra_args=carrier)
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert "prompt-owned fields" in response.json()["error"]["message"]
+    assert engine.calls == 0
 
 
 async def test_unknown_chat_field_is_clear_predispatch_400():

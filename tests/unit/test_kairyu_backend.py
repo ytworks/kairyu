@@ -11,7 +11,9 @@ from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
+from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt, TokensPrompt
 from kairyu.engine.registry import create_backend
+from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.entrypoints.server.app import create_app
 
 
@@ -90,6 +92,108 @@ async def test_zero_token_prompt_is_rejected_before_backend_state():
     tokenizer.return_token = True
     result = await backend.generate(request)
     assert result.finished is True
+
+
+class _NoEncodeTokenizer(ToyTokenizer):
+    def encode(self, text: str) -> tuple[int, ...]:
+        raise AssertionError("pre-tokenized prompts must not call encode")
+
+
+async def test_token_prompt_bypasses_encode_and_reports_exact_input_ids():
+    backend = KairyuBackend(tokenizer=_NoEncodeTokenizer(), num_pages=64)
+    request = GenerationRequest(
+        request_id="tokens",
+        prompt=TokensPrompt(prompt_token_ids=(7, 11, 13)),
+        sampling_params=SamplingParams(max_tokens=2, temperature=0),
+    )
+
+    result = await backend.generate(request)
+
+    assert result.prompt == request.prompt
+    assert result.prompt_token_ids == (7, 11, 13)
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == 3
+
+
+async def test_text_and_equivalent_token_prompt_share_native_radix_cache():
+    tokenizer = ToyTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=256, page_size=4)
+    text = " ".join(f"shared-{index}" for index in range(20))
+    token_ids = tokenizer.encode(text)
+    params = SamplingParams(max_tokens=1, temperature=0)
+
+    text_result = await backend.generate(
+        GenerationRequest("cache-text", text, params)
+    )
+    token_result = await backend.generate(
+        GenerationRequest(
+            "cache-tokens",
+            TokensPrompt(token_ids, prompt="display text is not a cache key"),
+            params,
+        )
+    )
+
+    assert text_result.completions[0].token_ids == token_result.completions[0].token_ids
+    assert text_result.usage is not None
+    assert token_result.usage is not None
+    assert text_result.usage.cached_tokens == 0
+    assert token_result.usage.prompt_tokens == len(token_ids)
+    assert token_result.usage.cached_tokens > 0
+
+
+def test_token_tool_suffix_and_multimodal_reject_before_backend_state():
+    backend = KairyuBackend(num_pages=64)
+    tool_request = GenerationRequest(
+        request_id="token-tools",
+        prompt=TokensPrompt((1, 2, 3)),
+        sampling_params=SamplingParams(max_tokens=1),
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object"},
+                },
+            },
+        ),
+    )
+    multimodal_request = GenerationRequest(
+        request_id="multimodal",
+        prompt=MultimodalPrompt(
+            base="describe",
+            items=(
+                MultimodalItem(
+                    modality="image",
+                    encoding="uri",
+                    data="https://example.test/image.png",
+                ),
+            ),
+        ),
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+
+    with pytest.raises(ValueError, match="tool-instruction"):
+        backend.validate_request(tool_request)
+    with pytest.raises(ValueError, match="does not support multimodal"):
+        backend.validate_request(multimodal_request)
+    assert backend._active_request_ids == set()
+    assert backend._loop._active_request_ids == set()
+    assert backend._scheduler.states == {}
+
+
+def test_token_id_outside_backend_vocabulary_rejects_before_state():
+    backend = KairyuBackend(tokenizer=_ToggleTokenizer(), num_pages=64)
+    request = GenerationRequest(
+        request_id="out-of-vocab",
+        prompt=TokensPrompt((2,)),
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+
+    with pytest.raises(ValueError, match="outside the backend tokenizer vocabulary"):
+        backend.validate_request(request)
+    assert backend._active_request_ids == set()
+    assert backend._loop._active_request_ids == set()
+    assert backend._scheduler.states == {}
 
 
 @pytest.mark.parametrize(

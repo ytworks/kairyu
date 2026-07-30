@@ -12,8 +12,15 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from kairyu.engine.prompt import (
+    PromptInput,
+    TextPrompt,
+    prompt_kind,
+    prompt_text,
+    supplied_prompt_token_ids,
+)
 from kairyu.outputs import CompletionOutput
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import SamplingParams, validate_prompt_owned_extra_args
 
 
 class Shutdownable(Protocol):
@@ -89,8 +96,10 @@ class CacheHint:
 
     ``session_id`` groups requests of one orchestration. ``prefix_fingerprint``
     is an optional trusted ``xxh3-64-v1`` key for the first complete
-    256-character shared-prompt chunk. An empty value declares session-only
-    affinity; prefix-enabled pools do not speculate about cross-session reuse.
+    256-character shared-text chunk. It is rejected for token and multimodal
+    prompts rather than mixing cache-key domains. An empty value declares
+    session-only affinity; prefix-enabled pools do not speculate about
+    cross-session reuse.
     """
 
     session_id: str
@@ -100,7 +109,7 @@ class CacheHint:
 @dataclass(frozen=True)
 class GenerationRequest:
     request_id: str
-    prompt: str
+    prompt: PromptInput
     sampling_params: SamplingParams
     # vLLM-compatible scheduling priority: smaller integers run first.
     priority: int = 0
@@ -117,6 +126,43 @@ class GenerationRequest:
     # than only the pure hash/least-load function cost (G5 F1a).
     placement_started_ns: int | None = None
 
+    def __post_init__(self) -> None:
+        # Defense in depth for callers holding a SamplingParams created by an
+        # older process or deliberately altered through low-level reflection.
+        validate_prompt_owned_extra_args(self.sampling_params.extra_args)
+        kind = prompt_kind(self.prompt)
+        if (
+            kind != "text"
+            and self.cache_hint is not None
+            and self.cache_hint.prefix_fingerprint
+        ):
+            raise ValueError(
+                "CacheHint.prefix_fingerprint is an xxh3 fingerprint of a "
+                "text prefix and cannot be used with token or multimodal prompts; "
+                "use a session-only CacheHint instead"
+            )
+
+
+def validate_backend_request(backend: object, request: GenerationRequest) -> None:
+    """Run an optional backend validator with a fail-closed typed default.
+
+    Backends predating the typed prompt contract remain compatible with legacy
+    text. They must explicitly implement ``validate_request`` before token or
+    multimodal values can cross their boundary.
+    """
+
+    validate = getattr(backend, "validate_request", None)
+    if validate is not None:
+        validate(request)
+        return
+    if type(request.prompt) is not str:
+        kind = prompt_kind(request.prompt)
+        variant = "typed text" if isinstance(request.prompt, TextPrompt) else kind
+        raise ValueError(
+            f"{type(backend).__name__} does not declare support for {variant} "
+            "prompts; backends without validate_request are legacy-string text-only"
+        )
+
 
 @dataclass(frozen=True)
 class AdmissionUpperBound:
@@ -128,11 +174,24 @@ class AdmissionUpperBound:
     refundable_on_exact_usage: bool
 
 
-def prompt_with_tool_intent(request: GenerationRequest) -> str:
-    """Render native-engine tool intent exactly once when no HF template did."""
+def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
+    """Render native-engine tool intent exactly once when no HF template did.
+
+    A pre-tokenized prompt is caller-owned: adding a text suffix would silently
+    mix two tokenizer owners. Multimodal prompts likewise cannot be flattened
+    into text without dropping modality data.
+    """
 
     if not request.tools or request.tools_in_prompt or request.tool_choice == "none":
         return request.prompt
+    kind = prompt_kind(request.prompt)
+    if kind != "text":
+        raise ValueError(
+            f"{kind} prompts cannot receive an implicit tool-instruction suffix; "
+            "render tools before tokenization and set tools_in_prompt=true"
+        )
+    text = prompt_text(request.prompt)
+    assert text is not None
     choice = request.tool_choice
     if isinstance(choice, Mapping):
         named = (choice.get("function") or {}).get("name")
@@ -147,11 +206,12 @@ def prompt_with_tool_intent(request: GenerationRequest) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    return (
-        f"{request.prompt}\n\nAvailable functions:\n{schemas}\n"
+    rendered = (
+        f"{text}\n\nAvailable functions:\n{schemas}\n"
         f"{policy} Emit each call exactly as "
         '<tool_call>{"name":"function_name","arguments":{}}</tool_call>.'
     )
+    return TextPrompt(rendered) if isinstance(request.prompt, TextPrompt) else rendered
 
 
 def admission_upper_bound(request: GenerationRequest) -> AdmissionUpperBound:
@@ -175,16 +235,34 @@ def admission_upper_bound(request: GenerationRequest) -> AdmissionUpperBound:
         sort_keys=True,
         separators=(",", ":"),
     )
-    # Covers the fixed role/control tokens inserted by common HF/OpenAI chat
-    # templates.  Supplied prompt, tool schemas, and response schema are counted
-    # explicitly above.
-    fixed_template_envelope = 256
-    prompt_upper = max(
-        1,
-        len(prompt.encode("utf-8"))
-        + len(metadata.encode("utf-8"))
-        + fixed_template_envelope,
-    )
+    kind = prompt_kind(prompt)
+    if kind == "multimodal":
+        # A media processor can expand one item into a model-specific number of
+        # placeholder tokens. Guessing from bytes would under-reserve some
+        # models and overstate usage for others.
+        raise ValueError(
+            "multimodal prompt admission requires a backend-reported processed "
+            "token count"
+        )
+    token_ids = supplied_prompt_token_ids(prompt)
+    if token_ids is not None:
+        # Pretokenized inputs are complete: the caller owns BOS, templates, and
+        # tool rendering. Their exact sequence length is therefore the truthful
+        # prefill reservation; optional display text is never counted.
+        prompt_upper = len(token_ids)
+    else:
+        text = prompt_text(prompt)
+        assert text is not None
+        # Covers the fixed role/control tokens inserted by common HF/OpenAI chat
+        # templates. Supplied prompt, tool schemas, and response schema are
+        # counted explicitly above.
+        fixed_template_envelope = 256
+        prompt_upper = max(
+            1,
+            len(text.encode("utf-8"))
+            + len(metadata.encode("utf-8"))
+            + fixed_template_envelope,
+        )
     return AdmissionUpperBound(
         tokens=candidates * (prompt_upper + params.max_tokens),
         refundable_on_exact_usage=candidates == 1,
@@ -208,10 +286,14 @@ class GenerationUsage:
 @dataclass(frozen=True)
 class GenerationResult:
     request_id: str
-    prompt: str
+    prompt: PromptInput
     completions: tuple[CompletionOutput, ...]
     finished: bool = True
     usage: GenerationUsage | None = None
+    # Exact only when the caller supplied token IDs or the backend explicitly
+    # reports the processed prompt. Text-only adapters may leave this empty.
+    # Appended after the historical fields to preserve positional compatibility.
+    prompt_token_ids: tuple[int, ...] = ()
 
     @property
     def text(self) -> str:

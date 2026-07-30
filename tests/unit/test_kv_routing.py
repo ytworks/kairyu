@@ -13,6 +13,7 @@ from kairyu.engine.backend import (
     UpstreamClientError,
 )
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.prompt import PromptInput, TextPrompt, TokensPrompt
 from kairyu.orchestration.kv_index import KvEventIndex, ZmqKvEventSubscriber
 from kairyu.orchestration.prefix_index import (
     PREFIX_HASH_VERSION,
@@ -35,7 +36,7 @@ class MockBackend:
 
 
 def _request(
-    prompt: str,
+    prompt: PromptInput,
     *,
     session_id: str | None = None,
     prefix_fingerprint: str = "",
@@ -618,6 +619,112 @@ class TestPrefixRouting:
         assert pool.decision_counts["prefix_match"] == 0
         assert index._replicas_by_first_key == {}
         assert all(not store for store in index._chunks.values())
+
+    @pytest.mark.asyncio
+    async def test_token_prompt_bypasses_text_prefix_index_but_keeps_session_affinity(
+        self, monkeypatch
+    ):
+        class TokenBackend(MockBackend):
+            def validate_request(self, _request):
+                return None
+
+        index = PrefixIndex(chunk_chars=1)
+        replicas = {"a": TokenBackend(), "b": TokenBackend()}
+        pool = ReplicaPool(replicas, prefix_index=index)
+        baseline = ReplicaPool(replicas)
+        request = _request(TokensPrompt((1, 2, 3)), session_id="token-session")
+
+        def unexpected_text_prefix_work(*_args, **_kwargs):
+            pytest.fail("token prompt entered the text PrefixIndex")
+
+        monkeypatch.setattr(pool, "_prefix_prepare", unexpected_text_prefix_work)
+        monkeypatch.setattr(pool, "_prefix_select", unexpected_text_prefix_work)
+        monkeypatch.setattr(pool, "_prefix_observe_root", unexpected_text_prefix_work)
+        monkeypatch.setattr(
+            pool,
+            "_prefix_observe_prepared",
+            unexpected_text_prefix_work,
+        )
+        monkeypatch.setattr(index, "observe", unexpected_text_prefix_work)
+
+        assert pool._select(request) == baseline._select(request)
+        await pool.generate(request)
+        chunks = [chunk async for chunk in pool.stream(request)]
+
+        assert len(chunks) == 1
+        assert pool.decision_counts["session_affinity"] == 2
+        assert pool.decision_counts["prefix_match"] == 0
+        assert index._replicas_by_first_key == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "prompt",
+        [TextPrompt("typed text"), TokensPrompt((1, 2, 3))],
+    )
+    async def test_typed_prompt_fails_closed_for_legacy_pool_members(
+        self, prompt
+    ):
+        pool = ReplicaPool({"legacy": MockBackend()})
+        request = _request(prompt)
+
+        with pytest.raises(ValueError, match="text-only"):
+            pool.validate_request(request)
+        with pytest.raises(ValueError, match="text-only"):
+            await pool.generate(request)
+        with pytest.raises(ValueError, match="text-only"):
+            async for _ in pool.stream(request):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_pool_direct_dispatch_revalidates_declared_backend_contract(self):
+        class RejectingTokenBackend(MockBackend):
+            def __init__(self):
+                self.calls = 0
+
+            def validate_request(self, request):
+                if isinstance(request.prompt, TokensPrompt):
+                    raise ValueError("token prompts are disabled")
+
+            async def generate(self, request):
+                self.calls += 1
+                return await super().generate(request)
+
+            async def stream(self, request):
+                self.calls += 1
+                async for chunk in super().stream(request):
+                    yield chunk
+
+        backend = RejectingTokenBackend()
+        pool = ReplicaPool({"declared": backend})
+        request = _request(TokensPrompt((1, 2, 3)))
+
+        with pytest.raises(ValueError, match="token prompts are disabled"):
+            await pool.generate(request)
+        with pytest.raises(ValueError, match="token prompts are disabled"):
+            async for _ in pool.stream(request):
+                pass
+
+        assert backend.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_explicit_text_prompt_uses_the_string_prefix_domain(self):
+        class TypedTextBackend(MockBackend):
+            def validate_request(self, _request):
+                return None
+
+        index = PrefixIndex(chunk_chars=4)
+        pool = ReplicaPool(
+            {"a": TypedTextBackend(), "b": TypedTextBackend()},
+            prefix_index=index,
+        )
+        request = _request(TextPrompt("shared-prefix"))
+
+        await pool.generate(request)
+        chunks = [chunk async for chunk in pool.stream(request)]
+
+        assert len(chunks) == 1
+        assert pool.decision_counts["prefix_match"] == 1
+        assert index.candidate_ids(index.chunk_keys("shared-prefix")) == ("a",)
 
     @pytest.mark.asyncio
     async def test_only_successful_generate_advertises_the_prefix(self):

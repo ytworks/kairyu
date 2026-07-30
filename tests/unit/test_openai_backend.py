@@ -11,11 +11,17 @@ from kairyu.engine.openai_capabilities import (
     OpenAIRequestCapabilities,
     known_openai_upstreams,
 )
+from kairyu.engine.prompt import (
+    MultimodalItem,
+    MultimodalPrompt,
+    PromptInput,
+    TokensPrompt,
+)
 from kairyu.outputs import TokenLogprob
 
 
 def _request(
-    prompt: str = "hi", sampling_params: SamplingParams | None = None
+    prompt: PromptInput = "hi", sampling_params: SamplingParams | None = None
 ) -> GenerationRequest:
     return GenerationRequest(
         request_id="r1",
@@ -586,6 +592,45 @@ async def test_upstream_profile_mismatch_is_400_before_transport(upstream, field
     assert backend._client is None
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        TokensPrompt((1, 2, 3)),
+        MultimodalPrompt(
+            base="describe",
+            items=(
+                MultimodalItem(
+                    modality="image",
+                    encoding="uri",
+                    data="https://example.test/image.png",
+                ),
+            ),
+        ),
+    ],
+)
+async def test_non_text_prompt_is_rejected_before_http_client_or_transport(prompt):
+    transport_calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+        upstream="vllm",
+    )
+
+    with pytest.raises(UpstreamClientError, match="prompt kind") as exc_info:
+        await backend.generate(_request(prompt=prompt))
+
+    assert exc_info.value.status_code == 400
+    assert transport_calls == []
+    assert backend._client is None
+
+
 async def test_anthropic_strict_tool_schema_is_rejected_before_transport():
     transport_calls: list[httpx.Request] = []
     backend = OpenAICompatBackend(
@@ -649,7 +694,20 @@ async def test_custom_capability_allows_reviewed_sampling_and_vendor_extensions(
     await backend.shutdown()
 
 
-@pytest.mark.parametrize("reserved", ["model", "stream", "temperature", "response_format"])
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "model",
+        "prompt",
+        "prompt_token_ids",
+        "prompt_embeds",
+        "multi_modal_data",
+        "mm_processor_kwargs",
+        "stream",
+        "temperature",
+        "response_format",
+    ],
+)
 def test_capability_configuration_cannot_allow_core_overrides(reserved):
     with pytest.raises(ValueError, match="may not override"):
         OpenAICompatBackend(
@@ -716,6 +774,22 @@ def test_resolved_capability_policy_is_deeply_immutable():
     )
     assert isinstance(backend.capabilities.sampling_fields, frozenset)
     assert isinstance(backend.capabilities.extra_args, frozenset)
+    assert backend.capabilities.prompt_kinds == frozenset({"text"})
+
+
+def test_adapter_rejects_a_capability_contract_it_cannot_execute():
+    capabilities = OpenAIRequestCapabilities(
+        upstream="custom",
+        sampling_fields={"max_tokens"},
+        prompt_kinds={"text", "tokens"},
+    )
+
+    with pytest.raises(ValueError, match="only text prompts"):
+        OpenAICompatBackend(
+            base_url="https://api.example.com/v1",
+            model="m",
+            capabilities=capabilities,
+        )
 
 
 async def test_stream_rejects_unsupported_intent_before_client_or_transport():

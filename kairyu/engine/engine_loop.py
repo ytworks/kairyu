@@ -25,6 +25,12 @@ from kairyu.engine.core.engine_core import grammar_finished, token_ids
 from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 from kairyu.engine.core.step_input import snapshot_step
+from kairyu.engine.prompt import (
+    PromptInput,
+    prompt_kind,
+    prompt_text,
+    supplied_prompt_token_ids,
+)
 from kairyu.engine.tokenizer import IncrementalDetokenizer, Tokenizer
 from kairyu.outputs import TokenLogprob
 from kairyu.sampling_params import SamplingParams
@@ -258,6 +264,7 @@ class EngineLoop:
         if pipeline_depth < 1:
             raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
         self._tokenizer = tokenizer
+        self._prompt_vocab_size: int | None = None
         self._scheduler = scheduler
         self._runner = runner
         self._pipeline_depth = pipeline_depth
@@ -298,10 +305,36 @@ class EngineLoop:
             raise ValueError("prompt must tokenize to at least one token")
         return prompt_token_ids
 
+    def resolve_prompt_token_ids(self, prompt: PromptInput) -> tuple[int, ...]:
+        """Resolve public input while preserving caller-owned token IDs."""
+
+        if prompt_kind(prompt) == "multimodal":
+            raise ValueError(
+                "Kairyu backend does not support multimodal prompts; "
+                "no modality processor is configured"
+            )
+        prompt_token_ids = supplied_prompt_token_ids(prompt)
+        if prompt_token_ids is not None:
+            if self._prompt_vocab_size is None:
+                self._prompt_vocab_size = len(self._tokenizer.vocab())
+                if self._prompt_vocab_size < 1:
+                    raise ValueError("tokenizer vocabulary must not be empty")
+            for index, token_id in enumerate(prompt_token_ids):
+                if token_id >= self._prompt_vocab_size:
+                    raise ValueError(
+                        f"prompt_token_ids[{index}]={token_id} is outside the "
+                        f"backend tokenizer vocabulary of "
+                        f"{self._prompt_vocab_size} entries"
+                    )
+            return prompt_token_ids
+        text = prompt_text(prompt)
+        assert text is not None
+        return self.tokenize_prompt(text)
+
     def submit(
         self,
         request_id: str,
-        prompt: str,
+        prompt: PromptInput,
         params: SamplingParams,
         priority: int = 0,
         scheduling_class: str = "interactive",
@@ -313,7 +346,7 @@ class EngineLoop:
             raise ValueError(f"duplicate request_id {request_id!r}")
         engine_request = EngineRequest(
             request_id=request_id,
-            prompt_token_ids=self.tokenize_prompt(prompt),
+            prompt_token_ids=self.resolve_prompt_token_ids(prompt),
             max_new_tokens=params.max_tokens or _DEFAULT_MAX_NEW_TOKENS,
             eos_token_id=self._default_eos,
             stop_token_ids=tuple(params.stop_token_ids or ()) + self._default_stop_ids,

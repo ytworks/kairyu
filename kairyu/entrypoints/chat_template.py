@@ -20,12 +20,33 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+from kairyu.sampling_params import PROMPT_CARRIER_EXTRA_ARGS
+
+
+def _reject_prompt_carriers(
+    message: Mapping[str, object],
+    *,
+    index: int,
+) -> None:
+    carriers = PROMPT_CARRIER_EXTRA_ARGS.intersection(message)
+    if carriers:
+        raise ValueError(
+            f"message {index} contains alternate prompt carriers "
+            f"{sorted(carriers)}; pass input through PromptInput"
+        )
+
 
 def render_chat(messages: Sequence[dict]) -> str:
     """Legacy minimal renderer: role-prefixed concatenation (pre-m9 default)."""
     lines = []
-    for message in messages:
-        text = flatten_content(message.get("content"))[0]
+    for index, message in enumerate(messages):
+        _reject_prompt_carriers(message, index=index)
+        text, has_images = flatten_content(message.get("content"))
+        if has_images:
+            raise ValueError(
+                f"message {index} contains image input that a text chat "
+                "renderer cannot execute; use MultimodalPrompt"
+            )
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list):
             rendered_calls = []
@@ -75,29 +96,69 @@ def _strftime_now(fmt: str) -> str:
 
 
 def flatten_content(content) -> tuple[str, bool]:
-    """Content-parts -> (text, has_images) (m11 A10). Strings pass through."""
+    """Content-parts -> (text, has_images) without dropping unknown payloads."""
     if content is None:
         return "", False
     if isinstance(content, str):
         return content, False
     texts: list[str] = []
     has_images = False
-    for part in content:
-        data = part if isinstance(part, dict) else part.model_dump()
-        if data.get("type") == "text":
-            texts.append(data.get("text") or "")
-        elif data.get("type") == "image_url":
+    allowed_fields = {"type", "text", "image_url"}
+    for index, part in enumerate(content):
+        if isinstance(part, Mapping):
+            data = dict(part)
+        else:
+            dump = getattr(part, "model_dump", None)
+            if not callable(dump):
+                raise ValueError(
+                    f"content part {index} must be a tagged object, "
+                    f"got {type(part).__name__}"
+                )
+            data = dump()
+        extra = set(data) - allowed_fields
+        if extra:
+            raise ValueError(
+                f"content part {index} has unsupported fields: {sorted(extra)}"
+            )
+        kind = data.get("type")
+        if kind == "text":
+            text = data.get("text")
+            if type(text) is not str or data.get("image_url") is not None:
+                raise ValueError(
+                    f"content part {index} type 'text' requires only a string text payload"
+                )
+            texts.append(text)
+        elif kind == "image_url":
+            image_url = data.get("image_url")
+            if (
+                not isinstance(image_url, Mapping)
+                or type(image_url.get("url")) is not str
+                or not image_url["url"]
+                or data.get("text") is not None
+            ):
+                raise ValueError(
+                    f"content part {index} type 'image_url' requires only a "
+                    "non-empty URL payload"
+                )
             has_images = True
+        else:
+            raise ValueError(f"content part {index} has unsupported type {kind!r}")
     return "".join(texts), has_images
 
 
-def _normalize_message(message: Mapping[str, object]) -> dict:
+def _normalize_message(message: Mapping[str, object], *, index: int) -> dict:
     """OpenAI wire form -> template form: tool_calls.arguments str -> dict."""
+    _reject_prompt_carriers(message, index=index)
     normalized = dict(message)
     content = normalized.get("content")
     if content is not None and not isinstance(content, str):
         # text-only HF templates must never see part lists (m11 A10)
-        normalized["content"], _ = flatten_content(content)
+        normalized["content"], has_images = flatten_content(content)
+        if has_images:
+            raise ValueError(
+                f"message {index} contains image input that a text chat "
+                "template cannot execute; use MultimodalPrompt"
+            )
     tool_calls = normalized.get("tool_calls")
     if isinstance(tool_calls, list):
         fixed_calls = []
@@ -157,7 +218,10 @@ class ChatTemplate:
         add_generation_prompt: bool = True,
     ) -> str:
         return self._template.render(
-            messages=[_normalize_message(message) for message in messages],
+            messages=[
+                _normalize_message(message, index=index)
+                for index, message in enumerate(messages)
+            ],
             # None (not []) when absent: templates gate on `tools is not none`
             tools=list(tools) if tools else None,
             add_generation_prompt=add_generation_prompt,
