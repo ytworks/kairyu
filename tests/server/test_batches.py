@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import tracemalloc
+import weakref
 
 import httpx
 import pytest
@@ -290,36 +291,69 @@ async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeyp
     assert peak_task_count <= baseline_task_count + max_concurrency + 3
 
 
-async def test_worker_peak_memory_stays_bounded_for_large_batch(
+async def test_worker_retains_only_bounded_parsed_lines_for_large_batch(
     tmp_path, monkeypatch
 ):
+    import kairyu.batch.worker as worker_module
+
     line_count = 10_000
-    peak_limit_bytes = 4 * 1024 * 1024
+    max_concurrency = 4
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=4)
+    worker = BatchWorker(
+        store,
+        {"m": MockBackend()},
+        max_concurrency=max_concurrency,
+    )
     content = "\n".join(
         json.dumps({"custom_id": f"r{index}"}) for index in range(line_count)
     )
     file = store.save_file(content.encode(), "input.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
+    original_json_loads = json.loads
+    live_lines = 0
+    peak_live_lines = 0
+
+    class TrackedLine(dict):
+        pass
+
+    def track_line_release() -> None:
+        nonlocal live_lines
+        live_lines -= 1
+
+    def tracking_json_loads(payload):
+        nonlocal live_lines, peak_live_lines
+        value = original_json_loads(payload)
+        if not isinstance(value, dict) or "custom_id" not in value:
+            return value
+        line = TrackedLine(value)
+        live_lines += 1
+        peak_live_lines = max(peak_live_lines, live_lines)
+        weakref.finalize(line, track_line_release)
+        return line
+
+    class TrackingJson:
+        JSONDecodeError = json.JSONDecodeError
+        loads = staticmethod(tracking_json_loads)
 
     async def immediate_result(line, *args):
         return {"custom_id": line["custom_id"]}, None, None
 
+    monkeypatch.setattr(worker_module, "json", TrackingJson)
     monkeypatch.setattr(worker, "_run_line", immediate_result)
-    tracemalloc.start()
-    try:
-        await worker.process(job.id)
-        _, peak_bytes = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    await worker.process(job.id)
 
     finished = store.get_batch(job.id)
     assert finished.status == "completed"
     assert finished.request_counts.completed == line_count
-    # This fixed budget deliberately does not scale with the input size: the
-    # bounded pipeline should retain only its small queue and consumer pool.
-    assert peak_bytes < peak_limit_bytes
+    # Parsed input retention is bounded by the fixed queue, consumer pool, and
+    # one producer-local line; it cannot scale with the 10,000-line input.
+    expected_bound = (
+        max_concurrency * worker_module._INPUT_QUEUE_FACTOR
+        + max_concurrency
+        + 2
+    )
+    assert peak_live_lines <= expected_bound
+    assert live_lines == 0
     assert list((tmp_path / "files").glob("*.tmp")) == []
 
 

@@ -140,6 +140,7 @@ def test_ci_jobs_are_bounded_and_uv_uses_the_committed_lockfile() -> None:
     assert workflow["jobs"]["test"]["name"] == (
         "Portable CPU tests (Python ${{ matrix.python-version }})"
     )
+    assert workflow["jobs"]["test"]["strategy"]["fail-fast"] == "false"
     for name, job in workflow["jobs"].items():
         timeout = job.get("timeout-minutes")
         assert isinstance(timeout, str), name
