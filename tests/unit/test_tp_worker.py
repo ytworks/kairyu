@@ -86,6 +86,12 @@ class _DiagnosticRunner(_AuthorityRunner):
             "batches": 4,
             "tokens": 12,
         }
+        self.decode_page_table_cache_enabled = True
+        self.page_table_stats = {
+            "enabled": True,
+            "builds": 5,
+            "rows": 16,
+        }
 
     def set_batched_prefill_enabled(self, enabled: bool) -> None:
         self.batched_prefill_enabled = enabled
@@ -107,6 +113,17 @@ class _DiagnosticRunner(_AuthorityRunner):
         if reset:
             self.verification_stats["batches"] = 0
             self.verification_stats["tokens"] = 0
+        return result
+
+    def set_decode_page_table_cache_enabled(self, enabled: bool) -> None:
+        self.decode_page_table_cache_enabled = enabled
+        self.page_table_stats["enabled"] = enabled
+
+    def decode_page_table_cache_stats(self, *, reset: bool = False):
+        result = dict(self.page_table_stats)
+        if reset:
+            self.page_table_stats["builds"] = 0
+            self.page_table_stats["rows"] = 0
         return result
 
 
@@ -406,6 +423,89 @@ def test_verification_stats_rank_failure_is_gathered_without_control_hang():
         assert [worker.result(timeout=2) for worker in workers] == [0, 0]
 
     assert isinstance(driver.fatal_error, RuntimeError)
+
+
+def test_page_table_mode_and_stats_probe_reach_every_rank_and_loop_resumes():
+    control = FakeCommunicator.create_group(3)
+    model = FakeCommunicator.create_group(3)
+    local = tuple(
+        _DiagnosticRunner(
+            (17,) if rank == 0 else (999,),
+            sampling_owner=rank == 0,
+            sampler_present=rank == 0,
+            device=f"cuda:{rank}",
+        )
+        for rank in range(3)
+    )
+    driver = DistTPModelRunner(control[0], local[0], model[0])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        workers = [
+            pool.submit(worker_step_loop, control[rank], local[rank], model[rank])
+            for rank in (1, 2)
+        ]
+        try:
+            driver.set_decode_page_table_cache_enabled(False)
+            rows = driver.decode_page_table_cache_stats(reset=True)
+            sampled = driver.execute(
+                (ScheduledChunk("a", 1, True, 0),),
+                {"a": _snapshot("a")},
+            )
+        finally:
+            driver.shutdown()
+        assert [worker.result(timeout=2) for worker in workers] == [1, 1]
+
+    assert [row["rank"] for row in rows] == [0, 1, 2]
+    assert [row["device"] for row in rows] == ["cuda:0", "cuda:1", "cuda:2"]
+    assert all(row["stats"]["enabled"] is False for row in rows)
+    assert all(row["stats"]["builds"] == 5 for row in rows)
+    assert all(runner.page_table_stats["builds"] == 0 for runner in local)
+    assert all(
+        runner.decode_page_table_cache_enabled is False
+        for runner in local
+    )
+    assert sampled == {"a": ("rank-0-public-result",)}
+
+
+def test_page_table_stats_rank_failure_is_gathered_and_marks_driver_fatal():
+    control = FakeCommunicator.create_group(3, timeout_s=0.2)
+    model = FakeCommunicator.create_group(3, timeout_s=0.2)
+    local = [
+        _DiagnosticRunner(
+            (),
+            sampling_owner=rank == 0,
+            sampler_present=rank == 0,
+            device=f"cuda:{rank}",
+        )
+        for rank in range(3)
+    ]
+
+    def fail_stats(*, reset: bool = False):
+        raise RuntimeError("page-table probe exploded")
+
+    local[1].decode_page_table_cache_stats = fail_stats
+    driver = DistTPModelRunner(control[0], local[0], model[0])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        workers = [
+            pool.submit(
+                worker_step_loop,
+                control[rank],
+                local[rank],
+                model[rank],
+            )
+            for rank in (1, 2)
+        ]
+        with pytest.raises(
+            RuntimeError,
+            match=r"rank 1: RuntimeError: page-table probe exploded",
+        ):
+            driver.decode_page_table_cache_stats()
+        assert isinstance(driver.fatal_error, RuntimeError)
+        with pytest.raises(RuntimeError, match="unavailable"):
+            driver.decode_page_table_cache_stats()
+        control[0].broadcast(None, src=0)
+        assert [worker.result(timeout=2) for worker in workers] == [0, 0]
 
 
 def test_sampling_ownership_metadata_reports_missing_rank():
