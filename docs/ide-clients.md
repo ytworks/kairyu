@@ -29,7 +29,14 @@ Model ID:     <an ID returned by /v1/models>
 
 Cline's VS Code extension follows VS Code's proxy handling. Its CLI and
 JetBrains plugin document HTTP proxy support only, so a SOCKS-only validation
-should use the VS Code/Cursor extension.
+must use the VS Code/Cursor extension. Treat that as a client/environment gate,
+not as guaranteed SOCKS support: in a 2026-07-30 macOS test with Cline 4.0.12,
+the VS Code extension host detected the operating-system SOCKS5 proxy but
+Cline's OpenAI SDK returned `Connection error` before
+`POST /v1/chat/completions` reached Kairyu. The same tunnel returned 200 for
+`curl --socks5-hostname ... /v1/models`. An HTTP proxy supported by the editor,
+or an SSH local port forward for diagnosis, avoids relying on the extension
+host's experimental SOCKS path.
 
 ## Continue
 
@@ -78,4 +85,6 @@ curl --socks5-hostname localhost:1080 http://<kairyu-host>:<port>/v1/models
 
 Keep the serving port closed to the public network. The IDE request should
 traverse the SOCKS tunnel; a direct request from an untrusted network should
-remain unreachable.
+remain unreachable. Verify both the editor result and Kairyu access logs: a
+successful `/v1/models` curl proves the tunnel, but it does not prove that an
+editor extension's Node.js HTTP client uses that tunnel.
