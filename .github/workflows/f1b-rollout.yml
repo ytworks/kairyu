@@ -2,7 +2,6 @@ name: F1b zero-failure rollout
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
     paths:
       - ".github/workflows/f1b-rollout.yml"
       - "scripts/kind_rollout_gate.sh"
@@ -34,10 +33,6 @@ permissions:
 
 jobs:
   rollout:
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.action != 'labeled' ||
-      github.event.label.name == 'f1b-formal'
     concurrency:
       group: f1b-zero-failure-rollout-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'formal' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -47,9 +42,8 @@ jobs:
       F1B_RESULTS_DIR: bench/results/f1b-zero-failure-rollout
       PROFILE: >-
         ${{
-          github.event_name == 'workflow_dispatch' && inputs.profile ||
-          contains(github.event.pull_request.labels.*.name, 'f1b-formal') && 'formal' ||
-          'smoke'
+          github.event_name == 'pull_request' && 'smoke' ||
+          inputs.profile
         }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

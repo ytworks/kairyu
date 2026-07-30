@@ -21,6 +21,7 @@ VALIDATOR = Path("scripts/validate_compose_binds.py").resolve()
 COMPOSE_SMOKE = Path("scripts/compose_smoke.sh")
 WEBUI_SMOKE = Path("scripts/webui_smoke.sh")
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
+DOCKERFILE = Path("Dockerfile")
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -392,7 +393,7 @@ def test_smoke_validation_failure_never_invokes_docker_cleanup(tmp_path):
 def test_ci_and_default_smoke_fail_fast_through_validator():
     smoke = COMPOSE_SMOKE.read_text(encoding="utf-8")
     assert smoke.index("validate_compose_binds.py") < smoke.index('echo "== up =="')
-    assert 'uv run --project "$REPO_ROOT" --no-dev python' in smoke
+    assert 'uv run --frozen --project "$REPO_ROOT" --no-dev' in smoke
 
     compose_steps = _load_yaml(CI_WORKFLOW)["jobs"]["compose-smoke"]["steps"]
     validation_index = next(
@@ -403,7 +404,7 @@ def test_ci_and_default_smoke_fail_fast_through_validator():
     smoke_index = next(
         index
         for index, step in enumerate(compose_steps)
-        if step.get("name") == "Compose smoke drill"
+        if step.get("name") == "Compose integration test"
     )
     assert validation_index < smoke_index
     assert any(
@@ -412,9 +413,41 @@ def test_ci_and_default_smoke_fail_fast_through_validator():
     )
     validation_command = compose_steps[validation_index]["run"]
     assert validation_command.startswith(
-        "uv run --no-dev python scripts/validate_compose_binds.py"
+        "uv run --frozen --no-dev python scripts/validate_compose_binds.py"
     )
     assert "deploy/compose/docker-compose*.yaml" in validation_command
+
+
+def test_compose_recovery_allows_detection_race_but_asserts_the_result():
+    smoke = COMPOSE_SMOKE.read_text(encoding="utf-8")
+
+    assert "ulimit -n 65536" in smoke
+    assert "|| true # eat the eject trigger" not in smoke
+    assert 'case "$convergence_status" in' in smoke
+    assert "200|502) ;;" in smoke
+    assert (
+        '*) fail "request during ejection convergence returned '
+        '$convergence_status" ;;'
+        in smoke
+    )
+    assert (
+        "wait_for_metric "
+        '\'kairyu_replica_healthy{pool="llama",replica="0"}\' "0.0" 10'
+        in smoke
+    )
+    assert (
+        "wait_for_metric "
+        '\'kairyu_replica_healthy{pool="llama",replica="0"}\' "1.0" 30'
+        in smoke
+    )
+    assert '[[ "$(chat "user-$i")" == 200 ]]' in smoke
+
+
+def test_cpu_image_bounds_uv_install_concurrency_for_high_core_builders():
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "UV_COMPILE_BYTECODE=1" in dockerfile
+    assert "UV_CONCURRENT_INSTALLS=8" in dockerfile
 
 
 def test_compose_validator_imports_without_engine_extra():
@@ -513,7 +546,7 @@ def test_webui_smoke_tears_down_even_if_response_cleanup_fails(tmp_path):
     )
 
 
-def test_ci_runs_webui_smoke_after_existing_compose_drill():
+def test_ci_runs_webui_smoke_after_compose_integration_test():
     assert WEBUI_SMOKE.is_file(), "WebUI smoke script is missing"
     assert WEBUI_SMOKE.stat().st_mode & 0o111
     smoke = WEBUI_SMOKE.read_text(encoding="utf-8")
@@ -530,7 +563,7 @@ def test_ci_runs_webui_smoke_after_existing_compose_drill():
     default_index = next(
         index
         for index, step in enumerate(compose_steps)
-        if step.get("name") == "Compose smoke drill"
+        if step.get("name") == "Compose integration test"
     )
     webui_index = next(
         index

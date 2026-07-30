@@ -8,8 +8,6 @@ from kairyu import SamplingParams
 from kairyu.engine import vllm_backend
 from kairyu.engine.vllm_backend import VLLMBackend, to_vllm_sampling_kwargs
 
-VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
-
 
 def test_module_imports_without_vllm():
     assert vllm_backend is not None  # import at top of file already proves this
@@ -109,13 +107,21 @@ def test_async_engine_default_backend_forwards_tensor_parallel_size_to_vllm(monk
     assert captured["tensor_parallel_size"] == 2
 
 
-@pytest.mark.skipif(VLLM_INSTALLED, reason="vLLM installed; error path not applicable")
-def test_instantiation_without_vllm_raises_clear_error():
+def test_instantiation_without_vllm_raises_clear_error(monkeypatch):
+    real_import = vllm_backend.importlib.import_module
+
+    def import_without_vllm(name):
+        if name == "vllm":
+            raise ImportError(name)
+        return real_import(name)
+
+    monkeypatch.setattr(vllm_backend.importlib, "import_module", import_without_vllm)
     with pytest.raises(RuntimeError, match="vllm"):
         VLLMBackend(model="meta-llama/Llama-3.1-8B")
 
 
-@pytest.mark.skipif(not VLLM_INSTALLED, reason="requires vLLM")
+@pytest.mark.vllm
+@pytest.mark.hf_hub
 async def test_generate_roundtrip_with_real_vllm():
     backend = VLLMBackend(model="facebook/opt-125m")
     from kairyu.engine.backend import GenerationRequest

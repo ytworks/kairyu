@@ -123,18 +123,20 @@ GPU-only remainder (design m5 §4.2).
   rank 0's fixed-layout device token before another forward. Run:
 
   ```bash
-  uv run pytest tests/unit/test_tp_sampling_authority.py tests/unit/test_tp_worker.py -q
-  uv run pytest tests/dist/test_distributed.py -k 'tp2_rank0_sampling_matrix or tp_structured_sampling' -v --no-cov
-  CUDA_VISIBLE_DEVICES=0,1 uv run pytest -m gpu tests/gpu/test_tp_sampling_owner_nccl.py -v --no-cov
-  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run python bench/tp_sampling_owner_bench.py \
+  uv run --frozen pytest --fail-on-skip tests/unit/test_tp_sampling_authority.py tests/unit/test_tp_worker.py -q
+  uv run --frozen pytest --fail-on-skip tests/dist/test_distributed.py -k 'tp2_rank0_sampling_matrix or tp_structured_sampling' -v --no-cov
+  CUDA_VISIBLE_DEVICES=0,1 uv run --frozen python scripts/test_prerequisites.py \
+    --min-gpus 2 --require-nccl --require-module transformers
+  CUDA_VISIBLE_DEVICES=0,1 uv run --frozen pytest --fail-on-skip -m gpu tests/gpu/test_tp_sampling_owner_nccl.py -v --no-cov
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run --frozen python bench/tp_sampling_owner_bench.py \
     --world-size 8 --assert-gate \
     --output bench/results/issue-225-tp-sampling-comm-<gpu>-<date>.json
-  uv run python bench/tp_sampling_owner_bench.py \
+  uv run --frozen python bench/tp_sampling_owner_bench.py \
     --verify bench/results/issue-225-tp-sampling-comm-<gpu>-<date>.json --assert-gate
-  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run python bench/tp_sampling_owner_qwen.py \
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run --frozen python bench/tp_sampling_owner_qwen.py \
     --model-path /models/qwen3-32b --assert-gate \
     --output bench/results/issue-225-tp-sampling-qwen3-32b-<gpu>-<date>.json
-  uv run python bench/tp_sampling_owner_qwen.py \
+  uv run --frozen python bench/tp_sampling_owner_qwen.py \
     --verify bench/results/issue-225-tp-sampling-qwen3-32b-<gpu>-<date>.json \
     --assert-gate
   ```

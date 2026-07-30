@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Runbook §7 / G2 B-gates: 2-node KV transport over the real fabric.
+# Runbook §7 local prerequisite: two processes plus TCP-loopback KV transfer.
+# This script does not claim 2-node/NCCL/RDMA fabric evidence.
 source "$(dirname "$0")/_lib.sh"
-run uv run pytest tests/dist/test_pd_two_process.py -v
-run uv run python bench/kv_transfer_bench.py
+preflight --require-module transformers
+pytest_no_skip tests/dist/test_pd_two_process.py -v
+run uv run --frozen python bench/kv_transfer_bench.py

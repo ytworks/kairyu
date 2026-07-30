@@ -32,8 +32,6 @@ def smoke_artifact(
     }
     frozen_source = {
         "commit": "a" * 40,
-        "expected_commit": None,
-        "expected_commit_matches": True,
         "git_clean_at_start": True,
         "files": [
             {"path": path, "sha256": source_hashes[path]}
@@ -44,12 +42,7 @@ def smoke_artifact(
     f2a.source_descriptor = lambda: frozen_source
     f2a.source_end_descriptor = lambda: {
         key: frozen_source[key]
-        for key in (
-            "commit",
-            "expected_commit",
-            "expected_commit_matches",
-            "files",
-        )
+        for key in ("commit", "files")
     }
     f2a._git_is_ancestor = lambda _commit: True
     f2a._git_blob_sha256 = (
@@ -128,41 +121,128 @@ def test_trace_and_initial_cache_are_deterministic() -> None:
     ]
 
 
-def test_formal_context_requires_typed_github_identity() -> None:
+def test_formal_context_ignores_optional_github_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     formal = f2a.profile_config("formal")
+    source_hashes = {
+        path: f2a._sha256_file(f2a._REPO_ROOT / path)
+        for path in f2a._SOURCE_PATHS
+    }
     source = {
         "commit": "a" * 40,
-        "expected_commit": "a" * 40,
-        "expected_commit_matches": True,
+        "git_clean_at_start": True,
+        "files": [
+            {"path": path, "sha256": source_hashes[path]}
+            for path in f2a._SOURCE_PATHS
+        ],
     }
-    github = {
-        "GITHUB_RUN_ID": "123",
-        "GITHUB_RUN_ATTEMPT": "2",
-        "GITHUB_EVENT_NAME": "pull_request",
-        "GITHUB_SHA": "B" * 40,
+    environment = {
+        "platform": "local-test-platform",
+        "python": "3.12.test",
+        "cpu_count": 8,
+        "sched_affinity": [0, 1],
     }
+    monkeypatch.setattr(f2a, "_git_is_ancestor", lambda _commit: True)
+    monkeypatch.setattr(
+        f2a,
+        "_git_output",
+        lambda *_args: "a" * 40,
+    )
+    monkeypatch.setattr(
+        f2a,
+        "_git_blob_sha256",
+        lambda _commit, path: source_hashes[path],
+    )
 
+    assert f2a._formal_context_complete(formal, source, environment)
     assert f2a._formal_context_complete(
-        formal, source, {"github": github}
+        formal,
+        source,
+        {
+            **environment,
+            "github": {
+                "GITHUB_RUN_ID": object(),
+                "GITHUB_EVENT_NAME": "not-a-github-event",
+            },
+        },
     )
     assert f2a._formal_context_complete(
         f2a.profile_config("smoke"), {}, {}
     )
 
-    invalid_values = {
-        "GITHUB_RUN_ID": ("0", "abc"),
-        "GITHUB_RUN_ATTEMPT": ("0", "-1"),
-        "GITHUB_EVENT_NAME": ("push", ""),
-        "GITHUB_SHA": ("a" * 39, "g" * 40),
+
+def test_formal_context_rejects_uncommitted_source_or_invalid_local_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    formal = f2a.profile_config("formal")
+    source_hashes = {
+        path: f2a._sha256_file(f2a._REPO_ROOT / path)
+        for path in f2a._SOURCE_PATHS
     }
-    for field, values in invalid_values.items():
-        for value in values:
-            invalid_github = {**github, field: value}
-            assert not f2a._formal_context_complete(
-                formal,
-                source,
-                {"github": invalid_github},
-            )
+    source = {
+        "commit": "a" * 40,
+        "git_clean_at_start": True,
+        "files": [
+            {"path": path, "sha256": source_hashes[path]}
+            for path in f2a._SOURCE_PATHS
+        ],
+    }
+    environment = {
+        "platform": "local-test-platform",
+        "python": "3.12.test",
+        "cpu_count": 8,
+        "sched_affinity": [0, 1],
+    }
+    monkeypatch.setattr(f2a, "_git_is_ancestor", lambda _commit: True)
+    monkeypatch.setattr(
+        f2a,
+        "_git_output",
+        lambda *_args: "a" * 40,
+    )
+    monkeypatch.setattr(
+        f2a,
+        "_git_blob_sha256",
+        lambda _commit, path: source_hashes[path],
+    )
+
+    assert not f2a._formal_context_complete(
+        formal,
+        {**source, "git_clean_at_start": False},
+        environment,
+    )
+    assert not f2a._formal_context_complete(
+        formal,
+        {**source, "commit": "a" * 39},
+        environment,
+    )
+    assert not f2a._formal_context_complete(
+        formal,
+        {**source, "commit": "b" * 40},
+        environment,
+    )
+    bad_files = [dict(item) for item in source["files"]]
+    bad_files[0]["sha256"] = "f" * 64
+    assert not f2a._formal_context_complete(
+        formal,
+        {**source, "files": bad_files},
+        environment,
+    )
+
+    invalid_environments = (
+        {**environment, "platform": ""},
+        {**environment, "python": ""},
+        {**environment, "cpu_count": 0},
+        {**environment, "cpu_count": True},
+        {**environment, "sched_affinity": []},
+        {**environment, "sched_affinity": [-1]},
+    )
+    for invalid_environment in invalid_environments:
+        assert not f2a._formal_context_complete(
+            formal,
+            source,
+            invalid_environment,
+        )
 
 
 def test_independent_replay_accepts_the_frozen_smoke_artifact(
@@ -181,6 +261,7 @@ def test_independent_replay_accepts_the_frozen_smoke_artifact(
     result = f2a.verify_artifact(smoke_artifact)
 
     assert result["passed"], result["errors"]
+    assert f2a.SCHEMA_VERSION == "kairyu.f2a.prefix-routing.v4"
     assert result["checks"]["every_actual_selection_and_cache_hit_replays"]
     assert result["checks"]["blank_hints_replay_as_session_only_hrw"]
     config = f2a.profile_config("smoke")
@@ -219,6 +300,12 @@ def test_independent_replay_accepts_the_frozen_smoke_artifact(
     assert (
         result["metrics"]["uniform"]["paired_ratio_geometric_mean"]
         >= 0.99
+    )
+    assert result["metrics"]["uniform"]["timing_diagnostics_complete"]
+    assert all(result["diagnostics"].values())
+    assert not (
+        set(result["diagnostics"])
+        & set(f2a.threshold_checks(result["metrics"], config))
     )
 
 
@@ -282,6 +369,62 @@ def test_replay_rejects_manifest_metric_tampering(
 
     assert not result["passed"]
     assert not result["checks"]["manifest_metrics_recomputed_exactly"]
+
+
+def test_replay_rejects_manifest_diagnostic_tampering(
+    smoke_artifact: Path, tmp_path: Path
+) -> None:
+    tampered_dir = tmp_path / "diagnostic-tamper"
+    shutil.copytree(smoke_artifact.parent, tampered_dir)
+    manifest_path = tampered_dir / f2a.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    diagnostic_name = next(iter(manifest["diagnostic_checks"]))
+    manifest["diagnostic_checks"][diagnostic_name] = not manifest[
+        "diagnostic_checks"
+    ][diagnostic_name]
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    result = f2a.verify_artifact(manifest_path)
+
+    assert not result["passed"]
+    assert not result["checks"][
+        "manifest_diagnostic_checks_recomputed_exactly"
+    ]
+
+
+def test_recomputed_false_diagnostics_do_not_fail_artifact(
+    smoke_artifact: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostic_dir = tmp_path / "false-diagnostics"
+    shutil.copytree(smoke_artifact.parent, diagnostic_dir)
+    manifest_path = diagnostic_dir / f2a.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    false_diagnostics = {
+        name: False for name in manifest["diagnostic_checks"]
+    }
+    manifest["diagnostic_checks"] = false_diagnostics
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        f2a,
+        "diagnostic_checks",
+        lambda _metrics, _config: false_diagnostics,
+    )
+
+    result = f2a.verify_artifact(manifest_path)
+
+    assert result["passed"], result["errors"]
+    assert result["diagnostics"] == false_diagnostics
+    assert result["checks"][
+        "manifest_diagnostic_checks_recomputed_exactly"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -485,25 +628,12 @@ def test_slo_miss_stays_in_dispatch_goodput_denominator(
     )
 
 
-def test_thresholds_use_exact_ratio_p99_and_one_percent_noninferiority() -> None:
+def test_binding_thresholds_exclude_host_timing_diagnostics() -> None:
     config = f2a.profile_config("smoke")
-    passing = {
+    metrics = {
         "shared": {
             "hrw_request_hits": 1,
             "hit_rate_ratio": 2.0,
-            "hit_rate_ratio_infinite": False,
-        },
-        "placement": {"prefix_worst_trace_p99_ms": 9.999999},
-        "uniform": {
-            "paired_ratio_exact_median_lcb95": 0.99,
-            "paired_ratio_geometric_mean": 0.99,
-            "rounds_at_or_above_noninferiority_floor": 8,
-        },
-    }
-    failing = {
-        "shared": {
-            "hrw_request_hits": 0,
-            "hit_rate_ratio": 1.999999,
             "hit_rate_ratio_infinite": False,
         },
         "placement": {"prefix_worst_trace_p99_ms": 10.0},
@@ -514,6 +644,62 @@ def test_thresholds_use_exact_ratio_p99_and_one_percent_noninferiority() -> None
         },
     }
 
-    assert all(f2a.threshold_checks(passing, config).values())
-    assert not any(f2a.threshold_checks(failing, config).values())
+    assert all(f2a.threshold_checks(metrics, config).values())
+    assert not any(f2a.diagnostic_checks(metrics, config).values())
+    assert set(f2a.threshold_checks(metrics, config)) == {
+        "shared_prefix_hit_rate_ratio_at_least_2",
+        "session_hrw_shared_hits_are_nonzero",
+    }
+
+
+def test_diagnostics_use_exact_p99_and_one_percent_noninferiority() -> None:
+    config = f2a.profile_config("smoke")
+    passing = {
+        "shared": {},
+        "placement": {"prefix_worst_trace_p99_ms": 9.999999},
+        "uniform": {
+            "paired_ratio_exact_median_lcb95": 0.99,
+            "paired_ratio_geometric_mean": 0.99,
+            "rounds_at_or_above_noninferiority_floor": 8,
+        },
+    }
+    failing = {
+        "shared": {},
+        "placement": {"prefix_worst_trace_p99_ms": 10.0},
+        "uniform": {
+            "paired_ratio_exact_median_lcb95": 0.989999,
+            "paired_ratio_geometric_mean": 0.989999,
+            "rounds_at_or_above_noninferiority_floor": 7,
+        },
+    }
+
+    assert all(f2a.diagnostic_checks(passing, config).values())
+    assert not any(f2a.diagnostic_checks(failing, config).values())
     assert config.uniform_equivalence_margin == 0.01
+
+
+def test_zero_slo_success_makes_timing_diagnostics_nonbinding(
+    smoke_artifact: Path,
+) -> None:
+    config = f2a.profile_config("smoke")
+    rows = json.loads(
+        json.dumps(f2a._read_jsonl(smoke_artifact.parent / f2a.RAW_NAME))
+    )
+    placement_slo_ns = int(config.placement_p99_limit_ms * 1_000_000)
+    for row in rows:
+        if row.get("type") == "placement" and row.get("trace") == "uniform":
+            row["placement_latency_ns"] = placement_slo_ns
+
+    metrics = f2a.derive_metrics(rows, config)
+
+    assert metrics["uniform"]["timing_diagnostics_complete"] is False
+    assert metrics["uniform"]["paired_ratio_exact_median_lcb95"] is None
+    assert metrics["uniform"]["paired_ratio_geometric_mean"] is None
+    assert all(f2a.threshold_checks(metrics, config).values())
+    diagnostics = f2a.diagnostic_checks(metrics, config)
+    assert not diagnostics["prefix_shared_and_uniform_p99_below_10ms"]
+    assert not diagnostics["uniform_exact_median_goodput_lcb_noninferior"]
+    assert not diagnostics[
+        "uniform_geometric_mean_goodput_guard_noninferior"
+    ]
+    assert not diagnostics["uniform_paired_goodput_sign_gate"]

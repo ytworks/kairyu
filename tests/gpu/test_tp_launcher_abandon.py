@@ -52,7 +52,10 @@ def test_failed_nccl_start_leaves_nothing_behind(indivisible_model):
     assert not dist.is_initialized()
 
     started = time.monotonic()
-    with pytest.raises(ValueError, match="num_kv_heads"):
+    with pytest.raises(
+        ValueError,
+        match=r"num_key_value_heads=2 not divisible by tp=4",
+    ):
         DistTPLauncher(
             indivisible_model,
             tp=4,
@@ -75,7 +78,10 @@ def test_the_process_can_still_launch_afterwards(indivisible_model):
     from kairyu.engine.core.worker import DistTPLauncher
 
     _require_devices(OVERCOMMIT_TP)
-    with pytest.raises(ValueError, match="num_kv_heads"):
+    with pytest.raises(
+        ValueError,
+        match=r"num_key_value_heads=2 not divisible by tp=4",
+    ):
         DistTPLauncher(
             indivisible_model, tp=4, num_pages=64, page_size=4,
             vocab=[f"t{i}" for i in range(256)],
@@ -92,7 +98,7 @@ def test_the_process_can_still_launch_afterwards(indivisible_model):
 def test_a_rank_local_failure_still_returns_and_reaps(indivisible_model, monkeypatch):
     """The case the symmetric gate cannot reach (review [P1] on #129).
 
-    `num_kv_heads` fails identically on every rank, so the peers are already gone
+    `num_key_value_heads` fails identically on every rank, so the peers are already gone
     when rank 0 tears down. Patching `build_tp_runner` in THIS process only is
     rank-local by construction — the spawned children import the module fresh —
     so the workers survive, reach their handshake broadcast, and sit there while

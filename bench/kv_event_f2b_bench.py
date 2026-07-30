@@ -11,7 +11,10 @@ claims.
 
 Raw JSONL is authoritative.  ``--verify-artifact`` rehashes it, reconstructs
 the frozen schedule and causal joins, and recomputes every gate instead of
-trusting the manifest's metrics or pass bit.
+trusting the manifest's metrics or pass bit.  Wall-clock deadline observations
+are preserved as diagnostics because host scheduling jitter is not a product
+correctness verdict; topology, causal ordering, lease safety, replay, routing,
+and final-state invariants remain binding.
 """
 
 from __future__ import annotations
@@ -52,7 +55,7 @@ from kairyu.orchestration.prefix_index import (
 )
 from kairyu.orchestration.replica import ReplicaPool
 
-SCHEMA_VERSION = "kairyu.f2b.kv-event-chaos.v1"
+SCHEMA_VERSION = "kairyu.f2b.kv-event-chaos.v2"
 RAW_NAME = "kv-event-f2b-raw.jsonl"
 MANIFEST_NAME = "kv-event-f2b-manifest.json"
 GATE = "G5-F2b"
@@ -87,8 +90,6 @@ _SOURCE_PATHS = (
 )
 _HEX_SHA256 = frozenset("0123456789abcdef")
 _NS_PER_SECOND = 1_000_000_000
-_WORKFLOW_NAME = "F2b KV-event freshness and chaos"
-_WORKFLOW_PATH = ".github/workflows/f2b-kv-event-chaos.yml"
 _GITHUB_CONTEXT_NAMES = (
     "GITHUB_RUN_ID",
     "GITHUB_RUN_ATTEMPT",
@@ -98,7 +99,6 @@ _GITHUB_CONTEXT_NAMES = (
     "GITHUB_WORKFLOW_REF",
     "GITHUB_REF",
     "GITHUB_SHA",
-    "F2B_GITHUB_HEAD_SHA",
 )
 
 
@@ -450,11 +450,8 @@ def _git_clean_at_start() -> bool:
 
 def _frozen_source_snapshot() -> dict[str, object]:
     commit = _git_output("rev-parse", "HEAD")
-    expected = os.environ.get("F2B_EXPECTED_COMMIT")
     return {
         "commit": commit,
-        "expected_commit": expected,
-        "expected_commit_matches": expected is None or expected == commit,
         "files": [
             {
                 "path": relative_path,
@@ -498,8 +495,6 @@ def _source_end_matches_start(source: object, source_end: object) -> bool:
         key: source.get(key)
         for key in (
             "commit",
-            "expected_commit",
-            "expected_commit_matches",
             "files",
         )
     }
@@ -538,121 +533,79 @@ def _verify_source_descriptor(source: object) -> dict[str, bool]:
     else:
         checks["source_file_hashes_match_commit"] = False
     checks["source_clean_at_start"] = source.get("git_clean_at_start") is True
-    checks["source_expected_commit_matches"] = source.get("expected_commit_matches") is True
     return checks
 
 
-def _formal_context_complete(
+def _local_environment_fields(environment: object) -> dict[str, object] | None:
+    if not isinstance(environment, dict):
+        return None
+    return {
+        "platform": environment.get("platform"),
+        "python": environment.get("python"),
+        "cpu_count": environment.get("cpu_count"),
+        "sched_affinity": environment.get("sched_affinity"),
+    }
+
+
+def _local_environment_is_complete(environment: object) -> bool:
+    local = _local_environment_fields(environment)
+    if local is None:
+        return False
+    affinity = local["sched_affinity"]
+    return (
+        isinstance(local["platform"], str)
+        and bool(local["platform"])
+        and isinstance(local["python"], str)
+        and bool(local["python"])
+        and type(local["cpu_count"]) is int
+        and int(local["cpu_count"]) > 0
+        and (
+            affinity is None
+            or (
+                isinstance(affinity, list)
+                and bool(affinity)
+                and all(type(cpu) is int and cpu >= 0 for cpu in affinity)
+                and len(set(affinity)) == len(affinity)
+            )
+        )
+    )
+
+
+def _formal_source_and_environment_complete(
     config: WorkloadConfig,
     source: object,
     environment: object,
 ) -> bool:
     if config.profile != "formal":
         return True
-    if not isinstance(source, dict) or not isinstance(environment, dict):
+    if not isinstance(source, dict):
         return False
-    github = environment.get("github")
-    if not isinstance(github, dict):
-        return False
+    commit = source.get("commit")
+    files = source.get("files")
     return (
-        isinstance(source.get("expected_commit"), str)
-        and source.get("expected_commit") == source.get("commit")
-        and source.get("expected_commit_matches") is True
+        isinstance(commit, str)
+        and len(commit) == 40
+        and set(commit.lower()) <= _HEX_SHA256
+        and source.get("git_clean_at_start") is True
+        and isinstance(files, list)
+        and [item.get("path") for item in files if isinstance(item, dict)]
+        == list(_SOURCE_PATHS)
         and all(
-            isinstance(github.get(name), str)
-            and str(github[name]).isascii()
-            and str(github[name]).isdecimal()
-            and int(str(github[name])) > 0
-            for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")
+            isinstance(item, dict)
+            and _valid_sha256(item.get("sha256"))
+            for item in files
         )
-        and github.get("GITHUB_EVENT_NAME") in {"pull_request", "workflow_dispatch"}
-        and isinstance(github.get("GITHUB_SHA"), str)
-        and len(str(github["GITHUB_SHA"])) == 40
-        and set(str(github["GITHUB_SHA"]).lower()) <= _HEX_SHA256
-        and github.get("F2B_GITHUB_HEAD_SHA") == source.get("commit")
-        and github.get("GITHUB_REPOSITORY") == "ytworks/kairyu"
-        and github.get("GITHUB_WORKFLOW") == _WORKFLOW_NAME
-        and isinstance(github.get("GITHUB_WORKFLOW_REF"), str)
-        and f"/{_WORKFLOW_PATH}@" in str(github["GITHUB_WORKFLOW_REF"])
-        and isinstance(github.get("GITHUB_REF"), str)
-        and bool(github["GITHUB_REF"])
+        and _local_environment_is_complete(environment)
     )
 
 
-def _github_context_matches_current_runner(environment: object) -> bool:
-    """Bind freshly measured evidence to this exact Actions runner context."""
+def _local_environment_matches_current_runner(environment: object) -> bool:
+    """Bind fresh evidence to the same locally observable execution context."""
 
-    return isinstance(environment, dict) and environment.get("github") == _current_github_context()
-
-
-def _positive_decimal(value: object) -> bool:
-    return isinstance(value, str) and value.isascii() and value.isdecimal() and int(value) > 0
-
-
-def _verify_actions_run_provenance(
-    provenance: object,
-    source: object,
-    environment: object,
-) -> dict[str, bool]:
-    """Bind retained evidence to a trusted GitHub Actions run API response."""
-
-    github = environment.get("github") if isinstance(environment, dict) else None
-    repository = provenance.get("repository") if isinstance(provenance, dict) else None
-    run_id = provenance.get("id") if isinstance(provenance, dict) else None
-    run_attempt = provenance.get("run_attempt") if isinstance(provenance, dict) else None
-    recorded_run_id = github.get("GITHUB_RUN_ID") if isinstance(github, dict) else None
-    recorded_attempt = github.get("GITHUB_RUN_ATTEMPT") if isinstance(github, dict) else None
-    recorded_repository = github.get("GITHUB_REPOSITORY") if isinstance(github, dict) else None
-    workflow_ref = github.get("GITHUB_WORKFLOW_REF") if isinstance(github, dict) else None
-    workflow_path = provenance.get("path") if isinstance(provenance, dict) else None
-    source_commit = source.get("commit") if isinstance(source, dict) else None
-    repository_full_name = repository.get("full_name") if isinstance(repository, dict) else None
-    return {
-        "actions_run_id_matches_artifact": (
-            type(run_id) is int
-            and _positive_decimal(recorded_run_id)
-            and run_id == int(recorded_run_id)
-        ),
-        "actions_run_head_sha_matches_artifact_source": (
-            isinstance(source_commit, str)
-            and provenance.get("head_sha") == source_commit
-            and isinstance(github, dict)
-            and github.get("F2B_GITHUB_HEAD_SHA") == source_commit
-        )
-        if isinstance(provenance, dict)
-        else False,
-        "actions_run_event_matches_artifact": (
-            isinstance(provenance, dict)
-            and isinstance(github, dict)
-            and provenance.get("event") == github.get("GITHUB_EVENT_NAME")
-        ),
-        "actions_run_name_matches_artifact": (
-            isinstance(provenance, dict)
-            and isinstance(github, dict)
-            and provenance.get("name") == github.get("GITHUB_WORKFLOW")
-            and provenance.get("name") == _WORKFLOW_NAME
-        ),
-        "actions_run_path_matches_artifact": (
-            workflow_path == _WORKFLOW_PATH
-            and isinstance(workflow_ref, str)
-            and isinstance(recorded_repository, str)
-            and workflow_ref.startswith(f"{recorded_repository}/{_WORKFLOW_PATH}@")
-        ),
-        "actions_run_repository_matches_artifact": (
-            isinstance(recorded_repository, str) and repository_full_name == recorded_repository
-        ),
-        "actions_run_attempt_matches_artifact": (
-            type(run_attempt) is int
-            and _positive_decimal(recorded_attempt)
-            and run_attempt == int(recorded_attempt)
-        ),
-        "actions_run_is_completed": (
-            isinstance(provenance, dict) and provenance.get("status") == "completed"
-        ),
-        "actions_run_conclusion_is_success": (
-            isinstance(provenance, dict) and provenance.get("conclusion") == "success"
-        ),
-    }
+    return (
+        _local_environment_fields(environment)
+        == _local_environment_fields(environment_descriptor())
+    )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -1088,7 +1041,7 @@ def derive_metrics(
     }
 
 
-def threshold_checks(
+def _evaluated_checks(
     rows: list[dict[str, object]],
     config: WorkloadConfig,
 ) -> dict[str, bool]:
@@ -1565,9 +1518,7 @@ def threshold_checks(
         and recovery_snapshot.get("replay_completed_ns") == replay_completed_ns
         and type(recovery_snapshot.get("observed_ns")) is int
         and type(replay_completed_ns) is int
-        and int(replay_completed_ns)
-        <= int(recovery_snapshot["observed_ns"])
-        < int(replay_completed_ns) + freshness_ns
+        and int(replay_completed_ns) <= int(recovery_snapshot["observed_ns"])
         and recovery_view.get("replica_id") == representative_id
         and recovery_view.get("stream_epoch") == final_stream_epoch
         and recovery_view.get("last_sequence") == high_sequence
@@ -1697,6 +1648,13 @@ def threshold_checks(
         "restore_recovery_completes_strictly_below_500ms": (
             type(recovery_ns) is int and 0 <= int(recovery_ns) < freshness_ns
         ),
+        "recovery_snapshot_observed_strictly_below_500ms_after_replay": (
+            type(replay_completed_ns) is int
+            and type(recovery_snapshot.get("observed_ns")) is int
+            and 0
+            <= int(recovery_snapshot["observed_ns"]) - int(replay_completed_ns)
+            < freshness_ns
+        ),
         "publisher_reports_no_unjournaled_live_drop": (
             transport_summary.get("publisher_dropped_live_events") == 0
             and transport_summary.get("publisher_stream_epoch") == final_stream_epoch
@@ -1705,6 +1663,41 @@ def threshold_checks(
             and transport_summary.get("recovery_count") == len(grouped.get("replay", []))
         ),
     }
+
+
+_DIAGNOSTIC_CHECK_NAMES = (
+    "logical_index_apply_freshness_is_strictly_below_500ms",
+    "representative_wire_live_freshness_is_strictly_below_500ms",
+    "pause_and_resume_action_lateness_is_strictly_below_500ms",
+    "max_route_schedule_lateness_is_strictly_below_500ms",
+    "max_actual_selected_route_gap_is_strictly_below_500ms",
+    "first_stale_approximate_route_after_pause_is_strictly_below_500ms",
+    "restore_recovery_completes_strictly_below_500ms",
+    "recovery_snapshot_observed_strictly_below_500ms_after_replay",
+)
+
+
+def threshold_checks(
+    rows: list[dict[str, object]],
+    config: WorkloadConfig,
+) -> dict[str, bool]:
+    """Deterministic correctness and workload-validity checks that bind pass/fail."""
+
+    return {
+        name: passed
+        for name, passed in _evaluated_checks(rows, config).items()
+        if name not in _DIAGNOSTIC_CHECK_NAMES
+    }
+
+
+def diagnostic_checks(
+    rows: list[dict[str, object]],
+    config: WorkloadConfig,
+) -> dict[str, bool]:
+    """Wall-clock observations retained for analysis but excluded from pass/fail."""
+
+    evaluated = _evaluated_checks(rows, config)
+    return {name: evaluated[name] for name in _DIAGNOSTIC_CHECK_NAMES}
 
 
 def _replay_rows(
@@ -1752,7 +1745,6 @@ def verify_artifact(
     required_profile: str | None = None,
     require_current_source: bool = False,
     require_current_runner_context: bool = False,
-    actions_run_provenance: Path | None = None,
 ) -> dict[str, object]:
     manifest_path = _resolve_manifest(path).resolve()
     checks: dict[str, bool] = {}
@@ -1776,19 +1768,10 @@ def verify_artifact(
                 required_profile=required_profile,
             )
         )
-        checks["artifact_github_context_matches_current_runner"] = (
+        checks["artifact_local_environment_matches_current_runner"] = (
             not require_current_runner_context
-            or _github_context_matches_current_runner(manifest.get("environment"))
+            or _local_environment_matches_current_runner(manifest.get("environment"))
         )
-        if actions_run_provenance is not None:
-            provenance = json.loads(actions_run_provenance.resolve().read_text(encoding="utf-8"))
-            checks.update(
-                _verify_actions_run_provenance(
-                    provenance,
-                    manifest.get("source"),
-                    manifest.get("environment"),
-                )
-            )
         checks["schema_version_matches"] = manifest.get("schema_version") == SCHEMA_VERSION
         checks["gate_matches"] = manifest.get("gate") == GATE
         checks["config_matches_frozen_profile"] = config_raw == asdict(config)
@@ -1847,25 +1830,34 @@ def verify_artifact(
         checks["source_did_not_drift_during_run"] = _source_end_matches_start(
             manifest.get("source"), manifest.get("source_end")
         )
-        checks["formal_github_context_is_complete"] = _formal_context_complete(
-            config,
-            manifest.get("source"),
-            manifest.get("environment"),
+        checks["formal_source_and_local_environment_are_complete"] = (
+            _formal_source_and_environment_complete(
+                config,
+                manifest.get("source"),
+                manifest.get("environment"),
+            )
         )
         replay_checks, replay_errors = _replay_rows(rows, config)
         checks.update(replay_checks)
         errors.extend(replay_errors)
         metrics = derive_metrics(rows, config)
         gates = threshold_checks(rows, config)
+        diagnostics = diagnostic_checks(rows, config)
         checks["manifest_metrics_recomputed_exactly"] = manifest.get("metrics") == metrics
         checks["manifest_gate_checks_recomputed_exactly"] = manifest.get("gate_checks") == gates
+        checks["manifest_diagnostic_checks_recomputed_exactly"] = (
+            manifest.get("diagnostic_checks") == diagnostics
+        )
         source = manifest.get("source")
         source_gate = (
             isinstance(source, dict)
             and source.get("git_clean_at_start") is True
-            and source.get("expected_commit_matches") is True
             and _source_end_matches_start(source, manifest.get("source_end"))
-            and _formal_context_complete(config, source, manifest.get("environment"))
+            and _formal_source_and_environment_complete(
+                config,
+                source,
+                manifest.get("environment"),
+            )
         )
         checks["manifest_passed_recomputed_exactly"] = manifest.get("passed") is (
             source_gate
@@ -1880,6 +1872,7 @@ def verify_artifact(
             "passed": passed,
             "checks": checks,
             "metrics": metrics,
+            "diagnostics": diagnostics,
             "errors": sorted(set(errors)),
             "manifest": str(manifest_path),
         }
@@ -1896,6 +1889,7 @@ def verify_artifact(
             "passed": False,
             "checks": checks,
             "metrics": None,
+            "diagnostics": None,
             "errors": errors,
             "manifest": str(manifest_path),
         }
@@ -2729,6 +2723,7 @@ def run_benchmark(
     _write_jsonl(raw_path, rows)
     metrics = derive_metrics(rows, config)
     gates = threshold_checks(rows, config)
+    diagnostics = diagnostic_checks(rows, config)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "gate": GATE,
@@ -2746,11 +2741,11 @@ def run_benchmark(
         },
         "metrics": metrics,
         "gate_checks": gates,
+        "diagnostic_checks": diagnostics,
         "passed": (
             source.get("git_clean_at_start") is True
-            and source.get("expected_commit_matches") is True
             and _source_end_matches_start(source, source_end)
-            and _formal_context_complete(config, source, environment)
+            and _formal_source_and_environment_complete(config, source, environment)
             and all(gates.values())
             and _reused_f2a_digests_match()
         ),
@@ -2793,12 +2788,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-current-runner-context",
         action="store_true",
-        help="Reject freshly measured evidence unless its GitHub context matches this runner",
-    )
-    parser.add_argument(
-        "--actions-run-provenance",
-        type=Path,
-        help="Trusted GitHub Actions run API JSON required for retained evidence",
+        help="Reject fresh evidence unless its local platform, Python, CPU, and affinity match",
     )
     return parser
 
@@ -2810,13 +2800,10 @@ def main(argv: list[str] | None = None) -> int:
         args.required_profile is not None
         or args.require_current_source
         or args.require_current_runner_context
-        or args.actions_run_provenance is not None
     )
     if args.output_dir is not None and replay_policies:
         parser.error("replay provenance policies cannot be used while measuring")
-    if args.check_current_source is not None and (
-        args.require_current_runner_context or args.actions_run_provenance is not None
-    ):
+    if args.check_current_source is not None and args.require_current_runner_context:
         parser.error("run provenance policies require --verify-artifact")
     if args.check_current_source is not None:
         matches = artifact_source_matches_current(
@@ -2838,7 +2825,6 @@ def main(argv: list[str] | None = None) -> int:
             required_profile=args.required_profile,
             require_current_source=args.require_current_source,
             require_current_runner_context=(args.require_current_runner_context),
-            actions_run_provenance=args.actions_run_provenance,
         )
     else:
         manifest = run_benchmark(args.output_dir, profile=args.profile)

@@ -865,22 +865,26 @@ Full guide: [`docs/benchmarks.md`](docs/benchmarks.md).
 ## 9. Development
 
 ```bash
-uv run pytest                        # tests + coverage (gate: 80%, enforced via addopts)
-uv run ruff check .                  # lint (E, F, I, UP, B; line length 100)
-uv run python bench/router_latency.py
-uv run python bench/orchestration_mock_bench.py
+uv run --frozen pytest --fail-on-skip  # portable tests + coverage (gate: 80%)
+uv run --frozen ruff check .           # lint (E, F, I, UP, B; line length 100)
+uv run --frozen python bench/router_latency.py
+uv run --frozen python bench/orchestration_mock_bench.py
 ```
 
 | pytest invocation | scope |
 |---|---|
-| `pytest` (default) | everything except `gpu` and `hf_hub` markers — runs on any machine, no GPU |
-| `pytest -m gpu` | deploy-day kernel/graph tests (`tests/gpu/`) |
-| `pytest -m hf_hub` | opt-in real-checkpoint downloads |
-| `pytest -m dist` | multi-process gloo tests (included in the default run) |
+| `pytest --fail-on-skip` (default selection) | portable CPU tests, including `tests/dist`; environment suites are explicitly deselected |
+| `scripts/gpu_gates/03_deferred.sh` | prerequisite-checked CUDA kernel/graph suite; selected skips fail |
+| `pytest --fail-on-skip -m hf_hub` | opt-in real-checkpoint downloads after network/model prerequisites are available |
+| `scripts/helm_integration.sh` | prerequisite-checked Helm rendering tests |
+| `scripts/postgres_integration.sh` | pinned-container PostgreSQL integration tests |
+| `pytest --fail-on-skip -m dist` | multi-process gloo tests (also included in the default run) |
 
 Conventions: all CI-facing tests run against `MockBackend` (deterministic,
-dependency-free); GPU-dependent claims are never reported without a `bench/` reproduction
-script.
+dependency-free) unless their named integration gate provisions the real dependency.
+An absent prerequisite is reported as not run with a nonzero status; selected skips
+cannot make a CI job pass. GPU-dependent claims are never reported without a `bench/`
+reproduction script.
 
 ## 10. Documentation index
 

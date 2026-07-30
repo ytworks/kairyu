@@ -16,8 +16,6 @@ from bench.fleet_churn_bench import FORMAL_CONFIG, churn_plan
 def _source() -> dict[str, object]:
     return {
         "commit": "a" * 40,
-        "expected_commit": None,
-        "expected_commit_matches": True,
         "git_clean_at_start": True,
         "files": [{"path": path, "sha256": "b" * 64} for path in f2b._SOURCE_PATHS],
     }
@@ -28,8 +26,6 @@ def _source_end(source: dict[str, object]) -> dict[str, object]:
         key: source[key]
         for key in (
             "commit",
-            "expected_commit",
-            "expected_commit_matches",
             "files",
         )
     }
@@ -48,22 +44,18 @@ def _github_context() -> dict[str, str]:
         ),
         "GITHUB_REF": "refs/heads/main",
         "GITHUB_SHA": commit,
-        "F2B_GITHUB_HEAD_SHA": commit,
     }
 
 
-def _actions_run_provenance() -> dict[str, object]:
-    context = _github_context()
+def _environment(
+    github: dict[str, str] | None = None,
+) -> dict[str, object]:
     return {
-        "id": int(context["GITHUB_RUN_ID"]),
-        "head_sha": context["F2B_GITHUB_HEAD_SHA"],
-        "event": context["GITHUB_EVENT_NAME"],
-        "name": context["GITHUB_WORKFLOW"],
-        "path": ".github/workflows/f2b-kv-event-chaos.yml",
-        "repository": {"full_name": context["GITHUB_REPOSITORY"]},
-        "run_attempt": int(context["GITHUB_RUN_ATTEMPT"]),
-        "status": "completed",
-        "conclusion": "success",
+        "platform": "Linux-test",
+        "python": "3.12.0 test",
+        "cpu_count": 8,
+        "sched_affinity": list(range(8)),
+        "github": {} if github is None else github,
     }
 
 
@@ -135,7 +127,7 @@ def _passing_rows() -> list[dict[str, object]]:
     config = f2b.profile_config("smoke")
     plan = f2b.compressed_churn_plan(config)
     source = _source()
-    environment = {"github": {}}
+    environment = _environment()
     origin = 1_000_000_000
     topology = {
         **f2b.topology_descriptor(config),
@@ -658,6 +650,7 @@ def _passing_rows() -> list[dict[str, object]]:
     for row_index, row in enumerate(rows):
         row["row_index"] = row_index
     assert all(f2b.threshold_checks(rows, config).values())
+    assert all(f2b.diagnostic_checks(rows, config).values())
     return rows
 
 
@@ -675,6 +668,7 @@ def _write_artifact(
     raw_path = output_dir / f2b.RAW_NAME
     f2b._write_jsonl(raw_path, rows)
     gates = f2b.threshold_checks(rows, config)
+    diagnostics = f2b.diagnostic_checks(rows, config)
     metrics = f2b.derive_metrics(rows, config)
     manifest = {
         "schema_version": f2b.SCHEMA_VERSION,
@@ -693,6 +687,7 @@ def _write_artifact(
         },
         "metrics": metrics,
         "gate_checks": gates,
+        "diagnostic_checks": diagnostics,
         "passed": all(gates.values()),
     }
     if not update_manifest:
@@ -716,7 +711,6 @@ def source_verification(monkeypatch: pytest.MonkeyPatch) -> None:
             "source_files_are_exact": True,
             "source_file_hashes_match_commit": True,
             "source_clean_at_start": True,
-            "source_expected_commit_matches": True,
         },
     )
 
@@ -755,32 +749,30 @@ def test_freshness_gate_has_two_times_stale_lease_headroom() -> None:
     assert reused["f2a"]["raw_sha256"] == f2b.F2A_RAW_SHA256
 
 
-def test_formal_context_binds_exact_workflow_and_source_commit() -> None:
+def test_formal_context_binds_source_and_local_environment_not_github() -> None:
     config = f2b.profile_config("formal")
-    source = {
-        "commit": "a" * 40,
-        "expected_commit": "a" * 40,
-        "expected_commit_matches": True,
-    }
-    github = {
-        "GITHUB_RUN_ID": "123",
-        "GITHUB_RUN_ATTEMPT": "1",
-        "GITHUB_EVENT_NAME": "workflow_dispatch",
-        "GITHUB_REPOSITORY": "ytworks/kairyu",
-        "GITHUB_WORKFLOW": "F2b KV-event freshness and chaos",
-        "GITHUB_WORKFLOW_REF": (
-            "ytworks/kairyu/.github/workflows/f2b-kv-event-chaos.yml@refs/heads/main"
-        ),
-        "GITHUB_REF": "refs/heads/main",
-        "GITHUB_SHA": "a" * 40,
-        "F2B_GITHUB_HEAD_SHA": "a" * 40,
-    }
+    source = _source()
+    environment = _environment(_github_context())
 
-    assert f2b._formal_context_complete(config, source, {"github": github})
-    assert not f2b._formal_context_complete(
+    assert f2b._formal_source_and_environment_complete(
         config,
         source,
-        {"github": {**github, "F2B_GITHUB_HEAD_SHA": "b" * 40}},
+        environment,
+    )
+    assert f2b._formal_source_and_environment_complete(
+        config,
+        source,
+        {**environment, "github": {"GITHUB_RUN_ID": "different"}},
+    )
+    assert not f2b._formal_source_and_environment_complete(
+        config,
+        {**source, "git_clean_at_start": False},
+        environment,
+    )
+    assert not f2b._formal_source_and_environment_complete(
+        config,
+        source,
+        {**environment, "cpu_count": 0},
     )
 
 
@@ -794,52 +786,59 @@ def test_replay_accepts_complete_raw_evidence(
 
     assert result["passed"], result["errors"]
     assert all(result["checks"].values())
+    assert all(result["diagnostics"].values())
     assert result["metrics"]["chaos"]["recovery_convergence_ns"] == 18_000_000
     assert result["metrics"]["routes"]["stale"] > 0
     assert result["metrics"]["routes"]["max_exact_truth_age_ns"] < 100_000_000
 
 
-def _delay_first_stale_fallback(rows: list[dict[str, object]]) -> None:
-    run = next(row for row in rows if row.get("type") == "run")
-    origin = int(run["measurement_origin_ns"])
+def test_wall_clock_deadlines_are_recorded_but_do_not_bind_pass_fail(
+    tmp_path: Path,
+    source_verification: None,
+) -> None:
+    rows = copy.deepcopy(_passing_rows())
     replay = next(row for row in rows if row.get("type") == "replay")
-    replay["completed_ns"] = origin + 980_000_000
     recovery_snapshot = next(
         row
         for row in rows
         if row.get("type") == "state_snapshot" and row.get("phase") == "recovery"
     )
-    recovery_snapshot["replay_completed_ns"] = origin + 980_000_000
-    recovery_snapshot["observed_ns"] = origin + 981_000_000
-    for row in rows:
-        if row.get("type") != "route":
-            continue
-        sequence = int(row["sequence"])
-        if 8 <= sequence <= 17:
-            row["reason"] = "kv_event_match"
-            row["mode"] = "exact"
-            row["selected_replica"] = row["expected_exact_replica"]
-            row["backend_replica"] = row["expected_exact_replica"]
-        elif sequence == 18:
-            row["reason"] = "prefix_match"
-            row["mode"] = "approximate"
-            row["selected_replica"] = row["expected_approximate_replica"]
-            row["backend_replica"] = row["expected_approximate_replica"]
+    recovery_snapshot["observed_ns"] = int(replay["completed_ns"]) + 500_000_000
+    manifest = _write_artifact(tmp_path / "slow-recovery-observation", rows)
+
+    result = f2b.verify_artifact(manifest)
+
+    assert result["passed"], result["errors"]
+    assert set(result["diagnostics"]) == set(f2b._DIAGNOSTIC_CHECK_NAMES)
+    assert not result["diagnostics"][
+        "recovery_snapshot_observed_strictly_below_500ms_after_replay"
+    ]
+    assert all(result["checks"].values())
+
+
+def test_manifest_cannot_lie_about_nonbinding_diagnostics(
+    tmp_path: Path,
+    source_verification: None,
+) -> None:
+    manifest_path = _write_artifact(tmp_path / "diagnostic-integrity", _passing_rows())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["diagnostic_checks"][
+        "recovery_snapshot_observed_strictly_below_500ms_after_replay"
+    ] = False
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    result = f2b.verify_artifact(manifest_path)
+
+    assert not result["passed"]
+    assert not result["checks"]["manifest_diagnostic_checks_recomputed_exactly"]
 
 
 @pytest.mark.parametrize(
     ("name", "mutate", "expected_check"),
     [
-        pytest.param(
-            "wire-freshness",
-            lambda rows: next(
-                row
-                for row in rows
-                if row.get("type") == "event_apply" and row.get("replayed") is False
-            ).update(applied_ns=2_000_000_000),
-            "representative_wire_live_freshness_is_strictly_below_500ms",
-            id="wire-freshness",
-        ),
         pytest.param(
             "stale-exact-route",
             lambda rows: next(
@@ -941,16 +940,6 @@ def _delay_first_stale_fallback(rows: list[dict[str, object]]) -> None:
             id="recovery-digest",
         ),
         pytest.param(
-            "recovery-snapshot-late",
-            lambda rows: next(
-                row
-                for row in rows
-                if row.get("type") == "state_snapshot" and row.get("phase") == "recovery"
-            ).update(observed_ns=2_300_000_000),
-            "recovery_snapshot_rebuilds_rotated_epoch_at_replay_completion",
-            id="recovery-snapshot-late",
-        ),
-        pytest.param(
             "same-process",
             lambda rows: next(
                 row
@@ -999,52 +988,6 @@ def _delay_first_stale_fallback(rows: list[dict[str, object]]) -> None:
             ),
             "route_ticks_are_absolute_complete_and_monotonic",
             id="route-tick",
-        ),
-        pytest.param(
-            "route-schedule-lateness",
-            lambda rows: (
-                lambda row: row.update(
-                    selected_ns=int(row["scheduled_ns"]) + 500_000_000,
-                    completed_ns=int(row["scheduled_ns"]) + 500_100_000,
-                )
-            )(
-                max(
-                    (row for row in rows if row.get("type") == "route"),
-                    key=lambda row: int(row["sequence"]),
-                )
-            ),
-            "max_route_schedule_lateness_is_strictly_below_500ms",
-            id="route-schedule-lateness",
-        ),
-        pytest.param(
-            "route-actual-gap",
-            lambda rows: (
-                lambda row: row.update(
-                    selected_ns=int(row["scheduled_ns"]) + 499_000_000,
-                    completed_ns=int(row["scheduled_ns"]) + 499_100_000,
-                )
-            )(
-                max(
-                    (row for row in rows if row.get("type") == "route"),
-                    key=lambda row: int(row["sequence"]),
-                )
-            ),
-            "max_actual_selected_route_gap_is_strictly_below_500ms",
-            id="route-actual-gap",
-        ),
-        pytest.param(
-            "chaos-action-lateness",
-            lambda rows: (
-                lambda row: row.update(observed_ns=int(row["scheduled_ns"]) + 500_000_000)
-            )(next(row for row in rows if row.get("type") == "kill")),
-            "pause_and_resume_action_lateness_is_strictly_below_500ms",
-            id="chaos-action-lateness",
-        ),
-        pytest.param(
-            "first-stale-fallback",
-            _delay_first_stale_fallback,
-            "first_stale_approximate_route_after_pause_is_strictly_below_500ms",
-            id="first-stale-fallback",
         ),
     ],
 )
@@ -1176,93 +1119,42 @@ def test_verify_artifact_enforces_required_profile_and_current_source(
     assert accepted["passed"], accepted["errors"]
 
 
-def test_fresh_replay_requires_exact_current_runner_context(
+def test_fresh_replay_requires_same_local_environment_not_github_identity(
     tmp_path: Path,
     source_verification: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = _github_context()
     rows = _passing_rows()
-    rows[0]["environment"] = {"github": context}
+    measured_environment = _environment(_github_context())
+    rows[0]["environment"] = measured_environment
     manifest = _write_artifact(tmp_path / "fresh", rows)
-    for name, value in context.items():
-        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        f2b,
+        "environment_descriptor",
+        lambda: {
+            **measured_environment,
+            "github": {"GITHUB_RUN_ID": "a-different-diagnostic-run"},
+        },
+    )
 
     accepted = f2b.verify_artifact(
         manifest,
         require_current_runner_context=True,
     )
     assert accepted["passed"], accepted["errors"]
-    assert accepted["checks"]["artifact_github_context_matches_current_runner"]
+    assert accepted["checks"]["artifact_local_environment_matches_current_runner"]
 
-    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
+    monkeypatch.setattr(
+        f2b,
+        "environment_descriptor",
+        lambda: {**measured_environment, "python": "3.13.0 different"},
+    )
     rejected = f2b.verify_artifact(
         manifest,
         require_current_runner_context=True,
     )
     assert not rejected["passed"]
-    assert not rejected["checks"]["artifact_github_context_matches_current_runner"]
-
-
-def test_retained_replay_accepts_matching_actions_run_provenance(
-    tmp_path: Path,
-    source_verification: None,
-) -> None:
-    rows = _passing_rows()
-    rows[0]["environment"] = {"github": _github_context()}
-    manifest = _write_artifact(tmp_path / "retained", rows)
-    provenance_path = tmp_path / "actions-run.json"
-    provenance_path.write_text(
-        json.dumps(_actions_run_provenance()),
-        encoding="utf-8",
-    )
-
-    result = f2b.verify_artifact(
-        manifest,
-        actions_run_provenance=provenance_path,
-    )
-
-    assert result["passed"], result["errors"]
-    actions_checks = {
-        name: passed for name, passed in result["checks"].items() if name.startswith("actions_run_")
-    }
-    assert len(actions_checks) == 9
-    assert all(actions_checks.values())
-
-
-@pytest.mark.parametrize(
-    ("case", "failed_check"),
-    [
-        ("id", "actions_run_id_matches_artifact"),
-        ("head_sha", "actions_run_head_sha_matches_artifact_source"),
-        ("event", "actions_run_event_matches_artifact"),
-        ("name", "actions_run_name_matches_artifact"),
-        ("path", "actions_run_path_matches_artifact"),
-        ("repository", "actions_run_repository_matches_artifact"),
-        ("run_attempt", "actions_run_attempt_matches_artifact"),
-        ("status", "actions_run_is_completed"),
-        ("conclusion", "actions_run_conclusion_is_success"),
-    ],
-)
-def test_retained_actions_run_provenance_rejects_every_mismatch(
-    case: str,
-    failed_check: str,
-) -> None:
-    provenance = _actions_run_provenance()
-    if case == "repository":
-        provenance["repository"] = {"full_name": "attacker/kairyu"}
-    elif case in {"id", "run_attempt"}:
-        provenance[case] = int(provenance[case]) + 1
-    else:
-        provenance[case] = "mismatch"
-
-    checks = f2b._verify_actions_run_provenance(
-        provenance,
-        _source(),
-        {"github": _github_context()},
-    )
-
-    assert not checks[failed_check]
+    assert not rejected["checks"]["artifact_local_environment_matches_current_runner"]
 
 
 def test_cli_forwards_replay_policy_to_verifier(
@@ -1278,20 +1170,17 @@ def test_cli_forwards_replay_policy_to_verifier(
         required_profile: str | None,
         require_current_source: bool,
         require_current_runner_context: bool,
-        actions_run_provenance: Path | None,
     ) -> dict[str, object]:
         captured.update(
             path=path,
             required_profile=required_profile,
             require_current_source=require_current_source,
             require_current_runner_context=require_current_runner_context,
-            actions_run_provenance=actions_run_provenance,
         )
         return {"passed": True}
 
     monkeypatch.setattr(f2b, "verify_artifact", fake_verify)
     artifact = tmp_path / "artifact"
-    provenance = tmp_path / "actions-run.json"
 
     assert (
         f2b.main(
@@ -1302,8 +1191,6 @@ def test_cli_forwards_replay_policy_to_verifier(
                 "formal",
                 "--require-current-source",
                 "--require-current-runner-context",
-                "--actions-run-provenance",
-                str(provenance),
             ]
         )
         == 0
@@ -1313,12 +1200,11 @@ def test_cli_forwards_replay_policy_to_verifier(
         "required_profile": "formal",
         "require_current_source": True,
         "require_current_runner_context": True,
-        "actions_run_provenance": provenance,
     }
     assert '"passed": true' in capsys.readouterr().out
 
 
-def test_workflow_replay_policy_and_source_closure_are_explicit() -> None:
+def test_workflow_fresh_pr_policy_and_source_closure_are_explicit() -> None:
     direct_dependencies = {
         "kairyu/__init__.py",
         "kairyu/audit_io.py",
@@ -1337,19 +1223,20 @@ def test_workflow_replay_policy_and_source_closure_are_explicit() -> None:
 
     assert direct_dependencies <= set(f2b._SOURCE_PATHS)
     assert all(f'- "{path}"' in workflow for path in direct_dependencies)
-    assert workflow.count("--required-profile formal") >= 2
-    assert workflow.count("--require-current-source") >= 2
+    assert workflow.count("--require-current-source") == 2
     assert workflow.count("--require-current-runner-context") == 1
-    assert workflow.count("--actions-run-provenance") == 1
+    assert "--actions-run-provenance" not in workflow
     assert '"bench/results/f2b-kv-event-retained/**"' in workflow
     assert "PROFILE: ${{ github.event_name == 'pull_request' && 'formal'" in workflow
-    assert "F2B_GITHUB_HEAD_SHA:" in workflow
-    assert "actions: read" in workflow
-    assert 'test("^[1-9][0-9]*$")' in workflow
-    assert '"repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"' in workflow
-    assert '"${RUNNER_TEMP}/f2b-retained-actions-run.json"' in workflow
-    assert 'gh run download "${run_id}"' in workflow
-    assert '--name "f2b-kv-event-formal-${run_id}"' in workflow
-    assert workflow.count("cmp --") == 2
+    assert "F2B_EXPECTED_COMMIT:" not in workflow
+    assert "F2B_GITHUB_HEAD_SHA:" not in workflow
+    assert "actions: read" not in workflow
+    assert "steps.mode.outputs" not in workflow
+    assert "gh api" not in workflow
+    assert "gh run download" not in workflow
+    assert "github.event_name == 'pull_request' || inputs.mode == 'measure'" in workflow
+    assert "github.event_name == 'workflow_dispatch' && inputs.mode == 'replay'" in workflow
+    assert '--verify-artifact "${F2B_RESULTS_DIR}"' in workflow
+    assert '--verify-artifact "${REPLAY_DIR}"' in workflow
     assert "membership_lock = asyncio.Lock()" in bench_source
     assert bench_source.count("async with membership_lock:") >= 3

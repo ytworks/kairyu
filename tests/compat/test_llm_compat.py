@@ -83,9 +83,11 @@ def test_default_backend_is_mock_when_vllm_missing():
     assert type(llm.backend).__name__ in {"MockBackend", "VLLMBackend"}
 
 
+@pytest.mark.vllm
 def test_signature_cross_check_against_real_vllm():
-    vllm = pytest.importorskip("vllm")
     import inspect
+
+    import vllm
 
     theirs = set(inspect.signature(vllm.SamplingParams).parameters)
     ours = set(inspect.signature(SamplingParams).parameters)

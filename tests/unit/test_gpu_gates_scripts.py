@@ -4,6 +4,7 @@ import importlib.util
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -51,10 +52,89 @@ def test_gpu_marker_tests_exist_and_are_deselected():
     gpu_tests = list(Path("tests/gpu").glob("test_*.py"))
     assert gpu_tests, "tests/gpu mirror is empty"
     result = subprocess.run(
-        ["uv", "run", "pytest", "tests/gpu", "--collect-only", "-q", "--no-cov"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/gpu",
+            "--collect-only",
+            "-q",
+            "--no-cov",
+        ],
         capture_output=True, text=True,
     )
+    assert result.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, result.stderr
     assert "deselected" in result.stdout  # addopts excludes gpu by default
+
+
+@pytest.mark.parametrize(
+    ("script_name", "minimum_gpu_argument"),
+    [
+        ("01_runner.sh", "--min-gpus 1"),
+        ("02_quant_bench.sh", "--min-gpus 1"),
+        ("03_deferred.sh", "--min-gpus 4"),
+        ("06_multigpu.sh", "--min-gpus 8"),
+        ("g4_moe.sh", "--min-gpus 2"),
+    ],
+)
+def test_formal_gpu_pytest_cannot_turn_selected_skips_into_success(
+    script_name, minimum_gpu_argument
+):
+    script = Path("scripts/gpu_gates", script_name).read_text(encoding="utf-8")
+
+    assert minimum_gpu_argument in script
+    assert "pytest_no_skip " in script
+    assert "run uv run pytest " not in script
+
+
+@pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.name)
+def test_gate_scripts_use_frozen_uv_and_skip_rejecting_pytest(script):
+    text = script.read_text(encoding="utf-8")
+
+    assert "run uv run pytest " not in text
+    for line in text.splitlines():
+        if "uv run " in line:
+            assert "uv run --frozen " in line, (script, line)
+
+
+def test_deferred_gate_collects_unit_cuda_placement_tests():
+    script = Path("scripts/gpu_gates/03_deferred.sh").read_text(encoding="utf-8")
+
+    assert "--min-gpus 4" in script
+    assert "--min-compute-capability 10.0" in script
+    for prerequisite in (
+        "--require-module flashinfer",
+        "--require-module transformers",
+        "--require-module triton",
+        "--require-executable ninja",
+        "--require-executable nvidia-smi",
+    ):
+        assert prerequisite in script
+    assert (
+        "pytest_no_skip -m gpu tests/gpu tests/unit/test_pd_factory.py -v"
+        in script
+    )
+
+
+def test_quant_and_qwen_gates_preflight_their_actual_runtime_dependencies():
+    quant = Path("scripts/gpu_gates/02_quant_bench.sh").read_text(encoding="utf-8")
+    qwen = Path("scripts/gpu_gates/06_multigpu.sh").read_text(encoding="utf-8")
+
+    assert "--min-compute-capability 10.0" in quant
+    assert "--require-module flashinfer" in quant
+    assert "--require-module triton" in quant
+    assert "--require-module flashinfer" in qwen
+    assert "--require-module transformers" in qwen
+    assert "--require-executable ninja" in qwen
+
+
+def test_g4_gate_preflights_transformers_before_cpu_parity():
+    script = Path("scripts/gpu_gates/g4_moe.sh").read_text(encoding="utf-8")
+
+    prerequisite = "preflight --require-module transformers"
+    cpu_parity = "pytest_no_skip tests/unit/test_moe_mla_parity.py"
+    assert prerequisite in script
+    assert script.index(prerequisite) < script.index(cpu_parity)
 
 
 def test_shared_bench_model_default_matches_gpu_gateway_pool():
@@ -175,11 +255,11 @@ def test_production_gate_preflights_shared_model_after_ready_before_benchmark():
     ]
     ready = "run curl -sf http://127.0.0.1:8000/readyz"
     preflight = (
-        "run uv run python scripts/gpu_gates/check_served_model.py "
+        "run uv run --frozen python scripts/gpu_gates/check_served_model.py "
         '--base-url http://127.0.0.1:8000/v1 --model "$KAIRYU_BENCH_MODEL"'
     )
     benchmark = (
-        "run uv run python bench/serving_bench.py "
+        "run uv run --frozen python bench/serving_bench.py "
         '--base-url http://127.0.0.1:8000/v1 --model "$KAIRYU_BENCH_MODEL"'
     )
 
@@ -203,11 +283,11 @@ def test_production_gate_dry_run_preflights_same_model_before_benchmark(model):
     commands = [line for line in result.stdout.splitlines() if line.startswith("+ ")]
     ready = "+ curl -sf http://127.0.0.1:8000/readyz"
     preflight = (
-        "+ uv run python scripts/gpu_gates/check_served_model.py "
+        "+ uv run --frozen python scripts/gpu_gates/check_served_model.py "
         f"--base-url http://127.0.0.1:8000/v1 --model {model}"
     )
     benchmark = (
-        "+ uv run python bench/serving_bench.py "
+        "+ uv run --frozen python bench/serving_bench.py "
         f"--base-url http://127.0.0.1:8000/v1 --model {model}"
     )
 

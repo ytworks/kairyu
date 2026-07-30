@@ -2,7 +2,9 @@
 # gateway vs replica (design m7 D1/D2).
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS builder
 WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+# Bound installation/bytecode workers so high-core builders with a conventional
+# 1024-descriptor container limit remain reproducible.
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_CONCURRENT_INSTALLS=8
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project --no-dev --extra fleet
 COPY kairyu ./kairyu

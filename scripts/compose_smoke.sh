@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compose smoke drill (goal G3 gates C1-C3): readiness, completion, SSE,
+# Compose integration test (goal G3 gates C1-C3): readiness, completion, SSE,
 # session affinity via metrics, replica kill -> eject -> prober recovery.
 set -euo pipefail
 
@@ -8,6 +8,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/deploy/compose/docker-compose.yaml"
 COMPOSE_VALIDATOR="$REPO_ROOT/scripts/validate_compose_binds.py"
 BASE_URL="${BASE_URL:-http://localhost:8000}"
+# Docker BuildKit inherits the invoking process's descriptor ceiling. The
+# default 1024 on some developer hosts is insufficient for uv bytecode
+# compilation; inability to raise it is harmless because the build still fails
+# normally rather than being reported as a passing test.
+ulimit -n 65536 2>/dev/null || true
 compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
 
 cleanup() { compose down --volumes --remove-orphans >/dev/null 2>&1 || true; }
@@ -31,8 +36,19 @@ chat() { # chat <user> -> http status
 
 metric() { curl -s "$BASE_URL/metrics" | grep -F "$1" | awk '{print $NF}' | head -1; }
 
+wait_for_metric() { # wait_for_metric <metric selector> <value> <attempts>
+  local selector=$1 want=$2 attempts=$3 value
+  for _ in $(seq 1 "$attempts"); do
+    value=$(metric "$selector") || value=
+    [[ "$value" == "$want" ]] && return 0
+    sleep 2
+  done
+  return 1
+}
+
 echo "== validate compose binds =="
-uv run --project "$REPO_ROOT" --no-dev python "$COMPOSE_VALIDATOR" "$COMPOSE_FILE"
+uv run --frozen --project "$REPO_ROOT" --no-dev \
+  python "$COMPOSE_VALIDATOR" "$COMPOSE_FILE"
 trap cleanup EXIT
 
 echo "== up =="
@@ -58,20 +74,25 @@ affinity=$(metric 'kairyu_pool_decisions_total{pool="llama",reason="session_affi
 
 echo "== kill replica-1: eject then zero 5xx (gate C2) =="
 compose kill replica-1
-curl -s -o /dev/null -X POST "$BASE_URL/v1/chat/completions" \
+if ! convergence_status=$(curl -sS -o /tmp/smoke_body -w '%{http_code}' \
+  -X POST "$BASE_URL/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"llama","messages":[{"role":"user","content":"x"}]}' || true # eat the eject trigger
+  -d '{"model":"llama","messages":[{"role":"user","content":"x"}]}'); then
+  fail "request during ejection convergence could not reach the gateway"
+fi
+case "$convergence_status" in
+  200|502) ;;
+  *) fail "request during ejection convergence returned $convergence_status" ;;
+esac
+wait_for_metric 'kairyu_replica_healthy{pool="llama",replica="0"}' "0.0" 10 \
+  || fail "replica-1 was not marked unhealthy after it stopped"
 for i in $(seq 1 10); do
   [[ "$(chat "user-$i")" == 200 ]] || fail "request after ejection returned non-200"
 done
 
 echo "== restart replica-1: prober recovery (gate C2) =="
 compose start replica-1
-for _ in $(seq 1 30); do
-  [[ "$(metric 'kairyu_replica_healthy{pool="llama",replica="0"}')" == "1.0" ]] && break
-  sleep 2
-done
-[[ "$(metric 'kairyu_replica_healthy{pool="llama",replica="0"}')" == "1.0" ]] \
+wait_for_metric 'kairyu_replica_healthy{pool="llama",replica="0"}' "1.0" 30 \
   || fail "prober did not restore replica-1"
 wait_for "$BASE_URL/readyz" '"ready"' 5 || fail "gateway unready after recovery"
 
