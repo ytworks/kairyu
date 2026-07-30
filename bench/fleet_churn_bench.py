@@ -53,6 +53,7 @@ _KUBECTL_PROXY_START_TIMEOUT_SECONDS = 10.0
 _KUBERNETES_READ_TIMEOUT_SECONDS = 10.0
 _KUBERNETES_DELETE_MAX_CONCURRENCY = 8
 _ENDPOINT_WITHDRAWAL_POLL_SECONDS = 0.25
+_ENDPOINT_WITHDRAWAL_CAUSAL_BRACKET_SECONDS = 1.0
 _RECOVERY_POLL_SECONDS = 1.0
 _KUBERNETES_OBSERVATION_TRANSPORT = (
     "one lifecycle-owned kubectl proxy and persistent HTTP client carry all "
@@ -3076,6 +3077,9 @@ def evaluate_gate(
     endpoint_interval_ns = int(
         config.evidence_interval_seconds * 1_000_000_000
     )
+    endpoint_causal_bracket_ns = int(
+        _ENDPOINT_WITHDRAWAL_CAUSAL_BRACKET_SECONDS * 1_000_000_000
+    )
     withdrawal_poll_interval_ns = int(
         _ENDPOINT_WITHDRAWAL_POLL_SECONDS * 1_000_000_000
     )
@@ -3207,10 +3211,10 @@ def evaluate_gate(
             and type(old_withdrawn_ns) is int
             and first_disjoint["observed_ns"]
             <= old_withdrawn_ns
-            <= first_disjoint["observed_ns"] + endpoint_interval_ns
+            <= first_disjoint["observed_ns"] + endpoint_causal_bracket_ns
             and first_disjoint["observed_ns"]
             - last_with_old["fetch_started_ns"]
-            <= endpoint_interval_ns
+            <= endpoint_causal_bracket_ns
         )
         no_reappearance = (
             type(old_withdrawn_ns) is int

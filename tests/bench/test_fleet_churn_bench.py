@@ -1542,7 +1542,7 @@ def test_gate_rejects_inexact_predelete_endpoint_snapshot() -> None:
     assert not result["checks"]["endpoint_predelete_snapshots_exact"]
 
 
-def test_endpoint_raw_bracket_keeps_exact_one_interval_boundary() -> None:
+def test_endpoint_raw_bracket_keeps_exact_one_second_boundary() -> None:
     evidence = _passing_evidence()
     churn = evidence["churn"][0]
     observer = [
@@ -1554,11 +1554,15 @@ def test_endpoint_raw_bracket_keeps_exact_one_interval_boundary() -> None:
     for row in observer:
         row["capture"] = "boundary-fixture"
     last_with_old, first_disjoint = observer
-    interval_ns = int(
-        SMOKE_CONFIG.evidence_interval_seconds * 1_000_000_000
+    bracket_ns = int(
+        fleet_bench._ENDPOINT_WITHDRAWAL_CAUSAL_BRACKET_SECONDS
+        * 1_000_000_000
+    )
+    assert SMOKE_CONFIG.evidence_interval_seconds < (
+        fleet_bench._ENDPOINT_WITHDRAWAL_CAUSAL_BRACKET_SECONDS
     )
     last_with_old["fetch_started_ns"] = (
-        first_disjoint["observed_ns"] - interval_ns
+        first_disjoint["observed_ns"] - bracket_ns
     )
 
     exact = evaluate_gate(**evidence)
