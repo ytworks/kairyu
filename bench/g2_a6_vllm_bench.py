@@ -96,7 +96,7 @@ EXPECTED_SWEEP_SCENARIOS = tuple(
 
 PINNED_TOKENIZER_SHA256 = _expected_checkpoint_identity()["tokenizer_sha256"]["tokenizer.json"]
 MODEL_DTYPE = "bfloat16"
-VLLM_VERSION = "0.26.0"
+VLLM_VERSION = "0.26.0+cu129"
 VLLM_BUILD_COMMIT = "ffd46bfab2128bb84146050e98b51a617c6575ab"
 VLLM_IMAGE_REF = "vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404"
 VLLM_IMAGE_ID = "sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8"

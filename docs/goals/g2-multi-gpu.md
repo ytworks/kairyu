@@ -340,11 +340,11 @@ caching. Qwen's usable local BF16 KV footprint is 8 GiB/GPU at TP4 and
 4 GiB/GPU at TP8. Each arm allocates one additional reserved block:
 1 MiB/rank at TP4 and 512 KiB/rank at TP8. Stock vLLM is
 `vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404`, build
-`ffd46bfab2128bb84146050e98b51a617c6575ab`; alternate common-path settings are
-diagnostic only. Decode CUDA Graphs are enabled on both arms, while the artifact
-must separately disclose Kairyu's decode-only capture envelope and vLLM's
-actual compile/capture mode and sizes rather than claiming identical full-graph
-strategies.
+`ffd46bfab2128bb84146050e98b51a617c6575ab`, whose installed distribution is
+`vllm==0.26.0+cu129`; alternate common-path settings are diagnostic only. Decode
+CUDA Graphs are enabled on both arms, while the artifact must separately
+disclose Kairyu's decode-only capture envelope and vLLM's actual compile/capture
+mode and sizes rather than claiming identical full-graph strategies.
 
 The formal closure uses `bench/run_g2_a6_formal.py`, not an uncommitted
 operator. Before any server starts it regenerates the complete trace bundle

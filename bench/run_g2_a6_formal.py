@@ -54,6 +54,8 @@ DEFAULT_KAIRYU_TEMPLATE = (
 )
 DEFAULT_PYTHON = DEFAULT_REPO / ".venv/bin/python"
 DEFAULT_KAIRYU_IMAGE = "kairyu-qwen3-32b-kairyu:latest"
+DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404"
+DEFAULT_VLLM_VERSION = "0.26.0+cu129"
 DEFAULT_MODEL_VOLUME = "kairyu-qwen3-32b_qwen3-32b"
 DEFAULT_PORT = 18080
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -2571,14 +2573,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kairyu-image", default=DEFAULT_KAIRYU_IMAGE)
     parser.add_argument(
         "--vllm-image",
-        default="vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404",
+        default=DEFAULT_VLLM_IMAGE,
     )
     parser.add_argument("--model-volume", default=DEFAULT_MODEL_VOLUME)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--api-key")
     parser.add_argument("--startup-timeout-s", type=float, default=1800.0)
     parser.add_argument("--request-timeout-s", type=float, default=1800.0)
-    parser.add_argument("--vllm-version", default="0.26.0")
+    parser.add_argument("--vllm-version", default=DEFAULT_VLLM_VERSION)
     parser.add_argument("--kairyu-cuda-version", default="13.0")
     parser.add_argument("--kairyu-nccl-version", default="2.29.7")
     parser.add_argument("--vllm-cuda-version", default="12.9")

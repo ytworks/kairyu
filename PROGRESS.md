@@ -620,7 +620,9 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   pages on each at Kairyu `pipeline_depth=1`. Stock vLLM has explicit async
   scheduling, multiprocessing TP, compile mode 3, disabled custom
   all-reduce/access/request logging, and an actual FlashAttention 2 startup
-  marker retained from the SM120 process.
+  marker retained from the SM120 process. The immutable image's installed
+  distribution is pinned exactly as `vllm==0.26.0+cu129`, distinct from its
+  `v0.26.0` release tag and startup label.
 - Why: A performance ratio is not attributable or replayable when trace
   construction, checkpoint bytes, effective KV capacity, runtime HTTP stack,
   resolved backend, graph preparation, or measurement-session identity can

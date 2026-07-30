@@ -13,6 +13,14 @@ from bench import g2_a6_vllm_bench as a6
 from bench import run_g2_a6_formal as runner
 
 
+def test_vllm_package_pin_matches_the_immutable_cuda_image() -> None:
+    args = runner.build_parser().parse_args([])
+
+    assert a6.VLLM_VERSION == "0.26.0+cu129"
+    assert args.vllm_version == a6.VLLM_VERSION
+    assert args.vllm_image == a6.VLLM_IMAGE_REF
+
+
 @pytest.mark.parametrize(
     "status",
     [
