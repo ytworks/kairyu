@@ -2,8 +2,59 @@
 
 from __future__ import annotations
 
-from kairyu.engine.core.attention_selector import select_backend_name
+from kairyu.engine.core.attention_selector import (
+    AttentionBackendDecision,
+    select_backend_decision,
+)
+from kairyu.engine.core.attention_selector import select_backend_name as select_backend_name
 from kairyu.engine.core.hw_profile import HardwareProfile
+
+
+def _construct_backend(
+    name: str,
+    profile: HardwareProfile | None,
+    *,
+    device: object | None,
+):
+    selected_device = "cuda" if device is None else device
+    if name == "flashinfer":
+        from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
+
+        return FlashInferBackend(device=selected_device)
+    if name in ("flashattention3", "flashattention4"):
+        from kairyu.engine.core.attention.flashattention_gpu import (
+            FlashAttentionBackend,
+        )
+
+        generation = 3 if name == "flashattention3" else 4
+        return FlashAttentionBackend(
+            generation=generation,
+            profile=profile,
+            device=selected_device,
+        )
+    from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
+
+    return TorchAttentionBackend()
+
+
+def _record_decision(backend, decision: AttentionBackendDecision):
+    # Attention backends are intentionally plain objects rather than
+    # ``nn.Module`` instances (m13 seam safety), so this process-level
+    # selection metadata cannot enter a model state_dict.
+    backend.selection_decision = decision
+    return backend
+
+
+def _missing_dependency_error(
+    backend_name: str,
+    error: ModuleNotFoundError,
+) -> RuntimeError:
+    missing = getattr(error, "name", None)
+    detail = f" ({missing})" if isinstance(missing, str) and missing else ""
+    return RuntimeError(
+        f"{backend_name} attention backend is missing a GPU dependency{detail}; "
+        "run `uv sync --extra gpu`"
+    )
 
 
 def select_backend(
@@ -11,17 +62,39 @@ def select_backend(
     *,
     device: object | None = None,
 ):
-    """Env override wins; else the profile's kernel tier; CPU -> torch.
+    """Construct the selected backend and retain the decision actually used.
 
-    ``device`` binds stateful GPU backends to one role's device.  Leaving a
-    FlashInfer backend at its ``"cuda"`` default makes every later allocation
-    follow the thread's current device, which is not stable when one process
-    owns distinct prefill and decode GPUs.
+    Explicit selections are strict. ``auto`` alone may fall back to torch when
+    the profile-selected optional backend cannot be constructed; the sanitized
+    failure type remains reportable through ``/backends``. ``device`` binds all
+    stateful component workspaces to the role's explicit device.
     """
-    if select_backend_name(profile) == "flashinfer":
-        from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
-
-        return FlashInferBackend(device="cuda" if device is None else device)
-    from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
-
-    return TorchAttentionBackend()
+    decision = select_backend_decision(profile)
+    try:
+        backend = _construct_backend(decision.resolved, profile, device=device)
+    except Exception as error:
+        if decision.requested != "auto" or decision.resolved == "torch":
+            if isinstance(error, ModuleNotFoundError):
+                raise _missing_dependency_error(decision.resolved, error) from error
+            raise
+        fallback = AttentionBackendDecision(
+            requested=decision.requested,
+            resolved="torch",
+            source=decision.source,
+            components={
+                "prefill": "torch",
+                "decode": "torch",
+                "kv_mode": "tensor-gather",
+            },
+            rationale=(
+                f"{decision.rationale}; automatic torch fallback after "
+                f"{decision.resolved} construction raised "
+                f"{type(error).__name__}"
+            ),
+            architecture=dict(decision.architecture),
+        )
+        return _record_decision(
+            _construct_backend("torch", profile, device=device),
+            fallback,
+        )
+    return _record_decision(backend, decision)

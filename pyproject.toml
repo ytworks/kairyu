@@ -40,6 +40,17 @@ gpu = [
     "triton>=3.0; sys_platform == 'linux'",
     "nixl>=0.2; sys_platform == 'linux'",
 ]
+# FlashAttention-4 is currently an upstream beta and pins a prerelease CuTe
+# DSL. Keep it opt-in for generic installs; the CUDA 13 production image uses
+# upstream's recommended cu13 extra so operators can explicitly compare it
+# with FlashInfer.
+flashattention4 = [
+    "flash-attn-4[cu13]==4.0.0b24; sys_platform == 'linux'",
+    # uv only treats a prerelease pin as explicit when it is first-party.
+    # beta24's cu13 extra pins this wheel transitively, so declare the exact
+    # upstream-required build here instead of enabling unrelated prereleases.
+    "nvidia-cutlass-dsl-libs-cu13==4.6.0.dev0; sys_platform == 'linux'",
+]
 # Process-split engine service and fleet transports (m8 D6, G5).
 fleet = [
     "pyzmq>=26",

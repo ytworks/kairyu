@@ -1,9 +1,14 @@
 """GET /backends: resolved attention backend, versions, per-engine map (m13)."""
 
+import importlib.metadata
+
 import httpx
 
+from kairyu.engine.core.attention_selector import AttentionBackendDecision
+from kairyu.engine.core.hw_profile import HardwareProfile
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.entrypoints.server import health as health_module
 from kairyu.entrypoints.server.app import create_app
 from kairyu.orchestration.replica import ReplicaPool
 
@@ -13,21 +18,33 @@ def _client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
-async def test_backends_shape_and_mock_engines():
+async def test_backends_shape_and_mock_engines(monkeypatch):
+    monkeypatch.delenv("KAIRYU_ATTENTION_BACKEND", raising=False)
+    monkeypatch.setattr(health_module, "probe", lambda: HardwareProfile(arch="cpu"))
     app = create_app(engines={"m1": MockBackend(), "m2": MockBackend()})
     async with _client(app) as client:
         resp = await client.get("/backends")
 
     assert resp.status_code == 200
     body = resp.json()
-    # process-level attention resolution (CPU test host -> torch)
-    assert body["attention_backend"] in {"torch", "flashinfer"}
-    assert body["source"] in {"env", "hw_profile"}
-    assert isinstance(body["kernel_tier"], str)
-    # torch is always reported; flashinfer only when it is the resolved kernel
+    assert body["requested_attention_backend"] == "auto"
+    assert body["attention_backend"] == "torch"
+    assert body["attention_components"] == {
+        "prefill": "torch",
+        "decode": "torch",
+        "kv_mode": "tensor-gather",
+    }
+    assert body["source"] == "hw_profile"
+    assert body["architecture"] == {
+        "arch": "cpu",
+        "device_name": "cpu",
+        "sm": None,
+        "kernel_tier": "torch",
+    }
+    assert body["kernel_tier"] == "torch"
+    assert isinstance(body["selection_rationale"], str)
     assert "torch" in body["versions"]
-    if body["attention_backend"] != "flashinfer":
-        assert "flashinfer" not in body["versions"]
+    assert "flashinfer" not in body["versions"]
 
     engines = {e["model"]: e for e in body["engines"]}
     assert set(engines) == {"m1", "m2"}
@@ -35,7 +52,143 @@ async def test_backends_shape_and_mock_engines():
         assert entry["engine_backend"] == "mock"
         # mock is a remote/echo engine, not local attention
         assert entry["attention_backend"] is None
+        assert entry["attention_components"] is None
         assert entry["tensor_parallel_size"] == 1
+
+
+async def test_backends_explicit_auto_reports_env_source(monkeypatch):
+    monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "auto")
+    monkeypatch.setattr(
+        health_module,
+        "probe",
+        lambda: HardwareProfile(arch="cuda", sm=120),
+    )
+    app = create_app(engines={"m": MockBackend()})
+
+    async with _client(app) as client:
+        resp = await client.get("/backends")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["requested_attention_backend"] == "auto"
+    assert body["attention_backend"] == "flashinfer"
+    assert body["source"] == "env"
+    assert body["attention_components"] == {
+        "prefill": "flashinfer",
+        "decode": "flashinfer",
+        "kv_mode": "paged-direct",
+    }
+    assert "stable" in body["selection_rationale"]
+
+
+async def test_backends_reports_the_local_engine_actual_auto_fallback(monkeypatch):
+    monkeypatch.delenv("KAIRYU_ATTENTION_BACKEND", raising=False)
+    monkeypatch.setattr(
+        health_module,
+        "probe",
+        lambda: HardwareProfile(arch="cuda", sm=120),
+    )
+
+    class KairyuBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.attention_backend_decision = AttentionBackendDecision(
+                requested="auto",
+                resolved="torch",
+                source="hw_profile",
+                components={
+                    "prefill": "torch",
+                    "decode": "torch",
+                    "kv_mode": "tensor-gather",
+                },
+                rationale=(
+                    "automatic torch fallback after flashinfer construction "
+                    "raised ModuleNotFoundError"
+                ),
+                architecture={
+                    "arch": "cuda",
+                    "device_name": "test-gpu",
+                    "sm": 120,
+                    "kernel_tier": "fa2",
+                },
+            )
+
+    app = create_app(engines={"m": KairyuBackend()})
+    async with _client(app) as client:
+        resp = await client.get("/backends")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["requested_attention_backend"] == "auto"
+    assert body["attention_backend"] == "torch"
+    assert body["attention_components"]["prefill"] == "torch"
+    assert "ModuleNotFoundError" in body["selection_rationale"]
+    assert "flashinfer" not in body["versions"]
+    assert body["architecture"]["sm"] == 120
+    assert body["kernel_tier"] == "fa2"
+    assert body["engines"][0]["attention_backend"] == "torch"
+    assert body["engines"][0]["decision_status"] == "actual"
+
+
+async def test_backends_does_not_invent_torch_after_invalid_selection(monkeypatch):
+    monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "invalid")
+    monkeypatch.setattr(
+        health_module,
+        "probe",
+        lambda: HardwareProfile(arch="cuda", sm=120),
+    )
+    app = create_app(engines={"m": MockBackend()})
+
+    async with _client(app) as client:
+        resp = await client.get("/backends")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["requested_attention_backend"] == "invalid"
+    assert body["attention_backend"] == "unavailable"
+    assert body["attention_components"] == {}
+    assert "ValueError" in body["selection_rationale"]
+
+
+async def test_backends_fa4_components_and_missing_versions(monkeypatch):
+    monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
+    monkeypatch.setattr(
+        health_module,
+        "probe",
+        lambda: HardwareProfile(arch="cuda", sm=120),
+    )
+
+    def package_version(name):
+        if name == "torch":
+            return "test-torch"
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", package_version)
+
+    class KairyuBackend(MockBackend):
+        pass
+
+    app = create_app(engines={"m": KairyuBackend()})
+    async with _client(app) as client:
+        resp = await client.get("/backends")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    components = {
+        "prefill": "flashattention4",
+        "decode": "flashinfer",
+        "kv_mode": "paged-materialized",
+    }
+    assert body["requested_attention_backend"] == "flashattention4"
+    assert body["attention_backend"] == "flashattention4"
+    assert body["attention_components"] == components
+    assert body["versions"] == {
+        "torch": "test-torch",
+        "flashinfer": None,
+        "flash-attn-4": None,
+    }
+    assert body["architecture"]["sm"] == 120
+    assert body["engines"][0]["attention_components"] == components
 
 
 async def test_backends_is_open_without_api_key():
@@ -54,7 +207,13 @@ async def test_backends_is_open_without_api_key():
     assert guarded.status_code == 401
 
 
-async def test_backends_gateway_aggregates_replica_through_pool():
+async def test_backends_gateway_aggregates_replica_through_pool(monkeypatch):
+    monkeypatch.delenv("KAIRYU_ATTENTION_BACKEND", raising=False)
+    monkeypatch.setattr(
+        health_module,
+        "probe",
+        lambda: HardwareProfile(arch="cuda", sm=120),
+    )
     # A gateway (all engines are ReplicaPools) runs no local attention, so its own
     # probe reports the process kernel; for each pool it must adopt the replica's
     # /backends. Wire the pool's replica to an in-process "replica" app via ASGI
@@ -80,7 +239,12 @@ async def test_backends_gateway_aggregates_replica_through_pool():
     # here proves the gateway fetched and adopted the replica's /backends.
     assert pool["attention_backend"] in {"torch", "flashinfer"}
     assert pool["via_replica"]["attention_backend"] == pool["attention_backend"]
+    assert pool["attention_components"] == body["attention_components"]
+    assert pool["via_replica"]["attention_components"] == body["attention_components"]
     assert "torch" in pool["via_replica"]["versions"]
+    assert pool["via_replica"]["architecture"] == body["architecture"]
+    assert pool["via_replica"]["requested_attention_backend"] == body["requested_attention_backend"]
+    assert pool["via_replica"]["source"] == body["source"]
     assert pool["tensor_parallel_size"] == 1
     assert pool["via_replica"]["tensor_parallel_size"] == 1
 
@@ -97,3 +261,49 @@ async def test_backends_gateway_pool_without_backends_endpoint_degrades():
     assert pool["engine_backend"] == "replica-pool"
     assert pool["attention_backend"] is None
     assert "via_replica" not in pool
+
+
+async def test_backends_does_not_hide_mixed_local_engine_decisions(monkeypatch):
+    monkeypatch.delenv("KAIRYU_ATTENTION_BACKEND", raising=False)
+    monkeypatch.setattr(health_module, "probe", lambda: HardwareProfile(arch="cpu"))
+
+    class KairyuBackend(MockBackend):
+        def __init__(self, sm, kv_mode):
+            super().__init__()
+            self.attention_backend_decision = AttentionBackendDecision(
+                requested="flashattention4",
+                resolved="flashattention4",
+                source="env",
+                components={
+                    "prefill": "flashattention4",
+                    "decode": "flashinfer",
+                    "kv_mode": kv_mode,
+                },
+                rationale=f"explicit backend on sm{sm}",
+                architecture={
+                    "arch": "cuda",
+                    "device_name": f"gpu-sm{sm}",
+                    "sm": sm,
+                    "kernel_tier": "full" if sm == 90 else "fa2",
+                },
+            )
+
+    app = create_app(
+        engines={
+            "hopper": KairyuBackend(90, "paged-direct"),
+            "blackwell": KairyuBackend(120, "paged-materialized"),
+        }
+    )
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["attention_backend"] == "mixed"
+    assert body["source"] == "engine"
+    assert body["kernel_tier"] == "mixed"
+    assert set(body["architecture"]) == {"hopper", "blackwell"}
+    by_model = {entry["model"]: entry for entry in body["engines"]}
+    assert by_model["hopper"]["architecture"]["sm"] == 90
+    assert by_model["blackwell"]["architecture"]["sm"] == 120
+    assert all(entry["decision_status"] == "actual" for entry in by_model.values())

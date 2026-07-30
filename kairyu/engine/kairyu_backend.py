@@ -333,6 +333,7 @@ def build_engine_loop(
     default_eos: int | None = None
     default_stop_ids: tuple[int, ...] = ()
     num_kv_heads_for_tp = None
+    attention_backend_decision = None
     if model_path is not None:
         import torch
 
@@ -353,10 +354,12 @@ def build_engine_loop(
             raise RuntimeError("decode_mode='cuda_graph' requires CUDA hardware")
         compute_device = "cuda" if gpu else "cpu"
         compute_dtype = torch.bfloat16 if gpu else torch.float32
+        attention_backend = select_backend(profile, device=compute_device)
+        attention_backend_decision = attention_backend.selection_decision
         model, model_config, generation = load_model(
             model_path,
             dtype=compute_dtype,
-            attention_backend=select_backend(profile),
+            attention_backend=attention_backend,
             target_device=compute_device,
         )
         model = model.to(compute_device)
@@ -438,6 +441,7 @@ def build_engine_loop(
         pipeline_depth=pipeline_depth,
     )
     loop.tp_launcher = None  # single-process: nothing to tear down
+    loop.attention_backend_decision = attention_backend_decision
     return loop, cache, scheduler
 
 
@@ -503,6 +507,9 @@ def _build_pd_loop(
     )
     loop.tp_launcher = None
     loop.pd_coordinator = coordinator
+    loop.attention_backend_decision = getattr(
+        coordinator, "attention_backend_decision", None
+    )
     return loop, adapter.kv_cache, adapter
 
 
@@ -579,6 +586,7 @@ def _build_dist_tp_loop(
         pipeline_depth=pipeline_depth,
     )
     loop.tp_launcher = launcher  # serve teardown must call launcher.shutdown()
+    loop.attention_backend_decision = launcher.attention_backend_decision
     return loop, cache, scheduler
 
 
@@ -628,6 +636,9 @@ class KairyuBackend:
             cuda_graph_max_batch=cuda_graph_max_batch,
             cuda_graph_max_pages=cuda_graph_max_pages,
             cuda_graph_warmup_iters=cuda_graph_warmup_iters,
+        )
+        self.attention_backend_decision = getattr(
+            self._loop, "attention_backend_decision", None
         )
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime

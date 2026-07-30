@@ -241,3 +241,4 @@ bench/data/
 !bench/results/quant-vllm-*.json
 !bench/results/orchestration-stream-*.json
 !bench/results/issue-223-*.json
+!bench/results/attention-backends-*.json

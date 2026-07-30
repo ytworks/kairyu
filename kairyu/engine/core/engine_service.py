@@ -22,8 +22,12 @@ Wire protocol (msgpack maps):
                     in either order.
                     Control replies remain {"op": "pong"} | {"op": "bye"}.
 
-The child entrypoint is a top-level function (spawn pickles it); the ephemeral
-port travels back over a multiprocessing Pipe.
+The child entrypoint is a top-level function (spawn pickles it).  The
+multiprocessing Pipe keeps its historical first frame — the raw ephemeral port
+integer — and a new service optionally follows it with a versioned startup
+frame after the engine is fully constructed.  Keeping the first frame intact
+lets old parents start new children; the optional send tolerates the old parent
+closing its Pipe end immediately.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ LEGACY_WIRE_VERSION = 1
 WIRE_VERSION = 2
 _SUPPORTED_WIRE_VERSIONS = frozenset({LEGACY_WIRE_VERSION, WIRE_VERSION})
 _PROMPT_WIRE_VERSION = 1
+STARTUP_WIRE_VERSION = 1
 
 
 @dataclass
@@ -131,9 +136,7 @@ def _v2_event_from_update(
     output_count = len(update.outputs)
     text_length = len(update.text)
     logprob_count = len(update.logprobs) if update.logprobs is not None else 0
-    content_count = (
-        len(update.logprob_content) if update.logprob_content is not None else 0
-    )
+    content_count = len(update.logprob_content) if update.logprob_content is not None else 0
     _validate_monotonic_length("token output", output_count, cursor.output_count)
     _validate_monotonic_length("logprobs", logprob_count, cursor.logprob_count)
     _validate_monotonic_length(
@@ -144,9 +147,7 @@ def _v2_event_from_update(
     if cursor.has_logprobs and update.logprobs is None:
         raise ValueError("engine logprobs disappeared from a cumulative update")
     if cursor.has_logprob_content and update.logprob_content is None:
-        raise ValueError(
-            "engine logprob content disappeared from a cumulative update"
-        )
+        raise ValueError("engine logprob content disappeared from a cumulative update")
     if cursor.sequence > 0 and not update.finished:
         _validate_monotonic_length(
             "visible text",
@@ -154,9 +155,7 @@ def _v2_event_from_update(
             len(cursor.text),
         )
         if not update.text.startswith(cursor.text):
-            raise ValueError(
-                "engine visible text changed an already-emitted non-terminal prefix"
-            )
+            raise ValueError("engine visible text changed an already-emitted non-terminal prefix")
     if (
         cursor.sequence > 0
         and output_count == cursor.output_count
@@ -275,6 +274,53 @@ def _encode_token_logprob(entry) -> list:
     ]
 
 
+def _attention_backend_decision_to_wire(decision) -> dict | None:
+    """Encode the child's constructed decision as plain startup metadata."""
+
+    if decision is None:
+        return None
+    return {
+        "requested": decision.requested,
+        "resolved": decision.resolved,
+        "source": decision.source,
+        "components": dict(decision.components),
+        "rationale": decision.rationale,
+        "architecture": dict(decision.architecture),
+    }
+
+
+def _startup_ready_frame(engine_loop) -> dict:
+    return {
+        "startup_wire_version": STARTUP_WIRE_VERSION,
+        "status": "ready",
+        "attention_backend_decision": _attention_backend_decision_to_wire(
+            getattr(engine_loop, "attention_backend_decision", None)
+        ),
+    }
+
+
+def _startup_error_frame(error: BaseException) -> dict:
+    return {
+        "startup_wire_version": STARTUP_WIRE_VERSION,
+        "status": "error",
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }
+
+
+def _send_optional_startup_frame(port_pipe, frame: dict) -> bool:
+    """Best-effort second Pipe frame, absent from the legacy parent contract."""
+
+    try:
+        port_pipe.send(frame)
+    except (BrokenPipeError, EOFError, OSError):
+        # A legacy parent closes its endpoint immediately after receiving the
+        # integer port.  That is a supported rolling-upgrade direction, not a
+        # reason to take down a successfully constructed engine.
+        return False
+    return True
+
+
 def run_engine_service(port_pipe, config: dict) -> None:
     """Child-process main: bind, report the port, serve until shutdown."""
     import msgpack
@@ -288,8 +334,16 @@ def run_engine_service(port_pipe, config: dict) -> None:
     socket = context.socket(zmq.ROUTER)
     port = socket.bind_to_random_port("tcp://127.0.0.1")
     port_pipe.send(port)
+    try:
+        engine_loop, _, _ = build_engine_loop(**config)
+    except BaseException as error:
+        _send_optional_startup_frame(port_pipe, _startup_error_frame(error))
+        port_pipe.close()
+        socket.close(linger=0)
+        context.term()
+        raise
+    _send_optional_startup_frame(port_pipe, _startup_ready_frame(engine_loop))
     port_pipe.close()
-    engine_loop, _, _ = build_engine_loop(**config)
 
     owners: dict[str, _RequestOwner] = {}
     running = True
@@ -325,9 +379,7 @@ def run_engine_service(port_pipe, config: dict) -> None:
                         if wire_version == WIRE_VERSION and (
                             not isinstance(stream_id, str) or not stream_id
                         ):
-                            raise ValueError(
-                                "engine wire v2 add requires a non-empty stream_id"
-                            )
+                            raise ValueError("engine wire v2 add requires a non-empty stream_id")
                         prompt_wire_version = message.get("prompt_wire_version")
                         if prompt_wire_version is None:
                             prompt = message["prompt"]
@@ -349,9 +401,7 @@ def run_engine_service(port_pipe, config: dict) -> None:
                             prompt,
                             sampling_params_from_wire(message["sampling"]),
                             priority=message.get("priority", 0),
-                            scheduling_class=message.get(
-                                "scheduling_class", "interactive"
-                            ),
+                            scheduling_class=message.get("scheduling_class", "interactive"),
                         )
                         # Install ownership only after a clean submit; a rejected
                         # duplicate must not replace the original request's route.

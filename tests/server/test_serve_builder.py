@@ -31,8 +31,7 @@ GATEWAY_GPU_YAML = Path(__file__).parents[2] / "deploy/compose/gateway-gpu.yaml"
 GATEWAY_YAML = Path(__file__).parents[2] / "deploy/compose/gateway.yaml"
 ROUTING_YAML = Path(__file__).parents[2] / "deploy/compose/routing.yaml"
 QWEN_AUTO_GATEWAY_YAML = (
-    Path(__file__).parents[2]
-    / "examples/qwen3-32b-multi-gpu/auto-gateway.yaml"
+    Path(__file__).parents[2] / "examples/qwen3-32b-multi-gpu/auto-gateway.yaml"
 )
 
 
@@ -43,6 +42,18 @@ class _ShutdownBackend(MockBackend):
 
     async def shutdown(self) -> None:
         self.shutdown_count += 1
+
+
+class _StartupBackend(_ShutdownBackend):
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__()
+        self.fail = fail
+        self.startup_count = 0
+
+    async def startup(self) -> None:
+        self.startup_count += 1
+        if self.fail:
+            raise RuntimeError("backend startup failed")
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -208,6 +219,74 @@ pools:
             assert (await client.get("/health")).status_code == 200
 
 
+async def test_lifespan_starts_direct_and_static_pool_backends_before_serving(
+    monkeypatch,
+):
+    direct = _StartupBackend()
+    replica = _StartupBackend()
+    created = iter((direct, replica))
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda *_args, **_kwargs: next(created),
+    )
+    app = build_app_from_spec(
+        load_deployment_spec(
+            """
+engines:
+  direct: { backend: mock }
+pools:
+  static:
+    replicas:
+      - { backend: mock }
+"""
+        )
+    )
+
+    assert direct.startup_count == replica.startup_count == 0
+    async with app.router.lifespan_context(app):
+        # Entering the context is the serving boundary: both builder-owned
+        # concrete engines, including the replica hidden by the pool, are ready.
+        assert direct.startup_count == replica.startup_count == 1
+        assert direct.shutdown_count == replica.shutdown_count == 0
+
+    assert direct.shutdown_count == replica.shutdown_count == 1
+
+
+async def test_lifespan_startup_failure_prevents_serving_and_shuts_down_all_owned_resources(
+    monkeypatch,
+):
+    direct = _StartupBackend()
+    failing_replica = _StartupBackend(fail=True)
+    created = iter((direct, failing_replica))
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda *_args, **_kwargs: next(created),
+    )
+    app = build_app_from_spec(
+        load_deployment_spec(
+            """
+engines:
+  direct: { backend: mock }
+pools:
+  static:
+    replicas:
+      - { backend: mock }
+"""
+        )
+    )
+    serving_started = False
+
+    with pytest.raises(RuntimeError, match="backend startup failed"):
+        async with app.router.lifespan_context(app):
+            serving_started = True
+
+    assert serving_started is False
+    assert direct.startup_count == failing_replica.startup_count == 1
+    assert direct.shutdown_count == failing_replica.shutdown_count == 1
+
+
 async def test_lifespan_immediate_probe_validates_only_ready_remote_replicas():
     yaml_text = """
 pools:
@@ -311,9 +390,7 @@ orchestrators:
         assert {"m", "kairyu-auto", "kairyu-auto-max"} <= ids
 
         for model in ("kairyu-auto", "kairyu-auto-max"):
-            response = await client.post(
-                "/v1/chat/completions", json=_chat_body("hi", model=model)
-            )
+            response = await client.post("/v1/chat/completions", json=_chat_body("hi", model=model))
             assert response.status_code == 200
             assert response.json()["choices"][0]["message"]["content"]
 
@@ -755,31 +832,46 @@ tenants:
     assert totals["tenant-b"]["requests"] == 1
     assert "default" not in totals
     for tenant, usage in totals.items():
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_requests_total",
-            {"tenant": tenant},
-        ) == usage["requests"]
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_tokens_total",
-            {"tenant": tenant, "type": "prompt"},
-        ) == usage["prompt_tokens"]
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_tokens_total",
-            {"tenant": tenant, "type": "completion"},
-        ) == usage["completion_tokens"]
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_tokens_total",
-            {"tenant": tenant, "type": "cached"},
-        ) == usage["cached_tokens"]
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_tokens_total",
-            {"tenant": tenant, "type": "uncached"},
-        ) == usage["uncached_tokens"]
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_requests_total",
+                {"tenant": tenant},
+            )
+            == usage["requests"]
+        )
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_tokens_total",
+                {"tenant": tenant, "type": "prompt"},
+            )
+            == usage["prompt_tokens"]
+        )
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_tokens_total",
+                {"tenant": tenant, "type": "completion"},
+            )
+            == usage["completion_tokens"]
+        )
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_tokens_total",
+                {"tenant": tenant, "type": "cached"},
+            )
+            == usage["cached_tokens"]
+        )
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_tokens_total",
+                {"tenant": tenant, "type": "uncached"},
+            )
+            == usage["uncached_tokens"]
+        )
 
 
 async def test_deployment_usage_metrics_restore_after_truncated_tail_restart(
@@ -835,31 +927,46 @@ tenants:
     assert restarted_app.state.usage_ledger.malformed_lines == 1
     assert set(totals) == {"tenant-a", "tenant-b"}
     for tenant, usage in totals.items():
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_requests_total",
-            {"tenant": tenant},
-        ) == usage["requests"]
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_tokens_total",
-            {"tenant": tenant, "type": "prompt"},
-        ) == usage["prompt_tokens"]
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_tokens_total",
-            {"tenant": tenant, "type": "completion"},
-        ) == usage["completion_tokens"]
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_tokens_total",
-            {"tenant": tenant, "type": "cached"},
-        ) == usage["cached_tokens"]
-        assert _metric_value(
-            metrics,
-            "kairyu_usage_tokens_total",
-            {"tenant": tenant, "type": "uncached"},
-        ) == usage["uncached_tokens"]
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_requests_total",
+                {"tenant": tenant},
+            )
+            == usage["requests"]
+        )
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_tokens_total",
+                {"tenant": tenant, "type": "prompt"},
+            )
+            == usage["prompt_tokens"]
+        )
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_tokens_total",
+                {"tenant": tenant, "type": "completion"},
+            )
+            == usage["completion_tokens"]
+        )
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_tokens_total",
+                {"tenant": tenant, "type": "cached"},
+            )
+            == usage["cached_tokens"]
+        )
+        assert (
+            _metric_value(
+                metrics,
+                "kairyu_usage_tokens_total",
+                {"tenant": tenant, "type": "uncached"},
+            )
+            == usage["uncached_tokens"]
+        )
 
 
 def test_tenant_preflight_revalidates_before_constructing_owned_backends(monkeypatch):
@@ -924,9 +1031,7 @@ def test_builder_without_tenant_section_preserves_legacy_app_state(monkeypatch):
     assert resolution_counts == {"data": 1, "admin": 1}
 
 
-async def test_lifespan_attempts_orchestrator_shutdown_after_engine_failure(
-    tmp_path, monkeypatch
-):
+async def test_lifespan_attempts_orchestrator_shutdown_after_engine_failure(tmp_path, monkeypatch):
     class _Resource:
         def __init__(self, fail: bool = False) -> None:
             self.fail = fail
@@ -939,9 +1044,7 @@ async def test_lifespan_attempts_orchestrator_shutdown_after_engine_failure(
 
     failing_engine = _Resource(fail=True)
     owned_backend = _ShutdownBackend()
-    owned_orchestrator = Orchestrator(
-        engines={"tier1": owned_backend, "tier2": owned_backend}
-    )
+    owned_orchestrator = Orchestrator(engines={"tier1": owned_backend, "tier2": owned_backend})
     (tmp_path / "auto.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
     monkeypatch.setattr(
         "kairyu.deploy.builder.create_backend", lambda *_args, **_kwargs: failing_engine
@@ -962,9 +1065,7 @@ orchestrator: {{ spec: auto.yaml }}
 
     with pytest.raises(ExceptionGroup, match="application shutdown"):
         async with app.router.lifespan_context(app):
-            app.state.usage_ledger.record(
-                "tenant-a", "bad", prompt_tokens=1, completion_tokens=2
-            )
+            app.state.usage_ledger.record("tenant-a", "bad", prompt_tokens=1, completion_tokens=2)
             app.state.usage_ledger.flush()
             ledger_handle = app.state.usage_ledger._handle
 

@@ -527,6 +527,7 @@ def build_tp_model(
             capabilities=linear_capabilities,
             selection_policy=linear_selection_policy,
         ),
+        dtype=dtype,
     )
     # Bind execution behavior before loading. Parameter-owning modules stay at
     # their HF/checkpoint paths, so post-bind state enumeration and canonical

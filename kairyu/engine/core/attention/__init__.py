@@ -161,12 +161,20 @@ from kairyu.engine.core.attention.selector import (  # noqa: E402
     select_backend_name,
 )
 from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend  # noqa: E402
+from kairyu.engine.core.attention_selector import (  # noqa: E402
+    SUPPORTED_ATTENTION_BACKENDS,
+    AttentionBackendDecision,
+    select_backend_decision,
+)
 
 __all__ = [
     "AttentionBackend",
+    "AttentionBackendDecision",
     "GraphDecodeBackend",
+    "SUPPORTED_ATTENTION_BACKENDS",
     "TorchAttentionBackend",
     "graph_capture_gap",
     "select_backend",
+    "select_backend_decision",
     "select_backend_name",
 ]

@@ -79,7 +79,7 @@
     },
     "attentionBackend": {
       "type": "string",
-      "enum": ["", "torch", "flashinfer"]
+      "enum": ["", "auto", "torch", "flashinfer", "flashattention3", "flashattention4"]
     },
     "batchPostgres": {
       "type": "object",
