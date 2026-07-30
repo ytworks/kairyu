@@ -1,12 +1,19 @@
-"""SpeculativeRunner: n-gram draft + sequential scoring + greedy verify (m8 D4).
+"""SpeculativeRunner: n-gram draft + batched scoring + greedy verify (m8 D4).
 
 A ``ModelRunner`` wrapper (composition — the scheduler is untouched beyond its
 D3 reservation contract). For a speculative decode chunk it proposes a draft
-from the committed context, scores each draft position through the wrapped
-runner using an immutable overlay state whose ``outputs`` are the committed
-tokens plus the draft prefix (the wrapped runner reads ``outputs[p-1]`` — draft
-tokens are not in scheduler state), verifies with the existing
-``verify_greedy``, and returns the accepted prefix + bonus token.
+from the committed context, then sends every target-verification position to
+the wrapped runner as one multi-token chunk.  An immutable overlay state exposes
+the committed tokens plus the complete draft (draft tokens are not in scheduler
+state).  All compatible requests in the scheduler step share that one wrapped
+runner call before the existing ``verify_greedy`` policy returns each accepted
+prefix plus its bonus/correction token.
+
+Multi-token chunks are an explicit optional ``ModelRunner`` capability.
+Targets must declare ``supports_batched_verification is True``; an undeclared
+custom runner keeps the pre-#215 one-position-at-a-time contract. The branch is
+chosen before execution, so a malformed capable-runner result is never retried
+after model/KV side effects.
 
 Per-request gating (review amendment): speculation is bypassed unless the
 request is pure greedy (no penalties, no grammar) — penalties change the
@@ -22,7 +29,6 @@ from dataclasses import replace
 
 from kairyu.engine.core.draft import DraftSource, NGramDraftSource
 from kairyu.engine.core.engine_core import ModelRunner, StepOutput
-from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.spec_decode import verify_greedy
 
@@ -64,57 +70,161 @@ class SpeculativeRunner:
         if release is not None:
             release(request_id)
 
+    def set_batched_verification_enabled(self, enabled: bool) -> None:
+        """Forward the matched-A/B and rollback switch to the target runner."""
+        setter = getattr(self._runner, "set_batched_verification_enabled", None)
+        if not callable(setter):
+            raise RuntimeError(
+                f"{type(self._runner).__name__} does not expose a batched "
+                "verification switch"
+            )
+        setter(enabled)
+
+    def verification_execution_stats(
+        self, *, reset: bool = False
+    ) -> object:
+        """Expose target-runner structural counters through the wrapper."""
+        getter = getattr(self._runner, "verification_execution_stats", None)
+        if not callable(getter):
+            raise RuntimeError(
+                f"{type(self._runner).__name__} does not expose verification "
+                "execution stats"
+            )
+        return getter(reset=reset)
+
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> StepOutput:
+        if getattr(self._runner, "supports_batched_verification", False) is True:
+            return self._execute_batched(scheduled, states)
+        return self._execute_sequential(scheduled, states)
+
+    def _propose(self, chunk: ScheduledChunk, state: object) -> tuple[int, ...]:
+        committed = tuple(state.outputs)
+        context = state.request.prompt_token_ids + committed
+        return tuple(
+            self._draft_source.propose(
+                context,
+                max_draft=chunk.num_tokens - 1,
+            )
+        )[: chunk.num_tokens - 1]
+
+    def _finish_verification(
+        self,
+        request_id: str,
+        draft: tuple[int, ...],
+        target: tuple,
+    ) -> tuple:
+        expected = len(draft) + 1
+        if len(target) != expected:
+            raise RuntimeError(
+                "target runner returned the wrong number of speculative "
+                f"verification positions for {request_id!r}: "
+                f"got {len(target)}, expected {expected}"
+            )
+        result = verify_greedy(
+            draft,
+            tuple(token.token_id for token in target),
+        )
+        self.draft_proposed += len(draft)
+        self.draft_accepted += result.accepted
+        return tuple(target[: result.accepted + 1])
+
+    def _execute_batched(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> StepOutput:
+        runner_chunks: list[ScheduledChunk] = []
+        runner_states = dict(states)
+        drafts: dict[str, tuple[int, ...]] = {}
+        for chunk in scheduled:
+            if chunk.is_prefill or chunk.num_tokens == 1:
+                runner_chunks.append(chunk)
+            elif not states[chunk.request_id].request.sampling.is_greedy_pure:
+                # bypass: score exactly one token; D3 shortfall releases the rest
+                runner_chunks.append(replace(chunk, num_tokens=1))
+            else:
+                state = states[chunk.request_id]
+                committed = tuple(state.outputs)
+                draft = self._propose(chunk, state)
+                drafts[chunk.request_id] = draft
+                runner_states[chunk.request_id] = _OverlayState(
+                    state, (*committed, *draft)
+                )
+                # The target emits one score for each draft token and one
+                # bonus/correction score.  Keeping one chunk per request lets
+                # the production runner pack every compatible row together.
+                runner_chunks.append(
+                    replace(chunk, num_tokens=len(draft) + 1)
+                )
+
+        if not runner_chunks:
+            return {}
+        target_output = self._runner.execute(tuple(runner_chunks), runner_states)
+        sampled = dict(target_output)
+        for request_id, draft in drafts.items():
+            target = target_output[request_id]
+            # target[i] is the model's own next token given the draft prefix
+            # of length i (verify_greedy's contract; walkthrough in m8 §6).
+            sampled[request_id] = self._finish_verification(
+                request_id,
+                draft,
+                target,
+            )
+        return sampled
+
+    def _execute_sequential(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> StepOutput:
+        """Pre-#215 compatibility path for one-token custom ModelRunners."""
         plain: list[ScheduledChunk] = []
         speculative: list[ScheduledChunk] = []
         for chunk in scheduled:
             if chunk.is_prefill or chunk.num_tokens == 1:
                 plain.append(chunk)
             elif not states[chunk.request_id].request.sampling.is_greedy_pure:
-                # bypass: score exactly one token; D3 shortfall releases the rest
                 plain.append(replace(chunk, num_tokens=1))
             else:
                 speculative.append(chunk)
+
         sampled: StepOutput = {}
         if plain:
             sampled.update(self._runner.execute(tuple(plain), states))
         for chunk in speculative:
-            sampled[chunk.request_id] = self._speculate(chunk, states)
+            state = states[chunk.request_id]
+            committed = tuple(state.outputs)
+            draft = self._propose(chunk, state)
+            target = []
+            for index in range(len(draft) + 1):
+                sub_chunk = ScheduledChunk(
+                    request_id=chunk.request_id,
+                    num_tokens=1,
+                    is_prefill=False,
+                    position=chunk.position + index,
+                )
+                result = self._runner.execute(
+                    (sub_chunk,),
+                    {
+                        chunk.request_id: _OverlayState(
+                            state,
+                            (*committed, *draft[:index]),
+                        )
+                    },
+                )
+                records = result[chunk.request_id]
+                if len(records) != 1:
+                    raise RuntimeError(
+                        "legacy target runner must return exactly one "
+                        "speculative verification position for "
+                        f"{chunk.request_id!r}; got {len(records)}"
+                    )
+                target.append(records[0])
+            sampled[chunk.request_id] = self._finish_verification(
+                chunk.request_id,
+                draft,
+                tuple(target),
+            )
         return sampled
-
-    def _score_position(
-        self,
-        chunk: ScheduledChunk,
-        state: object,
-        outputs: tuple[int, ...],
-        position: int,
-    ) -> SampledToken:
-        overlay = _OverlayState(state, outputs)
-        sub_chunk = ScheduledChunk(
-            request_id=chunk.request_id, num_tokens=1, is_prefill=False, position=position
-        )
-        out = self._runner.execute((sub_chunk,), {chunk.request_id: overlay})
-        return out[chunk.request_id][0]
-
-    def _speculate(
-        self, chunk: ScheduledChunk, states: Mapping[str, object]
-    ) -> tuple[SampledToken, ...]:
-        state = states[chunk.request_id]
-        committed = tuple(state.outputs)
-        context = state.request.prompt_token_ids + committed
-        draft = self._draft_source.propose(context, max_draft=chunk.num_tokens - 1)
-        draft = draft[: chunk.num_tokens - 1]
-        # target_tokens[i] is the model's own next token given the DRAFT prefix
-        # of length i (verify_greedy's contract; walkthrough in m8 §6)
-        target: list[SampledToken] = []
-        prefix = committed
-        for index in range(len(draft) + 1):
-            target.append(self._score_position(chunk, state, prefix, chunk.position + index))
-            if index < len(draft):
-                prefix = (*prefix, draft[index])
-        result = verify_greedy(draft, tuple(token.token_id for token in target))
-        self.draft_proposed += len(draft)
-        self.draft_accepted += result.accepted
-        return tuple(target[: result.accepted + 1])

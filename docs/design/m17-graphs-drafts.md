@@ -165,6 +165,41 @@ output (DeepSeek convention).
   not make attention traverse padding. The same example leaves the attention
   override empty so hardware policy selects FlashInfer rather than forcing the
   torch reference path.
+
+### 2026-07-30 batched-verification amendment
+
+- **A13 (explicit runner capability):** `supports_batched_verification is
+  True` opts a `ModelRunner` into non-prefill chunks wider than one target
+  position. Undeclared custom runners retain A7's one-position calls, selected
+  before execution; a malformed opted-in result fails without retrying a model
+  or KV side effect.
+- **A14 (flattened target geometry):** the native runner flattens
+  `[previous, draft[0], ..., draft[k-1]]` across compatible requests. Every row
+  has its own absolute position and causal length, duplicate page-table view,
+  and unique writable physical slot. All rows write KV before each layer's
+  attention, so earlier rows mask later draft positions while later rows can
+  attend to the earlier draft KV exactly as in sequential target scoring.
+  Rejected suffix KV remains stale and is overwritten from the first
+  correction position; no clearing pass is required.
+- **A15 (graph capacity is rows):** speculative graph capacity is
+  `min(token_budget, request_capacity * (k + 1))`. The graph bucket is selected
+  from the total target positions, padding still writes only the scheduler's
+  reserved scratch page, and an in-range formal cell must report one graph
+  dispatch with zero eager fallback.
+- **A16 (TP target packet):** the rank-0 packet owns one fixed int64 slot per
+  target position (partial prefill retains one sentinel). Offsets are derived
+  only from the broadcast `ScheduledChunk` tuple. Every follower executes the
+  same model/KV rows and adopts every authoritative target token device-side.
+- **A17 (eager policy by measurement):** the selected eager implementation is
+  flattened tensor decode, shared with the graph path. On the pinned full
+  Qwen3-32B checkpoint and the same 8-request/32-position/page/write geometry,
+  warmed alternating measurements gave median CUDA time 58.218 ms versus
+  73.711 ms for native ragged prefill (`flattened/native = 0.7898`), with all
+  32 selected tokens equal. Cross-kernel BF16 KV numerical distance is retained
+  as a diagnostic rather than an equality gate; production correctness remains
+  bound directly against sequential target scoring. Timing never decides the
+  issue's pass/fail result.
+
 - **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
   synthetic requests x 32 output tokens, torch attention: tensor eager wall
   8.844 s, TPOT 192.075 ms/token, 0.90 req/s; CUDA graph wall 7.196 s,

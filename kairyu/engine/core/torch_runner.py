@@ -80,6 +80,8 @@ class TorchPagedRunner:
     filters, grammar mask) — same seam the real model runner (M12) uses.
     """
 
+    supports_batched_verification = True
+
     def __init__(
         self,
         model: TinyAttentionLM,
@@ -153,15 +155,25 @@ class TorchPagedRunner:
                         ),
                     )
             else:
-                # decode for output index p: previous token's KV lands at
-                # absolute position prompt_len + p - 1, then it queries
-                p = chunk.position
-                input_token = state.outputs[p - 1] if p > 0 else prompt[-1]
-                absolute = len(prompt) + p - 1
-                self._write_kv(input_token, absolute, pages)
-                sampled[chunk.request_id] = (
-                    self._sample(
-                        state, input_token, seq_len=absolute + 1, pages=pages, position=p
-                    ),
-                )
+                # Decode/verification for output index p: each known previous
+                # token's KV lands at prompt_len + p - 1, then produces the
+                # target score at p.  SpeculativeRunner supplies the immutable
+                # draft tail through state.outputs, so a multi-token chunk
+                # scores every draft position plus the bonus in one runner call.
+                records: list[SampledToken] = []
+                for offset in range(chunk.num_tokens):
+                    p = chunk.position + offset
+                    input_token = state.outputs[p - 1] if p > 0 else prompt[-1]
+                    absolute = len(prompt) + p - 1
+                    self._write_kv(input_token, absolute, pages)
+                    records.append(
+                        self._sample(
+                            state,
+                            input_token,
+                            seq_len=absolute + 1,
+                            pages=pages,
+                            position=p,
+                        )
+                    )
+                sampled[chunk.request_id] = tuple(records)
         return sampled

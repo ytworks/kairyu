@@ -47,9 +47,27 @@ _DECODE_MODES = frozenset({"eager", "cuda_graph"})
 logger = logging.getLogger(__name__)
 
 
+def _graph_row_capacity(
+    request_batch_capacity: int,
+    token_budget: int,
+    *,
+    speculative: bool,
+    speculative_tokens: int,
+) -> int:
+    """Translate request capacity to the flattened decode-row capacity."""
+    if not speculative:
+        return request_batch_capacity
+    return min(
+        token_budget,
+        request_batch_capacity * (speculative_tokens + 1),
+    )
+
+
 class _ToyRunner:
     """Deterministic CPU stand-in for the GPU model forward (greedy only —
     sampling params take effect with a Sampler-equipped runner, m8 D2)."""
+
+    supports_batched_verification = True
 
     def __init__(self, *, sampling_owner: bool = True) -> None:
         self._sampling_owner = sampling_owner
@@ -68,8 +86,13 @@ class _ToyRunner:
             state = states[chunk.request_id]
             if self._chunk_emits_token(chunk, state):
                 seed = sum(state.request.prompt_token_ids) if state.request.prompt_token_ids else 0
-                token_id = (seed + 31 * chunk.position) % _VOCAB_SIZE
-                sampled[chunk.request_id] = (SampledToken(token_id),)
+                count = 1 if chunk.is_prefill else chunk.num_tokens
+                sampled[chunk.request_id] = tuple(
+                    SampledToken(
+                        (seed + 31 * (chunk.position + offset)) % _VOCAB_SIZE
+                    )
+                    for offset in range(count)
+                )
         return sampled
 
     def execute_passive(
@@ -82,17 +105,26 @@ class _ToyRunner:
     def _chunk_emits_token(chunk: ScheduledChunk, state: object) -> bool:
         return not chunk.is_prefill or state.prefill_done
 
+    @staticmethod
+    def _chunk_packet_width(chunk: ScheduledChunk) -> int:
+        """Fixed packet slots derivable from the already-broadcast chunk."""
+        return 1 if chunk.is_prefill else chunk.num_tokens
+
     def make_sampling_token_packet(
         self,
         scheduled: tuple[ScheduledChunk, ...],
         states: Mapping[str, object],
         sampled: Mapping[str, tuple[SampledToken, ...]] | None = None,
     ):
-        """Build the same one-int64-per-chunk layout as ``PagedModelRunner``."""
+        """Build the same fixed variable-width layout as ``PagedModelRunner``."""
         import torch
 
         chunks = tuple(scheduled)
-        packet = torch.full((len(chunks),), -1, dtype=torch.int64)
+        packet = torch.full(
+            (sum(self._chunk_packet_width(chunk) for chunk in chunks),),
+            -1,
+            dtype=torch.int64,
+        )
         expected = {
             chunk.request_id
             for chunk in chunks
@@ -107,16 +139,23 @@ class _ToyRunner:
                 f"layout: missing={sorted(expected - actual)}, "
                 f"extra={sorted(actual - expected)}"
             )
-        for index, chunk in enumerate(chunks):
+        offset = 0
+        for chunk in chunks:
+            width = self._chunk_packet_width(chunk)
             if chunk.request_id not in expected:
+                offset += width
                 continue
             records = sampled[chunk.request_id]
-            if len(records) != 1 or records[0].token_id < 0:
+            if len(records) != width or any(record.token_id < 0 for record in records):
                 raise RuntimeError(
-                    "TP sampling owner must emit exactly one valid token for "
-                    f"{chunk.request_id!r} at position {chunk.position}"
+                    "TP sampling owner emitted an invalid token sequence for "
+                    f"{chunk.request_id!r} at position {chunk.position}: "
+                    f"expected {width}, got {len(records)}"
                 )
-            packet[index] = records[0].token_id
+            packet[offset : offset + width] = torch.tensor(
+                [record.token_id for record in records], dtype=torch.int64
+            )
+            offset += width
         return packet
 
     def adopt_sampling_token_packet(
@@ -134,26 +173,32 @@ class _ToyRunner:
                 "TP sampling packet must be a one-dimensional int64 tensor; "
                 f"got dtype={packet.dtype}, shape={tuple(packet.shape)}"
             )
-        if packet.numel() != len(chunks):
+        expected_length = sum(self._chunk_packet_width(chunk) for chunk in chunks)
+        if packet.numel() != expected_length:
             raise RuntimeError(
                 "TP sampling packet length does not match the scheduled layout: "
-                f"got {packet.numel()}, expected {len(chunks)}"
+                f"got {packet.numel()}, expected {expected_length}"
             )
-        for index, chunk in enumerate(chunks):
+        offset = 0
+        for chunk in chunks:
+            width = self._chunk_packet_width(chunk)
             emits = self._chunk_emits_token(chunk, states[chunk.request_id])
-            token_id = int(packet[index])
-            if emits and token_id < 0:
+            values = tuple(int(value) for value in packet[offset : offset + width])
+            if emits and any(token_id < 0 for token_id in values):
                 raise RuntimeError(
-                    "TP sampling packet is missing the authoritative token for "
+                    "TP sampling packet is missing an authoritative token for "
                     f"{chunk.request_id!r} at position {chunk.position}"
                 )
-            if not emits and token_id != -1:
+            if not emits and any(token_id != -1 for token_id in values):
                 raise RuntimeError(
                     "TP sampling packet emitted an unexpected token for partial "
                     f"prefill {chunk.request_id!r} at position {chunk.position}"
                 )
             if emits:
-                self._future_tokens.setdefault(chunk.request_id, {})[chunk.position] = token_id
+                future = self._future_tokens.setdefault(chunk.request_id, {})
+                for index, token_id in enumerate(values):
+                    future[chunk.position + index] = token_id
+            offset += width
 
     def release(self, request_id: str) -> None:
         self._future_tokens.pop(request_id, None)
@@ -349,9 +394,18 @@ def build_engine_loop(
         if graph_decode:
             from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
 
+            # ``cuda_graph_max_batch`` is a request-batch capacity.  Target
+            # verification flattens each speculative request into at most
+            # k+1 decode rows, and those rows must fit a graph bucket too.
+            graph_row_capacity = _graph_row_capacity(
+                cuda_graph_max_batch,
+                max_num_batched_tokens,
+                speculative=speculative is not None,
+                speculative_tokens=speculative_tokens,
+            )
             graph_options = {
                 "graph_backend": CudaGraphBackend(warmup_iters=cuda_graph_warmup_iters),
-                "graph_max_batch": cuda_graph_max_batch,
+                "graph_max_batch": graph_row_capacity,
                 "graph_max_pages": cuda_graph_max_pages,
             }
         runner = PagedModelRunner(
@@ -489,6 +543,12 @@ def _build_dist_tp_loop(
         priority_age_s=priority_age_s,
     )
     graph_scratch_page = cache.reserve_scratch_page() if graph_decode else None
+    graph_row_capacity = _graph_row_capacity(
+        graph_max_batch,
+        max_num_batched_tokens,
+        speculative=graph_decode and speculative is not None,
+        speculative_tokens=speculative_tokens,
+    )
     launcher = DistTPLauncher(
         model_path,
         tensor_parallel_size,
@@ -496,7 +556,7 @@ def _build_dist_tp_loop(
         page_size,
         vocab=grammar_vocab,
         graph_scratch_page=graph_scratch_page,
-        graph_max_batch=graph_max_batch,
+        graph_max_batch=graph_row_capacity,
         graph_max_pages=graph_max_pages,
         graph_warmup_iters=graph_warmup_iters,
     )

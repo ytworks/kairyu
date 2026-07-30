@@ -395,3 +395,39 @@ image, and drill are unchanged.
   `4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`,
   and trace SHA-256
   `51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.
+
+- 9.7 Batched speculative target verification (#215): run from a clean commit
+  containing the implementation and formal runner. The gate uses the exact
+  reviewed Qwen3-32B checkpoint on all eight GPUs, exercises eager and CUDA
+  Graph runners with warmed OFF/ON ABBA/BAAB order, and independently counts
+  every rank's requests, target positions, model calls, FlashInfer plan/run
+  calls, graph dispatches, and eager fallbacks. End-to-end and fixed-geometry
+  target parity are binding. Wall time, TPOT, throughput, CUDA time,
+  median/MAD, and cross-kernel BF16 KV distance are diagnostic only.
+
+  The same run releases the TP launchers and loads the full checkpoint once on
+  GPU 0 to compare flattened tensor decode with native ragged prefill over the
+  identical 8-request/32-target-row page, position, and write geometry. It
+  requires identical selected tokens and proves that both paths overwrite all
+  poisoned target KV slots with finite values; it records the faster strategy
+  without turning host or device timing into a correctness gate.
+
+  ```bash
+  uv run python bench/batched_spec_verify_qwen.py \
+    --model-path /path/to/qwen3-32b \
+    --tp 8 \
+    --output \
+      bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-<date>.json \
+    --assert-gate
+
+  uv run python bench/batched_spec_verify_qwen.py \
+    --verify \
+      bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-<date>.json \
+    --model-path /path/to/qwen3-32b \
+    --assert-gate
+  ```
+
+  A skipped CUDA/FlashInfer/NCCL cell, missing rank, wrong target width, graph
+  fallback, source/checkpoint drift, unwritten/non-finite target KV slot, or
+  stored-verdict mismatch is a failure. It is never recorded as a pass merely
+  because the local environment cannot execute it.
