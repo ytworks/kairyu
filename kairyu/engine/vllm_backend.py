@@ -16,6 +16,14 @@ from kairyu.engine.backend import (
     GenerationResult,
     prompt_with_tool_intent,
 )
+from kairyu.engine.prompt import (
+    MultimodalPrompt,
+    PromptInput,
+    TextPrompt,
+    TokensPrompt,
+    prompt_text,
+    supplied_prompt_token_ids,
+)
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
@@ -75,6 +83,28 @@ class VLLMBackend:
         self._vllm = vllm
         self._engine = vllm.AsyncLLMEngine.from_engine_args(args)
 
+    @staticmethod
+    def _validated_prompt(request: GenerationRequest) -> PromptInput:
+        prompt = request.prompt
+        if isinstance(prompt, MultimodalPrompt):
+            raise ValueError(
+                "vLLM backend does not support multimodal prompts through "
+                "Kairyu's typed prompt adapter"
+            )
+        if not isinstance(prompt, (str, TextPrompt, TokensPrompt)):
+            raise ValueError(
+                "vLLM backend requires a text or token-ID prompt, "
+                f"got {type(prompt).__name__}"
+            )
+        # Besides rendering text tool intent, this rejects token-ID prompts
+        # whose caller did not declare that the tool intent was already rendered.
+        return prompt_with_tool_intent(request)
+
+    def validate_request(self, request: GenerationRequest) -> None:
+        """Reject prompt variants that this adapter cannot preserve exactly."""
+
+        self._validated_prompt(request)
+
     def _to_result(self, request: GenerationRequest, output) -> GenerationResult:
         completions = tuple(
             CompletionOutput(
@@ -92,6 +122,7 @@ class VLLMBackend:
             prompt=request.prompt,
             completions=completions,
             finished=output.finished,
+            prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
         )
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
@@ -103,9 +134,19 @@ class VLLMBackend:
         return final
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
+        prompt = self._validated_prompt(request)
+        if isinstance(prompt, TokensPrompt):
+            vllm_prompt: str | dict[str, list[int]] = {
+                "prompt_token_ids": list(prompt.prompt_token_ids)
+            }
+        else:
+            text = prompt_text(prompt)
+            if text is None:  # Defensive: multimodal prompts were rejected above.
+                raise ValueError("vLLM backend requires a text or token-ID prompt")
+            vllm_prompt = text
         vllm_params = self._vllm.SamplingParams(**to_vllm_sampling_kwargs(request.sampling_params))
         async for output in self._engine.generate(
-            prompt_with_tool_intent(request),
+            vllm_prompt,
             vllm_params,
             request.request_id,
             priority=request.priority,

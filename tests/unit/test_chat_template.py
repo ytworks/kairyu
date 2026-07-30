@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from kairyu.entrypoints.chat_template import ChatTemplate, render_chat
+from kairyu.entrypoints.chat_template import ChatTemplate, flatten_content, render_chat
 
 TEMPLATES = Path(__file__).parent.parent / "fixtures" / "templates"
 
@@ -110,6 +110,65 @@ def test_load_from_path_and_inline(tmp_path):
 def test_legacy_render_chat_unchanged():
     out = render_chat([{"role": "user", "content": "hello"}])
     assert out == "user: hello\nassistant:"
+
+
+@pytest.mark.parametrize(
+    "renderer",
+    [
+        lambda messages: render_chat(messages),
+        lambda messages: ChatTemplate("{{ messages[0].content }}").render(messages),
+    ],
+)
+def test_text_renderers_reject_images_instead_of_dropping_them(renderer):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.test/image"},
+                },
+            ],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="cannot execute"):
+        renderer(messages)
+
+
+@pytest.mark.parametrize(
+    "renderer",
+    [
+        lambda messages: render_chat(messages),
+        lambda messages: ChatTemplate("{{ messages[0].content }}").render(messages),
+    ],
+)
+def test_text_renderers_reject_alternate_prompt_carriers(renderer):
+    messages = [
+        {
+            "role": "user",
+            "content": "visible text",
+            "prompt_token_ids": [1, 2, 3],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="alternate prompt carriers"):
+        renderer(messages)
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"type": "input_audio", "input_audio": {"data": "AA=="}},
+        {"type": "text"},
+        {"type": "text", "text": "x", "unknown": True},
+        {"type": "image_url", "image_url": {}},
+    ],
+)
+def test_flatten_content_never_drops_unknown_or_malformed_parts(part):
+    with pytest.raises(ValueError, match="content part 0"):
+        flatten_content([part])
 
 
 def test_ascii_preserved_in_unicode_content():

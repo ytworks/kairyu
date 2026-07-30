@@ -14,6 +14,12 @@ from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.core.engine_service import LEGACY_WIRE_VERSION, WIRE_VERSION
 from kairyu.engine.kairyu_backend import KairyuBackend
+from kairyu.engine.prompt import (
+    MultimodalItem,
+    MultimodalPrompt,
+    PromptInput,
+    TokensPrompt,
+)
 from kairyu.engine.registry import create_backend
 from kairyu.engine.zmq_backend import ZmqEngineBackend
 
@@ -27,7 +33,7 @@ def zmq_backend():
     asyncio.run(backend.shutdown())
 
 
-def _request(request_id: str, prompt: str, **sampling) -> GenerationRequest:
+def _request(request_id: str, prompt: PromptInput, **sampling) -> GenerationRequest:
     return GenerationRequest(
         request_id=request_id,
         prompt=prompt,
@@ -47,6 +53,49 @@ async def test_generate_parity_with_in_process(zmq_backend):
     assert got.token_ids == ref.token_ids  # sha256 tokenizer: process-stable
     assert got.text == ref.text
     assert got.finish_reason == ref.finish_reason == "length"
+
+
+async def test_token_prompt_crosses_process_without_retokenization(zmq_backend):
+    prompt = TokensPrompt(
+        prompt_token_ids=(5, 8, 13, 21),
+        prompt="display-only text",
+    )
+    params = {"max_tokens": 5, "temperature": 0}
+    reference = await KairyuBackend(num_pages=256).generate(
+        _request("token-wire", prompt, **params)
+    )
+    result = await zmq_backend.generate(
+        _request("token-wire", prompt, **params)
+    )
+
+    assert result.prompt == prompt
+    assert result.prompt_token_ids == prompt.prompt_token_ids
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == len(prompt.prompt_token_ids)
+    assert result.completions == reference.completions
+
+
+async def test_multimodal_rejects_before_process_start():
+    backend = ZmqEngineBackend(num_pages=64)
+    request = _request(
+        "mm-preflight",
+        MultimodalPrompt(
+            base="describe",
+            items=(
+                MultimodalItem(
+                    modality="image",
+                    encoding="uri",
+                    data="https://example.test/image.png",
+                ),
+            ),
+        ),
+        max_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="does not support multimodal"):
+        await backend.generate(request)
+    assert backend._process is None
+    assert backend._active_request_ids == set()
 
 
 async def test_stream_yields_incremental_partials(zmq_backend):

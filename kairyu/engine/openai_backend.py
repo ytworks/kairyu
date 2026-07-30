@@ -32,6 +32,7 @@ from kairyu.engine.openai_capabilities import (
     OpenAIRequestCapabilities,
     resolve_openai_capabilities,
 )
+from kairyu.engine.prompt import prompt_kind, prompt_text
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import SamplingParams
@@ -292,6 +293,12 @@ def _validated_request_payload(
     request: GenerationRequest,
     capabilities: OpenAIRequestCapabilities,
 ) -> dict[str, object]:
+    kind = prompt_kind(request.prompt)
+    if kind not in capabilities.prompt_kinds:
+        raise _client_error(
+            capabilities.upstream,
+            f"does not support prompt kind: {kind}",
+        )
     _validate_tools(request, capabilities)
     if request.priority != 0 and not capabilities.priority:
         raise _client_error(
@@ -333,6 +340,13 @@ class OpenAICompatBackend:
         # upstreams that reject unknown stream_options
         self._request_stream_usage = request_stream_usage
         self._capabilities = resolve_openai_capabilities(upstream, capabilities)
+        unsupported_prompt_kinds = self._capabilities.prompt_kinds - {"text"}
+        if unsupported_prompt_kinds:
+            raise ValueError(
+                "OpenAICompatBackend currently implements only text prompts; "
+                "unsupported configured prompt kinds: "
+                f"{sorted(unsupported_prompt_kinds)}"
+            )
         self._client = client
         self._client_factory = client_factory
         # An injected instance has an external owner. A factory creates this
@@ -442,9 +456,18 @@ class OpenAICompatBackend:
         return self._client
 
     def _payload(self, request: GenerationRequest) -> dict:
+        text = prompt_text(request.prompt)
+        if text is None or prompt_kind(request.prompt) != "text":
+            # Keep direct backend calls as explicit as server preflight. Never
+            # stringify token IDs or flatten modality data into chat content.
+            raise UpstreamClientError(
+                f"OpenAI-compatible upstream {self._capabilities.upstream!r} "
+                f"does not support prompt kind: {prompt_kind(request.prompt)}",
+                status_code=400,
+            )
         payload: dict = {
             "model": self._model,
-            "messages": [{"role": "user", "content": request.prompt}],
+            "messages": [{"role": "user", "content": text}],
         }
         try:
             payload.update(_validated_request_payload(request, self._capabilities))

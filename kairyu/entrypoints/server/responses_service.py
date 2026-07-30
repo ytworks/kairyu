@@ -289,6 +289,17 @@ def _content_text(content: object, *, path: str) -> str:
         kind = part.get("type")
         if kind not in {"input_text", "output_text", "text"}:
             raise ChatRequestError(f"{path}[{index}].type {kind!r} is not supported")
+        allowed = (
+            {"type", "text", "annotations", "logprobs"}
+            if kind == "output_text"
+            else {"type", "text"}
+        )
+        unknown = set(part) - allowed
+        if unknown:
+            raise ChatRequestError(
+                f"{path}[{index}] has unsupported fields: "
+                + ", ".join(sorted(unknown))
+            )
         text = part.get("text")
         if not isinstance(text, str):
             raise ChatRequestError(f"{path}[{index}].text must be a string")

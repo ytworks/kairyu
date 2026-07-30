@@ -16,6 +16,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
 )
+from kairyu.engine.prompt import PromptInput
 from kairyu.entrypoints.chat_template import ChatTemplate, flatten_content, render_chat
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.protocol import (
@@ -193,7 +194,15 @@ def render_prompt(
 ) -> str:
     """Render one prompt identically for HTTP and batch transports."""
     template = (chat_templates or {}).get(request.model)
-    messages = [message.model_dump() for message in request.messages]
+    messages = []
+    for message in request.messages:
+        data = message.model_dump()
+        # Declaring the historically allowed tool_calls extra makes validation
+        # precise, but must not inject a None-valued key into every ordinary
+        # message passed to key-sensitive HF templates.
+        if "tool_calls" not in message.model_fields_set:
+            data.pop("tool_calls", None)
+        messages.append(data)
     tools = None if request.tool_choice == "none" else request.tools
     if template is None:
         return render_chat(messages)
@@ -216,7 +225,12 @@ def validate_chat_input(
     if request.top_logprobs is not None and not 0 <= request.top_logprobs <= 20:
         raise ChatRequestError("top_logprobs must be between 0 and 20")
     _validate_response_format(request.response_format)
-    for message in request.messages:
+    for index, message in enumerate(request.messages):
+        if message.model_extra:
+            raise ChatRequestError(
+                f"messages[{index}] has unsupported fields: "
+                + ", ".join(sorted(message.model_extra))
+            )
         _, has_images = flatten_content(message.content)
         if has_images:
             raise ChatRequestError(f"model {request.model!r} does not support image inputs")
@@ -391,7 +405,7 @@ def _build_choice(
 
 
 def _wire_usage(
-    prompt: str,
+    prompt: PromptInput,
     completions: Sequence[CompletionOutput],
     usage: GenerationUsage | Usage | None,
 ) -> Usage:

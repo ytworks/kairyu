@@ -5,6 +5,7 @@ import pytest
 from kairyu import SamplingParams
 from kairyu.engine.backend import CacheHint, GenerationRequest
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt, TokensPrompt
 
 
 def _request(prompt: str, params: SamplingParams | None = None) -> GenerationRequest:
@@ -67,6 +68,23 @@ async def test_call_log_records_prompts():
     await backend.generate(_request("first"))
     await backend.generate(_request("second"))
     assert [p for p in backend.prompts_seen] == ["first", "second"]
+
+
+async def test_token_based_multimodal_prompt_is_rejected_before_dispatch():
+    backend = MockBackend()
+    request = GenerationRequest(
+        request_id="multimodal",
+        prompt=MultimodalPrompt(
+            base=TokensPrompt((1, 2, 3)),
+            items=(MultimodalItem("image", "bytes", b"image"),),
+        ),
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+
+    with pytest.raises(ValueError, match="does not support multimodal"):
+        await backend.generate(request)
+
+    assert backend.prompts_seen == ()
 
 
 def test_tensor_parallel_size_recorded_for_plumbing_assertions():

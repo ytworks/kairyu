@@ -34,12 +34,18 @@ from kairyu.engine.core.engine_service import (
     sampling_params_to_wire,
 )
 from kairyu.engine.core.sampling_types import stable_request_seed
+from kairyu.engine.prompt import (
+    prompt_kind,
+    prompt_to_wire,
+    supplied_prompt_token_ids,
+)
 from kairyu.engine.registry import register_backend
 from kairyu.outputs import CompletionOutput, TokenLogprob
 
 _SPAWN_TIMEOUT_S = 30.0
 _SHUTDOWN_TIMEOUT_S = 5.0
 _RECV_TICK_S = 1.0
+_PROMPT_WIRE_VERSION = 1
 
 
 def _decode_token_logprob(raw: list) -> TokenLogprob:
@@ -430,6 +436,14 @@ class ZmqEngineBackend:
 
     # -- request plumbing ----------------------------------------------------
 
+    def validate_request(self, request: GenerationRequest) -> None:
+        prompt = prompt_with_tool_intent(request)
+        if prompt_kind(prompt) == "multimodal":
+            raise ValueError(
+                "kairyu-proc does not support multimodal prompts; "
+                "no modality processor is configured"
+            )
+
     def _reserve_request_id(self, request_id: str) -> None:
         if request_id in self._active_request_ids:
             raise ValueError(f"duplicate request_id {request_id!r}")
@@ -506,6 +520,7 @@ class ZmqEngineBackend:
         queue.put_nowait(event)
 
     async def _submit(self, request: GenerationRequest) -> asyncio.Queue:
+        self.validate_request(request)
         await self._ensure_started()
         assert self._socket is not None
         _, msgpack = _import_deps()
@@ -525,14 +540,17 @@ class ZmqEngineBackend:
                 # the historical public-ID default seed explicit so process
                 # splitting and request retries remain output-identical.
                 sampling["seed"] = stable_request_seed(request.request_id)
+            prompt = prompt_with_tool_intent(request)
             message = {
                 "op": "add",
                 "request_id": wire_request_id,
-                "prompt": prompt_with_tool_intent(request),
+                "prompt": prompt_to_wire(prompt),
                 "sampling": sampling,
                 "priority": request.priority,
                 "scheduling_class": request.scheduling_class,
             }
+            if not isinstance(prompt, str):
+                message["prompt_wire_version"] = _PROMPT_WIRE_VERSION
             if self._wire_version == WIRE_VERSION:
                 # Per-request negotiation keeps rolling upgrades
                 # bidirectionally compatible: an old service ignores these
@@ -604,6 +622,7 @@ class ZmqEngineBackend:
                 completion_tokens=len(event["outputs"]),
                 cached_tokens=event.get("num_cached_tokens", 0),
             ),
+            prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
         )
 
     @staticmethod

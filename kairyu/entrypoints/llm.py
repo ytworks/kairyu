@@ -9,9 +9,22 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
-from kairyu.engine.backend import EngineBackend, GenerationRequest
+from kairyu.engine.backend import (
+    EngineBackend,
+    GenerationRequest,
+    validate_backend_request,
+)
+from kairyu.engine.prompt import (
+    MultimodalPrompt,
+    PromptInput,
+    TextPrompt,
+    TokensPrompt,
+    prompt_kind,
+    prompt_text,
+    supplied_prompt_token_ids,
+)
 from kairyu.entrypoints.chat_template import render_chat
 from kairyu.outputs import RequestOutput
 from kairyu.sampling_params import SamplingParams
@@ -64,10 +77,24 @@ class LLM:
 
     def _normalize(
         self,
-        prompts: str | Sequence[str],
+        prompts: PromptInput | Sequence[PromptInput],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None,
-    ) -> tuple[tuple[str, ...], tuple[SamplingParams, ...]]:
-        prompt_list = (prompts,) if isinstance(prompts, str) else tuple(prompts)
+    ) -> tuple[tuple[PromptInput, ...], tuple[SamplingParams, ...]]:
+        if isinstance(prompts, (str, TextPrompt, TokensPrompt, MultimodalPrompt)):
+            prompt_list = (prompts,)
+        elif isinstance(prompts, Mapping) or not isinstance(prompts, Sequence):
+            raise TypeError(
+                "prompts must be a PromptInput or a sequence of PromptInput values"
+            )
+        else:
+            prompt_list = tuple(prompts)
+        for index, prompt in enumerate(prompt_list):
+            try:
+                prompt_kind(prompt)
+            except TypeError as error:
+                raise TypeError(
+                    f"prompts[{index}] is not a supported PromptInput: {error}"
+                ) from error
         if sampling_params is None:
             params_list: tuple[SamplingParams, ...] = (_DEFAULT_PARAMS,) * len(prompt_list)
         elif isinstance(sampling_params, SamplingParams):
@@ -83,7 +110,7 @@ class LLM:
 
     async def _generate_async(
         self,
-        prompt_list: tuple[str, ...],
+        prompt_list: tuple[PromptInput, ...],
         params_list: tuple[SamplingParams, ...],
         priorities: tuple[int, ...],
     ) -> list[RequestOutput]:
@@ -99,12 +126,18 @@ class LLM:
                 zip(prompt_list, params_list, priorities, strict=True)
             )
         ]
+        for request in requests:
+            validate_backend_request(self.backend, request)
         results = await asyncio.gather(*(self.backend.generate(r) for r in requests))
         return [
             RequestOutput(
                 request_id=result.request_id,
-                prompt=result.prompt,
-                prompt_token_ids=(),
+                prompt=prompt_text(result.prompt),
+                prompt_token_ids=(
+                    result.prompt_token_ids
+                    or supplied_prompt_token_ids(result.prompt)
+                    or ()
+                ),
                 outputs=result.completions,
             )
             for result in results
@@ -122,7 +155,7 @@ class LLM:
 
     def generate(
         self,
-        prompts: str | Sequence[str],
+        prompts: PromptInput | Sequence[PromptInput],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         use_tqdm: bool = True,
         priority: Sequence[int] | None = None,

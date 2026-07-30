@@ -300,6 +300,81 @@ def test_unsupported_or_unsafe_fields_fail_before_dispatch(tmp_path, payload, me
     assert backend.prompts_seen == ()
 
 
+@pytest.mark.parametrize(
+    "part",
+    [
+        {
+            "type": "input_text",
+            "text": "hello",
+            "input_audio": {"data": "AA=="},
+        },
+        {
+            "type": "text",
+            "text": "hello",
+            "image_url": {"url": "https://example.test/image"},
+        },
+        {
+            "type": "output_text",
+            "text": "hello",
+            "prompt_token_ids": [1, 2, 3],
+        },
+    ],
+)
+def test_response_text_parts_never_drop_alternate_prompt_payloads(
+    tmp_path, part
+):
+    backend = MockBackend()
+    with TestClient(_app(tmp_path, backend)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [part],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+    assert "unsupported fields" in response.json()["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
+def test_response_output_text_replay_metadata_remains_compatible(tmp_path):
+    with TestClient(_app(tmp_path)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "prior answer",
+                                "annotations": [],
+                                "logprobs": [],
+                            }
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "hello"}],
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+
+
 def test_parallel_tool_calls_false_accepts_one_call_and_rejects_multiple(tmp_path):
     one = ToolLoopBackend()
     with TestClient(_app(tmp_path, one)) as http:

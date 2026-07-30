@@ -2,15 +2,45 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer
+from typing import Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class ContentPart(BaseModel):
     """OpenAI vision content part (m11 D5): text or image_url."""
 
-    type: str
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text", "image_url"]
     text: str | None = None
     image_url: dict | None = None
+
+    @model_validator(mode="after")
+    def _validate_tagged_payload(self) -> ContentPart:
+        """Require the payload selected by ``type`` and forbid ambiguity."""
+
+        if self.type == "text":
+            if self.text is None:
+                raise ValueError("text content part requires a string 'text' field")
+            if self.image_url is not None:
+                raise ValueError("text content part must not include 'image_url'")
+            return self
+        if self.image_url is None:
+            raise ValueError("image_url content part requires an 'image_url' object")
+        if self.text is not None:
+            raise ValueError("image_url content part must not include 'text'")
+        url = self.image_url.get("url")
+        if type(url) is not str or not url:
+            raise ValueError("image_url content part requires a non-empty string URL")
+        return self
 
 
 class ChatMessage(BaseModel):
@@ -20,6 +50,7 @@ class ChatMessage(BaseModel):
     content: str | list[ContentPart] | None = None
     name: str | None = None
     tool_call_id: str | None = None
+    tool_calls: list[dict[str, object]] | None = None
 
 
 class RouteFeatures(BaseModel):
@@ -337,7 +368,7 @@ class CompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str
-    prompt: str | list[str]
+    prompt: str | list[str] | list[int] | list[list[int]]
     max_tokens: int | None = 16
     temperature: float = 1.0
     top_p: float = 1.0
@@ -351,6 +382,54 @@ class CompletionRequest(BaseModel):
     frequency_penalty: float = 0.0
     user: str | None = None
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def _validate_prompt_shape(cls, value: object) -> object:
+        """Reject lossy or ambiguous prompt arrays before union coercion."""
+
+        if type(value) is str:
+            return value
+        if type(value) is not list:
+            raise ValueError(
+                "prompt must be a string, an array of strings, an array of "
+                "token IDs, or an array of token-ID arrays"
+            )
+        if not value:
+            # Keep the historical endpoint-level 400 and error envelope.
+            return value
+        if all(type(item) is str for item in value):
+            return value
+        if all(type(item) is int for item in value):
+            cls._validate_token_ids(value, "prompt")
+            return value
+        if all(type(item) is list for item in value):
+            for index, token_ids in enumerate(value):
+                if not token_ids:
+                    raise ValueError(
+                        f"prompt[{index}] token-ID array must not be empty"
+                    )
+                cls._validate_token_ids(token_ids, f"prompt[{index}]")
+            return value
+        raise ValueError(
+            "prompt array must contain only strings, only token IDs, or only "
+            "non-empty token-ID arrays"
+        )
+
+    @staticmethod
+    def _validate_token_ids(token_ids: list[object], location: str) -> None:
+        maximum = (1 << 64) - 1
+        for index, token_id in enumerate(token_ids):
+            if type(token_id) is not int:
+                raise ValueError(
+                    f"{location}[{index}] must be an integer token ID (booleans "
+                    "are not token IDs)"
+                )
+            if not 0 <= token_id <= maximum:
+                raise ValueError(
+                    f"{location}[{index}] token ID must be in the unsigned "
+                    f"64-bit range 0..{maximum}"
+                )
 
 
 class CompletionLogprobs(BaseModel):

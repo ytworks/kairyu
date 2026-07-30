@@ -1,6 +1,7 @@
 import pytest
 
 from kairyu import SamplingParams
+from kairyu.sampling_params import PROMPT_OWNED_EXTRA_ARGS
 
 
 def test_defaults_match_vllm():
@@ -75,3 +76,31 @@ def test_params_are_immutable():
     params = SamplingParams()
     with pytest.raises(AttributeError):
         params.temperature = 0.2
+
+
+@pytest.mark.parametrize("prompt_owned", sorted(PROMPT_OWNED_EXTRA_ARGS))
+def test_prompt_owned_fields_cannot_enter_through_extra_args(prompt_owned):
+    with pytest.raises(ValueError, match="prompt-owned fields"):
+        SamplingParams(extra_args={prompt_owned: "opaque"})
+
+
+def test_non_prompt_sampling_extensions_remain_supported():
+    params = SamplingParams(
+        extra_args={
+            "response_format": {"type": "json_object"},
+            "vendor_cache": {"mode": "ephemeral"},
+        }
+    )
+
+    assert params.extra_args["response_format"] == {"type": "json_object"}
+    assert params.extra_args["vendor_cache"] == {"mode": "ephemeral"}
+
+
+def test_extra_args_are_defensively_copied_and_top_level_immutable():
+    source = {"vendor_cache": {"mode": "ephemeral"}}
+    params = SamplingParams(extra_args=source)
+    source["prompt_token_ids"] = [1, 2, 3]
+
+    assert "prompt_token_ids" not in params.extra_args
+    with pytest.raises(TypeError):
+        params.extra_args["prompt_token_ids"] = [1, 2, 3]

@@ -72,6 +72,17 @@ already forwards as kwargs; verified builder.py → registry.py).
 `_submit` sets `eos_token_id`, `stop_token_ids`, `min_tokens`, `ignore_eos` from
 `SamplingParams`.
 
+**Pretokenized-input amendment (2026-07-30, issue #227):**
+`EngineLoop.resolve_prompt_token_ids` is the only public-to-core normalization
+point. Text still calls the backend tokenizer. `TokensPrompt` bypasses
+`encode()` exactly, validates every ID against the selected backend tokenizer
+vocabulary before scheduler mutation, and forwards the immutable tuple to the
+unchanged `EngineRequest`/Scheduler/RadixKV core. IDs are exact usage truth.
+Optional display text does not participate in execution, admission, or cache
+identity. A multimodal value is rejected until a backend supplies a processor
+and exact post-processing token count; Kairyu never estimates that count from
+media bytes.
+
 **Stop-string handling (amended — SSE-safe, radix-safe):**
 - **Hold-back**: while the pending detokenized tail is a prefix of any stop string,
   the backend withholds up to `max(len(stop)) - 1` trailing characters from the
@@ -396,6 +407,15 @@ makes it reachable from YAML).
   even on the legacy response path. When the caller omits a sampling seed, the
   client sends the historical public-request-ID-derived seed explicitly; the
   internal ID therefore cannot change deterministic output.
+- **Typed request envelope (2026-07-30, issue #227):** legacy string requests
+  keep their original `prompt` field and response wire v1/v2 unchanged.
+  Explicit text and token inputs add an independent
+  `prompt_wire_version=1` tagged envelope decoded by one strict shared codec.
+  Missing, unknown, or extra fields and invalid token IDs fail only that
+  request. The service receives `TokensPrompt` and `EngineLoop` bypasses
+  tokenization; it never stringifies IDs. Multimodal envelopes round-trip in
+  codec tests but are rejected by the client preflight because the child has
+  no media processor.
 - Backend: `zmq.asyncio` DEALER with **lazy socket/receiver-task creation on
   first `_submit`** (amended — `build_app_from_spec` constructs backends before
   any event loop exists; same lazy pattern as today's `_pump_task`).

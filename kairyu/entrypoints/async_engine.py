@@ -13,7 +13,16 @@ import importlib.util
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
-from kairyu.engine.backend import EngineBackend, GenerationRequest
+from kairyu.engine.backend import (
+    EngineBackend,
+    GenerationRequest,
+    validate_backend_request,
+)
+from kairyu.engine.prompt import (
+    PromptInput,
+    prompt_text,
+    supplied_prompt_token_ids,
+)
 from kairyu.outputs import RequestOutput
 from kairyu.sampling_params import SamplingParams
 
@@ -68,21 +77,22 @@ class AsyncLLMEngine:
 
     async def generate(
         self,
-        prompt: str,
+        prompt: PromptInput,
         sampling_params: SamplingParams,
         request_id: str,
         priority: int = 0,
     ) -> AsyncIterator[RequestOutput]:
         if request_id in self._active:
             raise ValueError(f"request ID {request_id!r} is already active")
-        abort_event = asyncio.Event()
-        self._active[request_id] = abort_event
         request = GenerationRequest(
             request_id=request_id,
             prompt=prompt,
             sampling_params=sampling_params,
             priority=priority,
         )
+        validate_backend_request(self._backend, request)
+        abort_event = asyncio.Event()
+        self._active[request_id] = abort_event
         stream: AsyncIterator | None = None
         next_task: asyncio.Task | None = None
         abort_task: asyncio.Task | None = None
@@ -109,8 +119,12 @@ class AsyncLLMEngine:
                     next_task = None
                 yield RequestOutput(
                     request_id=request_id,
-                    prompt=prompt,
-                    prompt_token_ids=(),
+                    prompt=prompt_text(partial.prompt),
+                    prompt_token_ids=(
+                        partial.prompt_token_ids
+                        or supplied_prompt_token_ids(partial.prompt)
+                        or ()
+                    ),
                     outputs=partial.completions,
                     finished=partial.finished,
                 )

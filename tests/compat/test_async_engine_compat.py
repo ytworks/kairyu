@@ -5,7 +5,15 @@ Mirrors the vLLM pattern:
     async for output in engine.generate(prompt, params, request_id): ...
 """
 
-from kairyu import AsyncEngineArgs, AsyncLLMEngine, RequestOutput, SamplingParams
+import pytest
+
+from kairyu import (
+    AsyncEngineArgs,
+    AsyncLLMEngine,
+    RequestOutput,
+    SamplingParams,
+    TokensPrompt,
+)
 from kairyu.engine.mock import MockBackend
 
 
@@ -36,6 +44,43 @@ async def test_from_engine_args_constructs_engine():
         last = output
     assert last.finished is True
     assert last.outputs[0].text
+
+
+async def test_token_prompt_preserves_exact_input_ids_in_request_output():
+    engine = _engine()
+
+    async for output in engine.generate(
+        TokensPrompt((2, 7, 1)),
+        SamplingParams(max_tokens=2),
+        "token-request",
+    ):
+        last = output
+
+    assert last.prompt is None
+    assert last.prompt_token_ids == (2, 7, 1)
+
+
+async def test_token_prompt_is_not_streamed_to_an_undeclared_legacy_backend():
+    class LegacyBackend:
+        calls = 0
+
+        async def stream(self, _request):
+            self.calls += 1
+            raise AssertionError("typed prompt was dispatched")
+            yield  # pragma: no cover
+
+    backend = LegacyBackend()
+    engine = AsyncLLMEngine(backend=backend, model="legacy")
+
+    with pytest.raises(ValueError, match="text-only"):
+        async for _ in engine.generate(
+            TokensPrompt((1, 2, 3)),
+            SamplingParams(max_tokens=1),
+            "legacy-token",
+        ):
+            pass
+
+    assert backend.calls == 0
 
 
 async def test_abort_is_accepted():

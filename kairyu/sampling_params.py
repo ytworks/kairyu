@@ -7,8 +7,88 @@ with an import rewrite only (design doc D2).
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+
+
+class _FrozenDict(dict):
+    """JSON/msgpack-compatible dictionary with no public mutation methods."""
+
+    @staticmethod
+    def _immutable(*_args, **_kwargs):
+        raise TypeError("SamplingParams.extra_args is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __ior__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+
+PROMPT_CARRIER_EXTRA_ARGS = frozenset(
+    {
+        # Prompt ownership is represented only by GenerationRequest.prompt.
+        # These common vLLM/OpenAI carrier names must never enter through the
+        # sampling-extension bag, where some backends would silently drop them.
+        "prompt",
+        "messages",
+        "input",
+        "inputs",
+        "prompt_token_ids",
+        "prompt_embeds",
+        "prompt_is_token_ids",
+        "prompt_token_offsets",
+        "input_ids",
+        "input_embeds",
+        "inputs_embeds",
+        "token_type_ids",
+        "decoder_input_ids",
+        "decoder_inputs_embeds",
+        "encoder_prompt",
+        "encoder_prompt_token_ids",
+        "decoder_prompt",
+        "multi_modal_data",
+        "multi_modal_uuids",
+        "mm_processor_kwargs",
+        # OpenAI/IO/model-runner content carriers are equally non-sampling
+        # input, even though they are not members of vLLM's PromptType.
+        "input_text",
+        "input_image",
+        "input_file",
+        "image_data",
+        "audio_data",
+        "video_data",
+        "input_audio",
+        "image_url",
+        "audio_url",
+        "video_url",
+        "pixel_values",
+        "input_features",
+    }
+)
+PROMPT_IDENTITY_EXTRA_ARGS = frozenset(
+    {
+        # vLLM PromptType owns this prefix-cache identity control. Treating it
+        # as a sampling extension would let adapters silently discard or
+        # reinterpret cache authority.
+        "cache_salt",
+    }
+)
+PROMPT_OWNED_EXTRA_ARGS = PROMPT_CARRIER_EXTRA_ARGS | PROMPT_IDENTITY_EXTRA_ARGS
+
+
+def validate_prompt_owned_extra_args(extra_args: object) -> None:
+    if not isinstance(extra_args, Mapping):
+        return
+    prompt_owned = PROMPT_OWNED_EXTRA_ARGS.intersection(extra_args)
+    if prompt_owned:
+        raise ValueError(
+            "extra_args may not contain prompt-owned fields "
+            f"{sorted(prompt_owned)}; pass input through PromptInput and "
+            "cache identity through CacheHint"
+        )
 
 
 def _normalize_stop(stop: str | Sequence[str] | None) -> tuple[str, ...]:
@@ -46,9 +126,18 @@ class SamplingParams:
         object.__setattr__(
             self, "stop_token_ids", tuple(self.stop_token_ids) if self.stop_token_ids else ()
         )
+        if isinstance(self.extra_args, Mapping):
+            # A frozen SamplingParams must not expose a mutable top-level bag
+            # that can acquire a prompt carrier after construction.
+            object.__setattr__(
+                self,
+                "extra_args",
+                _FrozenDict(self.extra_args),
+            )
         self._validate()
 
     def _validate(self) -> None:
+        validate_prompt_owned_extra_args(self.extra_args)
         if self.n < 1:
             raise ValueError(f"n must be >= 1, got {self.n}")
         if self.temperature < 0.0:

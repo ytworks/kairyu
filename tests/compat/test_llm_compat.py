@@ -7,7 +7,7 @@ and reading ``output.prompt`` / ``output.outputs[0].text``.
 
 import pytest
 
-from kairyu import LLM, RequestOutput, SamplingParams
+from kairyu import LLM, RequestOutput, SamplingParams, TextPrompt, TokensPrompt
 from kairyu.engine.mock import MockBackend
 
 
@@ -37,6 +37,69 @@ def test_generate_accepts_single_string(llm):
     outputs = llm.generate("just one prompt")
     assert len(outputs) == 1
     assert outputs[0].prompt == "just one prompt"
+
+
+def test_generate_accepts_one_token_prompt_without_treating_it_as_a_batch(llm):
+    outputs = llm.generate(TokensPrompt((3, 5, 8)))
+
+    assert len(outputs) == 1
+    assert outputs[0].prompt is None
+    assert outputs[0].prompt_token_ids == (3, 5, 8)
+
+
+def test_generate_rejects_a_mapping_instead_of_dispatching_its_keys_as_prompts():
+    backend = MockBackend()
+    local_llm = LLM(model="mock-model", backend=backend)
+
+    with pytest.raises(TypeError, match="PromptInput or a sequence"):
+        local_llm.generate(
+            {
+                "prompt": "hello",
+                "multi_modal_data": {"image": "opaque"},
+            }
+        )
+
+    assert backend.prompts_seen == ()
+
+
+def test_generate_rejects_an_invalid_batch_item_before_any_dispatch():
+    backend = MockBackend()
+    local_llm = LLM(model="mock-model", backend=backend)
+
+    with pytest.raises(TypeError, match=r"prompts\[1\].*supported PromptInput"):
+        local_llm.generate(["valid", {"prompt_token_ids": [1, 2, 3]}])
+
+    assert backend.prompts_seen == ()
+
+
+def test_generation_request_rechecks_prompt_authority_after_low_level_mutation():
+    backend = MockBackend()
+    local_llm = LLM(model="mock-model", backend=backend)
+    params = SamplingParams()
+    object.__setattr__(params, "extra_args", {"prompt_token_ids": [1, 2, 3]})
+
+    with pytest.raises(ValueError, match="prompt-owned fields"):
+        local_llm.generate("text authority", params)
+
+    assert backend.prompts_seen == ()
+
+
+@pytest.mark.parametrize("prompt", [TextPrompt("typed"), TokensPrompt((1, 2, 3))])
+def test_typed_prompt_is_not_dispatched_to_an_undeclared_legacy_backend(prompt):
+    class LegacyBackend:
+        calls = 0
+
+        async def generate(self, _request):
+            self.calls += 1
+            raise AssertionError("typed prompt was dispatched")
+
+    backend = LegacyBackend()
+    legacy = LLM(model="legacy", backend=backend)
+
+    with pytest.raises(ValueError, match="legacy-string text-only"):
+        legacy.generate(prompt)
+
+    assert backend.calls == 0
 
 
 def test_generate_accepts_per_prompt_params(llm):
@@ -76,6 +139,48 @@ def test_chat_renders_messages(llm):
     outputs = llm.chat(messages)
     assert len(outputs) == 1
     assert outputs[0].outputs[0].text
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        {"prompt_token_ids": [1, 2, 3]},
+        {"input_audio": {"data": "AA=="}},
+        {"multi_modal_data": {"image": "opaque"}},
+    ],
+)
+def test_chat_rejects_nested_alternate_prompt_carriers_before_dispatch(carrier):
+    backend = MockBackend()
+    local_llm = LLM(model="mock-model", backend=backend)
+    message = {"role": "user", "content": "hello", **carrier}
+
+    with pytest.raises(ValueError, match="alternate prompt carriers"):
+        local_llm.chat([message])
+
+    assert backend.prompts_seen == ()
+
+
+def test_chat_rejects_image_parts_instead_of_flattening_them_to_text():
+    backend = MockBackend()
+    local_llm = LLM(model="mock-model", backend=backend)
+
+    with pytest.raises(ValueError, match="cannot execute"):
+        local_llm.chat(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.test/image"},
+                        },
+                    ],
+                }
+            ]
+        )
+
+    assert backend.prompts_seen == ()
 
 
 def test_default_backend_is_mock_when_vllm_missing():

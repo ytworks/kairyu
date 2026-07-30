@@ -34,6 +34,7 @@ from kairyu.engine.core.scheduler import ScheduledChunk, Scheduler
 from kairyu.engine.core.spec_runner import SpeculativeRunner
 from kairyu.engine.core.tp_runner import TPModelRunner, validate_tp_degree
 from kairyu.engine.engine_loop import EngineLoop, StreamUpdate
+from kairyu.engine.prompt import supplied_prompt_token_ids
 from kairyu.engine.registry import register_backend
 from kairyu.engine.tokenizer import (
     Tokenizer,
@@ -656,7 +657,7 @@ class KairyuBackend:
             raise ValueError(
                 "Kairyu backend does not support request fields: " + ", ".join(sorted(unsupported))
             )
-        self._loop.tokenize_prompt(request.prompt)
+        self._loop.resolve_prompt_token_ids(prompt_with_tool_intent(request))
 
     def scheduler_priority_metrics(self) -> dict[str, dict]:
         """Expose bounded native scheduler counters to the serve collector."""
@@ -833,6 +834,7 @@ class KairyuBackend:
                 completion_tokens=len(update.outputs),
                 cached_tokens=update.num_cached_tokens,
             ),
+            prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
         )
 
     def _sub_requests(self, request: GenerationRequest) -> list[GenerationRequest]:
@@ -894,6 +896,7 @@ class KairyuBackend:
             completions=completions,
             finished=finished,
             usage=usage,
+            prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
         )
 
     async def _generate_one(

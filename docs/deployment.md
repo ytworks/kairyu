@@ -217,6 +217,21 @@ compatibility endpoint cannot return 200 while silently discarding a field.
 The `generic` default preserves older deployments but should be treated as a
 migration profile.
 
+Every profile currently declares `prompt_kinds={"text"}` because
+`OpenAICompatBackend` targets Chat Completions. This is independent from the
+local native and vLLM adapters, which accept `TokensPrompt` directly, and from
+Kairyu's `/v1/completions` token-array input. A remote Chat-compatible worker
+therefore rejects token and multimodal prompts before creating its HTTP client;
+it never stringifies IDs or flattens media. Prompt kinds participate in the
+same immutable capability key as sampling/tool policy.
+
+Prompt content must never be placed in `extra_args`. Kairyu reserves alternate
+text/token/embed/multimodal carrier names and `cache_salt` at the common
+`SamplingParams` boundary, independently of a provider allowlist. Unknown
+top-level or nested Chat fields are also rejected before dispatch. Use
+`PromptInput` for content and `CacheHint` for native affinity; a legacy backend
+without `validate_request` remains compatible only with plain string prompts.
+
 | `upstream` | Portable request controls | Provider-specific notes |
 |---|---|---|
 | `openai` | OpenAI Chat Completions sampling, logprobs, structured output, tools | Emits the canonical `max_completion_tokens`; allows `reasoning_effort`, `service_tier`, and `parallel_tool_calls` in `extra_args`. |

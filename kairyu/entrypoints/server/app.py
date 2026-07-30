@@ -25,7 +25,9 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationUsage,
     admission_upper_bound,
+    validate_backend_request,
 )
+from kairyu.engine.prompt import PromptInput, TokensPrompt
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
@@ -176,11 +178,8 @@ def _with_usage_ledger_cleanup(lifespan):
 def _validate_generation_request(
     engine: EngineBackend, request: GenerationRequest
 ) -> JSONResponse | None:
-    validate = getattr(engine, "validate_request", None)
-    if validate is None:
-        return None
     try:
-        validate(request)
+        validate_backend_request(engine, request)
     except ValueError as error:
         return invalid_request(str(error))
     return None
@@ -241,7 +240,7 @@ def _mark_tenant_dispatched(http_request: Request) -> None:
 def _stream_usage_owner(
     http_request: Request,
     model: str,
-    prompt: str,
+    prompt: PromptInput,
     *,
     usage_exact: bool = True,
 ) -> StreamUsageOwner:
@@ -819,7 +818,7 @@ def _record_usage(
     model: str,
     usage: GenerationUsage | Usage | None,
     *,
-    prompt: str,
+    prompt: PromptInput,
     completions: Sequence[CompletionOutput],
     usage_exact: bool | None = None,
 ) -> None:
@@ -1382,20 +1381,46 @@ def create_app(
         for unsupported in ("echo", "suffix", "best_of"):
             if extra.get(unsupported) is not None:
                 return invalid_request(f"{unsupported} is not supported")
+        unknown_extra = set(extra) - {"echo", "suffix", "best_of"}
+        if unknown_extra:
+            return invalid_request(
+                "unsupported request fields: " + ", ".join(sorted(unknown_extra))
+            )
         if request.logprobs is not None and not 0 <= request.logprobs <= 5:
             return invalid_request("logprobs must be between 0 and 5")
         if request.stream_options is not None and not request.stream:
             return invalid_request("stream_options is only allowed when stream is true")
-        if isinstance(request.prompt, list) and request.stream:
+        if isinstance(request.prompt, list) and not request.prompt:
+            return invalid_request("prompt array must not be empty")
+        text_batch = (
+            isinstance(request.prompt, list)
+            and bool(request.prompt)
+            and type(request.prompt[0]) is str
+        )
+        token_batch = (
+            isinstance(request.prompt, list)
+            and bool(request.prompt)
+            and type(request.prompt[0]) is list
+        )
+        if request.stream and (text_batch or token_batch):
             return invalid_request("streaming with a prompt array is not supported")
         engine = served_engines.get(request.model)
         if engine is None:
             return model_not_found(request.model)
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
             return invalid_request(f"model {request.model!r} does not support n > 1")
-        prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
-        if not prompts:
-            return invalid_request("prompt array must not be empty")
+        prompts: list[PromptInput]
+        if type(request.prompt) is str:
+            prompts = [request.prompt]
+        elif text_batch:
+            prompts = list(request.prompt)
+        elif token_batch:
+            prompts = [
+                TokensPrompt(tuple(token_ids))
+                for token_ids in request.prompt
+            ]
+        else:
+            prompts = [TokensPrompt(tuple(request.prompt))]
         try:
             sampling = SamplingParams(  # invalid params are a client error, not a 502
                 temperature=request.temperature,
@@ -1421,7 +1446,7 @@ def create_app(
         )
 
         def _generation_request(
-            prompt: str,
+            prompt: PromptInput,
             prompt_index: int,
         ) -> GenerationRequest:
             return GenerationRequest(

@@ -113,7 +113,8 @@ token-granularity TPOT, results files).
   `sampling_params_from` maps `logprobs=True` →
   `SamplingParams(logprobs=top_logprobs or 0)`.
 - `/v1/completions` (legacy text): `CompletionRequest` (`prompt: str |
-  list[str]`, `max_tokens`, sampling fields, `logprobs: int | None` — legacy
+  list[str] | list[int] | list[list[int]]`, `max_tokens`, sampling fields,
+  `logprobs: int | None` — legacy
   top-k int, capped at 5 with 400, `stream`, `stream_options`). No chat
   template applied; ids prefixed `cmpl-`; `object: "text_completion"` for
   responses AND stream chunks (not delta-shaped). Legacy logprobs is the
@@ -121,6 +122,12 @@ token-granularity TPOT, results files).
   `tokens[]`, `token_logprobs[]`, `top_logprobs[] | null`, `text_offset[]`
   (offsets from 0 within `text` — echo is rejected, origin documented).
   `echo`, `suffix`, `best_of` → 400 with a clear message.
+  **Issue #227 amendment:** one `list[int]` is a single pretokenized prompt,
+  while `list[list[int]]` is a batch. Empty, mixed, boolean, negative, and
+  out-of-u64 shapes fail before dispatch. A single token prompt may stream;
+  batches may not. The server constructs `TokensPrompt` and never converts IDs
+  to text. Missing-backend-usage fallback counts IDs exactly rather than
+  splitting display text.
 - **`n > 1`**: `KairyuBackend` implements it as n engine sub-requests
   (`{rid}#c{i}`, sibling params cloned with `n=1`). **Amended (review): the
   sub-requests do NOT share prefill via radix** — siblings admitted in the

@@ -45,7 +45,9 @@ from kairyu.engine.backend import (
     UpstreamClientError,
     shutdown_all,
     shutdown_all_cancellation_safe,
+    validate_backend_request,
 )
+from kairyu.engine.prompt import prompt_kind, prompt_text
 from kairyu.orchestration.kv_routing import KvRoutingIndex, PreparedKvRouting
 from kairyu.orchestration.prefix_index import PrefixIndex, PreparedPrefixKeys
 from kairyu.orchestration.router import JsonlRouterLog
@@ -556,8 +558,8 @@ class ReplicaPool:
 
         Placement may select any eligible member after preflight, so accepting
         a request that only some members can execute would make behavior depend
-        on load or affinity. Backends without a validator retain the historical
-        assumption that they accept the canonical request. A backend may
+        on load or affinity. Backends without a validator remain compatible
+        with legacy text but fail closed for every typed prompt. A backend may
         explicitly publish an immutable ``request_validation_key``; equal keys
         on the same backend type promise identical validation semantics, so one
         representative is sufficient. Unknown or unhashable keys retain
@@ -570,6 +572,10 @@ class ReplicaPool:
             backend = self._entries[replica_id].backend
             validate = getattr(backend, "validate_request", None)
             if validate is None:
+                try:
+                    validate_backend_request(backend, request)
+                except ValueError as error:
+                    failures.append(f"{replica_id}: {error}")
                 continue
             validation_key = getattr(backend, "request_validation_key", None)
             if validation_key is not None:
@@ -615,6 +621,9 @@ class ReplicaPool:
         if track_prefix is None:
             track_prefix = self._should_track_prefix(request)
         if track_prefix:
+            prefix_prompt = prompt_text(request.prompt)
+            if prefix_prompt is None:  # Defensive: _should_track_prefix owns this invariant.
+                raise RuntimeError("prefix tracking requires a text prompt")
             prefix_reason = "prefix_match"
             if isinstance(prefix_keys, PreparedKvRouting):
                 view = self._prefix_index.route_view(eligible, prefix_keys)
@@ -636,7 +645,7 @@ class ReplicaPool:
                         )
                         else self._prefix_select(
                             eligible,
-                            request.prompt,
+                            prefix_prompt,
                             session_id=session_id or None,
                             prepared_keys=approximate,
                         )
@@ -651,7 +660,7 @@ class ReplicaPool:
                     )
                     else self._prefix_select(
                         eligible,
-                        request.prompt,
+                        prefix_prompt,
                         session_id=session_id or None,
                         prepared_keys=prefix_keys,
                     )
@@ -677,7 +686,7 @@ class ReplicaPool:
         and publication only lowers goodput. Sessionless callers retain the
         legacy local-prefix discovery path, while non-empty hints opt in.
         """
-        if self._prefix_index is None:
+        if self._prefix_index is None or prompt_kind(request.prompt) != "text":
             return False
         return not (
             self._prefix_prepare is not None
@@ -829,11 +838,14 @@ class ReplicaPool:
         )
         prepare = self._prefix_prepare
         track_prefix = self._should_track_prefix(request)
+        prefix_prompt = prompt_text(request.prompt) if track_prefix else None
+        if track_prefix and prefix_prompt is None:  # Defensive invariant.
+            raise RuntimeError("prefix tracking requires a text prompt")
         prefix_fingerprint = ""
         if track_prefix and request.cache_hint is not None:
             prefix_fingerprint = request.cache_hint.prefix_fingerprint
         prefix_keys = (
-            prepare(request.prompt, prefix_fingerprint or None)
+            prepare(prefix_prompt, prefix_fingerprint or None)
             if prepare is not None and track_prefix
             else None
         )
@@ -898,6 +910,12 @@ class ReplicaPool:
             entry.consecutive_failures = 0
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
+        # Legacy strings remain the universally compatible hot path and have
+        # already crossed normal server/offline preflight. Typed variants need
+        # an in-pool check as well so direct EngineBackend use cannot bypass the
+        # intersection contract. Avoid re-tokenizing text across the fleet.
+        if type(request.prompt) is not str:
+            self.validate_request(request)
         replica_id, reason, prefix_keys, track_prefix = self._place_prepared(request)
         entry = self._entries[replica_id]
         entry.outstanding += 1
@@ -923,12 +941,17 @@ class ReplicaPool:
                         reason in ("prefix_match", "kv_event_match"),
                     )
                 else:
-                    self._prefix_index.observe(replica_id, request.prompt)
+                    prefix_prompt = prompt_text(request.prompt)
+                    if prefix_prompt is None:  # Defensive: track_prefix is text-only.
+                        raise RuntimeError("prefix tracking requires a text prompt")
+                    self._prefix_index.observe(replica_id, prefix_prompt)
             return result
         finally:
             self._finish(entry)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
+        if type(request.prompt) is not str:
+            self.validate_request(request)
         replica_id, reason, prefix_keys, track_prefix = self._place_prepared(request)
         entry = self._entries[replica_id]
         entry.outstanding += 1  # streams stay in-flight until generator close (A2)
@@ -953,7 +976,10 @@ class ReplicaPool:
                         reason in ("prefix_match", "kv_event_match"),
                     )
                 else:
-                    self._prefix_index.observe(replica_id, request.prompt)
+                    prefix_prompt = prompt_text(request.prompt)
+                    if prefix_prompt is None:  # Defensive: track_prefix is text-only.
+                        raise RuntimeError("prefix tracking requires a text prompt")
+                    self._prefix_index.observe(replica_id, prefix_prompt)
         finally:
             self._finish(entry)
 

@@ -39,6 +39,44 @@ choice index rather than by non-empty text. Role-only, finish-only, and empty-co
 remain valid empty completions (including within `n > 1`), while a stream that observes no
 choices at all remains an upstream failure.
 
+**Typed-prompt amendment (2026-07-30, issue #227):** the public backend seam now
+accepts a nominal `PromptInput`: legacy `str`, `TextPrompt`, `TokensPrompt`, or
+`MultimodalPrompt`. Legacy strings retain their exact behavior. A
+`TokensPrompt` carries an immutable, non-empty tuple of non-negative integer IDs
+as the sole execution/cache/accounting authority; its optional text is display
+metadata and is never encoded, compared with the IDs, or used as a cache key.
+The caller owns templates, BOS/special tokens, and rendered tool instructions,
+while the selected backend tokenizer still owns output detokenization, EOS, and
+stop strings. Consequently an unrendered tool suffix on a token prompt fails
+before dispatch.
+
+`MultimodalPrompt` preserves an ordered text/token base and explicitly encoded
+URI/base64/bytes/JSON items through one strict tagged codec. Unknown tags,
+extra fields, and malformed payloads fail rather than being flattened or
+dropped. No current Kairyu backend declares a modality processor, so every
+multimodal request is represented losslessly but rejected during capability
+preflight. Native Kairyu, `kairyu-proc`, and the vLLM adapter execute text and
+token prompts; the OpenAI Chat adapter and L2 orchestration remain explicitly
+text-only. `OpenAIRequestCapabilities.prompt_kinds` participates in the same
+immutable replica-validation key introduced by issue #209.
+
+`GenerationRequest.prompt` is the only prompt-content authority.
+`SamplingParams.extra_args` defensively copies and freezes its top-level
+mapping and rejects vLLM/OpenAI/runner alternate carriers plus the
+prompt-owned `cache_salt`; `CacheHint` remains the cache-affinity authority.
+The request constructor repeats this check as a dispatch-boundary defense.
+Chat message extras/content parts, Responses content, and offline Mapping
+inputs likewise fail if a text renderer or adapter would otherwise drop input.
+Text chat renderers explicitly reject image parts and direct callers must use a
+`MultimodalPrompt` with a capable backend instead.
+
+Native RadixKV identity remains the processed token tuple, so equivalent text
+and caller-tokenized requests can reuse the same pages. The gateway does not
+own a tokenizer and therefore does not infer that cross-domain equivalence:
+non-text requests bypass the existing 256-character `PrefixIndex` but retain
+session affinity, and attaching its text-only `CacheHint.prefix_fingerprint`
+to a non-text request is an error.
+
 ### D2. vLLM compatibility is signature-level, verified by contract tests
 
 `kairyu.SamplingParams`, `kairyu.LLM`, `kairyu.RequestOutput`, `kairyu.CompletionOutput`
