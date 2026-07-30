@@ -92,6 +92,30 @@ class SpeculativeRunner:
             )
         return getter(reset=reset)
 
+    def set_decode_page_table_cache_enabled(self, enabled: bool) -> None:
+        """Forward the page-table allocation/copy rollback switch."""
+        setter = getattr(
+            self._runner, "set_decode_page_table_cache_enabled", None
+        )
+        if not callable(setter):
+            raise RuntimeError(
+                f"{type(self._runner).__name__} does not expose a decode "
+                "page-table cache switch"
+            )
+        setter(enabled)
+
+    def decode_page_table_cache_stats(
+        self, *, reset: bool = False
+    ) -> object:
+        """Expose rank-local or gathered page-table evidence."""
+        getter = getattr(self._runner, "decode_page_table_cache_stats", None)
+        if not callable(getter):
+            raise RuntimeError(
+                f"{type(self._runner).__name__} does not expose decode "
+                "page-table cache stats"
+            )
+        return getter(reset=reset)
+
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> StepOutput:

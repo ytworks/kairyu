@@ -118,6 +118,28 @@ GPU-only remainder (design m5 §4.2).
 - 6.2 Sharded FP8 70B load (per-rank safetensors); FlashInfer paged attention under
   head-sharded KV; pool sized min-over-ranks (m5 D1).
 - 6.3 Decode CUDA-graph capture per TP topology (A4 prerequisite, m5 §3).
+- 6.3a Decode page-table cache (#229): after CPU staleness/shape-churn tests,
+  run the exact legacy/cache switch through the production Qwen3-32B TP8 graph
+  path from a clean commit:
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run --frozen python \
+    bench/decode_page_table_cache_qwen.py \
+    --model-path /models/qwen3-32b \
+    --output bench/results/issue-229-page-table-cache-qwen3-32b-tp8-<date>.json \
+    --assert-gate
+  uv run --frozen python bench/decode_page_table_cache_qwen.py \
+    --verify bench/results/issue-229-page-table-cache-qwen3-32b-tp8-<date>.json \
+    --model-path /models/qwen3-32b --assert-gate
+  ```
+
+  Every rank must report the same 31 decode builds and graph dispatches, zero
+  fallback, exact output parity, bounded storage, fewer page-table device
+  allocations/H2D elements/graph D2D elements, and zero live cache or graph
+  owners after release. The retained OFF path must report its former outer +
+  per-row device allocations and full rectangular graph copies. Wall/CUDA
+  time, TPOT, throughput, medians, and MAD are integrity-protected diagnostics
+  only; OS jitter never changes this verdict.
 - TP sampling-ownership gate (#225, blocking before TP performance claims):
   rank 0 alone owns RNG/penalty/grammar/logprob state; every rank must adopt
   rank 0's fixed-layout device token before another forward. Run:

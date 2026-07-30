@@ -36,6 +36,7 @@ _CONTROL_IDLE_TIMEOUT_S = 365 * 24 * 60 * 60.0
 # identical on every rank and lets it run on the bounded model communicator.
 _PREFILL_STATS_PACKET_BYTES = 4096
 _VERIFICATION_STATS_PACKET_BYTES = 4096
+_PAGE_TABLE_STATS_PACKET_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,20 @@ class _BatchedVerificationMode:
 @dataclass(frozen=True)
 class _VerificationStatsProbe:
     """Out-of-band request for rank-local speculative-verification counters."""
+
+    reset: bool = False
+
+
+@dataclass(frozen=True)
+class _DecodePageTableCacheMode:
+    """Out-of-band, all-rank decode page-table cache toggle."""
+
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class _DecodePageTableCacheStatsProbe:
+    """Out-of-band request for rank-local page-table cache counters."""
 
     reset: bool = False
 
@@ -438,6 +453,168 @@ def _validate_verification_stats_rows(
     return tuple(by_rank[rank] for rank in range(world_size))
 
 
+def _page_table_stats_row(
+    control_comm,
+    local_runner,
+    *,
+    reset: bool,
+) -> dict[str, object]:
+    getter = getattr(local_runner, "decode_page_table_cache_stats", None)
+    if not callable(getter):
+        raise RuntimeError(
+            f"rank {control_comm.rank} runner has no "
+            "decode_page_table_cache_stats"
+        )
+    stats = getter(reset=reset)
+    if not isinstance(stats, dict):
+        raise RuntimeError(
+            f"rank {control_comm.rank} decode page-table stats must be a dict"
+        )
+    device = str(getattr(local_runner, "_device", ""))
+    if not device:
+        raise RuntimeError(f"rank {control_comm.rank} runner has no compute device")
+    return {
+        "rank": control_comm.rank,
+        "world_size": control_comm.world_size,
+        "device": device,
+        "stats": stats,
+    }
+
+
+def _page_table_stats_packet(
+    control_comm,
+    model_comm,
+    local_runner,
+    *,
+    reset: bool,
+):
+    """Serialize page-table stats while every rank enters the bounded gather."""
+    import torch
+
+    try:
+        envelope: dict[str, object] = {
+            "ok": True,
+            "row": _page_table_stats_row(
+                control_comm, local_runner, reset=reset
+            ),
+        }
+        raw = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
+    except Exception as error:
+        envelope = {
+            "ok": False,
+            "rank": control_comm.rank,
+            "error": (f"{type(error).__name__}: {error}")[:1024],
+        }
+        raw = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
+    capacity = _PAGE_TABLE_STATS_PACKET_BYTES - 2
+    if len(raw) > capacity:
+        raw = json.dumps(
+            {
+                "ok": False,
+                "rank": control_comm.rank,
+                "error": (
+                    f"serialized decode page-table stats exceed {capacity} bytes"
+                ),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    device = getattr(model_comm, "_device", None)
+    packet = torch.zeros(
+        _PAGE_TABLE_STATS_PACKET_BYTES,
+        dtype=torch.uint8,
+        device=device,
+    )
+    packet[0] = len(raw) & 0xFF
+    packet[1] = len(raw) >> 8
+    packet[2 : 2 + len(raw)].copy_(
+        torch.tensor(tuple(raw), dtype=torch.uint8, device=device)
+    )
+    return packet
+
+
+def _decode_page_table_stats_packets(
+    gathered,
+    *,
+    world_size: int,
+) -> tuple[dict[str, object], ...]:
+    """Decode page-table stats and reject any missing or failed rank."""
+    import torch
+
+    if (
+        not isinstance(gathered, torch.Tensor)
+        or gathered.dtype != torch.uint8
+        or gathered.ndim != 1
+        or gathered.numel() != world_size * _PAGE_TABLE_STATS_PACKET_BYTES
+    ):
+        raise RuntimeError(
+            "decode page-table stats tensor gather has malformed shape or dtype"
+        )
+    packets = gathered.reshape(world_size, _PAGE_TABLE_STATS_PACKET_BYTES).cpu()
+    rows: list[object] = []
+    failures: list[str] = []
+    for rank, packet in enumerate(packets):
+        length = int(packet[0]) | (int(packet[1]) << 8)
+        if not 0 < length <= _PAGE_TABLE_STATS_PACKET_BYTES - 2:
+            failures.append(f"rank {rank}: malformed packet length {length}")
+            continue
+        try:
+            envelope = json.loads(bytes(packet[2 : 2 + length].tolist()))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            failures.append(f"rank {rank}: invalid JSON: {error}")
+            continue
+        if not isinstance(envelope, dict):
+            failures.append(f"rank {rank}: envelope is not an object")
+        elif envelope.get("ok") is True:
+            rows.append(envelope.get("row"))
+        else:
+            failures.append(
+                f"rank {rank}: {envelope.get('error', 'unknown error')}"
+            )
+    if failures:
+        raise RuntimeError(
+            "decode page-table stats rank failures: " + "; ".join(failures)
+        )
+    return _validate_page_table_stats_rows(rows, world_size=world_size)
+
+
+def _validate_page_table_stats_rows(
+    rows: object,
+    *,
+    world_size: int,
+) -> tuple[dict[str, object], ...]:
+    if not isinstance(rows, (tuple, list)) or len(rows) != world_size:
+        raise RuntimeError(
+            "decode page-table stats reply count mismatch: "
+            f"expected {world_size}, got "
+            f"{len(rows) if isinstance(rows, (tuple, list)) else type(rows).__name__}"
+        )
+    by_rank: dict[int, dict[str, object]] = {}
+    expected_fields = {"rank", "world_size", "device", "stats"}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != expected_fields:
+            raise RuntimeError("decode page-table stats reply is malformed")
+        rank = row["rank"]
+        if (
+            type(rank) is not int
+            or rank in by_rank
+            or row["world_size"] != world_size
+            or not isinstance(row["device"], str)
+            or not isinstance(row["stats"], dict)
+        ):
+            raise RuntimeError(
+                f"decode page-table stats reply has invalid rank data: {row!r}"
+            )
+        by_rank[rank] = row
+    expected_ranks = set(range(world_size))
+    if set(by_rank) != expected_ranks:
+        raise RuntimeError(
+            "decode page-table stats ranks are incomplete: "
+            f"expected={sorted(expected_ranks)}, got={sorted(by_rank)}"
+        )
+    return tuple(by_rank[rank] for rank in range(world_size))
+
+
 def _validate_sampling_ownership_rows(
     rows: object,
     *,
@@ -741,6 +918,65 @@ class DistTPModelRunner:
             self._fatal_error = failure
             raise failure from error
 
+    def set_decode_page_table_cache_enabled(self, enabled: bool) -> None:
+        """Apply the decode page-table cache mode to every TP rank."""
+        if type(enabled) is not bool:
+            raise TypeError("decode page-table cache enabled flag must be bool")
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                "tensor-parallel runner is unavailable after a fatal step failure"
+            ) from self._fatal_error
+        try:
+            payload = _DecodePageTableCacheMode(enabled)
+            delivered = self._control_comm.broadcast(payload, src=0)
+            if delivered != payload:
+                raise RuntimeError(
+                    "decode page-table cache mode broadcast returned a "
+                    "malformed payload"
+                )
+            self._local.set_decode_page_table_cache_enabled(enabled)
+        except Exception as error:
+            self._fatal_error = error
+            raise
+
+    def decode_page_table_cache_stats(
+        self,
+        *,
+        reset: bool = False,
+    ) -> tuple[dict[str, object], ...]:
+        """Gather decode page-table counters from every rank."""
+        if type(reset) is not bool:
+            raise TypeError("decode page-table cache stats reset flag must be bool")
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                "tensor-parallel runner is unavailable after a fatal step failure"
+            ) from self._fatal_error
+        try:
+            probe = _DecodePageTableCacheStatsProbe(reset)
+            delivered = self._control_comm.broadcast(probe, src=0)
+            if delivered != probe:
+                raise RuntimeError(
+                    "decode page-table stats probe broadcast returned a "
+                    "malformed payload"
+                )
+            packet = _page_table_stats_packet(
+                self._control_comm,
+                self._model_comm,
+                self._local,
+                reset=reset,
+            )
+            gathered = self._model_comm.tensor_all_gather(packet)
+            return _decode_page_table_stats_packets(
+                gathered,
+                world_size=self._control_comm.world_size,
+            )
+        except Exception as error:
+            failure = RuntimeError(
+                f"TP decode page-table stats probe failed: {error}"
+            )
+            self._fatal_error = failure
+            raise failure from error
+
     def release(self, request_id: str) -> None:
         try:
             if self._fatal_error is None:
@@ -803,6 +1039,18 @@ def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
                 continue
             if isinstance(payload, _VerificationStatsProbe):
                 packet = _verification_stats_packet(
+                    control_comm,
+                    model_comm,
+                    local_runner,
+                    reset=payload.reset,
+                )
+                model_comm.tensor_all_gather(packet)
+                continue
+            if isinstance(payload, _DecodePageTableCacheMode):
+                local_runner.set_decode_page_table_cache_enabled(payload.enabled)
+                continue
+            if isinstance(payload, _DecodePageTableCacheStatsProbe):
+                packet = _page_table_stats_packet(
                     control_comm,
                     model_comm,
                     local_runner,

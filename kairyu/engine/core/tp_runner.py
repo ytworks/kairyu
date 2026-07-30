@@ -106,6 +106,49 @@ class TPModelRunner:
             if release is not None:
                 release(request_id)
 
+    def set_decode_page_table_cache_enabled(self, enabled: bool) -> None:
+        """Apply the page-table cache mode to every in-process rank."""
+        if type(enabled) is not bool:
+            raise TypeError("decode page-table cache enabled flag must be bool")
+        for rank, runner in enumerate(self._rank_runners):
+            setter = getattr(
+                runner, "set_decode_page_table_cache_enabled", None
+            )
+            if not callable(setter):
+                raise RuntimeError(
+                    f"rank {rank} does not expose a decode page-table cache switch"
+                )
+            setter(enabled)
+
+    def decode_page_table_cache_stats(
+        self, *, reset: bool = False
+    ) -> tuple[dict[str, object], ...]:
+        """Return one structural stats row per in-process rank."""
+        if type(reset) is not bool:
+            raise TypeError("decode page-table cache stats reset flag must be bool")
+        rows: list[dict[str, object]] = []
+        for rank, runner in enumerate(self._rank_runners):
+            getter = getattr(runner, "decode_page_table_cache_stats", None)
+            if not callable(getter):
+                raise RuntimeError(
+                    f"rank {rank} does not expose decode page-table cache stats"
+                )
+            stats = getter(reset=reset)
+            if not isinstance(stats, dict):
+                raise RuntimeError(
+                    f"rank {rank} decode page-table cache stats must be a dict"
+                )
+            device = str(getattr(runner, "_device", ""))
+            rows.append(
+                {
+                    "rank": rank,
+                    "world_size": len(self._rank_runners),
+                    "device": device,
+                    "stats": stats,
+                }
+            )
+        return tuple(rows)
+
     def execute(
         self, scheduled: tuple[ScheduledChunk, ...], states: Mapping[str, object]
     ) -> dict[str, tuple]:

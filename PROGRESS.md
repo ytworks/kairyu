@@ -62,6 +62,13 @@ all 32 compared target tokens and measured 59.004 ms median CUDA time versus
 distance remain diagnostic rather than correctness gates. The clean-source
 TP8 artifact passes all 16 live checks and all 21 independent replay checks
 (`bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-2026-07-30.json`).
+Decode page tables now use one bounded grow-only tensor per runner/device with
+request/lane ownership signatures and minimal safe dirty-range uploads.
+Captured graph buffers keep fixed addresses and copy only changed ranges;
+release tombstones force a scratch clear before a freed row can replay as
+padding. Cache OFF remains the exact former allocation/full-copy path. CPU
+tests bind grow/shrink/reorder/preemption/reuse and all-rank TP control/error
+handling; real Qwen3-32B TP8 retained evidence is pending.
 Tensor-parallel sampling now has one ownership contract across the production
 SPMD runner and in-process facade: rank 0 alone advances RNG, penalties,
 grammar, logprobs, and public D2H state; followers execute passive model/KV
@@ -514,6 +521,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [amendment] m17 A18-A20 bound decode page-table reuse to row ownership
+- What: Added one geometrically grown page-table tensor per runner/device, stable request/lane signatures, minimal safe dirty-range H2D updates, and independently counted graph-static D2D updates. Ordinary rows use lane 0 and flattened verification rows use request-local lanes 1..k. Growth preserves known data D2D; shape shrink/regrow treats hidden columns as unknown. Release clears every cache signature and leaves an ordered graph-row tombstone, so the next real row rewrites fully and a padding row is filled with the reserved scratch page before replay. Cache OFF omits both storage and signatures, preserving the exact former allocation/full-copy path. All-rank TP mode/stats probes use bounded tensor gathers and fail closed. The formal Qwen3-32B TP8 runner binds clean source/checkpoint/hardware/topology, exact output parity, allocation/upload/copy reductions, zero graph fallback, and zero live ownership after release; timing is diagnostic and its artifact remains pending.
+- Why: Rebuilding one device tensor plus one temporary tensor per row and then copying a full graph rectangle made steady decode metadata work proportional to batch and width. A request-keyed tensor map would retain unbounded/stale ownership, while clearing only graph metadata after release can replay old page IDs into newly freed KV pages. One bounded storage object plus explicit ownership/tombstone state removes steady allocation and copy work without weakening CUDA Graph address or page-reuse safety.
+- Refs: issue #229; m17 A18-A20; `kairyu/engine/core/{step_executor,model_runner,worker,spec_runner,tp_runner}.py`; `bench/decode_page_table_cache_qwen.py`; `tests/unit/test_{step_executor,model_runner_page_table_cache,decode_page_table_cache_bench,tp_worker}.py`
 
 ### 2026-07-30 — [amendment] Batch retention gate binds object lifetime, not allocator bytes
 - What: Corrected the preceding local-only validation record after the initial GitHub Python 3.11 job reported one failure while Python 3.12 was cancelled by matrix fail-fast. Replaced the fixed 4 MiB `tracemalloc` threshold with a direct bound on simultaneously live parsed input rows across the fixed producer queue and consumer pool, and disabled matrix fail-fast so both supported Python versions always report an outcome. The replacement and workflow-policy tests pass locally under Python 3.11.15 and 3.12 with coverage; the new GitHub run remains the merge authority.

@@ -49,6 +49,11 @@ from kairyu.engine.core.prefill import (
 from kairyu.engine.core.sampler import DeviceSample, Sampler
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
+from kairyu.engine.core.step_executor import (
+    DecodePageTableCache,
+    DecodeRowOwner,
+    build_decode_batch,
+)
 from kairyu.models.llama import DenseDecoder
 
 
@@ -422,6 +427,19 @@ class PagedModelRunner:
         # Input tensors (token ids, positions) must be built on the model's device
         # so the GPU forward never mixes CPU inputs with on-device weights/KV.
         self._device = next(model.parameters()).device
+        # #229: decode page tables have one grow-only tensor per rank.  The
+        # matched-A/B switch deliberately retains an exact legacy path when
+        # disabled; ownership metadata is omitted there as well, so graph
+        # execution performs its former full rectangular copy.
+        self._decode_page_table_cache = DecodePageTableCache(self._device)
+        self._decode_page_table_cache_enabled = True
+        self._decode_page_table_builds = 0
+        self._decode_page_table_rows = 0
+        self._decode_page_table_host_ids_visited = 0
+        self._decode_page_table_legacy_outer_allocations = 0
+        self._decode_page_table_legacy_row_allocations = 0
+        self._decode_page_table_legacy_elements_written = 0
+        self._decode_page_table_legacy_owned_elements_uploaded = 0
         # In-flight tokens: under OverlapEngineCore the snapshot for step N+1 is
         # taken BEFORE step N's token is committed, so `state.outputs` is short
         # and reading `outputs[position - 1]` raised IndexError. The runner
@@ -567,6 +585,7 @@ class PagedModelRunner:
         """Weight swap or pool resize: every capture is stale (m17 D2)."""
         if self._graph is not None:
             self._graph.invalidate()
+        self._decode_page_table_cache.invalidate()
 
     @property
     def sampler(self) -> Sampler | None:
@@ -629,6 +648,65 @@ class PagedModelRunner:
         if type(enabled) is not bool:
             raise TypeError("batched verification enabled flag must be bool")
         self._batched_verification_enabled = enabled
+
+    def set_decode_page_table_cache_enabled(self, enabled: bool) -> None:
+        """Switch reusable decode metadata on this rank.
+
+        Disabling is an exact rollback path: neither the cache nor its owner
+        signatures reach ``build_decode_batch`` or the graph copy-in seam.
+        """
+        if type(enabled) is not bool:
+            raise TypeError("decode page-table cache enabled flag must be bool")
+        self._decode_page_table_cache_enabled = enabled
+
+    def decode_page_table_cache_stats(
+        self, *, reset: bool = False
+    ) -> dict[str, object]:
+        """Return allocation/copy evidence without synchronizing model tensors."""
+        if type(reset) is not bool:
+            raise TypeError("decode page-table cache stats reset flag must be bool")
+        cache = self._decode_page_table_cache.stats(reset=reset)
+        graph = None
+        graph_dispatch = None
+        if self._graph is not None:
+            getter = getattr(self._graph, "page_table_execution_stats", None)
+            if callable(getter):
+                graph = getter(reset=reset)
+            dispatch_getter = getattr(
+                self._graph, "page_table_dispatch_stats", None
+            )
+            if callable(dispatch_getter):
+                graph_dispatch = dispatch_getter(reset=reset)
+        result = {
+            "enabled": self._decode_page_table_cache_enabled,
+            "builds": self._decode_page_table_builds,
+            "rows": self._decode_page_table_rows,
+            "host_page_ids_visited": self._decode_page_table_host_ids_visited,
+            "legacy_outer_allocations": (
+                self._decode_page_table_legacy_outer_allocations
+            ),
+            "legacy_row_allocations": (
+                self._decode_page_table_legacy_row_allocations
+            ),
+            "legacy_elements_written": (
+                self._decode_page_table_legacy_elements_written
+            ),
+            "legacy_owned_elements_uploaded": (
+                self._decode_page_table_legacy_owned_elements_uploaded
+            ),
+            "cache": cache,
+            "graph": graph,
+            "graph_dispatch": graph_dispatch,
+        }
+        if reset:
+            self._decode_page_table_builds = 0
+            self._decode_page_table_rows = 0
+            self._decode_page_table_host_ids_visited = 0
+            self._decode_page_table_legacy_outer_allocations = 0
+            self._decode_page_table_legacy_row_allocations = 0
+            self._decode_page_table_legacy_elements_written = 0
+            self._decode_page_table_legacy_owned_elements_uploaded = 0
+        return result
 
     def verification_execution_stats(
         self, *, reset: bool = False
@@ -695,6 +773,13 @@ class PagedModelRunner:
             self._sampler.release(request_id)
         self._future_tokens.pop(request_id, None)
         self._future_device_tokens.pop(request_id, None)
+        cache = getattr(self, "_decode_page_table_cache", None)
+        if cache is not None:
+            cache.release(request_id)
+        graph = getattr(self, "_graph", None)
+        graph_release = getattr(graph, "release", None)
+        if callable(graph_release):
+            graph_release(request_id)
 
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
         self._require_sampling_owner()
@@ -1452,6 +1537,56 @@ class PagedModelRunner:
             self._remember(chunk.request_id, chunk.position, token)
         sampled[chunk.request_id] = (token,)
 
+    def _build_tensor_decode_batch(
+        self,
+        *,
+        tokens: torch.Tensor,
+        positions: torch.Tensor,
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+        max_pages: int,
+        scratch_page: int | None,
+        write_from: list[int],
+        row_owners: list[DecodeRowOwner] | None,
+    ):
+        """Build one tensor decode batch and account for the exact rollback.
+
+        Owner metadata is all-or-nothing.  A disabled cache intentionally sends
+        none to the graph executor, preserving both the legacy allocation and
+        the legacy full rectangular graph copy for a fair A/B cell.
+        """
+        self._decode_page_table_builds += 1
+        self._decode_page_table_rows += len(page_tables)
+        owned_elements = sum(min(len(pages), max_pages) for pages in page_tables)
+        self._decode_page_table_host_ids_visited += owned_elements
+        use_cache = self._decode_page_table_cache_enabled and row_owners is not None
+        if use_cache:
+            cache = self._decode_page_table_cache
+            owners = row_owners
+        else:
+            cache = None
+            owners = None
+            self._decode_page_table_legacy_outer_allocations += 1
+            self._decode_page_table_legacy_row_allocations += sum(
+                bool(pages) for pages in page_tables
+            )
+            self._decode_page_table_legacy_elements_written += (
+                len(page_tables) * max_pages + owned_elements
+            )
+            self._decode_page_table_legacy_owned_elements_uploaded += owned_elements
+        return build_decode_batch(
+            token_ids=tokens,
+            positions=positions,
+            page_lists=page_tables,
+            seq_lens=seq_lens,
+            max_pages=max_pages,
+            scratch_page=scratch_page,
+            write_from=write_from,
+            device=self._device,
+            page_table_cache=cache,
+            row_owners=owners,
+        )
+
     def _graph_logits(
         self,
         tokens: torch.Tensor,
@@ -1459,6 +1594,7 @@ class PagedModelRunner:
         page_tables: list[list[int]],
         seq_lens: list[int],
         write_from: list[int] | None = None,
+        row_owners: list[DecodeRowOwner] | None = None,
     ) -> torch.Tensor:
         """Route this decode through capture/replay (m17 D1).
 
@@ -1472,20 +1608,18 @@ class PagedModelRunner:
         seq_lens), but pointing them at an allocatable page leaves the class of
         bug [P1] found one indexing mistake away.
         """
-        from kairyu.engine.core.step_executor import build_decode_batch
-
         assert self._graph_scratch_page is not None  # set with self._graph
         if write_from is None:
             write_from = [0] * len(tokens)
-        batch = build_decode_batch(
-            token_ids=tokens,
+        batch = self._build_tensor_decode_batch(
+            tokens=tokens,
             positions=positions,
-            page_lists=page_tables,
+            page_tables=page_tables,
             seq_lens=seq_lens,
             max_pages=max(len(table) for table in page_tables),
             scratch_page=self._graph_scratch_page,
             write_from=write_from,
-            device=self._device,
+            row_owners=row_owners,
         )
         return self._graph.execute_decode(batch)
 
@@ -1496,6 +1630,7 @@ class PagedModelRunner:
         page_tables: list[list[int]],
         seq_lens: list[int],
         write_from: list[int],
+        row_owners: list[DecodeRowOwner] | None = None,
     ) -> torch.Tensor:
         """One tensor-metadata eager forward, with no per-row device reads.
 
@@ -1503,17 +1638,15 @@ class PagedModelRunner:
         masked by seq_lens and there are no synthetic rows, so eager execution
         needs no graph scratch-page reservation.
         """
-        from kairyu.engine.core.step_executor import build_decode_batch
-
-        batch = build_decode_batch(
-            token_ids=tokens,
+        batch = self._build_tensor_decode_batch(
+            tokens=tokens,
             positions=positions,
-            page_lists=page_tables,
+            page_tables=page_tables,
             seq_lens=seq_lens,
             max_pages=max(len(table) for table in page_tables),
             scratch_page=None,
             write_from=write_from,
-            device=self._device,
+            row_owners=row_owners,
         )
         hidden = self._eager_tensor_hidden(batch)
         return self._model.logits(hidden)
@@ -1552,22 +1685,26 @@ class PagedModelRunner:
         # tensor path must not regress #143 by rebuilding those inputs while it
         # tensorizes page-table metadata.
         token_slots, position_slots = self._decode_input_slots(tokens, positions)
+        row_owners = [DecodeRowOwner(chunk.request_id) for chunk in chunks]
         if self._graph is not None:
             logits = self._graph_logits(
-                token_slots, position_slots, page_tables, seq_lens, write_from
+                token_slots,
+                position_slots,
+                page_tables,
+                seq_lens,
+                write_from,
+                row_owners,
             )
         elif self._tensor_decode_supported:
-            from kairyu.engine.core.step_executor import build_decode_batch
-
-            batch = build_decode_batch(
-                token_ids=token_slots,
+            batch = self._build_tensor_decode_batch(
+                tokens=token_slots,
                 positions=position_slots,
-                page_lists=page_tables,
+                page_tables=page_tables,
                 seq_lens=seq_lens,
                 max_pages=max(len(table) for table in page_tables),
                 scratch_page=None,
                 write_from=write_from,
-                device=self._device,
+                row_owners=row_owners,
             )
             hidden = self._eager_tensor_hidden(batch)
             logits = self._model.logits(hidden) if sampled is not None else None
@@ -1600,6 +1737,7 @@ class PagedModelRunner:
         list[list[int]],
         list[int],
         list[int],
+        list[DecodeRowOwner],
     ]:
         """Flatten request-local target chains into decode-shaped rows.
 
@@ -1616,6 +1754,7 @@ class PagedModelRunner:
         page_tables: list[list[int]] = []
         seq_lens: list[int] = []
         write_from: list[int] = []
+        row_owners: list[DecodeRowOwner] = []
         writable_slots: dict[tuple[int, int], tuple[str, int]] = {}
         for chunk in chunks:
             if chunk.is_prefill or chunk.num_tokens < 2:
@@ -1662,6 +1801,10 @@ class PagedModelRunner:
                 page_tables.append(pages)
                 seq_lens.append(absolute + 1)
                 write_from.append(cached)
+                # Lane 0 is the ordinary decode row. Verification positions
+                # start at 1 so a request's flattened rows retain stable,
+                # distinct ownership as absolute positions advance.
+                row_owners.append(DecodeRowOwner(chunk.request_id, offset + 1))
         return (
             row_chunks,
             tokens,
@@ -1669,6 +1812,7 @@ class PagedModelRunner:
             page_tables,
             seq_lens,
             write_from,
+            row_owners,
         )
 
     def _execute_verification_batch(
@@ -1685,6 +1829,7 @@ class PagedModelRunner:
             page_tables,
             seq_lens,
             write_from,
+            row_owners,
         ) = self._verification_decode_rows(chunks, states)
         self._verification_requests_executed += len(chunks)
         self._verification_positions_executed += len(rows)
@@ -1695,34 +1840,30 @@ class PagedModelRunner:
             tokens, positions
         )
         if self._graph is not None:
-            from kairyu.engine.core.step_executor import build_decode_batch
-
-            batch = build_decode_batch(
-                token_ids=token_slots,
+            batch = self._build_tensor_decode_batch(
+                tokens=token_slots,
                 positions=position_slots,
-                page_lists=page_tables,
+                page_tables=page_tables,
                 seq_lens=seq_lens,
                 max_pages=max(len(table) for table in page_tables),
                 scratch_page=self._graph_scratch_page,
                 write_from=write_from,
-                device=self._device,
+                row_owners=row_owners,
             )
             can_graph = getattr(self._graph, "can_execute_graph", None)
             if callable(can_graph) and can_graph(batch):
                 self._verification_graph_groups += 1
             logits = self._graph.execute_decode(batch)
         elif self._tensor_decode_supported:
-            from kairyu.engine.core.step_executor import build_decode_batch
-
-            batch = build_decode_batch(
-                token_ids=token_slots,
+            batch = self._build_tensor_decode_batch(
+                tokens=token_slots,
                 positions=position_slots,
-                page_lists=page_tables,
+                page_tables=page_tables,
                 seq_lens=seq_lens,
                 max_pages=max(len(table) for table in page_tables),
                 scratch_page=None,
                 write_from=write_from,
-                device=self._device,
+                row_owners=row_owners,
             )
             hidden = self._eager_tensor_hidden(batch)
             logits = self._model.logits(hidden) if sampled is not None else None

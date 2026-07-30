@@ -200,6 +200,36 @@ output (DeepSeek convention).
   bound directly against sequential target scoring. Timing never decides the
   issue's pass/fail result.
 
+### 2026-07-30 decode page-table cache amendment
+
+- **A18 (bounded storage, exact rollback):** each `PagedModelRunner` owns one
+  geometrically grown int32 page-table tensor per device, rather than a
+  request-keyed tensor cache. Growth copies the old compatible rectangle D2D,
+  preserves row signatures, and never changes a captured graph's separate
+  static buffers. The runtime OFF mode passes neither the cache nor ownership
+  metadata, so it remains the former allocate/populate plus full graph-copy
+  path and is a valid matched baseline. A narrow view over wider reserved
+  capacity may be strided; the internal tensor contract does not promise
+  contiguity, and the supported Torch gather/index plus graph copy paths accept
+  that layout. A future custom tensor backend must validate any stronger layout
+  requirement explicitly.
+- **A19 (ownership and staleness):** a row signature binds the request ID,
+  request-local lane, owned page-ID tuple, visible width, and padding page.
+  Ordinary decode uses lane 0; flattened speculative positions use lanes
+  1..k. Stable rows are hits, sequence growth or page reallocation uploads only
+  the smallest safe changed range, row movement/owner replacement rewrites the
+  complete row, and width regrowth treats previously hidden columns as
+  unknown. Request release forgets all lanes in both the reusable tensor and
+  every graph bucket before an ID can be reused; storage may remain allocated
+  but retains no request ownership.
+- **A20 (static graph copy and evidence):** graph page-table addresses stay
+  fixed. Trusted host signatures allow only changed dynamic ranges to be copied
+  into each bucket; metadata-free callers keep the unconditional rectangular
+  copy. Structural allocation/upload/copy/hit/release counters are gathered
+  from every TP rank over the bounded model communicator. Qwen3-32B TP8 output
+  parity and deterministic counter reductions decide retention; wall/CUDA
+  timing is diagnostic because OS jitter cannot decide correctness.
+
 - **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
   synthetic requests x 32 output tokens, torch attention: tensor eager wall
   8.844 s, TPOT 192.075 ms/token, 0.90 req/s; CUDA graph wall 7.196 s,
