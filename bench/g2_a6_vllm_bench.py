@@ -172,6 +172,9 @@ ACCESS_LOG_ENABLED = False
 VLLM_ASYNC_SCHEDULING = True
 VLLM_ATTENTION_BACKEND = "FLASH_ATTN"
 VLLM_FLASH_ATTN_VERSION = 2
+VLLM_ATTENTION_BACKEND_LOG_MARKER = (
+    "Using AttentionBackendEnum.FLASH_ATTN backend."
+)
 VLLM_DISTRIBUTED_EXECUTOR_BACKEND = "mp"
 VLLM_CUSTOM_ALL_REDUCE = False
 VLLM_COMPILATION_MODE = 3
@@ -519,7 +522,7 @@ def _vllm_startup_markers(
         ),
         "attention_backend_flash_attn": bool(attention_messages)
         and all(
-            "Using FLASH_ATTN" in message and "backend" in message
+            VLLM_ATTENTION_BACKEND_LOG_MARKER in message
             for message in attention_messages
         ),
         "attention_backend_version_2": bool(attention_version_messages)

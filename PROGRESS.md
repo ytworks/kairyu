@@ -589,6 +589,24 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-30 — [progress] G2 A6 live preflight corrects the immutable vLLM identity
+- What: The first real formal preflight stopped before any vLLM measurement
+  because the immutable CUDA image installs `vllm==0.26.0+cu129` while its
+  release tag and startup label are `v0.26.0`. The next fresh vLLM startup
+  exposed its exact resolved-backend message as
+  `Using AttentionBackendEnum.FLASH_ATTN backend.` alongside the separately
+  retained `Using FlashAttention version 2` marker. The operator and replay
+  schema now pin those observed immutable-image values; regression fixtures use
+  the real message shape. The completed first Kairyu shard remains
+  hash-protected for safe resume, and no failed vLLM measurement row exists.
+- Why: Package local-version suffixes and enum-qualified logger output are
+  provenance facts, not performance requirements. Binding the actual image
+  content prevents both false rejection and a weaker tag-only claim without
+  changing any of A6's three pooled performance thresholds.
+- Refs: issue #156; G2 A6;
+  `bench/run_g2_a6_formal.py`; `bench/g2_a6_vllm_bench.py`;
+  `tests/bench/test_run_g2_a6_formal.py`
+
 ### 2026-07-30 — [progress] G2 A6 performance candidate reaches formal-run readiness
 - What: Added canonical-name-preserving packed dense Q/K/V execution, guarded
   SM120 fused RMSNorm, RoPE, and paged-KV-write kernels with exact fallbacks,
@@ -620,9 +638,7 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   pages on each at Kairyu `pipeline_depth=1`. Stock vLLM has explicit async
   scheduling, multiprocessing TP, compile mode 3, disabled custom
   all-reduce/access/request logging, and an actual FlashAttention 2 startup
-  marker retained from the SM120 process. The immutable image's installed
-  distribution is pinned exactly as `vllm==0.26.0+cu129`, distinct from its
-  `v0.26.0` release tag and startup label.
+  marker retained from the SM120 process.
 - Why: A performance ratio is not attributable or replayable when trace
   construction, checkpoint bytes, effective KV capacity, runtime HTTP stack,
   resolved backend, graph preparation, or measurement-session identity can

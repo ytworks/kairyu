@@ -450,7 +450,10 @@ def test_vllm_startup_attestation_uses_real_v026_message_shapes(
         (
             "INFO [vllm/config/vllm.py] Asynchronous scheduling is enabled.",
             f"INFO [vllm/v1/engine/core.py] {config_message}",
-            "INFO [vllm/platforms/cuda.py] Using FLASH_ATTN backend.",
+            (
+                "INFO [vllm/platforms/cuda.py] "
+                f"{a6.VLLM_ATTENTION_BACKEND_LOG_MARKER}"
+            ),
             (
                 "INFO [vllm/v1/attention/backends/flash_attn.py] "
                 f"Using FlashAttention version {a6.VLLM_FLASH_ATTN_VERSION}"

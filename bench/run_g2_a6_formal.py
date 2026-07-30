@@ -1681,7 +1681,7 @@ def vllm_startup_log_attestation(
     attention_lines = [
         line
         for line in content.splitlines()
-        if "Using FLASH_ATTN" in line and "backend" in line
+        if a6.VLLM_ATTENTION_BACKEND_LOG_MARKER in line
     ]
     attention_version_lines = [
         line
@@ -1710,7 +1710,7 @@ def vllm_startup_log_attestation(
     config_message = config_line[config_line.index("Initializing a V1 LLM engine") :]
     attention_messages = sorted(
         {
-            line[line.index("Using FLASH_ATTN") :]
+            line[line.index(a6.VLLM_ATTENTION_BACKEND_LOG_MARKER) :]
             for line in attention_lines
         }
     )
@@ -2366,12 +2366,14 @@ def dry_validate_provenance(
                         f"{list(a6.VLLM_CUDA_GRAPH_CAPTURE_SIZES)}"
                     ),
                     "engine_config_line_sha256": sha256_bytes(b"dry-config"),
-                    "attention_backend_messages": [
-                        "Using FLASH_ATTN backend"
-                    ],
-                    "attention_backend_line_sha256": sha256_bytes(
-                        canonical_json(["Using FLASH_ATTN backend"]).encode()
-                    ),
+                        "attention_backend_messages": [
+                            a6.VLLM_ATTENTION_BACKEND_LOG_MARKER
+                        ],
+                        "attention_backend_line_sha256": sha256_bytes(
+                            canonical_json(
+                                [a6.VLLM_ATTENTION_BACKEND_LOG_MARKER]
+                            ).encode()
+                        ),
                     "attention_version_messages": [
                         (
                             "Using FlashAttention version "

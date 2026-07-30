@@ -184,7 +184,7 @@ def _vllm_startup_log(tp: int) -> dict[str, object]:
         f"VLLM_COMPILE {a6.VLLM_CUDAGRAPH_MODE} "
         f"{list(a6.VLLM_CUDA_GRAPH_CAPTURE_SIZES)}"
     )
-    attention_messages = ["Using FLASH_ATTN backend"]
+    attention_messages = [a6.VLLM_ATTENTION_BACKEND_LOG_MARKER]
     attention_version_messages = [
         f"Using FlashAttention version {a6.VLLM_FLASH_ATTN_VERSION}"
     ]
