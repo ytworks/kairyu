@@ -363,8 +363,12 @@ claim that a particular request used a graph dispatch. These rows are verified
 but excluded from performance aggregates. Both arms allocate 8,193 pages.
 Kairyu reserves one graph scratch page and no null page; stock vLLM reserves
 its mandatory `BlockPool` null page and no graph scratch page. Both therefore
-expose exactly 8,192 usable KV blocks. Kairyu
-pins `pipeline_depth=1`; stock vLLM explicitly enables async scheduling,
+expose exactly 8,192 usable KV blocks. Kairyu pins `pipeline_depth=5`, the
+production in-flight setting selected before formal closure after the exact
+TP4 token trace improved from 495.811 token/s at depth 1 to 674.181 token/s at
+depth 5. This removes a serialized-execution comparison confound without
+changing any workload, batching, cache, quality, or verdict threshold. Stock
+vLLM explicitly enables async scheduling,
 multiprocessing TP, FlashAttention, and `VLLM_COMPILE` mode 3 with
 `FULL_AND_PIECEWISE` graphs. Both disable custom all-reduce and access/request
 logging, and both pin uvloop 0.22.1 plus httptools 0.8.0. Each launch uses the

@@ -19,9 +19,9 @@ engines:
       max_model_len: 8192
       max_num_batched_tokens: 1024
       max_num_seqs: 16
-      # Keep this explicit and provenance-bound. Change only after the separate
-      # pipeline-depth/fusion A/B establishes a better fixed setting.
-      pipeline_depth: 1
+      # Keep the production pipeline depth explicit and provenance-bound so
+      # the formal Kairyu arm always measures the declared in-flight setting.
+      pipeline_depth: 5
       priority_age_s: 60.0
       decode_mode: cuda_graph
       # Match the active-sequence budget. A smaller graph capacity silently

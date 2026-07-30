@@ -263,3 +263,33 @@ def test_ragged_write_preserves_shared_pages_and_writes_private_slots(
     assert torch.equal(pool.v, expected_v)
     assert torch.equal(pool.k[:, 0], shared_k)
     assert torch.equal(pool.v[:, 0], shared_v)
+
+
+def test_ragged_request_shape_bounds_are_runtime_kernel_arguments():
+    from kairyu.kernels import paged_kv_write_gpu
+
+    _require_cuda()
+    parameters = {
+        parameter.name: parameter
+        for parameter in paged_kv_write_gpu._write_ragged_kernel.params
+    }
+
+    for name in ("NUM_TOKENS", "NUM_ROWS", "NUM_TABLE_PAGES"):
+        assert parameters[name].is_constexpr is False
+    for name in (
+        "NUM_POOL_PAGES",
+        "PAGE_SIZE",
+        "NUM_HEADS",
+        "HEAD_DIM",
+        "BLOCK",
+    ):
+        assert parameters[name].is_constexpr is True
+    assert {
+        parameters[index].name
+        for index in paged_kv_write_gpu._write_ragged_kernel.do_not_specialize
+    } == {
+        "table_stride_0",
+        "NUM_TOKENS",
+        "NUM_ROWS",
+        "NUM_TABLE_PAGES",
+    }

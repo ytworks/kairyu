@@ -146,13 +146,20 @@ def test_kv_pressure_keeps_request_waiting_then_admits():
     assert [c.request_id for c in step.scheduled] == ["b"]
 
 
-def test_identical_prompts_share_pages_under_pressure():
+def test_identical_prompts_wait_until_computed_pages_are_published():
     scheduler, cache = _setup(num_pages=1, budget=64, max_seqs=4)
     scheduler.add_request(_request("a", prompt_len=4, max_new_tokens=1))
     scheduler.add_request(_request("b", prompt_len=4, max_new_tokens=1))
     step = scheduler.schedule()
-    # both fit in ONE page because b radix-hits a's identical prompt
-    assert [c.request_id for c in step.scheduled] == ["a", "b"]
+    # Scheduling a's forward does not prove its KV exists yet, so b cannot
+    # reuse that page while the device result is still in flight.
+    assert [c.request_id for c in step.scheduled] == ["a"]
+    assert cache.peek_cached_tokens((1, 2, 3, 4)) == 0
+
+    scheduler.update({"a": 100})
+    assert cache.peek_cached_tokens((1, 2, 3, 4)) == 4
+    step = scheduler.schedule()
+    assert [c.request_id for c in step.scheduled] == ["b"]
     assert cache.hit_rate == 0.5
 
 

@@ -160,7 +160,7 @@ def test_arm_config_uses_equal_usable_cache_and_truthful_reservations() -> None:
         == stock_config["usable_cache_blocks"]
         == 8192
     )
-    assert kairyu_config["pipeline_depth"] == 1
+    assert kairyu_config["pipeline_depth"] == 5
     assert stock_config["async_scheduling"] is True
     assert kairyu_config["custom_all_reduce"] is False
     assert stock_config["custom_all_reduce"] is False
@@ -180,7 +180,7 @@ def test_kairyu_template_pins_context_cache_pipeline_and_access_log(
         "access_log: false",
         "num_pages: 8193",
         "max_model_len: 8192",
-        "pipeline_depth: 1",
+        "pipeline_depth: 5",
     ):
         assert marker in rendered
     assert "__TENSOR_PARALLEL_SIZE__" not in rendered

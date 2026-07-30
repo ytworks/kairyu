@@ -164,6 +164,42 @@ class RadixKVCache:
             return 0.0
         return self._hit_tokens / self._total_tokens
 
+    def peek_cached_tokens(self, tokens: tuple[int, ...]) -> int:
+        """Return the computed page-aligned prefix length without mutation.
+
+        Admission policy occasionally needs to distinguish expensive uncached
+        prefill from a cheap radix hit before it allocates or locks pages. A
+        normal allocation walk splits nodes, updates LRU state, refcounts the
+        path, and contributes to hit-rate accounting; this probe deliberately
+        does none of those things.
+        """
+
+        node = self._root
+        matched_tokens = 0
+        position = 0
+        while True:
+            first_page = tuple(tokens[position : position + self._page_size])
+            if len(first_page) < self._page_size:
+                return matched_tokens
+            child = node.children.get(first_page)
+            if child is None or not child.computed:
+                return matched_tokens
+            whole_pages = len(child.key) // self._page_size
+            common_pages = 0
+            for page_index in range(whole_pages):
+                start = page_index * self._page_size
+                segment = tokens[
+                    position + start : position + start + self._page_size
+                ]
+                if tuple(segment) != child.key[start : start + self._page_size]:
+                    break
+                common_pages += 1
+            matched_tokens += common_pages * self._page_size
+            if common_pages < whole_pages:
+                return matched_tokens
+            position += len(child.key)
+            node = child
+
     def _touch(self, node: _Node) -> None:
         self._clock += 1
         node.last_access = self._clock

@@ -40,9 +40,18 @@ launch/backend/package/GPU identities, 31 unique synchronized graph warmups,
 and equal 8,192-block usable KV capacity into independently replayed evidence.
 The first clean TP4 ShareGPT pair completed but did not meet A6: Kairyu
 measured 0.466x vLLM SLO-goodput and 1.628x vLLM TTFT p99. The remaining
-matrix is intentionally deferred while the measured steady-decode gap is
-closed; A6 remains executable but not closed, and its three pooled thresholds
-are unchanged.
+matrix is intentionally deferred while the performance gap is closed; A6
+remains executable but not closed, and its three pooled thresholds are
+unchanged. A direct-engine rerun removed the depth-1 comparison confound:
+the same TP4 ShareGPT token trace measured 495.811 token/s at depth 1 and
+674.181 token/s at depth 5 (+35.98%), versus pinned vLLM at 798.057 token/s.
+The resulting 0.845x ratio is diagnostic rather than the HTTP A6 verdict.
+Steady decode is already approximately equal (Kairyu 19.9 ms versus vLLM
+20.1 ms). Ragged paged-KV writes no longer specialize request-dependent
+token, row, or page-table shapes: after the first compile, previously unseen
+table widths fell from 63.81–67.53 ms to 0.11–0.20 ms with exact K/V output.
+The full TP4/8 HTTP matrix remains an open hard performance gate while the
+verified depth-5 implementation proceeds independently.
 G2 A7 now has an executable real-engine gate. Its Qwen3-32B trace reuses the
 fixed 64-session × 8-turn, 512-token shared-prefix plus 128-token turn geometry,
 then measures engine-originated prompt-token cache usage independently at TP4
@@ -591,6 +600,37 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] Ragged KV writes remove per-request shape compilation
+- What: made ragged token, row, page-table-width, and leading-stride bounds
+  non-specializing Triton runtime arguments while retaining pool geometry,
+  page size, head shape, and payload block as compile-time constants. A
+  structural GPU regression protects that boundary. In fresh-cache probes,
+  the former kernel compiled again for unseen table widths 61, 64, and 65 in
+  67.525/65.437/63.807 ms; the selected kernel handled them after one initial
+  compile in 0.199/0.126/0.112 ms. Every K/V write was exact.
+- Why: a real 1,024-token prefill trace contained a 70.487 ms GPU-idle interval
+  immediately before the first ragged write. The steady kernel itself is about
+  0.11 ms, so specializing request-dependent shapes made compile latency, not
+  write execution, the dominant cost. Runtime bounds preserve Kairyu's native
+  L1 path without copying vLLM's scheduler or execution architecture.
+- Refs: issue #156; G2 A6; `kairyu/kernels/paged_kv_write_gpu.py`;
+  `tests/gpu/test_paged_kv_write_gpu.py`
+
+### 2026-07-31 — [progress] G2 A6 depth 5 removes the serialized-run comparison confound
+- What: the exact TP4 direct-engine ShareGPT token trace measured 674.181
+  output token/s at pipeline depth 5 versus the prior 495.811 at depth 1
+  (+35.98%). Pinned vLLM remains 798.057 token/s, so the diagnostic ratio is
+  now 0.845x and still below the 0.95 target. Kairyu steady decode is already
+  approximately equal to vLLM; the measured remaining candidate is L1 prefill
+  compile/launch. The HTTP TP4/TP8 matrix remains the binding A6 verdict.
+- Why: depth 1 measured a serialized host/device execution policy against
+  vLLM's asynchronous in-flight execution, so it could not support a causal
+  claim that Kairyu's L3/L2/L1 responsibility split caused the whole gap.
+  Matching a useful in-flight depth preserves the product architecture and
+  limits further convergence to independently proven L1 mechanisms.
+- Refs: issue #156; G2 A6; `bench/g2_a6_vllm_bench.py`;
+  `examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml`
 
 ### 2026-07-30 — [progress] G2 A6 first matched TP4 pair isolates a steady-decode gap
 - What: The first clean Qwen3-32B TP4 ShareGPT pair completed all 128 requests

@@ -1601,11 +1601,11 @@ def test_provenance_requires_fair_cache_and_batching_configuration() -> None:
     different_yaml = copy.deepcopy(value["value"])
     source = different_yaml["configuration_source"]["value"]
     source["text"] = source["text"].replace(
-        "pipeline_depth: 1",
-        "pipeline_depth: 2",
+        "pipeline_depth: 5",
+        "pipeline_depth: 4",
     )
     source["text_sha256"] = a6.sha256_text(source["text"])
-    source["parsed"]["engines"]["qwen3-32b"]["options"]["pipeline_depth"] = 2
+    source["parsed"]["engines"]["qwen3-32b"]["options"]["pipeline_depth"] = 4
     different_yaml["configuration_source"] = a6.hashed_descriptor(source)
     assert not a6._provenance_valid(
         a6.hashed_descriptor(different_yaml),

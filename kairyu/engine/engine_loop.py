@@ -661,6 +661,23 @@ class EngineLoop:
             self._scheduler.has_unfinished()
             and len(self._pending_steps) < self._pipeline_depth
         ):
+            drain_before_admission = getattr(
+                self._scheduler,
+                "should_drain_before_admission",
+                None,
+            )
+            if (
+                self._device_executor is not None
+                and
+                self._pending_steps
+                and callable(drain_before_admission)
+                and drain_before_admission()
+            ):
+                # Every live request has its length-terminal token in an older
+                # immutable handle. Commit that bounded work before filling a
+                # partially empty sequence window, then re-evaluate admission
+                # with the newly released slots on the next public step.
+                break
             plan = self._scheduler.schedule()
             # prompts too large to ever fit are rejected in schedule() (C2);
             # their tracks surface as finished via _track_update below

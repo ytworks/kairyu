@@ -32,6 +32,29 @@ def test_second_allocation_hits_shared_prefix():
     assert cache.hit_rate == pytest.approx(4 / 16)
 
 
+def test_cached_prefix_probe_is_read_only_and_matches_allocation():
+    cache = RadixKVCache(num_pages=8, page_size=PAGE)
+    first = cache.allocate(_tokens([1, 2, 3, 4], [5, 6, 7, 8]))
+    cache.mark_computed(first)
+    cache.free(first)
+    hit_rate = cache.hit_rate
+    free_pages = cache.num_free_pages
+
+    assert cache.peek_cached_tokens(
+        _tokens([1, 2, 3, 4], [5, 6, 7, 8], [9, 9, 9, 9])
+    ) == 8
+    assert cache.peek_cached_tokens(_tokens([1, 2, 3, 4], [7, 7, 7, 7])) == 4
+    assert cache.peek_cached_tokens((1, 2, 3)) == 0
+    assert cache.peek_cached_tokens(_tokens([9, 9, 9, 9])) == 0
+    assert cache.hit_rate == hit_rate
+    assert cache.num_free_pages == free_pages
+
+    allocation = cache.allocate(
+        _tokens([1, 2, 3, 4], [5, 6, 7, 8], [9, 9, 9, 9])
+    )
+    assert allocation.num_cached_tokens == 8
+
+
 def test_partial_page_tail_is_private():
     cache = RadixKVCache(num_pages=8, page_size=PAGE)
     first = cache.allocate((1, 2, 3, 4, 5, 6))  # 1 full page + 2-token tail

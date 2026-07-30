@@ -5,7 +5,7 @@ import dataclasses
 import pytest
 
 from kairyu.engine.core.radix_kv import RadixKVCache
-from kairyu.engine.core.scheduler import EngineRequest, Scheduler
+from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
 from kairyu.engine.core.step_input import RequestSnapshot, snapshot_step
 
 PAGE = 4
@@ -143,6 +143,36 @@ def test_state_sync_delta_reconstructs_full_snapshot_each_step():
     drive_one_step({"a": 101, "b": 200})  # both decode; a hits max_new_tokens -> finishes
     drive_one_step({"b": 201})  # only b remains; "a" must be dropped from sync
     assert "a" not in worker._states
+
+
+def test_state_sync_release_diff_is_transactional_until_apply():
+    """A failed diff must not consume the old identity before it crosses the wire."""
+    from kairyu.engine.core.step_input import StateSync
+
+    scheduler = _scheduler()
+    scheduler.add_request(EngineRequest("reused", (1, 2, 3, 4)))
+    plan = scheduler.schedule()
+    sync = StateSync()
+    sync.apply(sync.diff(plan.scheduled, scheduler.states))
+    retained = dict(sync._states)
+
+    with pytest.raises(KeyError):
+        sync.diff(
+            (*plan.scheduled, ScheduledChunk("missing", 1, True, 0)),
+            scheduler.states,
+            released_ids=("reused",),
+        )
+
+    assert sync._states == retained
+    retry = sync.diff(
+        plan.scheduled,
+        scheduler.states,
+        released_ids=("reused",),
+    )
+    assert [snapshot.request_id for snapshot in retry.new] == ["reused"]
+    assert retry.updates == ()
+    assert sync._states == retained
+    sync.apply(retry)
 
 
 def test_state_sync_propagates_output_epoch_as_full_snapshot():
