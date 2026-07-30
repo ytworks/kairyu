@@ -3,9 +3,10 @@
 Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS (1-reviewer panel with web
 verification of the FlashInfer 0.6.x API and the DeepSeek-V2 MLA paper,
 2026-07-03; amendments below are binding). The issue #277 FlashAttention-3/4
-extension (2026-07-29) is implemented on an unmerged branch and FA4 is
-validated on SM120, but completion is blocked because this host has no
-representative FA3 SM8x/SM90 device.
+extension is implemented (2026-07-30). FA4 has retained SM120 correctness and
+performance evidence. FA3 is a strict, explicit SM90 path whose import/API/
+shape contract is fake-tested when representative hardware is unavailable;
+that coverage makes no FA3 performance or automatic-selection claim.
 Milestone: M13 (roadmap Track E1 GPU-path-local; kernel-adapter pattern setter
 for M14/M18)
 Date: 2026-07-03
@@ -131,8 +132,9 @@ falls back to torch and retains the sanitized failure type in its actual
 decision. Explicit selections never fall back. The constructed decision is
 carried by the backend/runner/engine and is what `/backends` reports; health
 inspection does not re-infer a different implementation from environment
-state. TP startup includes the resolved backend in its rank handshake, so a
-rank-local fallback cannot silently create a mixed-kernel group.
+state. TP startup exchanges a canonical decision identity containing the
+requested/resolved names, source, components, and architecture, so a rank-local
+fallback or heterogeneous kernel path cannot silently create a mixed group.
 
 ### D6 — FlashAttention phase adapters (`flashattention_gpu.py`)
 
@@ -143,19 +145,35 @@ and `kv_mode` components.
 
 - **FA3:** supported through the official upstream `hopper/` package, pinned
   to tag `fa4-v4.0.0.beta24`, commit
-  `849f660f73b176e5ad5670e7f822c7fa9f3eaf8b`. It is the non-Blackwell
-  FlashAttention path for SM8x/SM90; its fake-module contract keeps the adapter
-  testable without representative hardware.
+  `849f660f73b176e5ad5670e7f822c7fa9f3eaf8b`. Kairyu exposes it on SM90;
+  its fake-module contract pins imports, APIs, shapes, GQA, causality, and
+  fail-closed architecture handling without treating fake coverage as measured
+  performance.
 - **FA4:** the optional `flashattention4` install extra pins
-  `flash-attn-4==4.0.0b24`. SM100/SM110 use FA4's direct paged-KV interface.
-  SM90/SM120 keep the original page table as the source of truth and perform an
-  explicit device-to-device page materialization for FA4 prefill; no host
-  gather is allowed.
+  `flash-attn-4[cu13]==4.0.0b24`, upstream's recommended CUDA 13 variant.
+  SM90/SM100/SM110 use FA4's direct paged-KV interface. SM120 keeps the
+  original page table as the source of truth and performs explicit
+  device-to-device page materialization for FA4 prefill; no host gather is
+  allowed. Beta24 caches its selected architecture process-wide. Construction
+  therefore compares the selected device's real capability, the Kairyu
+  profile, `FLASH_ATTENTION_ARCH`, and the upstream global cache before model
+  loading, and every call enters that device's CUDA context. Two FA4 roles on
+  different SM families must use separate processes; the second backend fails
+  startup rather than compiling or launching a kernel for the first role's SM.
 - **Shared semantics:** both adapters preserve GQA head grouping,
   bottom-right rectangular causality, page identity, dtype, and the existing
   CUDA-graph boundary. Unsupported architectures and shapes are rejected
   before serving. Prefill failures are not allowed to change decode ownership
   or trigger an implicit torch/FlashInfer fallback.
+
+The deployment builder owns process lifecycle. It calls the public
+`kairyu-proc` startup hook before the application lifespan yields, so an
+explicit dependency, architecture, or model-shape failure prevents the socket
+from serving. The parent receives the child's actual decision over a versioned
+optional startup frame. Requests are tied to a monotonic child generation:
+death/reset delivers one terminal error to that generation only, and shutdown
+cancels and drains an in-progress model load before releasing process
+ownership.
 
 ## 3. Non-goals and fallbacks
 
@@ -204,9 +222,9 @@ and `kv_mode` components.
 - GPU on the available host: FA4 on SM120 compares against the FlashInfer
   oracle and serves Qwen3-32B at TP8. Auto-promotion evidence uses interleaved
   warm samples and retains order plus jitter metadata with the result. FA3 has
-  fake-module/API-contract coverage only in this environment; no Ampere/Hopper
-  device or performance result is claimed, and that contract coverage does not
-  complete issue #277 under the current hardware-validation policy.
+  fake-module/API-contract coverage only in this environment; no SM90 device
+  or performance result is claimed, and no automatic FA3 policy is inferred
+  from that fail-closed contract coverage.
 
 ## 6. Review record (binding amendments)
 
@@ -250,14 +268,14 @@ submodule would corrupt state_dict names); no shared-instance default arg
 (`backend or TorchAttentionBackend()`); positions-contiguity assumption
 documented on the protocol; invalid env override fails loudly.
 
-Issue #277 extension (2026-07-29):
+Issue #277 extension (implemented 2026-07-30; retained evidence 2026-07-29):
 - Public selection values are exactly `auto`, `torch`, `flashinfer`,
   `flashattention3`, and `flashattention4`; explicit means strict, while only
   `auto` may use a fallback.
 - FA3/FA4 are composite serving decisions: FlashAttention prefill and
   FlashInfer decode. Health output must expose both components, dependency
   versions, GPU architecture decision, and selection source.
-- FA4's SM100/SM110 direct-paged path and SM90/SM120 device-materialized path
+- FA4's SM90/SM100/SM110 direct-paged path and SM120 device-materialized path
   are separate contracts. Neither may renumber or mutate Kairyu's page table.
 - An auto-policy promotion is a release artifact backed by retained,
   profile-specific correctness/performance evidence, not a runtime

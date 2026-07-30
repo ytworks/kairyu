@@ -135,6 +135,10 @@ def build_pd_coordinator(
     import torch
 
     from kairyu.engine.core.attention import select_backend
+    from kairyu.engine.core.attention_selector import (
+        AttentionBackendDecision,
+        compose_backend_decisions,
+    )
     from kairyu.engine.core.hw_profile import HardwareProfile, probe
     from kairyu.engine.core.model_runner import PagedModelRunner
     from kairyu.engine.core.pd import LocalCopyKVHandoff, PDCoordinator
@@ -294,7 +298,12 @@ def build_pd_coordinator(
         handoff=handoff,
         max_transfer_retries=max_transfer_retries,
     )
-    coordinator.attention_backend_decision = getattr(
-        attention_backend, "selection_decision", None
+    prefill_decision = getattr(prefill_attention_backend, "selection_decision", None)
+    decode_decision = getattr(decode_attention_backend, "selection_decision", None)
+    coordinator.attention_backend_decision = (
+        compose_backend_decisions(prefill_decision, decode_decision)
+        if isinstance(prefill_decision, AttentionBackendDecision)
+        and isinstance(decode_decision, AttentionBackendDecision)
+        else None
     )
     return coordinator

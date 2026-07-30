@@ -318,9 +318,7 @@ def _validate_prefill_stats_rows(rows: object, *, world_size: int) -> tuple[dict
 def _verification_stats_row(control_comm, local_runner, *, reset: bool) -> dict[str, object]:
     getter = getattr(local_runner, "verification_execution_stats", None)
     if not callable(getter):
-        raise RuntimeError(
-            f"rank {control_comm.rank} runner has no verification_execution_stats"
-        )
+        raise RuntimeError(f"rank {control_comm.rank} runner has no verification_execution_stats")
     stats = getter(reset=reset)
     if not isinstance(stats, dict):
         raise RuntimeError(f"rank {control_comm.rank} verification stats must be a dict")
@@ -461,15 +459,10 @@ def _page_table_stats_row(
 ) -> dict[str, object]:
     getter = getattr(local_runner, "decode_page_table_cache_stats", None)
     if not callable(getter):
-        raise RuntimeError(
-            f"rank {control_comm.rank} runner has no "
-            "decode_page_table_cache_stats"
-        )
+        raise RuntimeError(f"rank {control_comm.rank} runner has no decode_page_table_cache_stats")
     stats = getter(reset=reset)
     if not isinstance(stats, dict):
-        raise RuntimeError(
-            f"rank {control_comm.rank} decode page-table stats must be a dict"
-        )
+        raise RuntimeError(f"rank {control_comm.rank} decode page-table stats must be a dict")
     device = str(getattr(local_runner, "_device", ""))
     if not device:
         raise RuntimeError(f"rank {control_comm.rank} runner has no compute device")
@@ -494,9 +487,7 @@ def _page_table_stats_packet(
     try:
         envelope: dict[str, object] = {
             "ok": True,
-            "row": _page_table_stats_row(
-                control_comm, local_runner, reset=reset
-            ),
+            "row": _page_table_stats_row(control_comm, local_runner, reset=reset),
         }
         raw = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
     except Exception as error:
@@ -512,9 +503,7 @@ def _page_table_stats_packet(
             {
                 "ok": False,
                 "rank": control_comm.rank,
-                "error": (
-                    f"serialized decode page-table stats exceed {capacity} bytes"
-                ),
+                "error": (f"serialized decode page-table stats exceed {capacity} bytes"),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -527,9 +516,7 @@ def _page_table_stats_packet(
     )
     packet[0] = len(raw) & 0xFF
     packet[1] = len(raw) >> 8
-    packet[2 : 2 + len(raw)].copy_(
-        torch.tensor(tuple(raw), dtype=torch.uint8, device=device)
-    )
+    packet[2 : 2 + len(raw)].copy_(torch.tensor(tuple(raw), dtype=torch.uint8, device=device))
     return packet
 
 
@@ -547,9 +534,7 @@ def _decode_page_table_stats_packets(
         or gathered.ndim != 1
         or gathered.numel() != world_size * _PAGE_TABLE_STATS_PACKET_BYTES
     ):
-        raise RuntimeError(
-            "decode page-table stats tensor gather has malformed shape or dtype"
-        )
+        raise RuntimeError("decode page-table stats tensor gather has malformed shape or dtype")
     packets = gathered.reshape(world_size, _PAGE_TABLE_STATS_PACKET_BYTES).cpu()
     rows: list[object] = []
     failures: list[str] = []
@@ -568,13 +553,9 @@ def _decode_page_table_stats_packets(
         elif envelope.get("ok") is True:
             rows.append(envelope.get("row"))
         else:
-            failures.append(
-                f"rank {rank}: {envelope.get('error', 'unknown error')}"
-            )
+            failures.append(f"rank {rank}: {envelope.get('error', 'unknown error')}")
     if failures:
-        raise RuntimeError(
-            "decode page-table stats rank failures: " + "; ".join(failures)
-        )
+        raise RuntimeError("decode page-table stats rank failures: " + "; ".join(failures))
     return _validate_page_table_stats_rows(rows, world_size=world_size)
 
 
@@ -602,9 +583,7 @@ def _validate_page_table_stats_rows(
             or not isinstance(row["device"], str)
             or not isinstance(row["stats"], dict)
         ):
-            raise RuntimeError(
-                f"decode page-table stats reply has invalid rank data: {row!r}"
-            )
+            raise RuntimeError(f"decode page-table stats reply has invalid rank data: {row!r}")
         by_rank[rank] = row
     expected_ranks = set(range(world_size))
     if set(by_rank) != expected_ranks:
@@ -719,7 +698,7 @@ def make_handshake(
     model_dir: str,
     num_pages: int,
     page_size: int,
-    attention_backend: str | None = None,
+    attention_backend_identity: str | None = None,
 ) -> dict:
     """Rank 0 broadcasts this before the step loop; workers validate (A11)."""
     handshake = {
@@ -727,8 +706,8 @@ def make_handshake(
         "page_size": page_size,
         "config": _config_fingerprint(model_dir),
     }
-    if attention_backend is not None:
-        handshake["attention_backend"] = attention_backend
+    if attention_backend_identity is not None:
+        handshake["attention_backend_identity"] = attention_backend_identity
     return handshake
 
 
@@ -737,18 +716,18 @@ def validate_handshake(
     model_dir: str,
     num_pages: int,
     page_size: int,
-    attention_backend: str | None = None,
+    attention_backend_identity: str | None = None,
 ) -> None:
     expected = make_handshake(
         model_dir,
         num_pages,
         page_size,
-        attention_backend,
+        attention_backend_identity,
     )
     if handshake != expected:
         raise RuntimeError(
             f"TP worker mismatch: driver={handshake} worker={expected} — "
-            "pool sizing/config must be identical on every rank"
+            "pool sizing/config/backend identity must be identical on every rank"
         )
 
 
@@ -773,10 +752,7 @@ class DistTPModelRunner:
     @property
     def supports_batched_verification(self) -> bool:
         """Advertise the capability only when the rank-local runner has it."""
-        return (
-            getattr(self._local, "supports_batched_verification", False)
-            is True
-        )
+        return getattr(self._local, "supports_batched_verification", False) is True
 
     def execute(self, scheduled, states) -> dict:
         if self._fatal_error is not None:
@@ -950,8 +926,7 @@ class DistTPModelRunner:
             delivered = self._control_comm.broadcast(payload, src=0)
             if delivered != payload:
                 raise RuntimeError(
-                    "decode page-table cache mode broadcast returned a "
-                    "malformed payload"
+                    "decode page-table cache mode broadcast returned a malformed payload"
                 )
             self._local.set_decode_page_table_cache_enabled(enabled)
         except Exception as error:
@@ -975,8 +950,7 @@ class DistTPModelRunner:
             delivered = self._control_comm.broadcast(probe, src=0)
             if delivered != probe:
                 raise RuntimeError(
-                    "decode page-table stats probe broadcast returned a "
-                    "malformed payload"
+                    "decode page-table stats probe broadcast returned a malformed payload"
                 )
             packet = _page_table_stats_packet(
                 self._control_comm,
@@ -990,9 +964,7 @@ class DistTPModelRunner:
                 world_size=self._control_comm.world_size,
             )
         except Exception as error:
-            failure = RuntimeError(
-                f"TP decode page-table stats probe failed: {error}"
-            )
+            failure = RuntimeError(f"TP decode page-table stats probe failed: {error}")
             self._fatal_error = failure
             raise failure from error
 
@@ -1229,6 +1201,7 @@ def build_tp_runner(
     import torch
 
     from kairyu.engine.core.attention import select_backend
+    from kairyu.engine.core.attention_selector import attention_backend_identity
     from kairyu.engine.core.hw_profile import probe
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
@@ -1237,8 +1210,10 @@ def build_tp_runner(
 
     if placement is None:
         placement = TPPlacement("cpu", torch.float32, "gloo")
+    profile = probe(placement.device)
     attention_backend = select_backend(
-        probe() if placement.device != "cpu" else None
+        profile,
+        device=placement.device,
     )
     model, local_config, full_config = build_tp_model(
         model_dir,
@@ -1281,6 +1256,9 @@ def build_tp_runner(
         **graph_options,
     )
     runner.attention_backend_decision = attention_backend.selection_decision
+    runner.attention_backend_identity = attention_backend_identity(
+        runner.attention_backend_decision
+    )
     return runner, full_config
 
 
@@ -1345,7 +1323,7 @@ def _tp_worker_entry(
         model_dir,
         num_pages,
         page_size,
-        runner.attention_backend_decision.resolved,
+        runner.attention_backend_identity,
     )
     groups = serving_groups(placement.backend)
     comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
@@ -1460,13 +1438,14 @@ class DistTPLauncher:
                 graph_warmup_iters,
             )
             self.attention_backend_decision = runner.attention_backend_decision
+            self.attention_backend_identity = runner.attention_backend_identity
             # the one collective that legitimately absorbs load skew
             startup_comm.broadcast(
                 make_handshake(
                     model_dir,
                     num_pages,
                     page_size,
-                    self.attention_backend_decision.resolved,
+                    self.attention_backend_identity,
                 ),
                 src=0,
             )

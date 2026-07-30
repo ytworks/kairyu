@@ -43,9 +43,7 @@ from kairyu.orchestration.router import JsonlRouterLog
 _EMBEDDING_BACKEND_FACTORIES: dict[str, Callable[..., EmbeddingBackend]] = {
     "mock": MockEmbeddingBackend
 }
-_SERVICE_ACCOUNT_NAMESPACE_PATH = Path(
-    "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
-)
+_SERVICE_ACCOUNT_NAMESPACE_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 
 
 _DYNAMIC_REPLICA_MAX_KEEPALIVE = 1
@@ -107,9 +105,7 @@ def _create_embedding_backend(backend: str, *, dimensions: int) -> EmbeddingBack
     factory = _EMBEDDING_BACKEND_FACTORIES.get(backend)
     if factory is None:
         known = ", ".join(sorted(_EMBEDDING_BACKEND_FACTORIES))
-        raise ValueError(
-            f"unknown embedding backend {backend!r}; known backends: {known}"
-        )
+        raise ValueError(f"unknown embedding backend {backend!r}; known backends: {known}")
     return factory(dimensions=dimensions)
 
 
@@ -123,9 +119,7 @@ def _resolve_path(path: str, base_dir: Path | None) -> Path:
 def _resolve_kubernetes_namespace(configured: str | None) -> str:
     if configured is not None:
         return configured
-    namespace = _SERVICE_ACCOUNT_NAMESPACE_PATH.read_text(
-        encoding="utf-8"
-    ).strip()
+    namespace = _SERVICE_ACCOUNT_NAMESPACE_PATH.read_text(encoding="utf-8").strip()
     if not namespace:
         raise ValueError("mounted Kubernetes service-account namespace is empty")
     return namespace
@@ -173,19 +167,21 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         batch_postgres_dsn = os.environ.get(spec.batch.dsn_env)
         if not batch_postgres_dsn:
             raise ValueError(
-                f"batch PostgreSQL DSN environment variable "
-                f"{spec.batch.dsn_env!r} is not set"
+                f"batch PostgreSQL DSN environment variable {spec.batch.dsn_env!r} is not set"
             )
     embedding_backends = {
-        name: _create_embedding_backend(
-            section.backend, dimensions=section.dimensions
-        )
+        name: _create_embedding_backend(section.backend, dimensions=section.dimensions)
         for name, section in spec.embeddings.items()
     }
     engines: dict[str, EngineBackend] = {
-        name: create_backend(entry.backend, **entry.options)
-        for name, entry in spec.engines.items()
+        name: create_backend(entry.backend, **entry.options) for name, entry in spec.engines.items()
     }
+    # The builder owns these concrete engines and must finish any failure-prone
+    # startup before FastAPI's lifespan yields (and uvicorn begins serving).
+    # Pools own their replicas for shutdown, but keep the concrete replicas here
+    # as startup targets because the pool itself intentionally has no startup
+    # protocol. Dynamic replicas are remote resources discovered after startup.
+    startup_resources: list[EngineBackend] = list(engines.values())
 
     probers: list[HealthProber] = []
     reconcilers: list[tuple[PoolReconciler, float]] = []
@@ -208,14 +204,9 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
 
     for name, pool_spec in spec.pools.items():
         pool_log = (
-            JsonlRouterLog(placement_log_paths[name])
-            if name in placement_log_paths
-            else None
+            JsonlRouterLog(placement_log_paths[name]) if name in placement_log_paths else None
         )
-        replicas = [
-            create_backend(entry.backend, **entry.options)
-            for entry in pool_spec.replicas
-        ]
+        replicas = [create_backend(entry.backend, **entry.options) for entry in pool_spec.replicas]
         dynamic = pool_spec.discovery is not None
         pool = ReplicaPool(
             replicas,
@@ -226,9 +217,8 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         )
         engines[name] = pool
         if not dynamic:
-            health_urls = [
-                entry.resolved_health_url() for entry in pool_spec.replicas
-            ]
+            startup_resources.extend(replicas)
+            health_urls = [entry.resolved_health_url() for entry in pool_spec.replicas]
             if any(url is not None for url in health_urls):
                 probers.append(
                     HealthProber(
@@ -267,9 +257,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 replica_ids = tuple(
                     str(replica_id)
                     for replica_id in (
-                        raw_replica_ids
-                        if raw_replica_ids is not None
-                        else _pool.replica_ids
+                        raw_replica_ids if raw_replica_ids is not None else _pool.replica_ids
                     )
                 )
                 raw_healthy_ids = actions.get("healthy_ids")
@@ -281,9 +269,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                         else (
                             tuple(
                                 current_id
-                                for current_id, healthy in (
-                                    _pool.healthy_by_id().items()
-                                )
+                                for current_id, healthy in (_pool.healthy_by_id().items())
                                 if healthy
                             )
                         )
@@ -293,9 +279,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 eligible_ids = tuple(
                     str(replica_id)
                     for replica_id in (
-                        raw_eligible_ids
-                        if raw_eligible_ids is not None
-                        else _pool.eligible_ids
+                        raw_eligible_ids if raw_eligible_ids is not None else _pool.eligible_ids
                     )
                 )
                 raw_generations = actions.get("generation_by_id", {})
@@ -358,8 +342,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     if spec.orchestrator is not None:
         orchestrator = _load_orchestrator(spec.orchestrator.spec)
     orchestrators: dict[str, Orchestrator] = {
-        name: _load_orchestrator(section.spec)
-        for name, section in spec.orchestrators.items()
+        name: _load_orchestrator(section.spec) for name, section in spec.orchestrators.items()
     }
 
     workers: list[BatchWorker] = []  # filled after create_app (worker needs app metrics)
@@ -367,13 +350,18 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        tasks = [
-            asyncio.create_task(reconciler.run(interval_s))
-            for reconciler, interval_s in reconcilers
-        ]
-        tasks += [asyncio.create_task(prober.run()) for prober in probers]
-        tasks += [asyncio.create_task(worker.run()) for worker in workers]
+        tasks: list[asyncio.Task] = []
         try:
+            for resource in {id(resource): resource for resource in startup_resources}.values():
+                startup = getattr(resource, "startup", None)
+                if callable(startup):
+                    await startup()
+            tasks = [
+                asyncio.create_task(reconciler.run(interval_s))
+                for reconciler, interval_s in reconcilers
+            ]
+            tasks += [asyncio.create_task(prober.run()) for prober in probers]
+            tasks += [asyncio.create_task(worker.run()) for worker in workers]
             yield
         finally:
             for task in tasks:
@@ -426,12 +414,8 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)
-    app.state.reconcilers = tuple(
-        reconciler for reconciler, _interval_s in reconcilers
-    )
-    app.state.dynamic_pool_http_client_factories = tuple(
-        dynamic_http_client_factories
-    )
+    app.state.reconcilers = tuple(reconciler for reconciler, _interval_s in reconcilers)
+    app.state.dynamic_pool_http_client_factories = tuple(dynamic_http_client_factories)
 
     if spec.batch is not None:
         from kairyu.entrypoints.server.batch_routes import add_batch_routes

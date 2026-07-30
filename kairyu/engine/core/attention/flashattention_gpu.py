@@ -9,9 +9,9 @@ The two upstream generations expose different paged-KV APIs:
 
 * FA3 uses ``flash_attn_with_kvcache`` directly over the physical page pool.
 * FA4 beta uses ``flash_attn_varlen_func`` for paged KV.  That path is used
-  only on SM100/SM110; SM90 and SM120 materialize the selected pages on-device
-  before calling dense ``flash_attn_func``.  In particular, the current SM120
-  kernel rejects ``page_table``.
+  on SM90/SM100/SM110; SM120 materializes the selected pages on-device before
+  calling dense ``flash_attn_func`` because its current kernel rejects
+  ``page_table``.
 
 Imports are deferred so CPU installations can still import the engine.  The
 module and decode backend injection points also make the exact upstream API
@@ -21,6 +21,10 @@ contract CPU-testable without pretending to validate a GPU kernel.
 from __future__ import annotations
 
 import importlib
+import inspect
+import os
+from collections.abc import Mapping
+from contextlib import nullcontext
 from importlib import metadata
 from typing import Any
 
@@ -28,11 +32,28 @@ import torch
 
 from kairyu.engine.core.kv_pool import PagedKVPool
 
-# The pinned upstream dispatches its Ampere/Ada path for every capability from
-# SM80 through SM89 (``enable_sm80_to_sm89``), then its Hopper path on SM90.
-_FA3_SUPPORTED_SMS = frozenset(range(80, 91))
+# The official hopper wheel pinned for this adapter emits only sm_90a code.
+# Source templates for older architectures do not constitute executable
+# support, so the public contract must remain fail-closed.
+_FA3_SUPPORTED_SMS = frozenset({90})
 _FA4_SUPPORTED_SMS = frozenset({90, 100, 110, 120})
-_FA4_DIRECT_PAGED_SMS = frozenset({100, 110})
+_FA4_DIRECT_PAGED_SMS = frozenset({90, 100, 110})
+_EXPECTED_PUBLIC_VERSIONS = {3: "3.0.0", 4: "4.0.0b24"}
+_FA3_HEAD_DIM_FLAGS = (
+    (64, "FLASHATTENTION_DISABLE_HDIM64"),
+    (96, "FLASHATTENTION_DISABLE_HDIM96"),
+    (128, "FLASHATTENTION_DISABLE_HDIM128"),
+    (192, "FLASHATTENTION_DISABLE_HDIM192"),
+    (256, "FLASHATTENTION_DISABLE_HDIM256"),
+)
+_FA3_RELEVANT_BUILD_FLAGS = frozenset(
+    {
+        "FLASHATTENTION_DISABLE_PAGEDKV",
+        "FLASHATTENTION_DISABLE_VARLEN",
+        "FLASHATTENTION_DISABLE_FP16",
+        *(flag for _, flag in _FA3_HEAD_DIM_FLAGS),
+    }
+)
 
 
 def _normalise_sm(capability: int | tuple[int, int]) -> int:
@@ -47,7 +68,7 @@ def _normalise_sm(capability: int | tuple[int, int]) -> int:
 def _resolve_sm(
     profile: object | None,
     capability: int | tuple[int, int] | None,
-    device: str,
+    device: object,
 ) -> int:
     if capability is not None:
         return _normalise_sm(capability)
@@ -134,8 +155,248 @@ def _module_version(module: object, generation: int) -> str:
         return reported
 
 
+def _validate_module_version(module: object, generation: int) -> str:
+    reported = _module_version(module, generation)
+    # Official source-built FA3 wheels can carry a PEP 440 local suffix that
+    # records their CUDA/Torch ABI.  The public source version before ``+`` is
+    # the compatibility contract.
+    public = reported.split("+", 1)[0]
+    expected = _EXPECTED_PUBLIC_VERSIONS[generation]
+    if public != expected:
+        raise RuntimeError(
+            f"flashattention{generation} upstream version mismatch: "
+            f"expected {expected}, got {reported}"
+        )
+    return reported
+
+
+def _validate_signature(
+    function: object,
+    *,
+    name: str,
+    generation: int,
+    version: str,
+    positional: tuple[str, ...],
+    keyword: tuple[str, ...],
+) -> None:
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"flashattention{generation} API mismatch (version={version}): "
+            f"cannot inspect {name}: {exc}"
+        ) from exc
+
+    parameters = signature.parameters
+    missing = [parameter for parameter in (*positional, *keyword) if parameter not in parameters]
+    wrong_positional = [
+        parameter
+        for parameter in positional
+        if parameter in parameters
+        and parameters[parameter].kind
+        not in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }
+    ]
+    wrong_keyword = [
+        parameter
+        for parameter in keyword
+        if parameter in parameters
+        and parameters[parameter].kind
+        not in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    ]
+    if missing or wrong_positional or wrong_keyword:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing {', '.join(missing)}")
+        if wrong_positional:
+            details.append(f"not positional: {', '.join(wrong_positional)}")
+        if wrong_keyword:
+            details.append(f"not keyword-callable: {', '.join(wrong_keyword)}")
+        raise RuntimeError(
+            f"flashattention{generation} API mismatch (version={version}): "
+            f"{name}{signature} has {'; '.join(details)}"
+        )
+
+
+def _fa3_build_flags(module: object, version: str) -> dict[str, bool]:
+    config = getattr(module, "CONFIG", None)
+    import_errors: list[str] = []
+    if config is None:
+        # ``flash_attn_interface`` reads the generated config lazily inside
+        # ``round_up_headdim`` rather than exporting it, so inspect the sibling
+        # module produced by the official setup.py.
+        for module_name in ("flash_attn_config", "flash_attn_3.flash_attn_config"):
+            try:
+                config_module = importlib.import_module(module_name)
+            except Exception as exc:
+                import_errors.append(f"{module_name}: {exc}")
+                continue
+            config = getattr(config_module, "CONFIG", None)
+            if config is not None:
+                break
+            import_errors.append(f"{module_name}: missing CONFIG")
+
+    if not isinstance(config, Mapping):
+        detail = "; ".join(import_errors) or "CONFIG is absent or not a mapping"
+        raise RuntimeError(
+            f"flashattention3 build metadata mismatch (version={version}): "
+            f"cannot read generated CONFIG/build_flags ({detail})"
+        )
+    flags = config.get("build_flags")
+    if not isinstance(flags, Mapping):
+        raise RuntimeError(
+            f"flashattention3 build metadata mismatch (version={version}): "
+            "CONFIG['build_flags'] is absent or not a mapping"
+        )
+    missing = sorted(_FA3_RELEVANT_BUILD_FLAGS - flags.keys())
+    invalid = sorted(
+        name
+        for name in _FA3_RELEVANT_BUILD_FLAGS & flags.keys()
+        if not isinstance(flags[name], bool)
+    )
+    if missing or invalid:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing {', '.join(missing)}")
+        if invalid:
+            details.append(f"non-boolean {', '.join(invalid)}")
+        raise RuntimeError(
+            f"flashattention3 build metadata mismatch (version={version}): "
+            f"invalid build_flags ({'; '.join(details)})"
+        )
+    if flags["FLASHATTENTION_DISABLE_PAGEDKV"]:
+        raise RuntimeError(
+            f"flashattention3 build is incompatible (version={version}): "
+            "FLASHATTENTION_DISABLE_PAGEDKV=True but Kairyu requires paged KV"
+        )
+    if flags["FLASHATTENTION_DISABLE_VARLEN"]:
+        raise RuntimeError(
+            f"flashattention3 build is incompatible (version={version}): "
+            "FLASHATTENTION_DISABLE_VARLEN=True but Kairyu requires variable-length attention"
+        )
+    if all(flags[name] for _, name in _FA3_HEAD_DIM_FLAGS):
+        raise RuntimeError(
+            f"flashattention3 build is incompatible (version={version}): "
+            "all supported head-dimension kernels are disabled"
+        )
+    return {name: bool(value) for name, value in flags.items()}
+
+
+def _validate_fa4_device_arch(
+    module: object,
+    version: str,
+    *,
+    device: torch.device,
+    expected_sm: int,
+) -> None:
+    """Bind beta24's process-global architecture cache to the selected GPU."""
+    interface = getattr(module, "interface", None)
+    resolver = getattr(interface, "_get_device_arch", None)
+    cache_info = getattr(resolver, "cache_info", None)
+    parser = getattr(interface, "_parse_arch_str", None)
+    if not callable(resolver) or not callable(cache_info) or not callable(parser):
+        missing: list[str] = []
+        if not callable(resolver):
+            missing.append("interface._get_device_arch")
+        if not callable(cache_info):
+            missing.append("interface._get_device_arch.cache_info")
+        if not callable(parser):
+            missing.append("interface._parse_arch_str")
+        raise RuntimeError(
+            f"flashattention4 private API mismatch (version={version}): "
+            f"missing callable {', '.join(missing)}. Kairyu requires the "
+            "flash-attn-4==4.0.0b24 interface and its global lru_cache "
+            "architecture resolver; run `uv sync --extra flashattention4`"
+        )
+
+    try:
+        with torch.cuda.device(device):
+            device_sm = _normalise_sm(torch.cuda.get_device_capability(device))
+    except Exception as exc:
+        raise RuntimeError(
+            f"flashattention4 could not read the CUDA capability for selected "
+            f"device {device}: {exc}"
+        ) from exc
+    if device_sm != expected_sm:
+        raise RuntimeError(
+            f"flashattention4 device capability mismatch (version={version}): "
+            f"selected device {device} reports SM{device_sm}, but Kairyu's "
+            f"profile/capability requires SM{expected_sm}"
+        )
+
+    override = os.environ.get("FLASH_ATTENTION_ARCH")
+    if override is not None:
+        try:
+            override_sm = parser(override)
+        except Exception as exc:
+            raise RuntimeError(
+                f"flashattention4 cannot parse FLASH_ATTENTION_ARCH={override!r} "
+                f"with the pinned beta24 interface: {exc}"
+            ) from exc
+        if isinstance(override_sm, bool) or not isinstance(override_sm, int):
+            raise RuntimeError(
+                "flashattention4 private API mismatch "
+                f"(version={version}): interface._parse_arch_str returned "
+                f"{type(override_sm).__name__}, expected an SM integer"
+            )
+        if override_sm != expected_sm:
+            raise RuntimeError(
+                f"flashattention4 architecture override mismatch (version={version}): "
+                f"FLASH_ATTENTION_ARCH={override!r} resolves to SM{override_sm}, "
+                f"but Kairyu's profile/capability requires SM{expected_sm} for {device}"
+            )
+
+    try:
+        state = cache_info()
+        if state.maxsize is not None:
+            raise ValueError(f"expected maxsize=None, got {state.maxsize}")
+        cached_before = int(state.currsize) > 0
+    except Exception as exc:
+        raise RuntimeError(
+            f"flashattention4 private API mismatch (version={version}): "
+            "cannot inspect interface._get_device_arch global cache; "
+            "reinstall flash-attn-4==4.0.0b24"
+        ) from exc
+
+    try:
+        with torch.cuda.device(device):
+            actual_sm = resolver()
+    except Exception as exc:
+        raise RuntimeError(
+            f"flashattention4 could not resolve the architecture for {device} "
+            f"through the pinned beta24 interface._get_device_arch(): {exc}"
+        ) from exc
+    if isinstance(actual_sm, bool) or not isinstance(actual_sm, int):
+        raise RuntimeError(
+            f"flashattention4 private API mismatch (version={version}): "
+            "interface._get_device_arch returned "
+            f"{type(actual_sm).__name__}, expected an SM integer"
+        )
+    if actual_sm != expected_sm:
+        source = (
+            "the pre-existing global _get_device_arch cache"
+            if cached_before
+            else f"the selected device {device}"
+        )
+        raise RuntimeError(
+            f"flashattention4 architecture mismatch (version={version}): "
+            f"{source} resolved SM{actual_sm}, but Kairyu's profile/capability "
+            f"requires SM{expected_sm}. beta24 caches this value process-wide, "
+            "so heterogeneous-SM FA4 backends must run in separate processes"
+        )
+
+
 class FlashAttentionBackend:
     """Composite prefill/decode backend for one FlashAttention generation."""
+
+    # ``attend_batched`` preserves compatibility by looping over prefills; it
+    # is not one native ragged launch and must not opt the runner into that path.
+    supports_batched_prefill = False
 
     def __init__(
         self,
@@ -144,12 +405,19 @@ class FlashAttentionBackend:
         *,
         flashattention_module: object | None = None,
         decode_backend: object | None = None,
-        device: str = "cuda",
+        device: object = "cuda",
         capability: int | tuple[int, int] | None = None,
     ) -> None:
         if generation not in (3, 4):
             raise ValueError(f"unsupported FlashAttention generation {generation}; expected 3 or 4")
-        sm = _resolve_sm(profile, capability, device)
+        selected_device = torch.device(device)
+        if (
+            selected_device.type == "cuda"
+            and selected_device.index is None
+            and torch.cuda.is_available()
+        ):
+            selected_device = torch.device("cuda", torch.cuda.current_device())
+        sm = _resolve_sm(profile, capability, selected_device)
         supported = _FA3_SUPPORTED_SMS if generation == 3 else _FA4_SUPPORTED_SMS
         if sm not in supported:
             supported_text = ", ".join(f"SM{value}" for value in sorted(supported))
@@ -172,12 +440,55 @@ class FlashAttentionBackend:
             self._fa4_dense = _require_callable(module, "flash_attn_func", generation)
             self._fa4_paged = _require_callable(module, "flash_attn_varlen_func", generation)
 
+        prefill_version = _validate_module_version(module, generation)
+        if generation == 3:
+            _validate_signature(
+                self._fa3_prefill,
+                name="flash_attn_with_kvcache",
+                generation=generation,
+                version=prefill_version,
+                positional=("q", "k_cache", "v_cache"),
+                keyword=("cache_seqlens", "page_table", "causal"),
+            )
+            self._fa3_build_flags = _fa3_build_flags(module, prefill_version)
+        else:
+            _validate_signature(
+                self._fa4_dense,
+                name="flash_attn_func",
+                generation=generation,
+                version=prefill_version,
+                positional=("q", "k", "v"),
+                keyword=("causal",),
+            )
+            _validate_signature(
+                self._fa4_paged,
+                name="flash_attn_varlen_func",
+                generation=generation,
+                version=prefill_version,
+                positional=("q", "k", "v"),
+                keyword=(
+                    "max_seqlen_q",
+                    "max_seqlen_k",
+                    "seqused_k",
+                    "page_table",
+                    "causal",
+                ),
+            )
+            if selected_device.type == "cuda":
+                _validate_fa4_device_arch(
+                    module,
+                    prefill_version,
+                    device=selected_device,
+                    expected_sm=sm,
+                )
+            self._fa3_build_flags = None
+
         if decode_backend is None:
             from kairyu.engine.core.attention.flashinfer_gpu import (
                 FlashInferBackend,
             )
 
-            decode_backend = FlashInferBackend(device=device)
+            decode_backend = FlashInferBackend(device=selected_device)
         missing = [
             name
             for name in ("attend", "attend_batched", "plan_decode", "attend_decode")
@@ -197,6 +508,7 @@ class FlashAttentionBackend:
         self.generation = generation
         self.sm = sm
         self.profile = profile
+        self._device = selected_device
         self.prefill_kv_mode = kv_mode
         self.components = {
             "prefill": f"flashattention{generation}",
@@ -204,7 +516,7 @@ class FlashAttentionBackend:
             "kv_mode": kv_mode,
         }
         self.component_versions = {
-            "prefill": _module_version(module, generation),
+            "prefill": prefill_version,
             "decode": str(
                 getattr(
                     decode_backend,
@@ -216,10 +528,21 @@ class FlashAttentionBackend:
         self._decode_backend = decode_backend
         self.supports_graph_capture = bool(getattr(decode_backend, "supports_graph_capture", False))
 
+    @property
+    def device(self) -> torch.device:
+        """The explicit device selected for both prefill and decode."""
+        return self._device
+
     def _supports_head_dim(self, head_dim: int) -> bool:
         if head_dim < 8 or head_dim % 8:
             return False
-        if self.generation == 3 or self.sm == 90:
+        if self.generation == 3:
+            assert self._fa3_build_flags is not None
+            return any(
+                head_dim <= bucket and not self._fa3_build_flags[flag]
+                for bucket, flag in _FA3_HEAD_DIM_FLAGS
+            )
+        if self.sm == 90:
             return head_dim <= 256
         if self.sm in _FA4_DIRECT_PAGED_SMS:
             # FA4 has a dedicated SM100/110 hd256 kernel, but it rejects the
@@ -245,6 +568,16 @@ class FlashAttentionBackend:
             raise ValueError(
                 f"flashattention{self.generation} requires an fp16 or bf16 "
                 f"compute dtype, got {dtype}"
+            )
+        if (
+            self.generation == 3
+            and dtype == torch.float16
+            and self._fa3_build_flags is not None
+            and self._fa3_build_flags["FLASHATTENTION_DISABLE_FP16"]
+        ):
+            raise ValueError(
+                "flashattention3 was built with "
+                "FLASHATTENTION_DISABLE_FP16=True and cannot serve fp16"
             )
         num_qo_heads = int(config.num_attention_heads)
         num_kv_heads = int(config.num_key_value_heads)
@@ -323,6 +656,16 @@ class FlashAttentionBackend:
             raise ValueError(
                 f"flashattention{self.generation} requires fp16 or bf16 CUDA "
                 f"tensors, got {query.dtype}"
+            )
+        if (
+            self.generation == 3
+            and query.dtype == torch.float16
+            and self._fa3_build_flags is not None
+            and self._fa3_build_flags["FLASHATTENTION_DISABLE_FP16"]
+        ):
+            raise ValueError(
+                "flashattention3 was built with "
+                "FLASHATTENTION_DISABLE_FP16=True and cannot serve fp16"
             )
         if query.device != kv_pool.k.device or query.device != kv_pool.v.device:
             raise ValueError(
@@ -422,28 +765,38 @@ class FlashAttentionBackend:
         page_count: int,
     ) -> torch.Tensor:
         query_batched = query.unsqueeze(0)
-        if self.sm in _FA4_DIRECT_PAGED_SMS:
-            result = self._fa4_paged(  # type: ignore[misc]
-                query_batched,
-                kv_pool.k[layer],
-                kv_pool.v[layer],
-                max_seqlen_q=int(query.shape[0]),
-                # SM100's paged kernel binds this maximum to page-table width
-                # (and its hd256 path requires page-size alignment).  The
-                # logical length remains exact in ``seqused_k``.
-                max_seqlen_k=page_count * kv_pool.page_size,
-                seqused_k=self._cache_length(seq_len, query.device),
-                page_table=self._page_tensor(page_table, page_count, query.device),
-                causal=True,
-            )
-        else:
-            keys, values = self._materialize_pages(kv_pool, layer, page_table, page_count, seq_len)
-            result = self._fa4_dense(  # type: ignore[misc]
-                query_batched,
-                keys,
-                values,
-                causal=True,
-            )
+        device_context = (
+            torch.cuda.device(self._device) if self._device.type == "cuda" else nullcontext()
+        )
+        with device_context:
+            if self.sm in _FA4_DIRECT_PAGED_SMS:
+                result = self._fa4_paged(  # type: ignore[misc]
+                    query_batched,
+                    kv_pool.k[layer],
+                    kv_pool.v[layer],
+                    max_seqlen_q=int(query.shape[0]),
+                    # The paged kernels bind this maximum to page-table width (and
+                    # SM100/110 hd256 require page-size alignment).  The
+                    # logical length remains exact in ``seqused_k``.
+                    max_seqlen_k=page_count * kv_pool.page_size,
+                    seqused_k=self._cache_length(seq_len, query.device),
+                    page_table=self._page_tensor(page_table, page_count, query.device),
+                    causal=True,
+                )
+            else:
+                keys, values = self._materialize_pages(
+                    kv_pool,
+                    layer,
+                    page_table,
+                    page_count,
+                    seq_len,
+                )
+                result = self._fa4_dense(  # type: ignore[misc]
+                    query_batched,
+                    keys,
+                    values,
+                    causal=True,
+                )
         return _first_output(result, self.generation)
 
     def _attend_prefill(

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from kairyu.engine.core.hw_profile import HardwareProfile
 
@@ -32,6 +33,74 @@ class AttentionBackendDecision:
     source: str
     components: dict[str, str]
     rationale: str
+    architecture: dict[str, object] = field(default_factory=dict)
+
+
+def _architecture(profile: HardwareProfile | None) -> dict[str, object]:
+    """Return the hardware facts that made the selection reproducible."""
+    if profile is None:
+        return {
+            "arch": "unknown",
+            "device_name": None,
+            "sm": None,
+            "kernel_tier": "torch",
+        }
+    return {
+        "arch": profile.arch,
+        "device_name": profile.device_name,
+        "sm": profile.sm,
+        "kernel_tier": profile.kernel_tier,
+    }
+
+
+def attention_backend_identity(decision: AttentionBackendDecision) -> str:
+    """Canonical execution identity exchanged by tensor-parallel ranks.
+
+    Free-form rationale is deliberately excluded: it is diagnostic text, not
+    an execution contract.  Device indices and host-wide counts are absent
+    from ``architecture`` so equivalent rank-local GPUs compare equal.
+    """
+    return json.dumps(
+        {
+            "requested": decision.requested,
+            "resolved": decision.resolved,
+            "source": decision.source,
+            "components": dict(decision.components),
+            "architecture": dict(decision.architecture),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def compose_backend_decisions(
+    prefill: AttentionBackendDecision,
+    decode: AttentionBackendDecision,
+) -> AttentionBackendDecision:
+    """Report role-specific P-D choices without hiding either half."""
+    if prefill == decode:
+        return prefill
+    prefill_kv = prefill.components.get("kv_mode", "unknown")
+    decode_kv = decode.components.get("kv_mode", "unknown")
+    return AttentionBackendDecision(
+        requested=(prefill.requested if prefill.requested == decode.requested else "role-specific"),
+        resolved=(prefill.resolved if prefill.resolved == decode.resolved else "composite"),
+        source=(prefill.source if prefill.source == decode.source else "role-specific"),
+        components={
+            "prefill": prefill.components.get("prefill", prefill.resolved),
+            "decode": decode.components.get("decode", decode.resolved),
+            "kv_mode": (
+                prefill_kv
+                if prefill_kv == decode_kv
+                else f"prefill:{prefill_kv};decode:{decode_kv}"
+            ),
+        },
+        rationale=(f"prefill role: {prefill.rationale}; decode role: {decode.rationale}"),
+        architecture={
+            "prefill": dict(prefill.architecture),
+            "decode": dict(decode.architecture),
+        },
+    )
 
 
 def _automatic_backend(profile: HardwareProfile | None) -> tuple[str, str]:
@@ -51,9 +120,7 @@ def _automatic_backend(profile: HardwareProfile | None) -> tuple[str, str]:
     return "torch", "CPU or unsupported GPU profile uses the portable torch backend"
 
 
-def _components(
-    resolved: str, profile: HardwareProfile | None
-) -> dict[str, str]:
+def _components(resolved: str, profile: HardwareProfile | None) -> dict[str, str]:
     if resolved == "torch":
         return {
             "prefill": "torch",
@@ -73,11 +140,11 @@ def _components(
             "kv_mode": "paged-direct",
         }
     if resolved == "flashattention4":
-        # The current upstream FA4 beta implements direct paged KV on datacenter
-        # Blackwell (SM100/SM110). Its SM90 and SM120 paths reject page tables,
-        # so those profiles use an explicit D2D page materialization before the
-        # FA4 prefill kernel. This must stay visible in /backends.
-        direct = profile is not None and profile.sm in (100, 110)
+        # The pinned upstream FA4 beta implements direct paged KV on SM90,
+        # SM100 and SM110. Its SM120 path rejects page tables, so that profile
+        # uses explicit device-to-device page materialization before prefill.
+        # This must stay visible in /backends.
+        direct = profile is not None and profile.sm in (90, 100, 110)
         return {
             "prefill": "flashattention4",
             "decode": "flashinfer",
@@ -94,9 +161,7 @@ def select_backend_decision(
     requested = override if override else "auto"
     if requested not in SUPPORTED_ATTENTION_BACKENDS:
         expected = ", ".join(repr(name) for name in SUPPORTED_ATTENTION_BACKENDS)
-        raise ValueError(
-            f"unknown {_ENV_OVERRIDE}={requested!r}; expected one of {expected}"
-        )
+        raise ValueError(f"unknown {_ENV_OVERRIDE}={requested!r}; expected one of {expected}")
 
     if requested == "auto":
         resolved, rationale = _automatic_backend(profile)
@@ -109,6 +174,7 @@ def select_backend_decision(
         source="env" if override else "hw_profile",
         components=_components(resolved, profile),
         rationale=rationale,
+        architecture=_architecture(profile),
     )
 
 

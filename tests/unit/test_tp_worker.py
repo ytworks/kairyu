@@ -2,6 +2,7 @@
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -165,13 +166,52 @@ def test_serving_groups_keep_control_off_the_model_backend(monkeypatch):
     assert groups.model == "group-2-nccl"
 
 
-def test_startup_handshake_requires_the_same_resolved_attention_backend(tmp_path):
+def _backend_identity(
+    *,
+    kv_mode: str = "paged-materialized",
+    sm: int = 120,
+) -> str:
+    return json.dumps(
+        {
+            "architecture": {
+                "arch": "cuda",
+                "device_name": "RTX PRO 6000 Blackwell Server Edition",
+                "kernel_tier": "fa2",
+                "sm": sm,
+            },
+            "components": {
+                "decode": "flashinfer",
+                "kv_mode": kv_mode,
+                "prefill": "flashattention4",
+            },
+            "requested": "flashattention4",
+            "resolved": "flashattention4",
+            "source": "env",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+@pytest.mark.parametrize(
+    "worker_identity",
+    [
+        _backend_identity(kv_mode="paged-direct"),
+        _backend_identity(sm=100),
+    ],
+    ids=["component-mismatch", "hardware-mismatch"],
+)
+def test_startup_handshake_requires_the_same_attention_backend_identity(
+    tmp_path,
+    worker_identity,
+):
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "test"}))
+    driver_identity = _backend_identity()
     handshake = make_handshake(
         str(tmp_path),
         num_pages=64,
         page_size=16,
-        attention_backend="flashinfer",
+        attention_backend_identity=driver_identity,
     )
 
     validate_handshake(
@@ -179,16 +219,141 @@ def test_startup_handshake_requires_the_same_resolved_attention_backend(tmp_path
         str(tmp_path),
         num_pages=64,
         page_size=16,
-        attention_backend="flashinfer",
+        attention_backend_identity=driver_identity,
     )
-    with pytest.raises(RuntimeError, match="worker mismatch"):
+    with pytest.raises(RuntimeError, match="backend identity"):
         validate_handshake(
             handshake,
             str(tmp_path),
             num_pages=64,
             page_size=16,
-            attention_backend="torch",
+            attention_backend_identity=worker_identity,
         )
+
+
+def test_build_tp_runner_probes_and_binds_the_rank_local_device(monkeypatch):
+    from kairyu.engine.core import attention as attention_module
+    from kairyu.engine.core import attention_selector, hw_profile, kv_pool, model_runner, sampler
+    from kairyu.models import parallel
+
+    placement = worker_module.TPPlacement("cuda:3", torch.bfloat16, "nccl")
+    profile = SimpleNamespace(
+        arch="cuda",
+        device_name="rank-3-gpu",
+        sm=120,
+        kernel_tier="fa2",
+    )
+    decision = SimpleNamespace(
+        requested="auto",
+        resolved="flashinfer",
+        source="hw_profile",
+        components={
+            "prefill": "flashinfer",
+            "decode": "flashinfer",
+            "kv_mode": "paged-direct",
+        },
+        architecture={
+            "arch": "cuda",
+            "device_name": "rank-3-gpu",
+            "sm": 120,
+            "kernel_tier": "fa2",
+        },
+    )
+    backend = SimpleNamespace(selection_decision=decision)
+    local_config = SimpleNamespace(
+        num_hidden_layers=2,
+        kv_cache_num_heads=4,
+        kv_cache_head_dim=16,
+    )
+    full_config = object()
+    seen: dict[str, object] = {}
+
+    def fake_probe(device):
+        seen["probe_device"] = device
+        return profile
+
+    def fake_select_backend(actual_profile, *, device):
+        seen["selection"] = (actual_profile, device)
+        return backend
+
+    def fake_identity(actual_decision):
+        seen["identity_decision"] = actual_decision
+        return "canonical-rank-local-identity"
+
+    def fake_build_tp_model(
+        model_dir,
+        tp,
+        rank,
+        comm,
+        *,
+        dtype,
+        device,
+        attention_backend,
+    ):
+        seen["model"] = {
+            "model_dir": model_dir,
+            "tp": tp,
+            "rank": rank,
+            "comm": comm,
+            "dtype": dtype,
+            "device": device,
+            "attention_backend": attention_backend,
+        }
+        return object(), local_config, full_config
+
+    def fake_pool(**kwargs):
+        seen["pool"] = kwargs
+        return object()
+
+    class FakeRunner:
+        def __init__(self, model, pool, **kwargs):
+            seen["runner"] = {
+                "model": model,
+                "pool": pool,
+                **kwargs,
+            }
+
+    monkeypatch.setattr(hw_profile, "probe", fake_probe)
+    monkeypatch.setattr(attention_module, "select_backend", fake_select_backend)
+    monkeypatch.setattr(
+        attention_selector,
+        "attention_backend_identity",
+        fake_identity,
+        raising=False,
+    )
+    monkeypatch.setattr(parallel, "build_tp_model", fake_build_tp_model)
+    monkeypatch.setattr(kv_pool, "PagedKVPool", fake_pool)
+    monkeypatch.setattr(model_runner, "PagedModelRunner", FakeRunner)
+    monkeypatch.setattr(sampler, "Sampler", lambda **kwargs: SimpleNamespace(**kwargs))
+
+    comm = object()
+    runner, returned_full_config = worker_module.build_tp_runner(
+        "/model",
+        tp=4,
+        rank=3,
+        comm=comm,
+        num_pages=64,
+        page_size=16,
+        vocab=["token"],
+        placement=placement,
+    )
+
+    assert seen["probe_device"] == "cuda:3"
+    assert seen["selection"] == (profile, "cuda:3")
+    assert seen["identity_decision"] is decision
+    assert seen["model"] == {
+        "model_dir": "/model",
+        "tp": 4,
+        "rank": 3,
+        "comm": comm,
+        "dtype": torch.bfloat16,
+        "device": "cuda:3",
+        "attention_backend": backend,
+    }
+    assert seen["pool"]["device"] == "cuda:3"
+    assert runner.attention_backend_decision is decision
+    assert runner.attention_backend_identity == "canonical-rank-local-identity"
+    assert returned_full_config is full_config
 
 
 def test_dist_release_reaches_driver_and_idle_worker():
@@ -492,10 +657,7 @@ def test_page_table_mode_and_stats_probe_reach_every_rank_and_loop_resumes():
     assert all(row["stats"]["enabled"] is False for row in rows)
     assert all(row["stats"]["builds"] == 5 for row in rows)
     assert all(runner.page_table_stats["builds"] == 0 for runner in local)
-    assert all(
-        runner.decode_page_table_cache_enabled is False
-        for runner in local
-    )
+    assert all(runner.decode_page_table_cache_enabled is False for runner in local)
     assert sampled == {"a": ("rank-0-public-result",)}
 
 

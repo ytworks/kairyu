@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
 import logging
+import threading
+import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -27,8 +30,10 @@ from kairyu.engine.backend import (
     GenerationUsage,
     prompt_with_tool_intent,
 )
+from kairyu.engine.core.attention_selector import AttentionBackendDecision
 from kairyu.engine.core.engine_service import (
     LEGACY_WIRE_VERSION,
+    STARTUP_WIRE_VERSION,
     WIRE_VERSION,
     run_engine_service,
     sampling_params_to_wire,
@@ -46,6 +51,7 @@ _SPAWN_TIMEOUT_S = 30.0
 _SHUTDOWN_TIMEOUT_S = 5.0
 _RECV_TICK_S = 1.0
 _PROMPT_WIRE_VERSION = 1
+_SPAWN_POLL_S = 0.05
 
 
 def _decode_token_logprob(raw: list) -> TokenLogprob:
@@ -61,6 +67,109 @@ def _decode_token_logprob(raw: list) -> TokenLogprob:
 
 class EngineServiceError(RuntimeError):
     """The engine service process died or became unreachable."""
+
+
+def _kill_and_reap_process(process, timeout_s: float) -> bool:
+    """Kill one owned child and report whether it was actually reaped."""
+
+    if process.is_alive():
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+    process.join(timeout=timeout_s)
+    return not process.is_alive()
+
+
+def _is_startup_value(value) -> bool:
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_startup_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and bool(key) and _is_startup_value(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _attention_backend_decision_from_wire(raw) -> AttentionBackendDecision | None:
+    """Validate startup metadata before exposing it through ``/backends``."""
+
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise EngineServiceError("engine startup attention_backend_decision must be a map or null")
+    values = {}
+    for field_name in ("requested", "resolved", "source", "rationale"):
+        value = raw.get(field_name)
+        if not isinstance(value, str) or not value:
+            raise EngineServiceError(
+                f"engine startup attention_backend_decision {field_name} must be a non-empty string"
+            )
+        values[field_name] = value
+    components = raw.get("components")
+    if not isinstance(components, dict) or not all(
+        isinstance(key, str) and bool(key) and isinstance(value, str) and bool(value)
+        for key, value in components.items()
+    ):
+        raise EngineServiceError(
+            "engine startup attention_backend_decision components must be a string-to-string map"
+        )
+    architecture = raw.get("architecture", {})
+    if not isinstance(architecture, dict) or not _is_startup_value(architecture):
+        raise EngineServiceError(
+            "engine startup attention_backend_decision architecture must be "
+            "a JSON-compatible string-keyed map"
+        )
+    return AttentionBackendDecision(
+        requested=values["requested"],
+        resolved=values["resolved"],
+        source=values["source"],
+        components=dict(components),
+        rationale=values["rationale"],
+        architecture=dict(architecture),
+    )
+
+
+def _decision_from_startup_frame(frame) -> AttentionBackendDecision | None:
+    if not isinstance(frame, dict):
+        raise EngineServiceError("engine service startup metadata must be a map")
+    version = frame.get("startup_wire_version")
+    if type(version) is not int or version != STARTUP_WIRE_VERSION:
+        raise EngineServiceError(
+            f"unsupported engine startup wire version {version!r}; "
+            f"supported version is {STARTUP_WIRE_VERSION}"
+        )
+    status = frame.get("status")
+    if status == "error":
+        error_type = frame.get("error_type")
+        error = frame.get("error")
+        if not isinstance(error_type, str) or not error_type:
+            raise EngineServiceError("engine service startup error_type must be a non-empty string")
+        if not isinstance(error, str):
+            raise EngineServiceError("engine service startup error must be a string")
+        raise EngineServiceError(f"engine service startup failed with {error_type}: {error}")
+    if status != "ready":
+        raise EngineServiceError(f"unknown engine service startup status {status!r}")
+    return _attention_backend_decision_from_wire(frame.get("attention_backend_decision"))
+
+
+def _recv_optional_startup_frame(
+    parent_pipe,
+    process,
+) -> AttentionBackendDecision | None:
+    """Receive a new child's second frame; EOF from a live child means legacy."""
+
+    try:
+        frame = parent_pipe.recv()
+    except EOFError:
+        if process.is_alive():
+            # Old services close the Pipe immediately after the integer port.
+            return None
+        raise EngineServiceError(
+            "engine service exited before reporting startup metadata"
+        ) from None
+    return _decision_from_startup_frame(frame)
 
 
 @dataclass
@@ -92,10 +201,7 @@ class _WireAccumulator:
             raise EngineServiceError("engine wire sent a duplicate snapshot")
         sequence = event.get("sequence")
         if type(sequence) is not int or sequence != 0:
-            raise EngineServiceError(
-                f"engine wire snapshot sequence must be 0, got "
-                f"{sequence!r}"
-            )
+            raise EngineServiceError(f"engine wire snapshot sequence must be 0, got {sequence!r}")
         outputs = event.get("outputs")
         text = event.get("text")
         if not isinstance(outputs, list) or not isinstance(text, str):
@@ -109,9 +215,7 @@ class _WireAccumulator:
             self.logprobs = list(event["logprobs"])
         if "logprob_content" in event:
             if not isinstance(event["logprob_content"], list):
-                raise EngineServiceError(
-                    "engine wire snapshot has invalid logprob content"
-                )
+                raise EngineServiceError("engine wire snapshot has invalid logprob content")
             self.logprob_content = list(event["logprob_content"])
         self.num_prompt_tokens = event.get("num_prompt_tokens", 0)
         self.started = True
@@ -123,8 +227,7 @@ class _WireAccumulator:
         sequence = event.get("sequence")
         if type(sequence) is not int or sequence != self.next_sequence:
             raise EngineServiceError(
-                f"engine wire sequence mismatch: expected {self.next_sequence}, "
-                f"got {sequence!r}"
+                f"engine wire sequence mismatch: expected {self.next_sequence}, got {sequence!r}"
             )
         new_token_ids = event.get("new_token_ids")
         text_delta = event.get("text_delta")
@@ -133,19 +236,13 @@ class _WireAccumulator:
         self._require_offset(event, "output_offset", len(self.outputs))
         self.outputs.extend(new_token_ids)
         text_offset = event.get("text_offset")
-        if (
-            type(text_offset) is not int
-            or text_offset < 0
-            or text_offset > self.text_length
-        ):
+        if type(text_offset) is not int or text_offset < 0 or text_offset > self.text_length:
             raise EngineServiceError(
                 f"engine wire delta text_offset mismatch: expected a value in "
                 f"[0, {self.text_length}], got {text_offset!r}"
             )
         if text_offset != self.text_length and event.get("finished") is not True:
-            raise EngineServiceError(
-                "engine wire attempted a non-terminal visible-text rewrite"
-            )
+            raise EngineServiceError("engine wire attempted a non-terminal visible-text rewrite")
         if text_offset == self.text_length:
             self.text_parts.append(text_delta)
         else:
@@ -156,13 +253,9 @@ class _WireAccumulator:
         has_new_logprobs = "new_logprobs" in event
         has_logprob_offset = "logprob_offset" in event
         if has_new_logprobs != has_logprob_offset:
-            raise EngineServiceError(
-                "engine wire delta logprobs and offset must appear together"
-            )
+            raise EngineServiceError("engine wire delta logprobs and offset must appear together")
         if self.logprobs is not None and not has_new_logprobs:
-            raise EngineServiceError(
-                "engine wire delta omitted active logprob metadata"
-            )
+            raise EngineServiceError("engine wire delta omitted active logprob metadata")
         if has_new_logprobs:
             new_logprobs = event["new_logprobs"]
             if not isinstance(new_logprobs, list):
@@ -179,15 +272,11 @@ class _WireAccumulator:
                 "engine wire delta logprob content and offset must appear together"
             )
         if self.logprob_content is not None and not has_new_content:
-            raise EngineServiceError(
-                "engine wire delta omitted active rich logprob metadata"
-            )
+            raise EngineServiceError("engine wire delta omitted active rich logprob metadata")
         if has_new_content:
             new_content = event["new_logprob_content"]
             if not isinstance(new_content, list):
-                raise EngineServiceError(
-                    "engine wire delta has invalid logprob content"
-                )
+                raise EngineServiceError("engine wire delta has invalid logprob content")
             expected = len(self.logprob_content or ())
             self._require_offset(event, "logprob_content_offset", expected)
             if self.logprob_content is None:
@@ -205,9 +294,7 @@ class _WireAccumulator:
 
         wire_version = event.get("wire_version", LEGACY_WIRE_VERSION)
         if type(wire_version) is not int:
-            raise EngineServiceError(
-                f"invalid engine wire version {wire_version!r}"
-            )
+            raise EngineServiceError(f"invalid engine wire version {wire_version!r}")
         if self.wire_version is None:
             self.wire_version = wire_version
         elif wire_version != self.wire_version:
@@ -218,18 +305,14 @@ class _WireAccumulator:
         if wire_version == LEGACY_WIRE_VERSION:
             return event
         if wire_version != WIRE_VERSION:
-            raise EngineServiceError(
-                f"unsupported engine wire version {wire_version!r}"
-            )
+            raise EngineServiceError(f"unsupported engine wire version {wire_version!r}")
         event_type = event.get("event")
         if event_type == "snapshot":
             self._snapshot(event)
         elif event_type == "delta":
             self._delta(event)
         else:
-            raise EngineServiceError(
-                f"unknown engine wire event type {event_type!r}"
-            )
+            raise EngineServiceError(f"unknown engine wire event type {event_type!r}")
 
         self.num_cached_tokens = event.get(
             "num_cached_tokens",
@@ -328,29 +411,85 @@ class ZmqEngineBackend:
         self._stream_ids: dict[str, str] = {}
         self._wire_request_ids: dict[str, str] = {}
         self._public_request_ids: dict[str, str] = {}
+        self._queue_generations: dict[str, int] = {}
+        self._failed_generations: set[int] = set()
+        self._generation_counter = 0
+        self._live_generation: int | None = None
         self._wire_version = WIRE_VERSION
         self._active_request_ids: set[str] = set()
+        self.attention_backend_decision: AttentionBackendDecision | None = None
         self._start_lock = asyncio.Lock()
+        self._startup_task: asyncio.Task[int] | None = None
+        self._startup_abandoned: threading.Event | None = None
+        self._closed = False
         self._atexit_registered = False
 
     # -- lifecycle ---------------------------------------------------------
 
-    def _spawn(self) -> int:
+    def _spawn(self, abandoned: threading.Event | None = None) -> int:
         import multiprocessing
 
+        if abandoned is not None and abandoned.is_set():
+            raise EngineServiceError("engine service startup was cancelled")
         spawn = multiprocessing.get_context("spawn")
         parent_pipe, child_pipe = spawn.Pipe()
         process = spawn.Process(
             target=run_engine_service, args=(child_pipe, self._config), daemon=True
         )
         process.start()
-        child_pipe.close()
-        if not parent_pipe.poll(_SPAWN_TIMEOUT_S):
-            process.kill()
-            raise EngineServiceError("engine service did not report its port in time")
-        port = parent_pipe.recv()
-        parent_pipe.close()
+        # Register ownership before either Pipe wait.  If the coroutine awaiting
+        # this worker thread is cancelled, its cleanup can now find and kill the
+        # child instead of leaving an unowned model load behind.
         self._process = process
+        child_pipe.close()
+        try:
+            port_deadline = time.monotonic() + _SPAWN_TIMEOUT_S
+            while not parent_pipe.poll(_SPAWN_POLL_S):
+                if abandoned is not None and abandoned.is_set():
+                    raise EngineServiceError("engine service startup was cancelled")
+                if not process.is_alive():
+                    raise EngineServiceError("engine service exited before reporting its port")
+                if time.monotonic() >= port_deadline:
+                    raise EngineServiceError("engine service did not report its port in time")
+            try:
+                port = parent_pipe.recv()
+            except EOFError:
+                raise EngineServiceError(
+                    "engine service exited before reporting its port"
+                ) from None
+            if type(port) is not int or not 1 <= port <= 65535:
+                raise EngineServiceError(f"engine service reported an invalid port {port!r}")
+            # Model load is deliberately outside the 30-second port timeout.
+            # Poll rather than blocking in recv() so cancellation can reclaim a
+            # Qwen-sized load promptly and cannot later publish stale metadata.
+            while not parent_pipe.poll(_SPAWN_POLL_S):
+                if abandoned is not None and abandoned.is_set():
+                    raise EngineServiceError("engine service startup was cancelled")
+                if not process.is_alive():
+                    raise EngineServiceError(
+                        "engine service exited before reporting startup metadata"
+                    )
+            decision = _recv_optional_startup_frame(parent_pipe, process)
+            if abandoned is not None and abandoned.is_set():
+                raise EngineServiceError("engine service startup was cancelled")
+            if not process.is_alive():
+                raise EngineServiceError("engine service exited after reporting startup readiness")
+            if self._process is not process:
+                raise EngineServiceError("engine service startup ownership was lost")
+        except BaseException as error:
+            self.attention_backend_decision = None
+            reaped = _kill_and_reap_process(process, timeout_s=1.0)
+            if self._process is process and reaped:
+                self._process = None
+            if not reaped:
+                raise EngineServiceError(
+                    "cancelled engine service startup left a live child; "
+                    "refusing to release process ownership"
+                ) from error
+            raise
+        finally:
+            parent_pipe.close()
+        self.attention_backend_decision = decision
         if not self._atexit_registered:
             atexit.register(self._kill_process)
             self._atexit_registered = True
@@ -363,7 +502,49 @@ class ZmqEngineBackend:
             and not self._receiver.done()
             and self._process is not None
             and self._process.is_alive()
+            and self._live_generation is not None
         )
+
+    def _fail_generation_once(
+        self,
+        generation: int | None,
+        error: BaseException,
+    ) -> None:
+        """Wake every request owned by one failed service generation exactly once."""
+
+        if generation is None or generation in self._failed_generations:
+            return
+        targets = [
+            queue
+            for request_id, queue in tuple(self._queues.items())
+            if self._queue_generations.get(request_id) == generation
+        ]
+        if not targets:
+            # live_generation is cleared before every caller reaches here, so
+            # no request can subsequently join this retired generation.
+            return
+        self._failed_generations.add(generation)
+        event = {"error": repr(error)}
+        for queue in targets:
+            queue.put_nowait(dict(event))
+
+    async def _cancel_receiver_locked(self) -> None:
+        receiver = self._receiver
+        self._receiver = None
+        if receiver is None:
+            return
+        if not receiver.done():
+            receiver.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await receiver
+
+    def _close_transport_locked(self) -> None:
+        if self._socket is not None:
+            self._socket.close(linger=0)
+            self._socket = None
+        if self._context is not None:
+            self._context.term()
+            self._context = None
 
     async def _reset_dead_locked(self) -> None:
         """Tear down a crashed child's stale socket/context/process (E1).
@@ -373,34 +554,103 @@ class ZmqEngineBackend:
         request awaited a queue nothing would ever fill. Clearing the dead refs
         lets the next request spawn a fresh service.
         """
-        if self._receiver is not None and not self._receiver.done():
-            self._receiver.cancel()
-        self._receiver = None
-        if self._socket is not None:
-            self._socket.close(linger=0)
-            self._socket = None
-        if self._context is not None:
-            self._context.term()
-            self._context = None
+        generation = self._live_generation
+        self._live_generation = None
+        self.attention_backend_decision = None
+        self._fail_generation_once(
+            generation,
+            EngineServiceError(
+                "engine service became unavailable and was reset before completing the request"
+            ),
+        )
+        await self._cancel_receiver_locked()
+        self._close_transport_locked()
         process = self._process
-        if process is not None and process.is_alive():
-            process.kill()
-        self._process = None
+        if process is not None:
+            reaped = await asyncio.to_thread(
+                _kill_and_reap_process,
+                process,
+                1.0,
+            )
+            if not reaped:
+                # Retaining the handle prevents a second GPU-owning child from
+                # being spawned over an uninterruptible old process.
+                raise EngineServiceError(
+                    "engine service child did not exit after kill; refusing to respawn"
+                )
+            if self._process is process:
+                self._process = None
 
     async def _ensure_started(self) -> None:
+        if self._closed:
+            raise EngineServiceError("kairyu-proc backend is shut down")
         if self._is_healthy():
             return
         async with self._start_lock:
+            if self._closed:
+                raise EngineServiceError("kairyu-proc backend is shut down")
             if self._is_healthy():
                 return
             await self._reset_dead_locked()  # respawn over a crashed child (E1)
-            zmq, _ = _import_deps()
-            port = await asyncio.to_thread(self._spawn)
-            self._context = zmq.asyncio.Context()
-            socket = self._context.socket(zmq.DEALER)
-            socket.connect(f"tcp://127.0.0.1:{port}")
-            self._socket = socket
-            self._receiver = asyncio.get_running_loop().create_task(self._receive_loop())
+            if self._closed:
+                raise EngineServiceError("kairyu-proc backend is shut down")
+            try:
+                zmq, _ = _import_deps()
+                abandoned = threading.Event()
+                spawn_task = asyncio.create_task(asyncio.to_thread(self._spawn, abandoned))
+                self._startup_abandoned = abandoned
+                self._startup_task = spawn_task
+                try:
+                    # Shield is essential: cancelling this coroutine must signal
+                    # and drain the worker, not mark its asyncio wrapper done while
+                    # the underlying thread later publishes an orphan process.
+                    port = await asyncio.shield(spawn_task)
+                except asyncio.CancelledError:
+                    abandoned.set()
+                    while not spawn_task.done():
+                        try:
+                            await asyncio.shield(spawn_task)
+                        except asyncio.CancelledError:
+                            # Repeated cancellation still cannot bypass ownership
+                            # cleanup; the poll loop observes the same event.
+                            abandoned.set()
+                        except BaseException:
+                            # The expected worker-side cancellation error is
+                            # consumed below; the caller still observes its
+                            # original asyncio cancellation.
+                            break
+                    try:
+                        spawn_task.result()
+                    except BaseException:
+                        pass
+                    raise
+                finally:
+                    if self._startup_task is spawn_task:
+                        self._startup_task = None
+                    if self._startup_abandoned is abandoned:
+                        self._startup_abandoned = None
+                if self._closed:
+                    raise EngineServiceError("kairyu-proc backend was shut down during startup")
+                self._context = zmq.asyncio.Context()
+                socket = self._context.socket(zmq.DEALER)
+                socket.connect(f"tcp://127.0.0.1:{port}")
+                self._socket = socket
+                self._generation_counter += 1
+                generation = self._generation_counter
+                self._live_generation = generation
+                process = self._process
+                assert process is not None
+                self._receiver = asyncio.get_running_loop().create_task(
+                    self._receive_loop(generation, socket, process)
+                )
+            except BaseException:
+                await self._reset_dead_locked()
+                raise
+
+    async def startup(self) -> None:
+        """Finish child construction before an owning app begins serving."""
+
+        await self._ensure_started()
 
     def _kill_process(self) -> None:
         process = self._process
@@ -408,31 +658,56 @@ class ZmqEngineBackend:
             process.kill()
 
     async def shutdown(self) -> None:
-        if self._receiver is not None:
-            self._receiver.cancel()
-            self._receiver = None
-        process = self._process
-        if process is None:
-            return
-        _, msgpack = _import_deps()
-        if self._socket is not None:
+        # Close admission before waiting for the start lock. If a model load is
+        # in flight, its 50 ms Pipe poll observes this event; _ensure_started
+        # drains the worker before releasing the same lock to us.
+        self._closed = True
+        abandoned = self._startup_abandoned
+        if abandoned is not None:
+            abandoned.set()
+
+        async with self._start_lock:
+            generation = self._live_generation
+            self._live_generation = None
+            self.attention_backend_decision = None
+            self._fail_generation_once(
+                generation,
+                EngineServiceError("engine service shut down before completing the request"),
+            )
+            await self._cancel_receiver_locked()
+
+            process = self._process
+            cleanup_error: EngineServiceError | None = None
             try:
-                await self._socket.send(msgpack.packb({"op": "shutdown"}))
-            except Exception:  # pragma: no cover - socket already dead
-                pass
-        await asyncio.to_thread(process.join, _SHUTDOWN_TIMEOUT_S)
-        if process.is_alive():  # pragma: no cover - hung child
-            process.terminate()
-            await asyncio.to_thread(process.join, 2.0)
-            if process.is_alive():
-                process.kill()
-        if self._socket is not None:
-            self._socket.close(linger=0)
-            self._socket = None
-        if self._context is not None:
-            self._context.term()
-            self._context = None
-        self._process = None
+                if process is not None and self._socket is not None:
+                    _, msgpack = _import_deps()
+                    try:
+                        await self._socket.send(msgpack.packb({"op": "shutdown"}))
+                    except Exception:  # pragma: no cover - socket already dead
+                        pass
+                if process is not None:
+                    await asyncio.to_thread(process.join, _SHUTDOWN_TIMEOUT_S)
+                    if process.is_alive():  # pragma: no cover - hung child
+                        with contextlib.suppress(ProcessLookupError):
+                            process.terminate()
+                        await asyncio.to_thread(process.join, 2.0)
+                    if process.is_alive():  # pragma: no cover - wedged child
+                        with contextlib.suppress(ProcessLookupError):
+                            process.kill()
+                        await asyncio.to_thread(process.join, 2.0)
+                    if process.is_alive():
+                        cleanup_error = EngineServiceError(
+                            "engine service child remained alive after shutdown escalation"
+                        )
+                    elif self._process is process:
+                        self._process = None
+            finally:
+                self._close_transport_locked()
+                self.attention_backend_decision = None
+            if cleanup_error is not None:
+                # Keep the Process object so a later shutdown attempt can reap
+                # it and no future code can mistake the backend for child-free.
+                raise cleanup_error
 
     # -- request plumbing ----------------------------------------------------
 
@@ -449,15 +724,14 @@ class ZmqEngineBackend:
             raise ValueError(f"duplicate request_id {request_id!r}")
         self._active_request_ids.add(request_id)
 
-    async def _receive_loop(self) -> None:
-        assert self._socket is not None
+    async def _receive_loop(self, generation: int, socket, process) -> None:
         _, msgpack = _import_deps()
         try:
             while True:
                 try:
-                    raw = await asyncio.wait_for(self._socket.recv(), timeout=_RECV_TICK_S)
+                    raw = await asyncio.wait_for(socket.recv(), timeout=_RECV_TICK_S)
                 except TimeoutError:
-                    if self._queues and not (self._process and self._process.is_alive()):
+                    if not process.is_alive():
                         raise EngineServiceError("engine service process died") from None
                     continue
                 try:
@@ -473,8 +747,10 @@ class ZmqEngineBackend:
         except asyncio.CancelledError:  # pragma: no cover - clean shutdown
             raise
         except Exception as error:
-            for queue in self._queues.values():
-                queue.put_nowait({"error": repr(error)})
+            if self._live_generation == generation:
+                self._live_generation = None
+                self.attention_backend_decision = None
+            self._fail_generation_once(generation, error)
 
     def _deliver_event(self, event: dict) -> None:
         """Route one decoded event without crossing request generations."""
@@ -494,9 +770,7 @@ class ZmqEngineBackend:
                 queue.put_nowait(
                     {
                         "error": repr(
-                            EngineServiceError(
-                                "engine wire v2 event omitted its stream_id"
-                            )
+                            EngineServiceError("engine wire v2 event omitted its stream_id")
                         )
                     }
                 )
@@ -523,12 +797,16 @@ class ZmqEngineBackend:
         self.validate_request(request)
         await self._ensure_started()
         assert self._socket is not None
+        service_generation = self._live_generation
+        if service_generation is None:
+            raise EngineServiceError("engine service stopped while submitting the request")
         _, msgpack = _import_deps()
         queue: asyncio.Queue = asyncio.Queue()
-        generation = uuid.uuid4().hex
-        wire_request_id = f"wire-{generation}"
-        stream_id = generation if self._wire_version == WIRE_VERSION else None
+        stream_generation = uuid.uuid4().hex
+        wire_request_id = f"wire-{stream_generation}"
+        stream_id = stream_generation if self._wire_version == WIRE_VERSION else None
         self._queues[request.request_id] = queue
+        self._queue_generations[request.request_id] = service_generation
         self._wire_request_ids[request.request_id] = wire_request_id
         self._public_request_ids[wire_request_id] = request.request_id
         if stream_id is not None:
@@ -557,9 +835,7 @@ class ZmqEngineBackend:
                 # fields; a new service defaults absent fields to v1.
                 message["wire_version"] = WIRE_VERSION
                 message["stream_id"] = stream_id
-            await self._socket.send(
-                msgpack.packb(message)
-            )
+            await self._socket.send(msgpack.packb(message))
         except BaseException:
             if self._queues.get(request.request_id) is queue:
                 self._queues.pop(request.request_id, None)
@@ -592,6 +868,9 @@ class ZmqEngineBackend:
         if wire_request_id is not None:
             self._public_request_ids.pop(wire_request_id, None)
         self._stream_ids.pop(request_id, None)
+        generation = self._queue_generations.pop(request_id, None)
+        if generation is not None and generation not in self._queue_generations.values():
+            self._failed_generations.discard(generation)
 
     def _result(self, request: GenerationRequest, event: dict) -> GenerationResult:
         logprobs = None
@@ -649,10 +928,7 @@ class ZmqEngineBackend:
                     return self._result(request, event)
         finally:
             try:
-                owns_queue = (
-                    queue is not None
-                    and self._queues.get(request.request_id) is queue
-                )
+                owns_queue = queue is not None and self._queues.get(request.request_id) is queue
                 if owns_queue:
                     self._queues.pop(request.request_id, None)
                 try:
@@ -687,10 +963,7 @@ class ZmqEngineBackend:
                     return
         finally:
             try:
-                owns_queue = (
-                    queue is not None
-                    and self._queues.get(request.request_id) is queue
-                )
+                owns_queue = queue is not None and self._queues.get(request.request_id) is queue
                 if owns_queue:
                     self._queues.pop(request.request_id, None)
                 try:

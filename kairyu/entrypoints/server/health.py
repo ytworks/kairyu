@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from kairyu.engine.backend import EngineBackend, EngineReadiness
 from kairyu.engine.core.attention_selector import (
     AttentionBackendDecision,
+    attention_backend_identity,
     select_backend_decision,
 )
 from kairyu.engine.core.hw_profile import probe
@@ -83,14 +84,10 @@ def add_health_routes(
         the process — nothing in-process can undo dead tensor-parallel ranks, and
         without this the container stays up forever serving nothing."""
         fatal = {
-            name: status.detail
-            for name, status in _engine_readiness().items()
-            if status.fatal
+            name: status.detail for name, status in _engine_readiness().items() if status.fatal
         }
         if fatal:
-            return JSONResponse(
-                status_code=503, content={"status": "fatal", "engines": fatal}
-            )
+            return JSONResponse(status_code=503, content={"status": "fatal", "engines": fatal})
         return {"status": "ok"}
 
     @app.post("/admin/drain")
@@ -122,9 +119,7 @@ def add_health_routes(
         # m10a A5: a drained node reports unready so the prober/load-balancer
         # stops sending NEW work; in-flight requests keep completing.
         if getattr(app.state, "draining", False):
-            return JSONResponse(
-                status_code=503, content={"status": "draining"}
-            )
+            return JSONResponse(status_code=503, content={"status": "draining"})
         # Engines are constructed by the time the app exists; pools additionally
         # need >=1 validated, non-ejected replica or every request would fail.
         # Declared remote readiness URLs therefore remain false here until the
@@ -152,14 +147,10 @@ def add_health_routes(
         # cannot emit a token — which is exactly how a benchmark ran against a
         # dead 8-GPU deployment for 14 minutes before anyone noticed.
         failed = {
-            name: status.detail
-            for name, status in _engine_readiness().items()
-            if not status.ready
+            name: status.detail for name, status in _engine_readiness().items() if not status.ready
         }
         if failed:
-            return JSONResponse(
-                status_code=503, content={"status": "unready", "engines": failed}
-            )
+            return JSONResponse(status_code=503, content={"status": "unready", "engines": failed})
         return {"status": "ready"}
 
     @app.get("/backends")
@@ -194,28 +185,68 @@ def add_health_routes(
                 resolved="unavailable",
                 source="env" if override else "hw_profile",
                 components={},
-                rationale=(
-                    "attention selection is unavailable after "
-                    f"{type(error).__name__}"
-                ),
+                rationale=(f"attention selection is unavailable after {type(error).__name__}"),
+                architecture={
+                    "arch": profile.arch if profile is not None else "unknown",
+                    "device_name": (profile.device_name if profile is not None else None),
+                    "sm": profile.sm if profile is not None else None,
+                    "kernel_tier": kernel_tier,
+                },
             )
+        configured_decision = decision
 
         # A real local engine retains the backend decision that was actually
         # constructed, including an ``auto`` dependency fallback. Prefer that
         # over re-evaluating env/profile state at inspection time. Engines with
         # no native model (mocks, remote gateways) have no such decision and
         # keep the configured process-level report above.
-        actual_decisions = [
-            actual
-            for engine in engines.values()
+        actual_decisions = {
+            name: actual
+            for name, engine in engines.items()
             if isinstance(
                 actual := getattr(engine, "attention_backend_decision", None),
                 AttentionBackendDecision,
             )
-        ]
+        }
         if actual_decisions:
-            decision = actual_decisions[0]
+            identities = {
+                attention_backend_identity(actual) for actual in actual_decisions.values()
+            }
+            if len(identities) == 1:
+                decision = next(iter(actual_decisions.values()))
+            else:
+                decision = AttentionBackendDecision(
+                    requested="mixed",
+                    resolved="mixed",
+                    source="engine",
+                    components={},
+                    rationale=(
+                        "local engines constructed different attention "
+                        "backend decisions; inspect the per-engine entries"
+                    ),
+                    architecture={
+                        name: dict(actual.architecture) for name, actual in actual_decisions.items()
+                    },
+                )
         attention = decision.resolved
+
+        def _kernel_tier_for(
+            architecture: Mapping[str, object],
+            fallback: str,
+        ) -> str:
+            direct = architecture.get("kernel_tier")
+            if isinstance(direct, str) and direct:
+                return direct
+            nested = {
+                tier
+                for value in architecture.values()
+                if isinstance(value, Mapping)
+                and isinstance((tier := value.get("kernel_tier")), str)
+                and tier
+            }
+            if len(nested) == 1:
+                return nested.pop()
+            return "mixed" if nested else fallback
 
         def _pkg_version(*names: str) -> str | None:
             # flashinfer ships under a few distribution names (flashinfer-python;
@@ -245,33 +276,39 @@ def add_health_routes(
             label = _ENGINE_LABELS.get(type(engine).__name__, type(engine).__name__)
             actual = getattr(engine, "attention_backend_decision", None)
             engine_decision = (
-                actual
-                if isinstance(actual, AttentionBackendDecision)
-                else decision
+                actual if isinstance(actual, AttentionBackendDecision) else configured_decision
             )
             entry: dict = {
                 "model": name,
                 "engine_backend": label,
                 "attention_backend": (
-                    engine_decision.resolved
-                    if label in _LOCAL_ATTENTION_BACKENDS
-                    else None
+                    engine_decision.resolved if label in _LOCAL_ATTENTION_BACKENDS else None
                 ),
                 "attention_components": (
-                    dict(engine_decision.components)
-                    if label in _LOCAL_ATTENTION_BACKENDS
-                    else None
+                    dict(engine_decision.components) if label in _LOCAL_ATTENTION_BACKENDS else None
                 ),
             }
+            if label in _LOCAL_ATTENTION_BACKENDS:
+                entry.update(
+                    {
+                        "requested_attention_backend": engine_decision.requested,
+                        "selection_rationale": engine_decision.rationale,
+                        "source": engine_decision.source,
+                        "architecture": dict(engine_decision.architecture),
+                        "decision_status": (
+                            "actual"
+                            if isinstance(actual, AttentionBackendDecision)
+                            else "configured"
+                        ),
+                        "versions": _versions_for(engine_decision.components),
+                    }
+                )
             tensor_parallel_size = getattr(
                 engine,
                 "tensor_parallel_size",
                 None,
             )
-            if (
-                type(tensor_parallel_size) is int
-                and tensor_parallel_size >= 1
-            ):
+            if type(tensor_parallel_size) is int and tensor_parallel_size >= 1:
                 entry["tensor_parallel_size"] = tensor_parallel_size
             if isinstance(engine, ReplicaPool):
                 replica = await engine.probe_backends()
@@ -280,26 +317,25 @@ def add_health_routes(
                     replica_components = replica.get("attention_components")
                     entry["via_replica"] = {
                         "attention_backend": replica.get("attention_backend"),
+                        "requested_attention_backend": replica.get("requested_attention_backend"),
                         "kernel_tier": replica.get("kernel_tier"),
                         "versions": replica.get("versions"),
+                        "selection_rationale": replica.get("selection_rationale"),
+                        "source": replica.get("source"),
+                        "architecture": replica.get("architecture"),
                     }
                     if isinstance(replica_components, dict):
                         entry["attention_components"] = dict(replica_components)
-                        entry["via_replica"]["attention_components"] = dict(
-                            replica_components
-                        )
+                        entry["via_replica"]["attention_components"] = dict(replica_components)
                     replica_sizes = {
                         item.get("tensor_parallel_size")
                         for item in replica.get("engines", ())
-                        if isinstance(item, dict)
-                        and type(item.get("tensor_parallel_size")) is int
+                        if isinstance(item, dict) and type(item.get("tensor_parallel_size")) is int
                     }
                     if len(replica_sizes) == 1:
                         replica_size = replica_sizes.pop()
                         entry["tensor_parallel_size"] = replica_size
-                        entry["via_replica"][
-                            "tensor_parallel_size"
-                        ] = replica_size
+                        entry["via_replica"]["tensor_parallel_size"] = replica_size
             engine_list.append(entry)
 
         role = (
@@ -314,7 +350,11 @@ def add_health_routes(
             "attention_components": dict(decision.components),
             "selection_rationale": decision.rationale,
             "source": decision.source,
-            "kernel_tier": kernel_tier,
+            "architecture": dict(decision.architecture),
+            "kernel_tier": _kernel_tier_for(
+                decision.architecture,
+                kernel_tier,
+            ),
             "role": role,
             "versions": _versions_for(decision.components),
             "engines": engine_list,

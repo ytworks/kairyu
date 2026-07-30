@@ -5,14 +5,23 @@ import); tests end via the clean shutdown op so the child flushes coverage.
 """
 
 import asyncio
+import multiprocessing
 import os
 import signal
+import threading
+import time
 
 import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
-from kairyu.engine.core.engine_service import LEGACY_WIRE_VERSION, WIRE_VERSION
+from kairyu.engine.core.attention_selector import AttentionBackendDecision
+from kairyu.engine.core.engine_service import (
+    LEGACY_WIRE_VERSION,
+    STARTUP_WIRE_VERSION,
+    WIRE_VERSION,
+    _send_optional_startup_frame,
+)
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.prompt import (
     MultimodalItem,
@@ -21,9 +30,70 @@ from kairyu.engine.prompt import (
     TokensPrompt,
 )
 from kairyu.engine.registry import create_backend
-from kairyu.engine.zmq_backend import ZmqEngineBackend
+from kairyu.engine.zmq_backend import (
+    EngineServiceError,
+    ZmqEngineBackend,
+    _decision_from_startup_frame,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+
+_READY_DECISION = {
+    "requested": "flashattention4",
+    "resolved": "flashattention4",
+    "source": "env",
+    "components": {
+        "prefill": "flashattention4",
+        "decode": "flashinfer",
+        "kv_mode": "paged-materialized",
+    },
+    "rationale": "constructed in child",
+    "architecture": {
+        "arch": "cuda",
+        "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "sm": 120,
+        "kernel_tier": "full",
+    },
+}
+
+
+def _fake_ready_engine_service(port_pipe, _config):
+    port_pipe.send(43210)
+    port_pipe.send(
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": _READY_DECISION,
+        }
+    )
+    port_pipe.close()
+    time.sleep(60)
+
+
+def _fake_legacy_engine_service(port_pipe, _config):
+    port_pipe.send(43211)
+    port_pipe.close()
+    time.sleep(60)
+
+
+def _fake_failing_engine_service(port_pipe, _config):
+    port_pipe.send(43212)
+    port_pipe.send(
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "error",
+            "error_type": "RuntimeError",
+            "error": "unsupported SM",
+        }
+    )
+    port_pipe.close()
+
+
+def _fake_slow_starting_engine_service(port_pipe, _config):
+    port_pipe.send(43213)
+    _config["_test_port_sent"].set()
+    time.sleep(60)
 
 
 @pytest.fixture(scope="module")
@@ -64,9 +134,7 @@ async def test_token_prompt_crosses_process_without_retokenization(zmq_backend):
     reference = await KairyuBackend(num_pages=256).generate(
         _request("token-wire", prompt, **params)
     )
-    result = await zmq_backend.generate(
-        _request("token-wire", prompt, **params)
-    )
+    result = await zmq_backend.generate(_request("token-wire", prompt, **params))
 
     assert result.prompt == prompt
     assert result.prompt_token_ids == prompt.prompt_token_ids
@@ -156,8 +224,7 @@ async def test_raw_v2_events_are_one_snapshot_then_sequenced_deltas(zmq_backend)
     assert len({event["stream_id"] for event in events}) == 1
     assert all(event["event"] == "delta" for event in events[1:])
     assert all(
-        {"outputs", "text", "logprobs", "logprob_content"}.isdisjoint(event)
-        for event in events[1:]
+        {"outputs", "text", "logprobs", "logprob_content"}.isdisjoint(event) for event in events[1:]
     )
 
 
@@ -228,9 +295,7 @@ async def test_stop_string_works_across_process(zmq_backend):
     probe = await zmq_backend.generate(_request("probe", "stoppable text", max_tokens=8))
     text = probe.completions[0].text
     stop = text.split()[2]  # a mid-stream toy word
-    result = await zmq_backend.generate(
-        _request("s2", "stoppable text", max_tokens=8, stop=stop)
-    )
+    result = await zmq_backend.generate(_request("s2", "stoppable text", max_tokens=8, stop=stop))
     completion = result.completions[0]
     assert completion.finish_reason == "stop"
     assert stop not in completion.text
@@ -306,6 +371,333 @@ async def test_cuda_graph_serving_options_cross_the_process_boundary():
     assert backend._config["cuda_graph_warmup_iters"] == 1
 
 
+async def test_startup_hook_ensures_the_service_once(monkeypatch):
+    backend = ZmqEngineBackend(num_pages=64)
+    calls = 0
+
+    async def ensure_started():
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(backend, "_ensure_started", ensure_started)
+
+    await backend.startup()
+
+    assert calls == 1
+
+
+async def test_versioned_startup_frame_propagates_the_child_actual_decision(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_ready_engine_service,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    try:
+        port = await asyncio.to_thread(backend._spawn)
+        assert port == 43210
+        assert backend.attention_backend_decision == AttentionBackendDecision(
+            requested="flashattention4",
+            resolved="flashattention4",
+            source="env",
+            components={
+                "prefill": "flashattention4",
+                "decode": "flashinfer",
+                "kv_mode": "paged-materialized",
+            },
+            rationale="constructed in child",
+            architecture={
+                "arch": "cuda",
+                "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                "sm": 120,
+                "kernel_tier": "full",
+            },
+        )
+    finally:
+        await backend._reset_dead_locked()
+
+
+async def test_new_parent_accepts_a_legacy_child_with_only_the_port_frame(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_legacy_engine_service,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    backend.attention_backend_decision = AttentionBackendDecision(
+        requested="auto",
+        resolved="torch",
+        source="hw_profile",
+        components={"prefill": "torch", "decode": "torch"},
+        rationale="stale",
+    )
+    try:
+        port = await asyncio.to_thread(backend._spawn)
+        assert port == 43211
+        assert backend.attention_backend_decision is None
+    finally:
+        await backend._reset_dead_locked()
+
+
+async def test_new_child_tolerates_a_legacy_parent_closing_after_the_port():
+    parent_pipe, child_pipe = multiprocessing.get_context("spawn").Pipe()
+    parent_pipe.close()
+    try:
+        assert (
+            _send_optional_startup_frame(
+                child_pipe,
+                {
+                    "startup_wire_version": STARTUP_WIRE_VERSION,
+                    "status": "ready",
+                    "attention_backend_decision": _READY_DECISION,
+                },
+            )
+            is False
+        )
+    finally:
+        child_pipe.close()
+
+
+async def test_startup_failure_is_actionable_and_clears_a_stale_decision(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_failing_engine_service,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    backend.attention_backend_decision = AttentionBackendDecision(
+        requested="auto",
+        resolved="torch",
+        source="hw_profile",
+        components={"prefill": "torch", "decode": "torch"},
+        rationale="stale",
+    )
+
+    with pytest.raises(
+        EngineServiceError,
+        match="startup failed with RuntimeError: unsupported SM",
+    ):
+        await asyncio.to_thread(backend._spawn)
+
+    assert backend.attention_backend_decision is None
+    assert backend._process is None
+
+
+async def test_real_child_build_failure_crosses_the_startup_pipe():
+    backend = ZmqEngineBackend(num_pages=64, pipeline_depth=0)
+
+    with pytest.raises(
+        EngineServiceError,
+        match="startup failed with ValueError: pipeline_depth must be >= 1",
+    ):
+        await backend.generate(_request("bad-startup", "prompt", max_tokens=1))
+
+    assert backend._process is None
+    assert backend.attention_backend_decision is None
+    assert backend._active_request_ids == set()
+
+
+async def test_cancelled_model_load_reclaims_its_child_before_a_new_generation(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_slow_starting_engine_service,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    port_sent = multiprocessing.get_context("spawn").Event()
+    backend._config["_test_port_sent"] = port_sent
+    starting = asyncio.create_task(backend._ensure_started())
+    assert await asyncio.to_thread(port_sent.wait, 3)
+    # The first frame is now in the Pipe; let the parent consume it and enter
+    # the unbounded model-load wait for the optional second frame.
+    await asyncio.sleep(0.1)
+    abandoned_process = backend._process
+    assert abandoned_process is not None and abandoned_process.is_alive()
+    backend.attention_backend_decision = _decision_from_startup_frame(
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": _READY_DECISION,
+        }
+    )
+
+    starting.cancel()
+    asyncio.get_running_loop().call_later(0.01, starting.cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(starting, timeout=3)
+
+    assert backend._process is None
+    assert backend.attention_backend_decision is None
+    assert not abandoned_process.is_alive()
+
+    # A later generation owns the fields; the drained worker from above cannot
+    # wake up after model load and overwrite this decision.
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_ready_engine_service,
+    )
+    try:
+        await backend._ensure_started()
+        assert backend._process is not abandoned_process
+        assert backend.attention_backend_decision is not None
+        assert backend.attention_backend_decision.resolved == "flashattention4"
+    finally:
+        await backend._reset_dead_locked()
+
+
+async def test_shutdown_before_spawn_registers_a_process_closes_admission(
+    monkeypatch,
+):
+    backend = ZmqEngineBackend(num_pages=64)
+    entered = threading.Event()
+    release = threading.Event()
+    original_spawn = backend._spawn
+
+    def delayed_spawn(abandoned=None):
+        entered.set()
+        if not release.wait(3):
+            raise RuntimeError("test did not release delayed spawn")
+        return original_spawn(abandoned)
+
+    monkeypatch.setattr(backend, "_spawn", delayed_spawn)
+    starting = asyncio.create_task(backend._ensure_started())
+    shutdown = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        shutdown = asyncio.create_task(backend.shutdown())
+        for _ in range(300):
+            abandoned = backend._startup_abandoned
+            if backend._closed and abandoned is not None and abandoned.is_set():
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("shutdown did not close admission and cancel startup")
+
+        release.set()
+        with pytest.raises(EngineServiceError, match="startup was cancelled"):
+            await asyncio.wait_for(starting, timeout=3)
+        await asyncio.wait_for(shutdown, timeout=3)
+
+        assert backend._process is None
+        assert backend._startup_task is None
+        assert backend._startup_abandoned is None
+        with pytest.raises(EngineServiceError, match="shut down"):
+            await backend._ensure_started()
+    finally:
+        release.set()
+        if not starting.done():
+            starting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await starting
+        if shutdown is not None and not shutdown.done():
+            await shutdown
+
+
+async def test_shutdown_cancels_and_reaps_an_inflight_model_load(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_slow_starting_engine_service,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    port_sent = multiprocessing.get_context("spawn").Event()
+    backend._config["_test_port_sent"] = port_sent
+    starting = asyncio.create_task(backend._ensure_started())
+
+    assert await asyncio.to_thread(port_sent.wait, 3)
+    await asyncio.sleep(0.1)
+    process = backend._process
+    assert process is not None and process.is_alive()
+
+    shutdown = asyncio.create_task(backend.shutdown())
+    with pytest.raises(EngineServiceError, match="startup was cancelled"):
+        await asyncio.wait_for(starting, timeout=3)
+    await asyncio.wait_for(shutdown, timeout=3)
+
+    assert not process.is_alive()
+    assert backend._process is None
+    assert backend._startup_task is None
+    assert backend._startup_abandoned is None
+
+
+@pytest.mark.parametrize(
+    "frame",
+    (
+        {
+            "startup_wire_version": "1",
+            "status": "ready",
+            "attention_backend_decision": _READY_DECISION,
+        },
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": {"resolved": "torch"},
+        },
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": {
+                **_READY_DECISION,
+                "components": {"prefill": 4},
+            },
+        },
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": {
+                **_READY_DECISION,
+                "architecture": {4: "cuda"},
+            },
+        },
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": {
+                **_READY_DECISION,
+                "architecture": {"sm": {120}},
+            },
+        },
+    ),
+)
+async def test_startup_metadata_is_type_checked_before_parent_retains_it(frame):
+    with pytest.raises(EngineServiceError):
+        _decision_from_startup_frame(frame)
+
+
+async def test_reset_and_shutdown_clear_the_actual_child_decision():
+    backend = ZmqEngineBackend(num_pages=64)
+    decision = _decision_from_startup_frame(
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": _READY_DECISION,
+        }
+    )
+    assert decision is not None
+    backend.attention_backend_decision = decision
+    await backend._reset_dead_locked()
+    assert backend.attention_backend_decision is None
+
+    backend.attention_backend_decision = decision
+    await backend.shutdown()
+    assert backend.attention_backend_decision is None
+
+
+async def test_idle_generation_reset_does_not_retain_a_failure_marker():
+    backend = ZmqEngineBackend(num_pages=64)
+    backend._live_generation = 7
+
+    await backend._reset_dead_locked()
+
+    assert backend._live_generation is None
+    assert backend._failed_generations == set()
+
+
 async def test_inflight_request_sees_service_death():
     # A request awaiting when the child dies must be delivered an error event
     # (death detection), not hang forever.
@@ -329,8 +721,16 @@ async def test_backend_recovers_after_service_death():
     try:
         await backend.generate(_request("r1", "warm up", max_tokens=2))
         queue = await backend._submit(_request("r2", "in flight", max_tokens=64))
+        backend.attention_backend_decision = _decision_from_startup_frame(
+            {
+                "startup_wire_version": STARTUP_WIRE_VERSION,
+                "status": "ready",
+                "attention_backend_decision": _READY_DECISION,
+            }
+        )
         backend._process.kill()
         await asyncio.wait_for(queue.get(), timeout=10)  # error event; receiver exits
+        assert backend.attention_backend_decision is None
         backend._queues.pop("r2", None)
         backend._release_wire_route("r2")
         # the next request respawns a fresh child and completes normally
@@ -339,6 +739,54 @@ async def test_backend_recovers_after_service_death():
         )
         assert result.completions[0].token_ids
     finally:
+        await backend.shutdown()
+
+
+async def test_respawn_before_receiver_death_tick_fails_old_generation_once(
+    monkeypatch,
+):
+    # Make the receiver's own death observation deliberately slow. A new
+    # request must still reset the dead child without cancelling away the only
+    # terminal event for an older in-flight request.
+    monkeypatch.setattr("kairyu.engine.zmq_backend._RECV_TICK_S", 60.0)
+    backend = ZmqEngineBackend(num_pages=64)
+    queue = None
+    try:
+        queue = await asyncio.wait_for(
+            backend._submit(_request("death-reset-race", "in flight", max_tokens=10_000)),
+            timeout=15,
+        )
+        old_generation = backend._queue_generations["death-reset-race"]
+        old_process = backend._process
+        assert old_process is not None
+        old_process.kill()
+        await asyncio.to_thread(old_process.join, 3)
+        assert not old_process.is_alive()
+
+        # This used to cancel the old receiver before its timeout without
+        # notifying the old queue, leaving that request blocked forever.
+        await asyncio.wait_for(backend._ensure_started(), timeout=10)
+        assert backend._live_generation != old_generation
+
+        queued = []
+        while True:
+            try:
+                queued.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        errors = [event for event in queued if "error" in event]
+        assert len(errors) == 1
+        assert "reset before completing the request" in errors[0]["error"]
+
+        result = await asyncio.wait_for(
+            backend.generate(_request("after-death-reset", "recovered", max_tokens=2)),
+            timeout=10,
+        )
+        assert result.finished is True
+    finally:
+        if queue is not None:
+            backend._queues.pop("death-reset-race", None)
+            backend._release_wire_route("death-reset-race")
         await backend.shutdown()
 
 
@@ -368,9 +816,7 @@ async def test_duplicate_request_id_preserves_original_queue_and_can_be_reused(
 
     with pytest.raises(ValueError, match="duplicate request_id"):
         await zmq_backend.generate(_request("same", "second", max_tokens=2))
-    duplicate_stream = zmq_backend.stream(
-        _request("same", "second stream", max_tokens=2)
-    )
+    duplicate_stream = zmq_backend.stream(_request("same", "second stream", max_tokens=2))
     with pytest.raises(ValueError, match="duplicate request_id"):
         await anext(duplicate_stream)
     assert zmq_backend._queues["same"] is original_queue
@@ -417,9 +863,7 @@ async def test_cancelled_request_id_can_be_reused_after_queued_abort(wire_versio
 
         os.kill(process.pid, sigstop)
         stopped = True
-        waited_pid, status = await asyncio.to_thread(
-            os.waitpid, process.pid, os.WUNTRACED
-        )
+        waited_pid, status = await asyncio.to_thread(os.waitpid, process.pid, os.WUNTRACED)
         assert waited_pid == process.pid
         assert os.WIFSTOPPED(status)
         original.cancel()
@@ -430,10 +874,7 @@ async def test_cancelled_request_id_can_be_reused_after_queued_abort(wire_versio
             backend.generate(_request("queued-reuse", "reused", max_tokens=2))
         )
         for _ in range(500):
-            if (
-                "queued-reuse" in backend._active_request_ids
-                and "queued-reuse" in backend._queues
-            ):
+            if "queued-reuse" in backend._active_request_ids and "queued-reuse" in backend._queues:
                 break
             await asyncio.sleep(0.01)
         assert "queued-reuse" in backend._active_request_ids
@@ -507,18 +948,18 @@ async def test_submit_failure_clears_request_reservation_and_queue(monkeypatch):
 
     monkeypatch.setattr(backend, "_ensure_started", already_started)
     backend._socket = FailingSocket()
+    backend._live_generation = 1
 
     with pytest.raises(RuntimeError, match="send failed"):
         await backend.generate(_request("send-failure", "prompt", max_tokens=2))
 
     assert "send-failure" not in backend._active_request_ids
     assert "send-failure" not in backend._queues
+    assert "send-failure" not in backend._queue_generations
 
 
 @pytest.mark.parametrize("original_api", ["generate", "stream"])
-async def test_duplicate_request_id_stays_reserved_until_abort_finishes(
-    monkeypatch, original_api
-):
+async def test_duplicate_request_id_stays_reserved_until_abort_finishes(monkeypatch, original_api):
     backend = ZmqEngineBackend(num_pages=64)
     first_queue = asyncio.Queue()
     abort_started = asyncio.Event()
@@ -566,12 +1007,8 @@ async def test_duplicate_request_id_stays_reserved_until_abort_finishes(
 
     try:
         with pytest.raises(ValueError, match="duplicate request_id"):
-            await backend.generate(
-                _request("abort-race", "duplicate generate", max_tokens=2)
-            )
-        duplicate_stream = backend.stream(
-            _request("abort-race", "duplicate stream", max_tokens=2)
-        )
+            await backend.generate(_request("abort-race", "duplicate generate", max_tokens=2))
+        duplicate_stream = backend.stream(_request("abort-race", "duplicate stream", max_tokens=2))
         with pytest.raises(ValueError, match="duplicate request_id"):
             await anext(duplicate_stream)
         assert "abort-race" in backend._active_request_ids

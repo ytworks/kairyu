@@ -64,7 +64,14 @@ class FlashInferBackend:
     supports_graph_capture = True
 
     def __init__(self, device: object = "cuda") -> None:
-        import flashinfer  # deferred: not installable on macOS; [gpu] extra
+        try:
+            import flashinfer  # deferred: not installable on macOS; [gpu] extra
+        except ModuleNotFoundError as error:
+            raise RuntimeError(
+                "FlashInfer is required for the flashinfer attention backend "
+                "and for FlashAttention delegated decode; run "
+                "`uv sync --extra gpu`"
+            ) from error
 
         self._flashinfer = flashinfer
         selected = torch.device(device)
@@ -97,9 +104,7 @@ class FlashInferBackend:
         """The explicit device owning this stateful backend's workspace."""
         return self._device
 
-    def prefill_execution_stats(
-        self, *, reset: bool = False
-    ) -> dict[str, object]:
+    def prefill_execution_stats(self, *, reset: bool = False) -> dict[str, object]:
         """Native prefill plan/run counts for matched structural evidence."""
         result = {
             "type": type(self).__name__,
@@ -111,9 +116,7 @@ class FlashInferBackend:
             self._prefill_run_calls = 0
         return result
 
-    def decode_execution_stats(
-        self, *, reset: bool = False
-    ) -> dict[str, object]:
+    def decode_execution_stats(self, *, reset: bool = False) -> dict[str, object]:
         """Native decode plan/run counts for structural verification evidence."""
         result = {
             "type": type(self).__name__,
@@ -504,26 +507,17 @@ class FlashInferBackend:
             "qo_indptr": len(qo_indptr) - 1,
         }
         if batch < 1 or len(set(lengths.values())) != 1:
-            details = ", ".join(
-                f"{name}={length}" for name, length in lengths.items()
-            )
+            details = ", ".join(f"{name}={length}" for name, length in lengths.items())
             raise ValueError(
                 "FlashInfer ragged prefill inputs must describe the same "
                 f"non-empty batch ({details})"
             )
         if qo_indptr[0] != 0 or qo_indptr[-1] != query.shape[0]:
-            raise ValueError(
-                "FlashInfer qo_indptr must span the flat query exactly"
-            )
-        query_lens = tuple(
-            qo_indptr[index + 1] - qo_indptr[index]
-            for index in range(batch)
-        )
+            raise ValueError("FlashInfer qo_indptr must span the flat query exactly")
+        query_lens = tuple(qo_indptr[index + 1] - qo_indptr[index] for index in range(batch))
         if any(query_len < 1 for query_len in query_lens):
             raise ValueError("FlashInfer ragged prefill rows must not be empty")
-        for query_len, seq_len, chunk_start in zip(
-            query_lens, seq_lens, chunk_starts, strict=True
-        ):
+        for query_len, seq_len, chunk_start in zip(query_lens, seq_lens, chunk_starts, strict=True):
             assert chunk_start + query_len == seq_len, (
                 "FlashInfer causal=True is bottom-right aligned: the chunk must "
                 "be the tail of the sequence "
@@ -557,8 +551,6 @@ class FlashInferBackend:
             self._prefill_plan_calls += 1
             self._plan_key = key
             self._planned_decode = False
-        out = self._prefill.run(
-            query, (kv_pool.k[layer], kv_pool.v[layer])
-        )
+        out = self._prefill.run(query, (kv_pool.k[layer], kv_pool.v[layer]))
         self._prefill_run_calls += 1
         return out.reshape(query.shape[0], -1)

@@ -13,6 +13,10 @@ from kairyu.engine.core.attention import (
     select_backend_name,
 )
 from kairyu.engine.core.attention.mla_torch import mla_absorbed, mla_decompress, mla_scale
+from kairyu.engine.core.attention_selector import (
+    attention_backend_identity,
+    compose_backend_decisions,
+)
 from kairyu.engine.core.hw_profile import HardwareProfile
 from kairyu.engine.core.kv_pool import PagedKVPool
 
@@ -149,6 +153,12 @@ class TestFlashInferAdapterContract:
         from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
 
         return FlashInferBackend(device="cpu")
+
+    def test_missing_import_has_gpu_extra_install_action(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "flashinfer", None)
+
+        with pytest.raises(RuntimeError, match=r"uv sync --extra gpu"):
+            self._backend()
 
     def test_wrapper_workspaces_are_zero_initialized(self, fake_flashinfer, monkeypatch):
         real_empty = torch.empty
@@ -590,9 +600,7 @@ class TestSelector:
         assert isinstance(select_backend(sm120, device="cuda:3"), FlashInferBackend)
         assert selected == ["cuda:3"]
 
-    def test_auto_gpu_falls_back_to_torch_when_flashinfer_cannot_construct(
-        self, monkeypatch
-    ):
+    def test_auto_gpu_falls_back_to_torch_when_flashinfer_cannot_construct(self, monkeypatch):
         from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
 
         monkeypatch.delenv("KAIRYU_ATTENTION_BACKEND", raising=False)
@@ -614,9 +622,7 @@ class TestSelector:
         }
         assert "ModuleNotFoundError" in decision.rationale
 
-    def test_explicit_flashinfer_constructor_failure_remains_strict(
-        self, monkeypatch
-    ):
+    def test_explicit_flashinfer_constructor_failure_remains_strict(self, monkeypatch):
         from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
 
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashinfer")
@@ -625,7 +631,7 @@ class TestSelector:
             raise ModuleNotFoundError("flashinfer is not installed")
 
         monkeypatch.setattr(FlashInferBackend, "__init__", unavailable)
-        with pytest.raises(ModuleNotFoundError, match="not installed"):
+        with pytest.raises(RuntimeError, match=r"uv sync --extra gpu"):
             select_backend(HardwareProfile(arch="cuda", sm=120))
 
 
@@ -647,23 +653,14 @@ class TestSelectBackendName:
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashinfer")
         assert select_backend_name(HardwareProfile(arch="cpu")) == "flashinfer"
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention3")
-        assert (
-            select_backend_name(HardwareProfile(arch="cuda", sm=90))
-            == "flashattention3"
-        )
+        assert select_backend_name(HardwareProfile(arch="cuda", sm=90)) == "flashattention3"
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
-        assert (
-            select_backend_name(HardwareProfile(arch="cuda", sm=120))
-            == "flashattention4"
-        )
+        assert select_backend_name(HardwareProfile(arch="cuda", sm=120)) == "flashattention4"
 
     def test_explicit_auto_uses_the_profile_policy(self, monkeypatch):
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "auto")
         assert select_backend_name(HardwareProfile(arch="cpu")) == "torch"
-        assert (
-            select_backend_name(HardwareProfile(arch="cuda", sm=120))
-            == "flashinfer"
-        )
+        assert select_backend_name(HardwareProfile(arch="cuda", sm=120)) == "flashinfer"
 
     def test_invalid_env_fails_loudly(self, monkeypatch):
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "bogus")
@@ -672,14 +669,10 @@ class TestSelectBackendName:
 
 
 class TestBackendDecision:
-    def test_sm120_fa4_materialization_and_decode_delegate_are_visible(
-        self, monkeypatch
-    ):
+    def test_sm120_fa4_materialization_and_decode_delegate_are_visible(self, monkeypatch):
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
 
-        decision = select_backend_decision(
-            HardwareProfile(arch="cuda", sm=120)
-        )
+        decision = select_backend_decision(HardwareProfile(arch="cuda", sm=120))
 
         assert decision.requested == decision.resolved == "flashattention4"
         assert decision.source == "env"
@@ -689,17 +682,50 @@ class TestBackendDecision:
             "kv_mode": "paged-materialized",
         }
 
-    def test_sm100_fa4_uses_direct_paged_kv(self, monkeypatch):
+    @pytest.mark.parametrize("sm", [90, 100, 110])
+    def test_fa4_supported_direct_paged_profiles_are_reported(self, monkeypatch, sm):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
+        decision = select_backend_decision(HardwareProfile(arch="cuda", sm=sm))
+        assert decision.components["kv_mode"] == "paged-direct"
+        assert decision.architecture["sm"] == sm
+        assert decision.architecture["arch"] == "cuda"
+
+    def test_tp_identity_is_canonical_and_excludes_free_form_rationale(self, monkeypatch):
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
         decision = select_backend_decision(
-            HardwareProfile(arch="cuda", sm=100)
+            HardwareProfile(
+                arch="cuda",
+                device_name="NVIDIA H100",
+                sm=90,
+            )
         )
-        assert decision.components["kv_mode"] == "paged-direct"
+        equivalent = type(decision)(
+            requested=decision.requested,
+            resolved=decision.resolved,
+            source=decision.source,
+            components=dict(reversed(tuple(decision.components.items()))),
+            rationale="diagnostic wording changed",
+            architecture=dict(reversed(tuple(decision.architecture.items()))),
+        )
+
+        assert attention_backend_identity(decision) == attention_backend_identity(equivalent)
+
+    def test_pd_role_decision_reports_both_architectures(self, monkeypatch):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
+        prefill = select_backend_decision(HardwareProfile(arch="cuda", device_name="H100", sm=90))
+        decode = select_backend_decision(
+            HardwareProfile(arch="cuda", device_name="RTX PRO 6000", sm=120)
+        )
+
+        decision = compose_backend_decisions(prefill, decode)
+
+        assert decision.resolved == "flashattention4"
+        assert decision.components["kv_mode"] == ("prefill:paged-direct;decode:paged-materialized")
+        assert decision.architecture["prefill"]["sm"] == 90
+        assert decision.architecture["decode"]["sm"] == 120
 
     def test_automatic_selection_reports_stable_fallback_reason(self):
-        decision = select_backend_decision(
-            HardwareProfile(arch="cuda", sm=120)
-        )
+        decision = select_backend_decision(HardwareProfile(arch="cuda", sm=120))
         assert decision.requested == "auto"
         assert decision.resolved == "flashinfer"
         assert decision.source == "hw_profile"

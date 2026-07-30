@@ -1345,6 +1345,14 @@ def test_pd_role_placement_and_blocking_control_reach_the_factory(model_dir):
     assert loop.pd_coordinator._prefill_runner._device.type == "cpu"
     assert loop.pd_coordinator._decode_runner._device.type == "cpu"
     assert loop.pd_coordinator._completion_ready is None
+    decision = loop.pd_coordinator.attention_backend_decision
+    assert decision.requested == decision.resolved == "torch"
+    assert decision.components == {
+        "prefill": "torch",
+        "decode": "torch",
+        "kv_mode": "tensor-gather",
+    }
+    assert decision.architecture["arch"] == "cpu"
 
 
 def test_pd_role_options_are_not_silently_ignored_without_pd(model_dir):

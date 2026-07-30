@@ -45,6 +45,18 @@ def _record_decision(backend, decision: AttentionBackendDecision):
     return backend
 
 
+def _missing_dependency_error(
+    backend_name: str,
+    error: ModuleNotFoundError,
+) -> RuntimeError:
+    missing = getattr(error, "name", None)
+    detail = f" ({missing})" if isinstance(missing, str) and missing else ""
+    return RuntimeError(
+        f"{backend_name} attention backend is missing a GPU dependency{detail}; "
+        "run `uv sync --extra gpu`"
+    )
+
+
 def select_backend(
     profile: HardwareProfile | None = None,
     *,
@@ -62,6 +74,8 @@ def select_backend(
         backend = _construct_backend(decision.resolved, profile, device=device)
     except Exception as error:
         if decision.requested != "auto" or decision.resolved == "torch":
+            if isinstance(error, ModuleNotFoundError):
+                raise _missing_dependency_error(decision.resolved, error) from error
             raise
         fallback = AttentionBackendDecision(
             requested=decision.requested,
@@ -77,6 +91,7 @@ def select_backend(
                 f"{decision.resolved} construction raised "
                 f"{type(error).__name__}"
             ),
+            architecture=dict(decision.architecture),
         )
         return _record_decision(
             _construct_backend("torch", profile, device=device),

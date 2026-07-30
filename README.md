@@ -267,7 +267,7 @@ Everything heavier is opt-in:
 | `--extra fleet` | pyzmq, msgpack, psycopg | process-split engine, KV event transport, shared PostgreSQL BatchStore |
 | `--extra otel` | opentelemetry-sdk | tracing spans (no-op without it) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU kernels/fabric (Linux-only markers; macOS `uv sync` skips them) |
-| `--extra flashattention4` | flash-attn-4 4.0.0 beta 24 | opt-in FlashAttention-4 prefill kernels (Linux only; included by `Dockerfile.cuda`) |
+| `--extra flashattention4` | `flash-attn-4[cu13]==4.0.0b24` | opt-in FlashAttention-4 prefill kernels using the upstream-recommended CUDA 13 extra (Linux only; combine with `--extra gpu` for delegated FlashInfer decode; both are included by `Dockerfile.cuda`) |
 | `--extra bench` | datasets, huggingface_hub, pillow, h5py | `kairyu bench download` dataset fetching |
 | `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker-based agentic benchmarks |
 | `--group dev` | pytest, ruff, transformers, openai, … | test suite + parity goldens |
@@ -277,6 +277,7 @@ supported build is pinned to the same immutable upstream snapshot as the FA4
 package, tag `fa4-v4.0.0.beta24`:
 
 ```bash
+uv sync --extra gpu
 git clone https://github.com/Dao-AILab/flash-attention.git
 cd flash-attention
 git checkout 849f660f73b176e5ad5670e7f822c7fa9f3eaf8b
@@ -285,9 +286,18 @@ cd hopper
 python setup.py install
 ```
 
-This upstream FA3 build provides SM8x/SM90 kernels and requires CUDA 12.3 or
-newer. Selecting FA3 on another GPU is a configuration error; it does not
-silently fall back.
+Install the packaged FA4 path together with its FlashInfer decode dependency:
+
+```bash
+uv sync --extra gpu --extra flashattention4
+```
+
+Kairyu publicly supports this upstream FA3 adapter on SM90, with CUDA 12.3 or
+newer. Environments without a representative SM90 GPU validate the deferred
+import, API, shape, and architecture contract with an injected fake module.
+Explicit FA3 selection fails closed when the package, API, shape, or hardware
+does not match; fake-contract coverage is not a performance result and does
+not justify selecting FA3 by default.
 
 vLLM is only needed for the `vllm` backend on a Linux GPU host (install it in the same
 environment).
@@ -749,14 +759,19 @@ gateways, install `--extra fleet` and select `store: postgres`,
 Explicit selections are strict: a missing package, unsupported GPU, or
 unsupported tensor shape fails startup with an actionable error. FA3 and FA4
 own prefill while FlashInfer owns paged decode; `/backends` reports both
-components. FA4 consumes paged KV directly on SM100/SM110. On SM90/SM120 it
-preserves page identity while materializing the selected pages device-to-device
-for prefill. `auto` uses the stable hardware-profile fallback (FlashInfer on
-supported GPU tiers, otherwise torch) and promotes neither FA3 nor FA4 unless
-retained, profile-specific correctness and performance evidence exists. If an
-optional profile-selected backend cannot be constructed, `auto` alone falls
-back to torch and `/backends` reports that actual fallback and its sanitized
-failure type; an explicit selection still fails startup.
+components. FA4 consumes paged KV directly on SM90/SM100/SM110. On SM120 it
+preserves page identity while materializing the selected pages
+device-to-device for prefill. FA4 beta24 caches one architecture per process,
+so Kairyu verifies the selected device, environment override, and upstream
+cache at startup; mixed-SM FA4 roles must run in separate processes. `auto`
+uses the stable hardware-profile fallback (FlashInfer on supported GPU tiers,
+otherwise torch) and promotes neither FA3 nor FA4 unless retained,
+profile-specific correctness and performance evidence exists. If an optional
+profile-selected backend cannot be constructed, `auto` alone falls back to
+torch and `/backends` reports that actual fallback and its sanitized failure
+type; an explicit selection still fails startup. Official deployments eagerly
+construct `kairyu-proc` before accepting traffic, so the same checks apply
+before `/readyz` can report the process as serving.
 
 ### HTTP surface
 
