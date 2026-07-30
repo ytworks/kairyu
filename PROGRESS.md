@@ -538,8 +538,11 @@ failures; 20 environment-specific marker cases are deselected. A pre-commit run
 on the pinned Qwen3-32B checkpoint and all eight RTX PRO 6000 Blackwell GPUs
 preserved the externally supplied 264 IDs, produced the same eight greedy
 output IDs/text as the text path, reported exact 264-token usage, and reused
-256 native RadixKV tokens. The retained gate now also requires a clean source
-commit and the exact 256-token cache hit; its commit-bound rerun is pending.
+256 native RadixKV tokens. The retained gate binds those results to clean source
+commit `62bd57fa782154455dbaa6445a1e48e373601122`, the pinned checkpoint,
+all ten direct source hashes, and the exact 256-token cache hit; all ten checks
+pass. Artifact SHA-256:
+`4fa2c57fe2dd7f8723f9dc60ea28972d63832754c72eb74d5ec8badfaf910920`.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -548,6 +551,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [progress] Issue #227 passes the clean-source Qwen3-32B TP8 gate
+- What: Retained
+  `bench/results/issue-227-typed-prompt-qwen3-32b-tp8-2026-07-30.json`
+  from clean implementation commit
+  `62bd57fa782154455dbaa6445a1e48e373601122` on 8× RTX PRO 6000
+  Blackwell. All ten binding checks pass: non-null clean commit provenance,
+  exact direct-source/checkpoint/hardware identity, preservation of all 264
+  caller token IDs, deliberately non-authoritative display text, identical
+  eight-token greedy output IDs/text, exact 264-token usage on both paths, and
+  the expected 256-token RadixKV replay hit. Artifact SHA-256:
+  `4fa2c57fe2dd7f8723f9dc60ea28972d63832754c72eb74d5ec8badfaf910920`.
+- Why: Commit-bound structural evidence closes the provenance gap left by the
+  earlier pre-commit diagnostic and proves token ownership, accounting, and
+  cache identity on the requested Qwen3-32B TP8 deployment. Wall-clock timing
+  remains non-binding because OS and host jitter do not affect these invariants.
+- Refs: issue #227; commit
+  `62bd57fa782154455dbaa6445a1e48e373601122`;
+  `bench/typed_prompt_qwen.py`;
+  `bench/results/issue-227-typed-prompt-qwen3-32b-tp8-2026-07-30.json`
 
 ### 2026-07-30 — [amendment] Backend requests gain strict text, token, and multimodal prompt types
 - What: Added frozen `TextPrompt`, `TokensPrompt`, ordered

@@ -1,0 +1,99 @@
+{
+  "checkpoint": {
+    "config.json": "97e295b63283935788fac5e4f8860862a56d4089538cafc93f0431f2ebe483bb",
+    "model.safetensors.index.json": "bed42c6c55274bc08a1f616bceb3bcb84b3f02cb6584c573bd18c6519291ecd0",
+    "revision": "9216db5781bf21249d130ec9da846c4624c16137",
+    "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+  },
+  "checks": {
+    "display_text_is_non_authoritative": true,
+    "eight_reviewed_blackwell_gpus": true,
+    "exact_pinned_checkpoint": true,
+    "exact_prompt_usage": true,
+    "external_token_ids_preserved": true,
+    "native_cache_reused": true,
+    "qwen3_32b_tp8": true,
+    "source_files_bound": true,
+    "text_and_token_output_ids_match": true,
+    "text_and_token_output_text_match": true
+  },
+  "config": {
+    "expected_cached_tokens": 256,
+    "hidden_size": 5120,
+    "max_tokens": 8,
+    "model_architecture": "Qwen3ForCausalLM",
+    "num_hidden_layers": 64,
+    "page_size": 16,
+    "prompt_tokens": 264,
+    "tensor_parallel_size": 8,
+    "timing_is_binding": false,
+    "vocab_size": 151936
+  },
+  "created_at": "2026-07-30T06:18:08+00:00",
+  "hardware": {
+    "gpu_names": [
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    ],
+    "torch_cuda": "13.0"
+  },
+  "measurement_kind": "qwen3-32b-tp8-typed-prompt-parity",
+  "passed": true,
+  "schema_version": 1,
+  "source": {
+    "files": {
+      "bench/typed_prompt_qwen.py": "1f093afdbf0b3dc529e08eb9ae1033d90143715dd777dd5a51f838968851715b",
+      "kairyu/engine/backend.py": "6f8873ec682f9e032b85a87394637701cf3f3a81f66e57d062ca8908a5f6c921",
+      "kairyu/engine/core/model_runner.py": "34c23318e5e3aaac2844e3f0b4172dbefec8c40762a640c4d88d6191f24cd1ce",
+      "kairyu/engine/core/radix_kv.py": "67902529138c70b44efe7553c032b2622eb51ebe9bf203ad150d379af03f7cfa",
+      "kairyu/engine/core/scheduler.py": "0b9c30140a55cc3780589f511412f0559c94c5172d78c1c19982fd9f745f64dd",
+      "kairyu/engine/engine_loop.py": "b57bfc182e7c90cfd68a4773e92d0bad8d941f8633586ec4b75cde7e94e5caad",
+      "kairyu/engine/kairyu_backend.py": "463c7bf557c1a814634a0e8e7257f0d4ac3b927b9503e94e39deeb7014ae6c6e",
+      "kairyu/engine/prompt.py": "4dbf68d11bf8a6ceb4b54bdef119a8221f1c921d8970641adf7fb41d51885832",
+      "kairyu/engine/tokenizer.py": "113ce147afc35ff93dc536dc5c2648dbcf62e10daa7c0759e3d710cfb57a724d",
+      "kairyu/sampling_params.py": "819c20134d15ea26d666b10e9b1722bb00c63496a590feaf3864a06731b2f810"
+    },
+    "git_head": "62bd57fa782154455dbaa6445a1e48e373601122",
+    "tracked_tree_clean": true
+  },
+  "text": {
+    "output_token_ids": [
+      50554,
+      9934,
+      49615,
+      1969,
+      21129,
+      1449,
+      19865,
+      17221
+    ],
+    "usage": {
+      "cached_tokens": 0,
+      "completion_tokens": 8,
+      "prompt_tokens": 264
+    }
+  },
+  "tokens": {
+    "output_token_ids": [
+      50554,
+      9934,
+      49615,
+      1969,
+      21129,
+      1449,
+      19865,
+      17221
+    ],
+    "usage": {
+      "cached_tokens": 256,
+      "completion_tokens": 8,
+      "prompt_tokens": 264
+    }
+  }
+}
