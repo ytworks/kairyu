@@ -17,12 +17,17 @@ from kairyu.engine.engine_loop import (
     _AbortBatch,
     _AddBatch,
 )
+from kairyu.engine.prompt import TokensPrompt
 
 
 class _Tokenizer:
     eos_token_id = None
 
+    def __init__(self) -> None:
+        self.encoded_texts: list[str] = []
+
     def encode(self, text: str) -> tuple[int, ...]:
+        self.encoded_texts.append(text)
         return (len(text) % 31 + 1,)
 
     def decode(self, token_ids) -> str:
@@ -56,9 +61,21 @@ def _scheduler() -> Scheduler:
     )
 
 
-def _loop(scheduler: object | None = None) -> tuple[EngineLoop, _Runner]:
+def _loop(
+    scheduler: object | None = None,
+    *,
+    max_model_len: int | None = None,
+) -> tuple[EngineLoop, _Runner]:
     runner = _Runner()
-    return EngineLoop(_Tokenizer(), scheduler or _scheduler(), runner), runner
+    return (
+        EngineLoop(
+            _Tokenizer(),
+            scheduler or _scheduler(),
+            runner,
+            max_model_len=max_model_len,
+        ),
+        runner,
+    )
 
 
 def _drive(loop: EngineLoop, limit: int = 1000) -> list[tuple[str, StreamUpdate]]:
@@ -145,6 +162,75 @@ def test_concurrent_duplicate_submit_reserves_exactly_once() -> None:
         assert len(loop._ops[0].requests) == 1
     loop.purge(("same",))
     loop.close()
+
+
+@pytest.mark.parametrize("max_model_len", [0, -1, True, 1.5, "8"])
+def test_max_model_len_requires_a_positive_integer_or_none(max_model_len) -> None:
+    with pytest.raises(ValueError, match="max_model_len.*positive integer"):
+        _loop(max_model_len=max_model_len)
+
+
+def test_context_limit_checks_typed_tokens_before_atomic_id_reservation() -> None:
+    loop, _runner = _loop(max_model_len=5)
+    params = SamplingParams(max_tokens=2)
+
+    with pytest.raises(
+        ValueError,
+        match=r"prompt tokens \(4\).*max_tokens \(2\).*max_model_len \(5\)",
+    ):
+        loop.submit("reusable", TokensPrompt((1, 2, 3, 4)), params)
+
+    assert loop._active_request_ids == set()
+    assert not loop._ops
+    assert loop._scheduler.states == {}
+
+    # Equality is the valid boundary, and the rejected ID was never reserved.
+    loop.submit("reusable", TokensPrompt((1, 2, 3)), params)
+    assert loop._active_request_ids == {"reusable"}
+    assert len(loop._ops) == 1
+    loop.purge(("reusable",))
+    loop.close()
+
+
+def test_default_none_keeps_context_length_unbounded() -> None:
+    loop, _runner = _loop()
+    prompt = TokensPrompt((1,) * 4096)
+
+    loop.submit("unbounded", prompt, SamplingParams(max_tokens=4096))
+
+    assert loop._active_request_ids == {"unbounded"}
+    loop.purge(("unbounded",))
+    loop.close()
+
+
+def test_prepared_prompt_reuses_tokens_and_rejects_cross_request_mismatch() -> None:
+    tokenizer = _Tokenizer()
+    runner = _Runner()
+    loop = EngineLoop(tokenizer, _scheduler(), runner, max_model_len=8)
+    params = SamplingParams(max_tokens=2)
+    prepared = loop.prepare_prompt("same prompt", params)
+
+    loop.submit("accepted", "same prompt", params, prepared_prompt=prepared)
+
+    assert tokenizer.encoded_texts == ["same prompt"]
+    with pytest.raises(ValueError, match="does not match"):
+        loop.submit("wrong-prompt", "changed", params, prepared_prompt=prepared)
+    with pytest.raises(ValueError, match="max_tokens does not match"):
+        loop.submit(
+            "wrong-length",
+            "same prompt",
+            SamplingParams(max_tokens=3),
+            prepared_prompt=prepared,
+        )
+    assert loop._active_request_ids == {"accepted"}
+
+    other, _other_runner = _loop()
+    with pytest.raises(ValueError, match="different engine loop"):
+        other.submit("other", "same prompt", params, prepared_prompt=prepared)
+
+    loop.purge(("accepted",))
+    loop.close()
+    other.close()
 
 
 def test_concurrent_unique_producers_share_one_add_batch() -> None:

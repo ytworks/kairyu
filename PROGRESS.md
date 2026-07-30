@@ -32,6 +32,14 @@ substantive differences. The ten-check assembler pins all 15 weight digests,
 the 64×16 raw rows, clean measurement commit, CUDA 13.0/NCCL 2.29.7, and
 physical PCIe topology
 (`bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json`).
+G2 A6 now has an implemented, fail-closed formal operator for the Qwen3-32B
+PCIe-GDDR closure profile. It regenerates pinned traces before execution,
+hashes the complete live checkpoint before and after all 52 fresh-server
+scenarios, and binds raw environment-session ownership, exact container
+launch/backend/package/GPU identities, 31 unique synchronized graph warmups,
+and equal 8,192-block usable KV capacity into independently replayed evidence.
+The dry-run and focused CPU checks pass; the real TP4/8 comparison remains
+to be measured from a clean committed tree, so A6 is executable but not closed.
 G2 A7 now has an executable real-engine gate. Its Qwen3-32B trace reuses the
 fixed 64-session × 8-turn, 512-token shared-prefix plus 128-token turn geometry,
 then measures engine-originated prompt-token cache usage independently at TP4
@@ -580,6 +588,49 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-30 — [progress] G2 A6 performance candidate reaches formal-run readiness
+- What: Added canonical-name-preserving packed dense Q/K/V execution, guarded
+  SM120 fused RMSNorm, RoPE, and paged-KV-write kernels with exact fallbacks,
+  and a long-lived native engine step worker. Native HTTP and process backends
+  now tokenize each request once while rejecting unsupported fields and
+  `max_model_len` overflow before response headers. The serving stack pins
+  uvloop/httptools on Linux, propagates the context limit through TP and P-D
+  construction, and preserves shutdown, cancellation, checkpoint, quantized,
+  and replacement-module behavior.
+- Why: The earlier native path paid repeated projection launches, Python
+  thread-pool and tokenization overhead, and avoidable elementwise/KV-write
+  launches that stock vLLM does not pay. The guarded execution views retain the
+  public module and checkpoint contracts while allowing the measured Qwen3-32B
+  path to remove those costs.
+- Refs: issue #156; G2 A6; m2 D1; m5 D6;
+  `kairyu/models/packed_linear.py`; `kairyu/kernels/rms_norm_gpu.py`;
+  `kairyu/kernels/rope_gpu.py`; `kairyu/kernels/paged_kv_write_gpu.py`;
+  `kairyu/engine/engine_loop.py`; `kairyu/engine/kairyu_backend.py`;
+  `kairyu/engine/zmq_backend.py`
+
+### 2026-07-30 — [amendment] G2 A6 formal comparison becomes replayable and fail closed
+- What: Added the committed `bench/run_g2_a6_formal.py` operator and hardened
+  `bench/g2_a6_vllm_bench.py` to regenerate the complete pinned trace, verify
+  the full live checkpoint before and after execution, retain 31 unique
+  synchronized graph warmups per cell, and bind raw environment-session,
+  post-start launch/backend/package/GPU, logging, CUDA Graph, and cache-capacity
+  evidence. Both arms allocate 8,193 pages: Kairyu reserves one graph scratch
+  page and stock vLLM reserves its mandatory null page, leaving 8,192 usable
+  pages on each at Kairyu `pipeline_depth=1`. Stock vLLM has explicit async
+  scheduling, multiprocessing TP, compile mode 3, disabled custom
+  all-reduce/access/request logging, and an actual FlashAttention 2 startup
+  marker retained from the SM120 process.
+- Why: A performance ratio is not attributable or replayable when trace
+  construction, checkpoint bytes, effective KV capacity, runtime HTTP stack,
+  resolved backend, graph preparation, or measurement-session identity can
+  differ without invalidating the artifact.
+- Refs: issue #156; G2 A6; m5 D6;
+  `bench/run_g2_a6_formal.py`; `bench/g2_a6_vllm_bench.py`;
+  `examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml`;
+  `tests/bench/test_g2_a6_vllm_bench.py`;
+  `tests/bench/test_run_g2_a6_formal.py`;
+  `bench/results/env-2026-07-30.json`
 
 ### 2026-07-30 — [amendment] M13 pins upstream execution identities and actual process reporting
 - What: Corrected the public FA3 capability to the officially supported SM90

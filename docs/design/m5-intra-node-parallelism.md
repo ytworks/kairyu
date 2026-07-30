@@ -149,7 +149,20 @@ maps.) The design is now:
 
 `bench/serving_bench.py` grows `--tensor-parallel`, `--dp-replicas`, `--pd` topology
 arguments and a sweep mode that emits the TP=2 base and TP=4/8 points into one results
-file (G2 §8 same-file rule). `bench/multiturn_prefix.py` defines the deterministic A7
+file (G2 §8 same-file rule). A6 uses the stricter committed
+`bench/run_g2_a6_formal.py` operator with
+`bench/g2_a6_vllm_bench.py`: one fresh-server shard per arm/TP/workload/paired
+round, strict one-attempt SSE accounting, a complete raw matrix, and independent
+replay. Each cell first retains the unique-prompt synchronized
+B=1/2/4/8/16 graph-size request warmup. That evidence binds request geometry
+and the disclosed configured/captured graph status, not observed graph
+dispatch. The operator also binds exact regenerated traces, full checkpoint
+hashes before/after, immutable image and post-start container identities,
+mount/import/YAML/startup-message provenance, resolved backend/package
+attestation, and equal 8,192-block usable KV capacity after Kairyu's one graph
+scratch block and vLLM's one mandatory `BlockPool` null block.
+`bench/multiturn_prefix.py`
+defines the deterministic A6/A7 shared-prefix
 workload geometry and retains its CPU KV-manager sanity check;
 `bench/tp_kv_hit_g2_a7_bench.py` runs that geometry through the production engine and
 gateway. The former also retains its `--replicas` mode for A8's affinity hit-rate
@@ -209,7 +222,7 @@ Same split as M2 §3. CPU now, GPU session later:
 |---|---|---|
 | A1, A2 | `bench/parity_tp.py` (new) | 64 fixed prompts, overlap ON/OFF; 8B TP=1 vs TP=2, 70B TP=2 vs 4/8 |
 | A3–A5 | `bench/serving_bench.py --sweep-tp 2,4,8` | TP=2 base in same results file; plus a report-only TPOT point at concurrency 64 (stresses all-reduce growth; no threshold, A9 spirit) |
-| A6 | `bench/serving_bench.py` vs pinned vLLM TP=4/8 | ShareGPT@128 + shared-prefix trace |
+| A6 | `bench/run_g2_a6_formal.py` + `bench/g2_a6_vllm_bench.py` vs pinned stock vLLM TP=4/8 | Four paired fresh-server rounds over the binding ShareGPT c128 burst and serialized shared-prefix trace; unique B=1/2/4/8/16 graph warmup; full source/checkpoint/runtime attestation; report-only fixed open-loop sweep; raw/manifest independent replay |
 | A7 | `bench/tp_kv_hit_g2_a7_bench.py` | fixed 50%-shared-prefix trace on the real native Qwen3-32B engine at TP4/8, direct and through the single-replica gateway; each engine-derived prompt-token hit rate must be strictly >80%, with raw/config/topology evidence verified from the committed artifact |
 | A8, A9 | `bench/serving_bench.py --dp-replicas 2` + `multiturn_prefix.py --replicas 2` | goodput, router p99, affinity hit retention; DP-vs-TP sweep |
 | A10 | `bench/pd_mixed.py` (new) | long-prefill + decode-SLO mix; handoff p99 |

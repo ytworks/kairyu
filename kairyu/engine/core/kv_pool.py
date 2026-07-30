@@ -112,6 +112,22 @@ class PagedKVPool:
         Here the slot is computed from the page-table TENSOR, so the same kernels
         write wherever the buffers currently point (m17 D1's static-buffer rule).
         """
+        if self.k.device.type == "cuda" and self.v_head_dim == self.head_dim:
+            # Import only on the CUDA path: CPU-only installs retain the plain
+            # torch implementation and do not need Triton to import Kairyu.
+            from kairyu.kernels.paged_kv_write_gpu import try_write_batched
+
+            if try_write_batched(
+                self.k[layer],
+                self.v[layer],
+                self.page_size,
+                page_tables,
+                positions,
+                keys,
+                values,
+                write_from,
+            ):
+                return
         page_index = torch.div(positions, self.page_size, rounding_mode="floor")
         slot = positions - page_index * self.page_size
         pages = page_tables.gather(1, page_index.unsqueeze(1).long()).squeeze(1)
@@ -156,6 +172,22 @@ class PagedKVPool:
             raise ValueError("ragged keys and values must have the same token count")
         if write_from.ndim != 1 or write_from.shape[0] != page_tables.shape[0]:
             raise ValueError("write_from must have one entry per ragged row")
+
+        if self.k.device.type == "cuda" and self.v_head_dim == self.head_dim:
+            from kairyu.kernels.paged_kv_write_gpu import try_write_ragged
+
+            if try_write_ragged(
+                self.k[layer],
+                self.v[layer],
+                self.page_size,
+                page_tables,
+                row_ids,
+                positions,
+                keys,
+                values,
+                write_from,
+            ):
+                return
 
         owners = row_ids.long()
         page_index = torch.div(

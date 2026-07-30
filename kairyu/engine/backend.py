@@ -214,6 +214,41 @@ def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
     return TextPrompt(rendered) if isinstance(request.prompt, TextPrompt) else rendered
 
 
+def validate_native_request_surface(request: GenerationRequest) -> None:
+    """Reject fields the native engine cannot honor instead of dropping them.
+
+    Both native process layouts consume the same ``EngineLoop`` sampling
+    surface. Keeping this check transport-neutral prevents the in-process and
+    ZMQ entry points from silently diverging when the public API gains a field.
+    """
+
+    params = request.sampling_params
+    unsupported: list[str] = []
+    if params.best_of is not None:
+        unsupported.append("best_of")
+    if params.prompt_logprobs is not None:
+        unsupported.append("prompt_logprobs")
+    if not params.skip_special_tokens:
+        unsupported.append("skip_special_tokens")
+    if not isinstance(params.extra_args, Mapping):
+        unsupported.append("extra_args")
+    else:
+        unsupported.extend(
+            f"extra_args.{key}"
+            for key in params.extra_args
+            if key != "response_format"
+        )
+    for index, tool in enumerate(request.tools):
+        function = tool.get("function")
+        if isinstance(function, Mapping) and function.get("strict") is True:
+            unsupported.append(f"tools[{index}].function.strict")
+    if unsupported:
+        raise ValueError(
+            "Kairyu backend does not support request fields: "
+            + ", ".join(sorted(unsupported))
+        )
+
+
 def admission_upper_bound(request: GenerationRequest) -> AdmissionUpperBound:
     """Transport-neutral, no-I/O upper bound for one generation.
 

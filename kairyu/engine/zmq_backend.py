@@ -21,6 +21,7 @@ import logging
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
@@ -29,6 +30,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
     prompt_with_tool_intent,
+    validate_native_request_surface,
 )
 from kairyu.engine.core.attention_selector import AttentionBackendDecision
 from kairyu.engine.core.engine_service import (
@@ -39,12 +41,17 @@ from kairyu.engine.core.engine_service import (
     sampling_params_to_wire,
 )
 from kairyu.engine.core.sampling_types import stable_request_seed
+from kairyu.engine.engine_loop import _validate_max_model_len
 from kairyu.engine.prompt import (
+    PromptInput,
+    TokensPrompt,
     prompt_kind,
+    prompt_text,
     prompt_to_wire,
     supplied_prompt_token_ids,
 )
 from kairyu.engine.registry import register_backend
+from kairyu.engine.tokenizer import Tokenizer, resolve_tokenizer
 from kairyu.outputs import CompletionOutput, TokenLogprob
 
 _SPAWN_TIMEOUT_S = 30.0
@@ -383,14 +390,17 @@ class ZmqEngineBackend:
         cuda_graph_max_batch: int = 8,
         cuda_graph_max_pages: int = 512,
         cuda_graph_warmup_iters: int = 3,
+        max_model_len: int | None = None,
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
+        _validate_max_model_len(max_model_len)
         self._config = {
             "num_pages": num_pages,
             "page_size": page_size,
             "max_num_batched_tokens": max_num_batched_tokens,
             "max_num_seqs": max_num_seqs,
+            "max_model_len": max_model_len,
             "priority_age_s": priority_age_s,
             "tokenizer": tokenizer,
             "speculative": speculative,
@@ -423,6 +433,31 @@ class ZmqEngineBackend:
         self._startup_abandoned: threading.Event | None = None
         self._closed = False
         self._atexit_registered = False
+        self._max_model_len = max_model_len
+        # A configured context limit must be enforceable by the HTTP-facing
+        # parent before a StreamingResponse commits SSE headers. Lazily resolve
+        # the exact tokenizer source that the child uses so construction stays
+        # side-effect compatible and config-only tooling need not mount a
+        # checkpoint. With no limit, retain the historical one-tokenizer-in-the-
+        # child process layout.
+        self._preflight_tokenizer_source = (
+            tokenizer
+            if tokenizer is not None
+            else model_path
+            if model_path is not None
+            else "toy"
+        )
+        self._preflight_tokenizer: Tokenizer | None = None
+        self._preflight_tokenizer_lock = threading.Lock()
+        # Validation may be called more than once by wrapping orchestration
+        # layers. Retain only this exact immutable request object, consume the
+        # prepared token prompt at submit, and let an abandoned request's weak
+        # reference reclaim the entry.
+        self._prepared_requests: dict[
+            int,
+            tuple[weakref.ReferenceType[GenerationRequest], PromptInput],
+        ] = {}
+        self._prepared_requests_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -662,6 +697,8 @@ class ZmqEngineBackend:
         # in flight, its 50 ms Pipe poll observes this event; _ensure_started
         # drains the worker before releasing the same lock to us.
         self._closed = True
+        with self._prepared_requests_lock:
+            self._prepared_requests.clear()
         abandoned = self._startup_abandoned
         if abandoned is not None:
             abandoned.set()
@@ -711,13 +748,120 @@ class ZmqEngineBackend:
 
     # -- request plumbing ----------------------------------------------------
 
+    def _peek_prepared_request(
+        self,
+        request: GenerationRequest,
+    ) -> PromptInput | None:
+        key = id(request)
+        with self._prepared_requests_lock:
+            cached = self._prepared_requests.get(key)
+            if cached is None:
+                return None
+            if cached[0]() is request:
+                return cached[1]
+            # Defensive against delayed weakref callbacks and object-ID reuse.
+            self._prepared_requests.pop(key, None)
+        return None
+
+    def _retain_prepared_request(
+        self,
+        request: GenerationRequest,
+        prompt: PromptInput,
+    ) -> PromptInput:
+        key = id(request)
+        backend_ref = weakref.ref(self)
+
+        def discard(request_ref: weakref.ReferenceType[GenerationRequest]) -> None:
+            backend = backend_ref()
+            if backend is None:
+                return
+            with backend._prepared_requests_lock:
+                current = backend._prepared_requests.get(key)
+                if current is not None and current[0] is request_ref:
+                    backend._prepared_requests.pop(key, None)
+
+        request_ref = weakref.ref(request, discard)
+        with self._prepared_requests_lock:
+            cached = self._prepared_requests.get(key)
+            if cached is not None and cached[0]() is request:
+                return cached[1]
+            self._prepared_requests[key] = (request_ref, prompt)
+        return prompt
+
+    def _take_prepared_request(
+        self,
+        request: GenerationRequest,
+    ) -> PromptInput | None:
+        key = id(request)
+        with self._prepared_requests_lock:
+            cached = self._prepared_requests.get(key)
+            if cached is None:
+                return None
+            self._prepared_requests.pop(key, None)
+            if cached[0]() is request:
+                return cached[1]
+        return None
+
+    def _prepare_request(
+        self,
+        request: GenerationRequest,
+        prompt: PromptInput,
+    ) -> PromptInput:
+        max_model_len = self._max_model_len
+        if max_model_len is None:
+            return prompt
+        tokenizer = self._get_preflight_tokenizer()
+
+        prompt_token_ids = supplied_prompt_token_ids(prompt)
+        if prompt_token_ids is None:
+            text = prompt_text(prompt)
+            assert text is not None
+            prompt_token_ids = tuple(tokenizer.encode(text))
+            if not prompt_token_ids:
+                raise ValueError("prompt must tokenize to at least one token")
+            # The child sees the exact parent-resolved IDs and therefore does
+            # not repeat text tokenization. Display text is retained only for
+            # diagnostics; the caller's public request remains untouched.
+            prompt = TokensPrompt(prompt_token_ids, prompt=text)
+
+        max_new_tokens = (
+            request.sampling_params.max_tokens
+            if request.sampling_params.max_tokens is not None
+            else 16
+        )
+        requested_length = len(prompt_token_ids) + max_new_tokens
+        if requested_length > max_model_len:
+            raise ValueError(
+                f"prompt tokens ({len(prompt_token_ids)}) plus max_tokens "
+                f"({max_new_tokens}) exceed max_model_len ({max_model_len})"
+            )
+        return prompt
+
+    def _get_preflight_tokenizer(self) -> Tokenizer:
+        tokenizer = self._preflight_tokenizer
+        if tokenizer is not None:
+            return tokenizer
+        with self._preflight_tokenizer_lock:
+            tokenizer = self._preflight_tokenizer
+            if tokenizer is None:
+                tokenizer = resolve_tokenizer(self._preflight_tokenizer_source)
+                self._preflight_tokenizer = tokenizer
+        return tokenizer
+
     def validate_request(self, request: GenerationRequest) -> None:
+        validate_native_request_surface(request)
         prompt = prompt_with_tool_intent(request)
         if prompt_kind(prompt) == "multimodal":
             raise ValueError(
                 "kairyu-proc does not support multimodal prompts; "
                 "no modality processor is configured"
             )
+        if (
+            self._max_model_len is not None
+            and self._peek_prepared_request(request) is None
+        ):
+            prepared = self._prepare_request(request, prompt)
+            self._retain_prepared_request(request, prepared)
 
     def _reserve_request_id(self, request_id: str) -> None:
         if request_id in self._active_request_ids:
@@ -818,7 +962,9 @@ class ZmqEngineBackend:
                 # the historical public-ID default seed explicit so process
                 # splitting and request retries remain output-identical.
                 sampling["seed"] = stable_request_seed(request.request_id)
-            prompt = prompt_with_tool_intent(request)
+            prompt = self._take_prepared_request(request)
+            if prompt is None:
+                prompt = prompt_with_tool_intent(request)
             message = {
                 "op": "add",
                 "request_id": wire_request_id,

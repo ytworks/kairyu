@@ -48,6 +48,11 @@ def main(argv: list[str] | None = None) -> None:
             app,
             host=args.host or spec.server.host,
             port=args.port or spec.server.port,
+            # The production Linux dependency set installs both packages.
+            # Select them explicitly so a missing/broken image fails at
+            # startup instead of silently benchmarking asyncio + h11.
+            loop="uvloop" if sys.platform == "linux" else "auto",
+            http="httptools" if sys.platform == "linux" else "auto",
             log_config=None,  # keep the JSON root logger
             # AccessLogMiddleware is the single structured access-log owner.
             # Leaving Uvicorn's logger enabled duplicates every request and

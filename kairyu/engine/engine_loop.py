@@ -39,6 +39,16 @@ _DEFAULT_MAX_NEW_TOKENS = 16
 _DEFAULT_PIPELINE_DEPTH = 1
 
 
+def _validate_max_model_len(max_model_len: int | None) -> None:
+    if max_model_len is not None and (
+        type(max_model_len) is not int or max_model_len < 1
+    ):
+        raise ValueError(
+            "max_model_len must be a positive integer or None, "
+            f"got {max_model_len!r}"
+        )
+
+
 class _StepHandle(Protocol):
     def result(self) -> dict[str, tuple[SampledToken, ...]]: ...
 
@@ -73,6 +83,22 @@ class StreamUpdate:
     num_prompt_tokens: int = 0
     num_cached_tokens: int = 0
     logprob_content: tuple[TokenLogprob, ...] | None = None
+
+
+@dataclass(frozen=True)
+class PreparedPrompt:
+    """One loop-owned prompt resolution safe to reuse at admission.
+
+    Native HTTP preflight must tokenize text to reject an oversized context
+    before response headers are sent.  Carrying this opaque value into
+    ``submit`` avoids resolving that same prompt again without creating a
+    cross-request prompt cache.
+    """
+
+    prompt: PromptInput
+    prompt_token_ids: tuple[int, ...]
+    max_new_tokens: int
+    _owner: object
 
 
 def engine_sampling_from(params: SamplingParams) -> EngineSampling:
@@ -260,14 +286,18 @@ class EngineLoop:
         default_eos_token_id: int | None = None,
         default_stop_token_ids: tuple[int, ...] = (),
         pipeline_depth: int = _DEFAULT_PIPELINE_DEPTH,
+        max_model_len: int | None = None,
     ) -> None:
         if pipeline_depth < 1:
             raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
+        _validate_max_model_len(max_model_len)
         self._tokenizer = tokenizer
         self._prompt_vocab_size: int | None = None
         self._scheduler = scheduler
         self._runner = runner
         self._pipeline_depth = pipeline_depth
+        self._max_model_len = max_model_len
+        self._prepared_prompt_owner = object()
         self._step_lock = Lock()
         self._step_index = 0
         self._pending_steps: deque[_PendingStep] = deque()
@@ -331,6 +361,56 @@ class EngineLoop:
         assert text is not None
         return self.tokenize_prompt(text)
 
+    @staticmethod
+    def _max_new_tokens(params: SamplingParams) -> int:
+        return (
+            params.max_tokens
+            if params.max_tokens is not None
+            else _DEFAULT_MAX_NEW_TOKENS
+        )
+
+    def _validate_context_length(
+        self,
+        prompt_token_ids: tuple[int, ...],
+        max_new_tokens: int,
+    ) -> None:
+        requested_length = len(prompt_token_ids) + max_new_tokens
+        if (
+            self._max_model_len is not None
+            and requested_length > self._max_model_len
+        ):
+            raise ValueError(
+                f"prompt tokens ({len(prompt_token_ids)}) plus max_tokens "
+                f"({max_new_tokens}) exceed max_model_len "
+                f"({self._max_model_len})"
+            )
+
+    def prepare_prompt(
+        self,
+        prompt: PromptInput,
+        params: SamplingParams,
+    ) -> PreparedPrompt:
+        """Resolve and validate a prompt once without reserving a request ID."""
+
+        prompt_token_ids = self.resolve_prompt_token_ids(prompt)
+        max_new_tokens = self._max_new_tokens(params)
+        self._validate_context_length(prompt_token_ids, max_new_tokens)
+        return PreparedPrompt(
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            max_new_tokens=max_new_tokens,
+            _owner=self._prepared_prompt_owner,
+        )
+
+    def validate_prompt_length(
+        self,
+        prompt: PromptInput,
+        params: SamplingParams,
+    ) -> None:
+        """Validate the tokenized request context without reserving its ID."""
+
+        self.prepare_prompt(prompt, params)
+
     def submit(
         self,
         request_id: str,
@@ -338,16 +418,35 @@ class EngineLoop:
         params: SamplingParams,
         priority: int = 0,
         scheduling_class: str = "interactive",
+        prepared_prompt: PreparedPrompt | None = None,
     ) -> None:
         # Advisory fast rejection avoids tokenization and lock traffic for the
         # common duplicate case. The lock-protected check below remains the
         # authority when producers race.
         if request_id in self._active_request_ids:
             raise ValueError(f"duplicate request_id {request_id!r}")
+        if prepared_prompt is None:
+            prepared_prompt = self.prepare_prompt(prompt, params)
+        else:
+            if prepared_prompt._owner is not self._prepared_prompt_owner:
+                raise ValueError("prepared prompt belongs to a different engine loop")
+            if prepared_prompt.prompt != prompt:
+                raise ValueError("prepared prompt does not match the submitted prompt")
+            max_new_tokens = self._max_new_tokens(params)
+            if prepared_prompt.max_new_tokens != max_new_tokens:
+                raise ValueError(
+                    "prepared prompt max_tokens does not match the submitted request"
+                )
+            self._validate_context_length(
+                prepared_prompt.prompt_token_ids,
+                max_new_tokens,
+            )
+        prompt_token_ids = prepared_prompt.prompt_token_ids
+        max_new_tokens = prepared_prompt.max_new_tokens
         engine_request = EngineRequest(
             request_id=request_id,
-            prompt_token_ids=self.resolve_prompt_token_ids(prompt),
-            max_new_tokens=params.max_tokens or _DEFAULT_MAX_NEW_TOKENS,
+            prompt_token_ids=prompt_token_ids,
+            max_new_tokens=max_new_tokens,
             eos_token_id=self._default_eos,
             stop_token_ids=tuple(params.stop_token_ids or ()) + self._default_stop_ids,
             min_tokens=params.min_tokens,
@@ -463,6 +562,10 @@ class EngineLoop:
     @property
     def pipeline_depth(self) -> int:
         return self._pipeline_depth
+
+    @property
+    def max_model_len(self) -> int | None:
+        return self._max_model_len
 
     def _take_ops(self) -> tuple[_OpBatch, ...]:
         """Freeze one step-boundary snapshot; later producers target a new queue."""

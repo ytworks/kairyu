@@ -1425,6 +1425,8 @@ def create_app(
             sampling = SamplingParams(  # invalid params are a client error, not a 502
                 temperature=request.temperature,
                 top_p=request.top_p,
+                top_k=request.top_k,
+                min_p=request.min_p,
                 n=request.n,
                 max_tokens=(
                     request.max_tokens
@@ -1432,10 +1434,15 @@ def create_app(
                     else 16
                 ),
                 stop=request.stop,
+                stop_token_ids=request.stop_token_ids,
+                min_tokens=request.min_tokens,
+                ignore_eos=request.ignore_eos,
                 seed=request.seed,
                 presence_penalty=request.presence_penalty,
                 frequency_penalty=request.frequency_penalty,
+                repetition_penalty=request.repetition_penalty,
                 logprobs=request.logprobs,
+                skip_special_tokens=request.skip_special_tokens,
             )
         except ValueError as error:
             return invalid_request(str(error))

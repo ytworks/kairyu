@@ -479,6 +479,33 @@ class _RecordingRunner:
         return getattr(self._inner, name)
 
 
+def _teacher_forced_waves(reference: dict):
+    """Yield independent prefixes without co-scheduling nested ownership.
+
+    Every position for one prompt extends the previous position. Scheduling
+    those nested prefixes in the same engine step can make one request write a
+    page that a longer request already treats as cached. That is not a valid
+    serving batch. A position wave still batches all independent prompts while
+    preserving the exact teacher-forced inputs.
+    """
+
+    positions = max(
+        (len(entry["continuation"]) for entry in reference.values()),
+        default=0,
+    )
+    for position in range(positions):
+        yield tuple(
+            (
+                name,
+                position,
+                tuple(entry["prompt_ids"])
+                + tuple(entry["continuation"][:position]),
+            )
+            for name, entry in reference.items()
+            if position < len(entry["continuation"])
+        )
+
+
 def _engine_next_tokens(
     model_path: str, tp: int, reference: dict, num_pages: int, page_size: int
 ) -> dict[str, list]:
@@ -501,22 +528,21 @@ def _engine_next_tokens(
         scheduler = Scheduler(cache, max_num_batched_tokens=2048, page_size=page_size)
         core = EngineCore(scheduler, runner)
         index = {}
-        for name, entry in reference.items():
-            prompt_ids = entry["prompt_ids"]
-            for position in range(len(entry["continuation"])):
+        for wave in _teacher_forced_waves(reference):
+            for name, position, prompt_ids in wave:
                 request_id = f"{name}@{position}"
                 index[request_id] = (name, position)
                 core.add_request(
                     EngineRequest(
                         request_id,
-                        tuple(prompt_ids) + tuple(entry["continuation"][:position]),
+                        prompt_ids,
                         max_new_tokens=1,
                         # run_to_completion() returns token ids only; step() hands
                         # back SampledToken, which is where the logprobs live
                         sampling=EngineSampling(logprobs=_TOP_K),
                     )
                 )
-        core.run_to_completion()
+            core.run_to_completion()
     finally:
         teardown()
 

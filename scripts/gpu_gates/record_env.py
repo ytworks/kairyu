@@ -6,7 +6,10 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib.metadata
+import json
 import subprocess
+import time
+import uuid
 from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
@@ -114,6 +117,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--date", default=date.today().isoformat())
     parser.add_argument("--results-dir", type=Path, default=Path("bench/results"))
     parser.add_argument(
+        "--measurement-session-id",
+        help=(
+            "stable ID for the measurement campaign; defaults to a freshly "
+            "generated env-<date>-<uuid> value"
+        ),
+    )
+    parser.add_argument(
         "--no-measure",
         action="store_true",
         help="record topology only; leaves bandwidth/P2P null (fast, and safe to "
@@ -128,6 +138,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile=profile, record_date=args.date, measure=not args.no_measure
     )
     path = write_env_record(record, args.results_dir)
+    measurement_session_id = args.measurement_session_id or (
+        f"env-{args.date}-{uuid.uuid4().hex}"
+    )
+    if not measurement_session_id.strip():
+        parser.error("--measurement-session-id must not be empty")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["measurement_session_id"] = measurement_session_id
+    payload["measured_at_ns"] = time.time_ns()
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     print(path)
     return 0
 

@@ -24,6 +24,22 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        if hidden.device.type == "cuda":
+            from kairyu.kernels.rms_norm_gpu import try_rms_norm
+
+            fused = try_rms_norm(hidden, self.weight, self.eps)
+            if fused is not None:
+                return fused
+            # Preserve the model's historical BF16 rounding boundary before
+            # applying the learned weight. Passing the weight into PyTorch's
+            # fused op changes Qwen's logits enough to fail the quality gate.
+            normalized = nn.functional.rms_norm(
+                hidden,
+                (hidden.shape[-1],),
+                weight=None,
+                eps=self.eps,
+            )
+            return normalized.to(hidden.dtype) * self.weight
         dtype = hidden.dtype
         hidden = hidden.to(torch.float32)
         variance = hidden.pow(2).mean(-1, keepdim=True)
@@ -135,9 +151,26 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    positions: torch.Tensor | None = None,
+    rope_theta: float | None = None,
+    rope_scaling: RopeScaling | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """q/k: [T, heads, head_dim]; cos/sin: [T, head_dim] (broadcast over heads)."""
+    if (
+        positions is not None
+        and rope_theta is not None
+        and rope_scaling is None
+        and q.device.type == "cuda"
+    ):
+        from kairyu.kernels.rope_gpu import try_apply_rope_inplace
+
+        if try_apply_rope_inplace(q, k, cos, sin):
+            return q, k
     cos = cos[:, None, :].to(q.dtype)
     sin = sin[:, None, :].to(q.dtype)
     return q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin

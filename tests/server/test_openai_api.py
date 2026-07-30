@@ -10,6 +10,7 @@ from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import TokensPrompt
+from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
@@ -33,6 +34,15 @@ class _EmptyTokenizer:
 
     def vocab(self) -> list[str]:
         return []
+
+
+class _CountingTokenizer(ToyTokenizer):
+    def __init__(self) -> None:
+        self.encode_calls = 0
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        self.encode_calls += 1
+        return super().encode(text)
 
 
 def _client(app, *, raise_app_exceptions: bool = True) -> httpx.AsyncClient:
@@ -91,6 +101,38 @@ async def test_zero_token_prompt_returns_400_before_streaming(endpoint, stream):
     assert response.json()["error"]["type"] == "invalid_request_error"
     assert "at least one token" in response.json()["error"]["message"]
     assert not response.headers["content-type"].startswith("text/event-stream")
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("endpoint", ["chat", "completions"])
+async def test_native_http_text_prompt_is_tokenized_once(endpoint, stream):
+    tokenizer = _CountingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    app = create_app(engines={"native": backend})
+    if endpoint == "chat":
+        path = "/v1/chat/completions"
+        body = {
+            "model": "native",
+            "messages": [{"role": "user", "content": "count this prompt"}],
+            "max_tokens": 2,
+            "stream": stream,
+        }
+    else:
+        path = "/v1/completions"
+        body = {
+            "model": "native",
+            "prompt": "count this prompt",
+            "max_tokens": 2,
+            "stream": stream,
+        }
+
+    async with _client(app) as client:
+        response = await client.post(path, json=body)
+
+    assert response.status_code == 200
+    assert tokenizer.encode_calls == 1
+    assert backend._prepared_requests == {}
+    await backend.shutdown()
 
 
 async def test_backend_without_validate_request_still_serves_requests():
@@ -395,6 +437,45 @@ async def test_completion_token_prompt_is_dispatched_losslessly(stream):
         assert chunks[-1]["usage"]["prompt_tokens"] == 3
     else:
         assert response.json()["usage"]["prompt_tokens"] == 3
+
+
+async def test_completion_sampling_extensions_are_typed_and_preserved_to_engine():
+    class CapturingBackend(StubBackend):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        async def generate(self, request):
+            self.seen = request
+            return await super().generate(request)
+
+    engine = CapturingBackend()
+    app = create_app(engines={"stub": engine})
+    body = {
+        "model": "stub",
+        "prompt": "fixed-length benchmark",
+        "max_tokens": 8,
+        "top_k": -1,
+        "min_p": 0.0,
+        "stop_token_ids": [7, 9],
+        "min_tokens": 8,
+        "ignore_eos": True,
+        "repetition_penalty": 1.0,
+        "skip_special_tokens": False,
+    }
+
+    async with _client(app) as client:
+        response = await client.post("/v1/completions", json=body)
+
+    assert response.status_code == 200
+    params = engine.seen.sampling_params
+    assert params.top_k == -1
+    assert params.min_p == 0.0
+    assert params.stop_token_ids == (7, 9)
+    assert params.min_tokens == 8
+    assert params.ignore_eos is True
+    assert params.repetition_penalty == 1.0
+    assert params.skip_special_tokens is False
 
 
 async def test_completion_token_batch_preserves_prompt_and_choice_order():
