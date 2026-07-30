@@ -369,9 +369,10 @@ def _tp_speculative_outputs(llama_dir, prompt, max_new, draft_source):
             )
         )
         outputs = list(engine.run_to_completion()["a"])
+        verification_stats = runner.verification_execution_stats()
     finally:
         launcher.shutdown()
-    return outputs, runner
+    return outputs, runner, verification_stats
 
 
 def test_tp_speculative_rejected_draft_does_not_corrupt_rank_state(llama_dir):
@@ -383,12 +384,17 @@ def test_tp_speculative_rejected_draft_does_not_corrupt_rank_state(llama_dir):
     prompt = torch.randint(0, 256, (11,)).tolist()
     reference = _single_process_greedy(llama_dir, prompt, max_new=12)
 
-    outputs, runner = _tp_speculative_outputs(
+    outputs, runner, verification_stats = _tp_speculative_outputs(
         llama_dir, prompt, 12, _AlwaysWrongDraft()
     )
     assert runner.draft_proposed > 0, "the draft path was never entered"
     assert runner.draft_accepted == 0, "the fixture must force rejections"
     assert outputs == reference
+    local = [row["stats"] for row in verification_stats]
+    assert all(row == local[0] for row in local)
+    assert local[0]["model_calls"] == local[0]["batched_groups"] > 0
+    assert local[0]["positions"] > local[0]["model_calls"]
+    assert local[0]["sequential_positions"] == 0
 
 
 def test_tp_speculative_accepted_draft_matches_greedy(llama_dir):
@@ -396,12 +402,17 @@ def test_tp_speculative_accepted_draft_matches_greedy(llama_dir):
     prompt = torch.randint(0, 256, (11,)).tolist()
     reference = _single_process_greedy(llama_dir, prompt, max_new=12)
 
-    outputs, runner = _tp_speculative_outputs(
+    outputs, runner, verification_stats = _tp_speculative_outputs(
         llama_dir, prompt, 12, _EchoDraft(reference).bind_prompt(len(prompt))
     )
     assert runner.draft_proposed > 0, "the draft path was never entered"
     assert runner.draft_accepted > 0, "the fixture must produce acceptances"
     assert outputs == reference
+    local = [row["stats"] for row in verification_stats]
+    assert all(row == local[0] for row in local)
+    assert local[0]["model_calls"] == local[0]["batched_groups"] > 0
+    assert local[0]["positions"] > local[0]["model_calls"]
+    assert local[0]["sequential_positions"] == 0
 
 
 class _TinyTokenizer:

@@ -72,6 +72,43 @@ def _mixed_step():
     return chunks, states
 
 
+def _variable_length_step():
+    """One control step with every packet-width case represented."""
+    chunks = (
+        ScheduledChunk("partial", 2, True, 0),
+        ScheduledChunk("decode", 1, False, 3),
+        ScheduledChunk("verify-three", 3, False, 4),
+        ScheduledChunk("verify-two", 2, False, 7),
+    )
+    states = {
+        "partial": _state("partial", computed_prompt=2),
+        "decode": _state("decode", outputs=(7, 8, 9)),
+        "verify-three": _state(
+            "verify-three",
+            outputs=(10, 11, 12, 13, 14, 15, 16),
+            pages=(1, 2),
+        ),
+        "verify-two": _state(
+            "verify-two",
+            outputs=(20, 21, 22, 23, 24, 25, 26, 27),
+            pages=(3, 4),
+        ),
+    }
+    sampled = {
+        "decode": (SampledToken(29),),
+        "verify-three": (
+            SampledToken(41),
+            SampledToken(42),
+            SampledToken(43),
+        ),
+        "verify-two": (
+            SampledToken(51),
+            SampledToken(52),
+        ),
+    }
+    return chunks, states, sampled
+
+
 def test_sampling_packet_has_one_fixed_slot_per_scheduled_chunk():
     runner = _packet_runner()
     chunks, states = _mixed_step()
@@ -89,6 +126,21 @@ def test_sampling_packet_has_one_fixed_slot_per_scheduled_chunk():
     assert packet.dtype == torch.int64
     assert packet.tolist() == [-1, 17, 29]
     assert follower_buffer.tolist() == [-1, -1, -1]
+
+
+def test_variable_length_sampling_packet_has_exact_flattened_layout_and_sentinel():
+    runner = _packet_runner()
+    chunks, states, sampled = _variable_length_step()
+
+    layout = runner._sampling_packet_layout(chunks, states)
+    packet = runner.make_sampling_token_packet(chunks, states, sampled)
+    follower_buffer = runner.make_sampling_token_packet(chunks, states)
+
+    # A non-emitting partial prefill still owns one sentinel slot. Emitting
+    # chunks then occupy one contiguous slot per target position.
+    assert layout == ((0, 0), (1, 1), (2, 3), (5, 2))
+    assert packet.tolist() == [-1, 29, 41, 42, 43, 51, 52]
+    assert follower_buffer.tolist() == [-1] * 7
 
 
 @pytest.mark.parametrize(
@@ -130,6 +182,35 @@ def test_sampling_packet_requires_exactly_one_token_per_emitting_chunk(values):
             states,
             {"final": values, "decode": (SampledToken(29),)},
         )
+
+
+@pytest.mark.parametrize(
+    ("request_id", "wrong_values", "expected_count"),
+    [
+        (
+            "verify-three",
+            (SampledToken(41), SampledToken(42)),
+            3,
+        ),
+        (
+            "verify-two",
+            (SampledToken(51), SampledToken(52), SampledToken(53)),
+            2,
+        ),
+    ],
+)
+def test_variable_length_sampling_packet_rejects_wrong_record_count(
+    request_id, wrong_values, expected_count
+):
+    runner = _packet_runner()
+    chunks, states, sampled = _variable_length_step()
+    sampled[request_id] = wrong_values
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"exactly {expected_count} tokens.*{request_id!r}",
+    ):
+        runner.make_sampling_token_packet(chunks, states, sampled)
 
 
 def test_sampling_packet_rejects_duplicate_emitting_slots_for_one_request():
@@ -216,6 +297,62 @@ def test_adopt_inserts_and_overwrites_packet_backed_future_tokens():
     assert int(runner._future_device_tokens["decode"][3]) == 29
     packet[2] = 31
     assert int(runner._future_device_tokens["decode"][3]) == 31
+
+
+def test_variable_length_adopt_inserts_and_overwrites_every_target_position():
+    runner = _packet_runner()
+    chunks, states, _sampled = _variable_length_step()
+    runner._future_device_tokens = {
+        "decode": {3: torch.tensor(903)},
+        "verify-three": {
+            4: torch.tensor(904),
+            5: torch.tensor(905),
+            6: torch.tensor(906),
+        },
+        "verify-two": {
+            7: torch.tensor(907),
+            8: torch.tensor(908),
+        },
+    }
+    packet = torch.tensor(
+        [-1, 29, 41, 42, 43, 51, 52],
+        dtype=torch.int64,
+    )
+
+    runner.adopt_sampling_token_packet(chunks, states, packet)
+
+    assert "partial" not in runner._future_device_tokens
+    assert {
+        request_id: {
+            position: int(token)
+            for position, token in positions.items()
+        }
+        for request_id, positions in runner._future_device_tokens.items()
+    } == {
+        "decode": {3: 29},
+        "verify-three": {4: 41, 5: 42, 6: 43},
+        "verify-two": {7: 51, 8: 52},
+    }
+
+    # Adopt retains packet-backed scalar views, including every verification
+    # offset, rather than copying only the first token in each chunk.
+    packet[4] = 143
+    packet[6] = 152
+    assert int(runner._future_device_tokens["verify-three"][6]) == 143
+    assert int(runner._future_device_tokens["verify-two"][8]) == 152
+
+
+@pytest.mark.parametrize("packet_length", [6, 8])
+def test_variable_length_adopt_rejects_wrong_packet_length(packet_length):
+    runner = _packet_runner()
+    chunks, states, _sampled = _variable_length_step()
+    packet = torch.full((packet_length,), -1, dtype=torch.int64)
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"got {packet_length}, expected 7",
+    ):
+        runner.adopt_sampling_token_packet(chunks, states, packet)
 
 
 class _PassiveModel:

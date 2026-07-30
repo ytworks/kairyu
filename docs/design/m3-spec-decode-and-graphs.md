@@ -1,8 +1,9 @@
 # M3 Design: Speculative Decoding, CUDA Graphs, P-D Separation
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (agent design-review panel, 2026-07-02;
-see §5). n-gram draft policy implemented CPU-side; everything else gated on the M2 GPU
-phase. Human sign-off pending.
+Status: **Production GPU-validated for n-gram target verification** (2026-07-30;
+reviewed APPROVE-WITH-AMENDMENTS on 2026-07-02, see §5). CUDA Graph serving
+and intra-node P-D are production-enabled through M17/M18; EAGLE runtime
+integration remains a G4 follow-up. Human sign-off pending.
 Milestone: M3
 Date: 2026-07-02
 
@@ -59,6 +60,30 @@ reconciliation protocol is specified and tested.
 
 Per goal: acceptance-rate and TTFT/TPOT deltas measured in `bench/` on the M2 GPU rig only;
 the CPU tests here pin correctness (greedy-equivalence), not speed.
+
+### 4.1 2026-07-30 production closure — batched target verification
+
+Issue #215 closes the target-runner half of the contract above. A compatible
+`ModelRunner` explicitly advertises multi-position verification, receives one
+chunk per speculative request, and scores every draft position plus the
+bonus/correction position in one grouped target call. Undeclared custom runners
+retain the original one-position calls before any model/KV side effect;
+MLA/DeepSeek retains the same safe path because its attention stack has neither
+the tensor nor list-batched decode contract.
+
+The native paged runner flattens compatible request-local chains into decode
+rows. Row `i` consumes the previous token or draft token, writes its unique
+physical KV slot, and carries the causal `seq_len` for that position. CUDA Graph
+buckets are selected from the total target-row count, not the request count.
+Tensor-parallel ranks derive a variable-width sampled-token packet solely from
+the already-broadcast chunks, so followers adopt every target position before
+the next forward without Python result traffic.
+
+Acceptance binds target tokens, accepted-prefix/bonus behavior, rollback and
+shortfall, logical KV parity against sequential scoring, all-rank model-call
+counts, and zero graph fallback. Qwen3-32B TP8 wall time, TPOT, throughput, and
+the eager strategy comparison are recorded after warm-up in alternating order
+but remain diagnostic so OS jitter cannot decide correctness.
 
 ## 5. Review record
 

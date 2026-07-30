@@ -290,6 +290,8 @@ def _tensor_decode_gap(model: DenseDecoder) -> str | None:
     layers = getattr(getattr(model, "model", None), "layers", None)
     if layers is None:
         return f"{type(model).__name__} exposes no model.layers to check"
+    if not callable(getattr(model, "forward_decode_tensors", None)):
+        return f"{type(model).__name__} has no forward_decode_tensors"
     if not callable(getattr(model, "plan_decode_tensors", None)):
         return (
             f"{type(model).__name__} has no plan_decode_tensors, so the step "
@@ -297,7 +299,7 @@ def _tensor_decode_gap(model: DenseDecoder) -> str | None:
         )
     for index, layer in enumerate(layers):
         attention = getattr(layer, "self_attn", None)
-        if not hasattr(attention, "forward_decode_tensors"):
+        if not callable(getattr(attention, "forward_decode_tensors", None)):
             return (
                 f"layer {index}'s attention ({type(attention).__name__}) has no "
                 "forward_decode_tensors"
@@ -344,7 +346,54 @@ def _batched_prefill_gap(model: DenseDecoder) -> str | None:
     return None
 
 
+def _verification_batch_gap(model: DenseDecoder) -> str | None:
+    """Why multi-position target scoring cannot use either batched decode form.
+
+    Tensor decode is the preferred path and the only graph-capable one.  The
+    established list-metadata ``forward_decode_batch`` remains a valid eager
+    compatibility path, though, so lack of graph/tensor support alone must not
+    serialize an otherwise batch-capable model.  MLA is the important inverse:
+    ``DenseDecoder`` exposes the model-level method, but ``MlaAttention`` has no
+    corresponding layer implementation and must retain position-at-a-time
+    verification.
+    """
+    tensor_gap = _tensor_decode_gap(model)
+    if tensor_gap is None:
+        return None
+    if not callable(getattr(model, "forward_decode_batch", None)):
+        return (
+            f"tensor decode is unavailable ({tensor_gap}); "
+            f"{type(model).__name__} has no forward_decode_batch"
+        )
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        return (
+            f"tensor decode is unavailable ({tensor_gap}); "
+            f"{type(model).__name__} exposes no model.layers to check"
+        )
+    for index, layer in enumerate(layers):
+        attention = getattr(layer, "self_attn", None)
+        if not callable(getattr(attention, "forward_decode_batch", None)):
+            return (
+                f"tensor decode is unavailable ({tensor_gap}); layer {index}'s "
+                f"attention ({type(attention).__name__}) has no "
+                "forward_decode_batch"
+            )
+        backend = getattr(attention, "backend", None)
+        if backend is not None and not callable(
+            getattr(backend, "attend_batched", None)
+        ):
+            return (
+                f"tensor decode is unavailable ({tensor_gap}); layer {index}'s "
+                f"attention backend {type(backend).__name__} has no "
+                "attend_batched"
+            )
+    return None
+
+
 class PagedModelRunner:
+    supports_batched_verification = True
+
     def __init__(
         self,
         model: DenseDecoder,
@@ -408,6 +457,7 @@ class PagedModelRunner:
         # eager batching. Unsupported model/attention combinations retain the
         # list-based compatibility path.
         self._tensor_decode_supported = _tensor_decode_gap(model) is None
+        self._verification_batch_gap = _verification_batch_gap(model)
         # Cross-request prefill is deliberately stricter than semantic
         # ``attend_batched`` support. Only a backend that owns one native
         # ragged plan/run opts in; Torch, MLA, and custom models keep the
@@ -418,6 +468,20 @@ class PagedModelRunner:
         self._prefill_model_calls = 0
         self._prefill_batched_groups = 0
         self._prefill_sequential_rows = 0
+        # A speculative target chunk carries every position that has to be
+        # scored: previous-token -> draft[0], then each draft token -> the next
+        # target token (including the bonus position).  The optimized path
+        # flattens those positions across requests into one decode-shaped model
+        # invocation.  Keeping an explicit rollback switch is useful for
+        # matched A/B evidence and for an operational escape hatch; it never
+        # changes scheduler reservation or verification semantics.
+        self._batched_verification_enabled = True
+        self._verification_requests_executed = 0
+        self._verification_positions_executed = 0
+        self._verification_model_calls = 0
+        self._verification_batched_groups = 0
+        self._verification_sequential_positions = 0
+        self._verification_graph_groups = 0
 
         # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
         # the seam has existed since m17 with no caller, and enabling it by
@@ -558,6 +622,64 @@ class PagedModelRunner:
             self._prefill_model_calls = 0
             self._prefill_batched_groups = 0
             self._prefill_sequential_rows = 0
+        return result
+
+    def set_batched_verification_enabled(self, enabled: bool) -> None:
+        """Switch grouped speculative target scoring without changing policy."""
+        if type(enabled) is not bool:
+            raise TypeError("batched verification enabled flag must be bool")
+        self._batched_verification_enabled = enabled
+
+    def verification_execution_stats(
+        self, *, reset: bool = False
+    ) -> dict[str, object]:
+        """Return structural speculative-verification evidence.
+
+        Wall time is deliberately absent: these counters bind the number of
+        logical positions to actual model invocations and graph dispatches,
+        independent of host scheduling noise.
+        """
+        graph_stats = None
+        if self._graph is not None:
+            getter = getattr(self._graph, "execution_stats", None)
+            if callable(getter):
+                graph_stats = getter(reset=reset)
+        backend_rows: list[dict[str, object]] = []
+        seen: set[int] = set()
+        layers = getattr(getattr(self._model, "model", None), "layers", ())
+        for layer in layers:
+            backend = getattr(getattr(layer, "self_attn", None), "backend", None)
+            if backend is None or id(backend) in seen:
+                continue
+            seen.add(id(backend))
+            getter = getattr(backend, "decode_execution_stats", None)
+            if callable(getter):
+                row = getter(reset=reset)
+                if not isinstance(row, dict):
+                    raise RuntimeError(
+                        f"{type(backend).__name__}.decode_execution_stats "
+                        "must return a dict"
+                    )
+                backend_rows.append(row)
+        result = {
+            "enabled": self._batched_verification_enabled,
+            "capability_gap": self._verification_batch_gap,
+            "requests": self._verification_requests_executed,
+            "positions": self._verification_positions_executed,
+            "model_calls": self._verification_model_calls,
+            "batched_groups": self._verification_batched_groups,
+            "sequential_positions": self._verification_sequential_positions,
+            "graph_groups": self._verification_graph_groups,
+            "graph": graph_stats,
+            "backend": backend_rows,
+        }
+        if reset:
+            self._verification_requests_executed = 0
+            self._verification_positions_executed = 0
+            self._verification_model_calls = 0
+            self._verification_batched_groups = 0
+            self._verification_sequential_positions = 0
+            self._verification_graph_groups = 0
         return result
 
     def _require_sampling_owner(self) -> None:
@@ -798,7 +920,16 @@ class PagedModelRunner:
             dict[str, tuple[SampledToken | _PendingDeviceToken, ...]] | None
         ) = {} if sample else None
         prefills = [chunk for chunk in scheduled if chunk.is_prefill]
-        decodes = [chunk for chunk in scheduled if not chunk.is_prefill]
+        decodes = [
+            chunk
+            for chunk in scheduled
+            if not chunk.is_prefill and chunk.num_tokens == 1
+        ]
+        verifications = [
+            chunk
+            for chunk in scheduled
+            if not chunk.is_prefill and chunk.num_tokens > 1
+        ]
         if (
             len(prefills) >= 2
             and self._batched_prefill_enabled
@@ -824,6 +955,23 @@ class PagedModelRunner:
         else:
             for chunk in decodes:
                 self._execute_decode(chunk, states[chunk.request_id], sampled)
+        if verifications:
+            if (
+                self._batched_verification_enabled
+                and self._verification_batch_gap is None
+            ):
+                self._execute_verification_batch(
+                    verifications, states, sampled
+                )
+            else:
+                # MLA/DeepSeek and custom stacks without either tensor or
+                # list-batched decode must retain the pre-#215 position loop.
+                # ``forward_decode_batch`` exists on DenseDecoder even when an
+                # MLA attention layer cannot implement it, so entering the
+                # flattened path based on the model method alone fails late.
+                self._execute_verification_sequential(
+                    verifications, states, sampled
+                )
         if sampled is None:
             return {}
         if any(
@@ -842,12 +990,38 @@ class PagedModelRunner:
         }
 
     @staticmethod
-    def _chunk_emits_token(chunk: ScheduledChunk, state: object) -> bool:
-        """Whether this scheduled slot produces one sampled token."""
+    def _chunk_token_count(chunk: ScheduledChunk, state: object) -> int:
+        """Number of authoritative token ids represented by a scheduled slot."""
         if not chunk.is_prefill:
-            return True
+            return chunk.num_tokens
         prompt = state.request.prompt_token_ids
-        return state.prefill_done and state.computed_prompt == len(prompt)
+        return int(state.prefill_done and state.computed_prompt == len(prompt))
+
+    @classmethod
+    def _chunk_emits_token(cls, chunk: ScheduledChunk, state: object) -> bool:
+        """Whether this scheduled slot produces at least one sampled token."""
+        return cls._chunk_token_count(chunk, state) > 0
+
+    @classmethod
+    def _sampling_packet_layout(
+        cls,
+        chunks: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> tuple[tuple[int, int], ...]:
+        """Return ``(offset, token_count)`` for every scheduled chunk.
+
+        Partial prefill retains one sentinel slot, preserving the established
+        fixed-layout collective.  Emitting chunks own one slot per target
+        position, so a multi-token verification packet is still derived solely
+        from the already-broadcast ``ScheduledChunk`` tuple.
+        """
+        layout: list[tuple[int, int]] = []
+        offset = 0
+        for chunk in chunks:
+            count = cls._chunk_token_count(chunk, states[chunk.request_id])
+            layout.append((offset, count))
+            offset += max(1, count)
+        return tuple(layout)
 
     def make_sampling_token_packet(
         self,
@@ -857,15 +1031,21 @@ class PagedModelRunner:
     ) -> torch.Tensor:
         """Build the fixed-layout rank-0 token packet or a follower receive buffer.
 
-        One int64 slot corresponds to one ``ScheduledChunk``.  Partial-prefill
-        slots carry ``-1``; every emitting slot carries exactly one token id.
+        Partial-prefill slots carry one ``-1`` sentinel; every emitting slot
+        carries one int64 per sampled target position.
         Keeping the shape tied to the already-broadcast chunk tuple means all
         ranks enter the same tensor collective even for mixed prefill/decode
         batches, without request-id or Python-result traffic.
         """
         chunks = tuple(scheduled)
+        layout = self._sampling_packet_layout(chunks, states)
+        packet_len = (
+            0
+            if not layout
+            else layout[-1][0] + max(1, layout[-1][1])
+        )
         packet = torch.full(
-            (len(chunks),), -1, dtype=torch.int64, device=self._device
+            (packet_len,), -1, dtype=torch.int64, device=self._device
         )
         expected = [
             chunk.request_id
@@ -896,32 +1076,38 @@ class PagedModelRunner:
             records = sampled.raw_records()
         else:
             records = sampled
-        for index, chunk in enumerate(chunks):
-            state = states[chunk.request_id]
-            if not self._chunk_emits_token(chunk, state):
+        for chunk, (offset, count) in zip(chunks, layout, strict=True):
+            if count == 0:
                 continue
             values = records[chunk.request_id]
-            if len(values) != 1:
+            if len(values) != count:
+                requirement = (
+                    "exactly one token"
+                    if count == 1
+                    else f"exactly {count} tokens"
+                )
                 raise RuntimeError(
-                    "TP sampling owner must emit exactly one token for "
+                    f"TP sampling owner must emit {requirement} for "
                     f"{chunk.request_id!r} at position {chunk.position}; "
                     f"got {len(values)}"
                 )
-            record = values[0]
-            if isinstance(record, _PendingDeviceToken):
-                packet[index].copy_(record.sample.token_id)
-            elif isinstance(record, SampledToken):
-                if record.token_id < 0:
-                    raise RuntimeError(
-                        f"TP sampling owner emitted invalid token id {record.token_id} "
-                        f"for {chunk.request_id!r} at position {chunk.position}"
+            for token_offset, record in enumerate(values):
+                packet_index = offset + token_offset
+                if isinstance(record, _PendingDeviceToken):
+                    packet[packet_index].copy_(record.sample.token_id)
+                elif isinstance(record, SampledToken):
+                    if record.token_id < 0:
+                        raise RuntimeError(
+                            "TP sampling owner emitted invalid token id "
+                            f"{record.token_id} for {chunk.request_id!r} at "
+                            f"position {chunk.position + token_offset}"
+                        )
+                    packet[packet_index] = record.token_id
+                else:  # pragma: no cover - a malformed internal StepOutput
+                    raise TypeError(
+                        "TP sampling owner returned an unsupported token record "
+                        f"{type(record).__name__}"
                     )
-                packet[index] = record.token_id
-            else:  # pragma: no cover - a malformed internal StepOutput
-                raise TypeError(
-                    "TP sampling owner returned an unsupported token record "
-                    f"{type(record).__name__}"
-                )
         return packet
 
     def adopt_sampling_token_packet(
@@ -932,41 +1118,49 @@ class PagedModelRunner:
     ) -> None:
         """Adopt rank 0's device ids before this rank can execute another step."""
         chunks = tuple(scheduled)
+        layout = self._sampling_packet_layout(chunks, states)
+        expected_len = (
+            0
+            if not layout
+            else layout[-1][0] + max(1, layout[-1][1])
+        )
         if packet.dtype != torch.int64 or packet.ndim != 1:
             raise RuntimeError(
                 "TP sampling packet must be a one-dimensional int64 tensor; "
                 f"got dtype={packet.dtype}, shape={tuple(packet.shape)}"
             )
-        if packet.numel() != len(chunks):
+        if packet.numel() != expected_len:
             raise RuntimeError(
                 "TP sampling packet length does not match the scheduled layout: "
-                f"got {packet.numel()}, expected {len(chunks)}"
+                f"got {packet.numel()}, expected {expected_len}"
             )
         if packet.device != self._device:
             raise RuntimeError(
                 "TP sampling packet is on the wrong device: "
                 f"got {packet.device}, expected {self._device}"
             )
-        for index, chunk in enumerate(chunks):
-            state = states[chunk.request_id]
-            emits = self._chunk_emits_token(chunk, state)
-            if self._device.type == "cpu":
-                value = int(packet[index])
-                if emits and value < 0:
-                    raise RuntimeError(
-                        "TP sampling packet is missing the authoritative token for "
-                        f"{chunk.request_id!r} at position {chunk.position}"
-                    )
-                if not emits and value != -1:
+        for chunk, (offset, count) in zip(chunks, layout, strict=True):
+            if count == 0:
+                if self._device.type == "cpu" and int(packet[offset]) != -1:
                     raise RuntimeError(
                         "TP sampling packet emitted an unexpected token for partial "
                         f"prefill {chunk.request_id!r} at position {chunk.position}"
                     )
-            if emits:
+                continue
+            for token_offset in range(count):
+                packet_index = offset + token_offset
+                if self._device.type == "cpu" and int(packet[packet_index]) < 0:
+                    raise RuntimeError(
+                        "TP sampling packet is missing the authoritative token for "
+                        f"{chunk.request_id!r} at position "
+                        f"{chunk.position + token_offset}"
+                    )
                 # Retain the packet-backed scalar itself: the next decode input
                 # consumes it D2D on the same stream, with no host scalar sync.
                 self._remember_device(
-                    chunk.request_id, chunk.position, packet[index]
+                    chunk.request_id,
+                    chunk.position + token_offset,
+                    packet[packet_index],
                 )
 
     def _reap_deferred_outputs(self) -> None:
@@ -1394,3 +1588,205 @@ class PagedModelRunner:
             if isinstance(token, SampledToken):
                 self._remember(chunk.request_id, chunk.position, token)
             sampled[chunk.request_id] = (token,)
+
+    def _verification_decode_rows(
+        self,
+        chunks: list[ScheduledChunk],
+        states: Mapping[str, object],
+    ) -> tuple[
+        list[ScheduledChunk],
+        list[int | torch.Tensor],
+        list[int],
+        list[list[int]],
+        list[int],
+        list[int],
+    ]:
+        """Flatten request-local target chains into decode-shaped rows.
+
+        For completion position ``p`` and draft ``d[0:m]`` the overlay state
+        exposes ``committed + draft``.  Rows therefore consume
+        ``[previous, d0, ..., d(m-1)]`` at positions ``p .. p+m``.  Every layer
+        writes all row KVs before paged attention; increasing ``seq_len`` masks
+        later draft slots from earlier rows, giving the same causal result as
+        m+1 sequential target calls.
+        """
+        row_chunks: list[ScheduledChunk] = []
+        tokens: list[int | torch.Tensor] = []
+        positions: list[int] = []
+        page_tables: list[list[int]] = []
+        seq_lens: list[int] = []
+        write_from: list[int] = []
+        writable_slots: dict[tuple[int, int], tuple[str, int]] = {}
+        for chunk in chunks:
+            if chunk.is_prefill or chunk.num_tokens < 2:
+                raise ValueError(
+                    "verification rows require a non-prefill chunk with "
+                    f"num_tokens >= 2, got {chunk!r}"
+                )
+            state = states[chunk.request_id]
+            for offset in range(chunk.num_tokens):
+                logical = ScheduledChunk(
+                    request_id=chunk.request_id,
+                    num_tokens=1,
+                    is_prefill=False,
+                    position=chunk.position + offset,
+                )
+                token, absolute, pages, cached = self._decode_inputs(
+                    logical, state
+                )
+                if absolute >= cached:
+                    page_index = absolute // self._pool.page_size
+                    if page_index >= len(pages):
+                        raise RuntimeError(
+                            f"verification request {chunk.request_id!r} has no "
+                            f"KV page for absolute position {absolute}"
+                        )
+                    slot = (
+                        pages[page_index],
+                        absolute % self._pool.page_size,
+                    )
+                    previous = writable_slots.get(slot)
+                    if previous is not None:
+                        raise RuntimeError(
+                            "verification rows would write the same physical "
+                            f"KV slot {slot}: {previous!r} and "
+                            f"{(chunk.request_id, logical.position)!r}"
+                        )
+                    writable_slots[slot] = (
+                        chunk.request_id,
+                        logical.position,
+                    )
+                row_chunks.append(logical)
+                tokens.append(token)
+                positions.append(absolute)
+                page_tables.append(pages)
+                seq_lens.append(absolute + 1)
+                write_from.append(cached)
+        return (
+            row_chunks,
+            tokens,
+            positions,
+            page_tables,
+            seq_lens,
+            write_from,
+        )
+
+    def _execute_verification_batch(
+        self,
+        chunks: list[ScheduledChunk],
+        states: Mapping[str, object],
+        sampled: dict | None,
+    ) -> None:
+        """Score every target position in one flattened model invocation."""
+        (
+            rows,
+            tokens,
+            positions,
+            page_tables,
+            seq_lens,
+            write_from,
+        ) = self._verification_decode_rows(chunks, states)
+        self._verification_requests_executed += len(chunks)
+        self._verification_positions_executed += len(rows)
+        self._verification_model_calls += 1
+        self._verification_batched_groups += 1
+
+        token_slots, position_slots = self._decode_input_slots(
+            tokens, positions
+        )
+        if self._graph is not None:
+            from kairyu.engine.core.step_executor import build_decode_batch
+
+            batch = build_decode_batch(
+                token_ids=token_slots,
+                positions=position_slots,
+                page_lists=page_tables,
+                seq_lens=seq_lens,
+                max_pages=max(len(table) for table in page_tables),
+                scratch_page=self._graph_scratch_page,
+                write_from=write_from,
+                device=self._device,
+            )
+            can_graph = getattr(self._graph, "can_execute_graph", None)
+            if callable(can_graph) and can_graph(batch):
+                self._verification_graph_groups += 1
+            logits = self._graph.execute_decode(batch)
+        elif self._tensor_decode_supported:
+            from kairyu.engine.core.step_executor import build_decode_batch
+
+            batch = build_decode_batch(
+                token_ids=token_slots,
+                positions=position_slots,
+                page_lists=page_tables,
+                seq_lens=seq_lens,
+                max_pages=max(len(table) for table in page_tables),
+                scratch_page=None,
+                write_from=write_from,
+                device=self._device,
+            )
+            hidden = self._eager_tensor_hidden(batch)
+            logits = self._model.logits(hidden) if sampled is not None else None
+        else:
+            hidden = self._model.forward_decode_batch(
+                token_slots,
+                position_slots,
+                self._pool,
+                page_tables,
+                seq_lens,
+                write_from,
+                position_values=positions,
+            )
+            logits = self._model.logits(hidden) if sampled is not None else None
+
+        if sampled is None:
+            return
+        assert logits is not None
+        records = self._sample_rows(rows, states, logits)
+        cursor = 0
+        for chunk in chunks:
+            end = cursor + chunk.num_tokens
+            values = records[cursor:end]
+            for offset, token in enumerate(values):
+                if isinstance(token, SampledToken):
+                    self._remember(
+                        chunk.request_id,
+                        chunk.position + offset,
+                        token,
+                    )
+            sampled[chunk.request_id] = tuple(values)
+            cursor = end
+        if cursor != len(records):  # pragma: no cover - internal shape guard
+            raise AssertionError("verification record regrouping left extra rows")
+
+    def _execute_verification_sequential(
+        self,
+        chunks: list[ScheduledChunk],
+        states: Mapping[str, object],
+        sampled: dict | None,
+    ) -> None:
+        """Matched-A/B rollback path reproducing the former position loop."""
+        positions = sum(chunk.num_tokens for chunk in chunks)
+        self._verification_requests_executed += len(chunks)
+        self._verification_positions_executed += positions
+        self._verification_model_calls += positions
+        self._verification_sequential_positions += positions
+        for chunk in chunks:
+            values: list[SampledToken | _PendingDeviceToken] = []
+            for offset in range(chunk.num_tokens):
+                logical = ScheduledChunk(
+                    request_id=chunk.request_id,
+                    num_tokens=1,
+                    is_prefill=False,
+                    position=chunk.position + offset,
+                )
+                one: dict[
+                    str,
+                    tuple[SampledToken | _PendingDeviceToken, ...],
+                ] | None = {} if sampled is not None else None
+                self._execute_decode(
+                    logical, states[chunk.request_id], one
+                )
+                if one is not None:
+                    values.extend(one[chunk.request_id])
+            if sampled is not None:
+                sampled[chunk.request_id] = tuple(values)

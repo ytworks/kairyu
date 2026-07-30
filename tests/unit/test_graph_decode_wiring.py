@@ -16,6 +16,21 @@ TINY = dict(
 PROMPTS = [list(range(9)), list(range(4, 15)), list(range(2, 11))]
 
 
+def test_speculative_graph_capacity_counts_flattened_target_rows():
+    from kairyu.engine.kairyu_backend import _graph_row_capacity
+
+    assert _graph_row_capacity(
+        8, 2048, speculative=False, speculative_tokens=4
+    ) == 8
+    assert _graph_row_capacity(
+        8, 2048, speculative=True, speculative_tokens=4
+    ) == 40
+    # The scheduler cannot emit more rows than the shared token budget.
+    assert _graph_row_capacity(
+        8, 24, speculative=True, speculative_tokens=4
+    ) == 24
+
+
 @pytest.fixture(scope="module")
 def llama_dir(tmp_path_factory):
     torch.manual_seed(71)
