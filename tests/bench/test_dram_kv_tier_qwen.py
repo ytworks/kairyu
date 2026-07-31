@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from bench import dram_kv_tier_qwen as gate
 from kairyu.engine.core.kv_tier_policy import (
@@ -133,7 +134,7 @@ def _runtime(tp_size: int) -> dict[str, object]:
         "engine_source_sha256": engine_source_sha256(),
         "page_size": gate.PAGE_SIZE,
         "kv_dtype": gate.DTYPE,
-        "tier_backend": "cuda-pinned-dram",
+        "tier_backend": gate.TIER_BACKEND,
         "recompute_path": "production-radix-model-prefill",
         "recompute_cache_disabled": True,
         "restore_path": gate.RESTORE_PATH,
@@ -227,6 +228,69 @@ def _cuda_span(elapsed_ns: int, stream_id: int) -> dict[str, object]:
     }
 
 
+def test_source_and_recompute_use_the_same_production_cold_prefill_chunks() -> None:
+    class Model:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[int], list[int], int, int]] = []
+
+        def forward_tokens(
+            self,
+            tokens,
+            positions,
+            _pool,
+            _page_ids,
+            *,
+            seq_len,
+            write_from,
+        ):
+            self.calls.append(
+                (tokens.tolist(), positions.tolist(), seq_len, write_from)
+            )
+            return torch.stack((tokens.float(), tokens.float() + 1), dim=1)
+
+        def logits(self, hidden):
+            return torch.tensor((hidden[0], hidden[1]))
+
+    class Comm:
+        @staticmethod
+        def tensor_broadcast(packet, src):
+            assert src == 0
+            return packet
+
+    pool = SimpleNamespace(k=torch.empty(1))
+    token_ids = (10, 11, 12, 13, 14)
+    expected_calls = [
+        ([10, 11], [0, 1], 2, 0),
+        ([12, 13], [2, 3], 4, 0),
+        ([14], [4], 5, 0),
+    ]
+    model = Model()
+
+    gate._source_prefix_forward(
+        model,
+        pool,
+        token_ids,
+        (0,),
+        prefix_tokens=5,
+        chunk_tokens=2,
+    )
+    assert model.calls == expected_calls
+
+    model.calls.clear()
+    output_token, _logits = gate._recompute_stage(
+        model,
+        pool,
+        Comm(),
+        rank=0,
+        token_ids=token_ids,
+        page_ids=(0,),
+        prefix_tokens=5,
+        chunk_tokens=2,
+    )
+    assert model.calls == expected_calls
+    assert output_token == 1
+
+
 def _rank_events(
     *,
     tp_size: int,
@@ -241,7 +305,7 @@ def _rank_events(
     elif phase == "restore":
         interval_names = ("restore_h2d", "next_token_model")
     else:
-        interval_names = ("recompute_prefill", "next_token_model")
+        interval_names = ("recompute_prefill",)
     ready_ns = min((wall_ns or 800_000) - 1, 700_000)
     result = []
     for rank in range(tp_size):

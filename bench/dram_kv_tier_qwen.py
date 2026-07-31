@@ -51,8 +51,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-SCHEMA_VERSION = "kairyu.g5.f4a.dram-kv-tier.v1"
-PROFILE_SCHEMA_VERSION = "kairyu.dram-kv-crossover.v1"
+SCHEMA_VERSION = "kairyu.g5.f4a.dram-kv-tier.v2"
+PROFILE_SCHEMA_VERSION = "kairyu.dram-kv-crossover.v2"
 MEASUREMENT_KIND = "real-qwen3-32b-dram-kv-tier-crossover"
 MODEL = "qwen3-32b"
 MODEL_REVISION = "9216db5781bf21249d130ec9da846c4624c16137"
@@ -75,6 +75,7 @@ SIGN_TEST_P_AT_MIN_WINS = 10 / 512
 ARMS = ("restore", "recompute")
 RESTORE_PATH = "production-radix-disttp-gloo"
 CONTROL_BACKEND = "gloo"
+TIER_BACKEND = "cuda-pinned-dram-fragment-major-torch-copy-v1"
 RAW_NAMES = {
     4: "dram-kv-tier-qwen3-32b-tp4-raw.jsonl",
     8: "dram-kv-tier-qwen3-32b-tp8-raw.jsonl",
@@ -220,6 +221,10 @@ def formal_config(tp_size: int) -> dict[str, object]:
         "primary_metric": (
             "rank0 controller empty-pages-to-next-token-ready wall_ns including "
             "checksum, Gloo control, H2D/recompute, Radix publication, and model/output"
+        ),
+        "recompute_baseline": (
+            "production cold prefill includes the final prompt token in its final "
+            "chunk and samples directly from that hidden state"
         ),
         "win_rule": {
             "median_paired_restore_over_recompute_lt": 1.0,
@@ -411,8 +416,8 @@ def _validate_runtime(value: object, tp_size: int) -> dict[str, object]:
     )
     _require(runtime.get("kv_dtype") == DTYPE, "runtime KV dtype differs")
     _require(
-        runtime.get("tier_backend") == "cuda-pinned-dram",
-        "runtime did not use the pinned-DRAM CUDA tier",
+        runtime.get("tier_backend") == TIER_BACKEND,
+        "runtime did not use the coalesced pinned-DRAM CUDA tier",
     )
     _require(
         runtime.get("recompute_path") == "production-radix-model-prefill"
@@ -1063,7 +1068,7 @@ def _validate_sample(
         intervals = ("restore_h2d", "next_token_model")
         transfer = True
     else:
-        intervals = ("recompute_prefill", "next_token_model")
+        intervals = ("recompute_prefill",)
         transfer = False
     events = _validate_rank_events(
         row.get("rank_events"),
@@ -1441,6 +1446,7 @@ def _runtime_identity(header: Mapping[str, object], tp_size: int) -> dict[str, o
         "engine_source_sha256": runtime["engine_source_sha256"],
         "tensor_parallel_size": tp_size,
         "attention_backend_identity": runtime["attention_backend_identity"],
+        "transfer_backend_identity": runtime["tier_backend"],
         "max_num_batched_tokens": runtime["max_num_batched_tokens"],
         "host_memory_placement_policy": runtime["host_memory_placement_policy"],
         "os_page_size": runtime["os_page_size"],
@@ -2228,6 +2234,24 @@ def _forward_token_range(
     return hidden
 
 
+def _sample_hidden(
+    model: object,
+    comm: object,
+    *,
+    rank: int,
+    hidden: object,
+) -> tuple[int, object | None]:
+    import torch
+
+    logits = model.logits(hidden[-1]) if rank == 0 else None
+    if rank == 0:
+        packet = torch.argmax(logits).reshape(1).to(dtype=torch.int64)
+    else:
+        packet = torch.empty((1,), dtype=torch.int64, device=hidden.device)
+    packet = comm.tensor_broadcast(packet, src=0)
+    return int(packet.cpu()[0]), logits
+
+
 def _next_token_stage(
     model: object,
     pool: object,
@@ -2257,13 +2281,32 @@ def _next_token_stage(
         seq_len=prefix_tokens,
         write_from=write_from,
     )
-    logits = model.logits(hidden[-1]) if rank == 0 else None
-    if rank == 0:
-        packet = torch.argmax(logits).reshape(1).to(dtype=torch.int64)
-    else:
-        packet = torch.empty((1,), dtype=torch.int64, device=pool.k.device)
-    packet = comm.tensor_broadcast(packet, src=0)
-    return int(packet.cpu()[0]), logits
+    return _sample_hidden(model, comm, rank=rank, hidden=hidden)
+
+
+def _recompute_stage(
+    model: object,
+    pool: object,
+    comm: object,
+    *,
+    rank: int,
+    token_ids: tuple[int, ...],
+    page_ids: tuple[int, ...],
+    prefix_tokens: int,
+    chunk_tokens: int,
+) -> tuple[int, object | None]:
+    hidden = _forward_token_range(
+        model,
+        pool,
+        token_ids,
+        page_ids,
+        start=0,
+        end=prefix_tokens,
+        chunk_tokens=chunk_tokens,
+        write_from=0,
+    )
+    _require(hidden is not None, "recompute prefill produced no hidden state")
+    return _sample_hidden(model, comm, rank=rank, hidden=hidden)
 
 
 def _source_prefix_forward(
@@ -2275,34 +2318,17 @@ def _source_prefix_forward(
     prefix_tokens: int,
     chunk_tokens: int,
 ) -> None:
-    import torch
-
-    _forward_token_range(
+    hidden = _forward_token_range(
         model,
         pool,
         token_ids,
         page_ids,
         start=0,
-        end=prefix_tokens - 1,
+        end=prefix_tokens,
         chunk_tokens=chunk_tokens,
         write_from=0,
     )
-    model.forward_tokens(
-        torch.tensor(
-            (token_ids[prefix_tokens - 1],),
-            dtype=torch.long,
-            device=pool.k.device,
-        ),
-        torch.tensor(
-            (prefix_tokens - 1,),
-            dtype=torch.long,
-            device=pool.k.device,
-        ),
-        pool,
-        list(page_ids),
-        seq_len=prefix_tokens,
-        write_from=0,
-    )
+    _require(hidden is not None, "source prefill produced no hidden state")
 
 
 def _aggregate_checksums(checksums: Sequence[str]) -> str:
@@ -2487,6 +2513,7 @@ def _startup_runtime(
     fingerprints: dict[str, str] = {}
     backend_names = set()
     backend_identities = set()
+    tier_backends = set()
     page_nbytes = set()
     for rank, startup in enumerate(startups):
         hardware = startup.get("hardware")
@@ -2507,6 +2534,12 @@ def _startup_runtime(
         )
         backend_names.add(backend_name)
         backend_identities.add(backend_identity)
+        tier_backend = startup.get("tier_backend")
+        _require(
+            tier_backend == TIER_BACKEND,
+            f"rank {rank} did not select the required coalesced tier backend",
+        )
+        tier_backends.add(tier_backend)
         page_nbytes.add(startup.get("page_nbytes"))
     for hardware in hardware_rows:
         node = hardware.get("gpu_numa_node")
@@ -2517,6 +2550,10 @@ def _startup_runtime(
     _require(
         len(backend_identities) == 1,
         "TP ranks selected different attention backend identities",
+    )
+    _require(
+        tier_backends == {TIER_BACKEND},
+        "TP ranks selected different DRAM transfer runtimes",
     )
     _require(len(page_nbytes) == 1, "TP ranks disagree on KV page bytes")
     transport_cohorts = {
@@ -2551,7 +2588,7 @@ def _startup_runtime(
         "engine_source_sha256": engine_source_sha256(),
         "page_size": PAGE_SIZE,
         "kv_dtype": DTYPE,
-        "tier_backend": "cuda-pinned-dram",
+        "tier_backend": str(next(iter(tier_backends))),
         "recompute_path": "production-radix-model-prefill",
         "recompute_cache_disabled": True,
         "restore_path": RESTORE_PATH,
@@ -2905,6 +2942,11 @@ def _live_rank_entry(rank: int, options: _LiveRankOptions) -> None:  # pragma: n
             capacity_pages=LIVE_TIER_CAPACITY_PAGES,
         )
         _require(tier.host_is_pinned and audit_tier.host_is_pinned, "tier slabs are not pinned")
+        _require(
+            tier.transfer_backend == TIER_BACKEND
+            and audit_tier.transfer_backend == TIER_BACKEND,
+            "formal F4a run requires one versioned coalesced CUDA transfer backend",
+        )
         hardware = _hardware_from_tier(rank, tier)
         local_tier_runner = SimpleNamespace(dram_kv_tier=tier)
         coordinator = (
@@ -2917,6 +2959,7 @@ def _live_rank_entry(rank: int, options: _LiveRankOptions) -> None:  # pragma: n
             "hardware": hardware,
             "pool_fingerprint": tier.fingerprint_digest,
             "page_nbytes": tier.page_nbytes,
+            "tier_backend": tier.transfer_backend,
             "attention_backend": type(attention_backend).__name__,
             "attention_backend_identity": attention_identity,
         }
@@ -3119,23 +3162,9 @@ def _live_rank_entry(rank: int, options: _LiveRankOptions) -> None:  # pragma: n
                             allocation = None
                             recompute_cache_hits = 0
                         control_operations = ()
-                        (_prefill_result, prefill_span) = _model_interval(
+                        (output_result, prefill_span) = _model_interval(
                             partial(
-                                _forward_token_range,
-                                model,
-                                pool,
-                                options.token_ids,
-                                destination_pages,
-                                start=0,
-                                end=prefix_tokens - 1,
-                                chunk_tokens=options.max_num_batched_tokens,
-                                write_from=0,
-                            ),
-                            stream=current,
-                        )
-                        (output_result, model_span) = _model_interval(
-                            partial(
-                                _next_token_stage,
+                                _recompute_stage,
                                 model,
                                 pool,
                                 comm,
@@ -3143,14 +3172,11 @@ def _live_rank_entry(rank: int, options: _LiveRankOptions) -> None:  # pragma: n
                                 token_ids=options.token_ids,
                                 page_ids=destination_pages,
                                 prefix_tokens=prefix_tokens,
-                                write_from=0,
+                                chunk_tokens=options.max_num_batched_tokens,
                             ),
                             stream=current,
                         )
-                        interval_rows = (
-                            {"name": "recompute_prefill", **prefill_span},
-                            {"name": "next_token_model", **model_span},
-                        )
+                        interval_rows = ({"name": "recompute_prefill", **prefill_span},)
                         if rank == 0:
                             cache.mark_computed(allocation)
                             destination_published_pages = len(

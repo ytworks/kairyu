@@ -256,6 +256,14 @@ empty destination pages through one next-token result; pure CUDA D2H/H2D
 intervals remain diagnostic evidence rather than replacing the production
 boundary.
 
+Restore validates the logical page checksums, transfers KV, replays the final
+prompt-token query, and samples. Cold recompute processes the complete prompt
+through its natural production chunks, including the final prompt token, then
+samples that hidden state without an extra one-token model invocation. Schema
+v2 binds every raw shard and runtime profile to the exact versioned
+fragment-major CUDA transfer backend. Schema-v1 raw cannot be mixed into,
+relabelled as, or used to seed a v2 profile.
+
 Run TP4 and TP8 in separate, non-overlapping containers from the same clean
 commit, immutable image, and checkpoint, then seal and verify the artifact:
 

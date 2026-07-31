@@ -25,7 +25,7 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 if TYPE_CHECKING:
     from kairyu.engine.core.kv_tier import PinnedKVPageTier
 
-SCHEMA_VERSION = "kairyu.dram-kv-crossover.v1"
+SCHEMA_VERSION = "kairyu.dram-kv-crossover.v2"
 PAIRED_REPEATS_PER_LENGTH = 9
 REQUIRED_RESTORE_WINS = 8
 POLICY_RULE = "median_lt_1_and_wins_at_least_8_of_9"
@@ -179,6 +179,7 @@ class DramKVRuntimeIdentity:
     engine_source_sha256: str
     tensor_parallel_size: int
     attention_backend_identity: str
+    transfer_backend_identity: str
     max_num_batched_tokens: int
     host_memory_placement_policy: str
     os_page_size: int
@@ -238,6 +239,9 @@ class DramKVRuntimeIdentity:
         if type(max_num_batched_tokens) is not int or max_num_batched_tokens < 1:
             raise ValueError("max_num_batched_tokens must be a positive integer")
         device = pool.k.device
+        from kairyu.engine.core.kv_tier import resolve_transfer_backend_identity
+
+        transfer_backend_identity = resolve_transfer_backend_identity(device)
         if device.type == "cuda":
             from kairyu.engine.core.numa import GPU_LOCAL_FIRST_TOUCH_POLICY
 
@@ -285,6 +289,7 @@ class DramKVRuntimeIdentity:
             engine_source_sha256=engine_source_sha256(),
             tensor_parallel_size=tensor_parallel_size,
             attention_backend_identity=attention_backend_identity,
+            transfer_backend_identity=transfer_backend_identity,
             max_num_batched_tokens=max_num_batched_tokens,
             host_memory_placement_policy=host_memory_placement_policy,
             os_page_size=os.sysconf("SC_PAGE_SIZE"),
@@ -365,6 +370,7 @@ class DramKVRuntimeIdentity:
             raise ValueError("runtime v_head_dim must be a non-negative integer")
         for name in (
             "attention_backend_identity",
+            "transfer_backend_identity",
             "host_memory_placement_policy",
             "cpu_model",
             "python_version",
@@ -388,10 +394,15 @@ class DramKVRuntimeIdentity:
             identity.local_numa_gpu_count,
         )
         if identity.device_type == "cuda":
+            from kairyu.engine.core.kv_tier import (
+                CUDA_CONTIGUOUS_BACKEND,
+            )
             from kairyu.engine.core.numa import GPU_LOCAL_FIRST_TOUCH_POLICY
 
             if identity.host_memory_placement_policy != GPU_LOCAL_FIRST_TOUCH_POLICY:
                 raise ValueError("runtime CUDA host-memory placement policy is invalid")
+            if identity.transfer_backend_identity != CUDA_CONTIGUOUS_BACKEND:
+                raise ValueError("runtime CUDA transfer backend identity is invalid")
             if (
                 not isinstance(identity.pcie_max_link_speed, str)
                 or not identity.pcie_max_link_speed
@@ -400,6 +411,7 @@ class DramKVRuntimeIdentity:
                 raise ValueError("runtime CUDA PCIe transport identity is invalid")
         elif (
             identity.host_memory_placement_policy != "not-applicable"
+            or identity.transfer_backend_identity != "torch-cpu-page-copy-v1"
             or identity.pcie_max_link_speed is not None
             or any(value is not None for value in transport_values)
         ):
@@ -499,7 +511,9 @@ def _derive_crossover(
             or type(recompute_ns) is not int
             or recompute_ns <= 0
         ):
-            raise ValueError("sample CUDA durations must be positive integer nanoseconds")
+            raise ValueError(
+                "sample controller wall durations must be positive integer nanoseconds"
+            )
         if (
             not _valid_digest(row["restore_sha256"])
             or row["restore_sha256"] != row["recompute_sha256"]
@@ -679,6 +693,13 @@ def build_dram_kv_tier(
         tp_rank=tensor_parallel_rank,
         capacity_pages=capacity_pages,
     )
+    if (
+        tier.transfer_backend != identity.transfer_backend_identity
+    ):
+        raise RuntimeError(
+            "DRAM KV transfer backend changed between profile validation and "
+            "tier construction"
+        )
     return DramKVTierBinding(tier=tier, policy=policy)
 
 

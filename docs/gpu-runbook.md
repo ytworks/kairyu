@@ -753,6 +753,23 @@ image, and drill are unchanged.
   substitute a dirty bind mount, or invent a crossover when the retained
   samples have no stable passing suffix.
 
+  The completed schema-v1 FlashInfer TP4/TP8 collection passed correctness and
+  provenance checks but produced no stable restore-winning suffix. Subsequent
+  review found that its cold-recompute arm split the final prompt token into an
+  additional model invocation, biasing the comparison toward restore. The v1
+  raw is diagnostic only: it cannot seed runtime policy, be replayed as v2, or
+  supply any sample to this run.
+
+  Fresh raw and profiles use schema v2. Every rank must report the exact
+  `cuda-pinned-dram-fragment-major-torch-copy-v1` backend: one NUMA-attested
+  pinned owner viewed as `[fragment, slot, bytes]`, with one copy submission
+  per fragment and jointly contiguous extent. The raw, profile, and runtime
+  policy bind that versioned backend identity and fail closed on an old or
+  different implementation. Restore includes checksum validation, H2D, the
+  final prompt-token query, and sampling. Cold recompute uses production
+  prompt chunks through the final prompt token and samples its hidden state
+  directly, without an additional one-token model call.
+
   The model volume contains a `qwen3-32b` subdirectory, so mount that exact
   volume subpath. Run as the host UID/GID, leave Docker's default hostname in
   place so it remains the container-ID prefix, and give the container only a
@@ -932,7 +949,9 @@ image, and drill are unchanged.
   `bench/results/g5-f4a-dram-kv-tier-qwen3-32b-<gpu>-<date>/` and update F4a.
   After that retained copy independently verifies, the two named measurement
   containers may be removed explicitly. Never use a broad Docker prune as
-  part of this procedure.
+  part of this procedure. Build and collect only after focused, unit, and real
+  GPU validation is green and the complete implementation is committed; the
+  detached source clone must resolve to that exact commit.
 
 - 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
   one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current

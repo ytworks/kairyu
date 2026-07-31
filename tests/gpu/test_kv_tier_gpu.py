@@ -9,7 +9,12 @@ import pytest
 import torch
 
 from kairyu.engine.core.kv_pool import PagedKVPool
-from kairyu.engine.core.kv_tier import DRAMKVTier, KVPageStateError, PageState
+from kairyu.engine.core.kv_tier import (
+    CUDA_CONTIGUOUS_BACKEND,
+    DRAMKVTier,
+    KVPageStateError,
+    PageState,
+)
 from kairyu.engine.core.numa import GPU_LOCAL_FIRST_TOUCH_POLICY
 
 pytestmark = pytest.mark.gpu
@@ -93,3 +98,40 @@ def test_cuda_d2h_h2d_uses_pinned_slab_and_physical_completion_events() -> None:
     assert tier.state(key) is None
     assert torch.equal(pool.k[:, 1], expected_k)
     assert torch.equal(pool.v[:, 1], expected_v)
+
+
+def test_cuda_multipage_transfer_coalesces_each_fragment_into_one_copy() -> None:
+    pool = PagedKVPool(
+        num_layers=3,
+        num_pages=8,
+        page_size=16,
+        num_kv_heads=2,
+        head_dim=32,
+        dtype=torch.float16,
+        device="cuda:0",
+    )
+    torch.manual_seed(187_2)
+    pool.k[:, :4].normal_()
+    pool.v[:, :4].normal_()
+    expected_k = pool.k[:, :4].clone()
+    expected_v = pool.v[:, :4].clone()
+    tier = DRAMKVTier(
+        pool,
+        model_id="gpu-test/coalesced@0123456789abcdef",
+        tp_size=1,
+        tp_rank=0,
+        capacity_pages=4,
+    )
+    assert tier.transfer_backend == CUDA_CONTIGUOUS_BACKEND
+    keys = tuple(_key(f"coalesced-{index}") for index in range(4))
+
+    assert tier.offload(keys, (0, 1, 2, 3))
+    fragments_per_page = pool.num_layers * 2
+    assert tier.backend.last_fragment_copy_count == fragments_per_page
+
+    pool.k[:, 4:8].zero_()
+    pool.v[:, 4:8].zero_()
+    assert tier.restore(keys, (4, 5, 6, 7))
+    assert tier.backend.last_fragment_copy_count == fragments_per_page
+    assert torch.equal(pool.k[:, 4:8], expected_k)
+    assert torch.equal(pool.v[:, 4:8], expected_v)

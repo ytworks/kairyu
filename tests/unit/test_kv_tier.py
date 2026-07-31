@@ -13,6 +13,7 @@ import kairyu.engine.core.kv_tier as kv_tier_module
 from kairyu.engine.core import numa as numa_module
 from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.engine.core.kv_tier import (
+    FRAGMENT_MAJOR_HOST_LAYOUT,
     DRAMKVTier,
     KVPageCapacityError,
     KVPageChecksumError,
@@ -136,6 +137,85 @@ class _ManualBackend:
         completion = _ManualCompletion(work)
         self.completions.append(completion)
         return completion
+
+
+class _PartialFragmentBackend(TorchPageTransferBackend):
+    """CPU fault injector for the production fragment-plane dispatch seam."""
+
+    def __init__(self) -> None:
+        super().__init__("cpu")
+        self.host_layout = FRAGMENT_MAJOR_HOST_LAYOUT
+        self.fail_offload = False
+        self.fail_restore = False
+
+    def _copy_first_run(
+        self,
+        host_planes,
+        device_planes,
+        host_slots,
+        device_page_ids,
+        *,
+        restore: bool,
+    ) -> None:
+        runs = self._validated_fragment_planes(
+            host_planes,
+            device_planes,
+            host_slots,
+            device_page_ids,
+        )
+        self._copy_fragment_planes(
+            host_planes[:1],
+            device_planes[:1],
+            runs[:1],
+            restore=restore,
+            non_blocking=False,
+        )
+
+    def begin_offload_fragments(
+        self,
+        sources,
+        source_page_ids,
+        destinations,
+        destination_slots,
+    ):
+        if self.fail_offload:
+            self._copy_first_run(
+                destinations,
+                sources,
+                destination_slots,
+                source_page_ids,
+                restore=False,
+            )
+            raise RuntimeError("partial fragment offload submission")
+        return super().begin_offload_fragments(
+            sources,
+            source_page_ids,
+            destinations,
+            destination_slots,
+        )
+
+    def begin_restore_fragments(
+        self,
+        sources,
+        source_slots,
+        destinations,
+        destination_page_ids,
+    ):
+        if self.fail_restore:
+            self._copy_first_run(
+                sources,
+                destinations,
+                source_slots,
+                destination_page_ids,
+                restore=True,
+            )
+            raise RuntimeError("partial fragment restore submission")
+        return super().begin_restore_fragments(
+            sources,
+            source_slots,
+            destinations,
+            destination_page_ids,
+        )
 
 
 def _tier(
@@ -341,6 +421,148 @@ def test_fingerprint_binds_model_layout_tp_rank_dtype_and_page_size() -> None:
     assert mismatch.value.source_reusable
     assert mismatch.value.destination_reusable
     assert not mismatch.value.destination_publishable
+
+
+def test_fragment_plane_copy_groups_only_jointly_contiguous_index_runs() -> None:
+    contiguous = TorchPageTransferBackend._jointly_contiguous_runs(
+        (0, 1, 2, 3),
+        (4, 5, 6, 7),
+    )
+    fragmented_host = TorchPageTransferBackend._jointly_contiguous_runs(
+        (0, 1, 3, 4),
+        (4, 5, 6, 7),
+    )
+    fragmented_device = TorchPageTransferBackend._jointly_contiguous_runs(
+        (0, 1, 2, 3),
+        (4, 5, 7, 8),
+    )
+
+    assert contiguous == ((0, 4, 4),)
+    assert fragmented_host == ((0, 4, 2), (3, 6, 2))
+    assert fragmented_device == ((0, 4, 2), (2, 7, 2))
+
+
+def test_fragment_major_checksum_preserves_the_logical_page_byte_abi() -> None:
+    pool = _pool(num_pages=2)
+    _fill(pool, 0, 3)
+    _fill(pool, 1, 7)
+    page_nbytes = kv_tier_module.KVPageFingerprint.from_pool(
+        pool,
+        model_id="checksum-layout",
+        tp_size=1,
+        tp_rank=0,
+    ).page_nbytes
+    storage = torch.empty((2, page_nbytes), dtype=torch.uint8)
+    planes = kv_tier_module._fragment_major_planes(storage, pool)
+    expected = []
+    for slot in range(2):
+        source = kv_tier_module._page_fragments(pool, slot)
+        destination = kv_tier_module._fragment_major_page(planes, slot)
+        TorchPageTransferBackend._copy_matching_fragments(
+            source,
+            destination,
+            non_blocking=False,
+        )
+        packed = torch.empty(page_nbytes, dtype=torch.uint8)
+        TorchPageTransferBackend._copy_offload_page(
+            source,
+            packed,
+            non_blocking=False,
+        )
+        expected.append(kv_tier_module._checksum(packed))
+        assert kv_tier_module._checksum(destination) == expected[-1]
+
+    assert kv_tier_module._fragment_major_checksums(
+        storage,
+        planes,
+        (0, 1),
+        page_nbytes=page_nbytes,
+    ) == tuple(expected)
+    planes[0][0, 0] ^= 1
+    corrupted = kv_tier_module._fragment_major_checksums(
+        storage,
+        planes,
+        (0, 1),
+        page_nbytes=page_nbytes,
+    )
+    assert corrupted[0] != expected[0]
+    assert corrupted[1] == expected[1]
+
+
+@pytest.mark.parametrize(
+    "slots",
+    [
+        (0, 1, 2, 3),
+        (0, 2, 3),
+        (3, 1, 0),
+    ],
+)
+def test_equal_fragment_batched_checksums_preserve_legacy_page_abi(
+    slots: tuple[int, ...],
+) -> None:
+    pool = PagedKVPool(
+        num_layers=3,
+        num_pages=4,
+        page_size=2,
+        num_kv_heads=1,
+        head_dim=4,
+        v_head_dim=4,
+        dtype=torch.float32,
+    )
+    for page_id in range(4):
+        _fill(pool, page_id, page_id + 1)
+    page_nbytes = kv_tier_module.KVPageFingerprint.from_pool(
+        pool,
+        model_id="equal-fragment-checksum-layout",
+        tp_size=1,
+        tp_rank=0,
+    ).page_nbytes
+    storage = torch.empty((4, page_nbytes), dtype=torch.uint8)
+    planes = kv_tier_module._fragment_major_planes(storage, pool)
+    expected_by_slot: list[str] = []
+    for slot in range(4):
+        source = kv_tier_module._page_fragments(pool, slot)
+        TorchPageTransferBackend._copy_matching_fragments(
+            source,
+            kv_tier_module._fragment_major_page(planes, slot),
+            non_blocking=False,
+        )
+        legacy_page = torch.empty(page_nbytes, dtype=torch.uint8)
+        TorchPageTransferBackend._copy_offload_page(
+            source,
+            legacy_page,
+            non_blocking=False,
+        )
+        expected_by_slot.append(kv_tier_module._checksum(legacy_page))
+
+    assert kv_tier_module._fragment_major_checksums(
+        storage,
+        planes,
+        slots,
+        page_nbytes=page_nbytes,
+    ) == tuple(expected_by_slot[slot] for slot in slots)
+
+
+def test_released_host_slots_are_reassigned_in_ascending_contiguous_order() -> None:
+    pool = _pool(num_pages=8)
+    for page_id in range(4):
+        _fill(pool, page_id, page_id + 1)
+    backend = _ManualBackend()
+    tier = _tier(pool, capacity=4, backend=backend)
+    keys = tuple(_key(f"slot-{index}") for index in range(4))
+
+    offload = tier.begin_offload(keys, (0, 1, 2, 3))
+    backend.completions[-1].complete()
+    assert offload.finalize()
+    restore = tier.begin_restore(keys, (4, 5, 6, 7))
+    backend.completions[-1].complete()
+    assert restore.finalize()
+
+    next_keys = tuple(_key(f"slot-next-{index}") for index in range(4))
+    next_offload = tier.begin_offload(next_keys, (0, 1, 2, 3))
+    assert [entry.slot for entry in next_offload._entries] == [0, 1, 2, 3]
+    backend.completions[-1].complete()
+    assert next_offload.finalize()
 
 
 def test_async_state_machine_never_publishes_or_reuses_before_finalize() -> None:
@@ -756,6 +978,49 @@ def test_transfer_faults_fail_closed_with_explicit_ownership(failure_site: str) 
     assert not retained.value.source_reusable
     assert retained.value.destination_reusable
     assert backend.submission_count == submissions
+
+
+@pytest.mark.parametrize("direction", ["offload", "restore"])
+def test_fragment_plane_partial_submission_fault_quarantines_ownership(
+    direction: str,
+) -> None:
+    pool = _pool(num_pages=3)
+    _fill(pool, 0, 5)
+    backend = _PartialFragmentBackend()
+    tier = _tier(pool, capacity=1, backend=backend)
+    key = _key(f"fragment-partial-{direction}")
+
+    if direction == "offload":
+        assert tier._host_fragment_planes is not None
+        tier._host_pages.zero_()
+        expected_fragment = pool.k[0, 0].detach().view(torch.uint8).reshape(-1).clone()
+        backend.fail_offload = True
+        retained_page = 0
+        with pytest.raises(KVPageTransferError) as failed:
+            tier.begin_offload((key,), (retained_page,))
+        assert torch.equal(tier._host_fragment_planes[0][0], expected_fragment)
+    else:
+        assert tier.offload((key,), (0,))
+        pool.k[:, 1].zero_()
+        pool.v[:, 1].zero_()
+        backend.fail_restore = True
+        retained_page = 1
+        with pytest.raises(KVPageTransferError) as failed:
+            tier.begin_restore((key,), (retained_page,))
+        assert torch.equal(pool.k[0, 1], pool.k[0, 0])
+
+    assert not failed.value.source_reusable
+    assert not failed.value.destination_reusable
+    assert not failed.value.destination_publishable
+    assert tier.quarantined_pages == 1
+    assert tier.quarantined_keys == (key,)
+    assert tier.quarantined_device_pages == (retained_page,)
+    assert tier.free_pages == 0
+    with pytest.raises(KVPageStateError):
+        tier.begin_offload(
+            (_key(f"fragment-partial-reuse-{direction}"),),
+            (retained_page,),
+        )
 
 
 def test_known_complete_finalization_failure_releases_device_page(

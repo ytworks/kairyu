@@ -249,7 +249,7 @@ and production-router SHA-256
 
 | Gate | Target | Where proven |
 |---|---|---|
-| F4a | DRAM offload: restore-from-DRAM beats recompute above a measured prefix-length crossover; the crossover is published, not assumed | **Open** — native tier and formal operator ready; separate Qwen3-32B TP4/TP8 measurements pending |
+| F4a | DRAM offload: restore-from-DRAM beats recompute above a measured prefix-length crossover; the crossover is published, not assumed | **Open** — schema-v2 native tier and formal operator ready; fresh Qwen3-32B TP4/TP8 measurements pending |
 | F4b | Agentic multi-turn trace with tiering on: fleet prefix-hit-rate gain reported; TPOT p99 unregressed (offload work stays off the decode critical path) | GPU bench |
 | F4c | Global-pool decision doc: F2's telemetry quantifies cross-replica duplicate-prefix mass; buy (Mooncake/LMCache) vs build (KVTransport extension) decided with data — m7 D6's revisit trigger honored | decision doc |
 
@@ -260,11 +260,15 @@ page integrity identities, a dedicated CUDA copy stream with completion
 events, and an auxiliary Gloo group for unanimous all-rank offload/restore
 ownership. Unknown physical completion quarantines host slots and HBM pages
 instead of publishing or recycling them. The measured profile is bound to the
-complete runtime/model/hardware identity; startup also requires the configured
-capacity to hold at least the measured crossover. P-D separation is not
-supported in this first tier. The formal operator is ready, but no crossover
-has yet been published: F4a remains open until its same-image, non-overlapping
-TP4 and TP8 Qwen3-32B artifacts pass assembly and independent replay.
+complete runtime/model/hardware and versioned transfer-backend identity;
+startup also requires the configured capacity to hold at least the measured
+crossover. P-D separation is not supported in this first tier. The completed
+schema-v1 FlashInfer collection is diagnostic only: it had no stable passing
+suffix and its recompute arm included an extra final-token model invocation.
+The schema-v2 operator uses production cold-prefill semantics, but no
+crossover has yet been published: F4a remains open until its fresh same-image,
+non-overlapping TP4 and TP8 Qwen3-32B artifacts pass assembly and independent
+replay.
 
 F4c is closed by the 2026-07-31 m7 D6 amendment and the independently
 replayable artifact at

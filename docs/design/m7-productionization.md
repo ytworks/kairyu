@@ -168,6 +168,15 @@ attesting every mapped page through Linux sysfs/procfs. The caller's affinity
 is restored on exit; host checksums use the same scoped rank-local affinity.
 CPU-only construction keeps its existing non-NUMA path.
 
+The CUDA backend retains that one attested allocation but interprets its
+physical views as `[fragment, slot, bytes]`, where each K/V layer fragment has
+the same page-indexed order as `PagedKVPool`. It caches the host and device
+plane owners once and submits one non-blocking Torch copy per fragment and
+jointly contiguous host/device extent. This removes per-page Python view
+construction from the transfer boundary. The logical per-page byte order,
+SHA-256 checksum, fingerprint, and ownership protocol do not change; CPU and
+injected compatibility backends retain the flat `[slot, page-bytes]` seam.
+
 Radix eviction snapshots only computed, page-aligned prefixes. The DRAM object
 key is the full SHA-256 prefix-chain digest rather than the compact 64-bit
 routing/display hash. Every host page also carries a full SHA-256 checksum and
@@ -196,17 +205,31 @@ profile independently re-derives the first stable measured restore-winning
 suffix from nine paired repeats per prefix length, then must match the exact
 runtime identity: model config, complete installed Kairyu Python-source
 rollup, actual attention execution composition, batching limit, CPU/NUMA/PCIe
-cohort, GPU/Torch/CUDA identity, KV layout, and TP degree. Startup rejects a
-stale profile, a TP-rank identity disagreement, or capacity smaller than
+cohort, GPU/Torch/CUDA identity, KV layout, TP degree, and exact versioned
+transfer-backend/host-layout identity. Startup rejects a stale profile, a
+TP-rank identity disagreement, or capacity smaller than
 `ceil(min_restore_tokens / page_size)`. P-D separation is deliberately not
 supported by this first local tier and rejects the option at configuration
 time; it does not change the P-D `KVTransport` ownership contract.
 
-The implementation and fail-closed Qwen3-32B operator are ready. F4a remains
-open until separate, non-overlapping TP4 and TP8 runs from the same clean
-commit and immutable image produce retained raw evidence, identity-bound
-profiles, and a passing independent replay. No crossover value is asserted by
-this amendment before that measurement.
+Both benchmark arms start with empty destination pages and end with one
+next-token result. Restore validates and transfers the cached KV, then replays
+the final prompt-token query because restored KV alone contains no logits.
+Cold recompute processes the complete prompt, including its final token in the
+natural final production chunk, and samples directly from that hidden state;
+it does not execute an additional one-token model forward.
+
+A completed schema-v1 FlashInfer TP4/TP8 collection passed its correctness and
+provenance checks but produced no stable restore-winning suffix. Audit then
+found that v1 cold recompute split the final prompt token into an additional
+model invocation, biasing the comparison toward restore. That collection is
+diagnostic only: it cannot seed policy and cannot be relabelled as schema v2.
+
+The schema-v2 implementation and fail-closed Qwen3-32B operator are ready for
+fresh evidence. F4a remains open until separate, non-overlapping TP4 and TP8
+runs from the same clean commit and immutable image produce retained raw
+evidence, identity-bound profiles, and a passing independent replay. No
+crossover value is asserted by this amendment before that measurement.
 
 #### D6 amendment (2026-07-31) — F4c global KV pool remains deferred
 

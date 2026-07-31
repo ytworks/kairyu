@@ -210,6 +210,19 @@ def test_profile_is_rejected_after_runtime_identity_drift(tmp_path) -> None:
         )
 
 
+def test_profile_is_rejected_after_transfer_backend_identity_drift(tmp_path) -> None:
+    identity = _identity()
+    changed = dataclasses.replace(
+        identity,
+        transfer_backend_identity="different-transfer-backend",
+    )
+    with pytest.raises(ValueError, match="does not match the current"):
+        load_crossover_policy(
+            _write_profile(tmp_path, _profile(identity)),
+            expected_identity=changed,
+        )
+
+
 @pytest.mark.parametrize(
     "changed",
     [

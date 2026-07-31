@@ -31,6 +31,9 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 
 _FULL_SHA256 = re.compile(r"[0-9a-f]{64}")
 _LAYOUT = "layer-major:[layer,page,token,kv-head,head-dim];fragments:k,v-per-layer"
+FRAGMENT_MAJOR_HOST_LAYOUT = "fragment-major:[fragment,slot,bytes]-v1"
+CUDA_CONTIGUOUS_BACKEND = "cuda-pinned-dram-fragment-major-torch-copy-v1"
+_CHECKSUM_BATCH_PAGES = 32
 
 
 class PageState(StrEnum):
@@ -234,6 +237,15 @@ class TorchPageTransferBackend:
         self._stream = (
             torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
         )
+        self.transfer_backend = (
+            CUDA_CONTIGUOUS_BACKEND
+            if self.device.type == "cuda"
+            else "torch-cpu-page-copy-v1"
+        )
+        self.host_layout = (
+            FRAGMENT_MAJOR_HOST_LAYOUT if self.device.type == "cuda" else None
+        )
+        self.last_fragment_copy_count = 0
 
     def allocate_host_pages(self, capacity_pages: int, page_nbytes: int) -> torch.Tensor:
         return torch.empty(
@@ -288,6 +300,151 @@ class TorchPageTransferBackend:
                 f"destination fragments contain {offset} bytes, host page has "
                 f"{source.numel()}"
             )
+
+    @staticmethod
+    def _jointly_contiguous_runs(
+        host_slots: tuple[int, ...],
+        device_page_ids: tuple[int, ...],
+    ) -> tuple[tuple[int, int, int], ...]:
+        """Return ``(host slot, device page, count)`` for matching extents."""
+
+        if not host_slots or len(host_slots) != len(device_page_ids):
+            raise ValueError("host/device KV index batches must be non-empty and equal")
+        starts = [0]
+        for index in range(1, len(host_slots)):
+            if (
+                host_slots[index] != host_slots[index - 1] + 1
+                or device_page_ids[index] != device_page_ids[index - 1] + 1
+            ):
+                starts.append(index)
+        return tuple(
+            (
+                host_slots[start],
+                device_page_ids[start],
+                end - start,
+            )
+            for start, end in zip(
+                starts,
+                (*starts[1:], len(host_slots)),
+                strict=True,
+            )
+        )
+
+    @classmethod
+    def _copy_matching_fragments(
+        cls,
+        source: tuple[torch.Tensor, ...],
+        destination: tuple[torch.Tensor, ...],
+        *,
+        non_blocking: bool,
+    ) -> None:
+        if len(source) != len(destination):
+            raise ValueError("host/device KV fragment counts differ")
+        for source_fragment, destination_fragment in zip(
+            source,
+            destination,
+            strict=True,
+        ):
+            raw_source = cls._validate_fragment(source_fragment)
+            raw_destination = cls._validate_fragment(destination_fragment)
+            if raw_source.numel() != raw_destination.numel():
+                raise ValueError("host/device KV fragment byte sizes differ")
+            raw_destination.copy_(raw_source, non_blocking=non_blocking)
+
+    def _validated_fragment_planes(
+        self,
+        host_planes: tuple[torch.Tensor, ...],
+        device_planes: tuple[torch.Tensor, ...],
+        host_slots: tuple[int, ...],
+        device_page_ids: tuple[int, ...],
+    ) -> tuple[tuple[int, int, int], ...]:
+        """Validate plane owners once, without constructing views per page."""
+
+        if not host_planes or len(host_planes) != len(device_planes):
+            raise ValueError("host/device KV fragment planes must be non-empty and equal")
+        runs = self._jointly_contiguous_runs(host_slots, device_page_ids)
+        if any(
+            plane.ndim != 2
+            or plane.device.type != "cpu"
+            or plane.dtype != torch.uint8
+            or not plane.is_contiguous()
+            or (self.device.type == "cuda" and not plane.is_pinned())
+            for plane in host_planes
+        ):
+            raise ValueError(
+                "fragment-major transfer requires contiguous CPU uint8 host planes"
+            )
+        if any(
+            plane.ndim < 2
+            or plane.device != self.device
+            or not plane.is_contiguous()
+            for plane in device_planes
+        ):
+            raise ValueError(
+                "fragment-major transfer requires contiguous device planes on "
+                f"{self.device}"
+            )
+        host_capacity = host_planes[0].shape[0]
+        device_capacity = device_planes[0].shape[0]
+        if any(plane.shape[0] != host_capacity for plane in host_planes):
+            raise ValueError("host KV fragment planes have different slot capacities")
+        if any(plane.shape[0] != device_capacity for plane in device_planes):
+            raise ValueError("device KV fragment planes have different page capacities")
+        fragment_sizes = tuple(
+            plane[0].numel() * plane.element_size() for plane in device_planes
+        )
+        if any(
+            plane.shape[1] != fragment_nbytes
+            for plane, fragment_nbytes in zip(
+                host_planes,
+                fragment_sizes,
+                strict=True,
+            )
+        ):
+            raise ValueError("host/device KV fragment plane byte sizes differ")
+        if any(
+            host_slot < 0 or host_slot >= host_capacity
+            for host_slot in host_slots
+        ):
+            raise ValueError("host KV slot is outside the fragment-major slab")
+        if any(
+            page_id < 0 or page_id >= device_capacity
+            for page_id in device_page_ids
+        ):
+            raise ValueError("device KV page is outside the fragment planes")
+        return runs
+
+    def _copy_fragment_planes(
+        self,
+        host_planes: tuple[torch.Tensor, ...],
+        device_planes: tuple[torch.Tensor, ...],
+        runs: tuple[tuple[int, int, int], ...],
+        *,
+        restore: bool,
+        non_blocking: bool,
+    ) -> int:
+        copy_count = 0
+        for host_plane, device_plane in zip(
+            host_planes,
+            device_planes,
+            strict=True,
+        ):
+            for host_start, device_start, count in runs:
+                host_run = host_plane[host_start : host_start + count].reshape(-1)
+                device_run = (
+                    device_plane[device_start : device_start + count]
+                    .detach()
+                    .view(torch.uint8)
+                    .reshape(-1)
+                )
+                destination, source = (
+                    (device_run, host_run)
+                    if restore
+                    else (host_run, device_run)
+                )
+                destination.copy_(source, non_blocking=non_blocking)
+                copy_count += 1
+        return copy_count
 
     def begin_offload(
         self,
@@ -345,6 +502,93 @@ class TorchPageTransferBackend:
             keepalive=(sources, destinations),
         )
 
+    def _begin_fragment_transfer(
+        self,
+        host_planes: tuple[torch.Tensor, ...],
+        device_planes: tuple[torch.Tensor, ...],
+        host_slots: tuple[int, ...],
+        device_page_ids: tuple[int, ...],
+        *,
+        restore: bool,
+    ) -> BackendCompletion:
+        runs = self._validated_fragment_planes(
+            host_planes,
+            device_planes,
+            host_slots,
+            device_page_ids,
+        )
+        if self._stream is None:
+            self.last_fragment_copy_count = self._copy_fragment_planes(
+                host_planes,
+                device_planes,
+                runs,
+                restore=restore,
+                non_blocking=False,
+            )
+            return _ImmediateCompletion()
+
+        current = torch.cuda.current_stream(device=self.device)
+        self._stream.wait_stream(current)
+        with torch.cuda.stream(self._stream):
+            start_event = torch.cuda.Event(enable_timing=True)
+            start_event.record(self._stream)
+            self.last_fragment_copy_count = self._copy_fragment_planes(
+                host_planes,
+                device_planes,
+                runs,
+                restore=restore,
+                non_blocking=True,
+            )
+            end_event = torch.cuda.Event(enable_timing=True)
+            end_event.record(self._stream)
+        return _CudaCompletion(
+            start_event,
+            end_event,
+            stream_id=int(self._stream.cuda_stream),
+            keepalive=(host_planes, device_planes),
+        )
+
+    def begin_offload_fragments(
+        self,
+        sources: tuple[torch.Tensor, ...],
+        source_page_ids: tuple[int, ...],
+        destinations: tuple[torch.Tensor, ...],
+        destination_slots: tuple[int, ...],
+    ) -> BackendCompletion:
+        return self._begin_fragment_transfer(
+            destinations,
+            sources,
+            destination_slots,
+            source_page_ids,
+            restore=False,
+        )
+
+    def begin_restore_fragments(
+        self,
+        sources: tuple[torch.Tensor, ...],
+        source_slots: tuple[int, ...],
+        destinations: tuple[torch.Tensor, ...],
+        destination_page_ids: tuple[int, ...],
+    ) -> BackendCompletion:
+        return self._begin_fragment_transfer(
+            sources,
+            destinations,
+            source_slots,
+            destination_page_ids,
+            restore=True,
+        )
+
+
+def resolve_transfer_backend_identity(
+    device: torch.device | str,
+) -> str:
+    """Resolve the copy path before allocating a potentially large host slab."""
+
+    requested = torch.device(device)
+    if requested.type != "cuda":
+        return "torch-cpu-page-copy-v1"
+    return CUDA_CONTIGUOUS_BACKEND
+
 
 @dataclass(frozen=True)
 class ResidentPageMetadata:
@@ -387,12 +631,107 @@ def _page_fragments(pool: PagedKVPool, page_id: int) -> tuple[torch.Tensor, ...]
     return tuple(fragments)
 
 
-def _checksum(page: torch.Tensor) -> str:
-    if page.device.type != "cpu" or page.dtype != torch.uint8 or not page.is_contiguous():
-        raise ValueError("host page checksum requires contiguous CPU uint8 storage")
-    # NumPy exposes the contiguous page through the buffer protocol, so SHA can
-    # consume it without allocating a second page-sized Python ``bytes`` copy.
-    return hashlib.sha256(page.numpy()).hexdigest()
+def _device_fragment_planes(pool: PagedKVPool) -> tuple[torch.Tensor, ...]:
+    """Return one contiguous page-indexed device plane per logical fragment."""
+
+    planes: list[torch.Tensor] = []
+    for layer in range(pool.num_layers):
+        planes.append(pool.k[layer])
+        if pool.v_head_dim:
+            planes.append(pool.v[layer])
+    return tuple(planes)
+
+
+def _fragment_major_planes(
+    storage: torch.Tensor,
+    pool: PagedKVPool,
+) -> tuple[torch.Tensor, ...]:
+    """Carve one row-compatible owner into fragment-major slot planes."""
+
+    capacity_pages = storage.shape[0]
+    flat = storage.reshape(-1)
+    offset = 0
+    planes: list[torch.Tensor] = []
+    for fragment in _page_fragments(pool, 0):
+        fragment_nbytes = fragment.numel() * fragment.element_size()
+        end = offset + capacity_pages * fragment_nbytes
+        if end > flat.numel():
+            raise ValueError("fragment-major host layout exceeds its owner slab")
+        planes.append(flat[offset:end].view(capacity_pages, fragment_nbytes))
+        offset = end
+    if offset != flat.numel():
+        raise ValueError(
+            f"fragment-major host layout covers {offset} bytes, owner has "
+            f"{flat.numel()}"
+        )
+    return tuple(planes)
+
+
+def _fragment_major_page(
+    planes: tuple[torch.Tensor, ...],
+    slot: int,
+) -> tuple[torch.Tensor, ...]:
+    return tuple(plane[slot] for plane in planes)
+
+
+def _checksum(page: torch.Tensor | tuple[torch.Tensor, ...]) -> str:
+    fragments = (page,) if isinstance(page, torch.Tensor) else page
+    if not fragments:
+        raise ValueError("host page checksum requires at least one fragment")
+    digest = hashlib.sha256()
+    for fragment in fragments:
+        if (
+            fragment.device.type != "cpu"
+            or fragment.dtype != torch.uint8
+            or not fragment.is_contiguous()
+        ):
+            raise ValueError(
+                "host page checksum requires contiguous CPU uint8 fragments"
+            )
+        # NumPy exposes each contiguous fragment through the buffer protocol,
+        # so SHA consumes it without allocating another Python ``bytes`` copy.
+        digest.update(fragment.numpy())
+    return digest.hexdigest()
+
+
+def _fragment_major_checksums(
+    storage: torch.Tensor,
+    planes: tuple[torch.Tensor, ...],
+    slots: tuple[int, ...],
+    *,
+    page_nbytes: int,
+) -> tuple[str, ...]:
+    """Hash logical pages in bounded page-major batches without changing ABI."""
+
+    if not slots:
+        return ()
+    fragment_sizes = tuple(plane.shape[1] for plane in planes)
+    if len(set(fragment_sizes)) != 1:
+        return tuple(
+            _checksum(_fragment_major_page(planes, slot)) for slot in slots
+        )
+    fragment_nbytes = fragment_sizes[0]
+    grouped = storage.reshape(
+        len(planes),
+        storage.shape[0],
+        fragment_nbytes,
+    )
+    result: list[str] = []
+    for start in range(0, len(slots), _CHECKSUM_BATCH_PAGES):
+        chunk_slots = slots[start : start + _CHECKSUM_BATCH_PAGES]
+        first = chunk_slots[0]
+        if chunk_slots == tuple(range(first, first + len(chunk_slots))):
+            selected = grouped[:, first : first + len(chunk_slots)]
+        else:
+            indices = torch.tensor(chunk_slots, dtype=torch.long)
+            selected = grouped.index_select(1, indices)
+        page_major = (
+            selected.permute(1, 0, 2)
+            .contiguous()
+            .view(len(chunk_slots), page_nbytes)
+        )
+        result.extend(_checksum(page) for page in page_major)
+    return tuple(result)
 
 
 def _keys(value: Iterable[str]) -> tuple[str, ...]:
@@ -664,6 +1003,26 @@ class PinnedKVPageTier:
                 )
             if pool.k.device.type == "cuda" and not self._host_pages.is_pinned():
                 raise ValueError("CUDA KV tier storage must be pinned host memory")
+            host_layout = getattr(self.backend, "host_layout", None)
+            if host_layout is None:
+                self._host_fragment_planes: tuple[torch.Tensor, ...] | None = None
+                self._device_fragment_planes: tuple[torch.Tensor, ...] | None = None
+            elif host_layout == FRAGMENT_MAJOR_HOST_LAYOUT:
+                if not callable(
+                    getattr(self.backend, "begin_offload_fragments", None)
+                ) or not callable(
+                    getattr(self.backend, "begin_restore_fragments", None)
+                ):
+                    raise ValueError(
+                        "fragment-major backend is missing fragment transfer methods"
+                    )
+                self._host_fragment_planes = _fragment_major_planes(
+                    self._host_pages,
+                    pool,
+                )
+                self._device_fragment_planes = _device_fragment_planes(pool)
+            else:
+                raise ValueError(f"unsupported transfer backend host layout: {host_layout}")
             if self._numa_plan is not None:
                 from kairyu.engine.core.numa import first_touch_and_attest_pinned_host
 
@@ -697,16 +1056,47 @@ class PinnedKVPageTier:
         """Hash one host batch on GPU-local CPUs without leaking affinity."""
 
         entries = tuple(entries)
+        slots = tuple(entry.slot for entry in entries)
+
+        def checksums() -> tuple[str, ...]:
+            if self._host_fragment_planes is None:
+                return tuple(_checksum(self._host_pages[slot]) for slot in slots)
+            return _fragment_major_checksums(
+                self._host_pages,
+                self._host_fragment_planes,
+                slots,
+                page_nbytes=self.page_nbytes,
+            )
+
         if self._numa_plan is None:
-            return tuple(_checksum(self._host_pages[entry.slot]) for entry in entries)
+            return checksums()
         from kairyu.engine.core.numa import scoped_current_thread_affinity
 
         with scoped_current_thread_affinity(self._numa_plan):
-            return tuple(_checksum(self._host_pages[entry.slot]) for entry in entries)
+            return checksums()
+
+    def _host_page(
+        self,
+        slot: int,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        if self._host_fragment_planes is None:
+            return self._host_pages[slot]
+        return _fragment_major_page(self._host_fragment_planes, slot)
 
     @property
     def host_is_pinned(self) -> bool:
         return bool(self._host_pages.is_pinned())
+
+    @property
+    def transfer_backend(self) -> str:
+        """Exact physical copy implementation used by this rank-local tier."""
+
+        value = getattr(self.backend, "transfer_backend", None)
+        return (
+            value
+            if isinstance(value, str) and value
+            else f"injected:{type(self.backend).__module__}.{type(self.backend).__qualname__}"
+        )
 
     @property
     def host_data_ptr(self) -> int:
@@ -905,8 +1295,11 @@ class PinnedKVPageTier:
     def _reserve(self, keys: tuple[str, ...]) -> tuple[_SlotEntry, ...]:
         self._evict_lru_for(len(keys), protected_keys=set(keys))
         entries: list[_SlotEntry] = []
-        for key in keys:
-            slot = self._free_slots.pop()
+        # Stable ascending slot assignment preserves long jointly contiguous
+        # host/device runs after earlier restores return slots in arbitrary
+        # order. The physical slot order is not part of logical LRU identity.
+        slots = sorted(self._free_slots.pop() for _ in keys)
+        for key, slot in zip(keys, slots, strict=True):
             self._slot_generations[slot] += 1
             entry = _SlotEntry(
                 key=key,
@@ -1035,11 +1428,25 @@ class PinnedKVPageTier:
                 self._in_flight.add(key)
                 if old is None:
                     self._published[key] = entry
-            sources = tuple(_page_fragments(self.pool, page_id) for page_id in pages)
-            destinations = tuple(self._host_pages[entry.slot] for entry in entries)
             device_page_owner = self._reserve_device_pages(pages)
             try:
-                completion = self.backend.begin_offload(sources, destinations)
+                if self._host_fragment_planes is None:
+                    sources = tuple(
+                        _page_fragments(self.pool, page_id) for page_id in pages
+                    )
+                    destinations = tuple(
+                        self._host_page(entry.slot) for entry in entries
+                    )
+                    completion = self.backend.begin_offload(sources, destinations)
+                else:
+                    if self._device_fragment_planes is None:
+                        raise RuntimeError("fragment-major device planes are missing")
+                    completion = self.backend.begin_offload_fragments(
+                        self._device_fragment_planes,
+                        pages,
+                        self._host_fragment_planes,
+                        tuple(entry.slot for entry in entries),
+                    )
             except BaseException as error:
                 self._quarantine(entries, error, retain_keys=True)
                 self._quarantine_device_pages(pages, device_page_owner)
@@ -1124,11 +1531,23 @@ class PinnedKVPageTier:
             for entry in entries:
                 entry.state = PageState.RESTORING
                 self._in_flight.add(entry.key)
-            sources = tuple(self._host_pages[entry.slot] for entry in entries)
-            destinations = tuple(_page_fragments(self.pool, page_id) for page_id in pages)
             device_page_owner = self._reserve_device_pages(pages)
             try:
-                completion = self.backend.begin_restore(sources, destinations)
+                if self._host_fragment_planes is None:
+                    sources = tuple(self._host_page(entry.slot) for entry in entries)
+                    destinations = tuple(
+                        _page_fragments(self.pool, page_id) for page_id in pages
+                    )
+                    completion = self.backend.begin_restore(sources, destinations)
+                else:
+                    if self._device_fragment_planes is None:
+                        raise RuntimeError("fragment-major device planes are missing")
+                    completion = self.backend.begin_restore_fragments(
+                        self._host_fragment_planes,
+                        tuple(entry.slot for entry in entries),
+                        self._device_fragment_planes,
+                        pages,
+                    )
             except BaseException as error:
                 self._quarantine(tuple(entries), error)
                 self._quarantine_device_pages(pages, device_page_owner)
