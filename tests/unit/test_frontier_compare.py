@@ -16,6 +16,19 @@ sys.modules["frontier_compare"] = frontier_compare
 _SPEC.loader.exec_module(frontier_compare)
 
 
+def test_legacy_target_python_api_remains_available() -> None:
+    target = frontier_compare.Target(
+        "target",
+        "https://api.example.test/v1",
+        "model",
+    )
+
+    assert target.name == "target"
+    assert target.base_url == "https://api.example.test/v1"
+    assert target.model == "model"
+    assert target.api_key == "sk-local"
+
+
 def test_summary_uses_nearest_rank_percentiles() -> None:
     report = frontier_compare.TargetReport(name="target", model="model")
     report.trials = [

@@ -40,6 +40,21 @@ DEFAULT_PROMPTS = (
 )
 
 
+@dataclass(frozen=True)
+class Target:
+    """Backward-compatible target for callers importing this repository script.
+
+    New CLI configuration is parsed into :class:`BenchTarget` and names an
+    environment variable for credentials.  This class preserves the historical
+    Python API for callers that construct a target in process.
+    """
+
+    name: str
+    base_url: str
+    model: str
+    api_key: str = "sk-local"
+
+
 @dataclass
 class TrialResult:
     ttft_s: float
@@ -83,7 +98,11 @@ class TargetReport:
         }
 
 
-async def run_trial(client, target: BenchTarget, prompt: str) -> TrialResult:
+async def run_trial(
+    client,
+    target: BenchTarget | Target,
+    prompt: str,
+) -> TrialResult:
     start = time.perf_counter()
     first_content_time = None
     last_content_time = None
@@ -131,17 +150,22 @@ async def run_trial(client, target: BenchTarget, prompt: str) -> TrialResult:
 
 
 async def run_target(
-    target: BenchTarget,
+    target: BenchTarget | Target,
     prompts: tuple[str, ...],
     trials: int,
 ) -> TargetReport:
     import openai
 
-    report = TargetReport(name=target.label(), model=target.model)
-    api_key = target_api_key(
-        target,
-        required=target.api_key_env is not None,
-    )
+    if isinstance(target, BenchTarget):
+        report_name = target.label()
+        api_key = target_api_key(
+            target,
+            required=target.api_key_env is not None,
+        )
+    else:
+        report_name = target.name
+        api_key = target.api_key
+    report = TargetReport(name=report_name, model=target.model)
     async with openai.AsyncOpenAI(
         base_url=normalize_base_url(target.base_url),
         # The SDK requires a non-empty value even for unauthenticated local
