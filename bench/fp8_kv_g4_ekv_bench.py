@@ -395,7 +395,7 @@ def _compiler_snapshot() -> dict[str, object]:
         name: str,
         *,
         path: str | None = None,
-        version_flag: str = "--version",
+        version_args: tuple[str, ...] = ("--version",),
     ) -> dict[str, object]:
         selected = path or shutil.which(name)
         if selected is None:
@@ -404,7 +404,7 @@ def _compiler_snapshot() -> dict[str, object]:
             )
         resolved = Path(selected).resolve()
         completed = subprocess.run(
-            (str(resolved), version_flag),
+            (str(resolved), *version_args),
             check=True,
             capture_output=True,
             text=True,
@@ -452,7 +452,12 @@ def _compiler_snapshot() -> dict[str, object]:
         "gcc": gcc,
         "g++": gxx,
         "cc1plus": tool(
-            "cc1plus", path=cc1plus_path, version_flag="--version"
+            "cc1plus",
+            path=cc1plus_path,
+            # GCC 13's cc1plus emits nothing for `--version`. Syntax-checking
+            # /dev/null with `-version` emits provenance, exits zero, and does
+            # not create an assembly file in the read-only source checkout.
+            version_args=("-version", "-fsyntax-only", "/dev/null"),
         ),
     }
     home = os.environ.get("HOME")

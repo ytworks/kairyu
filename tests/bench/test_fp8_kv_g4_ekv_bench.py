@@ -294,7 +294,7 @@ def test_formal_config_has_sixteen_unique_in_range_samples() -> None:
         assert config["sample_positions"][str(length)] == list(positions)
 
 
-def test_compiler_snapshot_uses_supported_cc1plus_version_flag(
+def test_compiler_snapshot_uses_nonwriting_cc1plus_version_probe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -316,6 +316,8 @@ def test_compiler_snapshot_uses_supported_cc1plus_version_flag(
         calls.append(command)
         if command[-1] == "-print-prog-name=cc1plus":
             stdout = str(tools["cc1plus"])
+        elif Path(command[0]).name == "cc1plus":
+            stdout = "GNU C++17 13.3.0"
         elif Path(command[0]).name == "nvcc":
             stdout = "Cuda compilation tools, release 13.3"
         else:
@@ -339,10 +341,15 @@ def test_compiler_snapshot_uses_supported_cc1plus_version_flag(
     snapshot = gate._compiler_snapshot()
 
     cc1plus = str(tools["cc1plus"].resolve())
-    assert (cc1plus, "--version") in calls
-    assert (cc1plus, "-version") not in calls
+    assert (
+        cc1plus,
+        "-version",
+        "-fsyntax-only",
+        "/dev/null",
+    ) in calls
+    assert (cc1plus, "--version") not in calls
     assert snapshot["host_compiler"]["cc1plus"]["version"] == (
-        "cc1plus 13.3.0"
+        "GNU C++17 13.3.0"
     )
 
 
