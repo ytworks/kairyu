@@ -96,6 +96,74 @@ class _DecodePageTableCacheStatsProbe:
     reset: bool = False
 
 
+@dataclass(frozen=True)
+class _DramKVAvailablePrefix:
+    """Query the rank-local DRAM tier without crossing a model step."""
+
+    keys: tuple[str, ...]
+    min_pages: int
+
+
+@dataclass(frozen=True)
+class _DramKVOffload:
+    """Copy the same logical KV pages to every rank-local DRAM tier."""
+
+    keys: tuple[str, ...]
+    page_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _DramKVRestore:
+    """Restore the same logical KV pages on every rank."""
+
+    keys: tuple[str, ...]
+    page_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _DramKVDiscard:
+    """Atomically discard rank-local host copies for the supplied keys."""
+
+    keys: tuple[str, ...]
+
+
+_DramKVControl = (
+    _DramKVAvailablePrefix | _DramKVOffload | _DramKVRestore | _DramKVDiscard
+)
+
+
+@dataclass(frozen=True)
+class _DramKVAck:
+    """Pickle-safe completion record; every rank contributes exactly one."""
+
+    rank: int
+    operation: str
+    ok: bool
+    value: object = None
+    error: str | None = None
+    base_exception: bool = False
+    source_reusable: bool = False
+    destination_reusable: bool = False
+    destination_publishable: bool = False
+
+
+class DramKVTierTransactionError(RuntimeError):
+    """An all-rank KV tier transaction could not establish safe ownership."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        source_reusable: bool = False,
+        destination_reusable: bool = False,
+        destination_publishable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.source_reusable = source_reusable
+        self.destination_reusable = destination_reusable
+        self.destination_publishable = destination_publishable
+
+
 _SAMPLING_OWNERSHIP_FIELDS = frozenset(
     {
         "rank",
@@ -706,6 +774,7 @@ def make_handshake(
     attention_backend_identity: str | None = None,
     kv_cache_dtype_requested: str | None = None,
     kv_cache_dtype_resolved: str | None = None,
+    dram_kv_tier_identity: str | None = None,
 ) -> dict:
     """Rank 0 broadcasts this before the step loop; workers validate (A11)."""
     handshake = {
@@ -719,6 +788,8 @@ def make_handshake(
         handshake["kv_cache_dtype_requested"] = kv_cache_dtype_requested
     if kv_cache_dtype_resolved is not None:
         handshake["kv_cache_dtype_resolved"] = kv_cache_dtype_resolved
+    if dram_kv_tier_identity is not None:
+        handshake["dram_kv_tier_identity"] = dram_kv_tier_identity
     return handshake
 
 
@@ -730,6 +801,7 @@ def validate_handshake(
     attention_backend_identity: str | None = None,
     kv_cache_dtype_requested: str | None = None,
     kv_cache_dtype_resolved: str | None = None,
+    dram_kv_tier_identity: str | None = None,
 ) -> None:
     expected = make_handshake(
         model_dir,
@@ -738,12 +810,13 @@ def validate_handshake(
         attention_backend_identity,
         kv_cache_dtype_requested,
         kv_cache_dtype_resolved,
+        dram_kv_tier_identity,
     )
     if handshake != expected:
         raise RuntimeError(
             f"TP worker mismatch: driver={handshake} worker={expected} — "
-            "pool sizing/config, backend identity, and KV dtype identity must "
-            "be identical on every rank"
+            "pool sizing/config, backend identity, KV dtype identity, and "
+            "DRAM tier identity must be identical on every rank"
         )
 
 
@@ -754,6 +827,156 @@ def _release_runner_requests(local_runner, request_ids: tuple[str, ...]) -> None
         return
     for request_id in request_ids:
         release(request_id)
+
+
+def _dram_kv_operation(payload: _DramKVControl) -> str:
+    if isinstance(payload, _DramKVAvailablePrefix):
+        return "available_prefix"
+    if isinstance(payload, _DramKVOffload):
+        return "offload"
+    if isinstance(payload, _DramKVRestore):
+        return "restore"
+    if isinstance(payload, _DramKVDiscard):
+        return "discard"
+    raise TypeError(f"unsupported DRAM KV control payload: {type(payload).__name__}")
+
+
+def _dram_kv_local_ack(control_comm, local_runner, payload: _DramKVControl) -> _DramKVAck:
+    """Run one blocking rank-local operation and always produce a gather ACK.
+
+    Rank-local exceptions cannot escape before the all-gather: doing so would
+    strand the other TP ranks in the collective.  Ownership flags are copied
+    by duck typing so this seam stays independent of a particular tier class.
+    Missing tiers are an explicit safe miss, which lets a mixed rollout fall
+    back to recompute instead of publishing a partial multi-rank prefix.
+    """
+    operation = _dram_kv_operation(payload)
+    tier = getattr(local_runner, "dram_kv_tier", None)
+    if tier is None:
+        value: object = 0 if operation == "available_prefix" else True
+        if operation in {"offload", "restore"}:
+            value = False
+        return _DramKVAck(
+            rank=control_comm.rank,
+            operation=operation,
+            ok=True,
+            value=value,
+            source_reusable=True,
+            destination_reusable=True,
+        )
+
+    try:
+        if isinstance(payload, _DramKVAvailablePrefix):
+            value = tier.available_prefix(payload.keys, min_pages=payload.min_pages)
+        elif isinstance(payload, _DramKVOffload):
+            value = tier.offload(payload.keys, payload.page_ids)
+        elif isinstance(payload, _DramKVRestore):
+            value = tier.restore(payload.keys, payload.page_ids)
+        else:
+            value = tier.discard(payload.keys)
+        return _DramKVAck(
+            rank=control_comm.rank,
+            operation=operation,
+            ok=True,
+            value=value,
+            source_reusable=True,
+            destination_reusable=True,
+            destination_publishable=operation == "restore" and value is True,
+        )
+    except BaseException as error:
+        return _DramKVAck(
+            rank=control_comm.rank,
+            operation=operation,
+            ok=False,
+            error=f"{type(error).__name__}: {error}"[:1024],
+            base_exception=not isinstance(error, Exception),
+            source_reusable=getattr(error, "source_reusable", None) is True,
+            destination_reusable=getattr(error, "destination_reusable", None) is True,
+            destination_publishable=(
+                getattr(error, "destination_publishable", None) is True
+            ),
+        )
+
+
+def _validate_dram_kv_acks(
+    gathered,
+    *,
+    operation: str,
+    world_size: int,
+) -> tuple[_DramKVAck, ...]:
+    if not isinstance(gathered, (tuple, list)) or len(gathered) != world_size:
+        actual = (
+            len(gathered)
+            if isinstance(gathered, (tuple, list))
+            else type(gathered).__name__
+        )
+        raise RuntimeError(
+            f"DRAM KV {operation} gathered malformed rank count: "
+            f"expected {world_size}, got {actual}"
+        )
+    rows: list[_DramKVAck] = []
+    for rank, row in enumerate(gathered):
+        if not isinstance(row, _DramKVAck):
+            raise RuntimeError(
+                f"DRAM KV {operation} rank {rank} returned malformed ACK "
+                f"{type(row).__name__}"
+            )
+        if row.rank != rank or row.operation != operation:
+            raise RuntimeError(
+                f"DRAM KV {operation} ACK identity mismatch at rank {rank}: "
+                f"rank={row.rank!r}, operation={row.operation!r}"
+            )
+        rows.append(row)
+    return tuple(rows)
+
+
+def _dram_kv_failure_summary(rows: tuple[_DramKVAck, ...]) -> str:
+    failures: list[str] = []
+    for row in rows:
+        if row.ok:
+            failures.append(f"rank {row.rank}: returned {row.value!r}")
+        else:
+            failures.append(f"rank {row.rank}: {row.error or 'unknown error'}")
+    return "; ".join(failures)
+
+
+def _raise_dram_kv_base_exceptions(
+    rows: tuple[_DramKVAck, ...],
+    *,
+    operation: str,
+) -> None:
+    fatal = tuple(row for row in rows if row.base_exception)
+    if fatal:
+        raise DramKVTierTransactionError(
+            f"TP DRAM KV {operation} intercepted rank-local process control: "
+            f"{_dram_kv_failure_summary(fatal)}"
+        )
+
+
+def _validate_dram_kv_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(keys, tuple):
+        raise TypeError("DRAM KV keys must be a tuple")
+    if any(not isinstance(key, str) or not key for key in keys):
+        raise ValueError("DRAM KV keys must be non-empty strings")
+    return keys
+
+
+def _validate_dram_kv_pages(
+    keys: tuple[str, ...],
+    page_ids: tuple[int, ...],
+) -> tuple[int, ...]:
+    if not isinstance(page_ids, tuple):
+        raise TypeError("DRAM KV page ids must be a tuple")
+    if len(page_ids) != len(keys):
+        raise ValueError(
+            "DRAM KV key/page cardinality mismatch: "
+            f"{len(keys)} keys for {len(page_ids)} pages"
+        )
+    if any(type(page_id) is not int or page_id < 0 for page_id in page_ids):
+        raise ValueError("DRAM KV page ids must be non-negative integers")
+    if len(set(page_ids)) != len(page_ids):
+        raise ValueError("DRAM KV page ids must be unique")
+    return page_ids
 
 
 def _serialized_protocol(method):
@@ -859,6 +1082,132 @@ class DistTPModelRunner:
     @property
     def fatal_error(self) -> Exception | None:
         return self._fatal_error
+
+    def _dram_kv_collect(self, payload: _DramKVControl) -> tuple[_DramKVAck, ...]:
+        """Run one already-serialized all-rank tier transaction."""
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                "tensor-parallel runner is unavailable after a fatal step failure"
+            ) from self._fatal_error
+        operation = _dram_kv_operation(payload)
+        try:
+            delivered = self._control_comm.broadcast(payload, src=0)
+            if delivered != payload:
+                raise RuntimeError(
+                    f"DRAM KV {operation} broadcast returned a malformed payload"
+                )
+            local = _dram_kv_local_ack(self._control_comm, self._local, payload)
+            gathered = self._control_comm.all_gather(local)
+            return _validate_dram_kv_acks(
+                gathered,
+                operation=operation,
+                world_size=self._control_comm.world_size,
+            )
+        except Exception as error:
+            # A transport/shape failure can leave ranks on different collective
+            # rounds. Local tier failures are encoded in ACKs and never enter
+            # this branch, so only protocol failures poison the TP runner.
+            failure = RuntimeError(f"TP DRAM KV {operation} protocol failed: {error}")
+            self._fatal_error = failure
+            raise failure from error
+
+    def _dram_kv_discard_locked(self, keys: tuple[str, ...]) -> None:
+        rows = self._dram_kv_collect(_DramKVDiscard(keys))
+        _raise_dram_kv_base_exceptions(rows, operation="discard")
+        failed = tuple(row for row in rows if not row.ok or row.value is not True)
+        if failed:
+            raise DramKVTierTransactionError(
+                "TP DRAM KV discard could not converge every rank: "
+                f"{_dram_kv_failure_summary(failed)}"
+            )
+
+    @_serialized_protocol
+    def available_prefix(self, keys: tuple[str, ...], *, min_pages: int = 1) -> int:
+        """Return only a DRAM prefix that every TP rank can restore."""
+        keys = _validate_dram_kv_keys(keys)
+        if type(min_pages) is not int or min_pages < 1:
+            raise ValueError("DRAM KV min_pages must be a positive integer")
+        if not keys:
+            return 0
+        rows = self._dram_kv_collect(_DramKVAvailablePrefix(keys, min_pages))
+        _raise_dram_kv_base_exceptions(rows, operation="available_prefix")
+        values = tuple(row.value for row in rows if row.ok and type(row.value) is int)
+        agreed = (
+            len(values) == len(rows)
+            and len(set(values)) == 1
+            and 0 <= values[0] <= len(keys)
+        )
+        if agreed:
+            return values[0] if values[0] >= min_pages else 0
+        self._dram_kv_discard_locked(keys)
+        return 0
+
+    @_serialized_protocol
+    def offload(self, keys: tuple[str, ...], page_ids: tuple[int, ...]) -> bool:
+        """Offload all rank shards before allowing source-page reuse."""
+        keys = _validate_dram_kv_keys(keys)
+        page_ids = _validate_dram_kv_pages(keys, page_ids)
+        if not keys:
+            return True
+        rows = self._dram_kv_collect(_DramKVOffload(keys, page_ids))
+        _raise_dram_kv_base_exceptions(rows, operation="offload")
+        if all(row.ok and row.value is True for row in rows):
+            return True
+
+        unsafe = tuple(
+            row
+            for row in rows
+            if (not row.ok and not row.source_reusable)
+            or (row.ok and row.value is not True and row.value is not False)
+        )
+        if unsafe:
+            raise DramKVTierTransactionError(
+                "TP DRAM KV offload left source ownership unknown: "
+                f"{_dram_kv_failure_summary(unsafe)}",
+                source_reusable=False,
+            )
+        self._dram_kv_discard_locked(keys)
+        return False
+
+    @_serialized_protocol
+    def restore(self, keys: tuple[str, ...], page_ids: tuple[int, ...]) -> bool:
+        """Publish success only after every rank completed its blocking restore."""
+        keys = _validate_dram_kv_keys(keys)
+        page_ids = _validate_dram_kv_pages(keys, page_ids)
+        if not keys:
+            return True
+        rows = self._dram_kv_collect(_DramKVRestore(keys, page_ids))
+        _raise_dram_kv_base_exceptions(rows, operation="restore")
+        if all(
+            row.ok and row.value is True and row.destination_publishable
+            for row in rows
+        ):
+            return True
+
+        unsafe = tuple(
+            row
+            for row in rows
+            if (not row.ok and not row.destination_reusable)
+            or (row.ok and row.value is not True and row.value is not False)
+        )
+        if unsafe:
+            raise DramKVTierTransactionError(
+                "TP DRAM KV restore left destination ownership unknown: "
+                f"{_dram_kv_failure_summary(unsafe)}",
+                destination_reusable=False,
+                destination_publishable=False,
+            )
+        self._dram_kv_discard_locked(keys)
+        return False
+
+    @_serialized_protocol
+    def discard(self, keys: tuple[str, ...]) -> bool:
+        """Discard host copies on every rank as one serialized transaction."""
+        keys = _validate_dram_kv_keys(keys)
+        if not keys:
+            return True
+        self._dram_kv_discard_locked(keys)
+        return True
 
     @_serialized_protocol
     def sampling_ownership_metadata(self) -> tuple[dict[str, object], ...]:
@@ -1150,6 +1499,13 @@ def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
                 )
                 model_comm.tensor_all_gather(packet)
                 continue
+            if isinstance(
+                payload,
+                (_DramKVAvailablePrefix, _DramKVOffload, _DramKVRestore, _DramKVDiscard),
+            ):
+                local = _dram_kv_local_ack(control_comm, local_runner, payload)
+                control_comm.all_gather(local)
+                continue
             raise RuntimeError(
                 f"TP worker received an unsupported control payload: {type(payload).__name__}"
             )
@@ -1295,6 +1651,9 @@ def build_tp_runner(
     graph_max_pages: int = 0,
     graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "auto",
+    dram_kv_tier_capacity_pages: int = 0,
+    dram_kv_tier_profile: str | Path | None = None,
+    max_num_batched_tokens: int = 2048,
 ):
     """The per-rank sharded PagedModelRunner (pool sized from the tp_view config).
 
@@ -1304,7 +1663,10 @@ def build_tp_runner(
     import torch
 
     from kairyu.engine.core.attention import select_backend
-    from kairyu.engine.core.attention_selector import attention_backend_identity
+    from kairyu.engine.core.attention_selector import (
+        attention_backend_execution_identity,
+        attention_backend_identity,
+    )
     from kairyu.engine.core.hw_profile import probe
     from kairyu.engine.core.kv_cache_dtype import (
         kv_cache_dtype_name,
@@ -1321,6 +1683,9 @@ def build_tp_runner(
     attention_backend = select_backend(
         profile,
         device=placement.device,
+    )
+    selected_attention_backend_identity = attention_backend_identity(
+        attention_backend.selection_decision
     )
     model, local_config, full_config = build_tp_model(
         model_dir,
@@ -1349,6 +1714,24 @@ def build_tp_runner(
         dtype=resolved_kv_cache_dtype,
         device=placement.device,
     )
+    dram_kv_binding = None
+    if dram_kv_tier_profile is not None:
+        from kairyu.engine.core.kv_tier_policy import build_dram_kv_tier
+
+        dram_attention_backend_identity = attention_backend_execution_identity(
+            attention_backend.selection_decision,
+            attention_backend,
+        )
+        dram_kv_binding = build_dram_kv_tier(
+            pool,
+            model_path=model_dir,
+            tensor_parallel_size=tp,
+            tensor_parallel_rank=rank,
+            capacity_pages=dram_kv_tier_capacity_pages,
+            profile_path=dram_kv_tier_profile,
+            attention_backend_identity=dram_attention_backend_identity,
+            max_num_batched_tokens=max_num_batched_tokens,
+        )
     grammar_vocab = (
         vocab if isinstance(vocab, GrammarVocabulary) else GrammarVocabulary(list(vocab))
     )
@@ -1370,12 +1753,22 @@ def build_tp_runner(
         **graph_options,
     )
     runner.attention_backend_decision = attention_backend.selection_decision
-    runner.attention_backend_identity = attention_backend_identity(
-        runner.attention_backend_decision
-    )
+    runner.attention_backend_identity = selected_attention_backend_identity
     runner.kv_cache_dtype_requested = kv_cache_dtype
     runner.kv_cache_dtype_resolved = kv_cache_dtype_name(
         resolved_kv_cache_dtype
+    )
+    runner.dram_kv_binding = dram_kv_binding
+    runner.dram_kv_tier = (
+        dram_kv_binding.tier if dram_kv_binding is not None else None
+    )
+    runner.dram_kv_policy = (
+        dram_kv_binding.policy if dram_kv_binding is not None else None
+    )
+    runner.dram_kv_tier_identity = (
+        dram_kv_binding.handshake_identity
+        if dram_kv_binding is not None
+        else None
     )
     return runner, full_config
 
@@ -1394,6 +1787,9 @@ def _tp_worker_entry(
     graph_max_pages: int = 0,
     graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "auto",
+    dram_kv_tier_capacity_pages: int = 0,
+    dram_kv_tier_profile: str | Path | None = None,
+    max_num_batched_tokens: int = 2048,
 ) -> None:
     """Spawned worker (rank = spawn_index + 1; rank 0 is the driver process).
 
@@ -1434,6 +1830,9 @@ def _tp_worker_entry(
         graph_max_pages,
         graph_warmup_iters,
         kv_cache_dtype,
+        dram_kv_tier_capacity_pages,
+        dram_kv_tier_profile,
+        max_num_batched_tokens,
     )
     # the handshake is the collective that absorbs load skew, so it — and only it
     # — runs on the long-timeout startup group
@@ -1446,6 +1845,7 @@ def _tp_worker_entry(
         runner.attention_backend_identity,
         runner.kv_cache_dtype_requested,
         runner.kv_cache_dtype_resolved,
+        runner.dram_kv_tier_identity,
     )
     groups = serving_groups(placement.backend)
     comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
@@ -1492,6 +1892,9 @@ class DistTPLauncher:
         graph_max_pages: int = 0,
         graph_warmup_iters: int = 3,
         kv_cache_dtype: str = "auto",
+        dram_kv_tier_capacity_pages: int = 0,
+        dram_kv_tier_profile: str | Path | None = None,
+        max_num_batched_tokens: int = 2048,
     ) -> None:
         import tempfile
 
@@ -1505,6 +1908,29 @@ class DistTPLauncher:
         if kv_cache_dtype != "auto" and force_cpu:
             raise ValueError(
                 "explicit kv_cache_dtype cannot use forced CPU TP placement"
+            )
+        if (
+            type(dram_kv_tier_capacity_pages) is not int
+            or dram_kv_tier_capacity_pages < 0
+        ):
+            raise ValueError(
+                "dram_kv_tier_capacity_pages must be a non-negative integer"
+            )
+        if dram_kv_tier_profile is not None and not isinstance(
+            dram_kv_tier_profile, (str, Path)
+        ):
+            raise ValueError("dram_kv_tier_profile must be a local path or null")
+        if dram_kv_tier_profile is not None and not str(
+            dram_kv_tier_profile
+        ):
+            raise ValueError(
+                "dram_kv_tier_profile must be a non-empty local path or null"
+            )
+        if (dram_kv_tier_capacity_pages > 0) != (
+            dram_kv_tier_profile is not None
+        ):
+            raise ValueError(
+                "DRAM KV tier requires both a positive capacity and profile"
             )
 
         # a fresh, not-yet-created path is the file:// rendezvous point
@@ -1531,6 +1957,9 @@ class DistTPLauncher:
                 graph_max_pages,
                 graph_warmup_iters,
                 kv_cache_dtype,
+                dram_kv_tier_capacity_pages,
+                dram_kv_tier_profile,
+                max_num_batched_tokens,
             ),
             nprocs=tp - 1,
             join=False,
@@ -1568,11 +1997,16 @@ class DistTPLauncher:
                 graph_max_pages,
                 graph_warmup_iters,
                 kv_cache_dtype,
+                dram_kv_tier_capacity_pages,
+                dram_kv_tier_profile,
+                max_num_batched_tokens,
             )
             self.attention_backend_decision = runner.attention_backend_decision
             self.attention_backend_identity = runner.attention_backend_identity
             self.kv_cache_dtype_requested = runner.kv_cache_dtype_requested
             self.kv_cache_dtype_resolved = runner.kv_cache_dtype_resolved
+            self.dram_kv_binding = runner.dram_kv_binding
+            self.dram_kv_tier_identity = runner.dram_kv_tier_identity
             # the one collective that legitimately absorbs load skew
             startup_comm.broadcast(
                 make_handshake(
@@ -1582,6 +2016,7 @@ class DistTPLauncher:
                     self.attention_backend_identity,
                     self.kv_cache_dtype_requested,
                     self.kv_cache_dtype_resolved,
+                    self.dram_kv_tier_identity,
                 ),
                 src=0,
             )

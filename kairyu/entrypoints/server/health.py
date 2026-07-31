@@ -362,6 +362,25 @@ def add_health_routes(
                 entry["requested_kv_cache_dtype"] = requested_kv_dtype
             if isinstance(resolved_kv_dtype, str) and resolved_kv_dtype:
                 entry["kv_cache_dtype"] = resolved_kv_dtype
+            dram_enabled = getattr(engine, "dram_kv_tier_enabled", None)
+            if type(dram_enabled) is bool:
+                entry["dram_kv_tier_enabled"] = dram_enabled
+                if dram_enabled:
+                    dram_capacity = getattr(
+                        engine, "dram_kv_tier_capacity_pages", None
+                    )
+                    dram_profile_sha = getattr(
+                        engine, "dram_kv_tier_profile_sha256", None
+                    )
+                    dram_threshold = getattr(
+                        engine, "dram_kv_tier_min_restore_tokens", None
+                    )
+                    if type(dram_capacity) is int and dram_capacity > 0:
+                        entry["dram_kv_tier_capacity_pages"] = dram_capacity
+                    if isinstance(dram_profile_sha, str) and dram_profile_sha:
+                        entry["dram_kv_tier_profile_sha256"] = dram_profile_sha
+                    if type(dram_threshold) is int and dram_threshold > 0:
+                        entry["dram_kv_tier_min_restore_tokens"] = dram_threshold
             if isinstance(engine, ReplicaPool):
                 replica = await engine.probe_backends()
                 if replica:  # adopt the replica's (real) attention backend

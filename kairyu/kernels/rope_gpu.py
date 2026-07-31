@@ -47,71 +47,104 @@ if triton is not None:
         token = tl.program_id(0)
         head = tl.program_id(1)
         columns = tl.arange(0, BLOCK)
-        payload = columns < HEAD_DIM
         half = HEAD_DIM // 2
-        rotated_columns = tl.where(
-            columns < half, columns + half, columns - half
-        )
-        sign = tl.where(columns < half, -1.0, 1.0)
+        payload = columns < half
+        upper_columns = columns + half
 
-        cosine = tl.load(
+        lower_cosine = tl.load(
             cos + token * HEAD_DIM + columns,
             mask=payload,
             other=0.0,
         )
-        sine = tl.load(
+        upper_cosine = tl.load(
+            cos + token * HEAD_DIM + upper_columns,
+            mask=payload,
+            other=0.0,
+        )
+        lower_sine = tl.load(
             sin + token * HEAD_DIM + columns,
             mask=payload,
             other=0.0,
         )
-        cosine = _round_bf16_to_fp32(cosine)
-        sine = _round_bf16_to_fp32(sine)
+        upper_sine = tl.load(
+            sin + token * HEAD_DIM + upper_columns,
+            mask=payload,
+            other=0.0,
+        )
+        lower_cosine = _round_bf16_to_fp32(lower_cosine)
+        upper_cosine = _round_bf16_to_fp32(upper_cosine)
+        lower_sine = _round_bf16_to_fp32(lower_sine)
+        upper_sine = _round_bf16_to_fp32(upper_sine)
 
         query_mask = payload & (head < NUM_QUERY_HEADS)
         query_base = (token * NUM_QUERY_HEADS + head) * HEAD_DIM
-        query_value = tl.load(
+        query_lower = tl.load(
             query + query_base + columns,
             mask=query_mask,
             other=0.0,
         )
-        query_rotated = sign * tl.load(
-            query + query_base + rotated_columns,
+        query_upper = tl.load(
+            query + query_base + upper_columns,
             mask=query_mask,
             other=0.0,
         )
-        query_left = _round_bf16_to_fp32(
-            query_value.to(tl.float32) * cosine
+        query_lower_left = _round_bf16_to_fp32(
+            query_lower.to(tl.float32) * lower_cosine
         )
-        query_right = _round_bf16_to_fp32(
-            query_rotated.to(tl.float32) * sine
+        query_lower_right = _round_bf16_to_fp32(
+            -query_upper.to(tl.float32) * lower_sine
         )
-        query_output = query_left + query_right
+        query_upper_left = _round_bf16_to_fp32(
+            query_upper.to(tl.float32) * upper_cosine
+        )
+        query_upper_right = _round_bf16_to_fp32(
+            query_lower.to(tl.float32) * upper_sine
+        )
         tl.store(
             query + query_base + columns,
-            query_output,
+            query_lower_left + query_lower_right,
+            mask=query_mask,
+        )
+        tl.store(
+            query + query_base + upper_columns,
+            query_upper_left + query_upper_right,
             mask=query_mask,
         )
 
         key_mask = payload & (head < NUM_KEY_HEADS)
         key_base = (token * NUM_KEY_HEADS + head) * HEAD_DIM
-        key_value = tl.load(
+        key_lower = tl.load(
             key + key_base + columns,
             mask=key_mask,
             other=0.0,
         )
-        key_rotated = sign * tl.load(
-            key + key_base + rotated_columns,
+        key_upper = tl.load(
+            key + key_base + upper_columns,
             mask=key_mask,
             other=0.0,
         )
-        key_left = _round_bf16_to_fp32(
-            key_value.to(tl.float32) * cosine
+        key_lower_left = _round_bf16_to_fp32(
+            key_lower.to(tl.float32) * lower_cosine
         )
-        key_right = _round_bf16_to_fp32(
-            key_rotated.to(tl.float32) * sine
+        key_lower_right = _round_bf16_to_fp32(
+            -key_upper.to(tl.float32) * lower_sine
         )
-        key_output = key_left + key_right
-        tl.store(key + key_base + columns, key_output, mask=key_mask)
+        key_upper_left = _round_bf16_to_fp32(
+            key_upper.to(tl.float32) * upper_cosine
+        )
+        key_upper_right = _round_bf16_to_fp32(
+            key_lower.to(tl.float32) * upper_sine
+        )
+        tl.store(
+            key + key_base + columns,
+            key_lower_left + key_lower_right,
+            mask=key_mask,
+        )
+        tl.store(
+            key + key_base + upper_columns,
+            key_upper_left + key_upper_right,
+            mask=key_mask,
+        )
 
 
 def try_apply_rope_inplace(
@@ -151,7 +184,8 @@ def try_apply_rope_inplace(
     tokens = query.shape[0]
     if tokens == 0:
         return True
-    block = triton.next_power_of_2(query.shape[2])
+    block = triton.next_power_of_2(query.shape[2] // 2)
+    num_warps = max(1, min(4, block // 32))
     _rope_inplace_kernel[
         (tokens, max(query.shape[1], key.shape[1]))
     ](
@@ -163,6 +197,6 @@ def try_apply_rope_inplace(
         NUM_KEY_HEADS=key.shape[1],
         HEAD_DIM=query.shape[2],
         BLOCK=block,
-        num_warps=4,
+        num_warps=num_warps,
     )
     return True

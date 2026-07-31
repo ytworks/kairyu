@@ -242,6 +242,8 @@ def build_engine_loop(
     cuda_graph_max_pages: int = 512,
     cuda_graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "auto",
+    dram_kv_tier_capacity_pages: int = 0,
+    dram_kv_tier_profile: str | Path | None = None,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
@@ -294,6 +296,31 @@ def build_engine_loop(
         raise ValueError(
             "explicit kv_cache_dtype does not support P-D separation"
         )
+    if (
+        type(dram_kv_tier_capacity_pages) is not int
+        or dram_kv_tier_capacity_pages < 0
+    ):
+        raise ValueError(
+            "dram_kv_tier_capacity_pages must be a non-negative integer"
+        )
+    if dram_kv_tier_profile is not None and not isinstance(
+        dram_kv_tier_profile, (str, Path)
+    ):
+        raise ValueError("dram_kv_tier_profile must be a local path or null")
+    if dram_kv_tier_profile is not None and not str(dram_kv_tier_profile):
+        raise ValueError(
+            "dram_kv_tier_profile must be a non-empty local path or null"
+        )
+    if (dram_kv_tier_capacity_pages > 0) != (dram_kv_tier_profile is not None):
+        raise ValueError(
+            "DRAM KV tier requires both a positive "
+            "dram_kv_tier_capacity_pages and dram_kv_tier_profile"
+        )
+    if dram_kv_tier_capacity_pages:
+        if model_path is None:
+            raise ValueError("DRAM KV tier requires a real model_path")
+        if pd_separation:
+            raise ValueError("DRAM KV tier does not support P-D separation")
     if not pd_separation and (
         pd_prefill_device is not None
         or pd_decode_device is not None
@@ -348,6 +375,8 @@ def build_engine_loop(
             graph_max_pages=cuda_graph_max_pages,
             graph_warmup_iters=cuda_graph_warmup_iters,
             kv_cache_dtype=kv_cache_dtype,
+            dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
+            dram_kv_tier_profile=dram_kv_tier_profile,
         )
     if speculative is not None and tensor_parallel_size > 1:
         # The FakeCommunicator TP path has rank-local toy runners but no
@@ -368,6 +397,9 @@ def build_engine_loop(
         import torch
 
         from kairyu.engine.core.attention import select_backend
+        from kairyu.engine.core.attention_selector import (
+            attention_backend_execution_identity,
+        )
         from kairyu.engine.core.hw_profile import probe
         from kairyu.engine.core.kv_pool import PagedKVPool
         from kairyu.engine.core.model_runner import PagedModelRunner
@@ -427,6 +459,7 @@ def build_engine_loop(
         speculative_tokens=speculative_tokens if speculative else 0,
         priority_age_s=priority_age_s,
     )
+    dram_kv_binding = None
     if model_path is not None:
         pool = PagedKVPool.for_cache(
             cache,
@@ -434,6 +467,22 @@ def build_engine_loop(
             dtype=resolved_kv_cache_dtype,
             device=compute_device,
         )
+        if dram_kv_tier_profile is not None:
+            from kairyu.engine.core.kv_tier_policy import build_dram_kv_tier
+
+            dram_kv_binding = build_dram_kv_tier(
+                pool,
+                model_path=model_path,
+                tensor_parallel_size=1,
+                tensor_parallel_rank=0,
+                capacity_pages=dram_kv_tier_capacity_pages,
+                profile_path=dram_kv_tier_profile,
+                attention_backend_identity=attention_backend_execution_identity(
+                    attention_backend_decision,
+                    attention_backend,
+                ),
+                max_num_batched_tokens=max_num_batched_tokens,
+            )
         graph_options = {}
         if graph_decode:
             from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
@@ -459,6 +508,13 @@ def build_engine_loop(
             cache=cache,
             **graph_options,
         )
+        if dram_kv_binding is not None:
+            runner.dram_kv_tier = dram_kv_binding.tier
+            runner.dram_kv_policy = dram_kv_binding.policy
+            cache.attach_dram_tier(
+                dram_kv_binding.tier,
+                min_restore_tokens=dram_kv_binding.policy.min_restore_tokens,
+            )
     if tensor_parallel_size > 1:
         # CPU-testable TP path (design m5 D1/D3): rank 0 is the only sampling
         # owner; followers enter the passive seam and adopt its fixed packet.
@@ -488,6 +544,22 @@ def build_engine_loop(
         kv_cache_dtype_name(resolved_kv_cache_dtype)
         if resolved_kv_cache_dtype is not None
         else "not-applicable"
+    )
+    loop.dram_kv_tier_enabled = dram_kv_binding is not None
+    loop.dram_kv_tier_capacity_pages = (
+        dram_kv_binding.tier.capacity_pages
+        if dram_kv_binding is not None
+        else 0
+    )
+    loop.dram_kv_tier_profile_sha256 = (
+        dram_kv_binding.policy.profile_sha256
+        if dram_kv_binding is not None
+        else None
+    )
+    loop.dram_kv_tier_min_restore_tokens = (
+        dram_kv_binding.policy.min_restore_tokens
+        if dram_kv_binding is not None
+        else None
     )
     return loop, cache, scheduler
 
@@ -563,6 +635,10 @@ def _build_pd_loop(
     # reports its own resolved pool dtype.
     loop.kv_cache_dtype_requested = "auto"
     loop.kv_cache_dtype_resolved = "role-specific"
+    loop.dram_kv_tier_enabled = False
+    loop.dram_kv_tier_capacity_pages = 0
+    loop.dram_kv_tier_profile_sha256 = None
+    loop.dram_kv_tier_min_restore_tokens = None
     return loop, adapter.kv_cache, adapter
 
 
@@ -585,6 +661,8 @@ def _build_dist_tp_loop(
     graph_max_pages: int = 512,
     graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "auto",
+    dram_kv_tier_capacity_pages: int = 0,
+    dram_kv_tier_profile: str | Path | None = None,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -623,7 +701,17 @@ def _build_dist_tp_loop(
         graph_max_pages=graph_max_pages,
         graph_warmup_iters=graph_warmup_iters,
         kv_cache_dtype=kv_cache_dtype,
+        dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
+        dram_kv_tier_profile=dram_kv_tier_profile,
+        max_num_batched_tokens=max_num_batched_tokens,
     )
+    if launcher.dram_kv_binding is not None:
+        cache.attach_dram_tier(
+            launcher.runner,
+            min_restore_tokens=(
+                launcher.dram_kv_binding.policy.min_restore_tokens
+            ),
+        )
     generation = load_generation_defaults(model_path)
     # SpeculativeRunner composes over any ModelRunner, and DistTPModelRunner is
     # one: each scoring pass it issues is broadcast like any other step, so every
@@ -646,6 +734,22 @@ def _build_dist_tp_loop(
     loop.attention_backend_decision = launcher.attention_backend_decision
     loop.kv_cache_dtype_requested = launcher.kv_cache_dtype_requested
     loop.kv_cache_dtype_resolved = launcher.kv_cache_dtype_resolved
+    loop.dram_kv_tier_enabled = launcher.dram_kv_binding is not None
+    loop.dram_kv_tier_capacity_pages = (
+        launcher.dram_kv_binding.tier.capacity_pages
+        if launcher.dram_kv_binding is not None
+        else 0
+    )
+    loop.dram_kv_tier_profile_sha256 = (
+        launcher.dram_kv_binding.policy.profile_sha256
+        if launcher.dram_kv_binding is not None
+        else None
+    )
+    loop.dram_kv_tier_min_restore_tokens = (
+        launcher.dram_kv_binding.policy.min_restore_tokens
+        if launcher.dram_kv_binding is not None
+        else None
+    )
     return loop, cache, scheduler
 
 
@@ -674,6 +778,8 @@ class KairyuBackend:
         pd_defer_handoff: bool = True,
         max_model_len: int | None = None,
         kv_cache_dtype: str = "auto",
+        dram_kv_tier_capacity_pages: int = 0,
+        dram_kv_tier_profile: str | Path | None = None,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
@@ -699,12 +805,24 @@ class KairyuBackend:
             cuda_graph_max_pages=cuda_graph_max_pages,
             cuda_graph_warmup_iters=cuda_graph_warmup_iters,
             kv_cache_dtype=kv_cache_dtype,
+            dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
+            dram_kv_tier_profile=dram_kv_tier_profile,
         )
         self.attention_backend_decision = getattr(
             self._loop, "attention_backend_decision", None
         )
         self.kv_cache_dtype_requested = self._loop.kv_cache_dtype_requested
         self.kv_cache_dtype_resolved = self._loop.kv_cache_dtype_resolved
+        self.dram_kv_tier_enabled = self._loop.dram_kv_tier_enabled
+        self.dram_kv_tier_capacity_pages = (
+            self._loop.dram_kv_tier_capacity_pages
+        )
+        self.dram_kv_tier_profile_sha256 = (
+            self._loop.dram_kv_tier_profile_sha256
+        )
+        self.dram_kv_tier_min_restore_tokens = (
+            self._loop.dram_kv_tier_min_restore_tokens
+        )
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None

@@ -32,3 +32,15 @@ def test_docker_build_checks_the_scoped_aot_override_was_applied() -> None:
         """grep -F -n '"f8_dtype": """
         """[__import__("torch").float8_e4m3fn]'"""
     ) in _DOCKERFILE
+
+
+def test_runtime_payload_is_revision_independent_and_nonroot_cache_safe() -> None:
+    payload = "FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04 AS runtime-payload"
+    final = "FROM runtime-payload AS base"
+
+    assert payload in _DOCKERFILE
+    assert final in _DOCKERFILE
+    assert _DOCKERFILE.index(final) > _DOCKERFILE.index('CMD ["/etc/kairyu/config.yaml"]')
+    assert _DOCKERFILE.index("ARG KAIRYU_VCS_REF") > _DOCKERFILE.index(final)
+    assert _DOCKERFILE.count("ARG KAIRYU_VCS_REF") == 1
+    assert "FLASHINFER_WORKSPACE_BASE=/tmp/flashinfer" in _DOCKERFILE

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import hashlib
 import logging
 import threading
 import time
@@ -24,6 +25,8 @@ import uuid
 import weakref
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from os import PathLike
+from pathlib import Path
 
 from kairyu.engine.backend import (
     GenerationRequest,
@@ -228,10 +231,83 @@ def _validate_startup_kv_cache_dtype_identity(
         )
 
 
+def _dram_kv_tier_from_startup_frame(frame) -> dict[str, object] | None:
+    raw = frame.get("dram_kv_tier")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {
+        "enabled",
+        "capacity_pages",
+        "profile_sha256",
+        "min_restore_tokens",
+    }:
+        raise EngineServiceError("engine startup DRAM KV tier metadata is invalid")
+    enabled = raw["enabled"]
+    capacity = raw["capacity_pages"]
+    profile_sha = raw["profile_sha256"]
+    threshold = raw["min_restore_tokens"]
+    if type(enabled) is not bool or type(capacity) is not int or capacity < 0:
+        raise EngineServiceError("engine startup DRAM KV tier state is invalid")
+    if enabled:
+        if (
+            capacity < 1
+            or not isinstance(profile_sha, str)
+            or len(profile_sha) != 64
+            or any(character not in "0123456789abcdef" for character in profile_sha)
+            or type(threshold) is not int
+            or threshold < 1
+        ):
+            raise EngineServiceError(
+                "engine startup enabled DRAM KV tier identity is incomplete"
+            )
+    elif capacity != 0 or profile_sha is not None or threshold is not None:
+        raise EngineServiceError(
+            "engine startup disabled DRAM KV tier reported active metadata"
+        )
+    return dict(raw)
+
+
+def _validate_startup_dram_kv_tier_identity(
+    configured_capacity_pages: int,
+    actual: dict[str, object] | None,
+    expected_profile_sha256: str | None = None,
+) -> None:
+    if actual is None:
+        if configured_capacity_pages:
+            raise EngineServiceError(
+                "engine service did not report DRAM KV tier metadata for "
+                "an enabled tier"
+            )
+        return
+    expected_enabled = configured_capacity_pages > 0
+    if (
+        actual["enabled"] is not expected_enabled
+        or actual["capacity_pages"] != configured_capacity_pages
+    ):
+        raise EngineServiceError(
+            "engine startup DRAM KV tier request mismatch: "
+            f"parent capacity={configured_capacity_pages}, child={actual}"
+        )
+    if (
+        expected_profile_sha256 is not None
+        and actual["profile_sha256"] != expected_profile_sha256
+    ):
+        raise EngineServiceError(
+            "engine startup DRAM KV tier profile mismatch: "
+            f"parent sha256={expected_profile_sha256}, "
+            f"child sha256={actual['profile_sha256']}"
+        )
+
+
 def _recv_optional_startup_frame(
     parent_pipe,
     process,
-) -> tuple[AttentionBackendDecision | None, str | None, str | None]:
+) -> tuple[
+    AttentionBackendDecision | None,
+    str | None,
+    str | None,
+    dict[str, object] | None,
+]:
     """Receive a new child's second frame; EOF from a live child means legacy."""
 
     try:
@@ -239,13 +315,14 @@ def _recv_optional_startup_frame(
     except EOFError:
         if process.is_alive():
             # Old services close the Pipe immediately after the integer port.
-            return None, None, None
+            return None, None, None, None
         raise EngineServiceError(
             "engine service exited before reporting startup metadata"
         ) from None
     decision = _decision_from_startup_frame(frame)
     requested, resolved = _kv_cache_dtype_from_startup_frame(frame)
-    return decision, requested, resolved
+    dram_kv_tier = _dram_kv_tier_from_startup_frame(frame)
+    return decision, requested, resolved, dram_kv_tier
 
 
 @dataclass
@@ -461,6 +538,8 @@ class ZmqEngineBackend:
         cuda_graph_warmup_iters: int = 3,
         max_model_len: int | None = None,
         kv_cache_dtype: str = "auto",
+        dram_kv_tier_capacity_pages: int = 0,
+        dram_kv_tier_profile: str | PathLike[str] | None = None,
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
@@ -470,6 +549,46 @@ class ZmqEngineBackend:
             raise ValueError(
                 "kairyu-proc explicit KV cache dtype requires a real model_path"
             )
+        if (
+            type(dram_kv_tier_capacity_pages) is not int
+            or dram_kv_tier_capacity_pages < 0
+        ):
+            raise ValueError(
+                "dram_kv_tier_capacity_pages must be a non-negative integer"
+            )
+        if dram_kv_tier_profile is not None and (
+            not isinstance(dram_kv_tier_profile, (str, PathLike))
+            or not str(dram_kv_tier_profile)
+        ):
+            raise ValueError(
+                "dram_kv_tier_profile must be a non-empty local path or null"
+            )
+        if (dram_kv_tier_capacity_pages > 0) != (
+            dram_kv_tier_profile is not None
+        ):
+            raise ValueError(
+                "DRAM KV tier requires both a positive "
+                "dram_kv_tier_capacity_pages and dram_kv_tier_profile"
+            )
+        if dram_kv_tier_capacity_pages and model_path is None:
+            raise ValueError("DRAM KV tier requires a real model_path")
+        dram_kv_tier_profile_bytes: bytes | None = None
+        dram_kv_tier_expected_profile_sha256: str | None = None
+        if dram_kv_tier_profile is not None:
+            profile_path = Path(dram_kv_tier_profile)
+            try:
+                dram_kv_tier_profile_bytes = profile_path.read_bytes()
+            except OSError as error:
+                raise ValueError(
+                    f"cannot read DRAM KV crossover profile: {profile_path}"
+                ) from error
+            if not dram_kv_tier_profile_bytes:
+                raise ValueError(
+                    f"DRAM KV crossover profile is empty: {profile_path}"
+                )
+            dram_kv_tier_expected_profile_sha256 = hashlib.sha256(
+                dram_kv_tier_profile_bytes
+            ).hexdigest()
         self._config = {
             "num_pages": num_pages,
             "page_size": page_size,
@@ -487,6 +606,12 @@ class ZmqEngineBackend:
             "cuda_graph_max_pages": cuda_graph_max_pages,
             "cuda_graph_warmup_iters": cuda_graph_warmup_iters,
             "kv_cache_dtype": kv_cache_dtype,
+            "dram_kv_tier_capacity_pages": dram_kv_tier_capacity_pages,
+            "dram_kv_tier_profile": (
+                str(dram_kv_tier_profile)
+                if dram_kv_tier_profile is not None
+                else None
+            ),
         }
         self._death_timeout_s = death_timeout_s
         self._process = None
@@ -506,6 +631,22 @@ class ZmqEngineBackend:
         self.attention_backend_decision: AttentionBackendDecision | None = None
         self.kv_cache_dtype_requested = kv_cache_dtype
         self.kv_cache_dtype_resolved: str | None = None
+        self.dram_kv_tier_enabled = dram_kv_tier_capacity_pages > 0
+        self.dram_kv_tier_capacity_pages = dram_kv_tier_capacity_pages
+        self.dram_kv_tier_profile = (
+            str(dram_kv_tier_profile)
+            if dram_kv_tier_profile is not None
+            else None
+        )
+        self.dram_kv_tier_profile_sha256: str | None = None
+        self.dram_kv_tier_min_restore_tokens: int | None = None
+        # The path is operator-facing configuration, but it is not a stable
+        # process-boundary payload.  Pin its bytes at backend construction so
+        # every child generation validates exactly the same measured policy.
+        self._dram_kv_tier_profile_bytes = dram_kv_tier_profile_bytes
+        self._dram_kv_tier_expected_profile_sha256 = (
+            dram_kv_tier_expected_profile_sha256
+        )
         self._start_lock = asyncio.Lock()
         self._startup_task: asyncio.Task[int] | None = None
         self._startup_abandoned: threading.Event | None = None
@@ -539,15 +680,40 @@ class ZmqEngineBackend:
 
     # -- lifecycle ---------------------------------------------------------
 
+    def _validate_dram_kv_profile_unchanged(self) -> None:
+        """Refuse a respawn after the configured profile path changes."""
+
+        expected = self._dram_kv_tier_profile_bytes
+        if expected is None:
+            return
+        profile_path = self.dram_kv_tier_profile
+        assert profile_path is not None
+        try:
+            current = Path(profile_path).read_bytes()
+        except OSError as error:
+            raise EngineServiceError(
+                "configured DRAM KV profile became unreadable after backend "
+                f"construction: {profile_path}"
+            ) from error
+        if current != expected:
+            raise EngineServiceError(
+                "configured DRAM KV profile changed after backend construction; "
+                "recreate the backend to adopt a new measured policy"
+            )
+
     def _spawn(self, abandoned: threading.Event | None = None) -> int:
         import multiprocessing
 
         if abandoned is not None and abandoned.is_set():
             raise EngineServiceError("engine service startup was cancelled")
+        self._validate_dram_kv_profile_unchanged()
         spawn = multiprocessing.get_context("spawn")
         parent_pipe, child_pipe = spawn.Pipe()
+        service_args = (child_pipe, self._config)
+        if self._dram_kv_tier_profile_bytes is not None:
+            service_args = (*service_args, self._dram_kv_tier_profile_bytes)
         process = spawn.Process(
-            target=run_engine_service, args=(child_pipe, self._config), daemon=True
+            target=run_engine_service, args=service_args, daemon=True
         )
         process.start()
         # Register ownership before either Pipe wait.  If the coroutine awaiting
@@ -582,7 +748,12 @@ class ZmqEngineBackend:
                     raise EngineServiceError(
                         "engine service exited before reporting startup metadata"
                     )
-            decision, requested_kv_dtype, resolved_kv_dtype = (
+            (
+                decision,
+                requested_kv_dtype,
+                resolved_kv_dtype,
+                dram_kv_tier,
+            ) = (
                 _recv_optional_startup_frame(parent_pipe, process)
             )
             _validate_startup_kv_cache_dtype_identity(
@@ -590,6 +761,16 @@ class ZmqEngineBackend:
                 requested_kv_dtype,
                 resolved_kv_dtype,
             )
+            _validate_startup_dram_kv_tier_identity(
+                self.dram_kv_tier_capacity_pages,
+                dram_kv_tier,
+                self._dram_kv_tier_expected_profile_sha256,
+            )
+            # Catch an operator rewrite that raced this respawn.  The child
+            # still consumed the pinned bytes, so this is detection rather
+            # than a data race; rejecting readiness makes the config change
+            # explicit instead of silently keeping the old policy alive.
+            self._validate_dram_kv_profile_unchanged()
             if abandoned is not None and abandoned.is_set():
                 raise EngineServiceError("engine service startup was cancelled")
             if not process.is_alive():
@@ -599,6 +780,8 @@ class ZmqEngineBackend:
         except BaseException as error:
             self.attention_backend_decision = None
             self.kv_cache_dtype_resolved = None
+            self.dram_kv_tier_profile_sha256 = None
+            self.dram_kv_tier_min_restore_tokens = None
             reaped = _kill_and_reap_process(process, timeout_s=1.0)
             if self._process is process and reaped:
                 self._process = None
@@ -614,6 +797,15 @@ class ZmqEngineBackend:
         if requested_kv_dtype is not None:
             self.kv_cache_dtype_requested = requested_kv_dtype
         self.kv_cache_dtype_resolved = resolved_kv_dtype
+        if dram_kv_tier is not None:
+            profile_sha = dram_kv_tier["profile_sha256"]
+            threshold = dram_kv_tier["min_restore_tokens"]
+            self.dram_kv_tier_profile_sha256 = (
+                profile_sha if isinstance(profile_sha, str) else None
+            )
+            self.dram_kv_tier_min_restore_tokens = (
+                threshold if type(threshold) is int else None
+            )
         if not self._atexit_registered:
             atexit.register(self._kill_process)
             self._atexit_registered = True
@@ -682,6 +874,8 @@ class ZmqEngineBackend:
         self._live_generation = None
         self.attention_backend_decision = None
         self.kv_cache_dtype_resolved = None
+        self.dram_kv_tier_profile_sha256 = None
+        self.dram_kv_tier_min_restore_tokens = None
         self._fail_generation_once(
             generation,
             EngineServiceError(
@@ -798,6 +992,8 @@ class ZmqEngineBackend:
             self._live_generation = None
             self.attention_backend_decision = None
             self.kv_cache_dtype_resolved = None
+            self.dram_kv_tier_profile_sha256 = None
+            self.dram_kv_tier_min_restore_tokens = None
             self._fail_generation_once(
                 generation,
                 EngineServiceError("engine service shut down before completing the request"),
@@ -833,6 +1029,8 @@ class ZmqEngineBackend:
                 self._close_transport_locked()
                 self.attention_backend_decision = None
                 self.kv_cache_dtype_resolved = None
+                self.dram_kv_tier_profile_sha256 = None
+                self.dram_kv_tier_min_restore_tokens = None
             if cleanup_error is not None:
                 # Keep the Process object so a later shutdown attempt can reap
                 # it and no future code can mistake the backend for child-free.
@@ -987,6 +1185,8 @@ class ZmqEngineBackend:
                 self._live_generation = None
                 self.attention_backend_decision = None
                 self.kv_cache_dtype_resolved = None
+                self.dram_kv_tier_profile_sha256 = None
+                self.dram_kv_tier_min_restore_tokens = None
             self._fail_generation_once(generation, error)
 
     def _deliver_event(self, event: dict) -> None:

@@ -171,6 +171,8 @@ def _backend_identity(
     *,
     kv_mode: str = "paged-materialized",
     sm: int = 120,
+    prefill_version: str = "4.0.0b24",
+    decode_version: str = "0.6.4",
 ) -> str:
     return json.dumps(
         {
@@ -184,6 +186,17 @@ def _backend_identity(
                 "decode": "flashinfer",
                 "kv_mode": kv_mode,
                 "prefill": "flashattention4",
+            },
+            "component_versions": {
+                "decode": decode_version,
+                "prefill": prefill_version,
+            },
+            "component_builds": {
+                "flashinfer-jit-cache": {
+                    "installed": True,
+                    "version": "0.6.4",
+                    "record_sha256": "c" * 64,
+                }
             },
             "requested": "flashattention4",
             "resolved": "flashattention4",
@@ -199,8 +212,9 @@ def _backend_identity(
     [
         _backend_identity(kv_mode="paged-direct"),
         _backend_identity(sm=100),
+        _backend_identity(prefill_version="4.0.0b25"),
     ],
-    ids=["component-mismatch", "hardware-mismatch"],
+    ids=["component-mismatch", "hardware-mismatch", "version-mismatch"],
 )
 def test_startup_handshake_requires_the_same_attention_backend_identity(
     tmp_path,
@@ -232,6 +246,32 @@ def test_startup_handshake_requires_the_same_attention_backend_identity(
         )
 
 
+def test_startup_handshake_requires_the_same_dram_tier_identity(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "test"}))
+    handshake = make_handshake(
+        str(tmp_path),
+        num_pages=64,
+        page_size=16,
+        dram_kv_tier_identity="a" * 64,
+    )
+
+    validate_handshake(
+        handshake,
+        str(tmp_path),
+        num_pages=64,
+        page_size=16,
+        dram_kv_tier_identity="a" * 64,
+    )
+    with pytest.raises(RuntimeError, match="DRAM tier identity"):
+        validate_handshake(
+            handshake,
+            str(tmp_path),
+            num_pages=64,
+            page_size=16,
+            dram_kv_tier_identity="b" * 64,
+        )
+
+
 @pytest.mark.parametrize(
     ("requested_kv_dtype", "resolved_kv_dtype"),
     (
@@ -239,13 +279,22 @@ def test_startup_handshake_requires_the_same_attention_backend_identity(
         ("bfloat16", torch.bfloat16),
     ),
 )
+@pytest.mark.parametrize("dram_enabled", [False, True], ids=["dram-off", "dram-on"])
 def test_build_tp_runner_probes_and_binds_the_rank_local_device(
     monkeypatch,
     requested_kv_dtype,
     resolved_kv_dtype,
+    dram_enabled,
 ):
     from kairyu.engine.core import attention as attention_module
-    from kairyu.engine.core import attention_selector, hw_profile, kv_pool, model_runner, sampler
+    from kairyu.engine.core import (
+        attention_selector,
+        hw_profile,
+        kv_pool,
+        kv_tier_policy,
+        model_runner,
+        sampler,
+    )
     from kairyu.models import parallel
 
     placement = worker_module.TPPlacement("cuda:3", torch.bfloat16, "nccl")
@@ -291,9 +340,14 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
         seen["selection"] = (actual_profile, device)
         return backend
 
-    def fake_identity(actual_decision):
+    def fake_selection_identity(actual_decision):
+        seen["selection_identity_decision"] = actual_decision
+        return "rank-local-selection-identity"
+
+    def fake_execution_identity(actual_decision, actual_backend):
         seen["identity_decision"] = actual_decision
-        return "canonical-rank-local-identity"
+        seen["identity_backend"] = actual_backend
+        return "exact-rank-local-execution-identity"
 
     def fake_build_tp_model(
         model_dir,
@@ -316,9 +370,22 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
         }
         return object(), local_config, full_config
 
+    rank_pool = object()
+
     def fake_pool(**kwargs):
         seen["pool"] = kwargs
-        return object()
+        return rank_pool
+
+    tier = object()
+    policy = object()
+
+    def fake_build_dram_kv_tier(pool, **kwargs):
+        seen["dram_kv_tier"] = {"pool": pool, **kwargs}
+        return SimpleNamespace(
+            tier=tier,
+            policy=policy,
+            handshake_identity="dram-runtime-profile-identity",
+        )
 
     class FakeRunner:
         def __init__(self, model, pool, **kwargs):
@@ -333,11 +400,19 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
     monkeypatch.setattr(
         attention_selector,
         "attention_backend_identity",
-        fake_identity,
+        fake_selection_identity,
         raising=False,
     )
+    if dram_enabled:
+        monkeypatch.setattr(
+            attention_selector,
+            "attention_backend_execution_identity",
+            fake_execution_identity,
+            raising=False,
+        )
     monkeypatch.setattr(parallel, "build_tp_model", fake_build_tp_model)
     monkeypatch.setattr(kv_pool, "PagedKVPool", fake_pool)
+    monkeypatch.setattr(kv_tier_policy, "build_dram_kv_tier", fake_build_dram_kv_tier)
     monkeypatch.setattr(model_runner, "PagedModelRunner", FakeRunner)
     monkeypatch.setattr(sampler, "Sampler", lambda **kwargs: SimpleNamespace(**kwargs))
 
@@ -352,11 +427,14 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
         vocab=["token"],
         placement=placement,
         kv_cache_dtype=requested_kv_dtype,
+        dram_kv_tier_capacity_pages=7 if dram_enabled else 0,
+        dram_kv_tier_profile="/profile.json" if dram_enabled else None,
+        max_num_batched_tokens=1536,
     )
 
     assert seen["probe_device"] == "cuda:3"
     assert seen["selection"] == (profile, "cuda:3")
-    assert seen["identity_decision"] is decision
+    assert seen["selection_identity_decision"] is decision
     assert seen["model"] == {
         "model_dir": "/model",
         "tp": 4,
@@ -369,7 +447,32 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
     assert seen["pool"]["device"] == "cuda:3"
     assert seen["pool"]["dtype"] is resolved_kv_dtype
     assert runner.attention_backend_decision is decision
-    assert runner.attention_backend_identity == "canonical-rank-local-identity"
+    assert runner.attention_backend_identity == "rank-local-selection-identity"
+    if dram_enabled:
+        assert seen["identity_decision"] is decision
+        assert seen["identity_backend"] is backend
+        assert seen["dram_kv_tier"] == {
+            "pool": rank_pool,
+            "model_path": "/model",
+            "tensor_parallel_size": 4,
+            "tensor_parallel_rank": 3,
+            "capacity_pages": 7,
+            "profile_path": "/profile.json",
+            "attention_backend_identity": "exact-rank-local-execution-identity",
+            "max_num_batched_tokens": 1536,
+        }
+        assert runner.dram_kv_tier is tier
+        assert runner.dram_kv_policy is policy
+        assert runner.dram_kv_tier_identity == "dram-runtime-profile-identity"
+    else:
+        # ``backend`` deliberately lacks exact package/build metadata.  The
+        # real execution-identity function would reject it, so reaching here
+        # proves the disabled path kept the historical selection identity only.
+        assert "identity_decision" not in seen
+        assert "dram_kv_tier" not in seen
+        assert runner.dram_kv_tier is None
+        assert runner.dram_kv_policy is None
+        assert runner.dram_kv_tier_identity is None
     assert runner.kv_cache_dtype_requested == requested_kv_dtype
     assert runner.kv_cache_dtype_resolved == "bfloat16"
     assert returned_full_config is full_config

@@ -744,6 +744,237 @@ image, and drill are unchanged.
   copies and token recomputation only; it must never be reported as measured
   physical KV bytes or byte-seconds.
 
+- 9.8a Native pinned-DRAM KV crossover (#187, G5 F4a): this gate is closed by
+  retained schema-v2 Qwen3-32B TP4/TP8 evidence; the procedure below remains
+  the reproducibility contract. Use one standalone clean clone of the exact
+  implementation commit and build one immutable image from it; an older image
+  is invalid. TP4 must exit successfully and release all GPUs before TP8
+  starts. Do not overlap the runs, reuse a tag that resolves to another image,
+  substitute a dirty bind mount, or invent a crossover when the retained
+  samples have no stable passing suffix.
+
+  The completed schema-v1 FlashInfer TP4/TP8 collection passed correctness and
+  provenance checks but produced no stable restore-winning suffix. Subsequent
+  review found that its cold-recompute arm split the final prompt token into an
+  additional model invocation, biasing the comparison toward restore. The v1
+  raw is diagnostic only: it cannot seed runtime policy, be replayed as v2, or
+  supply any sample to this run.
+
+  Fresh raw and profiles use schema v2. Every rank must report the exact
+  `cuda-pinned-dram-fragment-major-torch-copy-v1` backend: one NUMA-attested
+  pinned owner viewed as `[fragment, slot, bytes]`, with one copy submission
+  per fragment and jointly contiguous extent. The raw, profile, and runtime
+  policy bind that versioned backend identity and fail closed on an old or
+  different implementation. Restore includes checksum validation, H2D, the
+  final prompt-token query, and sampling. Cold recompute uses production
+  prompt chunks through the final prompt token and samples its hidden state
+  directly, without an additional one-token model call.
+
+  The model volume contains a `qwen3-32b` subdirectory, so mount that exact
+  volume subpath. Run as the host UID/GID, leave Docker's default hostname in
+  place so it remains the container-ID prefix, and give the container only a
+  read-only source clone, read-only full-container-ID metadata directory, and
+  its own read-write output directory. `memlock=-1`, host IPC, Docker's
+  default bridge network, loopback Gloo, and an explicit writable Triton cache
+  and FlashInfer workspace are part of the retained runtime contract. Without
+  the vendor-specific FlashInfer workspace, a non-root container falls back to
+  Torch when the library tries to create `/.cache`; the formal operator rejects
+  that fallback before loading the model. Host networking is invalid here: it
+  replaces the container-ID hostname with the host name and breaks the provenance
+  binding. `Dockerfile.cuda` keeps the revision label in a metadata-only final
+  stage so changing the source commit does not invalidate the large dependency
+  payload.
+
+  ```bash
+  set -euo pipefail
+  COMMIT=$(git rev-parse HEAD)
+  SESSION_ROOT=$(mktemp -d /tmp/kairyu-f4a.XXXXXX)
+  SOURCE_ROOT="$SESSION_ROOT/source"
+  RUN_ROOT="$SESSION_ROOT/evidence"
+  HOST_UID=$(id -u)
+  HOST_GID=$(id -g)
+
+  git clone --no-hardlinks . "$SOURCE_ROOT"
+  git -C "$SOURCE_ROOT" switch --detach "$COMMIT"
+  test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$COMMIT"
+  test -z "$(git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all)"
+
+  IMAGE_REF="kairyu-f4a:$COMMIT"
+  docker build --build-arg "KAIRYU_VCS_REF=$COMMIT" \
+    -t "$IMAGE_REF" -f "$SOURCE_ROOT/Dockerfile.cuda" "$SOURCE_ROOT"
+  IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")
+  test "$(docker image inspect --format \
+    '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$IMAGE_ID")" = "$COMMIT"
+  mapfile -t REPO_DIGESTS < <(docker image inspect --format \
+    '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE_ID")
+  REPO_ARGS=()
+  for digest in "${REPO_DIGESTS[@]}"; do
+    if test -n "$digest"; then
+      REPO_ARGS+=(--repo-digest "$digest")
+    fi
+  done
+
+  mkdir -p "$RUN_ROOT/tp4" "$RUN_ROOT/tp8" \
+    "$RUN_ROOT/metadata/tp4" "$RUN_ROOT/metadata/tp8" \
+    "$RUN_ROOT/artifact"
+  docker image inspect "$IMAGE_ID" > "$RUN_ROOT/metadata/image-inspect.json"
+
+  TP4_CID=$(docker create \
+    --name "kairyu-f4a-tp4-${COMMIT:0:12}" \
+    --gpus '"device=0,1,2,3"' \
+    --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    --ulimit memlock=-1:-1 --ipc=host \
+    -e GLOO_SOCKET_IFNAME=lo \
+    -e TRITON_CACHE_DIR=/evidence/triton-cache \
+    -e FLASHINFER_WORKSPACE_BASE=/evidence/flashinfer-workspace \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount \
+      type=volume,src=kairyu-qwen3-32b_qwen3-32b,dst=/models/qwen3-32b,volume-subpath=qwen3-32b,readonly \
+    --mount "type=bind,src=$RUN_ROOT/tp4,dst=/evidence" \
+    --mount \
+      "type=bind,src=$RUN_ROOT/metadata/tp4,dst=/run/kairyu-meta,readonly" \
+    "$IMAGE_ID" \
+    bench/dram_kv_tier_qwen.py run \
+      --tp 4 --model-path /models/qwen3-32b \
+      --output /evidence/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
+      --image-id "$IMAGE_ID" \
+      --container-id-file /run/kairyu-meta/container-id \
+      "${REPO_ARGS[@]}" --max-num-batched-tokens 2048 --timeout-s 1800)
+  test "${#TP4_CID}" -eq 64
+  test "$(docker inspect --format '{{.Config.Hostname}}' "$TP4_CID")" \
+    = "${TP4_CID:0:12}"
+  test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$TP4_CID")" \
+    != host
+  printf '%s\n' "$TP4_CID" > "$RUN_ROOT/metadata/tp4/container-id"
+  docker inspect "$TP4_CID" \
+    > "$RUN_ROOT/metadata/tp4/container-inspect-created.json"
+  docker start -a "$TP4_CID" || {
+    docker inspect "$TP4_CID" \
+      > "$RUN_ROOT/metadata/tp4/container-inspect-exited.json"
+    exit 1
+  }
+  test "$(docker inspect --format '{{.State.ExitCode}}' "$TP4_CID")" = 0
+  test "$(docker inspect --format '{{.State.Running}}' "$TP4_CID")" = false
+  test -s "$RUN_ROOT/tp4/dram-kv-tier-qwen3-32b-tp4-raw.jsonl"
+  docker inspect "$TP4_CID" \
+    > "$RUN_ROOT/metadata/tp4/container-inspect-exited.json"
+
+  TP8_CID=$(docker create \
+    --name "kairyu-f4a-tp8-${COMMIT:0:12}" \
+    --gpus '"device=0,1,2,3,4,5,6,7"' \
+    --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    --ulimit memlock=-1:-1 --ipc=host \
+    -e GLOO_SOCKET_IFNAME=lo \
+    -e TRITON_CACHE_DIR=/evidence/triton-cache \
+    -e FLASHINFER_WORKSPACE_BASE=/evidence/flashinfer-workspace \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount \
+      type=volume,src=kairyu-qwen3-32b_qwen3-32b,dst=/models/qwen3-32b,volume-subpath=qwen3-32b,readonly \
+    --mount "type=bind,src=$RUN_ROOT/tp8,dst=/evidence" \
+    --mount \
+      "type=bind,src=$RUN_ROOT/metadata/tp8,dst=/run/kairyu-meta,readonly" \
+    "$IMAGE_ID" \
+    bench/dram_kv_tier_qwen.py run \
+      --tp 8 --model-path /models/qwen3-32b \
+      --output /evidence/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
+      --image-id "$IMAGE_ID" \
+      --container-id-file /run/kairyu-meta/container-id \
+      "${REPO_ARGS[@]}" --max-num-batched-tokens 2048 --timeout-s 1800)
+  test "${#TP8_CID}" -eq 64
+  test "$(docker inspect --format '{{.Config.Hostname}}' "$TP8_CID")" \
+    = "${TP8_CID:0:12}"
+  test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$TP8_CID")" \
+    != host
+  printf '%s\n' "$TP8_CID" > "$RUN_ROOT/metadata/tp8/container-id"
+  docker inspect "$TP8_CID" \
+    > "$RUN_ROOT/metadata/tp8/container-inspect-created.json"
+  docker start -a "$TP8_CID" || {
+    docker inspect "$TP8_CID" \
+      > "$RUN_ROOT/metadata/tp8/container-inspect-exited.json"
+    exit 1
+  }
+  test "$(docker inspect --format '{{.State.ExitCode}}' "$TP8_CID")" = 0
+  test "$(docker inspect --format '{{.State.Running}}' "$TP8_CID")" = false
+  test -s "$RUN_ROOT/tp8/dram-kv-tier-qwen3-32b-tp8-raw.jsonl"
+  docker inspect "$TP8_CID" \
+    > "$RUN_ROOT/metadata/tp8/container-inspect-exited.json"
+  ```
+
+  Keep both stopped containers and their inspect records until assembly and
+  verification finish. Run the offline steps from the same clean source and
+  immutable image; they need no GPU. `assemble --assert-gate` is allowed to
+  fail when the measured grid has no stable restore-winning suffix—that is an
+  honest open gate, not an environment skip or a value to fill manually.
+
+  ```bash
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
+    "$IMAGE_ID" bench/dram_kv_tier_qwen.py assemble \
+      --tp4-raw /evidence/tp4/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
+      --tp8-raw /evidence/tp8/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
+      --output-dir /evidence/artifact --assert-gate
+
+  cp -a "$RUN_ROOT/metadata" "$RUN_ROOT/artifact/container-metadata"
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
+    "$IMAGE_ID" bench/dram_kv_tier_qwen.py verify \
+      --artifact-dir /evidence/artifact --assert-gate
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
+    "$IMAGE_ID" bench/dram_kv_tier_qwen.py replay \
+      --tp4-raw /evidence/artifact/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
+      --tp8-raw /evidence/artifact/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
+      --assert-gate
+  ```
+
+  Retain both raw shards, the manifest, both runtime profiles, image inspect,
+  full container IDs, and created/exited inspect records together before
+  publishing a crossover. Only then copy the complete artifact into
+  `bench/results/g5-f4a-dram-kv-tier-qwen3-32b-<gpu>-<date>/` and update F4a.
+  After that retained copy independently verifies, the two named measurement
+  containers may be removed explicitly. Never use a broad Docker prune as
+  part of this procedure. Build and collect only after focused, unit, and real
+  GPU validation is green and the complete implementation is committed; the
+  detached source clone must resolve to that exact commit.
+
+  The binding 2026-08-01 run used clean commit
+  `edd535f7018695fc03c479a86fbd690174cca5ef`, immutable image
+  `sha256:25543ae9cbc9d2e80f1b4be2193d138486adb91c89a02cdbd0be0e62a1cc67be`,
+  and separate default-bridge containers
+  `69254c1819b1a0203cbfc0f74d3ae4e2eb4cdda6c6949332cdf7b2fec7ef9c9b`
+  (TP4) and
+  `c6b5acde2e366e08fa4d983dff629c2bc13e119f8eada8e00a233f3ba2226c8b`
+  (TP8). TP4's stable passing suffix begins at 1,024 tokens: 512 failed
+  honestly at a 1.021531 median paired ratio and 2/9 restore wins, then 1,024
+  passed at 0.975449 and 8/9 and every larger cell passed. TP8 passed all ten
+  cells from 16 through 8,192 tokens with 9/9 restore wins, placing its
+  crossover at or below the measured 16-token lower bound. Assembly,
+  verification from the retained repository copy, and independent raw replay
+  all passed. The artifact is retained at
+  `bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`;
+  its manifest SHA-256 is
+  `0680333d06bf6d06ea91fbd12ef5b88732c936d1446a06d631674dcb15946fd6`,
+  and the TP4/TP8 raw SHA-256 values are
+  `609ff6bb1b951a7d4f70bb5948e1f9dcd68e55b0523e2993effa76a3b750cf01`
+  and
+  `2947d27dcb51a227ec9e21c72a4e435e693dbb675ff683632dd285cfc86d6611`.
+
 - 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
   one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current
   retained production image predates E4M3 attention AOT and contains no

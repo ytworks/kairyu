@@ -28,11 +28,12 @@ def _legacy_hashes(
 def _incremental_hashes(
     token_ids: tuple[int, ...], page_size: int
 ) -> tuple[str, ...]:
-    _hasher, _count, hashes = _extend_prefix_hash_chain(
+    _hasher, _count, hashes, _tier_keys = _extend_prefix_hash_chain(
         hashlib.sha256(b"("),
         0,
         token_ids,
         page_size,
+        include_tier_keys=False,
     )
     return hashes
 

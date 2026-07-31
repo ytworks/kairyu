@@ -99,6 +99,63 @@ def test_default_rope_is_inplace_and_exact_to_reference(monkeypatch):
     _assert_within_bf16_ulps(actual_k, reference_k, max_ulps=0)
 
 
+def test_default_rope_production_shape_is_exact_across_storage_remaps():
+    from kairyu.kernels.rope_gpu import try_apply_rope_inplace
+    from kairyu.models.layers import apply_rope
+
+    device = _require_cuda()
+    torch.manual_seed(231)
+    tokens = 15
+    query_shape = (tokens, 16, 128)
+    key_shape = (tokens, 2, 128)
+    positions = torch.arange(tokens, dtype=torch.int64, device=device)
+    cos, sin = _cos_sin(positions, dim=128, theta=1_000_000.0)
+    source_q = torch.randn(
+        query_shape, device=device, dtype=torch.bfloat16
+    )
+    source_k = torch.randn(
+        key_shape, device=device, dtype=torch.bfloat16
+    )
+    reference_q, reference_k = apply_rope(
+        source_q.clone(), source_k.clone(), cos, sin
+    )
+    results = []
+
+    # Vary the contiguous views' storage offsets while repeating the exact
+    # production prefill shape.  The old full-width in-place kernel let one
+    # warp overwrite a half before its partner warp loaded it; ownership of a
+    # (lower, upper) pair must be independent of address alignment/scheduling.
+    for repeat in range(32):
+        query_offset = repeat % 17
+        key_offset = (repeat * 3) % 19
+        query_storage = torch.empty(
+            source_q.numel() + query_offset,
+            device=device,
+            dtype=source_q.dtype,
+        )
+        key_storage = torch.empty(
+            source_k.numel() + key_offset,
+            device=device,
+            dtype=source_k.dtype,
+        )
+        query = query_storage.narrow(
+            0, query_offset, source_q.numel()
+        ).view(query_shape)
+        key = key_storage.narrow(
+            0, key_offset, source_k.numel()
+        ).view(key_shape)
+        query.copy_(source_q)
+        key.copy_(source_k)
+
+        assert try_apply_rope_inplace(query, key, cos, sin) is True
+        results.append((query.clone(), key.clone()))
+
+    torch.cuda.synchronize()
+    for actual_q, actual_k in results:
+        _assert_within_bf16_ulps(actual_q, reference_q, max_ulps=0)
+        _assert_within_bf16_ulps(actual_k, reference_k, max_ulps=0)
+
+
 def test_default_rope_cuda_graph_replay_reads_current_cos_sin(monkeypatch):
     from kairyu.kernels import rope_gpu
     from kairyu.models.layers import apply_rope

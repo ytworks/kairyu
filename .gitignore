@@ -249,3 +249,5 @@ bench/data/
 !bench/results/issue-223-*.json
 !bench/results/attention-backends-*.json
 !bench/results/f4c-global-kv-pool-decision-*.json
+!bench/results/g5-f4a-dram-kv-tier-*/
+!bench/results/g5-f4a-dram-kv-tier-*/**

@@ -32,16 +32,35 @@ def _snapshot_prefix_hash(prefix_hasher, token_count: int) -> str:
     return snapshot.hexdigest()[:16]
 
 
+def _snapshot_prefix_digest(prefix_hasher, token_count: int) -> str:
+    """Full-strength identity for one page-aligned prefix.
+
+    Fleet routing keeps the historical 64-bit display hash above.  A DRAM
+    payload key is an integrity boundary, however: a collision must never make
+    one prefix restore another prefix's KV.  The tier therefore uses the full
+    SHA-256 while public KV events retain their established compact identity.
+    """
+
+    snapshot = prefix_hasher.copy()
+    if token_count == 1:
+        snapshot.update(b",")
+    snapshot.update(b")")
+    return snapshot.hexdigest()
+
+
 def _extend_prefix_hash_chain(
     prefix_hasher,
     prefix_token_count: int,
     token_ids: tuple[int, ...],
     page_size: int,
+    *,
+    include_tier_keys: bool = True,
 ):
     """Extend compatible repr(tuple(prefix)) block hashes in one pass."""
     extended = prefix_hasher.copy()
     token_count = prefix_token_count
     hashes: list[str] = []
+    digests: list[str] = []
     for offset, token_id in enumerate(token_ids, start=1):
         if token_count:
             extended.update(b", ")
@@ -49,7 +68,9 @@ def _extend_prefix_hash_chain(
         token_count += 1
         if offset % page_size == 0:
             hashes.append(_snapshot_prefix_hash(extended, token_count))
-    return extended, token_count, tuple(hashes)
+            if include_tier_keys:
+                digests.append(_snapshot_prefix_digest(extended, token_count))
+    return extended, token_count, tuple(hashes), tuple(digests)
 
 
 class _Node:
@@ -62,9 +83,11 @@ class _Node:
         "last_access",
         "computed",
         "publishing",
+        "evicting",
         "prefix_hasher",
         "prefix_token_count",
         "block_hashes",
+        "tier_keys",
         "eviction_version",
     )
 
@@ -87,12 +110,17 @@ class _Node:
         # Suppress same-node reentry while BlockStored is being delivered.
         # This is reset even when the sink fails so callers can retry.
         self.publishing = False
+        # A selected eviction victim remains in the tree until BlockRemoved is
+        # accepted, but its PagePool pages are already promised to the outer
+        # allocation.  Reentrant event sinks must not match or pin those pages.
+        self.evicting = False
         # Event-enabled caches maintain the canonical repr(tuple(prefix))
         # SHA-256 stream without its closing punctuation. A copy can append the
         # tuple terminator at each block boundary without rebuilding prefixes.
         self.prefix_hasher = None
         self.prefix_token_count = 0
         self.block_hashes: tuple[str, ...] = ()
+        self.tier_keys: tuple[str, ...] = ()
         # Every eligibility/LRU transition invalidates older heap entries.
         self.eviction_version = 0
 
@@ -146,6 +174,12 @@ class RadixKVCache:
         self._eviction_sequence = 0
         self._eviction_heap: list[tuple[int, int, int, _Node]] = []
         self._evictable_index: dict[_Node, tuple[int, int]] = {}
+        # The full prefix chain has a measurable per-token cost.  Keep the
+        # historical zero-tier path free of that work; an event sink needs the
+        # compact hashes immediately, while a DRAM tier enables the same chain
+        # before the first allocation.
+        self._hash_chain_enabled = event_sink is not None
+        self._tier_hash_chain_enabled = False
         self._root = _Node(key=(), pages=(), parent=None)
         self._initialize_hash_chain(self._root)
         self._root.ref_count = 1  # never evictable
@@ -154,6 +188,52 @@ class RadixKVCache:
         self._pins: dict[str, tuple[_Node, int | None]] = {}  # node, expiry tick
         self._hit_tokens = 0
         self._total_tokens = 0
+        self._dram_tier = None
+        self._dram_min_restore_tokens = 0
+        self._dram_stats = {
+            "offload_pages": 0,
+            "offload_bypassed_pages": 0,
+            "restore_pages": 0,
+            "restore_attempts": 0,
+            "restore_fallbacks": 0,
+            "ownership_failures": 0,
+        }
+
+    def attach_dram_tier(self, tier, *, min_restore_tokens: int) -> None:
+        """Attach one physical DRAM tier after its ``PagedKVPool`` exists.
+
+        Radix owns logical page ids while the runner owns the tensors indexed by
+        them, so construction is necessarily two-stage.  Replacement is
+        forbidden: outstanding host entries are fingerprinted to the original
+        pool/rank and cannot safely migrate to another tier implicitly.
+        """
+
+        if self._dram_tier is not None:
+            raise ValueError("a DRAM KV tier is already attached")
+        if tier is None:
+            raise TypeError("DRAM KV tier must not be None")
+        if (
+            isinstance(min_restore_tokens, bool)
+            or not isinstance(min_restore_tokens, int)
+            or min_restore_tokens < self._page_size
+            or min_restore_tokens % self._page_size
+        ):
+            raise ValueError(
+                "min_restore_tokens must be a positive page-aligned token count"
+            )
+        if self._total_tokens or self._root.children:
+            raise ValueError("a DRAM KV tier must be attached before the cache is used")
+        self._hash_chain_enabled = True
+        self._tier_hash_chain_enabled = True
+        self._initialize_hash_chain(self._root)
+        self._dram_tier = tier
+        self._dram_min_restore_tokens = min_restore_tokens
+
+    @property
+    def dram_tier_stats(self) -> dict[str, int]:
+        """A snapshot of ownership transitions, never the mutable counters."""
+
+        return dict(self._dram_stats)
     @property
     def num_free_pages(self) -> int:
         return self._pool.num_free
@@ -182,7 +262,7 @@ class RadixKVCache:
             if len(first_page) < self._page_size:
                 return matched_tokens
             child = node.children.get(first_page)
-            if child is None or not child.computed:
+            if child is None or not child.computed or child.evicting:
                 return matched_tokens
             whole_pages = len(child.key) // self._page_size
             common_pages = 0
@@ -211,6 +291,7 @@ class RadixKVCache:
             node is not self._root
             and not node.children
             and node.ref_count == 0
+            and not node.evicting
         )
 
     def _maybe_compact_eviction_heap(self) -> None:
@@ -267,12 +348,13 @@ class RadixKVCache:
 
     def _initialize_hash_chain(self, node: _Node) -> None:
         """Derive one node's compatible block hashes from its parent once."""
-        if self._event_sink is None:
+        if not self._hash_chain_enabled:
             return
         if node.parent is None:
             node.prefix_hasher = hashlib.sha256(b"(")
             node.prefix_token_count = 0
             node.block_hashes = ()
+            node.tier_keys = ()
             return
 
         parent = node.parent
@@ -281,11 +363,13 @@ class RadixKVCache:
             node.prefix_hasher,
             node.prefix_token_count,
             node.block_hashes,
+            node.tier_keys,
         ) = _extend_prefix_hash_chain(
             parent.prefix_hasher,
             parent.prefix_token_count,
             node.key,
             self._page_size,
+            include_tier_keys=self._tier_hash_chain_enabled,
         )
 
     def _split(self, node: _Node, keep_pages: int) -> _Node:
@@ -306,17 +390,18 @@ class RadixKVCache:
         upper.computed = node.computed
         self._initialize_hash_chain(upper)
         retained_hashes = node.block_hashes[:keep_pages]
-        if (
-            self._event_sink is not None
-            and upper.block_hashes != retained_hashes
-        ):
+        retained_tier_keys = node.tier_keys[:keep_pages]
+        if upper.block_hashes != retained_hashes:
             raise AssertionError("split prefix hash diverged from stored chain")
+        if upper.tier_keys != retained_tier_keys:
+            raise AssertionError("split DRAM identity diverged from stored chain")
         parent = node.parent
         assert parent is not None  # root is never split (its key is empty)
         parent.children[upper.key[: self._page_size]] = upper
         node.key = node.key[split_tokens:]
         node.pages = node.pages[keep_pages:]
         node.block_hashes = node.block_hashes[keep_pages:]
+        node.tier_keys = node.tier_keys[keep_pages:]
         node.parent = upper
         upper.children[node.key[: self._page_size]] = node
         self._refresh_evictable(parent)
@@ -336,7 +421,7 @@ class RadixKVCache:
             if len(first_page) < self._page_size:
                 break
             child = node.children.get(first_page)
-            if child is None or not child.computed:
+            if child is None or not child.computed or child.evicting:
                 break
             whole_pages = len(child.key) // self._page_size
             common_pages = 0
@@ -363,16 +448,48 @@ class RadixKVCache:
             self._refresh_evictable(current)
             current = current.parent
 
-    def _ensure_free(self, needed: int) -> bool:
+    def _ensure_free(self, needed: int, *, offload_to_dram: bool = True) -> bool:
         while self._pool.num_free < needed:
             victim = self._pop_oldest_evictable()
             if victim is None:
                 return False
+            victim.evicting = True
             try:
+                if (
+                    offload_to_dram
+                    and self._dram_tier is not None
+                    and victim.computed
+                ):
+                    try:
+                        retained = self._dram_tier.offload(
+                            victim.tier_keys,
+                            victim.pages,
+                        )
+                    except BaseException as error:
+                        # Capacity pressure and a physically settled D2H failure
+                        # are cache misses, not engine failures: the HBM victim
+                        # is still safe to evict and will be recomputed later.
+                        # Unknown DMA completion is different and must retain the
+                        # source pages indefinitely.
+                        if getattr(error, "source_reusable", False) is not True:
+                            raise
+                        retained = False
+                    if retained:
+                        self._dram_stats["offload_pages"] += len(victim.pages)
+                    else:
+                        self._dram_stats["offload_bypassed_pages"] += len(
+                            victim.pages
+                        )
+                elif self._dram_tier is not None and victim.computed:
+                    self._dram_stats["offload_bypassed_pages"] += len(victim.pages)
                 self._emit_removed(victim)  # the ONLY BlockRemoved source (A13)
-            except Exception:
+            except BaseException:
                 # The old scan found the same leaf again on retry. Restore that
-                # ownership when an event sink refuses the removal.
+                # ownership when either the tier or event sink refuses removal.
+                # In particular, an unknown D2H completion must never let these
+                # physical pages return to PagePool.
+                self._dram_stats["ownership_failures"] += 1
+                victim.evicting = False
                 self._refresh_evictable(victim)
                 raise
             self._pool.free(victim.pages)
@@ -380,8 +497,125 @@ class RadixKVCache:
             parent = victim.parent
             self._invalidate_evictable(victim)
             del parent.children[victim.key[: self._page_size]]
+            victim.evicting = False
             self._refresh_evictable(parent)
         return True
+
+    def _restore_from_dram(
+        self,
+        tokens: tuple[int, ...],
+        matched_tokens: int,
+        cached_pages: tuple[int, ...],
+        node: _Node,
+    ) -> tuple[int, tuple[int, ...], _Node]:
+        """Restore a consecutive suffix and publish it only after H2D completes.
+
+        The allocation already locks ``node`` and every ancestor.  Restored
+        pages become one computed child with the same lock, so the ordinary
+        allocation continuation can treat them exactly like an HBM radix hit.
+        A safely settled transfer failure falls back to recompute; an unknown
+        destination completion deliberately leaks/quarantines the reserved page
+        ids and raises rather than exposing or recycling them.
+        """
+
+        tier = self._dram_tier
+        if tier is None:
+            return matched_tokens, cached_pages, node
+        full_suffix_tokens = (
+            (len(tokens) - matched_tokens) // self._page_size
+        ) * self._page_size
+        if full_suffix_tokens < self._dram_min_restore_tokens:
+            return matched_tokens, cached_pages, node
+        first_page = tuple(
+            tokens[matched_tokens : matched_tokens + self._page_size]
+        )
+        # An uncomputed sibling belongs to an in-flight prefill.  Restoring a
+        # second child under the same radix edge would overwrite its ownership.
+        if first_page in node.children:
+            return matched_tokens, cached_pages, node
+        assert node.prefix_hasher is not None
+        _, _, _, candidate_keys = _extend_prefix_hash_chain(
+            node.prefix_hasher,
+            node.prefix_token_count,
+            tokens[matched_tokens : matched_tokens + full_suffix_tokens],
+            self._page_size,
+            include_tier_keys=True,
+        )
+        minimum_pages = -(
+            -self._dram_min_restore_tokens // self._page_size
+        )
+        available = tier.available_prefix(
+            candidate_keys,
+            min_pages=minimum_pages,
+        )
+        if not isinstance(available, int) or isinstance(available, bool):
+            raise TypeError("DRAM tier available_prefix must return an int")
+        if not 0 <= available <= len(candidate_keys):
+            raise ValueError(
+                "DRAM tier available_prefix returned an out-of-range page count"
+            )
+        if available < minimum_pages:
+            return matched_tokens, cached_pages, node
+        # Protect the selected host entries while obtaining destination ids.
+        # Offloading the HBM victim into a full bounded tier could evict the
+        # exact DRAM pages we are about to restore, turning every swap into
+        # deterministic self-thrashing. The displaced HBM victim is therefore
+        # an ordinary eviction for this one page-exchange operation.
+        if not self._ensure_free(available, offload_to_dram=False):
+            return matched_tokens, cached_pages, node
+
+        destination_pages = self._pool.allocate(available)
+        selected_keys = candidate_keys[:available]
+        self._dram_stats["restore_attempts"] += 1
+        try:
+            restored = tier.restore(selected_keys, destination_pages)
+        except BaseException as error:
+            reusable = getattr(error, "destination_reusable", False) is True
+            if reusable:
+                self._pool.free(destination_pages)
+                self._dram_stats["restore_fallbacks"] += 1
+                return matched_tokens, cached_pages, node
+            self._dram_stats["ownership_failures"] += 1
+            # Unknown H2D completion: PagePool intentionally never sees these
+            # ids again. They remain quarantined for this cache's lifetime.
+            raise
+        if restored is not True:
+            self._pool.free(destination_pages)
+            self._dram_stats["restore_fallbacks"] += 1
+            return matched_tokens, cached_pages, node
+
+        restored_tokens = available * self._page_size
+        key = tokens[matched_tokens : matched_tokens + restored_tokens]
+        child = _Node(key=key, pages=destination_pages, parent=node)
+        self._initialize_hash_chain(child)
+        if child.tier_keys != selected_keys:
+            # This is an internal identity error, not a transfer failure.  The
+            # destination copy is physically complete and can be recycled.
+            self._pool.free(destination_pages)
+            raise AssertionError("restored DRAM identities differ from radix keys")
+        child.ref_count = 1
+        child.publishing = True
+        self._touch(child)
+        node.children[first_page] = child
+        self._refresh_evictable(node)
+        try:
+            self._emit_stored(child)
+            child.computed = True
+        except BaseException:
+            del node.children[first_page]
+            self._invalidate_evictable(child)
+            self._refresh_evictable(node)
+            self._pool.free(destination_pages)
+            raise
+        finally:
+            child.publishing = False
+        self._refresh_evictable(child)
+        self._dram_stats["restore_pages"] += available
+        return (
+            matched_tokens + restored_tokens,
+            cached_pages + destination_pages,
+            child,
+        )
 
     def _expire_pins(self) -> None:
         expired = [
@@ -398,11 +632,30 @@ class RadixKVCache:
         self._alloc_tick += 1
         self._expire_pins()
         matched_tokens, cached_pages, node = self._match_and_lock(tokens)
+        try:
+            matched_tokens, cached_pages, node = self._restore_from_dram(
+                tokens,
+                matched_tokens,
+                cached_pages,
+                node,
+            )
+        except BaseException:
+            self._unlock_path(node)
+            raise
         suffix_len = len(tokens) - matched_tokens
         full_pages_needed = suffix_len // self._page_size
         tail_tokens = suffix_len % self._page_size
         needed = full_pages_needed + (1 if tail_tokens else 0)
-        if not self._ensure_free(needed):
+        try:
+            has_capacity = self._ensure_free(needed)
+        except BaseException:
+            # A successful DRAM restore extends the locked match path before
+            # suffix admission.  If a later eviction/offload raises, release
+            # that updated path just like every other failed allocation while
+            # leaving the victim's unknown physical ownership untouched.
+            self._unlock_path(node)
+            raise
+        if not has_capacity:
             self._unlock_path(node)
             raise KVCacheFull(
                 f"need {needed} pages, {self._pool.num_free} free and nothing evictable"
