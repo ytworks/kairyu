@@ -38,6 +38,16 @@ Cline's OpenAI SDK returned `Connection error` before
 or an SSH local port forward for diagnosis, avoids relying on the extension
 host's experimental SOCKS path.
 
+A 2026-07-31 follow-up used
+`ssh -L 127.0.0.1:18002:127.0.0.1:8002 ...` and configured Cline with
+`http://127.0.0.1:18002/v1`. Cline reached `/v1/models` and issued three
+`POST /v1/chat/completions` requests; Kairyu returned 200 for all three. The
+Llama-3.1-8B deployment then emitted plain reasoning text instead of Cline's
+required Plan-mode XML tool response, and Cline stopped at its three-mistake
+limit. This proves the prior failure was in the editor's SOCKS transport path;
+the remaining end-to-end blocker is model/agent-protocol readiness, not
+firewall or API reachability.
+
 ## Continue
 
 Continue is an agent available as a VS Code extension, JetBrains plugin, and
@@ -88,3 +98,13 @@ traverse the SOCKS tunnel; a direct request from an untrusted network should
 remain unreachable. Verify both the editor result and Kairyu access logs: a
 successful `/v1/models` curl proves the tunnel, but it does not prove that an
 editor extension's Node.js HTTP client uses that tunnel.
+
+For a transport-independent editor check, forward the serving port directly:
+
+```sh
+ssh -N -L 127.0.0.1:18002:127.0.0.1:<kairyu-host-port> <gpu-host>
+curl http://127.0.0.1:18002/v1/models
+```
+
+Then use `http://127.0.0.1:18002/v1` as the editor provider's Base URL and
+confirm both the editor outcome and the server-side request log.
