@@ -2925,6 +2925,54 @@ async def test_generated_tool_arguments_are_serialized_once(arguments, expected)
     assert call["function"]["arguments"] == expected
 
 
+@pytest.mark.parametrize("prefix", ["", "<|python_tag|>"])
+async def test_llama_bare_json_tool_call_is_parsed(prefix):
+    text = prefix + json.dumps(
+        {"name": "get_weather", "parameters": {"city": "Tokyo"}}
+    )
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    tools = [
+        {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
+    ]
+    body = _chat_body("weather", tools=tools, tool_choice="required")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Tokyo"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'Reasoning first. {"name":"get_weather","parameters":{}}',
+        '{"name":"get_weather","parameters":{}} trailing text',
+        '[{"name":"get_weather","parameters":{}}]',
+    ],
+)
+async def test_llama_json_tool_call_requires_one_complete_object(text):
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    tools = [
+        {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
+    ]
+    body = _chat_body("weather", tools=tools)
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == text
+    assert choice["message"]["tool_calls"] is None
+
+
 async def test_generated_tool_calls_keep_order_while_skipping_only_malformed_entries():
     text = "".join(
         (

@@ -27,6 +27,11 @@ API Key:      any non-empty value when Kairyu authentication is disabled
 Model ID:     <an ID returned by /v1/models>
 ```
 
+For a local or self-hosted model, open Cline's advanced model configuration
+and set `Max Output Tokens` explicitly. Kairyu's omitted-request default is 16,
+which is intentionally conservative but too small for most Cline XML tool
+calls; the gpu02 compatibility check uses 4096.
+
 Cline's VS Code extension follows VS Code's proxy handling. Its CLI and
 JetBrains plugin document HTTP proxy support only, so a SOCKS-only validation
 must use the VS Code/Cursor extension. Treat that as a client/environment gate,
@@ -47,6 +52,37 @@ required Plan-mode XML tool response, and Cline stopped at its three-mistake
 limit. This proves the prior failure was in the editor's SOCKS transport path;
 the remaining end-to-end blocker is model/agent-protocol readiness, not
 firewall or API reachability.
+
+A 2026-07-31 protocol follow-up resolved that blocker for the existing
+Llama-3.1-8B deployment. Kairyu now auto-loads the Hugging Face tokenizer's
+chat template and special-token metadata from the configured local model path,
+and recognizes Llama 3.1's bare
+`{"name": "...", "parameters": {...}}` function-call form. With the official
+model template and Cline's output limit set to 4096, a Plan-mode response
+completed in one request. An Act-mode task then emitted `read_file`, consumed
+the file result, emitted `attempt_completion`, and reached `Task Completed`;
+both chat-completions requests returned 200.
+
+Cline 4.0.12's global `Native Tool Call` switch is not sufficient by itself:
+its model-family matcher enables native calls only for selected model IDs, and
+an unrecognized Llama ID continues to use Cline's XML protocol. Kairyu supports
+both paths: Cline XML remains assistant content for Cline to parse, while
+OpenAI `tools` requests receive structured `tool_calls`. Do not rename a model
+to impersonate an allow-listed family. For higher agent quality, Cline's local
+model guide recommends Qwen3 Coder 30B; validate the checkpoint and its own
+tokenizer template before making it the production default.
+
+For a native local model deployment, keep the checkpoint's tokenizer artifacts
+beside the model and let Kairyu resolve them from `model_path` instead of
+selecting the legacy role-prefix renderer:
+
+```yaml
+engines:
+  llama-3.1-8b-instruct:
+    backend: kairyu
+    options:
+      model_path: /models/llama-3.1-8b-instruct/current
+```
 
 ## Continue
 

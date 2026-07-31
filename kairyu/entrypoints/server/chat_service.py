@@ -51,6 +51,7 @@ from kairyu.sampling_params import (
 )
 
 _TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_LLAMA_TOOL_PREFIX = "<|python_tag|>"
 logger = logging.getLogger(__name__)
 
 
@@ -559,6 +560,28 @@ def chat_error_from_upstream_client_error(
     )
 
 
+def _tool_call_from_payload(payload: object) -> ToolCall | None:
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    arguments = payload.get("arguments", payload.get("parameters", {}))
+    if not isinstance(arguments, (dict, str)):
+        return None
+    if isinstance(arguments, dict):
+        try:
+            serialized_arguments = json.dumps(arguments)
+        except (ValueError, RecursionError):
+            return None
+    else:
+        serialized_arguments = arguments
+    return ToolCall(
+        id=f"call_{uuid.uuid4().hex[:12]}",
+        function=FunctionCall(name=name, arguments=serialized_arguments),
+    )
+
+
 def _parse_tool_calls(text: str) -> list[ToolCall]:
     calls = []
     for match in _TOOL_CALL_PATTERN.finditer(text):
@@ -566,28 +589,24 @@ def _parse_tool_calls(text: str) -> list[ToolCall]:
             payload = json.loads(match.group(1))
         except (ValueError, RecursionError):
             continue
-        if not isinstance(payload, dict):
-            continue
-        name = payload.get("name")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        arguments = payload.get("arguments", {})
-        if not isinstance(arguments, (dict, str)):
-            continue
-        if isinstance(arguments, dict):
-            try:
-                serialized_arguments = json.dumps(arguments)
-            except (ValueError, RecursionError):
-                continue
-        else:
-            serialized_arguments = arguments
-        calls.append(
-            ToolCall(
-                id=f"call_{uuid.uuid4().hex[:12]}",
-                function=FunctionCall(name=name, arguments=serialized_arguments),
-            )
-        )
-    return calls
+        call = _tool_call_from_payload(payload)
+        if call is not None:
+            calls.append(call)
+    if calls:
+        return calls
+
+    # Llama 3.1's tokenizer template asks for one bare
+    # {"name": ..., "parameters": ...} object. Depending on tokenizer decode
+    # settings, the leading python-tag special token may still be present.
+    candidate = text.strip()
+    if candidate.startswith(_LLAMA_TOOL_PREFIX):
+        candidate = candidate[len(_LLAMA_TOOL_PREFIX) :].lstrip()
+    try:
+        payload = json.loads(candidate)
+    except (ValueError, RecursionError):
+        return []
+    call = _tool_call_from_payload(payload)
+    return [call] if call is not None else []
 
 
 def _logprob_entries(content: tuple[TokenLogprob, ...]) -> list[LogprobEntry]:
