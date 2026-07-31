@@ -281,6 +281,21 @@ versioned route/DAG/verifier envelope as unary. A synchronous accounting
 observer preserves completed pre-final and partial-final usage across
 disconnects and failures without a task/queue bridge; returned failure data
 contains only sanitized exception types.
+G6 P-B3 is now closed on Open WebUI v0.11.0-slim. One Compose command starts
+healthy Kairyu and Open WebUI services exposing the direct `default` and
+orchestrated `kairyu-auto` mock models. Both the UI and Playwright 1.60.0 base
+are pinned by immutable linux/amd64 digest; the small browser derivative
+installs the exact lockfile-pinned JS package absent from the upstream browser
+image. A clean real-browser run created the first admin through the UI,
+selected and streamed both models, completed both UI chats, reloaded the
+persisted conversation and WebSocket, observed both a non-success proxy
+response and a visible UI error while only Kairyu was stopped, then streamed
+and chatted again after only Kairyu restarted. The three phases are bounded in
+a dedicated mandatory CI job. Each run owns a unique Compose project and
+ephemeral database, so its teardown cannot reuse or remove normal demo data;
+assistant-specific completion elements prevent a submitted user message from
+being mistaken for a response. The trace viewer remains the explicitly
+tracked sole custom UI.
 G6 AUTO request-intent parity is now closed. An immutable request carries
 sampling, deterministic `n`, choice-scoped logprobs, tools/tool choice, and
 response format across direct, Conductor, and MoA without mutating the shared
@@ -422,7 +437,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** retained exact-head run `30374404150`, PR #266, issue #175. **F1b is closed:** retained exact-head run `30387260062`, PR #267, issue #176. **F1c is closed:** exact-head source run `30399229234` at `be40b97` passed all 26 independently replayed three-gateway affinity, shared PostgreSQL BatchStore, fenced owner-Pod failover, output, and provenance checks; the complete artifact is retained under `bench/results/f1c-three-gateway/`. F1a/F1b were not rerun and the evidence-only closure commit does not repeat F1c. **F1d is closed:** m10 A34's deterministic fixture proves the complete span contract, and the separate-container Compose smoke proves W3C parentage across distinct gateway and replica services while rejecting prompt/output canaries. **F2a is closed:** exact-source run `30411111758` at `c067cb8` passed every source, replay, cache, statistical, and p99 gate. Shared cached prompt-work improved 37.9259x; across 21 blank-root paired rounds the goodput-ratio median was 1.002142, exact median LCB 0.999512, full-sample geometric mean 1.008610, and 21/21 ratios met 0.99. Worst-trace placement p99 was 0.145979 ms. The 24,709-row artifact is retained under `bench/results/f2a-prefix-routing-500-2026-07-28/`; the evidence-only closure commit does not repeat F2a. **F2b is closed:** exact-source run `30417507859` at `f383806` passed every source, Actions provenance, replay, 200-replica churn, freshness, fallback, and recovery gate. Across 500 routes, maximum exact truth age was 232.314498 ms, first stale approximate fallback was 251.339950 ms after pause, and same-process complete-replay recovery was 50.740933 ms after resume. The 2,196-row artifact is retained under `bench/results/f2b-kv-event-retained/`; F1a/F2a were not rerun and the evidence-only closure commit does not repeat F2b. |
 | M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
-| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, P-B1, P-B2, P-B4, P-B5, and P-C2 are green; P-B3 and the remaining P-C gates continue. |
+| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, all P-B gates, and P-C2 are green; the remaining P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -495,10 +510,12 @@ after inner worker/backend cleanup, including exceptional shutdowns. Aggregation
 skips and logs truncated tails or complete malformed records while preserving every valid
 usage total.
 
-The Open WebUI Compose topology is clean-checkout runnable with a standalone
-`default` mock DeploymentSpec; CI validates its binds/rendered internal endpoint and
-smokes only Kairyu readiness, exact model discovery, and completion without pulling the
-mutable UI image.
+The Open WebUI Compose topology is clean-checkout runnable with authenticated
+first-user setup, immutable third-party image pins, direct and legacy AUTO mock
+models, health-gated startup, and an opt-in browser service. The normal command
+starts only Kairyu plus Open WebUI; the dedicated browser gate owns its
+ephemeral database and validates initial use, outage, and no-WebUI-restart
+recovery.
 
 The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
 GPU, selects the configured runtime/node profile, mounts an existing host path or
@@ -606,6 +623,28 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [amendment] P-B3 closes on a pinned real Open WebUI browser flow
+- What: replaced the mutable, Kairyu-only demo check with health-gated Kairyu
+  and Open WebUI v0.11.0-slim services exposing `default` and `kairyu-auto`.
+  Open WebUI and the Playwright 1.60.0 base are immutable linux/amd64 pins; a
+  lockfile-built derivative supplies the JS package omitted by the official
+  browser image. A bounded three-phase Playwright gate proves fresh signup,
+  both model selections and SSE bodies, both UI chats, reload/WebSocket
+  persistence, real gateway outage at the proxy and UI, and recovery after
+  restarting only Kairyu. Assistant-specific response elements distinguish
+  completed replies from submitted user messages, and an isolated unique
+  Compose project makes fresh-user state deterministic while protecting the
+  normal demo volume. It runs in its own mandatory CI job.
+- Why: the previous smoke intentionally started only Kairyu and therefore
+  could not support P-B3's one-command fresh-user chat, streaming, or
+  reconnect/error claims. Exact release pins and browser-visible evidence make
+  the supported product surface reproducible without building a custom chat
+  frontend.
+- Refs: issue #197; G6 P-B3; m11 D7;
+  `deploy/compose/{docker-compose.webui.yaml,config.yaml,webui-orchestrator.yaml,Dockerfile.webui-browser}`;
+  `scripts/{webui_smoke.sh,webui_browser_smoke.mjs}`;
+  `.github/workflows/ci.yml`; `tests/unit/test_compose_configs.py`
 
 ### 2026-07-31 — [amendment] F1d closes the cross-process OTel trace
 - What: amended m10 D4/A34 and completed an optional W3C-only trace from the

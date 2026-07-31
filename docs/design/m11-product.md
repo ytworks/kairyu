@@ -375,13 +375,20 @@ leases, and queues drain. Raw evidence is in
 ### D7 — Open WebUI + frontier bench
 
 `deploy/compose/docker-compose.webui.yaml` points Open WebUI at the internal
-Kairyu endpoint `http://kairyu:8000/v1` and mounts a standalone
-`deploy/compose/config.yaml` that serves the keyless CPU-safe mock model
-`default`. `scripts/webui_smoke.sh` first validates literal bind sources and the
-rendered internal endpoint, then starts only the `kairyu` service and asserts
-bounded readiness, exact `/v1/models == ["default"]`, and one non-streaming
-completion. CI runs this after the existing Compose drill and deliberately does
-not pull or browser-test the large mutable Open WebUI image.
+Kairyu endpoint `http://kairyu:8000/v1` and mounts standalone CPU-safe direct
+and legacy-orchestration specs that expose `default` and `kairyu-auto`.
+Open WebUI v0.11.0-slim and Playwright v1.60.0-noble are pinned to immutable
+linux/amd64 manifests. Normal Compose startup brings up only healthy Kairyu and
+Open WebUI services; the browser runner is profile-scoped.
+`scripts/webui_smoke.sh` validates literal binds and the rendered endpoint
+before startup, then proves first-account creation, UI discovery and selection
+of both models, SSE streaming, reload persistence, a visible Kairyu-outage
+failure, and recovery after restarting Kairyu without restarting Open WebUI.
+Every smoke run uses a unique Compose project, so teardown removes only its
+ephemeral test database and cannot reuse or delete the normal demo's data.
+CI runs this as an independent mandatory job in parallel with the existing
+Compose drill. The only planned custom chat UI remains the orchestration-trace
+viewer tracked by G6's non-goals; Kairyu does not fork Open WebUI.
 `bench/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
 quality-proxy), scoreboard JSON+md; offline unit test with mock targets.

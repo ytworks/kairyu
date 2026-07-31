@@ -1,0 +1,35 @@
+# CPU-safe legacy kairyu-auto topology for the Open WebUI compose surface.
+workers:
+  - name: tier1
+    backend: mock
+  - name: tier2
+    backend: mock
+
+roles:
+  - name: planner
+    worker: tier2
+    role_type: planner
+    prompt: "[planner] Break the task into a short actionable plan.\nTask: {query}"
+  - name: worker
+    worker: tier1
+    prompt: "[worker] Execute this plan.\nPlan: {planner}\nTask: {query}"
+    depends_on: [planner]
+  - name: verifier
+    worker: tier2
+    role_type: verifier
+    verifies: worker
+    prompt: "[verifier] Reply PASS or FAIL with reasons.\nTask: {query}\nAnswer: {worker}"
+    depends_on: [worker]
+  - name: synthesizer
+    worker: tier2
+    role_type: synthesizer
+    prompt: >-
+      [synthesizer] Produce the final answer.
+      Task: {query}
+      Draft: {worker}
+      Notes: {verifier}
+    depends_on: [worker, verifier]
+
+budget:
+  max_steps: 12
+  max_refine_depth: 2

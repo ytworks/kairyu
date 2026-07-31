@@ -1,5 +1,6 @@
 """Checked-in Compose files must resolve their deployment contracts locally."""
 
+import json
 import os
 import subprocess
 import sys
@@ -16,7 +17,14 @@ COMPOSE_DIR = Path("deploy/compose")
 COMPOSE_FILES = sorted(COMPOSE_DIR.glob("docker-compose*.yaml"))
 WEBUI_COMPOSE = COMPOSE_DIR / "docker-compose.webui.yaml"
 WEBUI_CONFIG = COMPOSE_DIR / "config.yaml"
+WEBUI_ORCHESTRATOR = COMPOSE_DIR / "webui-orchestrator.yaml"
+WEBUI_BROWSER_DOCKERFILE = COMPOSE_DIR / "Dockerfile.webui-browser"
+WEBUI_BROWSER_PACKAGE = COMPOSE_DIR / "webui-browser" / "package.json"
+WEBUI_BROWSER_LOCK = COMPOSE_DIR / "webui-browser" / "package-lock.json"
+WEBUI_BROWSER_SMOKE = Path("scripts/webui_browser_smoke.mjs")
+WEBUI_SMOKE_PROJECT = "kairyu-webui-smoke-test"
 CONTAINER_CONFIG = "/etc/kairyu/config.yaml"
+CONTAINER_ORCHESTRATOR = "/etc/kairyu/webui-orchestrator.yaml"
 VALIDATOR = Path("scripts/validate_compose_binds.py").resolve()
 COMPOSE_SMOKE = Path("scripts/compose_smoke.sh")
 OTEL_TRACE_VERIFIER = Path("scripts/verify_otel_trace.py")
@@ -56,12 +64,18 @@ def _webui_smoke_env(
     *,
     uv_exit: int = 0,
     rendered_base_url: str = "http://kairyu:8000/v1",
-    rm_exit: int | None = None,
-) -> tuple[dict[str, str], Path]:
+    docker_fail_phase: str | None = None,
+    curl_exit: int = 0,
+) -> tuple[dict[str, str], Path, Path]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_executable(fake_bin / "uv", f"#!/bin/sh\nexit {uv_exit}\n")
     docker_log = tmp_path / "docker.log"
+    fail_case = (
+        f'  *"WEBUI_SMOKE_PHASE={docker_fail_phase}"*) exit 41 ;;\n'
+        if docker_fail_phase is not None
+        else ""
+    )
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
@@ -72,36 +86,29 @@ def _webui_smoke_env(
         "'{\"services\":{\"webui\":{\"environment\":{\"OPENAI_API_BASE_URL\":\"%s\"}}}}' "
         '"$WEBUI_RENDERED_BASE_URL"\n'
         "    ;;\n"
+        f"{fail_case}"
         "esac\n",
     )
+    curl_log = tmp_path / "curl.log"
     _write_executable(
         fake_bin / "curl",
         "#!/bin/sh\n"
-        'case "$*" in\n'
-        '  *"/readyz"*) printf \'{\"ready\":true}\' ;;\n'
-        '  *"/v1/models"*) printf \'{\"data\":[{\"id\":\"default\"}]}\' ;;\n'
-        '  *"/v1/chat/completions"*)\n'
-        "    output=\n"
-        '    while [ "$#" -gt 0 ]; do\n'
-        '      if [ "$1" = "-o" ]; then shift; output=$1; fi\n'
-        "      shift\n"
-        "    done\n"
-        "    printf "
-        "'{\"object\":\"chat.completion\",\"model\":\"default\"}' "
-        '> "$output"\n'
-        "    ;;\n"
-        "esac\n",
+        'printf "%s\\n" "$*" >> "$CURL_LOG"\n'
+        f"if [ {curl_exit} -ne 0 ]; then exit {curl_exit}; fi\n"
+        "printf '{\"ready\":true}'\n",
     )
-    if rm_exit is not None:
-        _write_executable(fake_bin / "rm", f"#!/bin/sh\nexit {rm_exit}\n")
+    _write_executable(fake_bin / "sleep", "#!/bin/sh\nexit 0\n")
     return (
         {
             **os.environ,
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
             "DOCKER_LOG": str(docker_log),
+            "CURL_LOG": str(curl_log),
             "WEBUI_RENDERED_BASE_URL": rendered_base_url,
+            "WEBUI_SMOKE_PROJECT_NAME": WEBUI_SMOKE_PROJECT,
         },
         docker_log,
+        curl_log,
     )
 
 
@@ -137,31 +144,115 @@ def test_checked_in_literal_relative_bind_sources_exist(compose_file):
         )
 
 
-def test_webui_compose_pins_internal_v1_and_file_relative_config_mount():
+def _assert_immutable_image(image: str, tagged_image: str) -> None:
+    prefix = f"{tagged_image}@sha256:"
+    assert image.startswith(prefix)
+    digest = image.removeprefix(prefix)
+    assert len(digest) == 64
+    assert all(character in "0123456789abcdef" for character in digest)
+
+
+def test_webui_compose_pins_full_authenticated_browser_topology():
     services = _load_yaml(WEBUI_COMPOSE)["services"]
     kairyu = services["kairyu"]
     webui = services["webui"]
+    browser = services["browser"]
 
     config_mounts = [
         volume
         for volume in kairyu["volumes"]
-        if isinstance(volume, str) and f":{CONTAINER_CONFIG}" in volume
+        if isinstance(volume, str)
+        and (
+            f":{CONTAINER_CONFIG}" in volume
+            or f":{CONTAINER_ORCHESTRATOR}" in volume
+        )
     ]
-    assert config_mounts == [f"./config.yaml:{CONTAINER_CONFIG}:ro"]
-    source = config_mounts[0].partition(":")[0]
-    assert (WEBUI_COMPOSE.parent / source).resolve() == WEBUI_CONFIG.resolve()
+    assert config_mounts == [
+        f"./config.yaml:{CONTAINER_CONFIG}:ro",
+        f"./webui-orchestrator.yaml:{CONTAINER_ORCHESTRATOR}:ro",
+    ]
+    for mount, source_file in zip(
+        config_mounts, (WEBUI_CONFIG, WEBUI_ORCHESTRATOR), strict=True
+    ):
+        source = mount.partition(":")[0]
+        assert (WEBUI_COMPOSE.parent / source).resolve() == source_file.resolve()
 
     environment = webui["environment"]
     assert environment["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
-    assert all("MODEL" not in name for name in environment)
+    assert environment["OPENAI_API_KEY"] == "sk-local"
+    assert environment["WEBUI_AUTH"] == "true"
+    assert environment["ENABLE_SIGNUP"] == "true"
+    assert "WEBUI_SECRET_KEY" not in environment
+    assert (
+        environment["WEBUI_SECRET_KEY_FILE"]
+        == "/app/backend/data/.webui_secret_key"
+    )
+    assert environment["DEFAULT_MODELS"] == "default"
+    assert webui["depends_on"] == {
+        "kairyu": {"condition": "service_healthy"}
+    }
+    assert "healthcheck" in kairyu
+    assert "healthcheck" in webui
+
+    _assert_immutable_image(
+        webui["image"], "ghcr.io/open-webui/open-webui:v0.11.0-slim"
+    )
+    assert browser["image"] == "kairyu-webui-browser:playwright-1.60.0"
+    assert browser["build"] == {
+        "context": "../..",
+        "dockerfile": "deploy/compose/Dockerfile.webui-browser",
+    }
+    dockerfile_lines = WEBUI_BROWSER_DOCKERFILE.read_text(
+        encoding="utf-8"
+    ).splitlines()
+    _assert_immutable_image(
+        dockerfile_lines[0].removeprefix("FROM "),
+        "mcr.microsoft.com/playwright:v1.60.0-noble",
+    )
+    package = json.loads(WEBUI_BROWSER_PACKAGE.read_text(encoding="utf-8"))
+    lock = json.loads(WEBUI_BROWSER_LOCK.read_text(encoding="utf-8"))
+    assert package["dependencies"] == {"playwright": "1.60.0"}
+    assert lock["packages"]["node_modules/playwright"]["version"] == "1.60.0"
+    assert lock["packages"]["node_modules/playwright-core"]["version"] == "1.60.0"
+    assert "npm ci --omit=dev --ignore-scripts" in "\n".join(dockerfile_lines)
+    assert browser["profiles"] == ["browser-smoke"]
+    assert browser["depends_on"] == {
+        "webui": {"condition": "service_healthy"}
+    }
+    assert browser["environment"]["WEBUI_BASE_URL"] == "http://webui:8080"
+    assert browser["environment"]["EXPECTED_DIRECT_MODEL"] == "default"
+    assert browser["environment"]["EXPECTED_AUTO_MODEL"] == "kairyu-auto"
+    assert browser["environment"]["WEBUI_SMOKE_EMAIL"]
+    assert browser["environment"]["WEBUI_SMOKE_PASSWORD"]
+    assert browser["volumes"] == [
+        "../../scripts/webui_browser_smoke.mjs:/work/webui_browser_smoke.mjs:ro"
+    ]
+    assert browser["command"] == "node /work/webui_browser_smoke.mjs"
 
 
-async def test_webui_mounted_config_builds_ready_app_and_discovers_default():
+def test_webui_browser_gate_binds_results_to_new_assistant_messages():
+    smoke = WEBUI_BROWSER_SMOKE.read_text(encoding="utf-8")
+
+    assert smoke.count("before + 2") == 2
+    assert smoke.count(".nth(before + 1)") == 2
+    assert ".copy-response-button" in smoke
+    assert "requestPath === '/api/chat/completions'" in smoke
+    assert "taskReceipt.task_ids.length === 1" in smoke
+    assert "UI chat completed with a visible error" in smoke
+    assert "await sendUiMessage(autoModel, reconnectMarker)" in smoke
+    assert "page.locator('body').filter" not in smoke
+
+
+async def test_webui_mounted_config_discovers_direct_and_auto_models():
     assert WEBUI_CONFIG.is_file(), "WebUI DeploymentSpec is missing"
+    assert WEBUI_ORCHESTRATOR.is_file(), "WebUI orchestrator spec is missing"
     spec = load_deployment_spec(WEBUI_CONFIG)
     assert list(spec.engines) == ["default"]
     assert spec.engines["default"].backend == "mock"
     assert spec.pools == {}
+    assert spec.orchestrator is not None
+    assert spec.orchestrator.spec == WEBUI_ORCHESTRATOR.name
+    assert spec.orchestrators == {}
     assert spec.server.host == "0.0.0.0"
     assert spec.server.port == 8000
     assert spec.server.api_keys_env is None
@@ -174,7 +265,10 @@ async def test_webui_mounted_config_builds_ready_app_and_discovers_default():
         )
 
     assert models.status_code == 200
-    assert [entry["id"] for entry in models.json()["data"]] == ["default"]
+    assert [entry["id"] for entry in models.json()["data"]] == [
+        "default",
+        "kairyu-auto",
+    ]
 
 
 def test_validator_accepts_checked_in_inventory_from_any_cwd(tmp_path):
@@ -495,7 +589,7 @@ def test_compose_validator_imports_without_engine_extra():
 
 
 def test_webui_smoke_validation_failure_never_invokes_docker(tmp_path):
-    env, docker_log = _webui_smoke_env(tmp_path, uv_exit=23)
+    env, docker_log, _curl_log = _webui_smoke_env(tmp_path, uv_exit=23)
 
     result = subprocess.run(
         ["/bin/bash", str(WEBUI_SMOKE.resolve())],
@@ -511,7 +605,7 @@ def test_webui_smoke_validation_failure_never_invokes_docker(tmp_path):
 
 
 def test_webui_smoke_rejects_wrong_rendered_internal_url_before_startup(tmp_path):
-    env, docker_log = _webui_smoke_env(
+    env, docker_log, _curl_log = _webui_smoke_env(
         tmp_path, rendered_base_url="http://wrong.example/v1"
     )
 
@@ -527,12 +621,15 @@ def test_webui_smoke_rejects_wrong_rendered_internal_url_before_startup(tmp_path
     assert result.returncode != 0
     assert "http://wrong.example/v1" in result.stderr
     assert docker_log.read_text(encoding="utf-8").splitlines() == [
-        f"compose -f {WEBUI_COMPOSE.resolve()} config --format json"
+        (
+            f"compose --project-name {WEBUI_SMOKE_PROJECT} "
+            f"-f {WEBUI_COMPOSE.resolve()} config --format json"
+        )
     ]
 
 
-def test_webui_smoke_runs_only_kairyu_contract_and_always_tears_down(tmp_path):
-    env, docker_log = _webui_smoke_env(tmp_path)
+def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
+    env, docker_log, curl_log = _webui_smoke_env(tmp_path)
 
     result = subprocess.run(
         ["/bin/bash", str(WEBUI_SMOKE.resolve())],
@@ -545,15 +642,40 @@ def test_webui_smoke_runs_only_kairyu_contract_and_always_tears_down(tmp_path):
 
     assert result.returncode == 0, result.stderr
     commands = docker_log.read_text(encoding="utf-8").splitlines()
+    compose = (
+        f"compose --project-name {WEBUI_SMOKE_PROJECT} "
+        f"-f {WEBUI_COMPOSE.resolve()}"
+    )
     assert commands == [
-        f"compose -f {WEBUI_COMPOSE.resolve()} config --format json",
-        f"compose -f {WEBUI_COMPOSE.resolve()} up -d --build kairyu",
-        f"compose -f {WEBUI_COMPOSE.resolve()} down --volumes --remove-orphans",
+        f"{compose} config --format json",
+        (
+            f"{compose} up -d --build --wait "
+            "--wait-timeout 240 kairyu webui"
+        ),
+        f"{compose} --profile browser-smoke build browser",
+        (
+            f"{compose} --profile browser-smoke run --rm --no-deps "
+            "-e WEBUI_SMOKE_PHASE=initial browser"
+        ),
+        f"{compose} stop kairyu",
+        (
+            f"{compose} --profile browser-smoke run --rm --no-deps "
+            "-e WEBUI_SMOKE_PHASE=outage browser"
+        ),
+        f"{compose} start kairyu",
+        (
+            f"{compose} --profile browser-smoke run --rm --no-deps "
+            "-e WEBUI_SMOKE_PHASE=recovery browser"
+        ),
+        f"{compose} --profile browser-smoke down --volumes --remove-orphans",
     ]
+    assert curl_log.read_text(encoding="utf-8").splitlines()
 
 
-def test_webui_smoke_tears_down_even_if_response_cleanup_fails(tmp_path):
-    env, docker_log = _webui_smoke_env(tmp_path, rm_exit=99)
+def test_webui_smoke_tears_down_if_browser_phase_fails(tmp_path):
+    env, docker_log, _curl_log = _webui_smoke_env(
+        tmp_path, docker_fail_phase="outage"
+    )
 
     result = subprocess.run(
         ["/bin/bash", str(WEBUI_SMOKE.resolve())],
@@ -564,45 +686,94 @@ def test_webui_smoke_tears_down_even_if_response_cleanup_fails(tmp_path):
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
     assert docker_log.read_text(encoding="utf-8").splitlines()[-1] == (
-        f"compose -f {WEBUI_COMPOSE.resolve()} down --volumes --remove-orphans"
+        f"compose --project-name {WEBUI_SMOKE_PROJECT} "
+        f"-f {WEBUI_COMPOSE.resolve()} --profile browser-smoke "
+        "down --volumes --remove-orphans"
     )
 
 
-def test_ci_runs_webui_smoke_after_compose_integration_test():
+def test_webui_smoke_bounds_recovery_readiness_and_always_tears_down(tmp_path):
+    env, docker_log, curl_log = _webui_smoke_env(tmp_path, curl_exit=22)
+
+    result = subprocess.run(
+        ["/bin/bash", str(WEBUI_SMOKE.resolve())],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    commands = docker_log.read_text(encoding="utf-8").splitlines()
+    assert not any("WEBUI_SMOKE_PHASE=recovery" in command for command in commands)
+    assert commands[-1] == (
+        f"compose --project-name {WEBUI_SMOKE_PROJECT} "
+        f"-f {WEBUI_COMPOSE.resolve()} --profile browser-smoke "
+        "down --volumes --remove-orphans"
+    )
+    curl_commands = curl_log.read_text(encoding="utf-8").splitlines()
+    assert 1 <= len(curl_commands) <= 120
+    assert all("--connect-timeout" in command for command in curl_commands)
+    assert all("--max-time" in command for command in curl_commands)
+    assert all("/readyz" in command for command in curl_commands)
+
+
+def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
     assert WEBUI_SMOKE.is_file(), "WebUI smoke script is missing"
     assert WEBUI_SMOKE.stat().st_mode & 0o111
     smoke = WEBUI_SMOKE.read_text(encoding="utf-8")
     assert smoke.index("validate_compose_binds.py") < smoke.index(
         "config --format json"
     )
+    assert 'WEBUI_SMOKE_PROJECT_NAME:-kairyu-webui-smoke-' in smoke
+    assert 'docker compose --project-name "$SMOKE_PROJECT_NAME"' in smoke
     assert "http://kairyu:8000/v1" in smoke
-    assert 'compose up -d --build kairyu' in smoke
+    assert "compose up -d --build --wait --wait-timeout" in smoke
+    assert '"$COMPOSE_WAIT_SECONDS" kairyu webui' in smoke
+    assert "compose --profile browser-smoke build browser" in smoke
+    assert 'WEBUI_SMOKE_PHASE="$phase"' in smoke
+    assert "browser_phase initial" in smoke
+    assert "browser_phase outage" in smoke
+    assert "browser_phase recovery" in smoke
+    assert "compose stop kairyu" in smoke
+    assert "compose start kairyu" in smoke
     assert '"$BASE_URL/readyz"' in smoke
-    assert '"$BASE_URL/v1/models"' in smoke
-    assert '"model":"default"' in smoke
 
-    compose_steps = _load_yaml(CI_WORKFLOW)["jobs"]["compose-smoke"]["steps"]
-    default_index = next(
-        index
-        for index, step in enumerate(compose_steps)
-        if step.get("name") == "Compose integration test"
+    jobs = _load_yaml(CI_WORKFLOW)["jobs"]
+    compose_steps = jobs["compose-smoke"]["steps"]
+    assert not any(
+        step.get("name") == "WebUI Kairyu smoke"
+        or "webui_smoke.sh" in step.get("run", "")
+        for step in compose_steps
     )
-    webui_index = next(
-        index
-        for index, step in enumerate(compose_steps)
-        if step.get("name") == "WebUI Kairyu smoke"
-    )
-    assert default_index < webui_index
-    assert compose_steps[webui_index]["run"] == "./scripts/webui_smoke.sh"
+    webui_job = jobs["webui-e2e"]
+    assert webui_job["runs-on"] == "ubuntu-latest"
+    assert webui_job["timeout-minutes"] <= 45
+    assert "needs" not in webui_job
+    webui_steps = webui_job["steps"]
+    assert any(step.get("uses") == "actions/checkout@v4" for step in webui_steps)
+    assert any(step.get("uses") == "astral-sh/setup-uv@v5" for step in webui_steps)
+    assert [
+        step.get("run")
+        for step in webui_steps
+        if "webui_smoke.sh" in step.get("run", "")
+    ] == ["./scripts/webui_smoke.sh"]
 
 
-def test_webui_smoke_bounds_every_http_request():
+def test_webui_smoke_uses_only_bounded_http_requests():
     smoke = WEBUI_SMOKE.read_text(encoding="utf-8")
 
     assert 'curl_bounded() { curl --connect-timeout 2 --max-time 10 "$@"; }' in smoke
-    assert smoke.count("curl_bounded -sf") == 3
-    assert "body=$(curl -sf" not in smoke
-    assert 'models="$(curl -sf' not in smoke
-    assert "curl -sf -o" not in smoke
+    raw_curl_lines = [
+        line.strip()
+        for line in smoke.splitlines()
+        if "curl " in line and not line.lstrip().startswith("#")
+    ]
+    assert raw_curl_lines == [
+        'curl_bounded() { curl --connect-timeout 2 --max-time 10 "$@"; }'
+    ]
+    assert "curl_bounded" in smoke
