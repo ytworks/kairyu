@@ -30,6 +30,11 @@ from kairyu.engine.backend import (
     validate_native_request_surface,
 )
 from kairyu.engine.core.comm import FakeCommunicator
+from kairyu.engine.core.kv_cache_dtype import (
+    kv_cache_dtype_name,
+    resolve_kv_cache_dtype,
+    validate_kv_cache_dtype,
+)
 from kairyu.engine.core.pd_loop import PDLoopAdapter
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import SampledToken, mix_seed
@@ -236,6 +241,7 @@ def build_engine_loop(
     cuda_graph_max_batch: int = 8,
     cuda_graph_max_pages: int = 512,
     cuda_graph_warmup_iters: int = 3,
+    kv_cache_dtype: str = "auto",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
@@ -278,6 +284,16 @@ def build_engine_loop(
             )
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
+    kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
+    if kv_cache_dtype != "auto" and model_path is None:
+        raise ValueError(
+            f"kv_cache_dtype={kv_cache_dtype!r} requires a real model_path; "
+            "custom and toy runners do not expose a managed KV pool"
+        )
+    if kv_cache_dtype != "auto" and pd_separation:
+        raise ValueError(
+            "explicit kv_cache_dtype does not support P-D separation"
+        )
     if not pd_separation and (
         pd_prefill_device is not None
         or pd_decode_device is not None
@@ -331,6 +347,7 @@ def build_engine_loop(
             graph_max_batch=cuda_graph_max_batch,
             graph_max_pages=cuda_graph_max_pages,
             graph_warmup_iters=cuda_graph_warmup_iters,
+            kv_cache_dtype=kv_cache_dtype,
         )
     if speculative is not None and tensor_parallel_size > 1:
         # The FakeCommunicator TP path has rank-local toy runners but no
@@ -346,6 +363,7 @@ def build_engine_loop(
     default_stop_ids: tuple[int, ...] = ()
     num_kv_heads_for_tp = None
     attention_backend_decision = None
+    resolved_kv_cache_dtype = None
     if model_path is not None:
         import torch
 
@@ -373,6 +391,13 @@ def build_engine_loop(
             dtype=compute_dtype,
             attention_backend=attention_backend,
             target_device=compute_device,
+        )
+        resolved_kv_cache_dtype = resolve_kv_cache_dtype(
+            kv_cache_dtype,
+            compute_dtype,
+            profile,
+            attention_backend,
+            model_config,
         )
         model = model.to(compute_device)
         default_eos = generation.eos_token_id
@@ -404,7 +429,10 @@ def build_engine_loop(
     )
     if model_path is not None:
         pool = PagedKVPool.for_cache(
-            cache, model_config, dtype=compute_dtype, device=compute_device
+            cache,
+            model_config,
+            dtype=resolved_kv_cache_dtype,
+            device=compute_device,
         )
         graph_options = {}
         if graph_decode:
@@ -455,6 +483,12 @@ def build_engine_loop(
     )
     loop.tp_launcher = None  # single-process: nothing to tear down
     loop.attention_backend_decision = attention_backend_decision
+    loop.kv_cache_dtype_requested = kv_cache_dtype
+    loop.kv_cache_dtype_resolved = (
+        kv_cache_dtype_name(resolved_kv_cache_dtype)
+        if resolved_kv_cache_dtype is not None
+        else "not-applicable"
+    )
     return loop, cache, scheduler
 
 
@@ -525,6 +559,10 @@ def _build_pd_loop(
     loop.attention_backend_decision = getattr(
         coordinator, "attention_backend_decision", None
     )
+    # P-D currently accepts only the default cache policy; each role owns and
+    # reports its own resolved pool dtype.
+    loop.kv_cache_dtype_requested = "auto"
+    loop.kv_cache_dtype_resolved = "role-specific"
     return loop, adapter.kv_cache, adapter
 
 
@@ -546,6 +584,7 @@ def _build_dist_tp_loop(
     graph_max_batch: int = 8,
     graph_max_pages: int = 512,
     graph_warmup_iters: int = 3,
+    kv_cache_dtype: str = "auto",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -583,6 +622,7 @@ def _build_dist_tp_loop(
         graph_max_batch=graph_row_capacity,
         graph_max_pages=graph_max_pages,
         graph_warmup_iters=graph_warmup_iters,
+        kv_cache_dtype=kv_cache_dtype,
     )
     generation = load_generation_defaults(model_path)
     # SpeculativeRunner composes over any ModelRunner, and DistTPModelRunner is
@@ -604,6 +644,8 @@ def _build_dist_tp_loop(
     )
     loop.tp_launcher = launcher  # serve teardown must call launcher.shutdown()
     loop.attention_backend_decision = launcher.attention_backend_decision
+    loop.kv_cache_dtype_requested = launcher.kv_cache_dtype_requested
+    loop.kv_cache_dtype_resolved = launcher.kv_cache_dtype_resolved
     return loop, cache, scheduler
 
 
@@ -631,6 +673,7 @@ class KairyuBackend:
         pd_decode_device: str | None = None,
         pd_defer_handoff: bool = True,
         max_model_len: int | None = None,
+        kv_cache_dtype: str = "auto",
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
@@ -655,10 +698,13 @@ class KairyuBackend:
             cuda_graph_max_batch=cuda_graph_max_batch,
             cuda_graph_max_pages=cuda_graph_max_pages,
             cuda_graph_warmup_iters=cuda_graph_warmup_iters,
+            kv_cache_dtype=kv_cache_dtype,
         )
         self.attention_backend_decision = getattr(
             self._loop, "attention_backend_decision", None
         )
+        self.kv_cache_dtype_requested = self._loop.kv_cache_dtype_requested
+        self.kv_cache_dtype_resolved = self._loop.kv_cache_dtype_resolved
         self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None

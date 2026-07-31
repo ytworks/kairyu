@@ -47,6 +47,7 @@ if triton is not None:
         NUM_HEADS: tl.constexpr,
         HEAD_DIM: tl.constexpr,
         HAS_WRITE_FROM: tl.constexpr,
+        FP8_DEST: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
         row = tl.program_id(0)
@@ -93,6 +94,9 @@ if triton is not None:
             mask=source_mask,
             other=0.0,
         )
+        if FP8_DEST:
+            key = tl.clamp(key, -448.0, 448.0)
+            value = tl.clamp(value, -448.0, 448.0)
         destination = (
             (page * PAGE_SIZE + slot) * (NUM_HEADS * HEAD_DIM) + offsets
         )
@@ -134,6 +138,7 @@ if triton is not None:
         PAGE_SIZE: tl.constexpr,
         NUM_HEADS: tl.constexpr,
         HEAD_DIM: tl.constexpr,
+        FP8_DEST: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
         token = tl.program_id(0)
@@ -186,6 +191,9 @@ if triton is not None:
             mask=source_mask,
             other=0.0,
         )
+        if FP8_DEST:
+            key = tl.clamp(key, -448.0, 448.0)
+            value = tl.clamp(value, -448.0, 448.0)
         destination = (
             (page * PAGE_SIZE + slot) * (NUM_HEADS * HEAD_DIM) + offsets
         )
@@ -193,7 +201,11 @@ if triton is not None:
         tl.store(v_pool + destination, value, mask=source_mask)
 
 
-_FLOAT_DTYPES = (torch.float16, torch.bfloat16)
+_FLOAT_DTYPES = (
+    torch.float16,
+    torch.bfloat16,
+    torch.float8_e4m3fn,
+)
 _INDEX_DTYPES = (torch.int32, torch.int64)
 
 
@@ -219,9 +231,15 @@ def _supported_payload(
     if (
         k_pool.dtype not in _FLOAT_DTYPES
         or v_pool.dtype != k_pool.dtype
-        or keys.dtype != k_pool.dtype
-        or values.dtype != k_pool.dtype
+        or values.dtype != keys.dtype
     ):
+        return False
+    source_matches_pool = keys.dtype == k_pool.dtype
+    source_can_fuse_fp8 = (
+        k_pool.dtype == torch.float8_e4m3fn
+        and keys.dtype in (torch.float16, torch.bfloat16)
+    )
+    if not source_matches_pool and not source_can_fuse_fp8:
         return False
     if any(
         tensor.device != k_pool.device
@@ -318,6 +336,7 @@ def try_write_batched(
         NUM_HEADS=keys.shape[1],
         HEAD_DIM=keys.shape[2],
         HAS_WRITE_FROM=write_from is not None,
+        FP8_DEST=k_pool.dtype == torch.float8_e4m3fn,
         BLOCK=block,
         num_warps=8 if block >= 2048 else 4,
     )
@@ -387,6 +406,7 @@ def try_write_ragged(
         PAGE_SIZE=page_size,
         NUM_HEADS=keys.shape[1],
         HEAD_DIM=keys.shape[2],
+        FP8_DEST=k_pool.dtype == torch.float8_e4m3fn,
         BLOCK=block,
         num_warps=8 if block >= 2048 else 4,
     )

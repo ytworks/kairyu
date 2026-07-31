@@ -71,6 +71,8 @@ def _fake_ready_engine_service(port_pipe, _config):
             "startup_wire_version": STARTUP_WIRE_VERSION,
             "status": "ready",
             "attention_backend_decision": _READY_DECISION,
+            "kv_cache_dtype_requested": "auto",
+            "kv_cache_dtype_resolved": "not-applicable",
         }
     )
     port_pipe.close()
@@ -685,6 +687,8 @@ async def test_versioned_startup_frame_propagates_the_child_actual_decision(
                 "kernel_tier": "full",
             },
         )
+        assert backend.kv_cache_dtype_requested == "auto"
+        assert backend.kv_cache_dtype_resolved == "not-applicable"
     finally:
         await backend._reset_dead_locked()
 

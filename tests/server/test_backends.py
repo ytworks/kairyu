@@ -112,6 +112,8 @@ async def test_backends_reports_the_local_engine_actual_auto_fallback(monkeypatc
                     "kernel_tier": "fa2",
                 },
             )
+            self.kv_cache_dtype_requested = "bfloat16"
+            self.kv_cache_dtype_resolved = "bfloat16"
 
     app = create_app(engines={"m": KairyuBackend()})
     async with _client(app) as client:
@@ -128,6 +130,8 @@ async def test_backends_reports_the_local_engine_actual_auto_fallback(monkeypatc
     assert body["kernel_tier"] == "fa2"
     assert body["engines"][0]["attention_backend"] == "torch"
     assert body["engines"][0]["decision_status"] == "actual"
+    assert body["engines"][0]["requested_kv_cache_dtype"] == "bfloat16"
+    assert body["engines"][0]["kv_cache_dtype"] == "bfloat16"
 
 
 async def test_backends_does_not_invent_torch_after_invalid_selection(monkeypatch):
@@ -218,7 +222,13 @@ async def test_backends_gateway_aggregates_replica_through_pool(monkeypatch):
     # probe reports the process kernel; for each pool it must adopt the replica's
     # /backends. Wire the pool's replica to an in-process "replica" app via ASGI
     # transport so the whole fetch path (URL derivation + transport reuse) runs.
-    replica_app = create_app(engines={"default": MockBackend()})
+    class KairyuBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.kv_cache_dtype_requested = "auto"
+            self.kv_cache_dtype_resolved = "bfloat16"
+
+    replica_app = create_app(engines={"default": KairyuBackend()})
     replica_backend = OpenAICompatBackend(
         base_url="http://replica/v1",
         model="default",
@@ -247,6 +257,10 @@ async def test_backends_gateway_aggregates_replica_through_pool(monkeypatch):
     assert pool["via_replica"]["source"] == body["source"]
     assert pool["tensor_parallel_size"] == 1
     assert pool["via_replica"]["tensor_parallel_size"] == 1
+    assert pool["requested_kv_cache_dtype"] == "auto"
+    assert pool["kv_cache_dtype"] == "bfloat16"
+    assert pool["via_replica"]["requested_kv_cache_dtype"] == "auto"
+    assert pool["via_replica"]["kv_cache_dtype"] == "bfloat16"
 
 
 async def test_backends_gateway_pool_without_backends_endpoint_degrades():

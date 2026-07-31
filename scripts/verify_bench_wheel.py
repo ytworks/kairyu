@@ -186,9 +186,9 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         raise VerificationError(
             f"`kairyu bench entrypoints --json` was not JSON: {entrypoint_result.stdout!r}"
         ) from error
-    if len(registry.get("entrypoints", ())) != 51:
+    if len(registry.get("entrypoints", ())) != 52:
         raise VerificationError(
-            "packaged benchmark entrypoint registry does not contain all 51 wrappers"
+            "packaged benchmark entrypoint registry does not contain all 52 wrappers"
         )
 
     for command in (

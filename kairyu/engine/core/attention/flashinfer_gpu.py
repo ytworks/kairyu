@@ -53,6 +53,7 @@ class FlashInferBackend:
     """One instance serves every layer: shared workspace + plan cache."""
 
     supports_batched_prefill = True
+    supports_fp8_kv = True
 
     #: ``GraphDecodeBackend`` (see ``kairyu.engine.core.attention``): declared
     #: TRUE only because the host work lives in ``plan_decode`` — outside the
@@ -128,6 +129,17 @@ class FlashInferBackend:
             self._decode_run_calls = 0
         return result
 
+    @staticmethod
+    def _kv_scale_kwargs(
+        kv_pool: PagedKVPool,
+        layer: int,
+    ) -> dict[str, float | None]:
+        """The cache's explicit calibration contract for one layer."""
+        return {
+            "k_scale": kv_pool.k_scale(layer),
+            "v_scale": kv_pool.v_scale(layer),
+        }
+
     def _paged_arrays(
         self, page_table: list[int], seq_len: int, page_size: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -173,7 +185,15 @@ class FlashInferBackend:
             f"the tail of the sequence (chunk_start={chunk_start} T={chunk_len} "
             f"seq_len={seq_len})"
         )
-        key = (tuple(page_table), seq_len, chunk_start, chunk_len)
+        key = (
+            tuple(page_table),
+            seq_len,
+            chunk_start,
+            chunk_len,
+            query.dtype,
+            kv_pool.k.dtype,
+            kv_pool.v.dtype,
+        )
         is_decode = chunk_len == 1
         if key == self._plan_key and is_decode == self._planned_decode:
             return is_decode
@@ -228,10 +248,18 @@ class FlashInferBackend:
             # a 2D [H, D] slice raises IndexError in the tvm_ffi kernel. The
             # single-sequence decode path has B=1, so pass the [1, H, D] query
             # as-is (the batched path in attend_batched already does this).
-            out = wrapper.run(query, paged_kv)  # decode: [B=1, H, D] query
+            out = wrapper.run(
+                query,
+                paged_kv,
+                **self._kv_scale_kwargs(kv_pool, layer),
+            )  # decode: [B=1, H, D] query
             self._decode_run_calls += 1
             return out.reshape(1, -1)
-        out = wrapper.run(query, paged_kv)  # [T, H, D]
+        out = wrapper.run(
+            query,
+            paged_kv,
+            **self._kv_scale_kwargs(kv_pool, layer),
+        )  # [T, H, D]
         self._prefill_run_calls += 1
         return out.reshape(query.shape[0], -1)
 
@@ -284,6 +312,7 @@ class FlashInferBackend:
             kv_pool.page_size,
             q_dtype,
             kv_pool.k.dtype,
+            kv_pool.v.dtype,
         )
 
     def plan_decode(
@@ -390,7 +419,9 @@ class FlashInferBackend:
             )
         self._decode_tensor_layers.add(layer)
         out = self._decode_tensor_wrapper.run(  # type: ignore[union-attr]
-            query, (kv_pool.k[layer], kv_pool.v[layer])
+            query,
+            (kv_pool.k[layer], kv_pool.v[layer]),
+            **self._kv_scale_kwargs(kv_pool, layer),
         )
         self._decode_run_calls += 1
         return out.reshape(query.shape[0], -1)
@@ -461,6 +492,9 @@ class FlashInferBackend:
             tuple(seq_lens),
             tuple(chunk_starts),
             query_lens,
+            first.dtype,
+            kv_pool.k.dtype,
+            kv_pool.v.dtype,
         )
         if key != self._plan_key or not self._planned_decode:
             indptr, indices, last_page_len = self._paged_batch_arrays(
@@ -483,7 +517,11 @@ class FlashInferBackend:
 
         query_batch = torch.cat(queries, dim=0)
         paged_kv = (kv_pool.k[layer], kv_pool.v[layer])
-        out = self._decode.run(query_batch, paged_kv)
+        out = self._decode.run(
+            query_batch,
+            paged_kv,
+            **self._kv_scale_kwargs(kv_pool, layer),
+        )
         self._decode_run_calls += 1
         contexts = out.reshape(query_batch.shape[0], -1)
         return list(torch.split(contexts, query_lens, dim=0))
@@ -530,6 +568,9 @@ class FlashInferBackend:
             seq_lens,
             chunk_starts,
             query_lens,
+            query.dtype,
+            kv_pool.k.dtype,
+            kv_pool.v.dtype,
         )
         if key != self._plan_key or self._planned_decode:
             kv_indptr, kv_indices, last_page_len = self._paged_batch_arrays(
@@ -551,6 +592,10 @@ class FlashInferBackend:
             self._prefill_plan_calls += 1
             self._plan_key = key
             self._planned_decode = False
-        out = self._prefill.run(query, (kv_pool.k[layer], kv_pool.v[layer]))
+        out = self._prefill.run(
+            query,
+            (kv_pool.k[layer], kv_pool.v[layer]),
+            **self._kv_scale_kwargs(kv_pool, layer),
+        )
         self._prefill_run_calls += 1
         return out.reshape(query.shape[0], -1)
