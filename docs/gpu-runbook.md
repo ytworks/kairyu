@@ -390,6 +390,105 @@ GPU-only remainder (design m5 §4.2).
 
 - Gate A9: retain the separate DP=2×TP4 vs TP8 goodput/TPOT crossover across
   the arrival sweep; A9 remains report-only and is not implied by an A8 pass.
+  The formal operator uses the post-SSE-fix A8 comparator retained at
+  `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/` only after
+  replaying its raw/manifest/placement SHA-256s. All 2,992 requests succeeded
+  without retry, all 1,496 placements correlated, and raw-only replay retained
+  only the accepted 1.9× deviation (measured median 1.7711×). A future fully
+  passing A8 rerun is also valid; every other false check is rejected. A9 then
+  measures the missing TP8 arm through a one-replica gateway. The TP8 engine
+  and gateway use the exact A8 image plus a read-only source tree that
+  `a9-tp8-stack.sh` materializes directly from `git archive` of A8 commit
+  `86d4922`, matching A8's runtime mount rather than the image's older baked
+  package or the current checkout. Preflight verifies the fixed archive digest,
+  all 199 runtime files, and the delegated A8 helper blob. Runtime-source and
+  full-checkpoint attestations both repeat after traffic.
+  This keeps both arms on the same runtime while allowing the current clean
+  commit to own the A9 operator and evidence schema.
+
+  ```bash
+  export KAIRYU_A9_IMAGE='sha256:2c73b577b5213264493c6aeba24c1f6318214d20bf6df7780158fd1ef2c70a50'
+  export KAIRYU_A9_IMAGE_ID="$KAIRYU_A9_IMAGE"
+  export KAIRYU_A9_RUN_DIR='bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-<date>'
+  examples/qwen3-32b-multi-gpu/a9-tp8-stack.sh "$KAIRYU_A9_RUN_DIR" \
+    up -d --force-recreate --wait
+  curl -fsS http://127.0.0.1:8300/readyz
+  curl -fsS http://127.0.0.1:8301/readyz
+
+  export KAIRYU_A9_EXPECTED_COMMIT='<40-lowercase-hex-commit>'
+  uv run --frozen python bench/g2_a9_dp_tp_crossover_bench.py measure \
+    --engine-url http://127.0.0.1:8300/v1 \
+    --gateway-url http://127.0.0.1:8301/v1 \
+    --trace-bundle /tmp/a6-traces/g2-a6-traces.json \
+    --gateway-placement-log "$KAIRYU_A9_RUN_DIR/placements.jsonl" \
+    --output-dir "$KAIRYU_A9_RUN_DIR" \
+    --image-id "$KAIRYU_A9_IMAGE_ID" \
+    --expected-commit "$KAIRYU_A9_EXPECTED_COMMIT" \
+    --assert-gate
+  uv run --frozen python bench/g2_a9_dp_tp_crossover_bench.py verify \
+    --artifact "$KAIRYU_A9_RUN_DIR" --assert-gate
+  uv run --frozen python bench/g2_a9_dp_tp_crossover_bench.py replay \
+    --artifact "$KAIRYU_A9_RUN_DIR" --assert-gate
+  ```
+
+  The fixed TP8 work is 24 excluded warmups plus 960 measured requests:
+  three seed-0 repeats of 64 requests at each predeclared
+  `{4,8,16,32,64}` request/s rate, with 32 exact output tokens and no retry.
+  TP8 reuses the retained DP arm's one-token namespace, making the full request
+  bytes and token IDs identical. Per-engine cache/scheduler/graph settings are
+  matched: each engine has 8,192 usable KV pages, 16 sequence slots, 1,024
+  batched tokens, graph batch 16, and pipeline depth 5. Consequently the two
+  independent DP replicas have twice TP8's aggregate configured capacity; the
+  artifact records this explicitly and observed in-flight work at every rate.
+  A9 is therefore a production topology comparison, not an equal-aggregate-
+  capacity kernel microbenchmark.
+  Goodput and TTFT use the A8 definitions. TPOT is explicitly versioned as
+  `stream-terminal-token-v1`:
+  `(stream terminal - first content) / (completion_tokens - 1)`. This matches
+  `bench/serving_bench.py` and includes the final usage/finish/`[DONE]` tail;
+  it must not be relabeled as `frontier_compare.py`'s last-content TPOT.
+  Report every rate and repeat, median/MAD, observed maximum in-flight count,
+  all measured ordering transitions with both arms' observed concurrency at
+  each bracket, an explicit `no_order_transition_in_measured_range` when none
+  exists, and either the first DP-noninferior arrival-rate bracket or
+  `none_in_measured_range`. There is no performance threshold and no
+  interpolation.
+
+  Retained result (2026-07-31):
+  `bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`
+  passed all 14 report-integrity checks. The TP8 arm recorded 984/984 exact,
+  retry-free successful requests and 984/984 correlated placements; both
+  `verify --assert-gate` and raw-only `replay --assert-gate` pass.
+
+  | Offered req/s | DP goodput | TP8 goodput | DP/TP8 | DP/TP8 TTFT p50 (ms) | DP/TP8 TPOT p50 (ms/token) |
+  |---:|---:|---:|---:|---:|---:|
+  | 4 | 3.884 | 3.902 | 0.995× | 181.0 / 174.9 | 20.3 / 21.1 |
+  | 8 | 7.383 | 7.313 | 1.010× | 190.2 / 339.9 | 25.4 / 50.5 |
+  | 16 | 12.948 | 8.994 | 1.440× | 350.8 / 1,258.3 | 49.5 / 42.4 |
+  | 32 | 16.042 | 11.707 | 1.370× | 507.7 / 1,304.1 | 42.3 / 30.0 |
+  | 64 | 19.612 | 12.440 | 1.577× | 617.6 / 1,627.8 | 33.4 / 29.2 |
+
+  The measured goodput ordering changes between 4 and 8 offered req/s; DP is
+  first noninferior at 8 req/s, with median observed in-flight counts 9 for DP
+  and 17 for TP8. No interpolated crossover is claimed. TP8's lower TPOT at
+  16–64 req/s does not offset DP's higher goodput and lower TTFT under load;
+  these are reported as distinct metrics. SHA-256: TP8 raw
+  `6c6d11deeb5735ecf37de48663e553a88a90e606196bb432111fe70772d4a664`,
+  manifest
+  `799813e087bd9aca9d62c45a995e7eed6471534f18fdaa09fca0666412786bdc`,
+  placements
+  `0276059cd9822ce9e046fce088102b372a324689d620375ce23e13829f4ec020`.
+
+  Stop only this scoped project after retaining and replaying the artifact:
+
+  ```bash
+  examples/qwen3-32b-multi-gpu/a9-tp8-stack.sh "$KAIRYU_A9_RUN_DIR" down
+  ```
+
+  The PCIe per-class DP×1/PP=2/TP=2 placement report is not fabricated by
+  relabeling `pipeline_depth`: production stage-sharded PP serving does not
+  yet exist. It remains a separate dependency on real PP wiring rather than
+  weakening or blocking this A9 DP-versus-TP report.
 - Gate A10 / issue #223: cross-device P-D handoff uses a dedicated source-copy
   stream on the prefill GPU and a destination dependency/completion stream on
   the decode GPU. Select two distinct GPUs for which CUDA peer access is

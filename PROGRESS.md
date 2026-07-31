@@ -79,8 +79,23 @@ against the original 1.9× threshold; router p99 was 3.723 ms and affinity cache
 retention was 99.53%. The artifact therefore truthfully remains `passed: false`.
 The product owner accepted the measured 1.7993× as an explicit closure
 deviation, not as a 1.9× PASS; the original operator threshold is unchanged.
-Its packaged benchmark boundary verifies all 53 registered entrypoints from
+Its packaged benchmark boundary verifies all 54 registered entrypoints from
 the isolated wheel as well as from the checkout.
+G2 A9 is closed for the Qwen3-32B DP=2×TP4 versus TP8 report. The post-SSE-fix
+A8 comparator and TP8 arm use the same image, checkpoint, trace, cache namespace,
+per-engine limits, and read-only commit-`86d4922` 199-file runtime. The retained
+TP8 run passed all 14 report-integrity checks with 984/984 retry-free successes
+and exact placements; verify and raw-only replay both pass. Median goodput
+(DP/TP8 req/s) was 3.884/3.902, 7.383/7.313, 12.948/8.994,
+16.042/11.707, and 19.612/12.440 at 4/8/16/32/64 offered req/s. The measured
+ordering transition is between 4 and 8 req/s without interpolation; DP is first
+noninferior at 8 req/s and remains above TP8 thereafter. TP8 has lower median
+terminal-stream TPOT at 16–64 req/s, while DP has materially higher goodput and
+lower TTFT under load; those latency and throughput findings remain separate.
+Matched per-engine limits give the two DP replicas twice TP8's aggregate
+configured capacity, so this is explicitly a production-topology comparison.
+The PCIe DP×1/PP=2/TP=2 report is not fabricated from `pipeline_depth`; real
+stage-sharded production PP remains a separate roadmap dependency.
 Issue #277's M13 extension exposes `auto`, torch, FlashInfer, FA3, and FA4 as
 strict public choices. FA3/FA4 use FlashAttention for prefill and retain
 FlashInfer ownership of paged decode/CUDA graphs; `/backends` reports the
@@ -720,10 +735,25 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
 
+### 2026-07-31 — [progress] G2 A9 DP-versus-TP crossover report passes
+- What: completed the fresh Qwen3-32B TP8 arm against the post-SSE-fix A8 comparator. All 984 TP8 requests completed with HTTP 200, exact 32-token output and usage, `[DONE]`, zero retry, and one exact gateway placement; all 14 report-integrity checks passed. `verify --assert-gate` and raw-only `replay --assert-gate` independently reproduced the report. Median DP/TP8 goodput was 3.884/3.902, 7.383/7.313, 12.948/8.994, 16.042/11.707, and 19.612/12.440 req/s across 4/8/16/32/64 offered req/s. The only ordering transition is bracketed at 4–8 req/s with no interpolation; DP is first noninferior at 8 req/s. The portable test job now checks out full history so its fixed-ancestor `git archive`/helper-blob contract runs in Actions instead of failing under a depth-1 checkout.
+- Why: this supplies the missing matched-runtime evidence after fixing the one real Unicode SSE transport failure instead of retrying or ignoring it. It also keeps throughput, TTFT, and TPOT separate: TP8's per-token latency is lower at 16–64 req/s, but DP sustains 1.37–1.58× its goodput at 16–64 req/s and much lower TTFT under load. The report is intentionally threshold-free and describes the production topology with its doubled DP aggregate capacity.
+- Refs: issue #159; G2 A9; operator source commit `d4c8e121d285a08843e5aa69d2de4a747d574c95`; runtime source commit `86d49223ffcdba6052428474bf0d9094c6791fed`; `bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`; raw SHA-256 `6c6d11deeb5735ecf37de48663e553a88a90e606196bb432111fe70772d4a664`; manifest SHA-256 `799813e087bd9aca9d62c45a995e7eed6471534f18fdaa09fca0666412786bdc`; placements SHA-256 `0276059cd9822ce9e046fce088102b372a324689d620375ce23e13829f4ec020`
+
+### 2026-07-31 — [progress] G2 A9 pins a fresh post-SSE-fix A8 comparator
+- What: reran the complete A8 single-TP4 versus DP=2×TP4 sweep on merged source `86d4922` and repinned A9 to its immutable source archive, 199-file runtime rollup, and new raw/manifest/placement digests. All 2,992 requests completed with HTTP 200, `[DONE]`, exact terminal usage, and zero retry; all 1,496 DP placements correlated. Verify and raw-only replay reproduced every value. The sole false check remains the explicitly accepted 1.9× scaling target, with repeat ratios 1.7810×/1.7711×/1.6422× and median 1.7711×. A9 now accepts either a fully passing A8 artifact or exactly that one accepted false check, while rejecting any other failure or verdict/check inconsistency.
+- Why: the first TP8 run exposed and then led to fixing Unicode SSE framing. Rerunning the A8 comparator on the same repaired runtime removes a transport/version confound without retrying or discarding any failed request, so the forthcoming TP8 arm will compare the same source, image, checkpoint, trace, and configuration.
+- Refs: issue #159; issue #303; source commit `86d49223ffcdba6052428474bf0d9094c6791fed`; `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`; raw SHA-256 `b024d71741eea71f9aa698fd0bf44e27c245584b524835c79acd4e72426f22d4`; manifest SHA-256 `833a7ef269ad2f427f8e88bf6f91773de1e876f5baa441fc01cfce04b1cd3b28`; placements SHA-256 `3be490d1a17a7d20a8cb98fa3eee8cb8bee60e5f6b8624dfea187f45394ab320`
+
 ### 2026-07-31 — [progress] SSE framing preserves Unicode model output
 - What: Replaced `httpx.aiter_lines()` in the OpenAI-compatible upstream path with a byte-oriented CR/LF SSE decoder, including BOM, comments, fragmented transport, and repeated `data:` fields. Kairyu's Chat Completions, Completions, and Responses writers also escape U+0085/U+2028/U+2029 so legacy universal-line clients retain one physical JSON event line. The regression suite covers all three separators and reconstructs their exact content.
 - Why: The first G2 A9 TP8 sweep failed one of 984 retry-free requests when a valid generated separator split the JSON string at the exact logged column. Retrying or ignoring it would hide a product bug; both sides of the eventual DP/TP8 comparison must run the same fixed transport.
 - Refs: issue #303, `kairyu/sse.py`, `kairyu/engine/openai_backend.py`, `kairyu/entrypoints/server/app.py`, `kairyu/entrypoints/server/responses_service.py`
+
+### 2026-07-31 — [progress] G2 A9 reuses A8 DP evidence and reaches TP8-run readiness
+- What: added the report-only A9 operator, a dedicated all-eight-GPU TP8 engine plus one-replica gateway stack, immutable A8 raw/manifest/placement replay, exact request/placement verification, and independent goodput/TTFT/terminal-TPOT/crossover recomputation. The operator measures only the missing 24 warmups and 960 TP8 requests. It uses A8 image `sha256:2c73b577...` plus the exact source tree materialized from A8 commit `4924b4d`, verifies the fixed source archive, all 196 mounted runtime files, and the delegated A8 helper, and repeats both source and full-checkpoint attestation after traffic. TP8 uses the retained DP one-token namespace, and the formal config discloses both topologies' per-engine and aggregate KV/sequence/batch/graph capacity.
+- Why: rerunning the already complete DP sweep would waste GPU time, while using current checkout code only for TP8 or changing its request namespace would make the comparison unmatched. A8 retained every timestamp needed by `serving_bench.py`'s terminal-stream TPOT, so fixed-SHA replay plus an identical-runtime/request TP8 arm supplies the missing evidence without estimating samples or weakening provenance. Matched per-engine limits intentionally leave two independent DP replicas with twice TP8's aggregate configured capacity; the report records observed concurrency so this production-topology tradeoff is not misread as an equal-capacity kernel comparison. Production PP stage sharding is not relabeled from `pipeline_depth`; the separate PCIe DP/PP/TP layout report remains dependent on real PP wiring.
+- Refs: issue #159; G2 A9; `bench/g2_a9_dp_tp_crossover_bench.py`; `examples/qwen3-32b-multi-gpu/a9-tp8-{compose,replica,gateway}.yaml`; `docs/gpu-runbook.md`
 
 ### 2026-07-31 — [progress] P-C4 closes on Qwen3-VL-32B TP8 and the real Open WebUI upload path
 - What: the clean `b8971cb` stack passed every A18 gate on 8× RTX PRO 6000. RED and BLUE fixtures produced their corresponding distinct answers; unary RED/BLUE and streamed RED each reported exact processor usage of 1,060 input and 2 output tokens; a metadata-service URL failed pre-dispatch with `400 invalid_image`; and pinned Open WebUI uploaded the PNG through `/api/v1/files/`, sent its owned file ID/type/URL without a browser data-URL shortcut, and rendered RED. The vLLM command retained the pinned model/image/TP8 bounds and enabled the `hermes` parser matching the model's JSON-in-`<tool_call>` template. Correction to the preceding progress entry: the browser need not explicitly write `tool_choice=auto`; Open WebUI can inject built-in tools and vLLM normalizes an omitted choice to `auto`.

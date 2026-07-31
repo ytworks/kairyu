@@ -1,0 +1,78 @@
+name: kairyu-qwen3-32b-a9-tp8
+
+x-a9-service: &a9-service
+  image: ${KAIRYU_A9_IMAGE:?set KAIRYU_A9_IMAGE to the immutable local image under test}
+  pull_policy: never
+  restart: "no"
+  init: true
+
+services:
+  tp8:
+    <<: *a9-service
+    shm_size: 8gb
+    ulimits:
+      memlock: -1
+    environment:
+      KAIRYU_ATTENTION_BACKEND: auto
+    # Exact union of the retained A8 replica0 and replica1 CPU sets.  The eight
+    # gateway threads below remain disjoint on all four NUMA nodes.
+    cpuset: "0-14,16-30,32-46,48-62,64-78,80-94,96-110,112-126"
+    ports:
+      - "127.0.0.1:8300:8000"
+    labels:
+      com.kairyu.a9.role: tp8
+      com.kairyu.a9.host-gpu-ordinals: "0,1,2,3,4,5,6,7"
+      com.kairyu.a9.image-id: "${KAIRYU_A9_IMAGE_ID:?set the immutable sha256 image ID}"
+    volumes:
+      - ./a9-tp8-replica.yaml:/etc/kairyu/config.yaml:ro
+      - type: bind
+        source: ${KAIRYU_A9_RUNTIME_DIR:?run a9-tp8-stack.sh to materialize the pinned A8 source}
+        target: /app/kairyu
+        read_only: true
+      - qwen3-32b:/models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 180
+      start_period: 5m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1", "2", "3", "4", "5", "6", "7"]
+              capabilities: [gpu]
+
+  gateway:
+    <<: *a9-service
+    cpuset: "15,31,47,63,79,95,111,127"
+    depends_on:
+      tp8:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8301:8000"
+    labels:
+      com.kairyu.a9.role: gateway
+      com.kairyu.a9.host-gpu-ordinals: ""
+      com.kairyu.a9.image-id: "${KAIRYU_A9_IMAGE_ID:?set the immutable sha256 image ID}"
+    volumes:
+      - ./a9-tp8-gateway.yaml:/etc/kairyu/config.yaml:ro
+      - type: bind
+        source: ${KAIRYU_A9_RUNTIME_DIR:?run a9-tp8-stack.sh to materialize the pinned A8 source}
+        target: /app/kairyu
+        read_only: true
+      - type: bind
+        source: ${KAIRYU_A9_RUN_DIR:?run a9-tp8-stack.sh with a host run directory}
+        target: /evidence
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 10s
+
+volumes:
+  qwen3-32b:
+    external: true
+    name: kairyu-qwen3-32b_qwen3-32b

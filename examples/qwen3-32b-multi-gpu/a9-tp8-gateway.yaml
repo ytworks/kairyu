@@ -1,0 +1,36 @@
+# G2 A9 puts the TP8 engine behind the same production ReplicaPool boundary as
+# the retained DP=2 x TP4 arm.  Port 8301 is therefore the formal endpoint;
+# port 8300 is an engine diagnostic only.
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  access_log: true
+  max_concurrency: 256
+
+pools:
+  qwen3-32b:
+    replicas:
+      - backend: openai
+        health_url: http://tp8:8000/readyz
+        options:
+          base_url: http://tp8:8000/v1
+          model: qwen3-32b
+          api_key_env: null
+          upstream: kairyu
+    unhealthy_after: 2
+    probe_interval_s: 1.0
+    queue_depth_threshold: 256
+    placement_log_path: /evidence/placements.jsonl
+
+tenants:
+  default_tenant: default
+  limits:
+    default:
+      requests_per_minute: 1000000
+      tokens_per_minute: 50000000
+      request_burst: 4096
+      token_burst: 50000000
+      max_in_flight: 256
+      interactive_priority: 0
+      batch_priority: 1

@@ -151,6 +151,21 @@ the operator and artifact preserve the original threshold and residual.
 Evidence:
 `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`.
 
+**A9 closure (2026-07-31).** The matched Qwen3-32B report compares the
+post-SSE-fix DP=2×TP4 artifact with a fresh TP8 arm on the same eight-GPU host,
+image, checkpoint, trace, request bytes, per-engine limits, and runtime source.
+The TP8 arm completed 984/984 requests without retry and correlated every
+placement; all 14 evidence checks, independent verify, and raw-only replay pass.
+Median DP/TP8 goodput across offered rates 4/8/16/32/64 req/s was
+3.884/3.902, 7.383/7.313, 12.948/8.994, 16.042/11.707, and
+19.612/12.440 req/s. The observed ordering transition is bracketed at 4–8
+req/s without interpolation, and DP is first noninferior at 8 req/s. TP8 has
+lower median terminal-stream TPOT at 16–64 req/s, while DP has higher goodput
+and lower TTFT under load; neither metric is substituted for the other. This is
+a production-topology report: matched per-engine limits give two DP replicas
+twice TP8's aggregate configured capacity. Evidence:
+`bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`.
+
 ### Stage 5.3 — P-D disaggregation, intra-node (blocked on 5.1)
 
 | Gate | Target | Regime |

@@ -16,6 +16,9 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # G2 A9 verifies the immutable A8 runtime from its measured ancestor.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}

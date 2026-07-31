@@ -61,7 +61,7 @@ Formal G2/G4/G5/G6 artifacts bind source paths, hashes, commands, and result
 locations. A refactor may delegate a stable wrapper to package-owned code, but
 must not silently rename the wrapper, invocation form, or recorded evidence
 path. Existing wrapper-to-wrapper imports are compatibility dependencies; new
-shared behavior belongs in the installed package. The exact fourteen retained
+shared behavior belongs in the installed package. The exact fifteen retained
 composition edges are allowlisted in the manifest's
 `[compatibility_imports]` table; checkout validation fails on any undeclared,
 removed, or redirected edge.
@@ -120,6 +120,7 @@ bench/fp8_kv_g4_ekv_bench.py
 bench/frontier_compare.py
 bench/future_token_bench.py
 bench/g2_a6_vllm_bench.py
+bench/g2_a9_dp_tp_crossover_bench.py
 bench/gate_a1.py
 bench/gate_a2.py
 bench/global_kv_pool_decision.py
@@ -198,6 +199,40 @@ explicit closure deviation; neither the artifact nor the operator rewrites the
 original threshold or claims a formal PASS. Evidence is retained under
 `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`.
 
+### G2 A9 DP-versus-TP crossover evidence
+
+`bench/g2_a9_dp_tp_crossover_bench.py` produces the report-only Qwen3-32B
+DP=2×TP4 versus TP8 arrival-sweep artifact. It independently replays the
+post-SSE-fix A8 DP evidence retained under
+`bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`, then
+measures only the missing TP8 arm through a one-replica production gateway.
+That comparator has 2,992/2,992 retry-free successes and 1,496 exact
+placements; its sole false check is the accepted 1.9× target at a measured
+1.7711× median. Both arms use the same image, commit-`86d4922` materialized
+read-only runtime source, checkpoint, workload,
+per-engine 8,192 usable KV pages, scheduler limits, pipeline depth, and CUDA
+Graph envelope. The report explicitly records that two DP replicas therefore
+have twice TP8's aggregate configured KV, sequence, batch-token, and graph-batch
+capacity; this is a deployment-topology comparison, not an equal-aggregate-
+capacity microbenchmark. TP8 uses the exact A8 DP cache namespace so request
+bytes and token IDs match the retained comparator. Every rate
+retains three fixed-seed repeats, exact request/placement rows, goodput,
+TTFT, and versioned terminal-stream TPOT. PASS means evidence completeness
+only; no topology wins by threshold. The report explicitly records whether
+any measured ordering transition exists and attaches both arms' observed
+concurrency to every transition bracket. The exact launch and replay procedure is
+in `docs/gpu-runbook.md`.
+
+The retained 2026-07-31 A9 artifact passed all 14 checks with 984/984
+retry-free TP8 successes and placements. Median DP/TP8 goodput at
+4/8/16/32/64 offered req/s was 3.884/3.902, 7.383/7.313,
+12.948/8.994, 16.042/11.707, and 19.612/12.440 req/s. The measured
+ordering transition is between 4 and 8 req/s with no interpolation, and DP is
+first noninferior at 8 req/s. TP8 retains lower terminal-stream TPOT at
+16–64 req/s, while DP retains higher goodput and lower TTFT under load.
+Evidence is retained under
+`bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`.
+
 ### G4 E-KV FP8 KV evidence
 
 `bench/fp8_kv_g4_ekv_bench.py` is the formal G4 E-KV correctness operator.
@@ -241,7 +276,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 53 registered wrappers through
+The first command separately exercises all 54 registered wrappers through
 both their path and module `--help` forms. It runs once in CI, on Python 3.12,
 after the declared development dependencies are synced, without duplicating
 106 subprocesses in every portable test cell.
