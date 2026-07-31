@@ -744,9 +744,9 @@ image, and drill are unchanged.
   copies and token recomputation only; it must never be reported as measured
   physical KV bytes or byte-seconds.
 
-- 9.8a Native pinned-DRAM KV crossover (#187, G5 F4a): the implementation and
-  formal operator are ready, but this gate remains open until both Qwen3-32B
-  TP4 and TP8 evidence shards pass. Use one standalone clean clone of the exact
+- 9.8a Native pinned-DRAM KV crossover (#187, G5 F4a): this gate is closed by
+  retained schema-v2 Qwen3-32B TP4/TP8 evidence; the procedure below remains
+  the reproducibility contract. Use one standalone clean clone of the exact
   implementation commit and build one immutable image from it; an older image
   is invalid. TP4 must exit successfully and release all GPUs before TP8
   starts. Do not overlap the runs, reuse a tag that resolves to another image,
@@ -952,6 +952,28 @@ image, and drill are unchanged.
   part of this procedure. Build and collect only after focused, unit, and real
   GPU validation is green and the complete implementation is committed; the
   detached source clone must resolve to that exact commit.
+
+  The binding 2026-08-01 run used clean commit
+  `edd535f7018695fc03c479a86fbd690174cca5ef`, immutable image
+  `sha256:25543ae9cbc9d2e80f1b4be2193d138486adb91c89a02cdbd0be0e62a1cc67be`,
+  and separate default-bridge containers
+  `69254c1819b1a0203cbfc0f74d3ae4e2eb4cdda6c6949332cdf7b2fec7ef9c9b`
+  (TP4) and
+  `c6b5acde2e366e08fa4d983dff629c2bc13e119f8eada8e00a233f3ba2226c8b`
+  (TP8). TP4's stable passing suffix begins at 1,024 tokens: 512 failed
+  honestly at a 1.021531 median paired ratio and 2/9 restore wins, then 1,024
+  passed at 0.975449 and 8/9 and every larger cell passed. TP8 passed all ten
+  cells from 16 through 8,192 tokens with 9/9 restore wins, placing its
+  crossover at or below the measured 16-token lower bound. Assembly,
+  verification from the retained repository copy, and independent raw replay
+  all passed. The artifact is retained at
+  `bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`;
+  its manifest SHA-256 is
+  `0680333d06bf6d06ea91fbd12ef5b88732c936d1446a06d631674dcb15946fd6`,
+  and the TP4/TP8 raw SHA-256 values are
+  `609ff6bb1b951a7d4f70bb5948e1f9dcd68e55b0523e2993effa76a3b750cf01`
+  and
+  `2947d27dcb51a227ec9e21c72a4e435e693dbb675ff683632dd285cfc86d6611`.
 
 - 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
   one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current

@@ -225,11 +225,17 @@ found that v1 cold recompute split the final prompt token into an additional
 model invocation, biasing the comparison toward restore. That collection is
 diagnostic only: it cannot seed policy and cannot be relabelled as schema v2.
 
-The schema-v2 implementation and fail-closed Qwen3-32B operator are ready for
-fresh evidence. F4a remains open until separate, non-overlapping TP4 and TP8
-runs from the same clean commit and immutable image produce retained raw
-evidence, identity-bound profiles, and a passing independent replay. No
-crossover value is asserted by this amendment before that measurement.
+The exact-source schema-v2 Qwen3-32B run closes F4a with separately executed,
+non-overlapping TP4 and TP8 shards from clean commit
+`edd535f7018695fc03c479a86fbd690174cca5ef` and one immutable image. The
+retained TP4 profile starts its stable restore-winning suffix at 1,024 tokens;
+TP8 passes from the 16-token measured lower bound, so the manifest records its
+crossover as at or below 16 tokens and the deployable profile conservatively
+sets `min_restore_tokens` to 16. Assembly, retained-copy verification, and
+independent raw replay all pass. The complete raw evidence, identity-bound
+profiles, manifest, image inspect, full container IDs, and created/exited
+container records are retained under
+`bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
 
 #### D6 amendment (2026-07-31) — F4c global KV pool remains deferred
 

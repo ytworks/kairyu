@@ -249,7 +249,7 @@ and production-router SHA-256
 
 | Gate | Target | Where proven |
 |---|---|---|
-| F4a | DRAM offload: restore-from-DRAM beats recompute above a measured prefix-length crossover; the crossover is published, not assumed | **Open** — schema-v2 native tier and formal operator ready; fresh Qwen3-32B TP4/TP8 measurements pending |
+| F4a | DRAM offload: restore-from-DRAM beats recompute above a measured prefix-length crossover; the crossover is published, not assumed | **Closed** — retained schema-v2 Qwen3-32B evidence publishes TP4=1,024 tokens and TP8≤16 tokens |
 | F4b | Agentic multi-turn trace with tiering on: fleet prefix-hit-rate gain reported; TPOT p99 unregressed (offload work stays off the decode critical path) | GPU bench |
 | F4c | Global-pool decision doc: F2's telemetry quantifies cross-replica duplicate-prefix mass; buy (Mooncake/LMCache) vs build (KVTransport extension) decided with data — m7 D6's revisit trigger honored | decision doc |
 
@@ -265,10 +265,19 @@ startup also requires the configured capacity to hold at least the measured
 crossover. P-D separation is not supported in this first tier. The completed
 schema-v1 FlashInfer collection is diagnostic only: it had no stable passing
 suffix and its recompute arm included an extra final-token model invocation.
-The schema-v2 operator uses production cold-prefill semantics, but no
-crossover has yet been published: F4a remains open until its fresh same-image,
-non-overlapping TP4 and TP8 Qwen3-32B artifacts pass assembly and independent
-replay.
+F4a is closed by the exact-source schema-v2 Qwen3-32B run retained at
+`bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
+The TP4 stable restore-winning suffix starts at 1,024 tokens: the isolated
+512-token cell had a 1.021531 median restore/recompute ratio and only 2/9
+restore wins, while 1,024 tokens passed at 0.975449 and 8/9 and every larger
+cell passed. TP8 passed every measured cell from the 16-token lower bound, so
+its published crossover is at or below 16 tokens and its deployable profile
+conservatively sets `min_restore_tokens` to 16. Both non-overlapping shards used
+clean commit `edd535f7018695fc03c479a86fbd690174cca5ef`, immutable image
+`sha256:25543ae9cbc9d2e80f1b4be2193d138486adb91c89a02cdbd0be0e62a1cc67be`,
+the same checkpoint, and the exact versioned transfer backend. Assembly,
+retained-copy verification, and independent raw replay all passed without
+editing or dropping a sample.
 
 F4c is closed by the 2026-07-31 m7 D6 amendment and the independently
 replayable artifact at

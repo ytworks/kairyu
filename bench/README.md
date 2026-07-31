@@ -283,6 +283,16 @@ suffix (median restore/recompute ratio below 1 with at least 8/9 restore wins),
 and rejects any model, TP, KV-layout, attention implementation, source,
 hardware-transport, or host-placement identity mismatch.
 
+The retained 2026-08-01 exact-source run closes F4a. TP4's stable suffix starts
+at 1,024 tokens: its 512-token cell failed at a 1.021531 median ratio and 2/9
+wins, while 1,024 tokens passed at 0.975449 and 8/9 and every larger cell
+passed. TP8 passed all cells from the 16-token measured lower bound, so the
+manifest reports the crossover at or below 16 tokens and its deployable
+profile conservatively sets `min_restore_tokens` to 16. Assembly, verification
+from the retained copy, and independent raw replay all pass. The raw shards,
+profiles, manifest, and full container provenance are retained at
+`bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
+
 ## Fixtures, results, and wheel verification
 
 The eight installed fixtures are synthetic plumbing inputs, never substitutes
