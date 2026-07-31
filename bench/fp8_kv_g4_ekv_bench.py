@@ -390,6 +390,28 @@ def _nvidia_smi_inventory() -> list[dict[str, object]]:
     return rows
 
 
+def _stable_cc1plus_provenance(value: str) -> str:
+    """Drop GCC's per-invocation timing while retaining compiler identity."""
+
+    return value.partition("\nTime variable")[0].rstrip()
+
+
+def _stable_environment_identity(value: object) -> object:
+    """Canonicalize the one known non-identity field in a valid snapshot."""
+
+    if not isinstance(value, dict):
+        return value
+    normalized = json.loads(json.dumps(value))
+    try:
+        cc1plus = normalized["compiler"]["host_compiler"]["cc1plus"]
+        cc1plus["version"] = _stable_cc1plus_provenance(
+            cc1plus["version"]
+        )
+    except (KeyError, TypeError):
+        return normalized
+    return normalized
+
+
 def _compiler_snapshot() -> dict[str, object]:
     def tool(
         name: str,
@@ -417,6 +439,8 @@ def _compiler_snapshot() -> dict[str, object]:
         )
         if not version:
             raise RuntimeError(f"{name} --version returned no provenance")
+        if name == "cc1plus":
+            version = _stable_cc1plus_provenance(version)
         return {
             "path": str(resolved),
             "sha256": sha256_file(resolved),
@@ -1974,7 +1998,8 @@ def recompute_manifest(
     checks["sm120_flashinfer_environment_stable"] = (
         _environment_valid(run.get("environment_start"))
         and _environment_valid(run_end.get("environment_end"))
-        and run.get("environment_start") == run_end.get("environment_end")
+        and _stable_environment_identity(run.get("environment_start"))
+        == _stable_environment_identity(run_end.get("environment_end"))
     )
     checks["no_runtime_failure"] = len(by_type["failure"]) == 0
     checks["run_end_counts_exact"] = (
@@ -2022,15 +2047,24 @@ def recompute_manifest(
                 and bf16["finish_reason"] == fp8["finish_reason"]
                 and bf16["output_text"] == fp8["output_text"]
             )
+            common_prefix = 0
+            for left, right in zip(
+                bf16["output_token_ids"],
+                fp8["output_token_ids"],
+                strict=True,
+            ):
+                if left != right:
+                    break
+                common_prefix += 1
             deltas = [
                 abs(float(left) - float(right))
                 for left, right in zip(
-                    bf16["selected_logprobs"],
-                    fp8["selected_logprobs"],
+                    bf16["selected_logprobs"][:common_prefix],
+                    fp8["selected_logprobs"][:common_prefix],
                     strict=True,
                 )
             ]
-            maximum = max(deltas)
+            maximum = max(deltas, default=math.inf)
             exact_tokens &= tokens_equal
             finite_deltas &= all(math.isfinite(value) for value in deltas)
             within_delta &= maximum <= LOGPROB_ABS_DELTA_MAX
@@ -2039,6 +2073,8 @@ def recompute_manifest(
                     "prompt_length": length,
                     "tokens_exact": tokens_equal,
                     "positions": OUTPUT_TOKENS,
+                    "common_prefix_tokens": common_prefix,
+                    "compared_logprob_positions": len(deltas),
                     "max_selected_logprob_abs_delta": maximum,
                 }
             )

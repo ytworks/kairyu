@@ -265,12 +265,6 @@ def _validate_native_common(
         raise ValueError(
             "native backend explicit KV cache dtype does not support P-D separation"
         )
-    if kv_cache_dtype == "fp8_e4m3":
-        if speculative is not None:
-            raise ValueError(
-                "native backend fp8_e4m3 KV cache does not support speculative decoding"
-            )
-
     graph_decode = decode_mode == "cuda_graph"
     if graph_decode:
         if model_path is None:

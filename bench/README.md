@@ -163,8 +163,11 @@ bench/vllm_quant_kernel_bench.py
 It measures the pinned Qwen3-32B checkpoint on one visible SM120 GPU, writes
 raw JSONL plus a derived manifest even on failure, and supports independent
 `verify` and raw-only `replay` commands. BF16 KV remains the product default;
-the E4M3 arm is explicit and timing is non-binding. The exact mounted
-source-JIT procedure and thresholds are in `docs/gpu-runbook.md` §9.9.
+the E4M3 candidate arm is explicit and timing is non-binding. The retained
+2026-07-31 bake failed output, common-prefix logprob, and cache-NRMSE gates, so
+public `fp8_e4m3` startup remains disabled. The exact mounted source-JIT
+procedure, thresholds, and retained evidence are in `docs/gpu-runbook.md`
+§9.9.
 
 ## Fixtures, results, and wheel verification
 

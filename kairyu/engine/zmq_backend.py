@@ -181,9 +181,10 @@ def _kv_cache_dtype_from_startup_frame(
         )
     try:
         validate_kv_cache_dtype(requested)
-    except ValueError as error:
+    except (ValueError, RuntimeError) as error:
         raise EngineServiceError(
-            f"engine startup kv_cache_dtype_requested is invalid: {requested!r}"
+            "engine startup kv_cache_dtype_requested is unavailable: "
+            f"{error}"
         ) from error
     return requested, resolved
 
@@ -469,11 +470,6 @@ class ZmqEngineBackend:
             raise ValueError(
                 "kairyu-proc explicit KV cache dtype requires a real model_path"
             )
-        if kv_cache_dtype == "fp8_e4m3":
-            if speculative is not None:
-                raise ValueError(
-                    "kairyu-proc fp8_e4m3 KV cache does not support speculative decoding"
-                )
         self._config = {
             "num_pages": num_pages,
             "page_size": page_size,

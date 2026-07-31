@@ -13,12 +13,15 @@ import pytest
 import torch
 
 from kairyu.engine.config_validation import validate_backend_options
-from kairyu.engine.core.engine_service import _startup_ready_frame
 from kairyu.engine.core.kv_cache_dtype import (
     resolve_kv_cache_dtype,
     validate_kv_cache_dtype,
 )
-from kairyu.engine.core.worker import make_handshake, validate_handshake
+from kairyu.engine.core.worker import (
+    DistTPLauncher,
+    make_handshake,
+    validate_handshake,
+)
 from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
 from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.engine.zmq_backend import (
@@ -29,9 +32,14 @@ from kairyu.engine.zmq_backend import (
 )
 
 
-@pytest.mark.parametrize("value", ("auto", "bfloat16", "fp8_e4m3"))
+@pytest.mark.parametrize("value", ("auto", "bfloat16"))
 def test_public_kv_cache_dtype_names(value):
     assert validate_kv_cache_dtype(value) == value
+
+
+def test_public_fp8_request_reports_failed_bake_and_stays_disabled():
+    with pytest.raises(RuntimeError, match="G4 E-KV.*bake failed"):
+        validate_kv_cache_dtype("fp8_e4m3")
 
 
 @pytest.mark.parametrize("value", (None, "", "bf16", "fp8", torch.bfloat16))
@@ -48,7 +56,7 @@ def test_native_config_default_remains_auto_and_explicit_needs_real_model(backen
 
 
 @pytest.mark.parametrize("backend", ("kairyu", "kairyu-proc"))
-@pytest.mark.parametrize("value", ("auto", "bfloat16", "fp8_e4m3"))
+@pytest.mark.parametrize("value", ("auto", "bfloat16"))
 def test_native_config_accepts_public_kv_dtype_with_real_model(backend, value):
     validate_backend_options(
         backend,
@@ -59,21 +67,32 @@ def test_native_config_accepts_public_kv_dtype_with_real_model(backend, value):
     )
 
 
-@pytest.mark.parametrize("value", ("bfloat16", "fp8_e4m3"))
-def test_pd_rejects_every_explicit_kv_cache_dtype(value):
+@pytest.mark.parametrize("backend", ("kairyu", "kairyu-proc"))
+def test_native_config_rejects_failed_fp8_bake_before_startup(backend):
+    with pytest.raises(RuntimeError, match="G4 E-KV.*bake failed"):
+        validate_backend_options(
+            backend,
+            {
+                "model_path": "/model",
+                "kv_cache_dtype": "fp8_e4m3",
+            },
+        )
+
+
+def test_pd_rejects_explicit_bfloat16_kv_cache_dtype():
     with pytest.raises(ValueError, match="does not support P-D separation"):
         validate_backend_options(
             "kairyu",
             {
                 "model_path": "/model",
                 "pd_separation": True,
-                "kv_cache_dtype": value,
+                "kv_cache_dtype": "bfloat16",
             },
         )
 
 
-def test_fp8_rejects_speculative_at_config_boundary():
-    with pytest.raises(ValueError, match="does not support speculative"):
+def test_fp8_rejects_before_other_candidate_specific_options():
+    with pytest.raises(RuntimeError, match="G4 E-KV.*bake failed"):
         validate_backend_options(
             "kairyu",
             {
@@ -87,6 +106,26 @@ def test_fp8_rejects_speculative_at_config_boundary():
 def test_custom_runner_rejects_explicit_kv_cache_dtype_before_hardware_probe():
     with pytest.raises(ValueError, match="real model_path"):
         build_engine_loop(runner=object(), kv_cache_dtype="bfloat16")
+
+
+def test_single_rank_rejects_failed_fp8_bake_before_model_load():
+    with pytest.raises(RuntimeError, match="G4 E-KV.*bake failed"):
+        build_engine_loop(
+            model_path="/missing-model",
+            kv_cache_dtype="fp8_e4m3",
+        )
+
+
+def test_tp_rejects_failed_fp8_bake_before_process_spawn():
+    with pytest.raises(RuntimeError, match="G4 E-KV.*bake failed"):
+        DistTPLauncher(
+            "/missing-model",
+            tp=2,
+            num_pages=64,
+            page_size=16,
+            vocab=[],
+            kv_cache_dtype="fp8_e4m3",
+        )
 
 
 def test_auto_preserves_compute_dtype():
@@ -126,59 +165,22 @@ def test_explicit_bfloat16_requires_real_bfloat16_compute():
 
 
 @pytest.mark.parametrize(
-    ("profile", "backend", "model_config", "match"),
+    "profile",
     (
-        (
-            SimpleNamespace(arch="cpu", sm=None),
-            SimpleNamespace(supports_fp8_kv=True),
-            SimpleNamespace(is_mla=False),
-            "CUDA SM120",
-        ),
-        (
-            SimpleNamespace(arch="cuda", sm=100),
-            SimpleNamespace(supports_fp8_kv=True),
-            SimpleNamespace(is_mla=False),
-            "CUDA SM120",
-        ),
-        (
-            SimpleNamespace(arch="cuda", sm=120),
-            object(),
-            SimpleNamespace(is_mla=False),
-            "unsupported by the selected attention backend",
-        ),
-        (
-            SimpleNamespace(arch="cuda", sm=120),
-            SimpleNamespace(supports_fp8_kv=True),
-            SimpleNamespace(is_mla=True),
-            "does not support MLA",
-        ),
+        SimpleNamespace(arch="cpu", sm=None),
+        SimpleNamespace(arch="cuda", sm=100),
+        SimpleNamespace(arch="cuda", sm=120),
     ),
 )
-def test_fp8_fails_closed_for_unsupported_runtime(
-    profile,
-    backend,
-    model_config,
-    match,
-):
-    with pytest.raises((ValueError, RuntimeError), match=match):
+def test_fp8_resolver_stays_disabled_on_every_runtime(profile):
+    with pytest.raises(RuntimeError, match="G4 E-KV.*bake failed"):
         resolve_kv_cache_dtype(
             "fp8_e4m3",
             torch.bfloat16,
             profile,
-            backend,
-            model_config,
+            SimpleNamespace(supports_fp8_kv=True),
+            SimpleNamespace(is_mla=False),
         )
-
-
-def test_fp8_resolver_returns_e4m3_only_for_declared_sm120_path():
-    resolved = resolve_kv_cache_dtype(
-        "fp8_e4m3",
-        torch.bfloat16,
-        SimpleNamespace(arch="cuda", sm=120),
-        SimpleNamespace(supports_fp8_kv=True),
-        SimpleNamespace(is_mla=False),
-    )
-    assert resolved is torch.float8_e4m3fn
 
 
 def test_single_rank_passes_resolved_dtype_to_pool(monkeypatch):
@@ -275,26 +277,19 @@ def test_tp_handshake_rejects_kv_dtype_mismatch(tmp_path):
         )
 
 
-def test_zmq_config_and_startup_wire_carry_requested_and_resolved_dtype():
-    backend = ZmqEngineBackend(
-        model_path="/model",
-        kv_cache_dtype="fp8_e4m3",
-    )
-    assert backend._config["kv_cache_dtype"] == "fp8_e4m3"
-    assert backend.kv_cache_dtype_requested == "fp8_e4m3"
-    assert backend.kv_cache_dtype_resolved is None
-
-    frame = _startup_ready_frame(
-        SimpleNamespace(
-            attention_backend_decision=None,
-            kv_cache_dtype_requested="fp8_e4m3",
-            kv_cache_dtype_resolved="fp8_e4m3",
+def test_zmq_config_and_startup_wire_reject_failed_fp8_bake():
+    with pytest.raises(RuntimeError, match="G4 E-KV.*bake failed"):
+        ZmqEngineBackend(
+            model_path="/model",
+            kv_cache_dtype="fp8_e4m3",
         )
-    )
-    assert _kv_cache_dtype_from_startup_frame(frame) == (
-        "fp8_e4m3",
-        "fp8_e4m3",
-    )
+    with pytest.raises(EngineServiceError, match="G4 E-KV.*bake failed"):
+        _kv_cache_dtype_from_startup_frame(
+            {
+                "kv_cache_dtype_requested": "fp8_e4m3",
+                "kv_cache_dtype_resolved": "fp8_e4m3",
+            }
+        )
 
 
 def test_zmq_startup_wire_rejects_partial_kv_dtype_metadata():

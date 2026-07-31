@@ -1,19 +1,28 @@
 """KV-cache dtype resolution shared by single-rank and tensor-parallel startup.
 
 The public option is intentionally smaller than ``torch.dtype``.  In
-particular, FP8 is an execution contract rather than an allocation shortcut:
-the hardware, model shape, and selected attention backend must all support it
-before a pool can be constructed.
+particular, FP8 is an execution contract rather than an allocation shortcut.
+The 2026-07-31 G4 E-KV bake rejected the unit-scale candidate, so the public
+request remains disabled while the internal candidate stays available for
+calibration work and offline evidence replay.
 """
 
 from __future__ import annotations
 
-SUPPORTED_KV_CACHE_DTYPES = ("auto", "bfloat16", "fp8_e4m3")
+SUPPORTED_KV_CACHE_DTYPES = ("auto", "bfloat16")
+FP8_KV_CACHE_DTYPE = "fp8_e4m3"
+FP8_KV_DISABLED_REASON = (
+    "kv_cache_dtype='fp8_e4m3' is disabled because the G4 E-KV "
+    "Qwen3-32B SM120 bake failed its output/logprob/cache-quality gates; "
+    "calibrated per-layer K/V scales require a new bake before serving"
+)
 
 
 def validate_kv_cache_dtype(requested: object) -> str:
     """Return a valid public dtype name without importing torch."""
 
+    if requested == FP8_KV_CACHE_DTYPE:
+        raise RuntimeError(FP8_KV_DISABLED_REASON)
     if not isinstance(requested, str) or requested not in SUPPORTED_KV_CACHE_DTYPES:
         choices = ", ".join(SUPPORTED_KV_CACHE_DTYPES)
         raise ValueError(
@@ -46,8 +55,8 @@ def resolve_kv_cache_dtype(
 
     ``auto`` preserves the existing compute-dtype cache behavior.  Explicit
     BF16 is available as a stable spelling of the existing CUDA behavior.
-    FP8 is deliberately narrower: #170 bakes only E4M3 on real dense models,
-    SM120, and a backend that explicitly owns FP8 KV scale semantics.
+    The rejected FP8 candidate is not reachable through this public resolver.
+    Its offline pool/kernel path remains testable without weakening startup.
     """
 
     import torch
@@ -66,31 +75,12 @@ def resolve_kv_cache_dtype(
             )
         return torch.bfloat16
 
-    if model_config is None:
-        raise ValueError(
-            "kv_cache_dtype='fp8_e4m3' requires a real model configuration"
-        )
-    if getattr(profile, "arch", None) != "cuda" or getattr(profile, "sm", None) != 120:
-        raise RuntimeError(
-            "kv_cache_dtype='fp8_e4m3' requires CUDA SM120; "
-            f"detected arch={getattr(profile, 'arch', None)!r}, "
-            f"sm={getattr(profile, 'sm', None)!r}"
-        )
-    if compute_dtype is not torch.bfloat16:
-        raise RuntimeError(
-            "kv_cache_dtype='fp8_e4m3' requires BF16 model compute dtype"
-        )
-    if bool(getattr(model_config, "is_mla", False)):
-        raise ValueError("kv_cache_dtype='fp8_e4m3' does not support MLA models")
-    if not bool(getattr(attention_backend, "supports_fp8_kv", False)):
-        raise RuntimeError(
-            "kv_cache_dtype='fp8_e4m3' is unsupported by the selected "
-            f"attention backend {type(attention_backend).__name__}"
-        )
-    return torch.float8_e4m3fn
+    raise AssertionError(f"unreachable KV cache dtype request: {requested!r}")
 
 
 __all__ = [
+    "FP8_KV_CACHE_DTYPE",
+    "FP8_KV_DISABLED_REASON",
     "SUPPORTED_KV_CACHE_DTYPES",
     "kv_cache_dtype_name",
     "resolve_kv_cache_dtype",

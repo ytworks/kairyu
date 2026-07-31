@@ -618,10 +618,23 @@ image, and drill are unchanged.
   The binding workload is one prompt at each exact length 8,192, 16,384,
   and 32,768, native FlashInfer ragged prefill in 2,048-token chunks, then
   16 greedy tokens through tensor decode. BF16 and explicit unit-scale E4M3
-  KV arms must have exact output IDs/stopping, finite selected logprobs with
-  maximum absolute delta 0.25, complete BF16-input/SATFINITE E4M3 write
+  KV arms must have exact output IDs/stopping, finite common-prefix selected
+  logprobs with maximum absolute delta 0.25, complete
+  BF16-input/SATFINITE E4M3 write
   audits, bit-exact stored bytes, and dequantization error no greater than
   `max(abs(input)/16, 2^-10)`. Fixed samples from 8 layers × 16 positions per
   prompt require NRMSE at most 0.05 and cosine at least 0.99. Timing is
   diagnostic only. A process/model/runtime error still writes raw JSONL and a
   manifest with verdict FAIL; a missing GPU/runtime is not a skip or PASS.
+
+  Recorded 2026-07-31: the unit-scale candidate produced a retained **FAIL**.
+  The environment, source, checkpoint, and FlashInfer shared-object identity
+  were stable. All 7,522,091,008 audited K/V values passed the SATFINITE write
+  contract, but 8K and 32K outputs diverged, the common-prefix selected-logprob
+  maximum was 0.3099/0.4518/0.2656 at 8K/16K/32K, and cache NRMSE reached
+  0.1047. Keep public FP8 KV disabled; do not relabel this as PASS. Evidence:
+  `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31/`
+  (raw SHA-256
+  `f759fa3308f90f70c26e04e51ebf82515a2891d1b183ef3a8bbfa67acbada305`;
+  manifest SHA-256
+  `4c213ebfb7376755e98bddb7c16ad508ee8ac56ef88fd69c57971e78c2224a64`).

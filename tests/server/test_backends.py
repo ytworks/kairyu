@@ -225,8 +225,8 @@ async def test_backends_gateway_aggregates_replica_through_pool(monkeypatch):
     class KairyuBackend(MockBackend):
         def __init__(self):
             super().__init__()
-            self.kv_cache_dtype_requested = "fp8_e4m3"
-            self.kv_cache_dtype_resolved = "fp8_e4m3"
+            self.kv_cache_dtype_requested = "auto"
+            self.kv_cache_dtype_resolved = "bfloat16"
 
     replica_app = create_app(engines={"default": KairyuBackend()})
     replica_backend = OpenAICompatBackend(
@@ -257,10 +257,10 @@ async def test_backends_gateway_aggregates_replica_through_pool(monkeypatch):
     assert pool["via_replica"]["source"] == body["source"]
     assert pool["tensor_parallel_size"] == 1
     assert pool["via_replica"]["tensor_parallel_size"] == 1
-    assert pool["requested_kv_cache_dtype"] == "fp8_e4m3"
-    assert pool["kv_cache_dtype"] == "fp8_e4m3"
-    assert pool["via_replica"]["requested_kv_cache_dtype"] == "fp8_e4m3"
-    assert pool["via_replica"]["kv_cache_dtype"] == "fp8_e4m3"
+    assert pool["requested_kv_cache_dtype"] == "auto"
+    assert pool["kv_cache_dtype"] == "bfloat16"
+    assert pool["via_replica"]["requested_kv_cache_dtype"] == "auto"
+    assert pool["via_replica"]["kv_cache_dtype"] == "bfloat16"
 
 
 async def test_backends_gateway_pool_without_backends_endpoint_degrades():

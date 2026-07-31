@@ -317,7 +317,11 @@ def test_compiler_snapshot_uses_nonwriting_cc1plus_version_probe(
         if command[-1] == "-print-prog-name=cc1plus":
             stdout = str(tools["cc1plus"])
         elif Path(command[0]).name == "cc1plus":
-            stdout = "GNU C++17 13.3.0"
+            stdout = (
+                "GNU C++17 13.3.0\n\n"
+                "Time variable usr sys wall GGC\n"
+                " TOTAL 0.00 0.00 0.01 2469k"
+            )
         elif Path(command[0]).name == "nvcc":
             stdout = "Cuda compilation tools, release 13.3"
         else:
@@ -361,6 +365,60 @@ def test_valid_raw_passes_write_verify_and_replay(
     assert manifest["verdict"] == "PASS"
     assert gate.verify_artifact(tmp_path) == manifest
     assert gate.replay_artifact(tmp_path) == manifest
+
+
+def test_environment_stability_ignores_only_cc1plus_timing(
+    valid_rows: list[dict[str, object]],
+) -> None:
+    rows = copy.deepcopy(valid_rows)
+    rows[-1]["environment_end"] = copy.deepcopy(
+        rows[-1]["environment_end"]
+    )
+    start_version = rows[0]["environment_start"]["compiler"][
+        "host_compiler"
+    ]["cc1plus"]["version"]
+    rows[0]["environment_start"]["compiler"]["host_compiler"]["cc1plus"][
+        "version"
+    ] = f"{start_version}\nTime variable wall\n TOTAL 0.01"
+    rows[-1]["environment_end"]["compiler"]["host_compiler"]["cc1plus"][
+        "version"
+    ] = f"{start_version}\nTime variable wall\n TOTAL 0.00"
+
+    manifest = gate.recompute_manifest(rows, raw_sha256="2" * 64)
+
+    assert manifest["checks"]["sm120_flashinfer_environment_stable"] is True
+
+
+def test_logprob_gate_compares_only_the_common_output_prefix(
+    valid_rows: list[dict[str, object]],
+) -> None:
+    rows = copy.deepcopy(valid_rows)
+    row = next(
+        row
+        for row in rows
+        if row.get("type") == "output"
+        and row.get("prompt_length") == gate.PROMPT_LENGTHS[0]
+        and row.get("arm") == "fp8_e4m3"
+    )
+    row["output_token_ids"] = list(row["output_token_ids"])
+    row["output_token_ids"][2] = 999
+    row["output_token_ids_sha256"] = gate.sha256_json(
+        row["output_token_ids"]
+    )
+    row["selected_logprobs"][2:] = [-100.0] * (gate.OUTPUT_TOKENS - 2)
+
+    manifest = gate.recompute_manifest(rows, raw_sha256="2" * 64)
+    metric = next(
+        item
+        for item in manifest["metrics"]["outputs"]
+        if item["prompt_length"] == gate.PROMPT_LENGTHS[0]
+    )
+
+    assert manifest["checks"]["exact_output_tokens_and_stopping"] is False
+    assert manifest["checks"]["selected_logprob_delta_at_most_0_25"] is True
+    assert metric["common_prefix_tokens"] == 2
+    assert metric["compared_logprob_positions"] == 2
+    assert metric["max_selected_logprob_abs_delta"] == 0.0
 
 
 @pytest.mark.parametrize(

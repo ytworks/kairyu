@@ -1,8 +1,10 @@
 # FlashInfer SM120 (Blackwell) AOT packaging
 
 Status: **ACTIVE packaging contract**. `Dockerfile.cuda` contains the scoped
-AOT build. A rebuilt production image still needs the cold-runtime verification
-below before its FP8-KV path is declared deployable.
+AOT build. The 2026-07-31 unit-scale G4 E-KV bake failed its product-quality
+gates, so public FP8-KV startup is disabled even if these candidate kernels are
+present. A calibrated replacement must pass a new bake and the cold-runtime
+verification below before any FP8-KV path is declared deployable.
 
 Date: 2026-07-13; updated 2026-07-31 for E4M3 KV-cache support.
 
@@ -60,7 +62,9 @@ kernel. When enough build disk is available:
    build summary contains SM120, heads 64/128, BF16, and
    `torch.float8_e4m3fn`.
 2. In the resulting runtime image, confirm `nvcc` is absent.
-3. Start Kairyu with `kv_cache_dtype: fp8_e4m3` and a forced FlashInfer backend.
+3. Only after calibrated scales pass a new G4 E-KV bake and the public gate is
+   deliberately re-enabled, start Kairyu with `kv_cache_dtype: fp8_e4m3` and a
+   forced FlashInfer backend.
    Exercise both prefill and decode for supported head dimensions with an empty
    writable FlashInfer cache (or a read-only cache location).
 4. Require successful responses, `/backends` reporting requested/resolved

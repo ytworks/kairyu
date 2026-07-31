@@ -51,7 +51,18 @@ All numbers from committed `bench/` scripts (G2 §8 evidence rules carry forward
 | M-A2 (EP does not break KV) | Radix hit >80% @50% shared prefix with EP on (A7 lineage; attention-DP must keep per-replica KV accounting rank-invariant) | — |
 | M-A3 (baseline comparison) | tok/s/GPU and TTFT p99 ≥ SGLang, same box, same checkpoint, same config — SGLang is the credible MoE-on-SM120 baseline; disclose its known SM120 limitations in the results file | saturation |
 | M-A4 (MTP value) | MTP acceptance ≥2 tokens/step measured; decode throughput ≥1.5× MTP-off at equal quality (spec ≡ non-spec greedy invariant pinned by test, E2 lineage) | latency-bound |
-| E-KV (FP8 KV bake) | `bench/fp8_kv_g4_ekv_bench.py` runs the pinned Qwen3-32B checkpoint on one SM120 with exact 8K/16K/32K prompts, 2,048-token native ragged-prefill chunks, and 16 greedy decode tokens in BF16-KV and explicit unit-scale E4M3-KV arms. PASS requires exact output token IDs/stopping, finite selected logprobs with max absolute delta ≤0.25, complete finite/in-range SATFINITE write audits with bit-exact stored E4M3 bytes and the declared quantization-error bound, and fixed cross-cache samples with NRMSE ≤0.05 and cosine ≥0.99. BF16 remains the default; FP8 KV is opt-in, and any runtime failure is retained as FAIL rather than skipped. | — |
+| E-KV (FP8 KV bake) | `bench/fp8_kv_g4_ekv_bench.py` runs the pinned Qwen3-32B checkpoint on one SM120 with exact 8K/16K/32K prompts, 2,048-token native ragged-prefill chunks, and 16 greedy decode tokens in BF16-KV and explicit unit-scale E4M3-KV arms. PASS requires exact output token IDs/stopping, finite common-prefix selected logprobs with max absolute delta ≤0.25, complete finite/in-range SATFINITE write audits with bit-exact stored E4M3 bytes and the declared quantization-error bound, and fixed cross-cache samples with NRMSE ≤0.05 and cosine ≥0.99. BF16 remains the default; the operator alone may construct the candidate arm, and any runtime or quality failure is retained as FAIL and keeps public FP8 KV disabled. | — |
+
+Recorded 2026-07-31: **FAIL** on the pinned Qwen3-32B revision and one RTX PRO
+6000 Blackwell. All K/V write audits passed across 7,522,091,008 values with
+zero non-finite inputs, range violations, stored-byte mismatches, or declared
+quantization-error violations. The unit-scale candidate nevertheless diverged
+from BF16 output at 8K and 32K, exceeded the 0.25 common-prefix selected-logprob
+bound at all three lengths (0.3099/0.4518/0.2656), and reached cache NRMSE
+0.1047. Public `fp8_e4m3` startup therefore remains fail-closed and BF16 remains
+the serving path. Raw evidence is retained under
+`bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31/`; calibrated
+per-layer K/V scales require a separate bake before enablement.
 
 ### Stage G4.2 — Frontier MoE, multi-node (prereq: G4.1 green + F3 transport gates)
 

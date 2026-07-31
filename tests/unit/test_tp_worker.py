@@ -236,7 +236,7 @@ def test_startup_handshake_requires_the_same_attention_backend_identity(
     ("requested_kv_dtype", "resolved_kv_dtype"),
     (
         ("auto", torch.bfloat16),
-        ("fp8_e4m3", torch.float8_e4m3fn),
+        ("bfloat16", torch.bfloat16),
     ),
 )
 def test_build_tp_runner_probes_and_binds_the_rank_local_device(
@@ -371,11 +371,7 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
     assert runner.attention_backend_decision is decision
     assert runner.attention_backend_identity == "canonical-rank-local-identity"
     assert runner.kv_cache_dtype_requested == requested_kv_dtype
-    assert runner.kv_cache_dtype_resolved == (
-        "fp8_e4m3"
-        if resolved_kv_dtype is torch.float8_e4m3fn
-        else "bfloat16"
-    )
+    assert runner.kv_cache_dtype_resolved == "bfloat16"
     assert returned_full_config is full_config
 
 

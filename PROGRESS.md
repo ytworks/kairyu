@@ -262,16 +262,15 @@ serving, preserves checkpoint ignore/exclusion rules and state-dict names, and
 fails closed instead of silently falling back. The contextual CPU acceptance
 gate passes 23/23 without skips; the actual SM120 FP8/INT8/AWQ/GPTQ/NVFP4
 kernel and full-model GPU gate passes 28/28 without skips.
-G4 E-KV / issue #170 is implementation-ready but remains open pending its real
-Qwen3-32B long-context bake. `auto` still preserves the BF16 CUDA cache default;
-only explicit `fp8_e4m3` may select the new path, and startup fails closed unless
-the model computes in BF16, the device is SM120, the model is non-MLA, and the
-selected backend is FlashInfer. K/V storage uses unit-scale SATFINITE E4M3
-(clamp to ±448 before conversion) and forwards `k_scale=v_scale=1.0` through
-all FlashInfer prefill/decode paths. The pinned v0.6.14 SM120 AOT source matrix
-now includes E4M3 KV for FP16/BF16 queries at head dimensions 64/128. The old
-`kairyu-depth-ab:20260731-issue156` image (`4dc6af1ddc97`) has no matching FA2
-E4M3 attention modules; no rebuilt-image or formal bake result is claimed yet.
+G4 E-KV / issue #170 has a retained real Qwen3-32B long-context **FAIL**. The
+unit-scale SM120/FlashInfer candidate passed all 7,522,091,008 SATFINITE write
+audits but diverged from BF16 output at 8K/32K, exceeded the 0.25
+common-prefix selected-logprob bound at every length, and reached cache NRMSE
+0.1047. `auto` and explicit BF16 behavior are unchanged; public
+`fp8_e4m3` startup is rejected with the failed-bake reason. Candidate E4M3
+pool/kernel/AOT plumbing remains available for offline calibration work but is
+not a deployability claim. Raw and replayed evidence is retained under
+`bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31/`.
 G6 P-B1 streaming orchestration is now closed. Direct routes already streamed;
 Conductor and MoA now keep pre-final work private and pull their final
 worker/synthesizer backend iterator through Orchestrator to OpenAI SSE.
@@ -667,6 +666,31 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] G4 E-KV rejects unit-scale FP8 KV and stays BF16
+- What: ran the formal 8K/16K/32K Qwen3-32B BF16-versus-unit-scale-E4M3 bake
+  on one RTX PRO 6000 Blackwell. Source, checkpoint, runtime, GPU, compilers,
+  and all five FlashInfer shared objects were stable. All 7,522,091,008 K/V
+  values passed finite/range/SATFINITE-byte/error audits, but output tokens
+  diverged at 8K and 32K, common-prefix selected-logprob deltas were
+  0.3099/0.4518/0.2656 against a 0.25 limit, and cache NRMSE reached 0.1047
+  against a 0.05 limit. Public `fp8_e4m3` startup now fails closed with this
+  bake result; `auto`/BF16 remain unchanged. The replay verifier ignores only
+  GCC's nondeterministic timing footer and compares logprobs only while both
+  arms share the same generated-token prefix.
+- Why: issue #170 explicitly requires retaining a failed bake and keeping FP8
+  KV disabled. Post-hoc threshold relaxation or enabling an uncalibrated
+  candidate would violate that product-quality contract. Per-layer K/V static
+  calibration needs representative calibration data, headroom, a bound scale
+  artifact, and another independent long-context bake.
+- Refs: issue #170; G4 E-KV;
+  `bench/fp8_kv_g4_ekv_bench.py`;
+  `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31/`;
+  raw SHA-256
+  `f759fa3308f90f70c26e04e51ebf82515a2891d1b183ef3a8bbfa67acbada305`;
+  manifest SHA-256
+  `4c213ebfb7376755e98bddb7c16ad508ee8ac56ef88fd69c57971e78c2224a64`;
+  `kairyu/engine/core/kv_cache_dtype.py`
 
 ### 2026-07-31 — [progress] G4 E-KV is ready for the real Qwen3-32B bake
 - What: implemented an opt-in `fp8_e4m3` KV cache without changing the BF16

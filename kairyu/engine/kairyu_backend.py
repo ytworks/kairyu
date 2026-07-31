@@ -294,11 +294,6 @@ def build_engine_loop(
         raise ValueError(
             "explicit kv_cache_dtype does not support P-D separation"
         )
-    if kv_cache_dtype == "fp8_e4m3":
-        if speculative is not None:
-            raise ValueError(
-                "kv_cache_dtype='fp8_e4m3' does not support speculative decoding"
-            )
     if not pd_separation and (
         pd_prefill_device is not None
         or pd_decode_device is not None
