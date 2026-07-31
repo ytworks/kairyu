@@ -253,6 +253,33 @@ and production-router SHA-256
 | F4b | Agentic multi-turn trace with tiering on: fleet prefix-hit-rate gain reported; TPOT p99 unregressed (offload work stays off the decode critical path) | GPU bench |
 | F4c | Global-pool decision doc: F2's telemetry quantifies cross-replica duplicate-prefix mass; buy (Mooncake/LMCache) vs build (KVTransport extension) decided with data — m7 D6's revisit trigger honored | decision doc |
 
+F4c is closed by the 2026-07-31 m7 D6 amendment and the independently
+replayable artifact at
+`bench/results/f4c-global-kv-pool-decision-2026-07-31.json`. F2a residency
+replay reconstructs session-HRW's 997 redundant family copies (3,988 logical
+shared-prefix chunk-copies and 513,809 family-copy/request-steps), while
+prefix-aware placement creates zero redundant copies and recovers every seeded
+reusable prefix. F2c's real Qwen3-32B trace confirms 319,696 matched avoided
+recomputed tokens, a 0.254486 TTFT-p95 ratio, and a 0.999998 goodput ratio.
+Only 1.5608% of candidate prompt tokens remain uncached, and that gross upper
+bound includes novel suffixes rather than proving remote reuse.
+
+The reviewed decision therefore keeps per-replica RadixKV plus F2 routing,
+completes F4a/F4b first, and defers a global pool. Three consecutive
+non-overlapping 10,000-request windows from one predeclared
+deployment/model/TP/hardware cohort must later make the same branch hold in
+all three: exact remote-resident local-miss block tokens are at least 5% of
+all eligible prompt tokens, or their F4a-curve recompute GPU time is at least
+10% of measured total prefill GPU-active time. Missing exact identity,
+residency, or timing invalidates a window. If triggered, Mooncake Store is the
+selected bounded physical allocation/storage/transfer data plane behind a
+separate Kairyu-owned global-KV object-store adapter. Kairyu retains logical
+namespace, radix, request/replica routing, cache truth, commit, isolation, and
+fallback; the existing `KVTransport` remains a transfer seam. LMCache's full
+policy layer and a home-grown global store are not selected. Logical chunk
+copies are measured; physical KV bytes and byte-seconds are explicitly not
+claimed.
+
 ### Stage F5 — Tenancy, SLO admission, autoscaling
 
 | Gate | Target | Where proven |

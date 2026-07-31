@@ -153,6 +153,155 @@ M7 maps the OpenAI `user` field and/or `X-Session-ID` header to
 cache: telemetry showing a material rate of byte-identical requests at
 temperature 0.
 
+#### D6 amendment (2026-07-31) — F4c global KV pool remains deferred
+
+**Decision:** keep per-replica RadixKV plus Kairyu's F2 prefix-aware placement.
+Do not deploy a global KV pool now. Complete the native DRAM tier and its
+agentic-trace gate (F4a/#187 and F4b/#188) first. If the predeclared revisit
+trigger below fires, adopt **Mooncake Store only as a bounded storage/transfer
+data-plane provider behind a separate Kairyu-owned global-KV object-store
+adapter**. This is not the existing three-method `KVTransport` seam. Kairyu
+continues to own the token/model namespace, radix index, request/replica
+routing, logical object naming, cache truth, restore-versus-recompute policy,
+shard commit, tenant isolation, and fallback. Mooncake owns only physical
+object allocation, immutable storage, and transfer. LMCache is not adopted as
+Kairyu's cache-policy layer, and `KVTransport` is not expanded into a
+home-grown global store.
+
+This is the m7 D6 revisit promised by G5 F4c. It does not change D6's separate
+response-cache decision or its byte-identical-request trigger.
+
+##### Measured duplicate-prefix and recomputation mass
+
+`bench/global_kv_pool_decision.py` independently hashes and replays the
+retained F2a and F2c evidence. It does not rerun either measurement and does
+not copy numbers out of their manifests:
+
+| Evidence | Session-HRW control | Prefix-aware placement | What the replay proves |
+|---|---:|---:|---|
+| F2a, 500 logical replicas, 64 seeded shared-prefix families | 27/1,024 hits; final 1,061 family copies; 997 redundant family copies = 3,988 logical 256-character prefix chunk-copies | 1,024/1,024 hits; final 64 family copies; zero redundant copies | Seed and placement order replay reconstructs logical residency exactly. HRW accumulated 513,809 duplicate family-copy/request-steps; routing recovered all 4,096 reusable chunks and avoided 3,988 recomputed chunks (97.3633% of the reusable opportunity) |
+| F2c, four real Qwen3-32B TP2 replicas on eight GPUs | 329,280 / 659,266 cached prompt tokens | 648,976 / 659,266 cached prompt tokens | On 256 identical prompt pairs, routing avoided 319,696 matched recomputed tokens (48.4927% of all prompt tokens and 96.8817% of control misses), with no pairwise cache regression |
+| F2c performance | TTFT p95 527.958 ms | TTFT p95 134.358 ms | Candidate/control TTFT ratio 0.254486 while goodput ratio remained 0.999998 |
+
+The units are deliberately separate:
+
+- **Logical duplicate-copy mass** is the extra family/chunk copies reconstructed
+  from F2a's seed, replica, sequence, and cache-hit rows. The trace has no
+  eviction, so every successful cold placement adds one resident family copy.
+- **Matched avoidable recomputation mass** is candidate cached work minus
+  session-HRW cached work for the identical paired prompt.
+- **Incremental global-pool mass** would be a post-routing local miss for which
+  a compatible copy actually exists on another replica *and* transfer beats the
+  measured F4a recompute crossover. F2a's treatment has none in its seeded
+  reusable set. F2c's remaining 10,290 uncached tokens (1.5608% of prompt
+  tokens) include novel suffixes, so 1.5608% is only a gross upper bound, not a
+  measured remote-reuse rate.
+
+No artifact records physical KV bytes, byte-seconds, or an exact-event
+real-engine residency index. This decision therefore makes no such claim.
+
+The generated artifact is
+`bench/results/f4c-global-kv-pool-decision-2026-07-31.json`. Reproduce it
+offline with:
+
+```bash
+uv run --frozen python bench/global_kv_pool_decision.py \
+  --verify-artifact \
+  bench/results/f4c-global-kv-pool-decision-2026-07-31.json \
+  --assert-gate
+```
+
+The input F2a raw SHA-256 is
+`82bb2a2ff420dbd4e244685ce2a83f38379028604be3c1077e85daf5b31cd0f3`;
+the input F2c raw and trace SHA-256 values are
+`4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64`
+and
+`51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad`.
+The generated F4c decision artifact SHA-256 is
+`1f75eca37df253ae27b651b4702f988ce364165378d80ce451615a3b7a5b06d3`.
+
+##### Buy/build comparison
+
+The external snapshot is dated 2026-07-31 and pins
+[Mooncake v0.3.12.post1](https://github.com/kvcache-ai/Mooncake/releases/tag/v0.3.12.post1)
+plus
+[main `f5f6a94`](https://github.com/kvcache-ai/Mooncake/commit/f5f6a94edcf6ee226435909d0483c321075ed951),
+and
+[LMCache v0.5.2](https://github.com/LMCache/LMCache/releases/tag/v0.5.2)
+plus
+[`dev` `145ec2c`](https://github.com/LMCache/LMCache/commit/145ec2c2a3f032a30d80593e8f67bdf614700f5e).
+Both projects are Apache-2.0 and pre-1.0. Mooncake and LMCache are not strictly
+exclusive: LMCache can use Mooncake as a remote backend.
+
+| Option | Operational surface | Correctness/failure model | Performance evidence and fit | Ownership verdict |
+|---|---|---|---|---|
+| **Mooncake Store** | Master plus Store clients and Transfer Engine; DRAM/VRAM/NVMe, TCP for development and RDMA/multi-NIC for production; optional HA log/snapshot operation | Immutable object `Put/Get/Remove`; after a successful Put, Get is strongly consistent and returns the complete most-recent object rather than a partial/old value. Capacity allocation and requested replication remain best effort independently of HA; HA preserves Master metadata/service continuity, not a requested replica count | Its vLLM agentic result reports 3.8x throughput and 46x p50 TTFT improvement, and its RDMA result reports 142.25 GB/s (71.1% of theoretical). These are vendor results on other hardware/workloads, not Kairyu evidence | **Chosen only after a trigger**, as physical object allocation/storage/transfer below Kairyu's logical cache semantics. Best match for preserving L1/L2 ownership |
+| **LMCache** | Connector plus token index, async multi-tier policy, MP server/controller, and selectable CPU/disk/NIXL/Redis/Mooncake backends | Cache failure is intended to degrade to recompute; durability/consistency follows the selected backend. Its engine connector and 256-token default chunk semantics must be integrated and version-matched | Its documented Qwen3-8B long-document example reports mean TTFT 757 → 185 ms. It has no Kairyu connector, and this is not a matched Kairyu comparison | **Not selected.** Its index, tiering policy, connector, and controller overlap Kairyu RadixKV/F2 responsibilities |
+| **Extend Kairyu KVTransport into a global store** | Kairyu would add lookup, leases, storage membership, replication, eviction, recovery, capacity control, and operations to today's `register/send/recv` transfer seam | Native PageFrame/layout semantics fit, but Kairyu would own every distributed-store failure mode and upgrade contract | Reuses current serde/NIXL work, but no global lookup/store performance or reliability evidence exists | **Not selected.** Keep KVTransport for native P/D and tier movement; do not turn it into a global metadata/storage service |
+
+Primary external references:
+[Mooncake architecture](https://kvcache-ai.github.io/Mooncake/design/architecture.html),
+[Mooncake Store semantics](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html),
+[Mooncake deployment and HA](https://kvcache-ai.github.io/Mooncake/deployment/mooncake-store-deployment-guide.html),
+[Mooncake vLLM shared-pool result](https://kvcache-ai.github.io/Mooncake/performance/vllm/vllm-v1-mooncake-store.html),
+[Mooncake RDMA result](https://kvcache-ai.github.io/Mooncake/performance/vllm/vllm-v1-pd-performance.html),
+[LMCache architecture](https://docs.lmcache.ai/developer_guide/architecture.html),
+[LMCache MP architecture](https://docs.lmcache.ai/mp/architecture.html), and
+[LMCache benchmark recipe](https://docs.lmcache.ai/getting_started/benchmarking.html).
+
+##### Revisit trigger and prototype contract
+
+Revisit only after F4a and F4b publish their retained evidence. Before reading
+results, declare one deployment, checkpoint/revision, TP degree, hardware
+profile, and UTC start. Then retain three consecutive, non-overlapping windows
+of exactly 10,000 eligible requests from that cohort. An eligible request is a
+successfully admitted, cache-enabled text-generation request with a non-empty
+prompt; eligibility is independent of whether telemetry is present. Every
+consecutive eligible request is included and must have exact compatible-block
+telemetry. A missing identity, residency, token-count, or timing row invalidates
+the whole window rather than allowing that request or window to be excluded or
+replaced after results are known.
+
+For each window calculate:
+
+1. `remote_token_fraction = remote_reusable_tokens / eligible_prompt_tokens`.
+   The numerator is the model-token count in exact full blocks that miss on the
+   selected replica at routing time while a committed, namespace-compatible
+   copy exists on another replica. The denominator is every model prompt token
+   in the eligible requests, including locally cached and novel tokens.
+2. `remote_recompute_time_fraction = remote_block_recompute_gpu_time /
+   total_prefill_gpu_active_time`. The numerator applies the predeclared,
+   same-cohort F4a token-count/recompute curve to those same exact remote
+   blocks; the denominator is measured prefill GPU-active time over all
+   eligible requests in the window.
+
+The trigger fires only if the **same branch** holds across all three windows:
+`min(remote_token_fraction) >= 0.05` or
+`min(remote_recompute_time_fraction) >= 0.10`. Future telemetry must carry full
+block identity, namespace compatibility, local and remote committed residency
+at routing time, prompt-token counts, and prefill GPU time. F2c's gross
+uncached count has no remote-residency identity and therefore cannot satisfy
+the trigger.
+
+The first triggered prototype is Mooncake Store, not a production rollout. It
+must prove all of the following against the unchanged per-replica/F2-routing
+control:
+
+- a namespace containing the full checkpoint, tokenizer, RoPE/config, adapter,
+  KV dtype/layout/page size, engine ABI, TP degree/rank, and tenant identity;
+- a full-digest object key (the current 64-bit placement fingerprint is not a
+  global object identity), per-shard checksums, and an all-shards commit
+  manifest before RadixKV publication;
+- timeout, missing/partial object, digest/layout mismatch, controller loss, or
+  source loss degrades to a cache miss and recomputation without a failed
+  request or partial KV publication;
+- tenant authorization and namespace isolation;
+- lookup plus transfer beats measured recompute above the F4a crossover;
+- exact greedy output parity, no TPOT p99 regression under a predeclared paired
+  crossover method, and a positive goodput/TTFT result after all store costs;
+- a rollback that removes the adapter and returns to the current architecture
+  without changing request or model semantics.
+
 ### D7 — Batch: minimal OpenAI-compatible `/v1/files` + `/v1/batches`, filesystem-backed
 
 An in-gateway asyncio worker drains queued batch jobs through the same served

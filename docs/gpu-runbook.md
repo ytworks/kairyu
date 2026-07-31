@@ -513,3 +513,33 @@ image, and drill are unchanged.
   ragged CUDA time (0.7809x), with 32/32 selected tokens equal and all poisoned
   target KV slots overwritten with finite values. Artifact SHA-256:
   `58ec81de2a7a1e89dbf7ced1d6f223039037c80be34cf743c1f4939aa10e66c9`.
+
+- 9.8 Global KV pool decision replay (#189, G5 F4c): do not rerun F2a or
+  F2c. Their retained raw artifacts already contain the distinct evidence
+  needed for this decision. Replay the F2a seed/placement sequence to
+  reconstruct logical replica residency, then independently replay F2c's
+  paired real-engine token usage:
+
+  ```bash
+  uv run --frozen python bench/global_kv_pool_decision.py \
+    --verify-artifact \
+    bench/results/f4c-global-kv-pool-decision-2026-07-31.json \
+    --assert-gate
+  ```
+
+  The replay must report session-HRW's 997 redundant family copies (3,988
+  logical prefix chunk-copies and 513,809 family-copy/request-steps), zero
+  redundant copies under prefix-aware placement, and 319,696 matched avoided
+  recomputed model tokens in F2c with no pairwise cache regression. It must
+  retain F2c's 0.999998 goodput ratio and classify the remaining 1.5608%
+  uncached prompt-token fraction only as a gross upper bound: the trace cannot
+  distinguish novel suffixes from compatible remote-resident misses.
+
+  F4c is a decision gate, not a new GPU performance run. The reviewed m7 D6
+  amendment keeps per-replica RadixKV plus F2 routing, completes F4a/F4b
+  first, and chooses Mooncake Store behind a separate bounded global-KV
+  object-store adapter only if the predeclared future exact-event telemetry
+  trigger fires across three consecutive 10,000-request windows. This does
+  not expand the existing `KVTransport` seam. The artifact claims logical
+  copies and token recomputation only; it must never be reported as measured
+  physical KV bytes or byte-seconds.

@@ -1,0 +1,160 @@
+{
+  "checks": {
+    "current_gross_upper_bound_is_below_revisit_trigger": true,
+    "decision_and_future_provider_are_explicit": true,
+    "f2a_prefix_routing_covers_all_seeded_reusable_prefixes": true,
+    "f2a_prefix_routing_creates_no_duplicate_copy": true,
+    "f2a_reconstructs_positive_session_hrw_duplicate_mass": true,
+    "f2c_goodput_is_noninferior": true,
+    "f2c_has_no_pairwise_cache_regression": true,
+    "f2c_policy_pairs_have_identical_prompt_work": true,
+    "f2c_real_engine_cache_mass_strictly_improves": true,
+    "revisit_policy_is_predeclared_and_bounded": true
+  },
+  "decision": {
+    "choice": "defer_global_pool",
+    "current_architecture": "per_replica_radix_kv_plus_f2_prefix_routing",
+    "current_next_steps": [
+      "complete_native_dram_tiering_f4a_issue_187",
+      "measure_native_tiering_value_f4b_issue_188"
+    ],
+    "if_revisit_triggers_fire": "prototype_mooncake_store_behind_a_separate_global_kv_object_store_adapter",
+    "not_selected": {
+      "lmcache_full_adoption": "duplicates Kairyu radix/index/tiering/connector policy and has no Kairyu engine connector",
+      "native_global_kvtransport_store": "would make Kairyu own global metadata, replication, eviction, recovery, and storage operations"
+    },
+    "ownership_boundaries": {
+      "kairyu": "token_and_model_namespace, radix_index, request_and_replica_routing, logical_object_naming, cache_truth, admission, shard_commit, fallback",
+      "mooncake_store": "physical_object_allocation, immutable_object_storage, and transfer only"
+    }
+  },
+  "definitions": {
+    "duplicate_prefix_mass": "additional resident copies of an already-seeded shared prefix, reported as logical F2a family/chunk copies and request-steps; physical KV bytes and byte-seconds were not recorded",
+    "incremental_global_pool_mass": "post-routing local misses with a compatible remote-resident copy whose measured restore cost beats recompute; not directly measured by F2a/F2c",
+    "matched_avoidable_cross_replica_recomputation": "candidate cached work minus session-HRW cached work for identical paired prompts",
+    "post_routing_uncached_prompt_fraction_upper_bound": "all candidate uncached prompt tokens; a conservative ceiling because novel suffixes are not remotely reusable"
+  },
+  "evidence": {
+    "f2a_500_replica_shared_trace": {
+      "avoidable_fraction_of_all_prompt_chunks": 0.77890625,
+      "avoidable_fraction_of_reusable_prefix_opportunity": 0.9736328125,
+      "baseline": {
+        "cache_hit_requests": 27,
+        "cached_prefix_chunks": 108,
+        "duplicate_prefix_chunk_copy_request_steps": 2055236,
+        "duplicate_prefix_copy_request_steps": 513809,
+        "duplicate_resident_prefix_chunk_copies": 3988,
+        "duplicate_resident_prefix_copies": 997,
+        "final_resident_prefix_copies": 1061,
+        "mean_duplicate_prefix_copies_before_request": 501.7666015625,
+        "prompt_chunks": 5120,
+        "request_count": 1024,
+        "reusable_prefix_chunks": 4096
+      },
+      "candidate": {
+        "cache_hit_requests": 1024,
+        "cached_prefix_chunks": 4096,
+        "duplicate_prefix_chunk_copy_request_steps": 0,
+        "duplicate_prefix_copy_request_steps": 0,
+        "duplicate_resident_prefix_chunk_copies": 0,
+        "duplicate_resident_prefix_copies": 0,
+        "final_resident_prefix_copies": 64,
+        "mean_duplicate_prefix_copies_before_request": 0.0,
+        "prompt_chunks": 5120,
+        "request_count": 1024,
+        "reusable_prefix_chunks": 4096
+      },
+      "candidate_reusable_prefix_coverage": 1.0,
+      "family_count": 64,
+      "matched_avoidable_cross_replica_recomputation_chunks": 3988,
+      "prefix_chunks_per_family": 4,
+      "unit": "256-character benchmark chunks; not KV bytes or model tokens"
+    },
+    "f2c_qwen3_32b_real_engine_trace": {
+      "avoidable_fraction_of_all_prompt_tokens": 0.48492717658729556,
+      "avoidable_fraction_of_baseline_uncached_tokens": 0.9688168588970442,
+      "baseline": {
+        "cached_tokens": 329280,
+        "prompt_tokens": 659266,
+        "request_count": 256,
+        "token_weighted_cache_rate": 0.49946455603656187,
+        "uncached_tokens": 329986
+      },
+      "candidate": {
+        "cached_tokens": 648976,
+        "prompt_tokens": 659266,
+        "request_count": 256,
+        "token_weighted_cache_rate": 0.9843917326238575,
+        "uncached_tokens": 10290
+      },
+      "candidate_over_baseline_goodput_ratio": 0.9999979014122478,
+      "candidate_over_baseline_ttft_p95_ratio": 0.254485854823996,
+      "equal_cache_delta_pairs": 128,
+      "matched_avoidable_cross_replica_recomputation_tokens": 319696,
+      "negative_cache_delta_pairs": 0,
+      "pair_count": 256,
+      "positive_cache_delta_pairs": 128,
+      "post_routing_uncached_prompt_fraction_upper_bound": 0.015608267376142558,
+      "unit": "engine-reported model tokens"
+    }
+  },
+  "gate": "G5-F4c",
+  "inputs": {
+    "f2a": {
+      "artifact": "bench/results/f2a-prefix-routing-500-2026-07-28",
+      "github_run_id": "30411111758",
+      "manifest_sha256": "fb2858ed213be3f6b98463d30623e937d74403a7a7dd97356311439a7f7585f4",
+      "raw_row_count": 24709,
+      "raw_sha256": "82bb2a2ff420dbd4e244685ce2a83f38379028604be3c1077e85daf5b31cd0f3",
+      "schema_version": "kairyu.f2a.prefix-routing.v3",
+      "source_commit": "c067cb8a6d1aa661c82a56a007fc325011426459"
+    },
+    "f2c": {
+      "artifact": "bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29",
+      "github_run_id": null,
+      "manifest_sha256": "fcb29c3c5675e58a5bafbcd3c6e1ba737006ec145c731c27cef82e2d2011ad03",
+      "model": "qwen3-32b",
+      "model_digests": {
+        "weights-rollup": "6aa37b7da4e37d45b277d0bca47b00c2bfb58bb60986ba93e4c3e667df123955"
+      },
+      "model_revision": "9216db5781bf21249d130ec9da846c4624c16137",
+      "raw_row_count": 770,
+      "raw_sha256": "4cfcdeba2b7473aa6c2b28409dbf21de23d775d9b08e971beed6bdab875abe64",
+      "schema_version": "kairyu.f2c.kv-aware-ttft.v1",
+      "source_commit": "80b039b5d429c656871a480c2740740951b29b97",
+      "trace_sha256": "51d188671432bf791c02d66d91e6a7d785eb2bd01f64e29a41a62e74f9957dad"
+    }
+  },
+  "passed": true,
+  "revisit_policy": {
+    "consecutive_windows": 3,
+    "current_evidence_crosses_prompt_fraction_trigger": false,
+    "current_f2c_uncached_prompt_fraction_upper_bound": 0.015608267376142558,
+    "eligible_request": "successfully admitted text-generation request with nonempty prompt, cache enabled; eligibility is independent of telemetry availability",
+    "metrics": {
+      "remote_recompute_time_fraction": "sum of counterfactual recompute GPU time for those same exact blocks, using the predeclared same-cohort F4a token-count curve, divided by measured total prefill GPU-active time for all eligible requests",
+      "remote_token_fraction": "sum of model tokens in exact full blocks that miss locally at routing time and have a committed namespace-compatible copy on another replica, divided by all model prompt tokens in eligible requests"
+    },
+    "prerequisites": [
+      "F4a_DRAM_crossover_is_published",
+      "F4b_agentic_tiering_trace_is_published"
+    ],
+    "prototype_acceptance": [
+      "same_checkpoint_tokenizer_rope_lora_kv_layout_page_size_tp_namespace",
+      "all_shards_and_commit_manifest_verified_before_injection",
+      "timeout_missing_object_digest_or_fingerprint_mismatch_recomputes",
+      "tenant_namespace_and_authorization_isolation",
+      "lookup_plus_transfer_beats_measured_recompute_above_f4a_crossover",
+      "greedy_output_parity_and_no_tpot_p99_regression",
+      "master_or_client_loss_degrades_to_cache_miss_without_failed_requests"
+    ],
+    "requests_per_window": 10000,
+    "thresholds": {
+      "post_routing_remote_recompute_time_fraction": 0.1,
+      "post_routing_remote_resident_reusable_prompt_fraction": 0.05
+    },
+    "trigger_logic": "after prerequisites, revisit only when the same branch clears its threshold in all three windows: min(remote_token_fraction) >= 0.05 OR min(remote_recompute_time_fraction) >= 0.10",
+    "window_contract": "three consecutive non-overlapping windows of exactly 10000 eligible requests from one predeclared deployment/model/TP/hardware cohort; all consecutive eligible requests are included and missing telemetry invalidates rather than excludes a window"
+  },
+  "schema_version": "kairyu.f4c.global-kv-pool-decision.v1"
+}
