@@ -452,7 +452,7 @@ def _compiler_snapshot() -> dict[str, object]:
         "gcc": gcc,
         "g++": gxx,
         "cc1plus": tool(
-            "cc1plus", path=cc1plus_path, version_flag="-version"
+            "cc1plus", path=cc1plus_path, version_flag="--version"
         ),
     }
     home = os.environ.get("HOME")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import subprocess
 from collections import Counter
 from pathlib import Path
 
@@ -291,6 +292,58 @@ def test_formal_config_has_sixteen_unique_in_range_samples() -> None:
         assert len(set(positions)) == gate.SAMPLE_POSITIONS_PER_PROMPT
         assert all(0 <= position < length for position in positions)
         assert config["sample_positions"][str(length)] == list(positions)
+
+
+def test_compiler_snapshot_uses_supported_cc1plus_version_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tools = {
+        name: tmp_path / name
+        for name in ("nvcc", "gcc", "g++", "cc1plus")
+    }
+    for path in tools.values():
+        path.write_text(path.name, encoding="utf-8")
+    cache_root = tmp_path / "workspace" / ".cache" / "flashinfer"
+    cache_root.mkdir(parents=True)
+    (cache_root / "kernel.so").write_bytes(b"kernel")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(
+        command: tuple[str, ...],
+        **_: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[-1] == "-print-prog-name=cc1plus":
+            stdout = str(tools["cc1plus"])
+        elif Path(command[0]).name == "nvcc":
+            stdout = "Cuda compilation tools, release 13.3"
+        else:
+            stdout = f"{Path(command[0]).name} 13.3.0"
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    monkeypatch.setattr(
+        gate.shutil,
+        "which",
+        lambda name: str(tools[name]),
+    )
+    monkeypatch.setattr(gate.subprocess, "run", fake_run)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(
+        "FLASHINFER_WORKSPACE_BASE",
+        str(tmp_path / "workspace"),
+    )
+    monkeypatch.setenv("CUDA_HOME", "/usr/local/cuda")
+    monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(tmp_path / "torch"))
+
+    snapshot = gate._compiler_snapshot()
+
+    cc1plus = str(tools["cc1plus"].resolve())
+    assert (cc1plus, "--version") in calls
+    assert (cc1plus, "-version") not in calls
+    assert snapshot["host_compiler"]["cc1plus"]["version"] == (
+        "cc1plus 13.3.0"
+    )
 
 
 def test_valid_raw_passes_write_verify_and_replay(
