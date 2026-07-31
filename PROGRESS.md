@@ -622,6 +622,22 @@ longer treats the official image's temporary initialization-only Unix-socket
 server as ready, eliminating the entrypoint shutdown/startup race without
 weakening or ignoring the real database tests.
 
+G5 F4c now has a fail-closed global-KV-pool decision bound to the frozen F2
+evidence. Replay of F2a's 500-replica trace reconstructs 997 redundant
+session-HRW family copies and 513,809 duplicate family-copy/request-steps,
+versus zero under prefix-aware placement. Paired real Qwen3-32B F2c rows
+attribute 319,696 avoided recomputed prompt tokens to that routing; its
+remaining 1.5608% uncached-token fraction is only a gross upper bound because
+the trace cannot identify remote-resident misses. Kairyu therefore retains
+per-replica RadixKV plus F2 routing while native F4a/F4b land. A global pool is
+revisited only if one exact token- or recompute-time branch crosses its
+predeclared threshold in all three consecutive 10,000-request windows. If
+triggered, the prototype uses Mooncake Store for physical object
+allocation/storage/transfer behind a separate Kairyu-owned global-KV
+object-store adapter; LMCache wholesale and expansion of `KVTransport` into a
+global store remain rejected. The retained decision artifact SHA-256 is
+`1f75eca37df253ae27b651b4702f988ce364165378d80ce451615a3b7a5b06d3`.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -629,6 +645,30 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [amendment] F4c defers a global KV pool after exact F2 replay
+- What: added a fail-closed F4c analyzer and retained decision artifact that
+  pin and replay the exact F2a/F2c manifests, raw rows, source commits, trace,
+  logical residency, paired Qwen3-32B token usage, and performance ratios.
+  F2a reconstructs 997 redundant session-HRW family copies and 513,809
+  duplicate family-copy/request-steps versus zero under prefix routing; F2c
+  reconstructs 319,696 avoided prompt tokens and a 1.5608% residual gross
+  upper bound. The m7 D6 amendment retains per-replica RadixKV/F2 routing,
+  rejects LMCache wholesale and a global `KVTransport`, and conditionally
+  selects Mooncake Store behind a separate Kairyu-owned global-KV object-store
+  adapter only after one exact trigger branch holds across three consecutive
+  10,000-request windows.
+- Why: routing already eliminates the duplicate-prefix mass visible in the
+  retained representative evidence, while F2 cannot distinguish the small
+  residual uncached mass from novel suffixes. Taking on a distributed store
+  now would add correctness and operational ownership without measured
+  incremental value; the exact window formulas preserve an objective revisit
+  path after native DRAM tiering is measured.
+- Refs: issue #189; G5 F4c; m7 D6;
+  `bench/global_kv_pool_decision.py`;
+  `bench/results/f4c-global-kv-pool-decision-2026-07-31.json`;
+  `tests/bench/test_global_kv_pool_decision.py`;
+  `docs/{design/m7-productionization.md,goals/g5-fleet-scale.md,gpu-runbook.md,roadmap.md}`
 
 ### 2026-07-31 — [amendment] P-B3 closes on a pinned real Open WebUI browser flow
 - What: replaced the mutable, Kairyu-only demo check with health-gated Kairyu

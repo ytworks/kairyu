@@ -244,3 +244,4 @@ bench/data/
 !bench/results/orchestration-stream-*.json
 !bench/results/issue-223-*.json
 !bench/results/attention-backends-*.json
+!bench/results/f4c-global-kv-pool-decision-*.json

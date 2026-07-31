@@ -153,7 +153,7 @@ progress-log rules.
 | m6 D1 no-Ray, static ClusterSpec | No-Ray **stands** (k8s owns placement); staticness falls | `kairyu.launch` + registry (F1/F3); ClusterSpec stays static per coherence domain |
 | ClusterSpec ≤2 nodes | Frontier MoE needs 4–8-node EP/PP domains | Cap raised to 8 (F3); "coherence domain ≠ fleet size" principle preserved |
 | m7 D2 no Kubernetes | Its own revisit triggers (fleet >5–8 nodes, weekly-rolling toil) are all hit | k8s adopted as the **machine layer** only; model-aware control (routing, P:D, admission, autoscaling decisions) stays in Kairyu. llm-d not adopted wholesale — it would replace the differentiating L2 |
-| m5 D4 / m7 D6 session-hash affinity, per-replica cache only | Blind to cross-request shared prefixes | Two-step: prefix-aware placement (caches stay per-replica, D6 letter intact) → tiering; global pool gated on F2 telemetry (D6's own revisit mechanism) |
+| m5 D4 / m7 D6 session-hash affinity, per-replica cache only | Blind to cross-request shared prefixes | Prefix-aware placement removes the measured duplicate-copy mass (F2a/F2c); F4c therefore keeps per-replica KV and defers a pool while F4a/F4b land. If exact-event telemetry later crosses the predeclared threshold, Mooncake Store is the selected physical data plane behind a separate Kairyu-owned global-KV object-store adapter; LMCache wholesale and expansion of `KVTransport` into a home-grown global store are not selected |
 | m7 D8 no OTel | A tracing consumer now exists (fleet-scale ops) | OTel spans in F1 |
 
 ## 6. Evidence rules
