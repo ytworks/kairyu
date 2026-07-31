@@ -1686,6 +1686,9 @@ hf = [
 otel = [
     { name = "opentelemetry-sdk" },
 ]
+vision = [
+    { name = "pillow" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1726,6 +1729,7 @@ requires-dist = [
     { name = "nvidia-cutlass-dsl-libs-cu13", marker = "sys_platform == 'linux' and extra == 'flashattention4'", specifier = "==4.6.0.dev0" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.27" },
     { name = "pillow", marker = "extra == 'bench'", specifier = ">=10" },
+    { name = "pillow", marker = "extra == 'vision'", specifier = ">=10" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'fleet'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -1746,7 +1750,7 @@ requires-dist = [
     { name = "xgrammar", marker = "extra == 'engine'", specifier = ">=0.2.3" },
     { name = "xxhash", specifier = ">=3.5" },
 ]
-provides-extras = ["hf", "engine", "embeddings", "otel", "gpu", "flashattention4", "fleet", "bench", "bench-agentic"]
+provides-extras = ["hf", "engine", "embeddings", "vision", "otel", "gpu", "flashattention4", "fleet", "bench", "bench-agentic"]
 
 [package.metadata.requires-dev]
 dev = [

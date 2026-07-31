@@ -26,6 +26,14 @@ class ServerSettings(BaseModel):
         ge=1,
         description="Global in-flight cap on /v1/* requests; None disables the guard.",
     )
+    max_chat_body_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum raw POST body for /v1/chat/completions; None disables "
+            "the process-level guard."
+        ),
+    )
     metrics: bool = Field(default=True, description="Expose /metrics (Prometheus).")
     protect_metrics: bool = Field(
         default=False, description="Require an API key for /metrics too."

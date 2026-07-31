@@ -24,7 +24,10 @@ from kairyu.engine.backend import (
     EngineBackend,
     GenerationRequest,
     GenerationUsage,
+    UpstreamClientError,
     admission_upper_bound,
+    backend_admission_upper_bound,
+    prepare_backend_request,
     validate_backend_request,
 )
 from kairyu.engine.prompt import PromptInput, TokensPrompt
@@ -33,6 +36,7 @@ from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     _logprob_entries,
     _wire_usage,
+    chat_error_from_upstream_client_error,
     completion_response,
     execute_chat,
     sampling_params_from,
@@ -61,6 +65,7 @@ from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
     AccessLogMiddleware,
     AuthMiddleware,
+    ChatBodyLimitMiddleware,
     ConcurrencyLimitMiddleware,
     MetricsMiddleware,
     RequestIngressMiddleware,
@@ -933,6 +938,11 @@ def create_app(
 
     # add_middleware prepends, so add innermost first: metrics -> concurrency
     # guard -> auth -> access log (outermost).
+    if settings.max_chat_body_bytes is not None:
+        app.add_middleware(
+            ChatBodyLimitMiddleware,
+            limit=settings.max_chat_body_bytes,
+        )
     if metrics is not None:
         app.add_middleware(MetricsMiddleware, metrics=metrics)
     if settings.max_concurrency is not None:
@@ -1322,9 +1332,27 @@ def create_app(
         except ChatRequestError as error:
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
         try:
-            bound = admission_upper_bound(validated.generation_request)
+            bound = backend_admission_upper_bound(
+                validated.engine,
+                validated.generation_request,
+            )
         except ValueError as error:
             return invalid_request(str(error))
+        except RuntimeError as error:
+            return upstream_error(error)
+        try:
+            await prepare_backend_request(
+                validated.engine,
+                validated.generation_request,
+            )
+        except UpstreamClientError as error:
+            chat_error = chat_error_from_upstream_client_error(error)
+            return JSONResponse(
+                status_code=chat_error.status_code,
+                content={"error": chat_error.payload()},
+            )
+        except RuntimeError as error:
+            return upstream_error(error)
         reservation_error = _reserve_tenant_work(http_request, bound)
         if reservation_error is not None:
             return reservation_error

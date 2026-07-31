@@ -43,6 +43,11 @@ engine = [
 embeddings = [
     "fastembed==0.8.0",
 ]
+# Strict raster validation at the VLM gateway boundary. The stock vLLM
+# replica owns model processing; Kairyu only verifies inline image inputs.
+vision = [
+    "pillow>=10",
+]
 # OpenTelemetry span export (L2-safe no-op without it).
 otel = ["opentelemetry-sdk>=1.27"]
 # GPU kernels/fabric: linux-only markers so macOS `uv sync` ignores them.

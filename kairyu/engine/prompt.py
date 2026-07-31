@@ -161,11 +161,76 @@ class MultimodalItem:
 
 
 @dataclass(frozen=True)
+class MultimodalMessagePart:
+    """One ordered chat part: literal text or a reference into ``items``.
+
+    A reference is deliberately an integer index rather than a copied media
+    payload.  This keeps the chat layout small while preserving the exact
+    message/part position of every image across process and replica
+    boundaries.
+    """
+
+    type: Literal["text", "item"]
+    text: str | None = None
+    item_index: int | None = None
+    detail: Literal["auto", "low", "high"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.type == "text":
+            if (
+                type(self.text) is not str
+                or self.item_index is not None
+                or self.detail is not None
+            ):
+                raise ValueError(
+                    "text multimodal message parts require only a string text payload"
+                )
+            return
+        if self.type != "item":
+            raise ValueError("multimodal message part type must be 'text' or 'item'")
+        if (
+            type(self.item_index) is not int
+            or self.item_index < 0
+            or self.text is not None
+            or self.detail not in (None, "auto", "low", "high")
+        ):
+            raise ValueError(
+                "item multimodal message parts require only a non-negative item_index"
+            )
+
+
+@dataclass(frozen=True)
+class MultimodalMessage:
+    """One role-preserving message consumed by a capable chat backend."""
+
+    role: str
+    content: tuple[MultimodalMessagePart, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.role) is not str or not self.role.strip():
+            raise ValueError("MultimodalMessage.role must be a non-empty string")
+        content = self.content
+        if isinstance(content, (str, bytes, bytearray)) or not isinstance(
+            content, Sequence
+        ):
+            raise TypeError("MultimodalMessage.content must be a sequence")
+        copied = tuple(content)
+        if not copied:
+            raise ValueError("MultimodalMessage.content must not be empty")
+        if any(not isinstance(part, MultimodalMessagePart) for part in copied):
+            raise TypeError(
+                "MultimodalMessage.content must contain MultimodalMessagePart values"
+            )
+        object.__setattr__(self, "content", copied)
+
+
+@dataclass(frozen=True)
 class MultimodalPrompt:
     """A text or token base plus non-text items owned by a capable backend."""
 
     base: str | TextPrompt | TokensPrompt
     items: tuple[MultimodalItem, ...]
+    messages: tuple[MultimodalMessage, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.base) is not str and not isinstance(
@@ -183,6 +248,30 @@ class MultimodalPrompt:
         if any(not isinstance(item, MultimodalItem) for item in copied):
             raise TypeError("MultimodalPrompt.items must contain MultimodalItem values")
         object.__setattr__(self, "items", copied)
+
+        messages = self.messages
+        if isinstance(messages, (str, bytes, bytearray)) or not isinstance(
+            messages, Sequence
+        ):
+            raise TypeError("MultimodalPrompt.messages must be a sequence")
+        copied_messages = tuple(messages)
+        if any(not isinstance(message, MultimodalMessage) for message in copied_messages):
+            raise TypeError(
+                "MultimodalPrompt.messages must contain MultimodalMessage values"
+            )
+        if copied_messages:
+            references = [
+                part.item_index
+                for message in copied_messages
+                for part in message.content
+                if part.type == "item"
+            ]
+            expected = list(range(len(copied)))
+            if sorted(references) != expected:
+                raise ValueError(
+                    "multimodal chat layout must reference every item exactly once"
+                )
+        object.__setattr__(self, "messages", copied_messages)
 
 
 PromptInput: TypeAlias = str | TextPrompt | TokensPrompt | MultimodalPrompt
@@ -253,7 +342,7 @@ def prompt_to_wire(prompt: PromptInput) -> PromptWire:
             "prompt": prompt.prompt,
         }
     if isinstance(prompt, MultimodalPrompt):
-        return {
+        wire: dict[str, object] = {
             "kind": "multimodal",
             "base": prompt_to_wire(prompt.base),
             "items": [
@@ -265,6 +354,30 @@ def prompt_to_wire(prompt: PromptInput) -> PromptWire:
                 for item in prompt.items
             ],
         }
+        if prompt.messages:
+            wire["messages"] = [
+                {
+                    "role": message.role,
+                    "content": [
+                        (
+                            {"type": "text", "text": part.text}
+                            if part.type == "text"
+                            else {
+                                "type": "item",
+                                "item_index": part.item_index,
+                                **(
+                                    {"detail": part.detail}
+                                    if part.detail is not None
+                                    else {}
+                                ),
+                            }
+                        )
+                        for part in message.content
+                    ],
+                }
+                for message in prompt.messages
+            ]
+        return wire
     raise TypeError(f"unsupported prompt type: {type(prompt).__name__}")
 
 
@@ -309,9 +422,12 @@ def prompt_from_wire(value: object) -> PromptInput:
             raise TypeError("tokens prompt_token_ids wire field must be a list")
         return TokensPrompt(token_ids, value["prompt"])
     if kind == "multimodal":
+        expected = {"kind", "base", "items"}
+        if "messages" in value:
+            expected.add("messages")
         _require_exact_fields(
             value,
-            frozenset({"kind", "base", "items"}),
+            frozenset(expected),
             context="multimodal prompt",
         )
         item_values = value["items"]
@@ -333,7 +449,78 @@ def prompt_from_wire(value: object) -> PromptInput:
                     data=item_value["data"],
                 )
             )
-        return MultimodalPrompt(base=prompt_from_wire(value["base"]), items=items)
+        messages: list[MultimodalMessage] = []
+        message_values = value.get("messages", [])
+        if type(message_values) is not list:
+            raise TypeError("multimodal messages wire field must be a list")
+        for message_index, message_value in enumerate(message_values):
+            if type(message_value) is not dict:
+                raise TypeError(
+                    f"multimodal message {message_index} must be a dictionary"
+                )
+            _require_exact_fields(
+                message_value,
+                frozenset({"role", "content"}),
+                context=f"multimodal message {message_index}",
+            )
+            content_values = message_value["content"]
+            if type(content_values) is not list:
+                raise TypeError(
+                    f"multimodal message {message_index} content must be a list"
+                )
+            parts: list[MultimodalMessagePart] = []
+            for part_index, part_value in enumerate(content_values):
+                if type(part_value) is not dict:
+                    raise TypeError(
+                        "multimodal message "
+                        f"{message_index} part {part_index} must be a dictionary"
+                    )
+                part_type = part_value.get("type")
+                if part_type == "text":
+                    _require_exact_fields(
+                        part_value,
+                        frozenset({"type", "text"}),
+                        context=(
+                            f"multimodal message {message_index} "
+                            f"text part {part_index}"
+                        ),
+                    )
+                    parts.append(
+                        MultimodalMessagePart(type="text", text=part_value["text"])
+                    )
+                elif part_type == "item":
+                    expected_item_fields = {"type", "item_index"}
+                    if "detail" in part_value:
+                        expected_item_fields.add("detail")
+                    _require_exact_fields(
+                        part_value,
+                        frozenset(expected_item_fields),
+                        context=(
+                            f"multimodal message {message_index} "
+                            f"item part {part_index}"
+                        ),
+                    )
+                    parts.append(
+                        MultimodalMessagePart(
+                            type="item",
+                            item_index=part_value["item_index"],
+                            detail=part_value.get("detail"),
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        "multimodal message "
+                        f"{message_index} part {part_index} has unknown type "
+                        f"{part_type!r}"
+                    )
+            messages.append(
+                MultimodalMessage(role=message_value["role"], content=parts)
+            )
+        return MultimodalPrompt(
+            base=prompt_from_wire(value["base"]),
+            items=items,
+            messages=messages,
+        )
 
     if "kind" not in value:
         raise ValueError("tagged wire prompt is missing required field: 'kind'")
@@ -343,6 +530,8 @@ def prompt_from_wire(value: object) -> PromptInput:
 __all__ = [
     "MultimodalEncoding",
     "MultimodalItem",
+    "MultimodalMessage",
+    "MultimodalMessagePart",
     "MultimodalPrompt",
     "PromptInput",
     "PromptKind",

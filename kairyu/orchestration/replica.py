@@ -39,10 +39,12 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from kairyu.engine.backend import (
+    AdmissionUpperBound,
     EngineBackend,
     GenerationRequest,
     GenerationResult,
     UpstreamClientError,
+    backend_admission_upper_bound,
     shutdown_all,
     shutdown_all_cancellation_safe,
     validate_backend_request,
@@ -133,6 +135,14 @@ class DrainLease:
     """Opaque ownership token for one independently reversible pool drain."""
 
     __slots__ = ()
+
+
+class _ReplicaRequestValidationError(ValueError):
+    """Aggregated placeable-replica rejection with a stable public code."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ReplicaPool:
@@ -566,7 +576,7 @@ class ReplicaPool:
         per-replica validation.
         """
 
-        failures: list[str] = []
+        failures: list[tuple[str, ValueError]] = []
         validated_keys: set[tuple[type, object]] = set()
         for replica_id in self._eligible_ids():
             backend = self._entries[replica_id].backend
@@ -575,7 +585,7 @@ class ReplicaPool:
                 try:
                     validate_backend_request(backend, request)
                 except ValueError as error:
-                    failures.append(f"{replica_id}: {error}")
+                    failures.append((replica_id, error))
                 continue
             validation_key = getattr(backend, "request_validation_key", None)
             if validation_key is not None:
@@ -591,11 +601,76 @@ class ReplicaPool:
             try:
                 validate(request)
             except ValueError as error:
-                failures.append(f"{replica_id}: {error}")
+                failures.append((replica_id, error))
         if failures:
-            raise ValueError(
-                "request is not supported by every eligible replica: " + "; ".join(failures)
+            codes = {
+                getattr(error, "code", "invalid_request")
+                for _replica_id, error in failures
+            }
+            logger.warning(
+                "request rejected by placeable replica contract",
+                extra={
+                    "replica_validation_failures": [
+                        f"{replica_id}: {error}"
+                        for replica_id, error in failures
+                    ]
+                },
             )
+            messages = {str(error) for _replica_id, error in failures}
+            public_message = "request is not supported by every eligible replica"
+            if len(messages) == 1:
+                public_message += f": {messages.pop()}"
+            raise _ReplicaRequestValidationError(
+                public_message,
+                code=codes.pop() if len(codes) == 1 else "invalid_request",
+            )
+
+    def admission_upper_bound(self, request: GenerationRequest) -> AdmissionUpperBound:
+        """Return the safe maximum across every currently placeable replica."""
+
+        eligible = self._eligible_ids()
+        if not eligible:
+            raise RuntimeError(
+                f"ReplicaPool: none of the {len(self._entries)} replicas are eligible"
+            )
+        bounds = [
+            backend_admission_upper_bound(
+                self._entries[replica_id].backend,
+                request,
+            )
+            for replica_id in eligible
+        ]
+        return AdmissionUpperBound(
+            tokens=max(bound.tokens for bound in bounds),
+            refundable_on_exact_usage=all(
+                bound.refundable_on_exact_usage for bound in bounds
+            ),
+        )
+
+    async def prepare_request(self, request: GenerationRequest) -> None:
+        """Prepare every distinct placeable contract before placement."""
+
+        eligible = self._eligible_ids()
+        if not eligible:
+            raise RuntimeError(
+                f"ReplicaPool: none of the {len(self._entries)} replicas are eligible"
+            )
+        prepared_keys: set[tuple[type, object]] = set()
+        for replica_id in eligible:
+            backend = self._entries[replica_id].backend
+            prepare = getattr(backend, "prepare_request", None)
+            if not callable(prepare):
+                continue
+            validation_key = getattr(backend, "request_validation_key", None)
+            if validation_key is not None:
+                typed_key = (type(backend), validation_key)
+                try:
+                    if typed_key in prepared_keys:
+                        continue
+                    prepared_keys.add(typed_key)
+                except TypeError:
+                    pass
+            await prepare(request)
 
     def _least_outstanding(self, candidates: Sequence[str]) -> str:
         # ``candidates`` is already in insertion order and ``min`` keeps the

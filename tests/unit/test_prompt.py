@@ -10,6 +10,8 @@ from kairyu.engine.backend import (
 )
 from kairyu.engine.prompt import (
     MultimodalItem,
+    MultimodalMessage,
+    MultimodalMessagePart,
     MultimodalPrompt,
     TextPrompt,
     TokensPrompt,
@@ -116,6 +118,75 @@ def test_multimodal_prompt_defensively_copies_items():
     source.clear()
 
     assert prompt.items == (MultimodalItem("image", "bytes", b"image"),)
+
+
+def test_multimodal_chat_layout_round_trip_preserves_roles_and_part_order():
+    prompt = MultimodalPrompt(
+        base=TextPrompt("display-only text"),
+        items=(
+            MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),
+            MultimodalItem("image", "uri", "data:image/png;base64,AQID"),
+        ),
+        messages=(
+            MultimodalMessage(
+                "system",
+                (MultimodalMessagePart("text", text="Answer with the color."),),
+            ),
+            MultimodalMessage(
+                "user",
+                (
+                    MultimodalMessagePart("text", text="first="),
+                    MultimodalMessagePart("item", item_index=0),
+                    MultimodalMessagePart("text", text=" second="),
+                    MultimodalMessagePart("item", item_index=1),
+                ),
+            ),
+        ),
+    )
+
+    decoded = prompt_from_wire(prompt_to_wire(prompt))
+
+    assert decoded == prompt
+    assert [part.type for part in decoded.messages[1].content] == [
+        "text",
+        "item",
+        "text",
+        "item",
+    ]
+    assert [
+        part.item_index
+        for part in decoded.messages[1].content
+        if part.type == "item"
+    ] == [0, 1]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        (
+            MultimodalMessage(
+                "user",
+                (MultimodalMessagePart("item", item_index=1),),
+            ),
+        ),
+        (
+            MultimodalMessage(
+                "user",
+                (
+                    MultimodalMessagePart("item", item_index=0),
+                    MultimodalMessagePart("item", item_index=0),
+                ),
+            ),
+        ),
+    ],
+)
+def test_multimodal_chat_layout_cannot_drop_duplicate_or_misindex_items(messages):
+    with pytest.raises(ValueError, match="reference every item exactly once"):
+        MultimodalPrompt(
+            base="display",
+            items=(MultimodalItem("image", "bytes", b"image"),),
+            messages=messages,
+        )
 
 
 @pytest.mark.parametrize(

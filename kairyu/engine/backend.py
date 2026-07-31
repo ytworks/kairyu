@@ -85,9 +85,21 @@ class UpstreamClientError(Exception):
     it as a replica failure, or one malformed client could eject the fleet (O1).
     """
 
-    def __init__(self, message: str, status_code: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int,
+        *,
+        code: str = "invalid_request",
+        public_message: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.code = code
+        # Upstream response bodies and replica URLs may contain credentials or
+        # internal topology. Only locally constructed validation errors opt in
+        # to exposing a separately reviewed message at the tenant boundary.
+        self.public_message = public_message
 
 
 @dataclass(frozen=True)
@@ -302,6 +314,41 @@ def admission_upper_bound(request: GenerationRequest) -> AdmissionUpperBound:
         tokens=candidates * (prompt_upper + params.max_tokens),
         refundable_on_exact_usage=candidates == 1,
     )
+
+
+def backend_admission_upper_bound(
+    backend: object,
+    request: GenerationRequest,
+) -> AdmissionUpperBound:
+    """Use an explicit backend processor ceiling when the generic bound cannot.
+
+    Text/token behavior remains byte-for-byte on the historical helper. A
+    multimodal backend must opt in with a synchronous, I/O-free bound derived
+    from its configured processor limits; media byte length is never treated as
+    a token estimate.
+    """
+
+    resolve = getattr(backend, "admission_upper_bound", None)
+    bound = resolve(request) if callable(resolve) else admission_upper_bound(request)
+    if not isinstance(bound, AdmissionUpperBound):
+        raise TypeError(
+            f"{type(backend).__name__}.admission_upper_bound must return "
+            "AdmissionUpperBound"
+        )
+    if type(bound.tokens) is not int or bound.tokens < 1:
+        raise ValueError("backend admission bound must contain a positive token count")
+    return bound
+
+
+async def prepare_backend_request(
+    backend: object,
+    request: GenerationRequest,
+) -> None:
+    """Run optional bounded async preparation before admission/HTTP streaming."""
+
+    prepare = getattr(backend, "prepare_request", None)
+    if callable(prepare):
+        await prepare(request)
 
 
 @dataclass(frozen=True)

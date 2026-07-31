@@ -730,3 +730,27 @@ image, and drill are unchanged.
   `f759fa3308f90f70c26e04e51ebf82515a2891d1b183ef3a8bbfa67acbada305`;
   manifest SHA-256
   `4c213ebfb7376755e98bddb7c16ad508ee8ac56ef88fd69c57971e78c2224a64`).
+
+- 9.10 G6 P-C4 Open WebUI image chat (#203): run from a clean implementation
+  commit on all eight GPUs. The opt-in overlay pins stock vLLM, the
+  Qwen3-VL-32B-Instruct revision, TP8, one image, video disabled, and the exact
+  Qwen processor pixel range. Keep its model-cache volume between runs:
+
+  ```bash
+  WEBUI_VLM_KEEP_STACK=1 ./scripts/webui_vlm_smoke.sh
+  ```
+
+  The gate must pass every phase: deterministic RED and BLUE images produce
+  the corresponding different answers through Kairyu; unary and SSE responses
+  include positive exact processor usage inside the 8,192-token complete
+  context; a metadata-service URL returns `400 invalid_image` without upstream
+  media I/O; and the pinned Playwright browser creates/signs into Open WebUI,
+  selects `qwen3-vl-32b`, uploads the RED PNG through the real file input and
+  `/api/v1/files/` ownership path, sends its file ID/type/url in the normal
+  chat request, and renders RED. Any missing runtime/GPU, omitted usage,
+  incorrect semantic answer, upload shortcut, skip, or upstream error is a
+  failure rather than a closure result.
+
+  The retained clean-commit run on 2026-07-31 passed all phases on
+  8× RTX PRO 6000. See
+  `bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.

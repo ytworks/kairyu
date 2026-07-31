@@ -203,6 +203,17 @@ class StreamUsageOwner:
         self._finalized = True
         if not self._dispatched:
             return
+        if (
+            not self._completed
+            and self._usage is None
+            and prompt_kind(self._prompt) == "multimodal"
+        ):
+            # A failed/disconnected multimodal stream has no safe fallback
+            # token count: processor output depends on decoded image geometry.
+            # Leave the dispatched reservation unsettled so request teardown
+            # consumes its complete pre-dispatch bound; do not turn the
+            # already-sanitized SSE error into a second ASGI exception.
+            return
         prompt_tokens, completion_tokens = resolve_usage_counts(
             self._usage,
             prompt=self._prompt,

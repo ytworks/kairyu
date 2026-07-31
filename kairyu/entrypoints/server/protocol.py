@@ -14,6 +14,15 @@ from pydantic import (
 )
 
 
+class ImageURL(BaseModel):
+    """One strict OpenAI image reference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1)
+    detail: Literal["auto", "low", "high"] | None = None
+
+
 class ContentPart(BaseModel):
     """OpenAI vision content part (m11 D5): text or image_url."""
 
@@ -21,7 +30,7 @@ class ContentPart(BaseModel):
 
     type: Literal["text", "image_url"]
     text: str | None = None
-    image_url: dict | None = None
+    image_url: ImageURL | None = None
 
     @model_validator(mode="after")
     def _validate_tagged_payload(self) -> ContentPart:
@@ -37,9 +46,6 @@ class ContentPart(BaseModel):
             raise ValueError("image_url content part requires an 'image_url' object")
         if self.text is not None:
             raise ValueError("image_url content part must not include 'text'")
-        url = self.image_url.get("url")
-        if type(url) is not str or not url:
-            raise ValueError("image_url content part requires a non-empty string URL")
         return self
 
 

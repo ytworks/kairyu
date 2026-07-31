@@ -2,6 +2,8 @@
 
 from kairyu.engine.prompt import (
     MultimodalItem,
+    MultimodalMessage,
+    MultimodalMessagePart,
     MultimodalPrompt,
     PromptInput,
     TextPrompt,
@@ -18,6 +20,8 @@ __version__ = "0.1.0"
 __all__ = [
     "LLM",
     "MultimodalItem",
+    "MultimodalMessage",
+    "MultimodalMessagePart",
     "MultimodalPrompt",
     "AsyncEngineArgs",
     "AsyncLLMEngine",

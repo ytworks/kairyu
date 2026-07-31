@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import json
 import logging
+import threading
 
 import httpx
 import pytest
@@ -11,6 +13,7 @@ from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import TokensPrompt
 from kairyu.engine.tokenizer import ToyTokenizer
+from kairyu.engine.vision import ImageInputPolicy
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
@@ -21,6 +24,16 @@ from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
 
 TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
+RED_PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDA"
+    "xMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg=="
+)
+_red_png_bytes = base64.b64decode(RED_PNG_DATA_URL.partition(",")[2])
+TRUNCATED_RED_PNG_DATA_URL = (
+    "data:image/png;base64,"
+    + base64.b64encode(_red_png_bytes[:-8]).decode("ascii")
+)
 
 
 class _EmptyTokenizer:
@@ -254,6 +267,39 @@ async def test_invalid_body_returns_422(app):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("chunked", [False, True])
+async def test_chat_body_limit_rejects_declared_and_streamed_oversize_bodies(
+    chunked,
+):
+    backend = MockBackend()
+    app = create_app(
+        engines={"m": backend},
+        settings=ServerSettings(max_chat_body_bytes=128),
+    )
+    encoded = json.dumps(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "x" * 256}],
+        }
+    ).encode()
+
+    async def body_chunks():
+        yield encoded[:96]
+        yield encoded[96:]
+
+    content = body_chunks() if chunked else encoded
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            content=content,
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "request_too_large"
+    assert backend.prompts_seen == ()
+
+
 async def test_invalid_sampling_params_return_400_not_500(app):
     # S2: out-of-range sampling values must be a client error (400), not an
     # unhandled ValueError surfacing as 500 (chat) or a mislabeled 502.
@@ -319,6 +365,440 @@ async def test_invalid_chat_content_parts_are_rejected_before_dispatch(part):
     assert response.status_code == 422
     assert response.json()["detail"]
     assert backend.prompts_seen == ()
+
+
+async def test_vlm_chat_preserves_roles_and_content_part_order_through_gateway():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "RED"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 43,
+                    "completion_tokens": 1,
+                    "total_tokens": 44,
+                },
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="upstream-vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={
+            "max_images": 1,
+            "max_processed_prompt_tokens": 1024,
+        },
+    )
+    app = create_app(engines={"vlm": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "vlm",
+                "messages": [
+                    {"role": "system", "content": "Name the color."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "before "},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": RED_PNG_DATA_URL,
+                                    "detail": "high",
+                                },
+                            },
+                            {"type": "text", "text": " after"},
+                        ],
+                    },
+                ],
+                "max_tokens": 4,
+                "temperature": 0,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "RED"
+    assert response.json()["usage"] == {
+        "prompt_tokens": 43,
+        "completion_tokens": 1,
+        "total_tokens": 44,
+        "prompt_tokens_details": None,
+    }
+    assert captured["body"]["model"] == "upstream-vlm"
+    assert captured["body"]["messages"] == [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Name the color."}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "before "},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": RED_PNG_DATA_URL,
+                        "detail": "high",
+                    },
+                },
+                {"type": "text", "text": " after"},
+            ],
+        },
+    ]
+
+
+async def test_pooled_vlm_decodes_inline_base64_only_once(monkeypatch):
+    decode_calls = 0
+    decode_threads: list[int] = []
+    original_decode = ImageInputPolicy._decode_item
+
+    def recording_decode(self, item, *, index):
+        nonlocal decode_calls
+        decode_calls += 1
+        decode_threads.append(threading.get_ident())
+        return original_decode(self, item, index=index)
+
+    monkeypatch.setattr(ImageInputPolicy, "_decode_item", recording_decode)
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="upstream-vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "RED",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 43,
+                        "completion_tokens": 1,
+                    },
+                },
+            )
+        ),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+    app = create_app(engines={"vlm": ReplicaPool([backend])})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "vlm",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "name the color"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": RED_PNG_DATA_URL},
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert decode_calls == 1
+    assert decode_threads[0] != threading.get_ident()
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+async def test_image_input_fails_closed_for_text_model_and_remote_url(pooled):
+    text_backend = MockBackend()
+    transport_calls: list[httpx.Request] = []
+    vision_backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="upstream-vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+    vision_engine = (
+        ReplicaPool({"10.23.45.67": vision_backend})
+        if pooled
+        else vision_backend
+    )
+    app = create_app(engines={"text": text_backend, "vlm": vision_engine})
+    content = [
+        {"type": "text", "text": "describe"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.test/image.png"},
+        },
+    ]
+
+    async with _client(app) as client:
+        text_response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "text", "messages": [{"role": "user", "content": content}]},
+        )
+        vision_response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "vlm", "messages": [{"role": "user", "content": content}]},
+        )
+
+    assert text_response.status_code == 400
+    assert "multimodal" in text_response.json()["error"]["message"]
+    assert text_backend.prompts_seen == ()
+    assert vision_response.status_code == 400
+    assert vision_response.json()["error"]["code"] == "invalid_image"
+    assert "remote and local image URLs are disabled" in (
+        vision_response.json()["error"]["message"]
+    )
+    assert "10.23.45.67" not in vision_response.text
+    assert transport_calls == []
+    assert vision_backend._client is None
+
+
+async def test_image_input_rejects_blank_role_as_a_controlled_400():
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="upstream-vlm",
+        api_key_env=None,
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+    app = create_app(engines={"vlm": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "vlm",
+                "messages": [
+                    {
+                        "role": " ",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": RED_PNG_DATA_URL},
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_truncated_image_is_rejected_before_stream_or_token_reservation(stream):
+    transport_calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="upstream-vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+    app = create_app(
+        engines={"vlm": backend},
+        tenant_config=TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=100_000,
+                    token_burst=100_000,
+                )
+            }
+        ),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "vlm",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": TRUNCATED_RED_PNG_DATA_URL,
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "stream": stream,
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_image"
+    assert transport_calls == []
+    assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
+
+
+async def test_unexpected_upstream_4xx_is_sanitized_and_not_forwarded():
+    backend = OpenAICompatBackend(
+        base_url="http://internal-vlm.secret:8000/v1",
+        model="upstream-vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                400,
+                text="SUPER_SECRET upstream diagnostic",
+            )
+        ),
+        upstream="vllm",
+    )
+    app = create_app(engines={"remote": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "remote",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 502
+    payload = response.json()["error"]
+    assert payload == {
+        "message": "upstream backend rejected the request",
+        "type": "upstream_error",
+        "code": "backend_error",
+    }
+    assert "SUPER_SECRET" not in response.text
+    assert "internal-vlm" not in response.text
+
+
+async def test_vlm_stream_failure_without_usage_closes_sanitized_sse(tmp_path):
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="upstream-vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    'data: {"choices":[{"index":0,"delta":{"content":"RED"},'
+                    '"finish_reason":null}]}\n\n'
+                    "data: [DONE]\n\n"
+                ),
+            )
+        ),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={
+            "max_images": 1,
+            "max_processed_prompt_tokens": 1024,
+        },
+    )
+    app = create_app(
+        engines={"vlm": backend},
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+        tenant_config=TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=20_000,
+                    token_burst=20_000,
+                )
+            }
+        ),
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "vlm",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "name the color"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": RED_PNG_DATA_URL},
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 4,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        )
+
+    assert response.status_code == 200
+    assert "RED" in response.text
+    assert "upstream backend error (RuntimeError)" in response.text
+    assert response.text.rstrip().endswith("data: [DONE]")
+    assert await _usage_totals(app) == {}
+    assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
+    assert app.state.tenant_limiter.token_balance("default") < 19_000
+
+
+async def test_unavailable_pool_admission_is_a_sanitized_upstream_error():
+    pool = ReplicaPool([MockBackend()])
+    pool.drain("0")
+    app = create_app(engines={"pool": pool})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "pool",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "backend_error"
 
 
 @pytest.mark.parametrize(

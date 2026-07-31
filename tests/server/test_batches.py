@@ -16,7 +16,7 @@ from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
 from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
-from kairyu.engine.backend import GenerationResult, GenerationUsage
+from kairyu.engine.backend import AdmissionUpperBound, GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.errors import sanitize_backend_error
 from kairyu.entrypoints.server.tenancy import (
@@ -194,6 +194,47 @@ async def test_batch_line_reserves_tokens_before_dispatch(tmp_path):
     assert backend.prompts_seen == ()
     assert limiter.in_flight("noisy") == 0
     assert limiter.reservation_snapshot()["noisy"] == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_line_uses_backend_specific_admission_bound(tmp_path):
+    class ProcessorBoundBackend(MockBackend):
+        def admission_upper_bound(self, request):
+            return AdmissionUpperBound(
+                tokens=1001,
+                refundable_on_exact_usage=True,
+            )
+
+    backend = ProcessorBoundBackend()
+    tenant_config = TenantConfig(
+        limits={
+            "noisy": TenantLimits(
+                requests_per_minute=60,
+                tokens_per_minute=1000,
+                token_burst=1000,
+                max_in_flight=1,
+            )
+        }
+    )
+    limiter = TenantLimiter(tenant_config)
+    worker = BatchWorker(
+        BatchStore(tmp_path / "batch"),
+        {"m": backend},
+        tenant_limiter=limiter,
+        tenant_config=tenant_config,
+    )
+
+    output, error, usage = await worker._run_line(
+        json.loads(_batch_line("line-1", "hello")),
+        "/v1/chat/completions",
+        set(),
+        "noisy",
+    )
+
+    assert output is None
+    assert usage is None
+    assert error["error"]["code"] == "tenant_rate_limited"
+    assert backend.prompts_seen == ()
 
 
 async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):

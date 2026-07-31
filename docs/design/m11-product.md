@@ -1,6 +1,6 @@
-# M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
+# M11 Design: Fugu-Class Product Surface + Tenancy — Implemented
 
-Status: **Implemented** (2026-07-03; D4/D7 amended 2026-07-31;
+Status: **Implemented** (2026-07-03; D4/D5/D7 amended 2026-07-31;
 D1/D2/D4/D6 amended 2026-07-28; D3 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
@@ -269,11 +269,25 @@ cover the wire contract and multi-turn tool loop; the reproducible record is
 
 ### D5 — Vision wire format
 
-protocol.py accepts OpenAI content-parts (`type: text|image_url`) in chat
-messages; `ChatTemplate` renders text parts and passes image references to
-a `VisionAdapter` seam that M-class VLM engines implement later (GPU);
-non-vision engines get a clean 400. Wire-format tests only — no VLM
-inference locally.
+`protocol.py` accepts OpenAI content-parts (`type: text|image_url`) in chat
+messages. Text-only messages retain the existing `ChatTemplate` path.
+Image-bearing messages instead become a typed `MultimodalPrompt` containing
+the exact role order, part order, and item references; Kairyu never flattens
+them or applies a text template first. A backend must explicitly declare
+multimodal prompt support and an `ImageInputPolicy`, while non-vision engines
+return a clean pre-dispatch 400.
+
+**Production VLM amendment (2026-07-31, issue #203).** The first production
+adapter is `OpenAICompatBackend` against a separate stock vLLM VLM replica.
+Kairyu owns admission, tenant accounting, typed transport, and fail-closed
+media validation; vLLM owns the Qwen processor and chat template exactly once.
+Only inline PNG, JPEG, and WebP data URLs are accepted. Remote/local URLs,
+MIME/magic mismatches, malformed/truncated or animated rasters, decompression
+bombs, excess bytes/pixels/dimensions/aspect ratio, and unsupported modalities
+fail before dispatch. Full base64 decode and Pillow verification run outside
+the event loop before token reservation or stream headers. Exact processed
+usage is mandatory for unary and streaming VLM responses; Kairyu never guesses
+image token counts.
 
 ### D6 — F5 CPU: priority admission + SLO shed + autoscaler logic
 
@@ -418,13 +432,28 @@ dimensions, finite L2-normalized vectors, and exact tokenizer usage. Optional
 reranking is explicitly deferred and is not a substitute for this retrieval
 proof.
 
+**Real image-chat amendment (2026-07-31, issue #203).** The GPU-only
+`docker-compose.webui-vlm.yaml` overlay replaces the mock chat pool with a
+revision-pinned Qwen3-VL-32B-Instruct stock-vLLM replica at TP8 while retaining
+the production embedding/RAG endpoint. The vLLM image and model revision are
+immutable, the Qwen image processor is bounded to 65,536–2,097,152 pixels, and
+the deployment accepts one inline image with an 8,192-token complete prompt
+reservation ceiling. `scripts/webui_vlm_smoke.sh` proves RED/BLUE semantic
+separation, exact unary/stream usage, remote-URL rejection, and a normal
+Open WebUI owned-file upload that becomes an inline data URL only inside the
+Open WebUI backend before reaching Kairyu. This GPU gate remains separate from
+CPU-only GitHub Actions. The clean `b8971cb` gate passed every binding check on
+8× RTX PRO 6000; the retained result is
+`bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.
+
 `bench/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
 quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 
 ## 3. Non-goals
 
-- Real VLM inference (GPU); online bandit for tiers; billing/invoicing.
+- A native in-process Kairyu VLM runner, tenant-controlled remote image
+  fetching, online bandit for tiers, and billing/invoicing.
 - Cross-node tenant state (single-gateway token buckets; the distributed
   limiter is a G6 note).
 - Autoscaler EXECUTION (decision logic only).
@@ -452,8 +481,9 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 - Tenancy isolation + ledger reconciliation gates (D3).
 - OpenAI SDK round-trips: responses.create (+previous_response_id chain),
   embeddings.create.
-- Vision: content-parts accepted, image parts rejected cleanly on
-  non-vision engines.
+- Vision: ordered content-parts reach a pinned stock-vLLM Qwen3-VL replica;
+  real images change output, exact usage is retained, remote/local references
+  fail closed, and non-vision engines still reject image input cleanly.
 - F5: priority ordering + aging; SLO shed under synthetic overload
   (deterministic fake clock); autoscaler hysteresis table test.
 - Bench: mock-target run produces the scoreboard schema.
@@ -567,3 +597,13 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   and retrieve a document through Open WebUI, prove retrieved context reaches a
   Kairyu chat model, and repeat after a Kairyu-only restart. Optional reranking
   may remain disabled but cannot replace the retrieval gate.
+- **A18 (D5/D7, Issue #203)**: image-bearing chat must preserve roles and
+  content-part order without double-templating. The production boundary accepts
+  only decoded and locally verified inline rasters under explicit byte, pixel,
+  dimension, aspect-ratio, count, and complete-context bounds. Media work must
+  finish off the event loop before quota reservation or SSE headers. The remote
+  VLM must return exact processor usage; failure without usage consumes the
+  reserved upper bound rather than guessing or refunding. The GPU gate must use
+  the normal Open WebUI owned-file upload path and prove that two different
+  images produce different correct model answers. This acceptance item does not
+  claim native multimodal tool-continuation support.

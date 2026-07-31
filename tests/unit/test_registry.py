@@ -6,6 +6,7 @@ from kairyu.engine import registry as registry_module
 from kairyu.engine.config_validation import validate_backend_options
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import available_backends, create_backend, register_backend
+from kairyu.engine.vision import ImageInputPolicy
 
 
 def test_mock_backend_is_preregistered():
@@ -130,6 +131,94 @@ def test_vllm_non_priority_policy_is_rejected_before_import():
         validate_backend_options(
             "vllm",
             {"model": "model", "scheduling_policy": "fcfs"},
+        )
+
+
+def test_openai_multimodal_capability_and_image_policy_must_be_paired():
+    base = {
+        "base_url": "http://vlm:8000/v1",
+        "model": "vlm",
+        "upstream": "vllm",
+    }
+    with pytest.raises(ValueError, match="must be configured together"):
+        validate_backend_options(
+            "openai",
+            {
+                **base,
+                "capabilities": {"allow_prompt_kinds": ["multimodal"]},
+            },
+        )
+    with pytest.raises(ValueError, match="must be configured together"):
+        validate_backend_options(
+            "openai",
+            {
+                **base,
+                "image_input_policy": {"max_images": 1},
+            },
+        )
+
+    validate_backend_options(
+        "openai",
+        {
+            **base,
+            "capabilities": {"allow_prompt_kinds": ["multimodal"]},
+            "image_input_policy": {
+                "max_images": 1,
+                "max_processed_prompt_tokens": 8192,
+            },
+        },
+    )
+    validate_backend_options(
+        "openai",
+        {
+            **base,
+            "capabilities": {"allow_prompt_kinds": ["multimodal"]},
+            "image_input_policy": ImageInputPolicy(max_images=1),
+        },
+    )
+    with pytest.raises(ValueError, match="request_stream_usage=true"):
+        validate_backend_options(
+            "openai",
+            {
+                **base,
+                "capabilities": {"allow_prompt_kinds": ["multimodal"]},
+                "image_input_policy": {"max_images": 1},
+                "request_stream_usage": False,
+            },
+        )
+    with pytest.raises(ValueError, match="text and multimodal"):
+        validate_backend_options(
+            "openai",
+            {
+                **base,
+                "capabilities": {"allow_prompt_kinds": ["tokens"]},
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "not-a-mapping",
+        {"max_images": 0},
+        {"unknown_limit": 1},
+        {
+            "max_image_bytes": 1024,
+            "max_total_image_bytes": 512,
+        },
+    ],
+)
+def test_openai_image_policy_is_strictly_validated_without_backend_start(policy):
+    with pytest.raises(ValueError, match="image_input_policy"):
+        validate_backend_options(
+            "openai",
+            {
+                "base_url": "http://vlm:8000/v1",
+                "model": "vlm",
+                "upstream": "vllm",
+                "capabilities": {"allow_prompt_kinds": ["multimodal"]},
+                "image_input_policy": policy,
+            },
         )
 
 

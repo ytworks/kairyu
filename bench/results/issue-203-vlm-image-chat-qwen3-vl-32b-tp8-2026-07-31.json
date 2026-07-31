@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "issue": 203,
+  "gate": "G6 P-C4 / m11 A18",
+  "recorded_at": "2026-07-31T20:21:10+09:00",
+  "passed": true,
+  "source": {
+    "branch": "codex/issue-203-vlm-image-chat",
+    "commit": "b8971cbe89e14002749e72f40fa1f33bf65bbc87",
+    "tracked_tree_clean": true
+  },
+  "portable_suite": {
+    "source_commit": "79292b2c129633b5ccb0ca21d835f1e18b153da6",
+    "command": "uv run --frozen pytest --fail-on-skip -ra --cov=kairyu --cov-fail-under=80",
+    "passed": true,
+    "tests_passed": 3746,
+    "deselected": 185,
+    "selected_skips": 0,
+    "warnings": 1,
+    "coverage_percent": 87.98
+  },
+  "post_suite_focused_validation": {
+    "source_commit": "b8971cbe89e14002749e72f40fa1f33bf65bbc87",
+    "command": "python -m pytest tests/unit/test_webui_vlm_compose.py -q --no-cov",
+    "passed": true,
+    "tests_passed": 3,
+    "note": "Changes after the portable-suite commit were limited to the stock-vLLM tool parser Compose flags, their static contract test, and documentation."
+  },
+  "runtime": {
+    "model": "Qwen/Qwen3-VL-32B-Instruct",
+    "served_model": "qwen3-vl-32b",
+    "model_revision": "b282fe1ca05915cc8825369f6aa510d7a0982594",
+    "tensor_parallel_size": 8,
+    "max_model_len": 8192,
+    "image_processor": {
+      "min_pixels": 65536,
+      "max_pixels": 2097152,
+      "max_images": 1,
+      "max_videos": 0,
+      "encoder_tp_mode": "data"
+    },
+    "vllm": {
+      "version": "0.26.0",
+      "image": "vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404@sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8",
+      "image_id": "sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8",
+      "health": "healthy",
+      "auto_tool_choice": true,
+      "tool_call_parser": "hermes",
+      "scheduling_policy": "priority",
+      "async_scheduling": true
+    },
+    "kairyu_image_id": "sha256:6b7e8cc9285106d44a311acbb4f43db71d68f4a46a03146fd524a44d7f5e20f7",
+    "open_webui": {
+      "version": "0.11.0",
+      "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+      "source_revision": "f9590b8017199e56d5e953657e6498e3cef1d246",
+      "health": "healthy"
+    },
+    "browser": {
+      "playwright_version": "1.60.0",
+      "base_image": "mcr.microsoft.com/playwright:v1.60.0-noble@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9"
+    }
+  },
+  "hardware": {
+    "driver_version": "595.84",
+    "gpu_count": 8,
+    "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "memory_mib_per_gpu": 97887,
+    "gpu_uuids": [
+      "GPU-c2dec644-056f-5a18-64af-0dcb2d4b5aa1",
+      "GPU-7ca344d0-c282-61d7-446b-dcdf5c2dee16",
+      "GPU-8accd8d3-6791-1e54-af77-b229a199b1f1",
+      "GPU-7a56fbb4-fd9d-1f93-7bd6-f7e55579a964",
+      "GPU-d8ef7924-e297-e1ef-e51e-82c77b41715a",
+      "GPU-4884d626-ecaa-7fc1-49d2-158f6d118801",
+      "GPU-f212d821-c550-947e-904c-1ee6be110c96",
+      "GPU-9813a152-84b7-57ef-3109-76b4a1d47673"
+    ]
+  },
+  "fixtures": {
+    "red": {
+      "format": "PNG",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 8428,
+      "sha256": "e94f68c04c1da996e07d8167cb2837c67fcb329da5a9471bc5e045d17b933bac"
+    },
+    "blue": {
+      "format": "PNG",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 7619,
+      "sha256": "2e18d47d0dad4d5e23bd0ce94e3501c6e50a9ba91cca6be76bb6dbb708d8158d"
+    }
+  },
+  "api_gate": {
+    "prompt": "Read the single large word shown in the image. Reply with exactly that uppercase word, RED or BLUE, and no other text.",
+    "red": {
+      "answer": "RED",
+      "prompt_tokens": 1060,
+      "completion_tokens": 2
+    },
+    "blue": {
+      "answer": "BLUE",
+      "prompt_tokens": 1060,
+      "completion_tokens": 2
+    },
+    "stream_red": {
+      "answer": "RED",
+      "prompt_tokens": 1060,
+      "completion_tokens": 2,
+      "terminated_with_done": true
+    },
+    "remote_url": {
+      "status": 400,
+      "code": "invalid_image"
+    }
+  },
+  "browser_gate": {
+    "passed": true,
+    "model": "qwen3-vl-32b",
+    "rendered_answer": "qwen3-vl-32b\n\nRED",
+    "uploaded_file": {
+      "id": "761b2087-d380-45fc-a8cf-ae1e3798816c",
+      "content_type": "image/png",
+      "content_path": "/api/v1/files/761b2087-d380-45fc-a8cf-ae1e3798816c/content"
+    },
+    "browser_chat_request_bytes": 2052,
+    "browser_request_contains_data_url": false,
+    "owned_file_reference_preserved": true
+  }
+}

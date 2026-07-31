@@ -621,6 +621,7 @@ the replica holding their warm radix-KV prefix; prefix/KV-aware placement is des
 docker compose -f deploy/compose/docker-compose.gpu.yaml up    # gateway + GPU replica
 docker compose -f deploy/compose/docker-compose.webui.yaml up -d --build --wait
 ./scripts/webui_smoke.sh                       # full browser E2E, outage, and recovery
+./scripts/webui_vlm_smoke.sh                   # 8-GPU Qwen3-VL image-chat E2E
 helm install kairyu deploy/helm/kairyu         # k8s chart (+ values-gpu.yaml)
 ```
 
@@ -636,7 +637,24 @@ authentication policy for production.
 pinned Playwright image to prove fresh-user setup, model selection, streaming,
 reload persistence, visible gateway failure, and recovery without restarting
 Open WebUI. Each run uses an isolated Compose project and deletes only that
-project's ephemeral WebUI volume, leaving the normal demo's data untouched.
+project’s ephemeral WebUI volume, leaving the normal demo's data untouched.
+
+For real image chat, add the opt-in eight-GPU overlay. It starts a
+revision-pinned Qwen3-VL-32B-Instruct stock-vLLM replica at TP8, routes its
+ordered OpenAI content parts through Kairyu, and keeps the same Kairyu-only RAG
+endpoint:
+
+```bash
+docker compose \
+  -f deploy/compose/docker-compose.webui.yaml \
+  -f deploy/compose/docker-compose.webui-vlm.yaml \
+  up -d --build --wait
+```
+
+The VLM boundary accepts one inline PNG, JPEG, or WebP image; remote and local
+image URLs are rejected. `scripts/webui_vlm_smoke.sh` runs both direct semantic
+and exact-usage checks and a real Open WebUI owned-file upload in the pinned
+Playwright browser.
 
 Full production guidance (DC topology, systemd, rolling model updates, observability) is
 in [`docs/deployment.md`](docs/deployment.md).
@@ -901,9 +919,11 @@ returns `invoice_ledger_invalid` instead of a partial invoice.
 | `deploy/compose/docker-compose.yaml` | gateway + 3 CPU replicas smoke topology |
 | `deploy/compose/docker-compose.gpu.yaml` | gateway + GPU replica (nvidia device reservation) |
 | `deploy/compose/docker-compose.webui.yaml` | Open WebUI chat surface on the gateway |
+| `deploy/compose/docker-compose.webui-vlm.yaml` | opt-in Qwen3-VL-32B TP8 image-chat overlay |
 | `deploy/helm/kairyu/` (+ `values-gpu.yaml`) | k8s chart; readiness `/readyz`, per-GPU-profile nodeSelector |
 | `scripts/kind_smoke.sh` | end-to-end kind cluster smoke (CI job) |
 | `scripts/webui_smoke.sh` | pinned Open WebUI browser E2E: first user, direct/AUTO streaming, persistence, outage, recovery |
+| `scripts/webui_vlm_smoke.sh` | eight-GPU direct + Open WebUI image-chat E2E |
 | `scripts/gpu_gates/*.sh` | GPU-day gate scripts (runbook §0–§9); all support `--dry-run` |
 | `bench/serving_bench.py`, `bench/frontier_compare.py`, `bench/kv_transfer_bench.py` | latency/goodput/transfer benches |
 
