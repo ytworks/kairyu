@@ -2,3 +2,5 @@
 engines:
   default:
     backend: mock
+orchestrator:
+  spec: webui-orchestrator.yaml

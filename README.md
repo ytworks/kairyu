@@ -619,19 +619,24 @@ the replica holding their warm radix-KV prefix; prefix/KV-aware placement is des
 ```bash
 ./scripts/compose_smoke.sh                     # 1 gateway + 3 replicas via Docker compose
 docker compose -f deploy/compose/docker-compose.gpu.yaml up    # gateway + GPU replica
-docker compose -f deploy/compose/docker-compose.webui.yaml up  # Open WebUI + mock model `default`
-./scripts/webui_smoke.sh                       # Kairyu-only WebUI topology smoke (no UI pull)
+docker compose -f deploy/compose/docker-compose.webui.yaml up -d --build --wait
+./scripts/webui_smoke.sh                       # full browser E2E, outage, and recovery
 helm install kairyu deploy/helm/kairyu         # k8s chart (+ values-gpu.yaml)
 ```
 
 The Open WebUI demo mounts [`deploy/compose/config.yaml`](deploy/compose/config.yaml)
-at `/etc/kairyu/config.yaml` and serves one keyless CPU-safe mock model named
-`default`. Replace that file to use a real engine or authentication policy. The
-WebUI service discovers models through its rendered internal endpoint
-`http://kairyu:8000/v1`. `scripts/webui_smoke.sh` validates that endpoint, starts
-only Kairyu, and checks readiness, exact model discovery, and one non-streaming
-completion; it intentionally does not pull or browser-test the mutable Open WebUI
-image.
+at `/etc/kairyu/config.yaml` and serves the keyless CPU-safe direct model
+`default` plus the legacy orchestrated model `kairyu-auto`. Open
+`http://localhost:3000`, create the first account, and select either model. The
+topology pins Open WebUI v0.11.0 by immutable linux/amd64 digest; its named data
+volume stores an automatically generated secret, while its mock backends are for
+this local demo only. Replace the deployment and orchestrator specs and
+authentication policy for production.
+`scripts/webui_smoke.sh` starts the complete topology and uses a separately
+pinned Playwright image to prove fresh-user setup, model selection, streaming,
+reload persistence, visible gateway failure, and recovery without restarting
+Open WebUI. Each run uses an isolated Compose project and deletes only that
+project's ephemeral WebUI volume, leaving the normal demo's data untouched.
 
 Full production guidance (DC topology, systemd, rolling model updates, observability) is
 in [`docs/deployment.md`](docs/deployment.md).
@@ -898,7 +903,7 @@ returns `invoice_ledger_invalid` instead of a partial invoice.
 | `deploy/compose/docker-compose.webui.yaml` | Open WebUI chat surface on the gateway |
 | `deploy/helm/kairyu/` (+ `values-gpu.yaml`) | k8s chart; readiness `/readyz`, per-GPU-profile nodeSelector |
 | `scripts/kind_smoke.sh` | end-to-end kind cluster smoke (CI job) |
-| `scripts/webui_smoke.sh` | Kairyu-only smoke for the Open WebUI topology; no UI image pull |
+| `scripts/webui_smoke.sh` | pinned Open WebUI browser E2E: first user, direct/AUTO streaming, persistence, outage, recovery |
 | `scripts/gpu_gates/*.sh` | GPU-day gate scripts (runbook §0–§9); all support `--dry-run` |
 | `bench/serving_bench.py`, `bench/frontier_compare.py`, `bench/kv_transfer_bench.py` | latency/goodput/transfer benches |
 

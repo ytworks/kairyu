@@ -1,6 +1,6 @@
 # Goal G6: Product Surface — Truthful API, Fugu-Class Orchestrated Product, Competitive Proof (Roadmap Track P)
 
-Status: Goal defined (2026-07-03). P-A, most of P-B, and P-C2 are green;
+Status: Goal defined (2026-07-03). P-A, all of P-B, and P-C2 are green;
 P-C's scoreboard needs real engines for the Kairyu column but runs against
 frontier APIs immediately.
 Depends on: M1/M7 server stack; real token accounting quality gates depend on
@@ -43,7 +43,7 @@ route decision, role DAG, verifier verdicts — Fugu is a black box). Sources in
 |---|---|---|
 | P-B1 (streaming orchestrator) | `Orchestrator.run_chat(messages, tools, stream=True)`: route decided fast, final synthesizer/worker stage streamed token-by-token, keep-alive status events on long Conductor runs; `kairyu-auto` TTFT ≤1.5× the underlying engine's TTFT on the direct-route path | bench + tests |
 | P-B2 (orchestration usage + trace) | `usage.orchestration_input/output_tokens` on every auto request (Fugu parity, billing necessity); opt-in `X-Kairyu-Trace` returns route/DAG/verifier verdicts (the transparency differentiator) | `tests/server/` |
-| P-B3 (chat UI) | Open WebUI shipped as a compose service against the gateway; a fresh user chats with `kairyu-auto` and per-model endpoints, streaming, after one `docker compose up`. Custom UI work is limited to an orchestration-trace viewer | compose smoke |
+| P-B3 (chat UI — COMPLETE) | Open WebUI shipped as a compose service against the gateway; a fresh user chats with `kairyu-auto` and per-model endpoints, streaming, after one `docker compose up`. Custom UI work is limited to an orchestration-trace viewer | pinned Playwright compose smoke |
 | P-B4 (tiered auto models) | `kairyu-auto` (latency-biased routing) and `kairyu-auto-max` (Conductor/MoA depth) both in `/v1/models`; auto ≤1.5× direct-call latency, auto-max quality-wins on a fixed eval set | bench |
 | P-B5 (tenancy v1) | Key→tenant map in `DeploymentSpec`; per-key token-bucket limits in-gateway; append-only usage ledger + `/admin/usage`; two keys get isolated 429s; ledger reconciles with Prometheus counters to <0.1% | `tests/server/` |
 
@@ -51,6 +51,16 @@ P-B2 is CPU-green as of 2026-07-27 (issue #196): direct, Conductor, and
 MoA unary/streaming paths expose cumulative internal usage; retry, fallback,
 partial-failure, cancellation, structured-trace, and privacy cases are fixed
 server tests.
+
+P-B3 is closed on the pinned Open WebUI v0.11.0-slim surface (issue #197).
+One normal Compose command starts healthy Kairyu and Open WebUI services with
+the direct `default` and orchestrated `kairyu-auto` models. A profile-scoped,
+digest-pinned Playwright v1.60.0 runner creates the first user through the UI,
+selects and streams both models, reloads the conversation, observes a real
+gateway-outage error, and succeeds again after only Kairyu is restarted. The
+mandatory browser job is independent of the general Compose integration job.
+The orchestration-trace viewer remains the only custom UI work and is explicitly
+tracked in §3.
 
 Direct/AUTO OpenAI request parity is GPU-green as of 2026-07-28 (issue #208).
 An immutable per-request intent carries sampling, `n`, logprobs, tools/tool

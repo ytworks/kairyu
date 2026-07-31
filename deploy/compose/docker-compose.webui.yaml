@@ -1,5 +1,8 @@
 # m11 D7: Open WebUI against the kairyu gateway (chat UI surface).
-# Usage: docker compose -f deploy/compose/docker-compose.webui.yaml up
+# Usage:
+#   docker compose -f deploy/compose/docker-compose.webui.yaml up
+#   docker compose -f deploy/compose/docker-compose.webui.yaml \
+#     --profile browser-smoke run --rm browser
 services:
   kairyu:
     build: ../..
@@ -7,13 +10,69 @@ services:
       - "8000:8000"
     volumes:
       - ./config.yaml:/etc/kairyu/config.yaml:ro
+      - ./webui-orchestrator.yaml:/etc/kairyu/webui-orchestrator.yaml:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+
   webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: >-
+      ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01
     ports:
       - "3000:8080"
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local
-      WEBUI_AUTH: "false"
+      WEBUI_AUTH: "true"
+      ENABLE_SIGNUP: "true"
+      WEBUI_SECRET_KEY_FILE: /app/backend/data/.webui_secret_key
+      DEFAULT_MODELS: default
     depends_on:
-      - kairyu
+      kairyu:
+        condition: service_healthy
+    volumes:
+      - webui-data:/app/backend/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 90
+      start_period: 10s
+
+  browser:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.webui-browser
+    image: kairyu-webui-browser:playwright-1.60.0
+    profiles: [browser-smoke]
+    depends_on:
+      webui:
+        condition: service_healthy
+    environment:
+      WEBUI_BASE_URL: http://webui:8080
+      WEBUI_SMOKE_EMAIL: browser-smoke@kairyu.local
+      WEBUI_SMOKE_PASSWORD: "KairyuBrowserSmoke-197!"
+      WEBUI_SMOKE_NAME: Kairyu Browser Smoke
+      EXPECTED_DIRECT_MODEL: default
+      EXPECTED_AUTO_MODEL: kairyu-auto
+    volumes:
+      - ../../scripts/webui_browser_smoke.mjs:/work/webui_browser_smoke.mjs:ro
+    command: node /work/webui_browser_smoke.mjs
+
+volumes:
+  webui-data:
