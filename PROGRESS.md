@@ -599,6 +599,12 @@ all ten direct source hashes, and the exact 256-token cache hit; all ten checks
 pass. Artifact SHA-256:
 `4fa2c57fe2dd7f8723f9dc60ea28972d63832754c72eb74d5ec8badfaf910920`.
 
+The mandatory PostgreSQL integration gate now waits on the same published TCP
+DSN used by its tests and requires a successful bounded `SELECT 1`. It no
+longer treats the official image's temporary initialization-only Unix-socket
+server as ready, eliminating the entrypoint shutdown/startup race without
+weakening or ignoring the real database tests.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -606,6 +612,20 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] PostgreSQL CI waits for final external readiness
+- What: replaced in-container `pg_isready` polling with a bounded psycopg
+  connection and `SELECT 1` against the exact published host-port DSN used by
+  the integration suite. Shell-level regression fixtures prove a transient
+  failed external query is retried to success and that exhaustion stops at the
+  exact bound, emits container diagnostics, and still cleans up; no
+  in-container readiness probe is used.
+- Why: the pinned official image briefly exposes an initialization-only
+  Unix-socket server, then shuts it down before starting the final TCP server.
+  The former probe could pass during that transition and race the first real
+  test connection.
+- Refs: issue #295; PR #294 Actions run `30593765947`;
+  `scripts/postgres_integration.sh`; `tests/unit/test_ci_workflow_policy.py`
 
 ### 2026-07-31 — [amendment] F1d closes the cross-process OTel trace
 - What: amended m10 D4/A34 and completed an optional W3C-only trace from the

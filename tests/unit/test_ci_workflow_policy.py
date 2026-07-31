@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,11 @@ def _run_commands(workflow: dict[str, Any]) -> tuple[str, ...]:
             if isinstance(step, dict) and isinstance(step.get("run"), str):
                 commands.append(step["run"])
     return tuple(commands)
+
+
+def _write_executable(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
 
 
 def test_f1b_pull_requests_always_run_the_local_smoke_gate() -> None:
@@ -205,10 +212,130 @@ def test_postgres_integration_uses_one_local_reproducible_script() -> None:
 
     assert step["run"] == "bash scripts/postgres_integration.sh"
     assert "postgres:17.6-bookworm@sha256:" in script
-    assert "docker run --detach --rm" in script
-    assert 'psycopg.connect(os.environ["KAIRYU_TEST_POSTGRES_DSN"])' in script
+    assert "docker run --detach" in script
+    assert "docker run --detach --rm" not in script
+    assert 'psycopg.connect(os.environ["KAIRYU_TEST_POSTGRES_DSN"],' in script
+    assert "connect_timeout=2" in script
+    assert 'connection.execute("SELECT 1")' in script
+    assert 'docker port "$CONTAINER" 5432/tcp' in script
+    assert "KAIRYU_TEST_POSTGRES_READY_ATTEMPTS" in script
+    assert 'for _ in $(seq 1 "$READY_ATTEMPTS")' in script
+    assert 'if postgres_ready; then' in script
+    assert 'docker exec "$CONTAINER" pg_isready' not in script
+    assert 'docker logs "$CONTAINER" >&2 || true' in script
     assert "--fail-on-skip" in script
     assert "-m postgres tests/unit/test_postgres_batch_store.py" in script
+
+
+def _postgres_integration_fake_env(
+    tmp_path: Path,
+    *,
+    attempts: int,
+    succeed_at: int,
+) -> tuple[dict[str, str], Path, Path, Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    uv_log = tmp_path / "uv.log"
+    ready_count = tmp_path / "ready-count"
+
+    _write_executable(
+        fake_bin / "docker",
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case "$1" in\n'
+        "  run) printf 'fake-container-id\\n' ;;\n"
+        "  port) printf '127.0.0.1:45678\\n' ;;\n"
+        "  logs) printf 'postgres readiness diagnostic\\n' >&2 ;;\n"
+        "  rm) : ;;\n"
+        "  *) exit 91 ;;\n"
+        "esac\n",
+    )
+    _write_executable(
+        fake_bin / "uv",
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$UV_LOG"\n'
+        'case "$*" in\n'
+        '  *"python -c"*)\n'
+        "    count=0\n"
+        '    if [ -f "$READY_COUNT" ]; then count=$(cat "$READY_COUNT"); fi\n'
+        "    count=$((count + 1))\n"
+        '    printf "%s\\n" "$count" > "$READY_COUNT"\n'
+        '    if [ "$READY_SUCCEED_AT" -gt 0 ] && '
+        '[ "$count" -ge "$READY_SUCCEED_AT" ]; then exit 0; fi\n'
+        "    exit 1\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n",
+    )
+    _write_executable(fake_bin / "sleep", "#!/bin/sh\nexit 0\n")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "DOCKER_LOG": str(docker_log),
+        "UV_LOG": str(uv_log),
+        "READY_COUNT": str(ready_count),
+        "READY_SUCCEED_AT": str(succeed_at),
+        "KAIRYU_TEST_POSTGRES_READY_ATTEMPTS": str(attempts),
+    }
+    return env, docker_log, uv_log, ready_count
+
+
+def _run_postgres_integration(
+    tmp_path: Path,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/bash", str(_ROOT / "scripts" / "postgres_integration.sh")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+
+def test_postgres_integration_retries_the_external_query_not_pg_isready(
+    tmp_path: Path,
+) -> None:
+    env, docker_log, uv_log, ready_count = _postgres_integration_fake_env(
+        tmp_path,
+        attempts=3,
+        succeed_at=2,
+    )
+    result = _run_postgres_integration(tmp_path, env)
+
+    assert result.returncode == 0, result.stderr
+    assert ready_count.read_text(encoding="utf-8").strip() == "2"
+    uv_commands = uv_log.read_text(encoding="utf-8").splitlines()
+    assert sum("python -c" in command for command in uv_commands) == 2
+    assert any("connect_timeout=2" in command for command in uv_commands)
+    docker_commands = docker_log.read_text(encoding="utf-8").splitlines()
+    assert any(command.startswith("port ") for command in docker_commands)
+    assert not any(command.startswith("exec ") for command in docker_commands)
+    assert docker_commands[-1].startswith("rm -f ")
+
+
+def test_postgres_integration_fails_closed_with_logs_after_exact_bound(
+    tmp_path: Path,
+) -> None:
+    env, docker_log, uv_log, ready_count = _postgres_integration_fake_env(
+        tmp_path,
+        attempts=2,
+        succeed_at=0,
+    )
+    result = _run_postgres_integration(tmp_path, env)
+
+    assert result.returncode == 1
+    assert ready_count.read_text(encoding="utf-8").strip() == "2"
+    assert "after 2 attempts" in result.stderr
+    assert "postgres readiness diagnostic" in result.stderr
+    uv_commands = uv_log.read_text(encoding="utf-8").splitlines()
+    assert sum("python -c" in command for command in uv_commands) == 2
+    docker_commands = docker_log.read_text(encoding="utf-8").splitlines()
+    assert any(command.startswith("logs ") for command in docker_commands)
+    assert docker_commands[-1].startswith("rm -f ")
 
 
 def test_f2_workflows_use_frozen_local_uv_commands() -> None:
