@@ -8,6 +8,7 @@ schema_version = 1
 "bench.decode_page_table_cache_qwen" = ["bench.batched_prefill_qwen"]
 "bench.fleet_rollout_bench" = ["bench.fleet_churn_bench"]
 "bench.g2_a6_vllm_bench" = ["bench.multiturn_prefix", "bench.tp_kv_hit_g2_a7_bench"]
+"bench.g2_a9_dp_tp_crossover_bench" = ["bench.dp_scaling_g2_a8_bench"]
 "bench.gate_a1" = ["bench.parity_tp"]
 "bench.gate_a2" = ["bench.parity_hf", "bench.parity_tp"]
 "bench.global_kv_pool_decision" = ["bench.kv_aware_ttft_f2c_bench"]
@@ -150,6 +151,15 @@ path = "bench/g2_a6_vllm_bench.py"
 module = "bench.g2_a6_vllm_bench"
 kind = "operator"
 requires = ["bench", "docker", "engine", "gpu", "hf", "service", "vllm"]
+documentation = ["bench/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "bench/g2_a9_dp_tp_crossover_bench.py"
+module = "bench.g2_a9_dp_tp_crossover_bench"
+kind = "formal-gate"
+requires = ["docker", "engine", "gpu", "hf", "service"]
 documentation = ["bench/README.md"]
 installed = false
 invocations = ["path", "module"]

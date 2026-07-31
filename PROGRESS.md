@@ -79,8 +79,23 @@ against the original 1.9× threshold; router p99 was 3.723 ms and affinity cache
 retention was 99.53%. The artifact therefore truthfully remains `passed: false`.
 The product owner accepted the measured 1.7993× as an explicit closure
 deviation, not as a 1.9× PASS; the original operator threshold is unchanged.
-Its packaged benchmark boundary verifies all 53 registered entrypoints from
+Its packaged benchmark boundary verifies all 54 registered entrypoints from
 the isolated wheel as well as from the checkout.
+G2 A9 now has a fail-closed report-only operator ready for its clean-commit
+Qwen3-32B TP8 run. It independently replays the fixed A8 DP raw, manifest, and
+placement artifacts, retaining A8's accepted 1.9× deviation as false rather
+than converting it into a PASS. Only the missing 24 TP8 warmups and 960
+open-loop requests are newly measured. The TP8 engine and one-replica gateway
+use the exact A8 image plus a read-only source tree materialized directly from
+A8 commit `4924b4d`; its fixed archive and complete 196-file rollup must match
+before traffic. The report recomputes per-repeat/per-rate
+goodput, TTFT, versioned terminal-stream TPOT, maximum in-flight work, and every
+measured topology-order transition without a numeric performance threshold or
+interpolation. TP8 reuses the retained DP cache namespace so request bytes and
+token IDs match exactly; the artifact discloses that matched per-engine limits
+give two DP replicas twice TP8's aggregate configured capacity. Full checkpoint
+attestation repeats after traffic. The real TP8 artifact remains the active
+closure step.
 Issue #277's M13 extension exposes `auto`, torch, FlashInfer, FA3, and FA4 as
 strict public choices. FA3/FA4 use FlashAttention for prefill and retain
 FlashInfer ownership of paged decode/CUDA graphs; `/backends` reports the
@@ -716,6 +731,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] G2 A9 reuses A8 DP evidence and reaches TP8-run readiness
+- What: added the report-only A9 operator, a dedicated all-eight-GPU TP8 engine plus one-replica gateway stack, immutable A8 raw/manifest/placement replay, exact request/placement verification, and independent goodput/TTFT/terminal-TPOT/crossover recomputation. The operator measures only the missing 24 warmups and 960 TP8 requests. It uses A8 image `sha256:2c73b577...` plus the exact source tree materialized from A8 commit `4924b4d`, verifies the fixed source archive, all 196 mounted runtime files, and the delegated A8 helper, and repeats both source and full-checkpoint attestation after traffic. TP8 uses the retained DP one-token namespace, and the formal config discloses both topologies' per-engine and aggregate KV/sequence/batch/graph capacity.
+- Why: rerunning the already complete DP sweep would waste GPU time, while using current checkout code only for TP8 or changing its request namespace would make the comparison unmatched. A8 retained every timestamp needed by `serving_bench.py`'s terminal-stream TPOT, so fixed-SHA replay plus an identical-runtime/request TP8 arm supplies the missing evidence without estimating samples or weakening provenance. Matched per-engine limits intentionally leave two independent DP replicas with twice TP8's aggregate configured capacity; the report records observed concurrency so this production-topology tradeoff is not misread as an equal-capacity kernel comparison. Production PP stage sharding is not relabeled from `pipeline_depth`; the separate PCIe DP/PP/TP layout report remains dependent on real PP wiring.
+- Refs: issue #159; G2 A9; `bench/g2_a9_dp_tp_crossover_bench.py`; `examples/qwen3-32b-multi-gpu/a9-tp8-{compose,replica,gateway}.yaml`; `docs/gpu-runbook.md`
 
 ### 2026-07-31 — [progress] P-C4 closes on Qwen3-VL-32B TP8 and the real Open WebUI upload path
 - What: the clean `b8971cb` stack passed every A18 gate on 8× RTX PRO 6000. RED and BLUE fixtures produced their corresponding distinct answers; unary RED/BLUE and streamed RED each reported exact processor usage of 1,060 input and 2 output tokens; a metadata-service URL failed pre-dispatch with `400 invalid_image`; and pinned Open WebUI uploaded the PNG through `/api/v1/files/`, sent its owned file ID/type/URL without a browser data-URL shortcut, and rendered RED. The vLLM command retained the pinned model/image/TP8 bounds and enabled the `hermes` parser matching the model's JSON-in-`<tool_call>` template. Correction to the preceding progress entry: the browser need not explicitly write `tool_choice=auto`; Open WebUI can inject built-in tools and vLLM normalizes an omitted choice to `auto`.
