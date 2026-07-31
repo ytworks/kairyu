@@ -677,6 +677,13 @@ credential names, fails closed when configured credentials are absent, and
 redacts secrets from errors. Generic serving/frontier artifacts record their
 nearest-rank percentile method; formal gate schemas remain source-bound.
 
+The F1b zero-failure rollout gate now freezes each clean-head gateway and mock
+image to a private archive immediately after its build, before creating the
+kind cluster. Loading those archives removes kind's delayed re-resolution and
+export of mutable host tags while preserving the canonical runtime image
+names, revision labels, Docker/CRI/containerd digest reconciliation, rollout
+traffic, and independent evidence replay.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -684,6 +691,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] F1b freezes build images before kind startup
+- What: Changed the F1b rollout gate to save each clean-head gateway and mock image to a guarded temporary archive immediately after its build and load those archives after kind startup. The gate still fails closed on image revision and Docker/CRI/containerd digest mismatches and still runs the unchanged zero-failure rollout and independent replay. A policy regression test fixes the build/save/create/load ordering and rejects a return to delayed `kind load docker-image` resolution.
+- Why: GitHub run `30611974651` built and inspected both images successfully, then kind's delayed internal `docker save` lost `kairyu:dev` before any Kubernetes rollout ran. F1a/F1b/F1c were on separate hosted runners, so cross-workflow cleanup was not the cause. Freezing the exact build output before cluster creation removes the observed mutable-tag TOCTOU without deleting, retrying, skipping, or weakening the real rollout test.
+- Refs: issue #158, PR #299, `scripts/kind_rollout_gate.sh`, `tests/unit/test_ci_workflow_policy.py`, GitHub job `91096580771`
 
 ### 2026-07-31 — [amendment] G2 A8 closes on an accepted 1.7993× scaling deviation
 - What: Ran the complete Qwen3-32B DP=2×TP4 versus TP4 gate on all eight RTX PRO 6000 GPUs. All 2,992 requests succeeded without retry, every DP response correlated to one of 1,496 placement rows, router p99 was 3.723 ms, and DP retained 99.53% of the single-replica cache-hit rate. The three peak-goodput ratios were 1.9988×, 1.7342×, and 1.7993×; their 1.7993× median missed the original 1.9× threshold, so the retained manifest remains `passed: false`. The product owner explicitly accepted this measured median for closure without rewriting the threshold or claiming a formal PASS.
