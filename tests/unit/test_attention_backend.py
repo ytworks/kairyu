@@ -23,8 +23,13 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 PAGE = 4
 
 
-def _pool(layers=1, kv_heads=2, head_dim=8) -> PagedKVPool:
-    return PagedKVPool(layers, 16, PAGE, kv_heads, head_dim)
+def _pool(
+    layers=1,
+    kv_heads=2,
+    head_dim=8,
+    dtype=torch.float32,
+) -> PagedKVPool:
+    return PagedKVPool(layers, 16, PAGE, kv_heads, head_dim, dtype=dtype)
 
 
 class TestTorchBackend:
@@ -105,6 +110,7 @@ class _FakeWrapper:
         self.use_cuda_graph = use_cuda_graph
         self.plans: list[dict] = []
         self.runs: list[tuple] = []
+        self.run_kwargs: list[dict] = []
         if use_cuda_graph:
             # cudagraph mode: the wrapper OWNS these buffers for its lifetime —
             # plan() copies into them in place and run() reads them, which is
@@ -130,9 +136,10 @@ class _FakeWrapper:
             self.indices_buffer[: len(indices)].copy_(indices)
             self.last_page_len_buffer.copy_(last_page_len)
 
-    def run(self, query, paged_kv):
+    def run(self, query, paged_kv, **kwargs):
         assert self.plans, "run() before plan() (contract violation)"
         self.runs.append((query, paged_kv))
+        self.run_kwargs.append(kwargs)
         return query.clone()
 
 
@@ -209,6 +216,99 @@ class TestFlashInferAdapterContract:
             backend.attend(query, pool, layer, [0, 1], seq_len=6, chunk_start=4)
         assert len(backend._prefill.plans) == 1  # layer 0 plans; 1..2 reuse (A8)
         assert len(backend._prefill.runs) == 3
+
+    def test_query_and_kv_dtypes_are_part_of_plan_identity(
+        self, fake_flashinfer
+    ):
+        backend = self._backend()
+        bf16_query = torch.randn(2, 4, 8, dtype=torch.bfloat16)
+
+        backend.attend(
+            bf16_query,
+            _pool(dtype=torch.bfloat16),
+            0,
+            [0],
+            seq_len=2,
+            chunk_start=0,
+        )
+        backend.attend(
+            bf16_query.to(torch.float16),
+            _pool(dtype=torch.bfloat16),
+            0,
+            [0],
+            seq_len=2,
+            chunk_start=0,
+        )
+        backend.attend(
+            bf16_query.to(torch.float16),
+            _pool(dtype=torch.float8_e4m3fn),
+            0,
+            [0],
+            seq_len=2,
+            chunk_start=0,
+        )
+
+        assert len(backend._prefill.plans) == 3
+        assert (
+            backend._prefill.plans[0]["kwargs"]["q_data_type"]
+            == torch.bfloat16
+        )
+        assert (
+            backend._prefill.plans[1]["kwargs"]["q_data_type"]
+            == torch.float16
+        )
+        assert backend._prefill.plans[0]["kwargs"]["kv_data_type"] == torch.bfloat16
+        assert backend._prefill.plans[1]["kwargs"]["kv_data_type"] == torch.bfloat16
+        assert (
+            backend._prefill.plans[2]["kwargs"]["kv_data_type"]
+            == torch.float8_e4m3fn
+        )
+
+    def test_every_list_run_path_forwards_kv_scales(self, fake_flashinfer):
+        backend = self._backend()
+        fp8_pool = _pool(dtype=torch.float8_e4m3fn)
+        query = torch.randn(2, 4, 8, dtype=torch.bfloat16)
+        scales = {"k_scale": 1.0, "v_scale": 1.0}
+
+        assert backend.supports_fp8_kv is True
+        backend.attend(query, fp8_pool, 0, [0], 2, 0)
+        assert backend._prefill.run_kwargs[-1] == scales
+
+        backend.attend(query[:1], fp8_pool, 0, [0], 1, 0)
+        assert backend._decode.run_kwargs[-1] == scales
+
+        backend.attend_batched(
+            [query[:1], query[:1]],
+            fp8_pool,
+            0,
+            [[0], [1]],
+            [1, 1],
+            [0, 0],
+        )
+        assert backend._decode.run_kwargs[-1] == scales
+
+        backend.attend_batched(
+            [query, query[:1]],
+            fp8_pool,
+            0,
+            [[0], [1]],
+            [2, 1],
+            [0, 0],
+        )
+        assert backend._prefill.run_kwargs[-1] == scales
+
+        backend.attend(
+            query,
+            _pool(dtype=torch.bfloat16),
+            0,
+            [0],
+            2,
+            0,
+        )
+        assert backend._prefill.run_kwargs[-1] == {
+            "k_scale": None,
+            "v_scale": None,
+        }
 
     def test_non_tail_chunk_asserts(self, fake_flashinfer):
         backend = self._backend()
@@ -569,6 +669,17 @@ class TestFlashInferTensorDecode:
         run_query, paged_kv = backend._decode_tensor_wrapper.runs[0]
         assert torch.equal(run_query, query)
         assert torch.equal(paged_kv[0], pool.k[0])
+
+    def test_tensor_decode_forwards_fp8_kv_scales(self, fake_flashinfer):
+        backend = self._backend()
+        pool = _pool(dtype=torch.float8_e4m3fn)
+        query, page_tables, seq_lens = self._inputs()
+
+        backend.attend_decode(query, pool, 0, page_tables, seq_lens)
+
+        assert backend._decode_tensor_wrapper.run_kwargs == [
+            {"k_scale": 1.0, "v_scale": 1.0}
+        ]
 
 
 class TestSelector:

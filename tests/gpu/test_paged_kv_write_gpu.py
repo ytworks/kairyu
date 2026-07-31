@@ -12,7 +12,12 @@ def _require_cuda() -> torch.device:
     return torch.device("cuda:0")
 
 
-def _pool(*, pages: int = 8, page_size: int = 4):
+def _pool(
+    *,
+    pages: int = 8,
+    page_size: int = 4,
+    dtype: torch.dtype = torch.bfloat16,
+):
     from kairyu.engine.core.kv_pool import PagedKVPool
 
     return PagedKVPool(
@@ -21,8 +26,17 @@ def _pool(*, pages: int = 8, page_size: int = 4):
         page_size=page_size,
         num_kv_heads=2,
         head_dim=128,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         device="cuda:0",
+    )
+
+
+def _randomize_pool(pool) -> None:
+    pool.k.copy_(
+        torch.randn(pool.k.shape, device=pool.k.device, dtype=torch.bfloat16)
+    )
+    pool.v.copy_(
+        torch.randn(pool.v.shape, device=pool.v.device, dtype=torch.bfloat16)
     )
 
 
@@ -68,14 +82,18 @@ def _reference_write(
         expected_v[0, page, slot].copy_(values[token])
 
 
-def test_batched_write_handles_packed_v_and_cached_rows(monkeypatch):
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, torch.float8_e4m3fn],
+    ids=["bf16", "fp8-e4m3"],
+)
+def test_batched_write_handles_packed_v_and_cached_rows(monkeypatch, dtype):
     from kairyu.kernels import paged_kv_write_gpu
 
     device = _require_cuda()
     torch.manual_seed(211)
-    pool = _pool()
-    pool.k.normal_()
-    pool.v.normal_()
+    pool = _pool(dtype=dtype)
+    _randomize_pool(pool)
     expected_k = pool.k.clone()
     expected_v = pool.v.clone()
 
@@ -89,9 +107,11 @@ def test_batched_write_handles_packed_v_and_cached_rows(monkeypatch):
     keys = torch.randn(4, 2, 128, device=device, dtype=torch.bfloat16)
     values = _packed_values(4, device=device)
     fused_results = []
+    fused_source_dtypes = []
     fused_write = paged_kv_write_gpu.try_write_batched
 
     def spy_fused_write(*args, **kwargs):
+        fused_source_dtypes.append((args[5].dtype, args[6].dtype))
         result = fused_write(*args, **kwargs)
         fused_results.append(result)
         return result
@@ -122,8 +142,55 @@ def test_batched_write_handles_packed_v_and_cached_rows(monkeypatch):
     torch.cuda.synchronize()
 
     assert fused_results == [True]
+    assert fused_source_dtypes == [(torch.bfloat16, torch.bfloat16)]
     assert torch.equal(pool.k, expected_k)
     assert torch.equal(pool.v, expected_v)
+
+
+def test_fp8_batched_write_uses_satfinite_bytes(monkeypatch):
+    from kairyu.kernels import paged_kv_write_gpu
+
+    device = _require_cuda()
+    pool = _pool(dtype=torch.float8_e4m3fn)
+    page_tables = torch.tensor([[0]], dtype=torch.int32, device=device)
+    positions = torch.tensor([0], dtype=torch.int64, device=device)
+    keys = torch.zeros(1, 2, 128, dtype=torch.float16, device=device)
+    keys[0, 0, :4] = torch.tensor(
+        [-1000.0, -449.0, 449.0, 1000.0],
+        device=device,
+    )
+    values = -keys
+    fused_results = []
+    fused_source_dtypes = []
+    fused_write = paged_kv_write_gpu.try_write_batched
+
+    def spy_fused_write(*args, **kwargs):
+        fused_source_dtypes.append((args[5].dtype, args[6].dtype))
+        result = fused_write(*args, **kwargs)
+        fused_results.append(result)
+        return result
+
+    monkeypatch.setattr(
+        paged_kv_write_gpu, "try_write_batched", spy_fused_write
+    )
+
+    pool.write_batched(
+        0,
+        page_tables,
+        positions,
+        keys,
+        values,
+    )
+    torch.cuda.synchronize()
+
+    stored_k = pool.k[0, 0, 0, 0, :4]
+    stored_v = pool.v[0, 0, 0, 0, :4]
+    assert fused_results == [True]
+    assert fused_source_dtypes == [(torch.float16, torch.float16)]
+    assert stored_k.view(torch.uint8).tolist() == [254, 254, 126, 126]
+    assert stored_v.view(torch.uint8).tolist() == [126, 126, 254, 254]
+    assert torch.isfinite(stored_k.float()).all()
+    assert torch.isfinite(stored_v.float()).all()
 
 
 def test_batched_write_cuda_graph_replay_reads_current_buffers(monkeypatch):
@@ -196,16 +263,20 @@ def test_batched_write_cuda_graph_replay_reads_current_buffers(monkeypatch):
     assert torch.equal(pool.v, expected_v)
 
 
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, torch.float8_e4m3fn],
+    ids=["bf16", "fp8-e4m3"],
+)
 def test_ragged_write_preserves_shared_pages_and_writes_private_slots(
-    monkeypatch,
+    monkeypatch, dtype
 ):
     from kairyu.kernels import paged_kv_write_gpu
 
     device = _require_cuda()
     torch.manual_seed(227)
-    pool = _pool()
-    pool.k.normal_()
-    pool.v.normal_()
+    pool = _pool(dtype=dtype)
+    _randomize_pool(pool)
     expected_k = pool.k.clone()
     expected_v = pool.v.clone()
     shared_k = pool.k[:, 0].clone()
@@ -225,9 +296,11 @@ def test_ragged_write_preserves_shared_pages_and_writes_private_slots(
     keys = torch.randn(8, 2, 128, device=device, dtype=torch.bfloat16)
     values = _packed_values(8, device=device)
     fused_results = []
+    fused_source_dtypes = []
     fused_write = paged_kv_write_gpu.try_write_ragged
 
     def spy_fused_write(*args, **kwargs):
+        fused_source_dtypes.append((args[6].dtype, args[7].dtype))
         result = fused_write(*args, **kwargs)
         fused_results.append(result)
         return result
@@ -259,10 +332,62 @@ def test_ragged_write_preserves_shared_pages_and_writes_private_slots(
     torch.cuda.synchronize()
 
     assert fused_results == [True]
+    assert fused_source_dtypes == [(torch.bfloat16, torch.bfloat16)]
     assert torch.equal(pool.k, expected_k)
     assert torch.equal(pool.v, expected_v)
     assert torch.equal(pool.k[:, 0], shared_k)
     assert torch.equal(pool.v[:, 0], shared_v)
+
+
+def test_fp8_ragged_write_uses_satfinite_bytes(monkeypatch):
+    from kairyu.kernels import paged_kv_write_gpu
+
+    device = _require_cuda()
+    pool = _pool(dtype=torch.float8_e4m3fn)
+    page_tables = torch.tensor([[0]], dtype=torch.int32, device=device)
+    row_ids = torch.tensor([0], dtype=torch.int32, device=device)
+    positions = torch.tensor([0], dtype=torch.int64, device=device)
+    write_from = torch.tensor([0], dtype=torch.int32, device=device)
+    keys = torch.zeros(1, 2, 128, dtype=torch.bfloat16, device=device)
+    keys[0, 0, :4] = torch.tensor(
+        [-1000.0, -449.0, 449.0, 1000.0],
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    values = -keys
+    fused_results = []
+    fused_source_dtypes = []
+    fused_write = paged_kv_write_gpu.try_write_ragged
+
+    def spy_fused_write(*args, **kwargs):
+        fused_source_dtypes.append((args[6].dtype, args[7].dtype))
+        result = fused_write(*args, **kwargs)
+        fused_results.append(result)
+        return result
+
+    monkeypatch.setattr(
+        paged_kv_write_gpu, "try_write_ragged", spy_fused_write
+    )
+
+    pool.write_ragged(
+        0,
+        page_tables,
+        row_ids,
+        positions,
+        keys,
+        values,
+        write_from,
+    )
+    torch.cuda.synchronize()
+
+    stored_k = pool.k[0, 0, 0, 0, :4]
+    stored_v = pool.v[0, 0, 0, 0, :4]
+    assert fused_results == [True]
+    assert fused_source_dtypes == [(torch.bfloat16, torch.bfloat16)]
+    assert stored_k.view(torch.uint8).tolist() == [254, 254, 126, 126]
+    assert stored_v.view(torch.uint8).tolist() == [126, 126, 254, 254]
+    assert torch.isfinite(stored_k.float()).all()
+    assert torch.isfinite(stored_v.float()).all()
 
 
 def test_ragged_request_shape_bounds_are_runtime_kernel_arguments():

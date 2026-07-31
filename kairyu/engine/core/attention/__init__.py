@@ -14,6 +14,11 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 
 
 class AttentionBackend(Protocol):
+    # Explicit opt-in: absence is treated as False by KV dtype resolution.
+    # Supporting ordinary BF16 attention does not imply that the backend owns
+    # FP8 cache storage, dequantization, and scale semantics.
+    supports_fp8_kv: bool
+
     # True only when ``attend_batched`` performs one native cross-request
     # prefill plan/run.  A Python loop is a valid compatibility implementation
     # of the method, but must not opt the model runner into the fast path.

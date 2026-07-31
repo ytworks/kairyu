@@ -310,6 +310,20 @@ def add_health_routes(
             )
             if type(tensor_parallel_size) is int and tensor_parallel_size >= 1:
                 entry["tensor_parallel_size"] = tensor_parallel_size
+            requested_kv_dtype = getattr(
+                engine,
+                "kv_cache_dtype_requested",
+                None,
+            )
+            resolved_kv_dtype = getattr(
+                engine,
+                "kv_cache_dtype_resolved",
+                None,
+            )
+            if isinstance(requested_kv_dtype, str) and requested_kv_dtype:
+                entry["requested_kv_cache_dtype"] = requested_kv_dtype
+            if isinstance(resolved_kv_dtype, str) and resolved_kv_dtype:
+                entry["kv_cache_dtype"] = resolved_kv_dtype
             if isinstance(engine, ReplicaPool):
                 replica = await engine.probe_backends()
                 if replica:  # adopt the replica's (real) attention backend
@@ -336,6 +350,27 @@ def add_health_routes(
                         replica_size = replica_sizes.pop()
                         entry["tensor_parallel_size"] = replica_size
                         entry["via_replica"]["tensor_parallel_size"] = replica_size
+                    replica_engines = [
+                        item
+                        for item in replica.get("engines", ())
+                        if isinstance(item, dict)
+                    ]
+                    for field in (
+                        "requested_kv_cache_dtype",
+                        "kv_cache_dtype",
+                    ):
+                        values = [
+                            item.get(field)
+                            for item in replica_engines
+                        ]
+                        if (
+                            values
+                            and all(isinstance(value, str) and value for value in values)
+                            and len(set(values)) == 1
+                        ):
+                            value = values[0]
+                            entry[field] = value
+                            entry["via_replica"][field] = value
             engine_list.append(entry)
 
         role = (

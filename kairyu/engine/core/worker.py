@@ -704,6 +704,8 @@ def make_handshake(
     num_pages: int,
     page_size: int,
     attention_backend_identity: str | None = None,
+    kv_cache_dtype_requested: str | None = None,
+    kv_cache_dtype_resolved: str | None = None,
 ) -> dict:
     """Rank 0 broadcasts this before the step loop; workers validate (A11)."""
     handshake = {
@@ -713,6 +715,10 @@ def make_handshake(
     }
     if attention_backend_identity is not None:
         handshake["attention_backend_identity"] = attention_backend_identity
+    if kv_cache_dtype_requested is not None:
+        handshake["kv_cache_dtype_requested"] = kv_cache_dtype_requested
+    if kv_cache_dtype_resolved is not None:
+        handshake["kv_cache_dtype_resolved"] = kv_cache_dtype_resolved
     return handshake
 
 
@@ -722,17 +728,22 @@ def validate_handshake(
     num_pages: int,
     page_size: int,
     attention_backend_identity: str | None = None,
+    kv_cache_dtype_requested: str | None = None,
+    kv_cache_dtype_resolved: str | None = None,
 ) -> None:
     expected = make_handshake(
         model_dir,
         num_pages,
         page_size,
         attention_backend_identity,
+        kv_cache_dtype_requested,
+        kv_cache_dtype_resolved,
     )
     if handshake != expected:
         raise RuntimeError(
             f"TP worker mismatch: driver={handshake} worker={expected} — "
-            "pool sizing/config/backend identity must be identical on every rank"
+            "pool sizing/config, backend identity, and KV dtype identity must "
+            "be identical on every rank"
         )
 
 
@@ -1283,6 +1294,7 @@ def build_tp_runner(
     graph_max_batch: int = 0,
     graph_max_pages: int = 0,
     graph_warmup_iters: int = 3,
+    kv_cache_dtype: str = "auto",
 ):
     """The per-rank sharded PagedModelRunner (pool sized from the tp_view config).
 
@@ -1294,6 +1306,10 @@ def build_tp_runner(
     from kairyu.engine.core.attention import select_backend
     from kairyu.engine.core.attention_selector import attention_backend_identity
     from kairyu.engine.core.hw_profile import probe
+    from kairyu.engine.core.kv_cache_dtype import (
+        kv_cache_dtype_name,
+        resolve_kv_cache_dtype,
+    )
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
     from kairyu.engine.core.sampler import Sampler
@@ -1317,13 +1333,20 @@ def build_tp_runner(
         # box would otherwise get the flashinfer kernel and hand it fp32 tensors
         attention_backend=attention_backend,
     )
+    resolved_kv_cache_dtype = resolve_kv_cache_dtype(
+        kv_cache_dtype,
+        placement.dtype,
+        profile,
+        attention_backend,
+        full_config,
+    )
     pool = PagedKVPool(
         num_layers=local_config.num_hidden_layers,
         num_pages=num_pages,
         page_size=page_size,
         num_kv_heads=local_config.kv_cache_num_heads,
         head_dim=local_config.kv_cache_head_dim,
-        dtype=placement.dtype,
+        dtype=resolved_kv_cache_dtype,
         device=placement.device,
     )
     grammar_vocab = (
@@ -1350,6 +1373,10 @@ def build_tp_runner(
     runner.attention_backend_identity = attention_backend_identity(
         runner.attention_backend_decision
     )
+    runner.kv_cache_dtype_requested = kv_cache_dtype
+    runner.kv_cache_dtype_resolved = kv_cache_dtype_name(
+        resolved_kv_cache_dtype
+    )
     return runner, full_config
 
 
@@ -1366,6 +1393,7 @@ def _tp_worker_entry(
     graph_max_batch: int = 0,
     graph_max_pages: int = 0,
     graph_warmup_iters: int = 3,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     """Spawned worker (rank = spawn_index + 1; rank 0 is the driver process).
 
@@ -1405,6 +1433,7 @@ def _tp_worker_entry(
         graph_max_batch,
         graph_max_pages,
         graph_warmup_iters,
+        kv_cache_dtype,
     )
     # the handshake is the collective that absorbs load skew, so it — and only it
     # — runs on the long-timeout startup group
@@ -1415,6 +1444,8 @@ def _tp_worker_entry(
         num_pages,
         page_size,
         runner.attention_backend_identity,
+        runner.kv_cache_dtype_requested,
+        runner.kv_cache_dtype_resolved,
     )
     groups = serving_groups(placement.backend)
     comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
@@ -1460,6 +1491,7 @@ class DistTPLauncher:
         graph_max_batch: int = 0,
         graph_max_pages: int = 0,
         graph_warmup_iters: int = 3,
+        kv_cache_dtype: str = "auto",
     ) -> None:
         import tempfile
 
@@ -1467,6 +1499,13 @@ class DistTPLauncher:
         import torch.multiprocessing as mp
 
         from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+        from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
+
+        kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
+        if kv_cache_dtype != "auto" and force_cpu:
+            raise ValueError(
+                "explicit kv_cache_dtype cannot use forced CPU TP placement"
+            )
 
         # a fresh, not-yet-created path is the file:// rendezvous point
         self._init_file = tempfile.mktemp(prefix="kairyu-tp-")  # noqa: S306
@@ -1491,6 +1530,7 @@ class DistTPLauncher:
                 graph_max_batch,
                 graph_max_pages,
                 graph_warmup_iters,
+                kv_cache_dtype,
             ),
             nprocs=tp - 1,
             join=False,
@@ -1527,9 +1567,12 @@ class DistTPLauncher:
                 graph_max_batch,
                 graph_max_pages,
                 graph_warmup_iters,
+                kv_cache_dtype,
             )
             self.attention_backend_decision = runner.attention_backend_decision
             self.attention_backend_identity = runner.attention_backend_identity
+            self.kv_cache_dtype_requested = runner.kv_cache_dtype_requested
+            self.kv_cache_dtype_resolved = runner.kv_cache_dtype_resolved
             # the one collective that legitimately absorbs load skew
             startup_comm.broadcast(
                 make_handshake(
@@ -1537,6 +1580,8 @@ class DistTPLauncher:
                     num_pages,
                     page_size,
                     self.attention_backend_identity,
+                    self.kv_cache_dtype_requested,
+                    self.kv_cache_dtype_resolved,
                 ),
                 src=0,
             )

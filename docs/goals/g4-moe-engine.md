@@ -51,7 +51,7 @@ All numbers from committed `bench/` scripts (G2 §8 evidence rules carry forward
 | M-A2 (EP does not break KV) | Radix hit >80% @50% shared prefix with EP on (A7 lineage; attention-DP must keep per-replica KV accounting rank-invariant) | — |
 | M-A3 (baseline comparison) | tok/s/GPU and TTFT p99 ≥ SGLang, same box, same checkpoint, same config — SGLang is the credible MoE-on-SM120 baseline; disclose its known SM120 limitations in the results file | saturation |
 | M-A4 (MTP value) | MTP acceptance ≥2 tokens/step measured; decode throughput ≥1.5× MTP-off at equal quality (spec ≡ non-spec greedy invariant pinned by test, E2 lineage) | latency-bound |
-| E-KV (FP8 KV bake) | FP8 KV cache enabled only after a dedicated correctness run (long-context bit-exactness vs BF16 KV) passes on SM120; result recorded either way | — |
+| E-KV (FP8 KV bake) | `bench/fp8_kv_g4_ekv_bench.py` runs the pinned Qwen3-32B checkpoint on one SM120 with exact 8K/16K/32K prompts, 2,048-token native ragged-prefill chunks, and 16 greedy decode tokens in BF16-KV and explicit unit-scale E4M3-KV arms. PASS requires exact output token IDs/stopping, finite selected logprobs with max absolute delta ≤0.25, complete finite/in-range SATFINITE write audits with bit-exact stored E4M3 bytes and the declared quantization-error bound, and fixed cross-cache samples with NRMSE ≤0.05 and cosine ≥0.99. BF16 remains the default; FP8 KV is opt-in, and any runtime failure is retained as FAIL rather than skipped. | — |
 
 ### Stage G4.2 — Frontier MoE, multi-node (prereq: G4.1 green + F3 transport gates)
 

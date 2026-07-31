@@ -232,7 +232,18 @@ def test_startup_handshake_requires_the_same_attention_backend_identity(
         )
 
 
-def test_build_tp_runner_probes_and_binds_the_rank_local_device(monkeypatch):
+@pytest.mark.parametrize(
+    ("requested_kv_dtype", "resolved_kv_dtype"),
+    (
+        ("auto", torch.bfloat16),
+        ("fp8_e4m3", torch.float8_e4m3fn),
+    ),
+)
+def test_build_tp_runner_probes_and_binds_the_rank_local_device(
+    monkeypatch,
+    requested_kv_dtype,
+    resolved_kv_dtype,
+):
     from kairyu.engine.core import attention as attention_module
     from kairyu.engine.core import attention_selector, hw_profile, kv_pool, model_runner, sampler
     from kairyu.models import parallel
@@ -260,13 +271,16 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(monkeypatch):
             "kernel_tier": "fa2",
         },
     )
-    backend = SimpleNamespace(selection_decision=decision)
+    backend = SimpleNamespace(
+        selection_decision=decision,
+        supports_fp8_kv=True,
+    )
     local_config = SimpleNamespace(
         num_hidden_layers=2,
         kv_cache_num_heads=4,
         kv_cache_head_dim=16,
     )
-    full_config = object()
+    full_config = SimpleNamespace(is_mla=False)
     seen: dict[str, object] = {}
 
     def fake_probe(device):
@@ -337,6 +351,7 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(monkeypatch):
         page_size=16,
         vocab=["token"],
         placement=placement,
+        kv_cache_dtype=requested_kv_dtype,
     )
 
     assert seen["probe_device"] == "cuda:3"
@@ -352,8 +367,15 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(monkeypatch):
         "attention_backend": backend,
     }
     assert seen["pool"]["device"] == "cuda:3"
+    assert seen["pool"]["dtype"] is resolved_kv_dtype
     assert runner.attention_backend_decision is decision
     assert runner.attention_backend_identity == "canonical-rank-local-identity"
+    assert runner.kv_cache_dtype_requested == requested_kv_dtype
+    assert runner.kv_cache_dtype_resolved == (
+        "fp8_e4m3"
+        if resolved_kv_dtype is torch.float8_e4m3fn
+        else "bfloat16"
+    )
     assert returned_full_config is full_config
 
 

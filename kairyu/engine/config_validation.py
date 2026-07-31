@@ -14,6 +14,7 @@ import re
 from collections.abc import Callable, Mapping
 from os import PathLike
 
+from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
 
 _MOCK_OPTIONS = frozenset(
@@ -60,6 +61,7 @@ _KAIRYU_OPTIONS = frozenset(
         "cuda_graph_max_batch",
         "cuda_graph_max_pages",
         "cuda_graph_warmup_iters",
+        "kv_cache_dtype",
     }
 )
 _KAIRYU_PROC_OPTIONS = frozenset(
@@ -80,6 +82,7 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "cuda_graph_max_batch",
         "cuda_graph_max_pages",
         "cuda_graph_warmup_iters",
+        "kv_cache_dtype",
     }
 )
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
@@ -253,6 +256,20 @@ def _validate_native_common(
         raise ValueError("native backend model_path must be a local path or null")
     if model_path is not None and runner is not None:
         raise ValueError("native backend model_path and runner are mutually exclusive")
+    kv_cache_dtype = validate_kv_cache_dtype(options.get("kv_cache_dtype", "auto"))
+    if kv_cache_dtype != "auto" and model_path is None:
+        raise ValueError(
+            "native backend explicit KV cache dtype requires a real model_path"
+        )
+    if kv_cache_dtype != "auto" and pd_separation:
+        raise ValueError(
+            "native backend explicit KV cache dtype does not support P-D separation"
+        )
+    if kv_cache_dtype == "fp8_e4m3":
+        if speculative is not None:
+            raise ValueError(
+                "native backend fp8_e4m3 KV cache does not support speculative decoding"
+            )
 
     graph_decode = decode_mode == "cuda_graph"
     if graph_decode:

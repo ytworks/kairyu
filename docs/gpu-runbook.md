@@ -552,3 +552,76 @@ image, and drill are unchanged.
   not expand the existing `KVTransport` seam. The artifact claims logical
   copies and token recomputation only; it must never be reported as measured
   physical KV bytes or byte-seconds.
+
+- 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
+  one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current
+  retained production image predates E4M3 attention AOT and contains no
+  `nvcc`, so this one closure run must honestly use the host's pinned venv,
+  CUDA 13.3 compiler, and already compiled FlashInfer 0.6.14 cache mounted
+  into that container. This is not evidence that the old image was rebuilt.
+  The source-JIT/compiler paths, compiler hash/version, FlashInfer shared
+  object hashes, image ID, source commit/files, checkpoint shards, GPU, and
+  environment are all retained and must be stable across the run.
+
+  ```bash
+  IMAGE=kairyu-qwen3-32b-kairyu:latest
+  IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE")
+  RESULT_ROOT=$(mktemp -d /tmp/kairyu-g4-ekv.XXXXXX)
+  mkdir -p \
+    "$RESULT_ROOT/artifact" \
+    "$RESULT_ROOT/home" \
+    "$RESULT_ROOT/torch-extensions" \
+    "$RESULT_ROOT/triton"
+  test -d /tmp/kairyu-issue170-flashinfer/.cache/flashinfer
+
+  docker run --rm --gpus device=7 \
+    --entrypoint /runtime/.venv/bin/python \
+    -e CUDA_VISIBLE_DEVICES=0 \
+    -e KAIRYU_ATTENTION_BACKEND=flashinfer \
+    -e CUDA_HOME=/usr/local/cuda \
+    -e HOME=/runtime-state/home \
+    -e TORCH_EXTENSIONS_DIR=/runtime-state/torch-extensions \
+    -e TRITON_CACHE_DIR=/runtime-state/triton \
+    -e FLASHINFER_WORKSPACE_BASE=/tmp/kairyu-issue170-flashinfer \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/workspace \
+    -e PATH=/usr/local/cuda/bin:/runtime/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    -v "$PWD:/workspace:ro" \
+    -v "$PWD/.venv:/runtime/.venv:ro" \
+    -v /usr/local/cuda-13.3:/usr/local/cuda:ro \
+    -v /usr/bin/x86_64-linux-gnu-gcc-13:/usr/bin/gcc:ro \
+    -v /usr/bin/x86_64-linux-gnu-g++-13:/usr/bin/g++:ro \
+    -v /usr/libexec/gcc/x86_64-linux-gnu/13:/usr/libexec/gcc/x86_64-linux-gnu/13:ro \
+    -v /usr/lib/gcc/x86_64-linux-gnu/13:/usr/lib/gcc/x86_64-linux-gnu/13:ro \
+    -v /usr/include/c++/13:/usr/include/c++/13:ro \
+    -v /usr/include/x86_64-linux-gnu/c++/13:/usr/include/x86_64-linux-gnu/c++/13:ro \
+    -v /usr/bin/git:/usr/bin/git:ro \
+    -v /usr/lib/git-core:/usr/lib/git-core:ro \
+    -v kairyu-qwen3-32b_qwen3-32b:/models:ro \
+    -v "$RESULT_ROOT:/runtime-state" \
+    -v /tmp/kairyu-issue170-flashinfer:/tmp/kairyu-issue170-flashinfer \
+    -w /workspace \
+    "$IMAGE" \
+    bench/fp8_kv_g4_ekv_bench.py measure \
+    --model-path /models/qwen3-32b \
+    --image-id "$IMAGE_ID" \
+    --output-dir /runtime-state/artifact \
+    --assert-gate
+
+  .venv/bin/python bench/fp8_kv_g4_ekv_bench.py verify \
+    --artifact "$RESULT_ROOT/artifact" --assert-gate
+  .venv/bin/python bench/fp8_kv_g4_ekv_bench.py replay \
+    --artifact "$RESULT_ROOT/artifact" --assert-gate
+  ```
+
+  The binding workload is one prompt at each exact length 8,192, 16,384,
+  and 32,768, native FlashInfer ragged prefill in 2,048-token chunks, then
+  16 greedy tokens through tensor decode. BF16 and explicit unit-scale E4M3
+  KV arms must have exact output IDs/stopping, finite selected logprobs with
+  maximum absolute delta 0.25, complete BF16-input/SATFINITE E4M3 write
+  audits, bit-exact stored bytes, and dequantization error no greater than
+  `max(abs(input)/16, 2^-10)`. Fixed samples from 8 layers × 16 positions per
+  prompt require NRMSE at most 0.05 and cosine at least 0.99. Timing is
+  diagnostic only. A process/model/runtime error still writes raw JSONL and a
+  manifest with verdict FAIL; a missing GPU/runtime is not a skip or PASS.

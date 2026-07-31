@@ -262,6 +262,16 @@ serving, preserves checkpoint ignore/exclusion rules and state-dict names, and
 fails closed instead of silently falling back. The contextual CPU acceptance
 gate passes 23/23 without skips; the actual SM120 FP8/INT8/AWQ/GPTQ/NVFP4
 kernel and full-model GPU gate passes 28/28 without skips.
+G4 E-KV / issue #170 is implementation-ready but remains open pending its real
+Qwen3-32B long-context bake. `auto` still preserves the BF16 CUDA cache default;
+only explicit `fp8_e4m3` may select the new path, and startup fails closed unless
+the model computes in BF16, the device is SM120, the model is non-MLA, and the
+selected backend is FlashInfer. K/V storage uses unit-scale SATFINITE E4M3
+(clamp to ±448 before conversion) and forwards `k_scale=v_scale=1.0` through
+all FlashInfer prefill/decode paths. The pinned v0.6.14 SM120 AOT source matrix
+now includes E4M3 KV for FP16/BF16 queries at head dimensions 64/128. The old
+`kairyu-depth-ab:20260731-issue156` image (`4dc6af1ddc97`) has no matching FA2
+E4M3 attention modules; no rebuilt-image or formal bake result is claimed yet.
 G6 P-B1 streaming orchestration is now closed. Direct routes already streamed;
 Conductor and MoA now keep pre-final work private and pull their final
 worker/synthesizer backend iterator through Orchestrator to OpenAI SSE.
@@ -640,7 +650,7 @@ global store remain rejected. The retained decision artifact SHA-256 is
 
 Benchmark ownership is now package-enforced. The installed `kairyu.bench`
 surface owns reusable target/auth/statistics/reporting contracts, the public
-CLI, eight fixtures, and a packaged registry for all 51 checkout-only
+CLI, eight fixtures, and a packaged registry for all 52 checkout-only
 wrappers. Exact existing wrapper-composition edges are frozen; new reusable
 dependencies, missing docs/main guards, or path/module CLI regressions fail
 validation. Historical `bench/*.py` and `bench/results/**` provenance paths
@@ -657,6 +667,32 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] G4 E-KV is ready for the real Qwen3-32B bake
+- What: implemented an opt-in `fp8_e4m3` KV cache without changing the BF16
+  default. Single-rank, TP, process-service, YAML validation, and `/backends`
+  reporting now carry requested and resolved cache dtype and reject unsupported
+  or cross-rank/cross-process mismatched identities. The SM120/FlashInfer-only
+  path stores K/V with unit-scale SATFINITE E4M3, passes unit K/V scales through
+  every FlashInfer prefill/decode path, and keeps speculative, MLA, unsupported
+  hardware/backend, and P-D combinations fail closed. FlashInfer v0.6.14 AOT
+  packaging now includes E4M3 KV for FP16/BF16 queries at heads 64/128 and has
+  a static non-empty-FP8 regression guard. Read-only inspection of the existing
+  `kairyu-depth-ab:20260731-issue156` image (`4dc6af1ddc97`) found 24 FA2
+  attention modules but zero FA2 E4M3-KV modules; that image was not rebuilt.
+- Why: host JIT and unit/GPU kernel tests can prove the implementation contract
+  but cannot satisfy G4 E-KV's binding long-context product gate or prove that a
+  nvcc-free production image contains the new AOT modules. The real Qwen3-32B
+  prompts, outputs, cache metadata, environment, checkpoint identity, and
+  BF16-vs-FP8 tolerance result must be retained before issue #170 can close.
+- Refs: issue #170; G4 E-KV; `Dockerfile.cuda`;
+  `kairyu/engine/core/{kv_cache_dtype.py,kv_pool.py,worker.py}`;
+  `kairyu/engine/core/attention/flashinfer_gpu.py`;
+  `kairyu/kernels/paged_kv_write_gpu.py`;
+  `kairyu/engine/{kairyu_backend.py,zmq_backend.py}`;
+  `bench/fp8_kv_g4_ekv_bench.py`;
+  `docs/design/flashinfer-sm120-aot.md`;
+  `tests/{unit/test_kv_cache_dtype.py,unit/test_kv_pool_fp8.py,gpu/test_flashinfer_gpu.py}`
 
 ### 2026-07-31 — [design] Benchmark ownership becomes package-enforced
 - What: made `kairyu.bench` the installed owner of reusable target,
