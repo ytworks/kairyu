@@ -59,6 +59,8 @@ def test_vlm_overlay_is_opt_in_and_pins_the_real_tp8_runtime() -> None:
     assert command[0] == "Qwen/Qwen3-VL-32B-Instruct"
     assert _argument_value(command, "--revision") == MODEL_REVISION
     assert _argument_value(command, "--served-model-name") == MODEL_NAME
+    assert "--enable-auto-tool-choice" in command
+    assert _argument_value(command, "--tool-call-parser") == "hermes"
     assert _argument_value(command, "--tensor-parallel-size") == "8"
     assert _argument_value(command, "--max-model-len") == "8192"
     assert _argument_value(command, "--mm-processor-kwargs") == (

@@ -401,7 +401,9 @@ fresh/migrated volume when adopting this configuration.
 Image chat is an opt-in GPU topology, not part of the CPU-safe default stack.
 The overlay starts the immutable Qwen3-VL-32B-Instruct revision on stock vLLM
 with tensor parallelism across eight NVIDIA GPUs, then exposes it as the
-`qwen3-vl-32b` Kairyu pool:
+`qwen3-vl-32b` Kairyu pool. Its `hermes` tool parser matches the pinned
+model's `<tool_call>{JSON}</tool_call>` chat-template format, so Open WebUI's
+built-in `tool_choice=auto` request is preserved rather than silently stripped:
 
 ```bash
 docker compose \
