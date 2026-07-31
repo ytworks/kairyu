@@ -655,6 +655,22 @@ def _runtime_source_dir(evidence_dir: Path) -> Path:
     )
 
 
+def _compose_environment(
+    image_id: str,
+    *,
+    evidence_dir: Path,
+) -> dict[str, str]:
+    return {
+        **os.environ,
+        "KAIRYU_A9_IMAGE": image_id,
+        "KAIRYU_A9_IMAGE_ID": image_id,
+        "KAIRYU_A9_RUN_DIR": str(evidence_dir),
+        "KAIRYU_A9_RUNTIME_DIR": str(
+            _runtime_source_dir(evidence_dir)
+        ),
+    }
+
+
 def _docker_stack_provenance(
     image_id: str,
     *,
@@ -697,11 +713,10 @@ def _docker_stack_provenance(
     expected_runtime_source = str(_runtime_source_dir(evidence_dir))
     services: dict[str, object] = {}
     for service in ("tp8", "gateway"):
-        environment = {
-            **os.environ,
-            "KAIRYU_A9_RUN_DIR": str(evidence_dir),
-            "KAIRYU_A9_RUNTIME_DIR": expected_runtime_source,
-        }
+        environment = _compose_environment(
+            image_id,
+            evidence_dir=evidence_dir,
+        )
         config_hash_result = subprocess.run(
             (*compose_prefix, "config", "--hash", service),
             check=False,

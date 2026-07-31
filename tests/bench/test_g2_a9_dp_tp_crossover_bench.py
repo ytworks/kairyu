@@ -999,6 +999,23 @@ def test_measurement_paths_require_the_exact_placement_log_name(
     ) == (output_dir.resolve(), placement_log.resolve())
 
 
+def test_compose_preflight_supplies_every_required_fixed_environment(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = (tmp_path / "run").resolve()
+    environment = a9._compose_environment(
+        a9.A8_IMAGE_ID,
+        evidence_dir=evidence_dir,
+    )
+
+    assert environment["KAIRYU_A9_IMAGE"] == a9.A8_IMAGE_ID
+    assert environment["KAIRYU_A9_IMAGE_ID"] == a9.A8_IMAGE_ID
+    assert environment["KAIRYU_A9_RUN_DIR"] == str(evidence_dir)
+    assert environment["KAIRYU_A9_RUNTIME_DIR"] == str(
+        a9._runtime_source_dir(evidence_dir)
+    )
+
+
 @pytest.mark.parametrize(
     "placement_log",
     [
