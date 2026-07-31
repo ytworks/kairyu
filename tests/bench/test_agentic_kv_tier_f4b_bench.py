@@ -260,6 +260,10 @@ def _shard(identity: tuple[int, str, str], index: int) -> list[dict[str, object]
     run_id = f"fixture-r{round_index}-{arm}-{cohort}"
     container_id = str(index + 4) * 64
     output_path = f"/evidence/round{round_index}-{arm}-{cohort}.jsonl"
+    repo_digest = (
+        "kairyu-f4a@sha256:"
+        + gate.F4A_CALIBRATED_IMAGE_ID.removeprefix("sha256:")
+    )
     command = [
         gate.SOURCE_PATH,
         "run",
@@ -274,9 +278,11 @@ def _shard(identity: tuple[int, str, str], index: int) -> list[dict[str, object]
         "--output",
         output_path,
         "--image-id",
-        f"sha256:{'a' * 64}",
+        gate.F4A_CALIBRATED_IMAGE_ID,
         "--container-id",
         container_id,
+        "--repo-digest",
+        repo_digest,
     ]
     if profile is not None:
         command.extend(("--profile", "/evidence/f4a-tp4-profile.json"))
@@ -297,8 +303,8 @@ def _shard(identity: tuple[int, str, str], index: int) -> list[dict[str, object]
             "profile": profile,
             "container": {
                 "container_id": container_id,
-                "image_id": f"sha256:{'a' * 64}",
-                "repo_digests": [],
+                "image_id": gate.F4A_CALIBRATED_IMAGE_ID,
+                "repo_digests": [repo_digest],
                 "command": command,
                 "container_id_binding": {
                     "option": "--container-id",
@@ -359,10 +365,10 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
         [
             {
                 "Id": image_id,
-                "RepoDigests": [],
+                "RepoDigests": first_header["container"]["repo_digests"],
                 "Config": {
                     "Labels": {
-                        "org.opencontainers.image.revision": first_header["source"]["commit"]
+                        "org.opencontainers.image.revision": gate.F4A_CALIBRATED_IMAGE_REVISION
                     }
                 },
             }
@@ -385,6 +391,8 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
             "Image": image_id,
             "Entrypoint": ["/app/.venv/bin/python"],
             "Cmd": container["command"],
+            "WorkingDir": "/workspace/kairyu",
+            "User": "1003:1003",
         }
         host_config = {
             "NetworkMode": "bridge",
@@ -407,6 +415,32 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
             "Args": container["command"],
             "Config": config,
             "HostConfig": host_config,
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": "/fixture/source",
+                    "Destination": "/workspace/kairyu",
+                    "RW": False,
+                },
+                {
+                    "Type": "volume",
+                    "Source": "/fixture/model-volume",
+                    "Destination": "/models/qwen3-32b",
+                    "RW": False,
+                },
+                {
+                    "Type": "bind",
+                    "Source": f"/fixture/evidence/{label}",
+                    "Destination": "/evidence",
+                    "RW": True,
+                },
+                {
+                    "Type": "bind",
+                    "Source": f"/fixture/metadata/{label}",
+                    "Destination": "/run/kairyu-meta",
+                    "RW": False,
+                },
+            ],
         }
         created = {
             **copy.deepcopy(static),
@@ -432,6 +466,7 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
                 "FinishedAt": _timestamp(finished_ns),
             },
         }
+        exited["Mounts"].reverse()
         exited["HostConfig"]["OomKillDisable"] = None
         label_dir = metadata / label
         label_dir.mkdir(parents=True)
@@ -560,6 +595,19 @@ def test_passing_artifact_replays_and_verifies(passing_artifact) -> None:
     assert manifest["checks"]["container_lifecycle_metadata_exact_and_sequential"] is True
     assert len(manifest["container_metadata"]["file_sha256"]) == 13
     assert (output / gate.CONTAINER_METADATA_DIR / gate.IMAGE_INSPECT_NAME).is_file()
+    assert manifest["bound_source"]["commit"] == "1" * 40
+    assert (
+        manifest["calibrated_execution_image"]["revision"]
+        == gate.F4A_CALIBRATED_IMAGE_REVISION
+    )
+    assert (
+        manifest["calibrated_execution_image"]["revision"]
+        != manifest["bound_source"]["commit"]
+    )
+    assert (
+        manifest["calibrated_execution_image"]["image_id"]
+        == gate.F4A_CALIBRATED_IMAGE_ID
+    )
 
 
 def test_retained_f4a_docker_host_config_has_only_known_false_to_null_drift() -> None:
@@ -587,7 +635,10 @@ def test_retained_f4a_docker_host_config_has_only_known_false_to_null_drift() ->
 @pytest.mark.parametrize(
     "difference",
     (
-        "image_revision",
+        "image_revision_wrong",
+        "image_revision_malformed",
+        "image_revision_missing",
+        "image_id",
         "container_id",
         "command",
         "hostname",
@@ -601,10 +652,21 @@ def test_container_metadata_identity_or_configuration_difference_fails_closed(
 ) -> None:
     paths, metadata = _write_fixture_inputs(tmp_path)
     label_dir = metadata / gate.SHARD_LABELS[gate.SHARD_PLAN[0]]
-    if difference == "image_revision":
+    if difference.startswith("image_revision"):
         path = metadata / gate.IMAGE_INSPECT_NAME
         image = _inspect_value(path)
-        image["Config"]["Labels"]["org.opencontainers.image.revision"] = "2" * 40
+        labels = image["Config"]["Labels"]
+        if difference == "image_revision_wrong":
+            labels["org.opencontainers.image.revision"] = "2" * 40
+        elif difference == "image_revision_malformed":
+            labels["org.opencontainers.image.revision"] = "not-a-commit"
+        else:
+            del labels["org.opencontainers.image.revision"]
+        _replace_inspect(path, image)
+    elif difference == "image_id":
+        path = metadata / gate.IMAGE_INSPECT_NAME
+        image = _inspect_value(path)
+        image["Id"] = f"sha256:{'b' * 64}"
         _replace_inspect(path, image)
     elif difference == "container_id":
         path = label_dir / gate.CONTAINER_CREATED_NAME
@@ -628,6 +690,47 @@ def test_container_metadata_identity_or_configuration_difference_fails_closed(
                 inspect["Config"]["Hostname"] = "not-the-container-id"
             else:
                 inspect["HostConfig"]["DeviceRequests"][0]["DeviceIDs"] = ["4", "5", "6", "7"]
+            _replace_inspect(path, inspect)
+
+    with pytest.raises(gate.EvidenceError, match="Docker"):
+        gate.assemble_artifact(
+            paths,
+            tmp_path / "artifact",
+            metadata_dir=metadata,
+        )
+
+
+@pytest.mark.parametrize(
+    "difference",
+    ("working_dir", "root_user", "source_rw", "model_type", "missing_meta", "source_drift"),
+)
+def test_container_mount_or_execution_carrier_difference_fails_closed(
+    tmp_path: Path,
+    difference: str,
+) -> None:
+    paths, metadata = _write_fixture_inputs(tmp_path)
+    identities = gate.SHARD_PLAN if difference != "source_drift" else (gate.SHARD_PLAN[1],)
+    for identity in identities:
+        label = gate.SHARD_LABELS[identity]
+        for name in (gate.CONTAINER_CREATED_NAME, gate.CONTAINER_EXITED_NAME):
+            path = metadata / label / name
+            inspect = _inspect_value(path)
+            if difference == "working_dir":
+                inspect["Config"]["WorkingDir"] = "/app"
+            elif difference == "root_user":
+                inspect["Config"]["User"] = "0:0"
+            else:
+                mounts = {
+                    mount["Destination"]: mount for mount in inspect["Mounts"]
+                }
+                if difference == "source_rw":
+                    mounts["/workspace/kairyu"]["RW"] = True
+                elif difference == "model_type":
+                    mounts["/models/qwen3-32b"]["Type"] = "bind"
+                elif difference == "missing_meta":
+                    inspect["Mounts"].remove(mounts["/run/kairyu-meta"])
+                else:
+                    mounts["/workspace/kairyu"]["Source"] = "/fixture/other-source"
             _replace_inspect(path, inspect)
 
     with pytest.raises(gate.EvidenceError, match="Docker"):
@@ -905,6 +1008,42 @@ def test_valid_runtime_identity_difference_fails_cross_arm_gate(
     assert manifest["checks"]["runtime_identity_equal_across_all_arms"] is False
 
 
+def test_bound_source_commit_drift_fails_cross_arm_gate(passing_artifact) -> None:
+    _output, original, _manifest_value = passing_artifact
+    rows = copy.deepcopy(original)
+    start_index = _shard_start_index(1)
+    end_index = start_index + gate.REQUESTS_PER_SHARD + 1
+    for index in (start_index, end_index):
+        rows[index]["source"]["commit"] = "3" * 40
+
+    manifest = _manifest(rows)
+
+    assert manifest["checks"]["bound_source_identity_exact_across_all_arms"] is False
+    assert manifest["passed"] is False
+
+
+@pytest.mark.parametrize("difference", ("image_id", "repo_digest"))
+def test_execution_image_drift_is_rejected_across_arms(
+    passing_artifact,
+    difference: str,
+) -> None:
+    _output, original, _manifest_value = passing_artifact
+    rows = copy.deepcopy(original)
+    start = rows[_shard_start_index(1)]
+    command = start["container"]["command"]
+    if difference == "image_id":
+        value = f"sha256:{'b' * 64}"
+        start["container"]["image_id"] = value
+        command[command.index("--image-id") + 1] = value
+    else:
+        value = f"other@sha256:{'b' * 64}"
+        start["container"]["repo_digests"] = [value]
+        command[command.index("--repo-digest") + 1] = value
+
+    with pytest.raises(gate.EvidenceError, match="image|Docker"):
+        _manifest(rows)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (("kv_cache_dtype_requested", ""), ("attention_backend_decision", {})),
@@ -984,7 +1123,7 @@ def test_container_hostname_and_command_are_bound_to_raw_identity(
 
 @pytest.mark.parametrize(
     "difference",
-    ("file_sha256", "evidence_sha256", "runtime_fingerprint"),
+    ("file_sha256", "evidence_sha256", "runtime_fingerprint", "engine_source_sha256"),
 )
 def test_retained_f4a_profile_exact_identity_is_pinned(
     passing_artifact,
@@ -997,6 +1136,9 @@ def test_retained_f4a_profile_exact_identity_is_pinned(
     profile = start["profile"]
     if difference == "file_sha256":
         profile["file_sha256"] = "0" * 64
+    elif difference == "engine_source_sha256":
+        profile["value"]["runtime_identity"][difference] = "0" * 64
+        profile["value_sha256"] = gate.sha256_json(profile["value"])
     else:
         profile["value"][difference] = "0" * 64
         profile["value_sha256"] = gate.sha256_json(profile["value"])

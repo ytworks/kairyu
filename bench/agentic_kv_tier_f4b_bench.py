@@ -64,6 +64,10 @@ EXPECTED_MODEL_CONFIG_SHA256 = "97e295b63283935788fac5e4f8860862a56d4089538cafc9
 F4A_PROFILE_FILE_SHA256 = "7b73d4adb2cc6a89ec41d0ad9e36ce788ce761ca18796b56a31e0f73d97b041d"
 F4A_PROFILE_EVIDENCE_SHA256 = "c8a15902923a16ce6f38655843083d8c47c1df3afc49846ee9108235968fa992"
 F4A_PROFILE_RUNTIME_FINGERPRINT = "4ba5dc9267fa4442d5545b8c889720bd77df35817e3ff3c03e2e4bd470b62dcb"
+F4A_CALIBRATED_IMAGE_ID = (
+    "sha256:25543ae9cbc9d2e80f1b4be2193d138486adb91c89a02cdbd0be0e62a1cc67be"
+)
+F4A_CALIBRATED_IMAGE_REVISION = "edd535f7018695fc03c479a86fbd690174cca5ef"
 TP_SIZE = 4
 PAGE_SIZE = 16
 HBM_PAGES = 1024
@@ -636,12 +640,15 @@ def _container_provenance_live(
     command: Sequence[str],
 ) -> dict[str, object]:
     _require(
-        image_id.startswith("sha256:") and _valid_sha256(image_id.removeprefix("sha256:")),
-        "container image id is invalid",
+        image_id == F4A_CALIBRATED_IMAGE_ID,
+        "container image id differs from the calibrated F4a image",
     )
     _require(
-        all(
-            "@sha256:" in digest and _valid_sha256(digest.rsplit("@sha256:", 1)[-1])
+        bool(repo_digests)
+        and all(
+            isinstance(digest, str)
+            and "@sha256:" in digest
+            and _valid_sha256(digest.rsplit("@sha256:", 1)[-1])
             for digest in repo_digests
         ),
         "container repository digest is invalid",
@@ -705,10 +712,8 @@ def _validate_container(value: object) -> dict[str, object]:
     )
     image_id = container.get("image_id")
     _require(
-        isinstance(image_id, str)
-        and image_id.startswith("sha256:")
-        and _valid_sha256(image_id.removeprefix("sha256:")),
-        "container image id is invalid",
+        image_id == F4A_CALIBRATED_IMAGE_ID,
+        "container image id differs from the calibrated F4a image",
     )
     _require(
         _valid_sha256(container.get("container_id")),
@@ -717,7 +722,13 @@ def _validate_container(value: object) -> dict[str, object]:
     options = _command_options(container.get("command"))
     _require(
         isinstance(container.get("repo_digests"), list)
-        and all(isinstance(item, str) and "@sha256:" in item for item in container["repo_digests"]),
+        and bool(container["repo_digests"])
+        and all(
+            isinstance(item, str)
+            and "@sha256:" in item
+            and _valid_sha256(item.rsplit("@sha256:", 1)[-1])
+            for item in container["repo_digests"]
+        ),
         "container repository digest inventory is invalid",
     )
     hostname = container.get("hostname")
@@ -1859,6 +1870,84 @@ def _normalized_host_config(value: object, name: str) -> dict[str, object]:
     return host_config
 
 
+def _calibrated_execution_image_identity(
+    lifecycle: Mapping[str, object],
+) -> dict[str, object]:
+    image_descriptor = _validate_metadata_descriptor(
+        lifecycle.get("image_inspect"), relative_path=IMAGE_INSPECT_NAME
+    )
+    image = _single_docker_inspect(image_descriptor, "image inspect")
+    image_id = image.get("Id")
+    _require(
+        image_id == F4A_CALIBRATED_IMAGE_ID,
+        "Docker image inspect ID differs from the calibrated F4a image",
+    )
+    image_config = _docker_mapping(image.get("Config"), "image Config")
+    labels = _docker_mapping(image_config.get("Labels"), "image labels")
+    revision = labels.get("org.opencontainers.image.revision")
+    _require(
+        _valid_commit(revision) and revision == F4A_CALIBRATED_IMAGE_REVISION,
+        "Docker image revision differs from the calibrated F4a image",
+    )
+    repo_digests = image.get("RepoDigests")
+    _require(
+        isinstance(repo_digests, list)
+        and bool(repo_digests)
+        and all(
+            isinstance(item, str)
+            and "@sha256:" in item
+            and _valid_sha256(item.rsplit("@sha256:", 1)[-1])
+            for item in repo_digests
+        )
+        and len(set(repo_digests)) == len(repo_digests),
+        "Docker image repository digests are invalid",
+    )
+    return {
+        "image_id": image_id,
+        "revision": revision,
+        "repo_digests": list(repo_digests),
+        "image_inspect_file_sha256": image_descriptor["file_sha256"],
+    }
+
+
+def _container_mount_inventory(value: object, label: str) -> dict[str, dict[str, object]]:
+    _require(isinstance(value, list), f"Docker Mounts are invalid: {label}")
+    mounts: dict[str, dict[str, object]] = {}
+    for item in value:
+        mount = _docker_mapping(item, f"{label} Mount")
+        destination = mount.get("Destination")
+        source = mount.get("Source")
+        _require(
+            isinstance(destination, str)
+            and destination.startswith("/")
+            and destination not in mounts
+            and isinstance(source, str)
+            and source.startswith("/"),
+            f"Docker mount identity is invalid: {label}",
+        )
+        mounts[destination] = {
+            "type": mount.get("Type"),
+            "source": source,
+            "rw": mount.get("RW"),
+        }
+    expected = {
+        "/workspace/kairyu": {"type": "bind", "rw": False},
+        "/models/qwen3-32b": {"type": "volume", "rw": False},
+        "/evidence": {"type": "bind", "rw": True},
+        "/run/kairyu-meta": {"type": "bind", "rw": False},
+    }
+    _require(set(mounts) == set(expected), f"Docker mount destinations differ: {label}")
+    _require(
+        all(
+            mounts[destination]["type"] == contract["type"]
+            and mounts[destination]["rw"] is contract["rw"]
+            for destination, contract in expected.items()
+        ),
+        f"Docker mount type/access differs: {label}",
+    )
+    return mounts
+
+
 def _validate_container_lifecycle(
     value: object,
     shards: Mapping[tuple[int, str, str], Mapping[str, object]],
@@ -1870,31 +1959,9 @@ def _validate_container_lifecycle(
         and lifecycle.get("schema_version") == 1,
         "container lifecycle metadata fields/schema differ",
     )
-    image_descriptor = _validate_metadata_descriptor(
-        lifecycle.get("image_inspect"), relative_path=IMAGE_INSPECT_NAME
-    )
-    image = _single_docker_inspect(image_descriptor, "image inspect")
-    image_id = image.get("Id")
-    _require(
-        isinstance(image_id, str)
-        and image_id.startswith("sha256:")
-        and _valid_sha256(image_id.removeprefix("sha256:")),
-        "Docker image inspect ID is invalid",
-    )
-    image_config = _docker_mapping(image.get("Config"), "image Config")
-    labels = _docker_mapping(image_config.get("Labels"), "image labels")
-    commits = {shards[identity]["header"]["source"]["commit"] for identity in SHARD_PLAN}
-    _require(
-        len(commits) == 1
-        and labels.get("org.opencontainers.image.revision") == next(iter(commits)),
-        "Docker image revision differs from measured source commit",
-    )
-    image_repo_digests = image.get("RepoDigests")
-    _require(
-        isinstance(image_repo_digests, list)
-        and all(isinstance(item, str) for item in image_repo_digests),
-        "Docker image repository digests are invalid",
-    )
+    execution_image = _calibrated_execution_image_identity(lifecycle)
+    image_id = execution_image["image_id"]
+    image_repo_digests = execution_image["repo_digests"]
 
     entries = lifecycle.get("shards")
     _require(
@@ -1902,6 +1969,8 @@ def _validate_container_lifecycle(
         "container lifecycle shard inventory differs",
     )
     previous_finished_ns: int | None = None
+    bound_source_host_path: str | None = None
+    model_volume_host_path: str | None = None
     for index, identity in enumerate(SHARD_PLAN):
         label = SHARD_LABELS[identity]
         entry_value = entries[index]
@@ -1973,6 +2042,29 @@ def _validate_container_lifecycle(
             and container.get("hostname") == container_id[:12],
             f"Docker hostname differs from full container ID: {label}",
         )
+        _require(
+            config.get("WorkingDir") == "/workspace/kairyu"
+            and isinstance(config.get("User"), str)
+            and re.fullmatch(r"[1-9][0-9]*(?::[1-9][0-9]*)?", config["User"]) is not None,
+            f"Docker bound-source working directory/non-root user differs: {label}",
+        )
+        created_mounts = _container_mount_inventory(created.get("Mounts"), f"{label} created")
+        exited_mounts = _container_mount_inventory(exited.get("Mounts"), f"{label} exited")
+        _require(
+            created_mounts == exited_mounts,
+            f"Docker mount identity changed during execution: {label}",
+        )
+        source_host_path = created_mounts["/workspace/kairyu"]["source"]
+        model_host_path = created_mounts["/models/qwen3-32b"]["source"]
+        if bound_source_host_path is None:
+            bound_source_host_path = str(source_host_path)
+            model_volume_host_path = str(model_host_path)
+        else:
+            _require(
+                source_host_path == bound_source_host_path
+                and model_host_path == model_volume_host_path,
+                f"Docker shared source/model carrier differs across shards: {label}",
+            )
         expected_device_request = [
             {
                 "Driver": "",
@@ -2210,10 +2302,30 @@ def recompute_manifest(
     metadata_rollup = sha256_json(dict(sorted(metadata_digests.items())))
 
     source_same = len({canonical_json(shard["header"]["source"]) for shard in all_shards}) == 1
+    reference_source = all_shards[0]["header"]["source"]
+    bound_source = {
+        "commit": reference_source["commit"],
+        "bound_files_sha256": reference_source["bound_files_sha256"],
+        "engine_source_sha256": reference_source["engine_source_sha256"],
+    }
     checkpoint_same = (
         len({canonical_json(shard["header"]["checkpoint"]) for shard in all_shards}) == 1
     )
-    image_same = len({shard["header"]["container"]["image_id"] for shard in all_shards}) == 1
+    calibrated_execution_image = _calibrated_execution_image_identity(lifecycle)
+    execution_image_same = (
+        len(
+            {
+                canonical_json(
+                    {
+                        "image_id": shard["header"]["container"]["image_id"],
+                        "repo_digests": shard["header"]["container"]["repo_digests"],
+                    }
+                )
+                for shard in all_shards
+            }
+        )
+        == 1
+    )
     containers_fresh = len(
         {shard["header"]["container"]["container_id"] for shard in all_shards}
     ) == len(SHARD_PLAN)
@@ -2395,11 +2507,10 @@ def recompute_manifest(
             hardware_environment_same and gpu_specification_same
         ),
         "container_hostname_command_and_shard_identity_exact": container_identity_exact,
-        "retained_f4a_tp4_profile_identity_exact": profile_identity_exact,
-        "source_checkpoint_image_and_profile_identity_exact": source_same
-        and checkpoint_same
-        and image_same
-        and profile_same,
+        "bound_source_identity_exact_across_all_arms": source_same,
+        "checkpoint_identity_exact_across_all_arms": checkpoint_same,
+        "calibrated_execution_image_identity_exact_across_all_arms": execution_image_same,
+        "retained_f4a_tp4_profile_identity_exact": profile_identity_exact and profile_same,
         "all_requests_complete_without_retry_at_exact_32_tokens": all(
             request["status"] == "success"
             and request["retry_count"] == 0
@@ -2436,6 +2547,8 @@ def recompute_manifest(
         "measurement_kind": MEASUREMENT_KIND,
         "config": formal_config(),
         "raw": {"name": RAW_NAME, "sha256": raw_sha256, "row_count": len(rows)},
+        "bound_source": bound_source,
+        "calibrated_execution_image": calibrated_execution_image,
         "container_metadata": {
             "directory": CONTAINER_METADATA_DIR,
             "file_sha256": dict(sorted(metadata_digests.items())),

@@ -976,13 +976,13 @@ image, and drill are unchanged.
   `2947d27dcb51a227ec9e21c72a4e435e693dbb675ff683632dd285cfc86d6611`.
 
 - 9.8b Agentic DRAM-tier on/off trace (#188, G5 F4b): run four fresh Qwen3-32B
-  TP4 arms from one detached clean source commit and one immutable
-  `Dockerfile.cuda` image. Cohort A is physical GPUs 0--3 and cohort B is
-  physical GPUs 4--7. Execute, in order, round-0 off on A, round-0 on on B,
-  round-1 on on A, and round-1 off on B. Every container must exit and release
-  its four GPUs before the next starts; never run any pair concurrently. This
-  AB/BA arm order and cohort swap controls for both elapsed-time order and a
-  fixed four-GPU cohort effect.
+  TP4 arms from one detached clean source commit and the exact immutable
+  runtime image used to calibrate the retained F4a TP4 profile. Cohort A is
+  physical GPUs 0--3 and cohort B is physical GPUs 4--7. Execute, in order,
+  round-0 off on A, round-0 on on B, round-1 on on A, and round-1 off on B.
+  Every container must exit and release its four GPUs before the next starts;
+  never run any pair concurrently. This AB/BA arm order and cohort swap
+  controls for both elapsed-time order and a fixed four-GPU cohort effect.
 
   The trace and gates are fixed before measurement: 16 sessions by eight
   turns, a 2,048-token fleet-shared prefix, 512 new session-history tokens per
@@ -996,11 +996,17 @@ image, and drill are unchanged.
   the free-page decrease from output 16 to 17. That page-boundary control makes
   the decode-critical-path exclusion check non-vacuous.
 
-  Build only after the implementation and focused tests are committed. Do not
-  use a dirty source bind mount, a moving image tag, an F4a profile from a
-  different checkpoint/TP/layout/backend, host networking, or a shared arm
-  cache. The model checkpoint, container provenance, source, image, and F4a
-  profile identities must remain stable across all four arms.
+  Commit the implementation and focused tests before measurement. Reuse the
+  content-addressed F4a image below; rebuilding the same package versions is
+  not equivalent because the retained profile binds the compiled attention
+  runtime identity. The image's OCI revision records the source used to build
+  that calibrated runtime, while the read-only source mount independently
+  records and supplies the Kairyu code under measurement. Do not use a dirty
+  source bind mount, a moving image tag, another image or revision, an F4a
+  profile from a different checkpoint/TP/layout/backend, host networking, or a
+  shared arm cache. The model checkpoint, container provenance, measured
+  source, calibrated image, and F4a profile identities must remain stable
+  across all four arms.
 
   ```bash
   set -euo pipefail
@@ -1019,13 +1025,12 @@ image, and drill are unchanged.
   F4A_PROFILE=/workspace/kairyu/bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/dram-kv-tier-qwen3-32b-tp4-profile.json
   test -s "$SOURCE_ROOT/${F4A_PROFILE#/workspace/kairyu/}"
 
-  IMAGE_REF="kairyu-f4b:$COMMIT"
-  docker build --build-arg "KAIRYU_VCS_REF=$COMMIT" \
-    -t "$IMAGE_REF" -f "$SOURCE_ROOT/Dockerfile.cuda" "$SOURCE_ROOT"
-  IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")
+  IMAGE_ID=sha256:25543ae9cbc9d2e80f1b4be2193d138486adb91c89a02cdbd0be0e62a1cc67be
+  IMAGE_REVISION=edd535f7018695fc03c479a86fbd690174cca5ef
+  test "$(docker image inspect --format '{{.Id}}' "$IMAGE_ID")" = "$IMAGE_ID"
   test "$(docker image inspect --format \
     '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-    "$IMAGE_ID")" = "$COMMIT"
+    "$IMAGE_ID")" = "$IMAGE_REVISION"
   mapfile -t REPO_DIGESTS < <(docker image inspect --format \
     '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE_ID")
   REPO_ARGS=()
@@ -1056,7 +1061,7 @@ image, and drill are unchanged.
 
     CID=$(docker create \
       --name "kairyu-f4b-${label}-${COMMIT:0:12}" \
-      --gpus "device=$physical_gpus" \
+      --gpus "\"device=$physical_gpus\"" \
       --user "$HOST_UID:$HOST_GID" \
       --entrypoint /app/.venv/bin/python \
       --ulimit memlock=-1:-1 --ipc=host \

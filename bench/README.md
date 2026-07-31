@@ -330,13 +330,17 @@ real decode-page allocation rather than making the zero tier-delta check
 vacuous. Raw request timing, cached-token usage, output tokens, and tier/cache
 events are retained for independent replay.
 
-After four raw arms have completed from the same clean source, immutable
-image, checkpoint, and retained TP4 F4a runtime profile, assemble and replay
-the evidence without editing a measured verdict. Assembly requires the image
+After four raw arms have completed from the same clean source, checkpoint,
+retained TP4 F4a runtime profile, and the exact immutable image in which that
+profile was calibrated, assemble and replay the evidence without editing a
+measured verdict. The calibrated execution image and the read-only
+bind-mounted measured source are separate provenance authorities: the image
+pins the compiled runtime dependencies, while the source record pins every
+executed Kairyu Python file and the engine rollup. Assembly requires the image
 inspect plus each arm's full container ID and created/exited inspect pair. It
-validates those lifecycle records, embeds their descriptors in the combined
-raw, and copies the exact input files into the artifact's
-`container-metadata/` directory.
+validates both provenance authorities and those lifecycle records, embeds
+their descriptors in the combined raw, and copies the exact input files into
+the artifact's `container-metadata/` directory.
 
 ```bash
 python bench/agentic_kv_tier_f4b_bench.py assemble \
