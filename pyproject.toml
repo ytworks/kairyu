@@ -37,6 +37,12 @@ engine = [
     "tokenizers>=0.20",
     "safetensors>=0.5",
 ]
+# CPU production embeddings without pulling the multi-GB PyTorch runtime.
+# Model snapshots are resolved at an explicitly configured revision and ONNX
+# Runtime owns inference; the tokenizer supplies exact request usage.
+embeddings = [
+    "fastembed==0.8.0",
+]
 # OpenTelemetry span export (L2-safe no-op without it).
 otel = ["opentelemetry-sdk>=1.27"]
 # GPU kernels/fabric: linux-only markers so macOS `uv sync` ignores them.

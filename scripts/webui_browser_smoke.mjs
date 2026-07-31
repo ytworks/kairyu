@@ -43,6 +43,10 @@ const initialAutoMarker = 'KAIRYU_WEBUI_INITIAL_AUTO_197';
 const reconnectMarker = 'KAIRYU_WEBUI_RECONNECT_197';
 const outageMarker = 'KAIRYU_WEBUI_OUTAGE_197';
 const recoveryMarker = 'KAIRYU_WEBUI_RECOVERY_197';
+const ragFilename = 'kairyu-rag-202.txt';
+const ragNeedle = 'KAIRYU_RAG_NEEDLE_202';
+const ragAnswer = 'KAIRYU_RAG_ANSWER_202';
+const ragQuery = 'What is the archive code in the local deployment record?';
 
 let browser;
 let context;
@@ -291,6 +295,184 @@ async function assertModelsSelectable() {
 	for (const modelId of models) {
 		await selectModel(modelId);
 	}
+}
+
+async function browserJson(pathname, options = {}) {
+	const result = await page.evaluate(
+		async ({ pathname: path, options: requestOptions }) => {
+			const token = localStorage.token;
+			if (!token) {
+				return { error: 'browser session has no localStorage token' };
+			}
+			const headers = new Headers(requestOptions.headers ?? {});
+			headers.set('Authorization', `Bearer ${token}`);
+			if (
+				requestOptions.body !== undefined &&
+				typeof requestOptions.body === 'string' &&
+				!headers.has('Content-Type')
+			) {
+				headers.set('Content-Type', 'application/json');
+			}
+			const response = await fetch(path, {
+				...requestOptions,
+				headers
+			});
+			const text = await response.text();
+			let body;
+			try {
+				body = JSON.parse(text);
+			} catch {
+				body = text;
+			}
+			return {
+				status: response.status,
+				contentType: response.headers.get('content-type') ?? '',
+				body,
+				text
+			};
+		},
+		{ pathname, options }
+	);
+	invariant(!result.error, result.error);
+	return result;
+}
+
+async function uploadRagDocument() {
+	const document = [
+		'Kairyu local deployment record.',
+		'The archive code is stored only in this uploaded document.',
+		`Archive code: ${ragNeedle}`
+	].join('\n');
+	invariant(!ragQuery.includes(ragNeedle), 'RAG query leaked the retrieval needle');
+	invariant(!ragQuery.includes(ragAnswer), 'RAG query leaked the canned answer');
+
+	const upload = await page.evaluate(
+		async ({ filename, content }) => {
+			const token = localStorage.token;
+			if (!token) {
+				return { error: 'browser session has no localStorage token' };
+			}
+			const form = new FormData();
+			form.append(
+				'file',
+				new File([content], filename, { type: 'text/plain' })
+			);
+			const response = await fetch(
+				'/api/v1/files/?process=true&process_in_background=false',
+				{
+					method: 'POST',
+					headers: { Authorization: `Bearer ${token}` },
+					body: form
+				}
+			);
+			const text = await response.text();
+			let body;
+			try {
+				body = JSON.parse(text);
+			} catch {
+				body = text;
+			}
+			return { status: response.status, body, text };
+		},
+		{ filename: ragFilename, content: document }
+	);
+	invariant(!upload.error, upload.error);
+	invariant(
+		upload.status === 200 && typeof upload.body?.id === 'string',
+		`RAG document upload failed: HTTP ${upload.status}: ${upload.text}`
+	);
+
+	const fileId = upload.body.id;
+	for (let attempt = 0; attempt < 40; attempt += 1) {
+		const status = await browserJson(
+			`/api/v1/files/${encodeURIComponent(fileId)}/process/status`
+		);
+		invariant(
+			status.status === 200,
+			`RAG document status failed: HTTP ${status.status}: ${status.text}`
+		);
+		if (status.body?.status === 'completed') {
+			return fileId;
+		}
+		if (status.body?.status === 'failed') {
+			throw new Error(`RAG document processing failed: ${status.text}`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	throw new Error('RAG document processing did not complete within 10 seconds');
+}
+
+async function queryRagDocument(fileId) {
+	const retrieval = await browserJson('/api/v1/retrieval/query/doc', {
+		method: 'POST',
+		body: JSON.stringify({
+			collection_name: `file-${fileId}`,
+			query: ragQuery,
+			k: 1,
+			hybrid: false
+		})
+	});
+	invariant(
+		retrieval.status === 200,
+		`RAG retrieval failed: HTTP ${retrieval.status}: ${retrieval.text}`
+	);
+	invariant(
+		retrieval.text.includes(ragNeedle),
+		`RAG retrieval did not return the uploaded needle: ${retrieval.text}`
+	);
+	return retrieval.body;
+}
+
+async function answerWithRagDocument(fileId) {
+	const completion = await browserJson('/api/chat/completions', {
+		method: 'POST',
+		body: JSON.stringify({
+			model: directModel,
+			stream: false,
+			messages: [{ role: 'user', content: ragQuery }],
+			files: [{ type: 'file', id: fileId, name: ragFilename }]
+		})
+	});
+	invariant(
+		completion.status === 200,
+		`RAG chat failed: HTTP ${completion.status}: ${completion.text}`
+	);
+	const answer = completion.body?.choices?.[0]?.message?.content;
+	invariant(
+		typeof answer === 'string' && answer.includes(ragAnswer),
+		`RAG chat did not produce the retrieval-only answer: ${completion.text}`
+	);
+	invariant(
+		answer.includes('[1]'),
+		`RAG chat answer did not preserve its retrieved-source citation: ${answer}`
+	);
+}
+
+async function assertRagEndToEnd() {
+	const fileId = await uploadRagDocument();
+	await queryRagDocument(fileId);
+	await answerWithRagDocument(fileId);
+}
+
+async function findPersistedRagDocument() {
+	const search = await browserJson(
+		`/api/v1/files/search?filename=${encodeURIComponent(ragFilename)}`
+	);
+	invariant(
+		search.status === 200 && Array.isArray(search.body),
+		`persisted RAG document search failed: HTTP ${search.status}: ${search.text}`
+	);
+	const file = search.body.find(
+		(item) => item?.filename === ragFilename && typeof item?.id === 'string'
+	);
+	invariant(file, `persisted RAG document ${ragFilename} was not found`);
+	return file.id;
+}
+
+async function assertRagAfterGatewayRestart() {
+	const fileId = await findPersistedRagDocument();
+	await queryRagDocument(fileId);
+	await answerWithRagDocument(fileId);
 }
 
 function parseSse(body, modelId) {
@@ -643,6 +825,7 @@ async function assertUiOutage(modelId) {
 async function runInitialPhase() {
 	await step('fresh user signup', signupFreshUser);
 	await step('direct and AUTO model discovery', assertModelsSelectable);
+	await step('document ingest, vector retrieval, and RAG answer', assertRagEndToEnd);
 	await step('default browser-visible SSE', () =>
 		assertBrowserStreaming(directModel, `${initialDefaultMarker}_SSE`)
 	);
@@ -675,6 +858,7 @@ async function runRecoveryPhase() {
 		assertBrowserStreaming(directModel, `${recoveryMarker}_SSE`)
 	);
 	await step('recovered UI chat', () => sendUiMessage(directModel, recoveryMarker));
+	await step('RAG retrieval and answer after gateway restart', assertRagAfterGatewayRestart);
 }
 
 async function main() {

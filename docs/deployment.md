@@ -346,6 +346,56 @@ Operational notes:
   with an engine, pool, or orchestrator name. Unknown IDs return
   `model_not_found` without execution or usage accounting.
 
+### Production embeddings and Open WebUI RAG
+
+Install the CPU production backend with `uv sync --extra embeddings`. It uses
+FastEmbed/ONNX Runtime rather than PyTorch and owns one warmed model session
+plus a bounded worker pool:
+
+```yaml
+embeddings:
+  embed-small:
+    backend: fastembed
+    model: sentence-transformers/all-MiniLM-L6-v2
+    model_path: /opt/kairyu/models/all-MiniLM-L6-v2
+    revision: 5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
+    model_sha256: bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5
+    provenance_sha256: 57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c
+    dimensions: 384
+    batch_size: 64
+    threads: 2
+    max_concurrency: 2
+```
+
+`model_path` must be a prefetched local snapshot with
+`MODEL_PROVENANCE.json`. Startup verifies the configured repository revision,
+FastEmbed catalog dimensions, recorded model hash, and the actual ONNX SHA-256,
+then runs one normalized-vector warmup without network access. Until that
+finishes `/readyz` is 503; an integrity or load failure is fatal and also makes
+`/health` return 503. Shutdown drains accepted inference work before releasing
+the executor and model session. Successful requests report tokenizer-derived
+exact input usage, so tenant admission refunds the difference between its
+pre-dispatch UTF-8 work bound and actual token work.
+
+The repository Dockerfile keeps this dependency and model out of the default
+image. Set `KAIRYU_EMBEDDINGS=1` and the four immutable model build arguments
+shown in `deploy/compose/docker-compose.webui.yaml` to build the RAG image.
+That Compose topology points both chat and embedding traffic at Kairyu:
+
+```bash
+docker compose -f deploy/compose/docker-compose.webui.yaml up --build
+```
+
+Its Open WebUI configuration selects `embed-small`, bounds embedding batches
+and concurrent requests, and disables query generation, full-context bypass,
+and reranking. Reranking is optional in P-C3 and is deliberately deferred;
+retrieval itself remains mandatory and is exercised by
+`scripts/webui_smoke.sh`, which uploads a document, verifies its retrieved
+canary, obtains a citation-bearing Kairyu answer, and repeats retrieval after
+restarting only Kairyu. Existing Open WebUI data volumes may retain prior RAG
+settings in the application database; confirm the admin RAG settings or use a
+fresh/migrated volume when adopting this configuration.
+
 ## 5. Rolling model update (gate C7)
 
 Weights update = rolling replica restart; there is no hot swap (m7 §3).

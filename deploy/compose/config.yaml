@@ -2,5 +2,20 @@
 engines:
   default:
     backend: mock
+    options:
+      responses:
+        KAIRYU_RAG_NEEDLE_202: "The archive code is KAIRYU_RAG_ANSWER_202 [1]."
+embeddings:
+  embed-small:
+    backend: fastembed
+    model: sentence-transformers/all-MiniLM-L6-v2
+    model_path: /opt/kairyu/models/all-MiniLM-L6-v2
+    revision: 5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
+    model_sha256: bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5
+    provenance_sha256: 57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c
+    dimensions: 384
+    batch_size: 64
+    threads: 2
+    max_concurrency: 2
 orchestrator:
   spec: webui-orchestrator.yaml

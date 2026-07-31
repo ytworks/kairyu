@@ -463,8 +463,8 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M10a — Elastic fleet base (dynamic pool/registry/tracing/Helm) | **Complete** (2026-07-03, `docs/design/m10-fleet-cpu.md`). 594 tests. |
 | M10b — KV-aware routing (prefix trie / KV events / offline tuning) | **Complete** (2026-07-03, D7/A13 amended 2026-07-27): exact-compatible incremental RadixKV event hash chains remove quadratic prefix publication work. |
 | G5 — Fleet scale (elasticity, KV-aware routing, P/D pools, tiering, tenancy) | Goal defined (`docs/goals/g5-fleet-scale.md`); amends m7 D2 (k8s as machine layer), m5 D4/m7 D6 (prefix-aware placement), m6 D1 staticness, ClusterSpec cap, m7 D8 (OTel). **F1a is closed:** retained exact-head run `30374404150`, PR #266, issue #175. **F1b is closed:** retained exact-head run `30387260062`, PR #267, issue #176. **F1c is closed:** exact-head source run `30399229234` at `be40b97` passed all 26 independently replayed three-gateway affinity, shared PostgreSQL BatchStore, fenced owner-Pod failover, output, and provenance checks; the complete artifact is retained under `bench/results/f1c-three-gateway/`. F1a/F1b were not rerun and the evidence-only closure commit does not repeat F1c. **F1d is closed:** m10 A34's deterministic fixture proves the complete span contract, and the separate-container Compose smoke proves W3C parentage across distinct gateway and replica services while rejecting prompt/output canaries. **F2a is closed:** exact-source run `30411111758` at `c067cb8` passed every source, replay, cache, statistical, and p99 gate. Shared cached prompt-work improved 37.9259x; across 21 blank-root paired rounds the goodput-ratio median was 1.002142, exact median LCB 0.999512, full-sample geometric mean 1.008610, and 21/21 ratios met 0.99. Worst-trace placement p99 was 0.145979 ms. The 24,709-row artifact is retained under `bench/results/f2a-prefix-routing-500-2026-07-28/`; the evidence-only closure commit does not repeat F2a. **F2b is closed:** exact-source run `30417507859` at `f383806` passed every source, Actions provenance, replay, 200-replica churn, freshness, fallback, and recovery gate. Across 500 routes, maximum exact truth age was 232.314498 ms, first stale approximate fallback was 251.339950 ms after pause, and same-process complete-replay recovery was 50.740933 ms after resume. The 2,196-row artifact is retained under `bench/results/f2b-kv-event-retained/`; F1a/F2a were not rerun and the evidence-only closure commit does not repeat F2b. |
-| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
-| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, all P-B gates, and P-C2 are green; the remaining P-C gates continue. |
+| M11 — Product surface + tenancy (streaming auto/tenancy/responses/embeddings/F5) | **Complete** (2026-07-03, D4/D7 amended 2026-07-31, D1/D2/D4/D6 amended 2026-07-28, D3 amended 2026-07-27, `docs/design/m11-product.md`): final-stage streaming, immutable OpenAI request intent, canonical typed Responses/tool loops, production offline embeddings/RAG, cumulative orchestration usage/trace, measured Conductor/MoA tiers, and indexed FIFO/priority admission with a measured 2x-overload SLO gate are production-wired. |
+| G6 — Product surface (truthful API, Fugu-class product, frontier scoreboard) | Goal defined (`docs/goals/g6-product-surface.md`). P-A, all P-B gates, P-C2, and P-C3 are green; the remaining P-C gates continue. |
 
 What works today: full stack on CPU — `kairyu` EngineBackend wired through the
 OpenAI-compatible server with the mock/CPU runner; serving/router/multiturn benchmarks
@@ -491,10 +491,14 @@ while rolling back partial result publications after ordinary processing or stor
 Each batch row now validates a typed method/URL/custom-ID envelope and enters the same
 chat validation plus buffered-dispatch service as regular HTTP requests; invalid rows never
 reach an engine, and backend error records reveal only the exception class.
-Embedding backends are configured and discovered as explicit, non-colliding model IDs;
-requests resolve that bounded registry before work, unknown IDs return `model_not_found`,
-response, metric, and ledger identities use the resolved key, and limiter charging occurs
-only after resolution.
+Embedding backends are configured and discovered as explicit, non-colliding model IDs.
+The production FastEmbed backend loads an externally pinned all-MiniLM-L6-v2
+ONNX bundle without runtime network access, verifies its manifest and every
+recorded file, owns bounded admission plus cancellation-safe lifecycle, and
+reports exact tokenizer usage. Requests resolve the bounded registry before
+work, unknown IDs return `model_not_found`, saturation returns a pre-dispatch
+429, response/metric/ledger identities use the resolved key, and limiter
+charging occurs only after resolution.
 The Responses developer surface now emits canonical, gapless typed text/function SSE,
 round-trips flat and Codex namespace tools plus linked outputs, and keeps successful
 continuation state bounded and tenant scoped. It shares Chat Completions validation,
@@ -538,11 +542,13 @@ skips and logs truncated tails or complete malformed records while preserving ev
 usage total.
 
 The Open WebUI Compose topology is clean-checkout runnable with authenticated
-first-user setup, immutable third-party image pins, direct and legacy AUTO mock
-models, health-gated startup, and an opt-in browser service. The normal command
-starts only Kairyu plus Open WebUI; the dedicated browser gate owns its
-ephemeral database and validates initial use, outage, and no-WebUI-restart
-recovery.
+first-user setup, immutable third-party/model pins, direct and legacy AUTO mock
+chat models, the real 384-dimensional embedding backend, health-gated startup,
+and an opt-in browser service. The normal command starts only Kairyu plus Open
+WebUI; the dedicated browser gate owns its ephemeral database and validates
+initial chat, real embedding dimensions/order/usage, document ingestion,
+retrieval-only canary injection, citation-bearing RAG answer, outage, and
+Kairyu-only restart recovery. Optional reranking is explicitly deferred.
 
 The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
 GPU, selects the configured runtime/node profile, mounts an existing host path or
@@ -695,6 +701,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [amendment] P-C3 closes on production offline embeddings and Kairyu-only RAG
+- What: added a production `fastembed` backend that loads a revision-, ONNX-, and manifest-SHA-pinned all-MiniLM-L6-v2 snapshot entirely offline; validates every recorded bundle file; warms one CPU session; reports exact tokenizer usage; rejects excess work before dispatch; and participates in readiness, fatal health, cancellation-safe startup, and draining shutdown. The default image remains lean while the Open WebUI image opts into the dependency and model. Its mandatory browser smoke now proves two-input 384-dimensional normalized embeddings, document ingestion, vector retrieval of a query-only canary, a citation-bearing Kairyu answer that requires retrieved context, visible outage, and retrieval/answer recovery after restarting only Kairyu. Optional reranking remains disabled and deferred. A source allowlist reduces the root Docker context from 7.5 GB of checkout state to 7.07 MB.
+- Why: the former mock-only route proved wire compatibility but not a deployable embedding engine, immutable model semantics, bounded CPU ownership, lifecycle health, or an actual Open WebUI RAG flow. A pinned CPU ONNX path closes those product requirements without adding the multi-GB PyTorch runtime or making CI depend on GPUs/network-time model resolution; a retrieval-only canary prevents a plain chat success from masquerading as RAG.
+- Refs: issue #202; G6 P-C3; m11 D4/D7/A17; `kairyu/engine/embedding.py`; `kairyu/deploy/{spec,builder}.py`; `deploy/compose/{config.yaml,docker-compose.webui.yaml}`; `scripts/{prefetch_embedding_model.py,webui_smoke.sh,webui_browser_smoke.mjs}`; `tests/{unit/test_embedding_backend.py,unit/test_compose_configs.py,server/test_embeddings_models.py}`; `docs/{deployment.md,goals/g6-product-surface.md,design/m11-product.md}`
 
 ### 2026-07-31 — [progress] Noisy-neighbor schedule test binds raw clock inputs
 - What: Replaced the noisy-neighbor schedule test's exact equality on subtracted floating-point timestamps with exact checks of tenant/phase/index order, one shared origin, and each raw target as that origin plus its specified cadence. The test fixes the origin immediately below the 512-second binary exponent boundary and verifies that the benchmark reads the clock exactly once, making the former CI-only failure deterministic while strengthening the named shared-origin contract.

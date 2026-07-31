@@ -915,7 +915,13 @@ def create_app(
     admin_keys = (
         settings.resolve_admin_keys() if resolved_admin_keys is None else resolved_admin_keys
     )
-    add_health_routes(app, served_engines, metrics, admin_keys=admin_keys)
+    add_health_routes(
+        app,
+        served_engines,
+        metrics,
+        admin_keys=admin_keys,
+        embedding_backends=served_embedding_backends,
+    )
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 
     add_extra_routes(

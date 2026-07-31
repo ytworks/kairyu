@@ -9,15 +9,21 @@ separate from embeddings.
 from __future__ import annotations
 
 import base64
+import math
 import struct
 from collections.abc import Mapping
-from typing import Protocol
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from kairyu.entrypoints.server.errors import model_not_found
+from kairyu.engine.embedding import (
+    EmbeddingBackend,
+    EmbeddingCapacityError,
+    EmbeddingResult,
+    MockEmbeddingBackend,
+)
+from kairyu.entrypoints.server.errors import model_not_found, upstream_error
 from kairyu.entrypoints.server.metering import record_state_usage
 from kairyu.entrypoints.server.responses_service import (
     ResponsesRequest,
@@ -35,34 +41,21 @@ __all__ = [
 ]
 
 _MAX_EMBEDDING_INPUTS = 2048  # cap the embeddings batch (M6)
+_MAX_EMBEDDING_UTF8_BYTES = 8 * 1024 * 1024
 
 
-class EmbeddingBackend(Protocol):
-    dimensions: int
-
-    async def embed(self, texts: list[str]) -> list[list[float]]: ...
-
-
-class MockEmbeddingBackend:
-    """Deterministic hash-based unit vectors (CPU tests, wire-format truth)."""
-
-    def __init__(self, dimensions: int = 64) -> None:
-        self.dimensions = dimensions
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        import hashlib
-
-        vectors: list[list[float]] = []
-        for text in texts:
-            values = []
-            counter = 0
-            while len(values) < self.dimensions:
-                digest = hashlib.sha256(f"{text}:{counter}".encode()).digest()
-                values.extend(b / 255.0 - 0.5 for b in digest)
-                counter += 1
-            norm = sum(v * v for v in values[: self.dimensions]) ** 0.5 or 1.0
-            vectors.append([v / norm for v in values[: self.dimensions]])
-        return vectors
+def _embedding_capacity_error() -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": "1"},
+        content={
+            "error": {
+                "message": "embedding backend is at max concurrency",
+                "type": "rate_limit_error",
+                "code": "embedding_concurrency_exceeded",
+            }
+        },
+    )
 
 
 class EmbeddingsRequest(BaseModel):
@@ -103,6 +96,19 @@ def add_extra_routes(
                         "message": f"input exceeds {_MAX_EMBEDDING_INPUTS} items",
                         "type": "invalid_request_error", "code": None}},
                 )
+            input_bytes = sum(len(text.encode()) for text in texts)
+            if input_bytes > _MAX_EMBEDDING_UTF8_BYTES:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {
+                        "message": (
+                            "input exceeds "
+                            f"{_MAX_EMBEDDING_UTF8_BYTES} UTF-8 bytes"
+                        ),
+                        "type": "invalid_request_error",
+                        "code": None,
+                    }},
+                )
             if request.encoding_format not in ("float", "base64"):  # M6: no silent fallthrough
                 return JSONResponse(
                     status_code=400,
@@ -113,16 +119,15 @@ def add_extra_routes(
             owner = getattr(http_request.state, "tenant", None) or "default"
             admission = getattr(http_request.state, "tenant_admission", None)
             if admission is not None:
-                # Embedding backends do not expose authoritative scheduled-token
-                # usage, so reserve and retain a conservative UTF-8 work bound.
-                # The per-item envelope covers tokenizer/template metadata.
-                work_bound = sum(
-                    max(1, len(text.encode()) + 32)
-                    for text in texts
-                )
+                # Reserve before tokenization/dispatch. Production backends
+                # that return exact tokenizer usage may refund the difference;
+                # mocks and legacy estimates retain the conservative bound.
+                work_bound = sum(max(1, len(text.encode()) + 32) for text in texts)
                 admitted = admission.reserve_tokens(
                     work_bound,
-                    refundable_on_exact_usage=False,
+                    refundable_on_exact_usage=bool(
+                        getattr(backend, "reports_exact_usage", False)
+                    ),
                 )
                 metrics = getattr(http_request.app.state, "metrics", None)
                 if metrics is not None:
@@ -148,17 +153,53 @@ def add_extra_routes(
                         },
                     )
                 http_request.state.tenant_metric_admitted = True
+            try:
+                # FastEmbed reserves its bounded execution slot synchronously.
+                # Capacity rejection therefore remains pre-dispatch and the
+                # tenant middleware refunds the conservative token reservation.
+                work = backend.embed(texts)
+            except EmbeddingCapacityError:
+                return _embedding_capacity_error()
+            except Exception as error:
+                return upstream_error(error)
+            if admission is not None:
                 admission.mark_dispatched()
-            vectors = await backend.embed(texts)
+            try:
+                result = await work
+                if not isinstance(result, EmbeddingResult):
+                    raise TypeError(
+                        "embedding backend returned an unsupported result type"
+                    )
+                if len(result.vectors) != len(texts):
+                    raise ValueError(
+                        "embedding backend returned the wrong vector count"
+                    )
+                for vector in result.vectors:
+                    if len(vector) != backend.dimensions:
+                        raise ValueError(
+                            "embedding backend returned the wrong dimensions"
+                        )
+                    if not all(math.isfinite(value) for value in vector):
+                        raise ValueError(
+                            "embedding backend returned a non-finite value"
+                        )
+                if result.prompt_tokens < 0:
+                    raise ValueError(
+                        "embedding backend returned negative token usage"
+                    )
+            except EmbeddingCapacityError:
+                return _embedding_capacity_error()
+            except Exception as error:
+                return upstream_error(error)
             data = []
-            for index, vector in enumerate(vectors):
+            for index, vector in enumerate(result.vectors):
                 if request.encoding_format == "base64":  # SDK default (A9)
                     packed = struct.pack(f"<{len(vector)}f", *vector)
                     payload = base64.b64encode(packed).decode()
                 else:
                     payload = vector
                 data.append({"object": "embedding", "index": index, "embedding": payload})
-            prompt_tokens = sum(len(text.split()) for text in texts)
+            prompt_tokens = result.prompt_tokens
             response = {
                 "object": "list",
                 "data": data,
@@ -172,6 +213,6 @@ def add_extra_routes(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=0,
                 reservation=admission,
-                usage_exact=False,
+                usage_exact=result.usage_exact,
             )
             return response

@@ -290,6 +290,93 @@ embeddings:
     assert spec.embeddings["embed-large"].dimensions == 12
 
 
+def test_fastembed_section_requires_immutable_model_identity():
+    spec = load_deployment_spec(
+        """
+engines:
+  chat: { backend: mock }
+embeddings:
+  embed-small:
+    backend: fastembed
+    model: sentence-transformers/all-MiniLM-L6-v2
+    model_path: /models/all-MiniLM-L6-v2
+    revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    model_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    provenance_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    dimensions: 384
+    batch_size: 32
+    threads: 3
+    max_concurrency: 2
+"""
+    )
+
+    section = spec.embeddings["embed-small"]
+    assert section.backend == "fastembed"
+    assert section.model == "sentence-transformers/all-MiniLM-L6-v2"
+    assert section.model_path == "/models/all-MiniLM-L6-v2"
+    assert section.revision == "a" * 40
+    assert section.model_sha256 == "b" * 64
+    assert section.provenance_sha256 == "c" * 64
+    assert section.dimensions == 384
+    assert section.batch_size == 32
+    assert section.threads == 3
+    assert section.max_concurrency == 2
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("revision", "main"),
+        ("model_sha256", "not-a-digest"),
+        ("provenance_sha256", "not-a-digest"),
+        ("batch_size", 0),
+        ("threads", 0),
+        ("max_concurrency", 0),
+    ],
+)
+def test_fastembed_section_rejects_unpinned_or_unbounded_values(field, value):
+    values = {
+        "revision": "a" * 40,
+        "model_sha256": "b" * 64,
+        "provenance_sha256": "c" * 64,
+        "batch_size": 64,
+        "threads": 2,
+        "max_concurrency": 2,
+    }
+    values[field] = value
+    yaml_text = f"""
+engines:
+  chat: {{ backend: mock }}
+embeddings:
+  embed-small:
+    backend: fastembed
+    model: sentence-transformers/all-MiniLM-L6-v2
+    model_path: /models/all-MiniLM-L6-v2
+    revision: {values["revision"]}
+    model_sha256: {values["model_sha256"]}
+    provenance_sha256: {values["provenance_sha256"]}
+    dimensions: 384
+    batch_size: {values["batch_size"]}
+    threads: {values["threads"]}
+    max_concurrency: {values["max_concurrency"]}
+"""
+
+    with pytest.raises(ValueError, match=field):
+        load_deployment_spec(yaml_text)
+
+
+def test_embedding_sections_forbid_backend_specific_unknown_keys():
+    with pytest.raises(ValueError, match="future_option"):
+        load_deployment_spec(
+            """
+engines:
+  chat: { backend: mock }
+embeddings:
+  embed: { backend: mock, dimensions: 4, future_option: true }
+"""
+        )
+
+
 @pytest.mark.parametrize(
     "yaml_text",
     [

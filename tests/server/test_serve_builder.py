@@ -11,6 +11,8 @@ import kairyu.deploy.builder as builder_module
 from kairyu.deploy.builder import build_app_from_config, build_app_from_spec
 from kairyu.deploy.spec import ServerSection, load_deployment_spec
 from kairyu.dsl.loader import load_spec
+from kairyu.engine.backend import EngineReadiness
+from kairyu.engine.embedding import EmbeddingResult
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantLimits, UsageLedger
@@ -54,6 +56,37 @@ class _StartupBackend(_ShutdownBackend):
         self.startup_count += 1
         if self.fail:
             raise RuntimeError("backend startup failed")
+
+
+class _LifecycleEmbedding:
+    dimensions = 4
+    reports_exact_usage = True
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.started = False
+        self.startup_count = 0
+        self.shutdown_count = 0
+
+    async def startup(self) -> None:
+        self.startup_count += 1
+        if self.fail:
+            raise RuntimeError("embedding startup failed")
+        self.started = True
+
+    def readiness(self) -> EngineReadiness:
+        return EngineReadiness(self.started, "embedding is not started")
+
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
+        return EmbeddingResult(
+            vectors=tuple((1.0, 0.0, 0.0, 0.0) for _ in texts),
+            prompt_tokens=len(texts),
+            usage_exact=True,
+        )
+
+    async def shutdown(self) -> None:
+        self.shutdown_count += 1
+        self.started = False
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -285,6 +318,95 @@ pools:
     assert serving_started is False
     assert direct.startup_count == failing_replica.startup_count == 1
     assert direct.shutdown_count == failing_replica.shutdown_count == 1
+
+
+async def test_lifespan_owns_embedding_startup_readiness_and_shutdown(
+    tmp_path,
+    monkeypatch,
+):
+    embedding = _LifecycleEmbedding()
+    captured = {}
+
+    def factory(**options):
+        captured.update(options)
+        return embedding
+
+    monkeypatch.setitem(
+        builder_module._EMBEDDING_BACKEND_FACTORIES,
+        "fastembed",
+        factory,
+    )
+    app = build_app_from_spec(
+        load_deployment_spec(
+            f"""
+engines:
+  direct: {{ backend: mock }}
+embeddings:
+  embed:
+    backend: fastembed
+    model: test/model
+    model_path: models/embed
+    revision: {"a" * 40}
+    model_sha256: {"b" * 64}
+    provenance_sha256: {"c" * 64}
+    dimensions: 4
+"""
+        ),
+        base_dir=tmp_path,
+    )
+
+    assert captured["model_path"] == tmp_path / "models/embed"
+    assert captured["provenance_sha256"] == "c" * 64
+    assert embedding.startup_count == embedding.shutdown_count == 0
+    async with _client(app) as client:
+        not_ready = await client.get("/readyz")
+    assert not_ready.status_code == 503
+    assert not_ready.json()["embeddings"] == {
+        "embed": "embedding is not started"
+    }
+
+    async with app.router.lifespan_context(app):
+        assert embedding.startup_count == 1
+        async with _client(app) as client:
+            assert (await client.get("/readyz")).status_code == 200
+    assert embedding.shutdown_count == 1
+
+
+async def test_embedding_startup_failure_prevents_serving_and_rolls_back(
+    monkeypatch,
+):
+    embedding = _LifecycleEmbedding(fail=True)
+    monkeypatch.setitem(
+        builder_module._EMBEDDING_BACKEND_FACTORIES,
+        "fastembed",
+        lambda **_options: embedding,
+    )
+    app = build_app_from_spec(
+        load_deployment_spec(
+            f"""
+engines:
+  direct: {{ backend: mock }}
+embeddings:
+  embed:
+    backend: fastembed
+    model: test/model
+    model_path: /models/embed
+    revision: {"a" * 40}
+    model_sha256: {"b" * 64}
+    provenance_sha256: {"c" * 64}
+    dimensions: 4
+"""
+        )
+    )
+    serving_started = False
+
+    with pytest.raises(RuntimeError, match="embedding startup failed"):
+        async with app.router.lifespan_context(app):
+            serving_started = True
+
+    assert serving_started is False
+    assert embedding.startup_count == 1
+    assert embedding.shutdown_count == 1
 
 
 async def test_lifespan_immediate_probe_validates_only_ready_remote_replicas():

@@ -301,3 +301,36 @@ async def test_health_503s_on_a_fatal_engine_fault():
         "status": "fatal",
         "engines": {"m": "ranks not running: [1, 2]"},
     }
+
+
+async def test_embedding_readiness_participates_in_readyz_and_health():
+    from kairyu.engine.backend import EngineReadiness
+
+    class _Embedding:
+        dimensions = 4
+
+        def readiness(self):
+            return EngineReadiness(
+                False,
+                "embedding startup failed (ValueError)",
+                fatal=True,
+            )
+
+    app = create_app(
+        engines={"m": MockBackend()},
+        embedding_backends={"embed": _Embedding()},
+    )
+    async with _client(app) as client:
+        ready = await client.get("/readyz")
+        health = await client.get("/health")
+
+    assert ready.status_code == 503
+    assert ready.json() == {
+        "status": "unready",
+        "embeddings": {"embed": "embedding startup failed (ValueError)"},
+    }
+    assert health.status_code == 503
+    assert health.json() == {
+        "status": "fatal",
+        "embeddings": {"embed": "embedding startup failed (ValueError)"},
+    }

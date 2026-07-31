@@ -5,10 +5,13 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+import kairyu.entrypoints.server.extra_routes as extra_routes_module
+from kairyu.engine.embedding import EmbeddingCapacityError, EmbeddingResult
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.extra_routes import MockEmbeddingBackend
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
 
 
@@ -17,7 +20,7 @@ class RecordingEmbeddingBackend(MockEmbeddingBackend):
         super().__init__(dimensions=dimensions)
         self.calls: list[tuple[str, ...]] = []
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
         self.calls.append(tuple(texts))
         return await super().embed(texts)
 
@@ -153,3 +156,110 @@ def test_create_app_rejects_embedding_model_collisions(surface):
                 "shared": RecordingEmbeddingBackend(dimensions=4)
             },
         )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        EmbeddingResult(vectors=(), prompt_tokens=1, usage_exact=True),
+        EmbeddingResult(vectors=((1.0, 2.0),), prompt_tokens=1, usage_exact=True),
+        EmbeddingResult(
+            vectors=((float("nan"), 0.0, 0.0, 0.0),),
+            prompt_tokens=1,
+            usage_exact=True,
+        ),
+        EmbeddingResult(
+            vectors=((1.0, 0.0, 0.0, 0.0),),
+            prompt_tokens=-1,
+            usage_exact=True,
+        ),
+    ],
+)
+def test_malformed_embedding_backend_output_fails_closed(result):
+    class MalformedBackend(MockEmbeddingBackend):
+        async def embed(self, texts):
+            return result
+
+    app = create_app(
+        {"chat": MockBackend()},
+        embedding_backends={"embed": MalformedBackend(dimensions=4)},
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/embeddings",
+            json={"model": "embed", "input": "hello"},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "backend_error"
+    assert "wrong" not in response.text
+    assert "nan" not in response.text.lower()
+
+
+def test_embedding_request_rejects_total_utf8_work_before_dispatch(monkeypatch):
+    backend = RecordingEmbeddingBackend(dimensions=4)
+    monkeypatch.setattr(
+        extra_routes_module,
+        "_MAX_EMBEDDING_UTF8_BYTES",
+        5,
+    )
+    app = create_app(
+        {"chat": MockBackend()},
+        embedding_backends={"embed": backend},
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/embeddings",
+            json={"model": "embed", "input": ["123", "456"]},
+        )
+
+    assert response.status_code == 400
+    assert "UTF-8 bytes" in response.json()["error"]["message"]
+    assert backend.calls == []
+
+
+def test_embedding_capacity_rejection_is_429_and_refunds_predispatch_work():
+    class BusyBackend(MockEmbeddingBackend):
+        def __init__(self):
+            super().__init__(dimensions=4)
+            self.reports_exact_usage = True
+            self.calls = 0
+
+        def embed(self, texts):
+            self.calls += 1
+            raise EmbeddingCapacityError("private backend capacity detail")
+
+    backend = BusyBackend()
+    app = create_app(
+        {"chat": MockBackend()},
+        tenant_config=TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=100,
+                    token_burst=100,
+                )
+            }
+        ),
+        embedding_backends={"embed": backend},
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/embeddings",
+            json={"model": "embed", "input": "hello"},
+        )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "1"
+    assert response.json()["error"] == {
+        "message": "embedding backend is at max concurrency",
+        "type": "rate_limit_error",
+        "code": "embedding_concurrency_exceeded",
+    }
+    assert "private" not in response.text
+    assert backend.calls == 1
+    assert app.state.tenant_limiter.token_balance("default") == pytest.approx(100)
+    assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0

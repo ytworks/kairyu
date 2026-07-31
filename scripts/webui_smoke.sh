@@ -47,6 +47,50 @@ browser_phase() {
     -e WEBUI_SMOKE_PHASE="$phase" browser
 }
 
+assert_embedding_contract() {
+  local body
+  body=$(curl_bounded -sf \
+    -H "Content-Type: application/json" \
+    -d '{"model":"embed-small","input":["semantic vector retrieval","fresh strawberries"],"encoding_format":"float"}' \
+    "$BASE_URL/v1/embeddings") \
+    || fail "Kairyu production embedding request failed"
+  printf '%s' "$body" | python3 -c '
+import json
+import math
+import sys
+
+payload = json.load(sys.stdin)
+assert payload["model"] == "embed-small", payload
+assert payload["usage"] == {"prompt_tokens": 10, "total_tokens": 10}, payload
+vectors = [item["embedding"] for item in payload["data"]]
+assert len(vectors) == 2, payload
+assert all(len(vector) == 384 for vector in vectors), payload
+assert all(all(math.isfinite(value) for value in vector) for vector in vectors), payload
+assert all(math.isclose(math.sqrt(sum(value * value for value in vector)), 1.0, rel_tol=1e-4, abs_tol=1e-4) for vector in vectors), payload
+assert vectors[0] != vectors[1], payload
+' || fail "Kairyu embedding dimensions/order/usage contract failed"
+}
+
+assert_embedding_metrics() {
+  local minimum=$1 phase=$2 body
+  body=$(curl_bounded -sf "$BASE_URL/metrics") \
+    || fail "Kairyu metrics were unavailable during $phase"
+  printf '%s' "$body" | python3 -c '
+import sys
+
+minimum = float(sys.argv[1])
+value = None
+for line in sys.stdin:
+    if line.startswith("kairyu_requests_total{") and "code=\"200\"" in line and "model=\"embed-small\"" in line:
+        value = float(line.rsplit(" ", 1)[1])
+        break
+if value is None or value < minimum:
+    raise SystemExit(
+        f"embed-small successful request count {value!r} is below required {minimum:g}"
+    )
+' "$minimum" || fail "RAG embedding metrics did not prove $phase traffic"
+}
+
 echo "== validate WebUI compose binds =="
 uv run --frozen --project "$REPO_ROOT" --no-dev \
   python "$COMPOSE_VALIDATOR" "$COMPOSE_FILE"
@@ -82,8 +126,12 @@ echo "== build pinned Playwright runner =="
 compose --profile browser-smoke build browser \
   || fail "Playwright runner build failed"
 
+echo "== production embedding dimensions, order, normalization, and exact usage =="
+assert_embedding_contract
+
 echo "== fresh-user direct/auto streaming and persistence =="
 browser_phase initial || fail "initial browser contract failed"
+assert_embedding_metrics 4 "initial ingest/retrieval/chat"
 
 echo "== gateway outage is visible in the existing Open WebUI instance =="
 compose stop kairyu || fail "could not stop Kairyu"
@@ -94,5 +142,6 @@ compose start kairyu || fail "could not restart Kairyu"
 wait_for "$BASE_URL/readyz" '"ready"' 90 \
   || fail "Kairyu did not become ready after restart"
 browser_phase recovery || fail "browser did not recover after Kairyu restart"
+assert_embedding_metrics 2 "post-restart retrieval/chat"
 
 echo "WEBUI E2E PASS"

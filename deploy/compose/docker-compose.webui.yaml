@@ -5,7 +5,14 @@
 #     --profile browser-smoke run --rm browser
 services:
   kairyu:
-    build: ../..
+    build:
+      context: ../..
+      args:
+        KAIRYU_EMBEDDINGS: "1"
+        KAIRYU_EMBEDDING_MODEL_REPOSITORY: Qdrant/all-MiniLM-L6-v2-onnx
+        KAIRYU_EMBEDDING_MODEL_REVISION: 5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
+        KAIRYU_EMBEDDING_MODEL_SHA256: bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5
+        KAIRYU_EMBEDDING_PROVENANCE_SHA256: 57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c
     ports:
       - "8000:8000"
     volumes:
@@ -32,6 +39,19 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_EMBEDDING_MODEL: embed-small
+      RAG_OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      RAG_OPENAI_API_KEY: sk-local
+      RAG_EMBEDDING_BATCH_SIZE: "32"
+      ENABLE_ASYNC_EMBEDDING: "true"
+      RAG_EMBEDDING_CONCURRENT_REQUESTS: "2"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      RAG_TOP_K: "1"
+      RAG_RELEVANCE_THRESHOLD: "0"
+      RAG_FULL_CONTEXT: "false"
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "false"
+      RAG_RERANKING_ENGINE: ""
       WEBUI_AUTH: "true"
       ENABLE_SIGNUP: "true"
       WEBUI_SECRET_KEY_FILE: /app/backend/data/.webui_secret_key
