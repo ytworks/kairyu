@@ -393,6 +393,11 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
             "Cmd": container["command"],
             "WorkingDir": "/workspace/kairyu",
             "User": "1003:1003",
+            "Env": [
+                "GLOO_SOCKET_IFNAME=lo",
+                "TRITON_CACHE_DIR=/evidence/triton-cache",
+                "FLASHINFER_WORKSPACE_BASE=/evidence/flashinfer-workspace",
+            ],
         }
         host_config = {
             "NetworkMode": "bridge",
@@ -702,14 +707,29 @@ def test_container_metadata_identity_or_configuration_difference_fails_closed(
 
 @pytest.mark.parametrize(
     "difference",
-    ("working_dir", "root_user", "source_rw", "model_type", "missing_meta", "source_drift"),
+    (
+        "working_dir",
+        "root_user",
+        "source_rw",
+        "model_type",
+        "missing_meta",
+        "source_drift",
+        "shared_evidence",
+        "shared_metadata",
+        "triton_env",
+        "flashinfer_env",
+        "duplicate_triton_env",
+    ),
 )
 def test_container_mount_or_execution_carrier_difference_fails_closed(
     tmp_path: Path,
     difference: str,
 ) -> None:
     paths, metadata = _write_fixture_inputs(tmp_path)
-    identities = gate.SHARD_PLAN if difference != "source_drift" else (gate.SHARD_PLAN[1],)
+    one_shard_differences = {"source_drift", "shared_evidence", "shared_metadata"}
+    identities = (
+        (gate.SHARD_PLAN[1],) if difference in one_shard_differences else gate.SHARD_PLAN
+    )
     for identity in identities:
         label = gate.SHARD_LABELS[identity]
         for name in (gate.CONTAINER_CREATED_NAME, gate.CONTAINER_EXITED_NAME):
@@ -719,6 +739,21 @@ def test_container_mount_or_execution_carrier_difference_fails_closed(
                 inspect["Config"]["WorkingDir"] = "/app"
             elif difference == "root_user":
                 inspect["Config"]["User"] = "0:0"
+            elif difference in {"triton_env", "flashinfer_env"}:
+                name = (
+                    "TRITON_CACHE_DIR"
+                    if difference == "triton_env"
+                    else "FLASHINFER_WORKSPACE_BASE"
+                )
+                environment = inspect["Config"]["Env"]
+                entry_index = next(
+                    index
+                    for index, entry in enumerate(environment)
+                    if entry.startswith(f"{name}=")
+                )
+                environment[entry_index] = f"{name}=/shared-cache"
+            elif difference == "duplicate_triton_env":
+                inspect["Config"]["Env"].append("TRITON_CACHE_DIR=/shared-cache")
             else:
                 mounts = {
                     mount["Destination"]: mount for mount in inspect["Mounts"]
@@ -729,6 +764,10 @@ def test_container_mount_or_execution_carrier_difference_fails_closed(
                     mounts["/models/qwen3-32b"]["Type"] = "bind"
                 elif difference == "missing_meta":
                     inspect["Mounts"].remove(mounts["/run/kairyu-meta"])
+                elif difference == "shared_evidence":
+                    mounts["/evidence"]["Source"] = "/fixture/evidence/round0-off"
+                elif difference == "shared_metadata":
+                    mounts["/run/kairyu-meta"]["Source"] = "/fixture/metadata/round0-off"
                 else:
                     mounts["/workspace/kairyu"]["Source"] = "/fixture/other-source"
             _replace_inspect(path, inspect)

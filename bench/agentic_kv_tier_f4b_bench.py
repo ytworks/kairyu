@@ -1948,6 +1948,32 @@ def _container_mount_inventory(value: object, label: str) -> dict[str, dict[str,
     return mounts
 
 
+def _container_env_inventory(value: object, label: str) -> dict[str, str]:
+    _require(isinstance(value, list), f"Docker environment is invalid: {label}")
+    environment: dict[str, str] = {}
+    for item in value:
+        _require(
+            isinstance(item, str) and "=" in item,
+            f"Docker environment entry is invalid: {label}",
+        )
+        name, entry_value = item.split("=", 1)
+        _require(
+            bool(name) and name not in environment,
+            f"Docker environment name is invalid or duplicated: {label}",
+        )
+        environment[name] = entry_value
+    required = {
+        "GLOO_SOCKET_IFNAME": "lo",
+        "TRITON_CACHE_DIR": "/evidence/triton-cache",
+        "FLASHINFER_WORKSPACE_BASE": "/evidence/flashinfer-workspace",
+    }
+    _require(
+        all(environment.get(name) == expected for name, expected in required.items()),
+        f"Docker per-arm cache environment differs: {label}",
+    )
+    return environment
+
+
 def _validate_container_lifecycle(
     value: object,
     shards: Mapping[tuple[int, str, str], Mapping[str, object]],
@@ -1971,6 +1997,8 @@ def _validate_container_lifecycle(
     previous_finished_ns: int | None = None
     bound_source_host_path: str | None = None
     model_volume_host_path: str | None = None
+    evidence_host_paths: set[str] = set()
+    metadata_host_paths: set[str] = set()
     for index, identity in enumerate(SHARD_PLAN):
         label = SHARD_LABELS[identity]
         entry_value = entries[index]
@@ -2048,6 +2076,7 @@ def _validate_container_lifecycle(
             and re.fullmatch(r"[1-9][0-9]*(?::[1-9][0-9]*)?", config["User"]) is not None,
             f"Docker bound-source working directory/non-root user differs: {label}",
         )
+        _container_env_inventory(config.get("Env"), label)
         created_mounts = _container_mount_inventory(created.get("Mounts"), f"{label} created")
         exited_mounts = _container_mount_inventory(exited.get("Mounts"), f"{label} exited")
         _require(
@@ -2056,6 +2085,8 @@ def _validate_container_lifecycle(
         )
         source_host_path = created_mounts["/workspace/kairyu"]["source"]
         model_host_path = created_mounts["/models/qwen3-32b"]["source"]
+        evidence_host_paths.add(str(created_mounts["/evidence"]["source"]))
+        metadata_host_paths.add(str(created_mounts["/run/kairyu-meta"]["source"]))
         if bound_source_host_path is None:
             bound_source_host_path = str(source_host_path)
             model_volume_host_path = str(model_host_path)
@@ -2117,6 +2148,11 @@ def _validate_container_lifecycle(
                 f"Docker container lifecycles overlap fixed shard order: {label}",
             )
         previous_finished_ns = finished_ns
+    _require(
+        len(evidence_host_paths) == len(SHARD_PLAN)
+        and len(metadata_host_paths) == len(SHARD_PLAN),
+        "Docker per-arm cache/evidence metadata mounts are not isolated",
+    )
     return lifecycle
 
 
