@@ -757,8 +757,11 @@ image, and drill are unchanged.
   volume subpath. Run as the host UID/GID, leave Docker's default hostname in
   place so it remains the container-ID prefix, and give the container only a
   read-only source clone, read-only full-container-ID metadata directory, and
-  its own read-write output directory. `memlock=-1`, host IPC/network, and
-  loopback Gloo are part of the retained runtime contract.
+  its own read-write output directory. `memlock=-1`, host IPC, Docker's
+  default bridge network, loopback Gloo, and an explicit writable Triton cache
+  are part of the retained runtime contract. Host networking is invalid here:
+  it replaces the container-ID hostname with the host name and breaks the
+  provenance binding.
 
   ```bash
   set -euo pipefail
@@ -797,11 +800,12 @@ image, and drill are unchanged.
 
   TP4_CID=$(docker create \
     --name "kairyu-f4a-tp4-${COMMIT:0:12}" \
-    --gpus 'device=0,1,2,3' \
+    --gpus '"device=0,1,2,3"' \
     --user "$HOST_UID:$HOST_GID" \
     --entrypoint /app/.venv/bin/python \
-    --ulimit memlock=-1:-1 --ipc=host --network=host \
+    --ulimit memlock=-1:-1 --ipc=host \
     -e GLOO_SOCKET_IFNAME=lo \
+    -e TRITON_CACHE_DIR=/evidence/triton-cache \
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount \
@@ -817,6 +821,10 @@ image, and drill are unchanged.
       --container-id-file /run/kairyu-meta/container-id \
       "${REPO_ARGS[@]}" --max-num-batched-tokens 2048 --timeout-s 1800)
   test "${#TP4_CID}" -eq 64
+  test "$(docker inspect --format '{{.Config.Hostname}}' "$TP4_CID")" \
+    = "${TP4_CID:0:12}"
+  test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$TP4_CID")" \
+    != host
   printf '%s\n' "$TP4_CID" > "$RUN_ROOT/metadata/tp4/container-id"
   docker inspect "$TP4_CID" \
     > "$RUN_ROOT/metadata/tp4/container-inspect-created.json"
@@ -833,11 +841,12 @@ image, and drill are unchanged.
 
   TP8_CID=$(docker create \
     --name "kairyu-f4a-tp8-${COMMIT:0:12}" \
-    --gpus 'device=0,1,2,3,4,5,6,7' \
+    --gpus '"device=0,1,2,3,4,5,6,7"' \
     --user "$HOST_UID:$HOST_GID" \
     --entrypoint /app/.venv/bin/python \
-    --ulimit memlock=-1:-1 --ipc=host --network=host \
+    --ulimit memlock=-1:-1 --ipc=host \
     -e GLOO_SOCKET_IFNAME=lo \
+    -e TRITON_CACHE_DIR=/evidence/triton-cache \
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount \
@@ -853,6 +862,10 @@ image, and drill are unchanged.
       --container-id-file /run/kairyu-meta/container-id \
       "${REPO_ARGS[@]}" --max-num-batched-tokens 2048 --timeout-s 1800)
   test "${#TP8_CID}" -eq 64
+  test "$(docker inspect --format '{{.Config.Hostname}}' "$TP8_CID")" \
+    = "${TP8_CID:0:12}"
+  test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$TP8_CID")" \
+    != host
   printf '%s\n' "$TP8_CID" > "$RUN_ROOT/metadata/tp8/container-id"
   docker inspect "$TP8_CID" \
     > "$RUN_ROOT/metadata/tp8/container-inspect-created.json"
