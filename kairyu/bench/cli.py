@@ -1,4 +1,4 @@
-"""`kairyu bench` subcommands: run / download / report / list."""
+"""``kairyu bench`` subcommands and benchmark ownership inspection."""
 
 from __future__ import annotations
 
@@ -151,6 +151,23 @@ def add_bench_parser(subparsers) -> None:
 
     commands.add_parser("list", help="List benchmarks, requirements, and cache status.")
 
+    entrypoints = commands.add_parser(
+        "entrypoints",
+        help="List installed and repository-only benchmark ownership.",
+    )
+    entrypoints.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the package-owned entrypoint manifest as JSON.",
+    )
+    entrypoints.add_argument(
+        "--check-repo",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Validate a Kairyu source checkout against the ownership manifest.",
+    )
+
 
 def handle(args: argparse.Namespace) -> int:
     if args.bench_command == "run":
@@ -161,6 +178,8 @@ def handle(args: argparse.Namespace) -> int:
         return _handle_report(args)
     if args.bench_command == "list":
         return _handle_list(args)
+    if args.bench_command == "entrypoints":
+        return _handle_entrypoints(args)
     raise ValueError(f"unknown bench command {args.bench_command!r}")
 
 
@@ -304,3 +323,41 @@ def _handle_list(args) -> int:  # noqa: ARG001 - argparse handler signature
         extras = f" [{', '.join(needs)}]" if needs else ""
         print(f"  {name:24s} {info.display_name} — {info.metric}{extras} ({state})")
     return 0
+
+
+def _handle_entrypoints(args) -> int:
+    from kairyu.bench.ownership import (
+        entrypoints_payload,
+        load_entrypoints,
+        validate_repository,
+    )
+
+    errors = (
+        validate_repository(args.check_repo)
+        if args.check_repo is not None
+        else ()
+    )
+    if args.json:
+        payload = entrypoints_payload()
+        if args.check_repo is not None:
+            payload["repository_check"] = {
+                "path": str(args.check_repo),
+                "valid": not errors,
+                "errors": list(errors),
+            }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1 if errors else 0
+
+    print("installed: kairyu.bench library, kairyu bench CLI, package fixtures")
+    print("repository-only: bench/*.py entrypoints and bench/results artifacts")
+    for entry in load_entrypoints():
+        requirements = ",".join(entry.requires)
+        print(f"  {entry.path:48s} {entry.kind:16s} [{requirements}]")
+    if args.check_repo is not None:
+        if errors:
+            print(f"repository check: FAILED ({args.check_repo})")
+            for error in errors:
+                print(f"  - {error}")
+        else:
+            print(f"repository check: OK ({args.check_repo})")
+    return 1 if errors else 0

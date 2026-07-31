@@ -638,6 +638,18 @@ object-store adapter; LMCache wholesale and expansion of `KVTransport` into a
 global store remain rejected. The retained decision artifact SHA-256 is
 `1f75eca37df253ae27b651b4702f988ce364165378d80ce451615a3b7a5b06d3`.
 
+Benchmark ownership is now package-enforced. The installed `kairyu.bench`
+surface owns reusable target/auth/statistics/reporting contracts, the public
+CLI, eight fixtures, and a packaged registry for all 51 checkout-only
+wrappers. Exact existing wrapper-composition edges are frozen; new reusable
+dependencies, missing docs/main guards, or path/module CLI regressions fail
+validation. Historical `bench/*.py` and `bench/results/**` provenance paths
+remain unchanged, while a real-wheel CI gate proves that neither is shipped.
+Target construction now canonicalizes `/v1`, validates environment-variable
+credential names, fails closed when configured credentials are absent, and
+redacts secrets from errors. Generic serving/frontier artifacts record their
+nearest-rank percentile method; formal gate schemas remain source-bound.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -645,6 +657,30 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [design] Benchmark ownership becomes package-enforced
+- What: made `kairyu.bench` the installed owner of reusable target,
+  credential, percentile, and atomic-reporting contracts; moved Fugu's
+  `ResultStore` and the general serving/frontier wrappers onto those
+  primitives; and added a packaged 51-entry registry plus exact allowlist for
+  the 14 retained wrapper-composition edges. Both historical wrapper invocation
+  forms are exercised 102/102, all installed benchmark subcommands and eight
+  fixtures are verified from a real isolated wheel, and checkout-only
+  wrappers/results/tests are rejected from that wheel. URL and credential
+  construction is identical across combined flags, split flags, direct models,
+  and YAML; configured missing credentials fail closed and secret inputs are
+  redacted. New serving/frontier artifacts identify
+  `nearest-rank-v1`; older percentile semantics are explicitly migrated.
+- Why: installable quality benchmarks and repository-only formal/performance
+  operators had no enforceable ownership boundary and had already diverged on
+  credentials, URL normalization, percentile definitions, and atomic output.
+  Keeping stable wrapper/result paths preserves G2/G4/G5/G6 replay provenance,
+  while package-owned reusable semantics and CI-enforced inventories prevent
+  that drift from recurring.
+- Refs: issue #232;
+  `kairyu/bench/{entrypoints.toml,ownership.py,targets.py,reporting.py}`;
+  `bench/README.md`; `scripts/verify_bench_{entrypoints,wheel}.py`;
+  `docs/{benchmarks.md,gpu-runbook.md}`
 
 ### 2026-07-31 — [amendment] F4c defers a global KV pool after exact F2 replay
 - What: added a fail-closed F4c analyzer and retained decision artifact that

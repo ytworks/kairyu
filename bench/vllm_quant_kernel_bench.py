@@ -12,11 +12,10 @@ import math
 import statistics
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F
-import vllm
-from vllm import _custom_ops as ops
 
 
 def _measure(fn, warmup: int, repeats: int) -> dict[str, float | int]:
@@ -58,7 +57,19 @@ def _error_metrics(
     }
 
 
-def _fp8(weight: torch.Tensor):
+def _load_vllm_runtime() -> tuple[Any, Any]:
+    try:
+        import vllm
+        from vllm import _custom_ops
+    except ImportError as error:
+        raise RuntimeError(
+            "vllm_quant_kernel_bench requires vLLM and its _custom_ops extension; "
+            "run it inside the pinned vllm/vllm-openai CUDA image"
+        ) from error
+    return vllm, _custom_ops
+
+
+def _fp8(weight: torch.Tensor, ops: Any):
     qweight, weight_scale = ops.scaled_fp8_quant(
         weight, use_per_token_if_dynamic=True
     )
@@ -81,7 +92,7 @@ def _fp8(weight: torch.Tensor):
     return build
 
 
-def _int8(weight: torch.Tensor):
+def _int8(weight: torch.Tensor, ops: Any):
     qweight, weight_scale, _ = ops.scaled_int8_quant(weight)
 
     def build(x):
@@ -100,7 +111,7 @@ def _int8(weight: torch.Tensor):
     return build
 
 
-def _nvfp4(weight: torch.Tensor):
+def _nvfp4(weight: torch.Tensor, ops: Any):
     weight_scale = (
         weight.float().abs().amax() / (6.0 * 448.0)
     ).clamp(min=1e-12)
@@ -140,6 +151,10 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--repeats", type=int, default=200)
     args = parser.parse_args()
+    try:
+        vllm, ops = _load_vllm_runtime()
+    except RuntimeError as error:
+        parser.error(str(error))
 
     torch.manual_seed(205)
     weight = torch.randn(
@@ -147,9 +162,9 @@ def main() -> None:
     )
     records = []
     for scheme, prepare in (
-        ("fp8", _fp8),
-        ("int8", _int8),
-        ("nvfp4", _nvfp4),
+        ("fp8", lambda value: _fp8(value, ops)),
+        ("int8", lambda value: _int8(value, ops)),
+        ("nvfp4", lambda value: _nvfp4(value, ops)),
     ):
         build = prepare(weight)
         for m_size in args.m:

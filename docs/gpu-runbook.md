@@ -15,6 +15,15 @@ Purpose: everything CPU-verifiable is done (M8–M19: the full engine/model/quan
 distributed/transport stack, ~647 tests on main). This is the ordered,
 command-level plan for the first GPU session. Est. scope: 2–4 focused days.
 
+> **Benchmark command provenance:** Every top-level `bench/*.py` command in this
+> runbook is a source-checkout-only compatibility entrypoint recorded in
+> `kairyu/bench/entrypoints.toml`; it is not installed in the wheel. Run formal
+> measurements from the exact clean commit whose wrapper and package-owned
+> `kairyu.bench` helpers are recorded by the artifact. Before a GPU session, run
+> `uv run --frozen kairyu bench entrypoints --check-repo .`. Result artifacts
+> remain under the checkout-only `bench/results/` path so G2/G4/G5/G6 provenance
+> and historical replay commands do not change.
+
 > Note (2026-07-04): §1/§3 below predate M8/M12/M13 — the tokenizer seam,
 > `PagedModelRunner`, the `AttentionBackend`/`FlashInferBackend` seam, and quant
 > loading are already delivered. The GPU-day work is enabling/tuning the real

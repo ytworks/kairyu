@@ -29,6 +29,11 @@ jobs:
           --require-module xgrammar
           --require-module zmq
           --require-module yaml
+      - name: Verify benchmark entrypoints and wheel boundary
+        if: matrix.python-version == '3.12'
+        run: |
+          uv run --frozen python scripts/verify_bench_entrypoints.py
+          uv run --frozen python scripts/verify_bench_wheel.py
       - name: Lint
         run: uv run --frozen ruff check .
       - name: Test with coverage gate

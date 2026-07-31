@@ -38,7 +38,9 @@ async def test_run_one_reads_usage_chunk_for_token_tpot():
         return StreamingResponse(_gen(), media_type="text/event-stream")
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://t/v1"
+    ) as client:
         metrics = await serving_bench.run_one(
             client,
             "m",
@@ -79,7 +81,9 @@ async def test_run_one_falls_back_when_target_rejects_stream_options():
         return StreamingResponse(_gen(), media_type="text/event-stream")
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://t/v1"
+    ) as client:
         metrics = await serving_bench.run_one(
             client,
             "m",
@@ -127,7 +131,9 @@ def test_summary_retains_raw_request_timings_and_token_throughput():
 
     assert summary["wall_ns"] == 1_000_000_000
     assert summary["wall_s"] == 1.0
+    assert summary["ttft_p50_ms"] == 100.0
     assert summary["completion_tokens_total"] == 9
+    assert summary["percentile_method"] == "nearest-rank-v1"
     assert summary["output_tokens_per_s"] == 9.0
     assert summary["tpot_method"] == "token"
     assert summary["goodput_rps"] == 1.0
@@ -149,3 +155,63 @@ def test_summary_retains_raw_request_timings_and_token_throughput():
             "completion_tokens": 5,
         },
     ]
+
+
+def test_shared_target_form_normalizes_url_and_uses_env_secret(monkeypatch):
+    monkeypatch.setenv("SERVING_API_KEY", "private-value")
+    args = serving_bench.build_parser().parse_args(
+        [
+            "--target",
+            "gateway=http://gateway.test:8000/=model=SERVING_API_KEY",
+        ]
+    )
+
+    target = serving_bench.resolve_target(args)
+    config = serving_bench.build_run_config(args)
+
+    assert target.base_url == "http://gateway.test:8000/v1"
+    assert serving_bench.resolve_api_key(args, target) == "private-value"
+    assert config["api_key_env"] == "SERVING_API_KEY"
+    assert config["api_key_source"] == "environment"
+    assert "private-value" not in str(config)
+
+
+def test_shared_target_refuses_conflicting_legacy_endpoint_flags():
+    args = serving_bench.build_parser().parse_args(
+        [
+            "--target",
+            "gateway=http://gateway.test=model",
+            "--model",
+            "other-model",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        serving_bench.resolve_target(args)
+
+
+def test_missing_explicit_api_key_environment_fails_closed(monkeypatch):
+    monkeypatch.delenv("MISSING_SERVING_API_KEY", raising=False)
+    args = serving_bench.build_parser().parse_args(
+        ["--api-key-env", "MISSING_SERVING_API_KEY"]
+    )
+    target = serving_bench.resolve_target(args)
+
+    with pytest.raises(ValueError, match="MISSING_SERVING_API_KEY"):
+        serving_bench.resolve_api_key(args, target)
+
+
+def test_legacy_literal_api_key_never_enters_recorded_config():
+    secret = "literal-secret-value"
+    args = serving_bench.build_parser().parse_args(["--api-key", secret])
+    target = serving_bench.resolve_target(args)
+    config = serving_bench.build_run_config(args)
+
+    assert serving_bench.resolve_api_key(args, target) == secret
+    assert config["api_key_source"] == "legacy-cli"
+    assert secret not in str(config)
+    assert "Deprecated literal bearer token" in serving_bench.build_parser().format_help()
+
+
+def test_serving_percentile_uses_nearest_rank_definition():
+    assert serving_bench._percentile(list(range(1, 21)), 0.95) == 19
