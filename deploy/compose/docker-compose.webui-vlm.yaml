@@ -42,9 +42,9 @@ services:
       - b282fe1ca05915cc8825369f6aa510d7a0982594
       - --served-model-name
       - qwen3-vl-32b
-      # Open WebUI attaches its built-in tools with tool_choice=auto. Preserve
-      # that intent through Kairyu and use the parser matching Qwen3-VL's
-      # pinned <tool_call>{JSON}</tool_call> chat-template format.
+      # Open WebUI can attach built-in tools; vLLM normalizes an omitted
+      # tool_choice to auto. Preserve that intent through Kairyu and use the
+      # parser matching the pinned <tool_call>{JSON}</tool_call> template.
       - --enable-auto-tool-choice
       - --tool-call-parser
       - hermes

@@ -750,3 +750,7 @@ image, and drill are unchanged.
   chat request, and renders RED. Any missing runtime/GPU, omitted usage,
   incorrect semantic answer, upload shortcut, skip, or upstream error is a
   failure rather than a closure result.
+
+  The retained clean-commit run on 2026-07-31 passed all phases on
+  8× RTX PRO 6000. See
+  `bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.

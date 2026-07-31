@@ -442,7 +442,9 @@ reservation ceiling. `scripts/webui_vlm_smoke.sh` proves RED/BLUE semantic
 separation, exact unary/stream usage, remote-URL rejection, and a normal
 Open WebUI owned-file upload that becomes an inline data URL only inside the
 Open WebUI backend before reaching Kairyu. This GPU gate remains separate from
-CPU-only GitHub Actions.
+CPU-only GitHub Actions. The clean `b8971cb` gate passed every binding check on
+8× RTX PRO 6000; the retained result is
+`bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.
 
 `bench/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
@@ -603,4 +605,5 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   VLM must return exact processor usage; failure without usage consumes the
   reserved upper bound rather than guessing or refunding. The GPU gate must use
   the normal Open WebUI owned-file upload path and prove that two different
-  images produce different correct model answers.
+  images produce different correct model answers. This acceptance item does not
+  claim native multimodal tool-continuation support.

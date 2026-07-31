@@ -1,9 +1,8 @@
 # Goal G6: Product Surface — Truthful API, Fugu-Class Orchestrated Product, Competitive Proof (Roadmap Track P)
 
-Status: Goal defined (2026-07-03). P-A, all of P-B, P-C2, and P-C3 are green;
-P-C4's production path and reproducible TP8 gate are implemented and awaiting
-the retained real-model result. P-C's scoreboard needs real engines for the
-Kairyu column but runs against frontier APIs immediately.
+Status: Goal defined (2026-07-03). P-A, all of P-B, P-C2, P-C3, and P-C4 are
+green. P-C's scoreboard needs real engines for the Kairyu column but runs
+against frontier APIs immediately.
 Depends on: M1/M7 server stack; real token accounting quality gates depend on
 Track E1 (real tokenizer). See `docs/roadmap.md` §4 Track P.
 Date: 2026-07-03
@@ -136,8 +135,12 @@ aspect-ratio, and complete-context bounds. Full media work completes off the
 event loop before admission or SSE headers, and exact processor usage is
 mandatory. The GPU-only Compose overlay and `scripts/webui_vlm_smoke.sh` bind
 RED/BLUE output semantics, unary/stream usage, remote-URL rejection, and the
-normal Open WebUI owned-file upload path. P-C4 becomes green only after that
-real TP8 gate completes from a clean implementation commit.
+normal Open WebUI owned-file upload path. The clean `b8971cb` TP8 gate passed:
+RED and BLUE produced their corresponding distinct answers, unary and stream
+each reported exact 1,060 input / 2 output tokens, the remote URL failed with
+`400 invalid_image`, and the real browser owned-file path rendered RED. The
+retained result is
+`bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.
 
 ## 3. Non-goals
 
