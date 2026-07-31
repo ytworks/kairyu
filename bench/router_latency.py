@@ -5,8 +5,10 @@ Run: uv run python bench/router_latency.py
 
 from __future__ import annotations
 
+import argparse
 import statistics
 import time
+from collections.abc import Sequence
 
 from kairyu.orchestration.router import RuleRouter
 
@@ -19,10 +21,26 @@ QUERIES = (
 )
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--routes",
+        type=int,
+        default=N_ROUTES,
+        help=f"number of routes to measure (default: {N_ROUTES})",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.routes < 1:
+        parser.error("--routes must be at least 1")
+
     router = RuleRouter()
     durations = []
-    for i in range(N_ROUTES):
+    for i in range(args.routes):
         query = QUERIES[i % len(QUERIES)]
         start = time.perf_counter()
         router.route(query)
@@ -30,7 +48,7 @@ def main() -> None:
     durations.sort()
     p50 = statistics.median(durations)
     p99 = durations[int(len(durations) * 0.99)]
-    print(f"routes={N_ROUTES}")
+    print(f"routes={args.routes}")
     print(f"router latency p50={p50 * 1e6:.1f}us p99={p99 * 1e6:.1f}us")
     print(f"budget: p99 < 10ms -> {'OK' if p99 < 0.010 else 'VIOLATED'}")
 

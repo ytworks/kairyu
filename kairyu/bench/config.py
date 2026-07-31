@@ -8,21 +8,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kairyu.bench.targets import parse_target_spec
 from kairyu.bench.types import BenchConfig, BenchTarget, JudgeConfig
 
 
 def parse_target_flag(spec: str, **sampling) -> BenchTarget:
-    """`name=base_url=model[=api_key_env]` (frontier_compare.py precedent)."""
-    parts = spec.split("=")
-    if len(parts) not in (3, 4):
-        raise ValueError(
-            f"--target {spec!r}: expected name=base_url=model[=api_key_env]"
-        )
-    name, base_url, model = parts[:3]
-    api_key_env = parts[3] if len(parts) == 4 else None
-    return BenchTarget(
-        name=name, base_url=base_url, model=model, api_key_env=api_key_env, **sampling
-    )
+    """Compatibility alias for the package-owned target parser."""
+    return parse_target_spec(spec, **sampling)
 
 
 def _cli_sampling(args) -> dict:

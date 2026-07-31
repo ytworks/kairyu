@@ -23,6 +23,7 @@ import httpx
 
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.progress import NullProgress
+from kairyu.bench.targets import normalize_base_url, target_api_key
 from kairyu.bench.types import (
     BenchItem,
     BenchTarget,
@@ -139,11 +140,6 @@ def utc_now() -> str:
 def estimate_tokens(text: str) -> int:
     """Chars/4 heuristic — recorded in methodology wherever it gates items."""
     return len(text) // 4 + 1
-
-
-def normalize_base_url(base_url: str) -> str:
-    root = base_url.rstrip("/")
-    return root if root.endswith("/v1") else f"{root}/v1"
 
 
 def mcq_prompt(question: str, choices: list[str]) -> str:
@@ -591,11 +587,3 @@ class GenerativeAdapter(ABC):
                 else ()
             ),
         )
-
-
-def target_api_key(target: BenchTarget) -> str | None:
-    if target.api_key_env is None:
-        return None
-    import os
-
-    return os.environ.get(target.api_key_env)

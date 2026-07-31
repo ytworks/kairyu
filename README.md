@@ -921,14 +921,22 @@ uv run kairyu bench run --base-url http://localhost:8000/v1 \
 
 Datasets download to `~/.cache/kairyu/benchmarks` (never committed); unmet preconditions
 (no docker, gated dataset, no judge) become annotated `skipped` cells, so the run always
-completes. Subcommands: `bench run`, `bench download`, `bench report <run>`, `bench list`.
-Full guide: [`docs/benchmarks.md`](docs/benchmarks.md).
+completes. Subcommands: `bench run`, `bench download`, `bench report <run>`, `bench list`,
+and `bench entrypoints`. Full guide: [`docs/benchmarks.md`](docs/benchmarks.md).
+
+The wheel includes the reusable `kairyu.bench` library, public CLI, entrypoint
+manifest, and eight offline fixtures. Top-level `bench/*.py` developer/formal
+wrappers, `bench/results/`, and `tests/` remain checkout-only; their stable
+inventory and compatibility policy are in [`bench/README.md`](bench/README.md).
 
 ## 9. Development
 
 ```bash
 uv run --frozen pytest --fail-on-skip  # portable tests + coverage (gate: 80%)
 uv run --frozen ruff check .           # lint (E, F, I, UP, B; line length 100)
+uv run --frozen kairyu bench entrypoints --check-repo .
+uv run --frozen python scripts/verify_bench_entrypoints.py
+uv run --frozen python scripts/verify_bench_wheel.py
 uv run --frozen python bench/router_latency.py
 uv run --frozen python bench/orchestration_mock_bench.py
 ```

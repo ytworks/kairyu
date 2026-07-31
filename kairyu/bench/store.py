@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
 from pathlib import Path, PureWindowsPath
 
+from kairyu.bench.reporting import atomic_write_text
 from kairyu.bench.types import PairResult
 
 
@@ -213,26 +212,8 @@ class ResultStore:
 
     def _atomic_write(self, path: Path, text: str) -> None:
         self._preflight_atomic_write(path)
-        fd: int | None = None
-        tmp: Path | None = None
-        try:
-            fd, tmp_name = tempfile.mkstemp(
-                dir=path.parent,
-                prefix=f".{path.name}.",
-                suffix=".tmp",
-                text=True,
-            )
-            tmp = self._require_contained_artifact(path.parent / Path(tmp_name).name)
-            with os.fdopen(fd, "w", encoding="utf-8") as output:
-                fd = None
-                output.write(text)
-                output.flush()
-                os.fsync(output.fileno())
-            self._preflight_atomic_write(path)
-            os.replace(tmp, path)
-            tmp = None
-        finally:
-            if fd is not None:
-                os.close(fd)
-            if tmp is not None:
-                tmp.unlink(missing_ok=True)
+        atomic_write_text(
+            path,
+            text,
+            validate_path=self._require_contained_artifact,
+        )

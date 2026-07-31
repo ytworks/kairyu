@@ -20,13 +20,29 @@ import asyncio
 import datetime as _datetime
 import json
 import statistics
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
+from kairyu.bench.reporting import (
+    PERCENTILE_METHOD,
+    atomic_write_json,
+    nearest_rank_percentile,
+)
+from kairyu.bench.targets import (
+    TARGET_SPEC_FORMAT,
+    normalize_base_url,
+    parse_target_spec,
+    target_api_key,
+)
+from kairyu.bench.types import BenchTarget
+
 _SSE_PREFIX = "data: "
+_DEFAULT_BASE_URL = "http://localhost:8000"
+_DEFAULT_MODEL = "kairyu-mock"
 
 
 @dataclass(frozen=True)
@@ -109,7 +125,9 @@ async def run_one(
     ttft = None
     chunks = 0
     completion_tokens = None
-    async with client.stream("POST", "/v1/chat/completions", json=body) as response:
+    # Clients use the shared canonical API root (ending in /v1). Keep the
+    # request relative so URL joining cannot produce /v1/v1.
+    async with client.stream("POST", "chat/completions", json=body) as response:
         if response.status_code == 400 and request_usage:
             # target rejects stream_options: retry once without (labeled fallback)
             return await run_one(
@@ -147,7 +165,55 @@ async def run_one(
 
 
 def _percentile(sorted_values: list[float], fraction: float) -> float:
-    return sorted_values[min(int(len(sorted_values) * fraction), len(sorted_values) - 1)]
+    """Compatibility wrapper for the package-owned nearest-rank definition."""
+    return nearest_rank_percentile(sorted_values, fraction)
+
+
+def resolve_target(args: argparse.Namespace) -> BenchTarget:
+    """Resolve the shared target contract or the legacy split endpoint flags."""
+    target_spec = getattr(args, "target", None)
+    base_url = getattr(args, "base_url", None)
+    model = getattr(args, "model", None)
+    api_key_env = getattr(args, "api_key_env", None)
+    literal_api_key = getattr(args, "api_key", None)
+
+    if target_spec is not None:
+        conflicting = [
+            flag
+            for flag, value in (
+                ("--base-url", base_url),
+                ("--model", model),
+                ("--api-key-env", api_key_env),
+                ("--api-key", literal_api_key),
+            )
+            if value is not None
+        ]
+        if conflicting:
+            raise ValueError(
+                f"--target cannot be combined with {', '.join(conflicting)}"
+            )
+        return parse_target_spec(target_spec)
+
+    if literal_api_key == "":
+        raise ValueError("--api-key must not be empty")
+    resolved_model = model or _DEFAULT_MODEL
+    return BenchTarget(
+        name=resolved_model,
+        base_url=normalize_base_url(base_url or _DEFAULT_BASE_URL),
+        model=resolved_model,
+        api_key_env=api_key_env,
+    )
+
+
+def resolve_api_key(args: argparse.Namespace, target: BenchTarget) -> str | None:
+    """Resolve auth without ever adding the secret value to run metadata."""
+    literal_api_key = getattr(args, "api_key", None)
+    if literal_api_key is not None:
+        return literal_api_key
+    return target_api_key(
+        target,
+        required=target.api_key_env is not None,
+    )
 
 
 def build_run_config(args: argparse.Namespace) -> dict:
@@ -156,9 +222,19 @@ def build_run_config(args: argparse.Namespace) -> dict:
     The topology args (``--tensor-parallel``, ``--dp-replicas``, ``--pd``) are
     labels for the results file; the GPU phase wires them into engine behavior.
     """
+    target = resolve_target(args)
     return {
-        "base_url": args.base_url,
-        "model": args.model,
+        "target": target.label(),
+        "base_url": normalize_base_url(target.base_url),
+        "model": target.model,
+        "api_key_env": target.api_key_env,
+        "api_key_source": (
+            "legacy-cli"
+            if getattr(args, "api_key", None) is not None
+            else "environment"
+            if target.api_key_env is not None
+            else "none"
+        ),
         "dataset": args.dataset,
         "num_requests": args.num_requests,
         "concurrency": args.concurrency,
@@ -208,11 +284,12 @@ def summarize_results(
     ]
     summary = {
         "dataset": dataset_label,
+        "percentile_method": PERCENTILE_METHOD,
         "requests": len(results),
         "wall_ns": wall_ns,
         "wall_s": wall_s,
-        "ttft_p50_ms": round(statistics.median(ttfts) * 1e3, 2),
-        "ttft_p99_ms": round(_percentile(ttfts, 0.99) * 1e3, 2),
+        "ttft_p50_ms": round(nearest_rank_percentile(ttfts, 0.50) * 1e3, 2),
+        "ttft_p99_ms": round(nearest_rank_percentile(ttfts, 0.99) * 1e3, 2),
         "tpot_mean_ms": round(statistics.mean(tpots) * 1e3, 3) if tpots else None,
         "tpot_method": tpot_method,
         "throughput_rps": round(len(results) / wall_s, 2),
@@ -228,21 +305,32 @@ def summarize_results(
 
 
 async def run_benchmark(args: argparse.Namespace) -> None:
+    target = resolve_target(args)
+    api_key = resolve_api_key(args, target)
+    if getattr(args, "api_key", None) is not None:
+        print(
+            "warning: --api-key is deprecated because command-line arguments may "
+            "be visible to other processes; use --api-key-env or --target "
+            f"{TARGET_SPEC_FORMAT}",
+            file=sys.stderr,
+        )
     print(f"config={json.dumps(build_run_config(args))}")
     prompts, dataset_label = load_prompts(
         Path(args.dataset) if args.dataset else None, args.num_requests
     )
     semaphore = asyncio.Semaphore(args.concurrency)
-    headers = {"Authorization": f"Bearer {args.api_key}"} if args.api_key else {}
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     async with httpx.AsyncClient(
-        base_url=args.base_url, timeout=args.timeout, headers=headers
+        base_url=normalize_base_url(target.base_url),
+        timeout=args.timeout,
+        headers=headers,
     ) as client:
 
         async def bounded(prompt: str) -> RequestMetrics:
             async with semaphore:
                 return await run_one(
                     client,
-                    args.model,
+                    target.model,
                     prompt,
                     args.max_tokens,
                     temperature=args.temperature,
@@ -261,7 +349,10 @@ async def run_benchmark(args: argparse.Namespace) -> None:
         dataset_label=dataset_label,
         ttft_slo_s=args.ttft_slo_s,
     )
-    print(f"target={args.base_url} model={args.model} dataset={dataset_label}")
+    print(
+        f"target={normalize_base_url(target.base_url)} "
+        f"model={target.model} dataset={dataset_label}"
+    )
     print(
         f"requests={len(results)} concurrency={args.concurrency} "
         f"wall={summary['wall_s']:.2f}s"
@@ -282,25 +373,27 @@ async def run_benchmark(args: argparse.Namespace) -> None:
     if args.results_dir:
         stamp = _datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
         results_dir = Path(args.results_dir)
-        results_dir.mkdir(parents=True, exist_ok=True)
         out = results_dir / f"{stamp}-serving.json"  # timestamped: same-day safe
-        out.write_text(
-            json.dumps(
-                {
-                    "config": build_run_config(args),
-                    "summary": summary,
-                    "samples": samples,
-                },
-                indent=2,
-            )
+        atomic_write_json(
+            out,
+            {
+                "config": build_run_config(args),
+                "summary": summary,
+                "samples": samples,
+            },
         )
         print(f"results written to {out}")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default="http://localhost:8000")
-    parser.add_argument("--model", default="kairyu-mock")
+    parser.add_argument(
+        "--target",
+        default=None,
+        help=f"{TARGET_SPEC_FORMAT}; cannot be combined with split endpoint flags",
+    )
+    parser.add_argument("--base-url", default=None)
+    parser.add_argument("--model", default=None)
     parser.add_argument("--dataset", default=None, help="ShareGPT-format JSON path")
     parser.add_argument("--num-requests", type=int, default=128)
     parser.add_argument("--concurrency", type=int, default=128)
@@ -330,8 +423,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ttft-slo-s", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=120.0)
-    parser.add_argument("--api-key", default=None,
-                        help="Bearer token for authenticated targets (m9 D5)")
+    auth = parser.add_mutually_exclusive_group()
+    auth.add_argument(
+        "--api-key-env",
+        default=None,
+        help="Environment variable containing the target bearer token",
+    )
+    auth.add_argument(
+        "--api-key",
+        default=None,
+        help=(
+            "Deprecated literal bearer token; may be visible in process arguments. "
+            "Prefer --api-key-env"
+        ),
+    )
     parser.add_argument("--results-dir", default="bench/results",
                         help="Write a timestamped results JSON here ('' to disable)")
     # M5 topology labels (design m5 D6); recorded in the run config for G2 §8.

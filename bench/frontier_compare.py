@@ -5,33 +5,39 @@ trials per prompt per target, streaming TTFT = first content chunk, TPOT =
 (last content chunk-first content chunk)/(final streamed usage completion_tokens-1);
 quality proxy = response length + refusal rate only (real quality evals are out
 of scope). Targets are OpenAI-protocol endpoints — kairyu, OpenAI, or any proxy
-— configured by URL+key+model. Endpoints that omit usage retain TTFT/output
-characters but do not publish a TPOT value.
+— configured by URL+model plus an optional API-key environment-variable name.
+Endpoints that omit usage retain TTFT/output characters but do not publish a
+TPOT value.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from kairyu.bench.reporting import (
+    PERCENTILE_METHOD,
+    atomic_write_json,
+    atomic_write_text,
+    nearest_rank_percentile,
+)
+from kairyu.bench.targets import (
+    TARGET_SPEC_FORMAT,
+    normalize_base_url,
+    parse_target_spec,
+    target_api_key,
+)
+from kairyu.bench.types import BenchTarget
 
 DEFAULT_PROMPTS = (
     "Explain the difference between processes and threads in one paragraph.",
     "Write a Python function that merges two sorted lists.",
     "Summarize the plot of Hamlet in three sentences.",
 )
-
-
-@dataclass(frozen=True)
-class Target:
-    name: str
-    base_url: str
-    model: str
-    api_key: str = "sk-local"
 
 
 @dataclass
@@ -56,7 +62,7 @@ class TargetReport:
         def pct(values, q):
             if not values:
                 return None
-            return values[min(int(len(values) * q), len(values) - 1)]
+            return nearest_rank_percentile(values, q)
 
         return {
             "target": self.name,
@@ -77,7 +83,7 @@ class TargetReport:
         }
 
 
-async def run_trial(client, target: Target, prompt: str) -> TrialResult:
+async def run_trial(client, target: BenchTarget, prompt: str) -> TrialResult:
     start = time.perf_counter()
     first_content_time = None
     last_content_time = None
@@ -124,17 +130,30 @@ async def run_trial(client, target: Target, prompt: str) -> TrialResult:
     )
 
 
-async def run_target(target: Target, prompts, trials: int) -> TargetReport:
+async def run_target(
+    target: BenchTarget,
+    prompts: tuple[str, ...],
+    trials: int,
+) -> TargetReport:
     import openai
 
-    report = TargetReport(name=target.name, model=target.model)
-    client = openai.AsyncOpenAI(base_url=target.base_url, api_key=target.api_key)
-    for prompt in prompts:
-        for _ in range(trials):
-            try:
-                report.trials.append(await run_trial(client, target, prompt))
-            except Exception:
-                report.errors += 1
+    report = TargetReport(name=target.label(), model=target.model)
+    api_key = target_api_key(
+        target,
+        required=target.api_key_env is not None,
+    )
+    async with openai.AsyncOpenAI(
+        base_url=normalize_base_url(target.base_url),
+        # The SDK requires a non-empty value even for unauthenticated local
+        # endpoints.  This sentinel is not a user credential.
+        api_key=api_key or "sk-local",
+    ) as client:
+        for prompt in prompts:
+            for _ in range(trials):
+                try:
+                    report.trials.append(await run_trial(client, target, prompt))
+                except Exception:
+                    report.errors += 1
     return report
 
 
@@ -142,6 +161,7 @@ def build_scoreboard(reports: list[TargetReport]) -> dict:
     return {
         "methodology": {
             "prompts": len(DEFAULT_PROMPTS),
+            "percentile_method": PERCENTILE_METHOD,
             "metric_definitions": {
                 "ttft": "request start -> first content chunk (streaming)",
                 "tpot": (
@@ -178,23 +198,27 @@ def render_markdown(scoreboard: dict) -> str:
     return "\n".join(lines)
 
 
-async def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--target", action="append", required=True,
-                        help="name=base_url=model[=api_key]")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--target",
+        action="append",
+        required=True,
+        help=f"{TARGET_SPEC_FORMAT}; the optional fourth field names an env var",
+    )
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--out", default="bench/results/frontier.json")
-    args = parser.parse_args()
-    targets = []
-    for spec in args.target:
-        parts = spec.split("=")
-        targets.append(Target(*parts))
+    return parser
+
+
+async def main() -> None:
+    args = build_parser().parse_args()
+    targets = [parse_target_spec(spec) for spec in args.target]
     reports = [await run_target(t, DEFAULT_PROMPTS, args.trials) for t in targets]
     scoreboard = build_scoreboard(reports)
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(scoreboard, indent=2))
-    out.with_suffix(".md").write_text(render_markdown(scoreboard))
+    atomic_write_json(out, scoreboard)
+    atomic_write_text(out.with_suffix(".md"), render_markdown(scoreboard))
     print(render_markdown(scoreboard))
 
 

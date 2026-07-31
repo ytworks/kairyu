@@ -13,6 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kairyu.bench.targets import normalize_base_url, validate_api_key_env
+
 SCHEMA_VERSION = 1
 
 # `extra_body` is an escape hatch for vendor knobs, not a way to silently
@@ -103,7 +105,7 @@ class BenchTarget(SamplingOptions):
     vs "kairyu-auto-max") — usually on the same gateway base_url.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     name: str = ""  # scoreboard label; defaults to model
     base_url: str
@@ -112,6 +114,16 @@ class BenchTarget(SamplingOptions):
     max_context_tokens: int | None = None  # gate for long-context items
     max_output_tokens: int = 8192
     supports_vision: bool = True
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str) -> str:
+        return normalize_base_url(value)
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _validate_api_key_env(cls, value: str | None) -> str | None:
+        return validate_api_key_env(value)
 
     def label(self) -> str:
         return self.name or self.model
@@ -124,13 +136,26 @@ class JudgeConfig(SamplingOptions):
     effort — hence the shared sampling knobs.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     base_url: str | None = None
     model: str | None = None
     api_key_env: str = "KAIRYU_JUDGE_API_KEY"
     concurrency: int = Field(default=4, ge=1)
     max_retries: int = Field(default=3, ge=0)
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_optional_base_url(cls, value: str | None) -> str | None:
+        return normalize_base_url(value) if value is not None else None
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _validate_api_key_env(cls, value: str) -> str:
+        validated = validate_api_key_env(value)
+        if validated is None:  # pragma: no cover - field type rejects None first
+            raise ValueError("api_key_env must be an environment-variable name")
+        return validated
 
     @property
     def enabled(self) -> bool:
@@ -198,7 +223,7 @@ class ExecutionConfig(BaseModel):
 
 
 class BenchConfig(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     suite: str = "fugu"
     targets: tuple[BenchTarget, ...] = Field(min_length=1)

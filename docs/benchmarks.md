@@ -7,8 +7,62 @@ dated, footnoted scoreboard. This implements goal G6 gate P-C1 ("one command →
 dated scoreboard") and the roadmap §6 evidence rules (per-item results,
 methodology, config committed next to every number).
 
-The perf harnesses in the top-level `bench/` directory (TTFT/TPOT/goodput)
-are separate; this suite measures answer quality.
+The perf and formal-gate harnesses in the top-level `bench/` directory are a
+separate, checkout-only surface; this installed suite measures answer quality.
+The complete ownership policy and wrapper inventory live in
+[`bench/README.md`](../bench/README.md).
+
+## Installed package vs source-checkout tools
+
+`kairyu/bench/` is the single owner of reusable benchmark config, target types,
+credential resolution, statistics, atomic reporting, adapters, the public
+`kairyu bench` CLI, and the eight synthetic offline fixtures. All of those ship
+in the wheel. `kairyu/bench/entrypoints.toml` is also packaged and records every
+supported repository-only benchmark executable.
+
+Top-level `bench/*.py` files are developer/formal wrappers, not installed
+commands. From a source checkout each registered wrapper supports both
+`python bench/<name>.py` and `python -m bench.<name>` so historical commands and
+artifact provenance remain replayable. `bench/results/` is likewise
+checkout-only: routine outputs are ignored, while explicitly reviewed formal
+evidence can be retained. Neither wrappers, result artifacts, nor `tests/` are
+included in the wheel.
+
+Inspect the packaged inventory or validate a checkout with:
+
+```bash
+kairyu bench entrypoints
+kairyu bench entrypoints --json
+kairyu bench entrypoints --check-repo .
+uv run --frozen python scripts/verify_bench_entrypoints.py
+uv run --frozen python scripts/verify_bench_wheel.py
+```
+
+After the declared development dependencies are synced, the first verifier
+exercises all 51 registered wrappers through both their path and module
+`--help` forms without executing workloads or contacting external runtimes.
+The last command builds and imports a real wheel from an isolated temporary
+directory. It verifies the public CLI dispatch, packaged manifest and all eight
+fixtures, and rejects accidental inclusion of top-level benchmark scripts,
+results, or tests. Gate-specific code stays in its stable wrapper; semantics
+shared by the Fugu CLI and gate scripts belong in `kairyu.bench`.
+
+The shared target form is `name=base_url=model[=api_key_env]`; the fourth
+field names an environment variable and is never a literal secret. This
+corrects the old `frontier_compare.py` interpretation. Export the credential
+and pass its variable name when migrating an old command. The legacy
+`serving_bench.py --api-key` flag remains executable but is deprecated in
+favor of `--api-key-env`. An explicitly named but unset credential variable
+fails closed, and no resolved key is recorded in artifacts or validation
+errors.
+All construction paths normalize the API root before run fingerprinting.
+Historical runs remain reportable, but a run fingerprinted from a YAML URL
+without `/v1` must use a new run ID rather than silently resume.
+New serving/frontier artifacts explicitly record
+`percentile_method: nearest-rank-v1`; older artifacts without that field used
+frontier's floor-index calculation and serving's median p50/floor-index p99.
+Versioned formal-gate artifact schemas remain source-bound compatibility
+contracts rather than generic reporting implementations.
 
 `bench/proc_wire_bench.py` is a deterministic process-boundary complexity
 gate. It encodes the same cumulative generation trace through the legacy and
@@ -73,6 +127,7 @@ Useful subcommands:
 kairyu bench list                      # slots, requirements, cache status
 kairyu bench download [--only a,b]     # pre-fetch datasets (idempotent)
 kairyu bench report <run_id>           # rebuild + print a stored scoreboard
+kairyu bench entrypoints               # installed/repository ownership inventory
 ```
 
 ## Single model vs orchestration

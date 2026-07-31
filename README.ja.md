@@ -798,14 +798,23 @@ uv run kairyu bench run --base-url http://localhost:8000/v1 \
 データセットは `~/.cache/kairyu/benchmarks` にダウンロードされます(コミットされま
 せん)。前提条件が満たせない場合(docker なし、ゲート付きデータセット、ジャッジなし)
 は注釈付きの `skipped` セルになるため、実行は常に完走します。サブコマンド:
-`bench run`、`bench download`、`bench report <run>`、`bench list`。
-詳細ガイド: [`docs/benchmarks.md`](docs/benchmarks.md)。
+`bench run`、`bench download`、`bench report <run>`、`bench list`、
+`bench entrypoints`。詳細ガイド: [`docs/benchmarks.md`](docs/benchmarks.md)。
+
+wheel に含まれるのは、再利用可能な `kairyu.bench` ライブラリ、公開 CLI、
+エントリポイント台帳、8 個のオフライン fixture です。トップレベルの
+`bench/*.py` 開発／正式ゲート用ラッパー、`bench/results/`、`tests/` は
+ソース checkout 専用です。安定した一覧と互換性ポリシーは
+[`bench/README.md`](bench/README.md) を参照してください。
 
 ## 9. 開発
 
 ```bash
 uv run pytest                        # テスト + カバレッジ (ゲート 80%, addopts で強制)
 uv run ruff check .                  # lint (E, F, I, UP, B; 行長 100)
+uv run kairyu bench entrypoints --check-repo .
+uv run python scripts/verify_bench_entrypoints.py
+uv run python scripts/verify_bench_wheel.py
 uv run python bench/router_latency.py
 uv run python bench/orchestration_mock_bench.py
 ```
