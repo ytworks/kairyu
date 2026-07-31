@@ -62,8 +62,8 @@ class MockBackend:
         prompt = prompt_with_tool_intent(request)
         if prompt_kind(prompt) == "multimodal":
             raise ValueError(
-                "MockBackend does not support multimodal prompts; "
-                "modality data was not dispatched"
+                "MockBackend does not support multimodal image prompts; "
+                "image data was not dispatched"
             )
         token_ids = supplied_prompt_token_ids(prompt)
         if token_ids is not None:

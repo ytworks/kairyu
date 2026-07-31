@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from kairyu.engine.backend import (
+    AdmissionUpperBound,
     CacheHint,
     EngineBackend,
     GenerationRequest,
@@ -84,6 +85,23 @@ class UnkeyedValidationBackend(FlakyBackend):
 
     def validate_request(self, request: GenerationRequest) -> None:
         self.validation_calls += 1
+
+
+class AdmissionBackend(FlakyBackend):
+    def __init__(self, tokens: int, *, refundable: bool = True) -> None:
+        super().__init__()
+        self._bound = AdmissionUpperBound(
+            tokens=tokens,
+            refundable_on_exact_usage=refundable,
+        )
+        self.admission_calls = 0
+
+    def admission_upper_bound(
+        self,
+        request: GenerationRequest,
+    ) -> AdmissionUpperBound:
+        self.admission_calls += 1
+        return self._bound
 
 
 class BlockingShutdownBackend(FlakyBackend):
@@ -172,6 +190,32 @@ def test_constructor_rejects_invalid_thresholds():
         ReplicaPool([MockBackend()], unhealthy_after=0)
     with pytest.raises(ValueError, match="queue_depth_threshold"):
         ReplicaPool([MockBackend()], queue_depth_threshold=-1)
+
+
+def test_admission_uses_safe_maximum_across_every_eligible_replica() -> None:
+    smaller = AdmissionBackend(128)
+    larger = AdmissionBackend(512, refundable=False)
+    pool = ReplicaPool({"smaller": smaller, "larger": larger})
+
+    bound = pool.admission_upper_bound(make_request("media"))
+
+    assert bound == AdmissionUpperBound(
+        tokens=512,
+        refundable_on_exact_usage=False,
+    )
+    assert smaller.admission_calls == 1
+    assert larger.admission_calls == 1
+
+
+def test_admission_excludes_draining_replicas() -> None:
+    active = AdmissionBackend(128)
+    draining = AdmissionBackend(4096)
+    pool = ReplicaPool({"active": active, "draining": draining})
+    pool.drain("draining")
+
+    assert pool.admission_upper_bound(make_request("media")).tokens == 128
+    assert active.admission_calls == 1
+    assert draining.admission_calls == 0
 
 
 async def test_cached_ring_preserves_exact_hrw_and_membership_order() -> None:
@@ -264,7 +308,7 @@ def test_equivalent_validation_failure_rejects_before_dispatch():
 
     with pytest.raises(
         ValueError,
-        match="rejecting: unsupported",
+        match="every eligible replica: unsupported",
     ):
         pool.validate_request(make_request("invalid"))
 

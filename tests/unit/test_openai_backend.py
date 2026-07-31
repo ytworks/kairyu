@@ -1,10 +1,12 @@
 import asyncio
 import json
+import threading
 
 import httpx
 import pytest
 
 from kairyu import SamplingParams
+from kairyu.engine import vision as vision_module
 from kairyu.engine.backend import GenerationRequest, UpstreamClientError
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.openai_capabilities import (
@@ -13,11 +15,20 @@ from kairyu.engine.openai_capabilities import (
 )
 from kairyu.engine.prompt import (
     MultimodalItem,
+    MultimodalMessage,
+    MultimodalMessagePart,
     MultimodalPrompt,
     PromptInput,
     TokensPrompt,
 )
+from kairyu.engine.vision import ImageInputPolicy
 from kairyu.outputs import TokenLogprob
+
+_RED_PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDA"
+    "xMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg=="
+)
 
 
 def _request(
@@ -27,6 +38,31 @@ def _request(
         request_id="r1",
         prompt=prompt,
         sampling_params=sampling_params or SamplingParams(temperature=0.2, max_tokens=64),
+    )
+
+
+def _multimodal_prompt(image_url: str = _RED_PNG_DATA_URL) -> MultimodalPrompt:
+    return MultimodalPrompt(
+        base="display only",
+        items=(MultimodalItem("image", "uri", image_url),),
+        messages=(
+            MultimodalMessage(
+                "system",
+                (MultimodalMessagePart("text", text="Answer exactly."),),
+            ),
+            MultimodalMessage(
+                "user",
+                (
+                    MultimodalMessagePart("text", text="before "),
+                    MultimodalMessagePart(
+                        "item",
+                        item_index=0,
+                        detail="high",
+                    ),
+                    MultimodalMessagePart("text", text=" after"),
+                ),
+            ),
+        ),
     )
 
 
@@ -784,12 +820,232 @@ def test_adapter_rejects_a_capability_contract_it_cannot_execute():
         prompt_kinds={"text", "tokens"},
     )
 
-    with pytest.raises(ValueError, match="only text prompts"):
+    with pytest.raises(ValueError, match="text and multimodal"):
         OpenAICompatBackend(
             base_url="https://api.example.com/v1",
             model="m",
             capabilities=capabilities,
         )
+
+
+async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "RED"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 37,
+                    "completion_tokens": 1,
+                    "total_tokens": 38,
+                },
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={
+            "max_images": 1,
+            "max_processed_prompt_tokens": 512,
+        },
+    )
+    request = _request(_multimodal_prompt())
+
+    result = await backend.generate(request)
+
+    assert captured["body"]["messages"] == [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Answer exactly."}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "before "},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _RED_PNG_DATA_URL,
+                        "detail": "high",
+                    },
+                },
+                {"type": "text", "text": " after"},
+            ],
+        },
+    ]
+    assert result.text == "RED"
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == 37
+    assert result.usage.completion_tokens == 1
+    bound = backend.admission_upper_bound(request)
+    assert bound.tokens == 512 + 64
+    assert bound.refundable_on_exact_usage is True
+
+
+def test_multimodal_backend_requires_stream_usage_reporting():
+    with pytest.raises(ValueError, match="request_stream_usage=true"):
+        OpenAICompatBackend(
+            base_url="http://vlm:8000/v1",
+            model="vlm",
+            api_key_env=None,
+            upstream="vllm",
+            capabilities={"allow_prompt_kinds": ["multimodal"]},
+            image_input_policy={"max_images": 1},
+            request_stream_usage=False,
+        )
+
+
+async def test_token_based_multimodal_prompt_is_rejected_before_media_or_transport(
+    monkeypatch,
+):
+    decode_calls = 0
+    original_decode = ImageInputPolicy._decode_item
+
+    def recording_decode(self, item, *, index):
+        nonlocal decode_calls
+        decode_calls += 1
+        return original_decode(self, item, index=index)
+
+    monkeypatch.setattr(ImageInputPolicy, "_decode_item", recording_decode)
+    transport_calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+    original = _multimodal_prompt()
+    prompt = MultimodalPrompt(
+        base=TokensPrompt((123, 456), prompt="display"),
+        items=original.items,
+        messages=original.messages,
+    )
+
+    with pytest.raises(UpstreamClientError, match="token-based multimodal"):
+        await backend.generate(_request(prompt))
+
+    assert decode_calls == 0
+    assert transport_calls == []
+    assert backend._client is None
+
+
+async def test_multimodal_full_decode_runs_once_off_the_event_loop(monkeypatch):
+    vision_module._clear_verified_raster_cache()
+    decode_threads: list[int] = []
+    original_verify = ImageInputPolicy._verify_raster
+
+    def recording_verify(data, *, mime, index):
+        decode_threads.append(threading.get_ident())
+        original_verify(data, mime=mime, index=index)
+
+    monkeypatch.setattr(
+        ImageInputPolicy,
+        "_verify_raster",
+        staticmethod(recording_verify),
+    )
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "RED",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 37,
+                        "completion_tokens": 1,
+                    },
+                },
+            )
+        ),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+    request = _request(_multimodal_prompt())
+
+    backend.validate_request(request)
+    assert decode_threads == []
+
+    await backend.generate(request)
+
+    assert len(decode_threads) == 1
+    assert decode_threads[0] != threading.get_ident()
+
+
+async def test_multimodal_remote_url_is_400_before_http_client_or_transport():
+    transport_calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+
+    with pytest.raises(UpstreamClientError, match="remote and local") as exc_info:
+        await backend.generate(
+            _request(_multimodal_prompt("https://example.test/image.png"))
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.code == "invalid_image"
+    assert transport_calls == []
+    assert backend._client is None
+
+
+async def test_multimodal_unary_response_must_report_processed_prompt_usage():
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="vlm",
+        api_key_env=None,
+        transport=_ok_transport({}),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="omitted exact processed prompt usage"):
+        await backend.generate(_request(_multimodal_prompt()))
 
 
 async def test_stream_rejects_unsupported_intent_before_client_or_transport():
@@ -863,6 +1119,48 @@ _SSE_BODY = (
     b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
     b"data: [DONE]\n\n"
 )
+
+
+async def test_multimodal_stream_requires_and_returns_exact_final_usage():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        body = (
+            b'data: {"choices":[{"index":0,"delta":{"content":"RED"}}]}\n\n'
+            b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":41,'
+            b'"completion_tokens":1,"total_tokens":42}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="vlm",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+
+    results = [
+        result
+        async for result in backend.stream(_request(_multimodal_prompt()))
+    ]
+
+    assert captured["body"]["stream_options"] == {"include_usage": True}
+    assert captured["body"]["messages"][1]["content"][1]["type"] == "image_url"
+    assert results[-1].finished is True
+    assert results[-1].text == "RED"
+    assert results[-1].usage is not None
+    assert results[-1].usage.prompt_tokens == 41
+    assert results[-1].usage.completion_tokens == 1
 
 
 def _sse_transport(captured: dict) -> httpx.MockTransport:
@@ -1139,7 +1437,7 @@ def test_validation_key_is_exactly_the_immutable_capability_contract():
         upstream="generic",
     )
 
-    assert first.request_validation_key == first.capabilities
+    assert first.request_validation_key == (first.capabilities, None)
     assert first.request_validation_key == second.request_validation_key
     assert first.request_validation_key != different.request_validation_key
     assert isinstance(hash(first.request_validation_key), int)

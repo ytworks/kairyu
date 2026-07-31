@@ -396,6 +396,42 @@ restarting only Kairyu. Existing Open WebUI data volumes may retain prior RAG
 settings in the application database; confirm the admin RAG settings or use a
 fresh/migrated volume when adopting this configuration.
 
+### Qwen3-VL image chat through stock vLLM
+
+Image chat is an opt-in GPU topology, not part of the CPU-safe default stack.
+The overlay starts the immutable Qwen3-VL-32B-Instruct revision on stock vLLM
+with tensor parallelism across eight NVIDIA GPUs, then exposes it as the
+`qwen3-vl-32b` Kairyu pool:
+
+```bash
+docker compose \
+  -f deploy/compose/docker-compose.webui.yaml \
+  -f deploy/compose/docker-compose.webui-vlm.yaml \
+  up -d --build --wait
+```
+
+Kairyu preserves message roles and content-part order and deliberately does not
+apply a text chat template to image-bearing requests. The stock vLLM replica
+owns the Qwen processor/template. The gateway accepts only inline PNG, JPEG, or
+WebP data URLs and verifies the decoded raster before admission; remote URLs,
+local paths, invalid MIME/magic, malformed or animated images, decompression
+bombs, and configured byte/pixel/dimension/aspect-ratio overages return a
+controlled OpenAI-compatible error without upstream media I/O.
+
+The production overlay permits one image up to 8 MiB and 2,097,152 pixels,
+uses Qwen's matching 65,536–2,097,152-pixel processor range, and reserves the
+complete 8,192-token model context because image, text, roles, and template
+tokens share that context. Set `KAIRYU_VISION=1` when building a custom image
+so Pillow is installed for strict raster verification.
+
+Run `scripts/webui_vlm_smoke.sh` on an eight-GPU host. It generates
+deterministic RED/BLUE PNGs, proves different correct model answers and exact
+unary/stream usage through Kairyu, rejects a metadata-service URL before
+dispatch, and uses Open WebUI's normal authenticated file-upload path in the
+pinned Playwright browser. The Open WebUI backend owns the uploaded file and
+converts it to an inline data URL only when forwarding the completion to
+Kairyu.
+
 ## 5. Rolling model update (gate C7)
 
 Weights update = rolling replica restart; there is no hot swap (m7 §3).

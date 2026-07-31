@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 
 _ASGIApp = Callable[..., Awaitable[None]]
@@ -163,6 +164,73 @@ class ConcurrencyLimitMiddleware:
             await self.app(scope, receive, send)
         finally:
             self._active -= 1
+
+
+class ChatBodyLimitMiddleware:
+    """Bound Chat Completions JSON before Starlette materializes the body."""
+
+    _PATH = "/v1/chat/completions"
+
+    def __init__(self, app: _ASGIApp, *, limit: int) -> None:
+        self.app = app
+        self._limit = limit
+
+    async def _reject(self, send: Callable) -> None:
+        await _send_json(
+            send,
+            413,
+            {
+                "error": {
+                    "message": (
+                        "chat request body exceeds the configured "
+                        f"{self._limit}-byte limit"
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "request_too_large",
+                }
+            },
+            {},
+        )
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if (
+            scope["type"] != "http"
+            or scope.get("method") != "POST"
+            or scope.get("path") != self._PATH
+        ):
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or ())
+        raw_length = headers.get(b"content-length")
+        if raw_length is not None:
+            try:
+                content_length = int(raw_length)
+            except ValueError:
+                content_length = None
+            if content_length is not None and content_length > self._limit:
+                await self._reject(send)
+                return
+
+        received = 0
+        buffered: deque[dict] = deque()
+        while True:
+            message = await receive()
+            buffered.append(message)
+            if message["type"] != "http.request":
+                break
+            received += len(message.get("body", b""))
+            if received > self._limit:
+                await self._reject(send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        async def replay_receive() -> dict:
+            if buffered:
+                return buffered.popleft()
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
 
 
 class MetricsMiddleware:

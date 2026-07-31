@@ -1,0 +1,56 @@
+# GPU-only Open WebUI deployment: a Kairyu pool fronts one stock vLLM VLM.
+# The structured message/content-part layout crosses Kairyu unchanged; vLLM
+# owns the Qwen processor and chat template exactly once.
+server:
+  host: 0.0.0.0
+  port: 8000
+  max_concurrency: 64
+  # The largest accepted 8 MiB raster expands to about 10.7 MiB of base64.
+  # Reject oversized Content-Length and streamed bodies before JSON allocation.
+  max_chat_body_bytes: 16777216
+
+pools:
+  qwen3-vl-32b:
+    replicas:
+      - backend: openai
+        health_url: http://vllm:8000/health
+        options:
+          base_url: http://vllm:8000/v1
+          model: qwen3-vl-32b
+          api_key_env: null
+          upstream: vllm
+          capabilities:
+            allow_prompt_kinds: [multimodal]
+          image_input_policy:
+            max_images: 1
+            max_image_bytes: 8388608
+            max_total_image_bytes: 8388608
+            # Qwen3-VL patch=16/merge=2 emits roughly one vision token per
+            # 1,024 pixels. This exactly matches vLLM's max_pixels override.
+            max_image_pixels: 2097152
+            max_total_image_pixels: 2097152
+            max_image_dimension: 4096
+            # Transformers' Qwen image smart_resize rejects ratios above
+            # 200:1; mirror the exact inclusive boundary before dispatch.
+            max_image_aspect_ratio: 200
+            # Admission must cover image + arbitrary in-body text/template up
+            # to the upstream's complete 8,192-token context.
+            max_processed_prompt_tokens: 8192
+    unhealthy_after: 1
+    queue_depth_threshold: 8
+    probe_interval_s: 2.0
+
+# Retain the CPU OpenWebUI stack's local RAG endpoint. The VLM path itself
+# does not require retrieval, but image chat must not regress existing RAG.
+embeddings:
+  embed-small:
+    backend: fastembed
+    model: sentence-transformers/all-MiniLM-L6-v2
+    model_path: /opt/kairyu/models/all-MiniLM-L6-v2
+    revision: 5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
+    model_sha256: bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5
+    provenance_sha256: 57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c
+    dimensions: 384
+    batch_size: 64
+    threads: 2
+    max_concurrency: 2

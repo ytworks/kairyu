@@ -1,0 +1,82 @@
+# GPU-only overlay for Open WebUI image chat through Kairyu and stock vLLM.
+# This is intentionally separate from the CPU-only GitHub Actions stack.
+#
+# Usage (8 NVIDIA GPUs and enough model-cache storage are required):
+#   docker compose \
+#     -f deploy/compose/docker-compose.webui.yaml \
+#     -f deploy/compose/docker-compose.webui-vlm.yaml \
+#     up -d --build --wait
+services:
+  kairyu:
+    build:
+      args:
+        KAIRYU_VISION: "1"
+    volumes:
+      # Compose merges service volumes by container target, so this replaces
+      # config.yaml while retaining the base image and Open WebUI wiring.
+      - ./config-vlm.yaml:/etc/kairyu/config.yaml:ro
+    depends_on:
+      vllm:
+        condition: service_healthy
+
+  webui:
+    environment:
+      DEFAULT_MODELS: qwen3-vl-32b
+
+  vllm:
+    image: >-
+      vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404@sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8
+    ipc: host
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      # Kairyu rejects every remote/local image URL before dispatch. Keep the
+      # upstream redirect path disabled as an independent defence in depth.
+      VLLM_MEDIA_URL_ALLOW_REDIRECTS: "0"
+    volumes:
+      - qwen3-vl-model-cache:/root/.cache/huggingface
+    command:
+      - Qwen/Qwen3-VL-32B-Instruct
+      - --revision
+      - b282fe1ca05915cc8825369f6aa510d7a0982594
+      - --served-model-name
+      - qwen3-vl-32b
+      - --tensor-parallel-size
+      - "8"
+      - --max-model-len
+      - "8192"
+      - --mm-processor-kwargs
+      - '{"min_pixels":65536,"max_pixels":2097152}'
+      - --limit-mm-per-prompt.image
+      - "1"
+      - --limit-mm-per-prompt.video
+      - "0"
+      - --mm-encoder-tp-mode
+      - data
+      - --scheduling-policy
+      - priority
+      - --async-scheduling
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 8
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2).read()
+      interval: 10s
+      timeout: 3s
+      retries: 180
+      start_period: 60s
+    stop_grace_period: 2m
+
+volumes:
+  qwen3-vl-model-cache:

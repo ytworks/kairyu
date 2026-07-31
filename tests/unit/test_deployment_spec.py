@@ -19,6 +19,7 @@ server:
   port: 8100
   api_keys_env: KAIRYU_API_KEYS
   max_concurrency: 64
+  max_chat_body_bytes: 16777216
 engines:
   small:
     backend: mock
@@ -212,6 +213,13 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
             ],
             "default": None,
         },
+        "max_chat_body_bytes": {
+            "anyOf": [
+                {"minimum": 1, "type": "integer"},
+                {"type": "null"},
+            ],
+            "default": None,
+        },
         "metrics": {"default": True, "type": "boolean"},
         "protect_metrics": {"default": False, "type": "boolean"},
         "access_log": {"default": True, "type": "boolean"},
@@ -235,6 +243,7 @@ server:
   port: 8100
   api_keys_env: KAIRYU_API_KEYS
   max_concurrency: 64
+  max_chat_body_bytes: 16777216
   metrics: false
   protect_metrics: true
   access_log: false
@@ -251,6 +260,7 @@ engines:
     assert spec.server.to_server_settings() == ServerSettings(
         api_keys_env="KAIRYU_API_KEYS",
         max_concurrency=64,
+        max_chat_body_bytes=16_777_216,
         metrics=False,
         protect_metrics=True,
         access_log=False,

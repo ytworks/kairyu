@@ -29,11 +29,17 @@ from kairyu.batch.store import (
     JsonlFileWriter,
     StaleBatchClaimError,
 )
-from kairyu.engine.backend import EngineBackend, admission_upper_bound
+from kairyu.engine.backend import (
+    EngineBackend,
+    UpstreamClientError,
+    backend_admission_upper_bound,
+    prepare_backend_request,
+)
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     ExecutedChat,
+    chat_error_from_upstream_client_error,
     execute_chat,
     validate_chat_request,
 )
@@ -311,13 +317,29 @@ class BatchWorker:
                             "code": "tenant_rate_limited",
                         },
                     )
+                try:
+                    bound = backend_admission_upper_bound(
+                        validated.engine,
+                        validated.generation_request,
+                    )
+                except ValueError as error:
+                    raise ChatRequestError(
+                        str(error),
+                        code=getattr(error, "code", "invalid_request"),
+                    ) from error
+                try:
+                    await prepare_backend_request(
+                        validated.engine,
+                        validated.generation_request,
+                    )
+                except UpstreamClientError as error:
+                    raise chat_error_from_upstream_client_error(error) from error
                 reserve = (
                     getattr(admission, "reserve_tokens", None)
                     if admission is not None
                     else None
                 )
                 if callable(reserve):
-                    bound = admission_upper_bound(validated.generation_request)
                     quota_accounted = reserve(
                         bound.tokens,
                         refundable_on_exact_usage=(

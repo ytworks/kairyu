@@ -209,6 +209,7 @@ _PROFILES = {
 _OVERRIDE_KEYS = frozenset(
     {
         "allow_extra_args",
+        "allow_prompt_kinds",
         "allow_sampling_fields",
         "deny_sampling_fields",
         "strict_tools",
@@ -282,6 +283,16 @@ def resolve_openai_capabilities(
         overrides.get("allow_extra_args"),
         field="allow_extra_args",
     )
+    allow_prompt_kinds = _string_set(
+        overrides.get("allow_prompt_kinds"),
+        field="allow_prompt_kinds",
+    )
+    unknown_prompt_kinds = allow_prompt_kinds - PROMPT_KINDS
+    if unknown_prompt_kinds:
+        raise ValueError(
+            "unknown OpenAI prompt capability kinds: "
+            f"{sorted(unknown_prompt_kinds)}"
+        )
     strict_tools = overrides.get("strict_tools", base.strict_tools)
     if not isinstance(strict_tools, bool):
         raise ValueError("capabilities.strict_tools must be a boolean")
@@ -296,6 +307,7 @@ def resolve_openai_capabilities(
         extra_args=base.extra_args | allow_extra,
         forward_neutral_fields=base.forward_neutral_fields - deny_sampling,
         strict_tools=strict_tools,
+        prompt_kinds=base.prompt_kinds | allow_prompt_kinds,
     )
 
 

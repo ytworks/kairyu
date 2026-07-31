@@ -6,20 +6,25 @@ WORKDIR /app
 # 1024-descriptor container limit remain reproducible.
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_CONCURRENT_INSTALLS=8
 ARG KAIRYU_EMBEDDINGS=0
+ARG KAIRYU_VISION=0
 COPY pyproject.toml uv.lock README.md ./
 RUN set -eu; \
-    case "$KAIRYU_EMBEDDINGS" in \
-      0) uv sync --frozen --no-install-project --no-dev --extra fleet --extra otel ;; \
-      1) uv sync --frozen --no-install-project --no-dev --extra fleet --extra otel --extra embeddings ;; \
-      *) echo "KAIRYU_EMBEDDINGS must be 0 or 1" >&2; exit 2 ;; \
+    case "$KAIRYU_EMBEDDINGS:$KAIRYU_VISION" in \
+      0:0) uv sync --frozen --no-install-project --no-dev --extra fleet --extra otel ;; \
+      1:0) uv sync --frozen --no-install-project --no-dev --extra fleet --extra otel --extra embeddings ;; \
+      0:1) uv sync --frozen --no-install-project --no-dev --extra fleet --extra otel --extra vision ;; \
+      1:1) uv sync --frozen --no-install-project --no-dev --extra fleet --extra otel --extra embeddings --extra vision ;; \
+      *) echo "KAIRYU_EMBEDDINGS and KAIRYU_VISION must each be 0 or 1" >&2; exit 2 ;; \
     esac
 COPY kairyu ./kairyu
 COPY scripts/prefetch_embedding_model.py ./scripts/prefetch_embedding_model.py
 RUN set -eu; \
-    case "$KAIRYU_EMBEDDINGS" in \
-      0) uv sync --frozen --no-dev --extra fleet --extra otel ;; \
-      1) uv sync --frozen --no-dev --extra fleet --extra otel --extra embeddings ;; \
-      *) echo "KAIRYU_EMBEDDINGS must be 0 or 1" >&2; exit 2 ;; \
+    case "$KAIRYU_EMBEDDINGS:$KAIRYU_VISION" in \
+      0:0) uv sync --frozen --no-dev --extra fleet --extra otel ;; \
+      1:0) uv sync --frozen --no-dev --extra fleet --extra otel --extra embeddings ;; \
+      0:1) uv sync --frozen --no-dev --extra fleet --extra otel --extra vision ;; \
+      1:1) uv sync --frozen --no-dev --extra fleet --extra otel --extra embeddings --extra vision ;; \
+      *) echo "KAIRYU_EMBEDDINGS and KAIRYU_VISION must each be 0 or 1" >&2; exit 2 ;; \
     esac
 ARG KAIRYU_EMBEDDING_MODEL_REPOSITORY=
 ARG KAIRYU_EMBEDDING_MODEL_REVISION=

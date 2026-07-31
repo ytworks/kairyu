@@ -549,6 +549,18 @@ WebUI; the dedicated browser gate owns its ephemeral database and validates
 initial chat, real embedding dimensions/order/usage, document ingestion,
 retrieval-only canary injection, citation-bearing RAG answer, outage, and
 Kairyu-only restart recovery. Optional reranking is explicitly deferred.
+G6 P-C4 now has a production implementation and an executable real-model gate.
+Image-bearing chats preserve exact roles and part order through a typed
+`MultimodalPrompt` into a separate stock-vLLM replica, so vLLM owns the Qwen
+processor/template once while Kairyu owns admission and tenant accounting.
+The boundary accepts only locally decoded and Pillow-verified inline
+PNG/JPEG/WebP data under explicit byte/pixel/dimension/aspect/count/context
+limits; all media work completes off the event loop before reservation or SSE
+headers, and exact processor usage is mandatory. A GPU-only overlay pins
+Qwen3-VL-32B-Instruct at TP8 and retains Kairyu-only embeddings/RAG.
+Its direct RED/BLUE plus normal Open WebUI owned-file upload gate is ready on
+the loaded eight-GPU stack; the retained clean-commit result is the remaining
+P-C4 closure step.
 
 The Helm chart has CPU-safe defaults plus a GPU overlay that requests one NVIDIA
 GPU, selects the configured runtime/node profile, mounts an existing host path or
@@ -701,6 +713,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [amendment] P-C4 gains a fail-closed stock-vLLM image-chat path
+- What: added role- and part-preserving multimodal prompt transport through direct and pooled OpenAI-compatible backends, exact processor-usage ownership, backend-specific admission, off-event-loop raster preparation, strict inline PNG/JPEG/WebP validation, bounded chat bodies, and consistent interactive/batch failure semantics. A GPU-only Compose overlay pins stock vLLM and Qwen3-VL-32B-Instruct at TP8 while retaining the production embedding endpoint; its reproducible gate checks RED/BLUE semantics, unary/SSE usage, remote-URL rejection, and Open WebUI's normal owned-file upload path. The portable CI-equivalent suite passes 3,746 tests with no selected skips and 87.98% coverage; the clean-commit real TP8 gate remains the final closure step.
+- Why: the former content-part parser intentionally rejected every image because it had no lossless role/part transport, processor owner, media security boundary, exact token accounting, or deployable VLM. Keeping Kairyu responsible for orchestration/admission while delegating model-specific processing and templating once to pinned stock vLLM preserves the L3/L2/L1 product boundary and avoids a second Qwen preprocessing implementation.
+- Refs: issue #203; G6 P-C4; m11 D5/D7/A18; `kairyu/engine/{prompt,vision,openai_backend}.py`; `kairyu/entrypoints/server/{chat_service,middleware,metering}.py`; `deploy/compose/{config-vlm.yaml,docker-compose.webui-vlm.yaml}`; `scripts/webui_vlm_{smoke.sh,api_smoke.py,browser_smoke.mjs}`; `tests/{unit/test_vision.py,unit/test_webui_vlm_compose.py,server/test_openai_api.py}`
 
 ### 2026-07-31 — [amendment] P-C3 closes on production offline embeddings and Kairyu-only RAG
 - What: added a production `fastembed` backend that loads a revision-, ONNX-, and manifest-SHA-pinned all-MiniLM-L6-v2 snapshot entirely offline; validates every recorded bundle file; warms one CPU session; reports exact tokenizer usage; rejects excess work before dispatch; and participates in readiness, fatal health, cancellation-safe startup, and draining shutdown. The default image remains lean while the Open WebUI image opts into the dependency and model. Its mandatory browser smoke now proves two-input 384-dimensional normalized embeddings, document ingestion, vector retrieval of a query-only canary, a citation-bearing Kairyu answer that requires retrieved context, visible outage, and retrieval/answer recovery after restarting only Kairyu. Optional reranking remains disabled and deferred. A source allowlist reduces the root Docker context from 7.5 GB of checkout state to 7.07 MB.

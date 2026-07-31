@@ -16,6 +16,7 @@ from os import PathLike
 
 from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
+from kairyu.engine.vision import ImageInputPolicy
 
 _MOCK_OPTIONS = frozenset(
     {
@@ -34,6 +35,7 @@ _OPENAI_OPTIONS = frozenset(
         "request_stream_usage",
         "upstream",
         "capabilities",
+        "image_input_policy",
         "client",
         "client_factory",
     }
@@ -159,13 +161,50 @@ def _validate_openai(options: Mapping[str, object]) -> None:
         raise ValueError(
             "openai backend client, client_factory, and transport are mutually exclusive"
         )
+    request_stream_usage = options.get("request_stream_usage", True)
+    if type(request_stream_usage) is not bool:
+        raise ValueError("openai backend request_stream_usage must be a boolean")
     try:
-        resolve_openai_capabilities(
+        capabilities = resolve_openai_capabilities(
             options.get("upstream", "generic"),
             options.get("capabilities"),
         )
     except (TypeError, ValueError):
         raise ValueError("openai backend capability configuration is invalid") from None
+    unsupported_prompt_kinds = capabilities.prompt_kinds - {
+        "text",
+        "multimodal",
+    }
+    if unsupported_prompt_kinds:
+        raise ValueError(
+            "openai backend currently supports only text and multimodal "
+            "prompt kinds"
+        )
+    image_input_policy = options.get("image_input_policy")
+    if image_input_policy is not None:
+        if not isinstance(image_input_policy, ImageInputPolicy):
+            if not isinstance(image_input_policy, Mapping):
+                raise ValueError(
+                    "openai backend image_input_policy must be a mapping or "
+                    "ImageInputPolicy"
+                )
+            try:
+                ImageInputPolicy(**dict(image_input_policy))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "openai backend image_input_policy configuration is invalid"
+                ) from None
+    supports_multimodal = "multimodal" in capabilities.prompt_kinds
+    if supports_multimodal != (image_input_policy is not None):
+        raise ValueError(
+            "openai backend multimodal capability and image_input_policy "
+            "must be configured together"
+        )
+    if supports_multimodal and not request_stream_usage:
+        raise ValueError(
+            "openai backend multimodal streaming requires "
+            "request_stream_usage=true"
+        )
 
 
 def _validate_vllm(options: Mapping[str, object]) -> None:

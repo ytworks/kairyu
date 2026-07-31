@@ -23,17 +23,27 @@ from collections.abc import AsyncIterator, Callable, Mapping
 import httpx
 
 from kairyu.engine.backend import (
+    AdmissionUpperBound,
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
     UpstreamClientError,
 )
+from kairyu.engine.backend import (
+    admission_upper_bound as default_admission_upper_bound,
+)
 from kairyu.engine.openai_capabilities import (
     OpenAIRequestCapabilities,
     resolve_openai_capabilities,
 )
-from kairyu.engine.prompt import prompt_kind, prompt_text
+from kairyu.engine.prompt import (
+    MultimodalPrompt,
+    TextPrompt,
+    prompt_kind,
+    prompt_text,
+)
 from kairyu.engine.registry import register_backend
+from kairyu.engine.vision import ImageInputPolicy, InvalidImageInput
 from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import SamplingParams
 
@@ -322,6 +332,7 @@ class OpenAICompatBackend:
         request_stream_usage: bool = True,
         upstream: str = "generic",
         capabilities: Mapping[str, object] | OpenAIRequestCapabilities | None = None,
+        image_input_policy: Mapping[str, object] | ImageInputPolicy | None = None,
         client: httpx.AsyncClient | None = None,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
@@ -338,15 +349,49 @@ class OpenAICompatBackend:
         self._transport = transport
         # m9 D1: upstreams only emit the usage chunk when asked; disable for
         # upstreams that reject unknown stream_options
+        if type(request_stream_usage) is not bool:
+            raise ValueError("request_stream_usage must be a boolean")
         self._request_stream_usage = request_stream_usage
         self._capabilities = resolve_openai_capabilities(upstream, capabilities)
-        unsupported_prompt_kinds = self._capabilities.prompt_kinds - {"text"}
+        unsupported_prompt_kinds = self._capabilities.prompt_kinds - {
+            "text",
+            "multimodal",
+        }
         if unsupported_prompt_kinds:
             raise ValueError(
-                "OpenAICompatBackend currently implements only text prompts; "
+                "OpenAICompatBackend currently implements text and multimodal "
+                "chat prompts; "
                 "unsupported configured prompt kinds: "
                 f"{sorted(unsupported_prompt_kinds)}"
             )
+        if isinstance(image_input_policy, ImageInputPolicy):
+            self._image_input_policy = image_input_policy
+        elif isinstance(image_input_policy, Mapping):
+            self._image_input_policy = ImageInputPolicy(**dict(image_input_policy))
+        elif image_input_policy is None:
+            self._image_input_policy = None
+        else:
+            raise ValueError(
+                "OpenAI-compatible image_input_policy must be a mapping or "
+                "ImageInputPolicy"
+            )
+        supports_multimodal = "multimodal" in self._capabilities.prompt_kinds
+        if supports_multimodal and self._image_input_policy is None:
+            raise ValueError(
+                "OpenAI-compatible multimodal capability requires image_input_policy"
+            )
+        if not supports_multimodal and self._image_input_policy is not None:
+            raise ValueError(
+                "OpenAI-compatible image_input_policy requires the multimodal "
+                "prompt capability"
+            )
+        if supports_multimodal and not self._request_stream_usage:
+            raise ValueError(
+                "OpenAI-compatible multimodal streaming requires "
+                "request_stream_usage=true for exact processed prompt usage"
+            )
+        if self._image_input_policy is not None:
+            self._image_input_policy.require_runtime()
         self._client = client
         self._client_factory = client_factory
         # An injected instance has an external owner. A factory creates this
@@ -367,7 +412,10 @@ class OpenAICompatBackend:
         return self._capabilities
 
     @property
-    def request_validation_key(self) -> OpenAIRequestCapabilities | None:
+    def request_validation_key(self) -> tuple[
+        OpenAIRequestCapabilities,
+        ImageInputPolicy | None,
+    ] | None:
         """Identity for replicas with exactly equivalent request validation.
 
         ``ReplicaPool`` may validate one representative for backends that
@@ -380,12 +428,64 @@ class OpenAICompatBackend:
 
         if type(self) is not OpenAICompatBackend:
             return None
-        return self._capabilities
+        return self._capabilities, self._image_input_policy
 
     def validate_request(self, request: GenerationRequest) -> None:
         """Fail unsupported intent before dispatch, metering, or client creation."""
 
         _validated_request_payload(request, self._capabilities)
+        if isinstance(request.prompt, MultimodalPrompt):
+            if type(request.prompt.base) is not str and not isinstance(
+                request.prompt.base,
+                TextPrompt,
+            ):
+                raise _client_error(
+                    self._capabilities.upstream,
+                    "does not support token-based multimodal prompt bases",
+                )
+            assert self._image_input_policy is not None
+            self._image_input_policy.validate_prompt_headers(request.prompt)
+
+    def _dispatch_preflight(
+        self,
+        request: GenerationRequest,
+    ) -> dict[str, object]:
+        try:
+            self.validate_request(request)
+            return _validated_request_payload(request, self._capabilities)
+        except InvalidImageInput as error:
+            raise UpstreamClientError(
+                str(error),
+                status_code=400,
+                code=error.code,
+                public_message=str(error),
+            ) from error
+        except OpenAIRequestValidationError as error:
+            raise UpstreamClientError(
+                str(error),
+                status_code=400,
+                public_message=str(error),
+            ) from error
+
+    def admission_upper_bound(self, request: GenerationRequest) -> AdmissionUpperBound:
+        """Reserve a configured processor ceiling, never media-byte heuristics."""
+
+        if not isinstance(request.prompt, MultimodalPrompt):
+            return default_admission_upper_bound(request)
+        policy = self._image_input_policy
+        if policy is None:  # Defensive: validation owns the normal error.
+            raise ValueError("multimodal admission requires image_input_policy")
+        max_tokens = request.sampling_params.max_tokens
+        if max_tokens is None:
+            raise ValueError("multimodal admission requires a finite max_tokens")
+        candidates = max(
+            request.sampling_params.n,
+            request.sampling_params.best_of or request.sampling_params.n,
+        )
+        return AdmissionUpperBound(
+            tokens=candidates * (policy.max_processed_prompt_tokens + max_tokens),
+            refundable_on_exact_usage=candidates == 1,
+        )
 
     async def fetch_backends(self, *, timeout_s: float = 2.0) -> dict | None:
         """Best-effort GET of a kairyu replica's ``/backends`` (m13 introspection).
@@ -461,32 +561,105 @@ class OpenAICompatBackend:
                 raise RuntimeError("client_factory returned a closed HTTP client")
         return self._client
 
-    def _payload(self, request: GenerationRequest) -> dict:
-        text = prompt_text(request.prompt)
-        if text is None or prompt_kind(request.prompt) != "text":
-            # Keep direct backend calls as explicit as server preflight. Never
-            # stringify token IDs or flatten modality data into chat content.
-            raise UpstreamClientError(
-                f"OpenAI-compatible upstream {self._capabilities.upstream!r} "
-                f"does not support prompt kind: {prompt_kind(request.prompt)}",
-                status_code=400,
+    async def _validated_image_urls(
+        self,
+        request: GenerationRequest,
+    ) -> tuple[str, ...] | None:
+        prompt = request.prompt
+        if not isinstance(prompt, MultimodalPrompt):
+            return None
+        assert self._image_input_policy is not None
+        try:
+            # Pillow must decompress the complete raster to reject truncated
+            # or malicious compressed inputs. Keep that bounded CPU work off
+            # the server event loop and do it once, after tenant admission.
+            return await asyncio.to_thread(
+                self._image_input_policy.validate_prompt,
+                prompt,
             )
+        except InvalidImageInput as error:
+            raise UpstreamClientError(
+                str(error),
+                status_code=400,
+                code=error.code,
+                public_message=str(error),
+            ) from error
+
+    async def prepare_request(self, request: GenerationRequest) -> None:
+        """Fully verify media once before quota debit or streaming headers."""
+
+        self._dispatch_preflight(request)
+        await self._validated_image_urls(request)
+
+    def _payload(
+        self,
+        request: GenerationRequest,
+        *,
+        validated: dict[str, object],
+        image_urls: tuple[str, ...] | None,
+    ) -> dict:
+        prompt = request.prompt
+        if isinstance(prompt, MultimodalPrompt):
+            if image_urls is None:
+                raise RuntimeError(
+                    "multimodal payload requires fully validated image data"
+                )
+            messages: list[dict[str, object]] = []
+            for message in prompt.messages:
+                content: list[dict[str, object]] = []
+                for part in message.content:
+                    if part.type == "text":
+                        content.append({"type": "text", "text": part.text})
+                        continue
+                    assert part.item_index is not None
+                    image_url: dict[str, object] = {
+                        "url": image_urls[part.item_index],
+                    }
+                    if part.detail is not None:
+                        image_url["detail"] = part.detail
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": image_url,
+                        }
+                    )
+                messages.append({"role": message.role, "content": content})
+        else:
+            text = prompt_text(prompt)
+            assert text is not None
+            messages = [{"role": "user", "content": text}]
         payload: dict = {
             "model": self._model,
-            "messages": [{"role": "user", "content": text}],
+            "messages": messages,
+            **validated,
         }
-        try:
-            payload.update(_validated_request_payload(request, self._capabilities))
-        except OpenAIRequestValidationError as error:
-            raise UpstreamClientError(str(error), status_code=400) from error
         if request.tools:
             payload["tools"] = list(request.tools)
             if request.tool_choice is not None:
                 payload["tool_choice"] = request.tool_choice
         return payload
 
+    @staticmethod
+    def _require_exact_multimodal_usage(
+        request: GenerationRequest,
+        usage: GenerationUsage | None,
+    ) -> None:
+        if isinstance(request.prompt, MultimodalPrompt) and (
+            usage is None or usage.prompt_tokens < 1
+        ):
+            raise RuntimeError(
+                "multimodal OpenAI-compatible upstream omitted exact processed "
+                "prompt usage"
+            )
+
     async def generate(self, request: GenerationRequest) -> GenerationResult:
-        payload = self._payload(request)
+        validated = self._dispatch_preflight(request)
+        image_urls = await self._validated_image_urls(request)
+        payload = self._payload(
+            request,
+            validated=validated,
+            image_urls=image_urls,
+        )
         response = await self._get_client().post(
             f"{self._base_url}/chat/completions",
             json=payload,
@@ -526,11 +699,13 @@ class OpenAICompatBackend:
         completions = tuple(completions_list)
         if not completions:
             raise RuntimeError(f"backend {self._base_url} returned no choices: {data}")
+        usage = _usage_from(data.get("usage"))
+        self._require_exact_multimodal_usage(request, usage)
         return GenerationResult(
             request_id=request.request_id,
             prompt=request.prompt,
             completions=completions,
-            usage=_usage_from(data.get("usage")),
+            usage=usage,
         )
 
     def _partial(
@@ -566,7 +741,13 @@ class OpenAICompatBackend:
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         """Real SSE streaming: yields cumulative partials, then the final result."""
-        payload = self._payload(request) | {"stream": True}
+        validated = self._dispatch_preflight(request)
+        image_urls = await self._validated_image_urls(request)
+        payload = self._payload(
+            request,
+            validated=validated,
+            image_urls=image_urls,
+        ) | {"stream": True}
         if self._request_stream_usage:
             payload["stream_options"] = {"include_usage": True}
         async with self._get_client().stream(
@@ -621,6 +802,7 @@ class OpenAICompatBackend:
                     )
         if not texts and not finish:
             raise RuntimeError(f"backend {self._base_url} streamed no choices")
+        self._require_exact_multimodal_usage(request, usage)
         yield self._partial(
             request,
             texts,
