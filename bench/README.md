@@ -111,6 +111,7 @@ bench/auto_params_bench.py
 bench/batched_prefill_qwen.py
 bench/batched_spec_verify_qwen.py
 bench/decode_page_table_cache_qwen.py
+bench/dp_scaling_g2_a8_bench.py
 bench/fleet_churn_bench.py
 bench/fleet_gateway_bench.py
 bench/fleet_rollout_bench.py
@@ -158,6 +159,34 @@ bench/usage_architecture_bench.py
 bench/vllm_quant_kernel_bench.py
 ```
 
+### G2 A8 DP scaling evidence
+
+`bench/dp_scaling_g2_a8_bench.py` is the checkout-only formal operator for
+G2 A8. It compares one Qwen3-32B TP4 replica with two independent TP4 replicas
+behind the L2 gateway on the same eight-GPU host. The performance arm uses a
+predeclared open-loop arrival-rate grid, at least three fixed-seed paired runs,
+with explicit seed 0, and excludes warmup. It does not substitute A6's synchronized-concurrency
+binding point for A8's saturation sweep.
+
+The operator retains every request sample and correlates gateway responses with
+the replica-placement JSONL log. Its independent verifier recomputes all three
+binding verdicts:
+
+- the median paired peak-goodput ratio is at least 1.9;
+- nearest-rank ingress-to-replica-selection latency p99 is below 10 ms; and
+- the engine-originated multi-turn KV hit rate through the two-replica
+  session-affinity gateway is at least 90% of the single-replica value.
+
+Gateway counters and placement reasons prove routing behavior but are never
+used as cache-hit truth; cache hits come only from response
+`prompt_tokens_details.cached_tokens`. A report cannot say PASS without
+complete raw performance, placement, and cache-usage evidence from a real
+eight-GPU run. Offline fixtures and unit tests validate the verifier only.
+Before traffic, the live read-only model volume is full-hashed (all 17 weight
+shards plus index, tokenizer, and model config) and compared with the pinned A7
+checkpoint evidence.
+The exact launch and replay procedure is in `docs/gpu-runbook.md` §6.
+
 ## Fixtures, results, and wheel verification
 
 The eight installed fixtures are synthetic plumbing inputs, never substitutes
@@ -189,7 +218,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 51 registered wrappers through
+The first command separately exercises all 52 registered wrappers through
 both their path and module `--help` forms. It runs once in CI, on Python 3.12,
 after the declared development dependencies are synced, without duplicating
-102 subprocesses in every portable test cell.
+104 subprocesses in every portable test cell.

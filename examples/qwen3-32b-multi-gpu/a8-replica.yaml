@@ -1,0 +1,31 @@
+# G2 A8 replica contract.  The companion Compose stack runs two independent
+# copies, each with four visible host GPUs and therefore one private RadixKV
+# cache.  Keep this capacity aligned with the already validated Qwen3-32B A6
+# serving path so A8 measures DP placement rather than a different engine.
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  access_log: false
+  # This cap leaves headroom for the predeclared open-loop saturation sweep.
+  # The engine's 16 active sequences provide backpressure below the HTTP queue.
+  max_concurrency: 128
+
+engines:
+  qwen3-32b:
+    backend: kairyu
+    options:
+      model_path: /models/qwen3-32b
+      tensor_parallel_size: 4
+      # CUDA Graph replay reserves page 0.  This exposes the same 8,192 usable
+      # blocks as the retained A6 configuration.
+      num_pages: 8193
+      max_model_len: 8192
+      max_num_batched_tokens: 1024
+      max_num_seqs: 16
+      pipeline_depth: 5
+      priority_age_s: 60.0
+      decode_mode: cuda_graph
+      cuda_graph_max_batch: 16
+      cuda_graph_max_pages: 512
+      cuda_graph_warmup_iters: 3

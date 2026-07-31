@@ -102,8 +102,41 @@ raw replay passes all eight binding checks:
 
 | Gate | Target | Regime |
 |---|---|---|
-| A8 (DP scaling) | DP=2 × TP=4 (same 8 GPUs) vs 1 × TP=4: goodput ≥1.9× (replicas are independent — near-linear is fair to demand); L2 Router added latency p99 <10 ms (m4 budget); session-affinity routing keeps multi-turn KV hit rate ≥90% of the single-replica value (naive round-robin destroys prefix locality — affinity is part of the acceptance contract) | saturation |
+| A8 (DP scaling) | `bench/dp_scaling_g2_a8_bench.py` compares DP=2 × TP=4 (same 8 GPUs) vs 1 × TP=4: goodput ≥1.9× (replicas are independent — near-linear is fair to demand); L2 Router added latency p99 <10 ms (m4 budget); session-affinity routing keeps multi-turn KV hit rate ≥90% of the single-replica value (naive round-robin destroys prefix locality — affinity is part of the acceptance contract) | saturation |
 | A9 (DP vs TP crossover) | Report DP=2×TP=4 vs TP=8 goodput and TPOT across the arrival sweep. No threshold — the crossover concurrency must appear in the results file | saturation |
+
+**A8 formal procedure (evidence pending):** run the pinned Qwen3-32B checkpoint
+on one TP4 replica for the baseline and on two independent TP4 replicas behind
+`ReplicaPool` for the DP arm. Both arms run on the same eight-GPU host; the
+single arm uses one of the same TP4 partitions, while the DP arm uses both
+partitions. Predeclare the full open-loop arrival-rate grid and TTFT SLO before
+measurement. Run at least three paired repeats with explicit seed 0, alternate arm
+order, and exclude warmup. For each repeat, take each arm's peak SLO-goodput
+from that same predeclared sweep, then bind the median of the paired DP/single
+ratios to ≥1.9. A request contributes to goodput only when it completes
+successfully and exactly and meets the predeclared TTFT SLO.
+
+The two-replica gateway must record every formal request's placement decision.
+The binding router value is nearest-rank p99 of the measured outer-HTTP-ingress
+to replica-selection interval and must remain <10 ms. The affinity arm runs
+64 sessions × 8 turns, with a 512-token shared prefix, 128 new prompt tokens
+per turn, and one output token, first against one replica and then through the
+two-replica gateway with a stable session ID per conversation. Recompute both
+hit rates only from engine-originated response
+`prompt_tokens_details.cached_tokens / prompt_tokens`; the DP/single ratio must
+be ≥0.90. Placement reasons and gateway counters are supporting routing
+evidence, never KV-hit truth.
+
+The retained artifact must include the predeclared config, complete raw request
+samples, complete correlated placement rows, complete per-turn cache usage,
+physical GPU topology, model/image/source identities, and integrity hashes.
+The model identity must be a current-runtime attestation: full-hash the live
+read-only volume's 17 weight shards, safetensors index, tokenizer, and model
+config, then compare those bytes with the pinned A7 checkpoint evidence.
+The verifier recomputes all three thresholds from those raw records and fails
+closed on omissions or correlation mismatches. Unit tests or offline replay can
+validate only the operator: A8 remains incomplete and no PASS may be reported
+until a complete real eight-GPU artifact passes independent replay.
 
 ### Stage 5.3 — P-D disaggregation, intra-node (blocked on 5.1)
 

@@ -1,0 +1,102 @@
+name: kairyu-qwen3-32b-a8
+
+# KAIRYU_A8_IMAGE is the caller-built image under test.  KAIRYU_A8_IMAGE_ID is
+# its immutable `docker image inspect` identity and is copied onto every
+# container so the retained gate can join configuration to runtime provenance.
+x-a8-service: &a8-service
+  image: ${KAIRYU_A8_IMAGE:?set KAIRYU_A8_IMAGE to the local image under test}
+  pull_policy: never
+  restart: "no"
+  init: true
+
+x-a8-replica: &a8-replica
+  <<: *a8-service
+  shm_size: 8gb
+  ulimits:
+    memlock: -1
+  environment:
+    KAIRYU_ATTENTION_BACKEND: auto
+  volumes:
+    - ./a8-replica.yaml:/etc/kairyu/config.yaml:ro
+    - ../../kairyu:/app/kairyu:ro
+    - qwen3-32b:/models:ro
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+    interval: 5s
+    timeout: 5s
+    retries: 180
+    start_period: 5m
+
+services:
+  # GPUs 0-3 sit under NUMA nodes 0-1 on the retained RTX PRO 6000 host.
+  # One physical core per NUMA node is reserved for the gateway below.
+  replica0:
+    <<: *a8-replica
+    cpuset: "0-14,16-30,64-78,80-94"
+    ports:
+      - "127.0.0.1:8200:8000"
+    labels:
+      com.kairyu.a8.role: replica0
+      com.kairyu.a8.host-gpu-ordinals: "0,1,2,3"
+      com.kairyu.a8.image-id: "${KAIRYU_A8_IMAGE_ID:?set the immutable sha256 image ID}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1", "2", "3"]
+              capabilities: [gpu]
+
+  # GPUs 4-7 sit under NUMA nodes 2-3.  This is a separate process/cache and
+  # shares no GPU or pinned CPU with replica0.
+  replica1:
+    <<: *a8-replica
+    cpuset: "32-46,48-62,96-110,112-126"
+    ports:
+      - "127.0.0.1:8201:8000"
+    labels:
+      com.kairyu.a8.role: replica1
+      com.kairyu.a8.host-gpu-ordinals: "4,5,6,7"
+      com.kairyu.a8.image-id: "${KAIRYU_A8_IMAGE_ID:?set the immutable sha256 image ID}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["4", "5", "6", "7"]
+              capabilities: [gpu]
+
+  gateway:
+    <<: *a8-service
+    # Four physical cores (both SMT threads), one from each NUMA node.  Keeping
+    # them outside both engine CPU sets prevents router latency from competing
+    # with model-runner control threads.
+    cpuset: "15,31,47,63,79,95,111,127"
+    depends_on:
+      replica0:
+        condition: service_healthy
+      replica1:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8202:8000"
+    labels:
+      com.kairyu.a8.role: gateway
+      com.kairyu.a8.host-gpu-ordinals: ""
+      com.kairyu.a8.image-id: "${KAIRYU_A8_IMAGE_ID:?set the immutable sha256 image ID}"
+    volumes:
+      - ./a8-gateway.yaml:/etc/kairyu/config.yaml:ro
+      - ../../kairyu:/app/kairyu:ro
+      - type: bind
+        source: ${KAIRYU_A8_RUN_DIR:?run a8-stack.sh with a host run directory}
+        target: /evidence
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 10s
+
+volumes:
+  qwen3-32b:
+    external: true
+    name: kairyu-qwen3-32b_qwen3-32b

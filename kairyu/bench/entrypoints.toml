@@ -74,6 +74,15 @@ installed = false
 invocations = ["path", "module"]
 
 [[entrypoints]]
+path = "bench/dp_scaling_g2_a8_bench.py"
+module = "bench.dp_scaling_g2_a8_bench"
+kind = "formal-gate"
+requires = ["engine", "gpu", "hf", "service"]
+documentation = ["bench/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
 path = "bench/fleet_churn_bench.py"
 module = "bench.fleet_churn_bench"
 kind = "formal-gate"

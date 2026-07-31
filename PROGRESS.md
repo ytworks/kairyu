@@ -63,6 +63,18 @@ and 8× RTX PRO 6000: TP4 direct/gateway measured 87.6725%/87.3531%, and TP8
 direct/gateway measured the identical 87.6725%/87.3531%, with 512/512 successful
 requests per cell and all eight binding checks passing independent raw replay
 (`bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`).
+G2 A8 now has a fail-closed formal operator and dedicated two-replica TP4
+stack for the real Qwen3-32B eight-GPU run. The fixed seed-0 open-loop sweep
+alternates paired arms, isolates every warmup/cell/arm with pinned one-token
+cache namespaces, joins every DP response to production placement evidence,
+and independently recomputes peak-goodput scaling, ingress-to-selection p99,
+and session-affinity cache retention. Runtime provenance binds the forced-new
+containers, exact GPU/CPU partitions, Compose configuration, clean source
+commit, and a fresh full hash of the live 17-shard model volume to retained A7
+checkpoint evidence. CPU/static tests validate only the operator and stack;
+A8 remains open with no PASS until the real artifact replays. The immediate
+live-run blocker is an external-namespace process retaining 26.8 GiB on GPU 0;
+the preflight correctly rejects that asymmetric inventory.
 Issue #277's M13 extension exposes `auto`, torch, FlashInfer, FA3, and FA4 as
 strict public choices. FA3/FA4 use FlashAttention for prefill and retain
 FlashInfer ownership of paged decode/CUDA graphs; `/backends` reports the
@@ -657,6 +669,10 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] G2 A8 formal DP scaling gate reaches live-run readiness
+- What: Added the fixed Qwen3-32B DP=2×TP4 versus TP4 open-loop operator, the forced-recreate two-replica/gateway stack, exact request/placement/cache evidence replay, and current-runtime container/source/checkpoint attestation. Portable tests cover semantic and integrity tampering but cannot claim the real eight-GPU result. The formal preflight currently rejects an unrelated 26.8 GiB GPU 0 owner, so A8 remains open and unpassed.
+- Refs: issue #158, `bench/dp_scaling_g2_a8_bench.py`, `examples/qwen3-32b-multi-gpu/a8-*`, `tests/bench/test_dp_scaling_g2_a8_bench.py`, `docs/goals/g2-multi-gpu.md`
 
 ### 2026-07-31 — [design] Benchmark ownership becomes package-enforced
 - What: made `kairyu.bench` the installed owner of reusable target,
