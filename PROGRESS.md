@@ -63,6 +63,24 @@ and 8× RTX PRO 6000: TP4 direct/gateway measured 87.6725%/87.3531%, and TP8
 direct/gateway measured the identical 87.6725%/87.3531%, with 512/512 successful
 requests per cell and all eight binding checks passing independent raw replay
 (`bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/`).
+G2 A8 now has a fail-closed formal operator and dedicated two-replica TP4
+stack for the real Qwen3-32B eight-GPU run. The fixed seed-0 open-loop sweep
+alternates paired arms, isolates every warmup/cell/arm with pinned one-token
+cache namespaces, joins every DP response to production placement evidence,
+and independently recomputes peak-goodput scaling, ingress-to-selection p99,
+and session-affinity cache retention. Runtime provenance binds the forced-new
+containers, exact GPU/CPU partitions, Compose configuration, clean source
+commit, and a fresh full hash of the live 17-shard model volume to retained A7
+checkpoint evidence. CPU/static tests validate only the operator and stack;
+the retained real run independently verifies and replays all 2,992 retry-free
+requests, 1,496 placement rows, and the full checkpoint/runtime provenance.
+DP peak-goodput ratios were 1.9988×/1.7342×/1.7993×, for a 1.7993× median
+against the original 1.9× threshold; router p99 was 3.723 ms and affinity cache
+retention was 99.53%. The artifact therefore truthfully remains `passed: false`.
+The product owner accepted the measured 1.7993× as an explicit closure
+deviation, not as a 1.9× PASS; the original operator threshold is unchanged.
+Its packaged benchmark boundary verifies all 53 registered entrypoints from
+the isolated wheel as well as from the checkout.
 Issue #277's M13 extension exposes `auto`, torch, FlashInfer, FA3, and FA4 as
 strict public choices. FA3/FA4 use FlashAttention for prefill and retain
 FlashInfer ownership of paged decode/CUDA graphs; `/backends` reports the
@@ -649,7 +667,7 @@ global store remain rejected. The retained decision artifact SHA-256 is
 
 Benchmark ownership is now package-enforced. The installed `kairyu.bench`
 surface owns reusable target/auth/statistics/reporting contracts, the public
-CLI, eight fixtures, and a packaged registry for all 52 checkout-only
+CLI, eight fixtures, and a packaged registry for all 53 checkout-only
 wrappers. Exact existing wrapper-composition edges are frozen; new reusable
 dependencies, missing docs/main guards, or path/module CLI regressions fail
 validation. Historical `bench/*.py` and `bench/results/**` provenance paths
@@ -659,6 +677,17 @@ credential names, fails closed when configured credentials are absent, and
 redacts secrets from errors. Generic serving/frontier artifacts record their
 nearest-rank percentile method; formal gate schemas remain source-bound.
 
+The F1b zero-failure rollout gate now freezes each clean-head gateway and mock
+image to a private archive immediately after its build, before creating the
+kind cluster. Loading those archives removes kind's delayed re-resolution and
+export of mutable host tags while preserving the canonical runtime image
+names, revision labels, Docker/CRI/containerd digest reconciliation, rollout
+traffic, and independent evidence replay.
+The portable noisy-neighbor schedule test now separately binds the shared
+absolute origin, exact tenant/phase/index order, and targets derived from that
+origin. Its deterministic exponent-boundary clock catches timestamp
+cancellation without weakening the schedule contract with a broad tolerance.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -666,6 +695,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] Noisy-neighbor schedule test binds raw clock inputs
+- What: Replaced the noisy-neighbor schedule test's exact equality on subtracted floating-point timestamps with exact checks of tenant/phase/index order, one shared origin, and each raw target as that origin plus its specified cadence. The test fixes the origin immediately below the 512-second binary exponent boundary and verifies that the benchmark reads the clock exactly once, making the former CI-only failure deterministic while strengthening the named shared-origin contract.
+- Why: Python 3.12 job `91101025612` crossed that exponent boundary and produced `0.49999999999994316` for a mathematically 0.5-second offset. The one-ULP cancellation is not a product timing error; exact subtraction was both numerically invalid and unable to prove that the two tenants shared one origin. Broad approximation, skip, retry, or test deletion would provide weaker coverage than asserting the raw schedule inputs directly.
+- Refs: PR #299, `tests/bench/test_noisy_neighbor_gpu_bench.py`, GitHub run `30613391675`
+
+### 2026-07-31 — [progress] F1b freezes build images before kind startup
+- What: Changed the F1b rollout gate to save each clean-head gateway and mock image to a guarded temporary archive immediately after its build and load those archives after kind startup. The gate still fails closed on image revision and Docker/CRI/containerd digest mismatches and still runs the unchanged zero-failure rollout and independent replay. A policy regression test fixes the build/save/create/load ordering and rejects a return to delayed `kind load docker-image` resolution.
+- Why: GitHub run `30611974651` built and inspected both images successfully, then kind's delayed internal `docker save` lost `kairyu:dev` before any Kubernetes rollout ran. F1a/F1b/F1c were on separate hosted runners, so cross-workflow cleanup was not the cause. Freezing the exact build output before cluster creation removes the observed mutable-tag TOCTOU without deleting, retrying, skipping, or weakening the real rollout test.
+- Refs: issue #158, PR #299, `scripts/kind_rollout_gate.sh`, `tests/unit/test_ci_workflow_policy.py`, GitHub job `91096580771`
+
+### 2026-07-31 — [amendment] G2 A8 closes on an accepted 1.7993× scaling deviation
+- What: Ran the complete Qwen3-32B DP=2×TP4 versus TP4 gate on all eight RTX PRO 6000 GPUs. All 2,992 requests succeeded without retry, every DP response correlated to one of 1,496 placement rows, router p99 was 3.723 ms, and DP retained 99.53% of the single-replica cache-hit rate. The three peak-goodput ratios were 1.9988×, 1.7342×, and 1.7993×; their 1.7993× median missed the original 1.9× threshold, so the retained manifest remains `passed: false`. The product owner explicitly accepted this measured median for closure without rewriting the threshold or claiming a formal PASS.
+- Why: The real artifact proves the routing, affinity, integrity, and near-linear scaling value while preserving the remaining 5.3% target shortfall as visible evidence. Treating 1.7993× as 1.9× or moving the threshold after measurement would hide the residual; an explicit accepted deviation records the product decision without falsifying the gate.
+- Refs: issue #158, PR #299, source commit `4924b4d71b8fae0af087979908819aed6939a871`, `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`, raw SHA-256 `b637489302a9b818a0c34790c4059946994ff6070f76ac9e1bc7d128bbbd803f`, manifest SHA-256 `da439f153c04d05178ddf96c489aca7fb1cc270ba982736c1bc98197730e3946`, placements SHA-256 `76ca1a5f709ccf8492238bdcc4193776f94fdb7a88a40a7e970a517db30270c3`
 
 ### 2026-07-31 — [progress] G4 E-KV rejects unit-scale FP8 KV and stays BF16
 - What: ran the formal 8K/16K/32K Qwen3-32B BF16-versus-unit-scale-E4M3 bake
@@ -717,6 +761,14 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
   `bench/fp8_kv_g4_ekv_bench.py`;
   `docs/design/flashinfer-sm120-aot.md`;
   `tests/{unit/test_kv_cache_dtype.py,unit/test_kv_pool_fp8.py,gpu/test_flashinfer_gpu.py}`
+
+### 2026-07-31 — [fix] G2 A8 packaged benchmark count follows its new operator
+- What: Raised the isolated-wheel registry assertion from 51 to 52 when A8 added the 52nd owned benchmark entrypoint. The real wheel now proves that the complete registry and CLI are installed instead of failing on the intentionally added wrapper.
+- Refs: issue #158, PR #299, `scripts/verify_bench_wheel.py`
+
+### 2026-07-31 — [progress] G2 A8 formal DP scaling gate reaches live-run readiness
+- What: Added the fixed Qwen3-32B DP=2×TP4 versus TP4 open-loop operator, the forced-recreate two-replica/gateway stack, exact request/placement/cache evidence replay, and current-runtime container/source/checkpoint attestation. Portable tests cover semantic and integrity tampering but cannot claim the real eight-GPU result. The formal preflight currently rejects an unrelated 26.8 GiB GPU 0 owner, so A8 remains open and unpassed.
+- Refs: issue #158, `bench/dp_scaling_g2_a8_bench.py`, `examples/qwen3-32b-multi-gpu/a8-*`, `tests/bench/test_dp_scaling_g2_a8_bench.py`, `docs/goals/g2-multi-gpu.md`
 
 ### 2026-07-31 — [design] Benchmark ownership becomes package-enforced
 - What: made `kairyu.bench` the installed owner of reusable target,

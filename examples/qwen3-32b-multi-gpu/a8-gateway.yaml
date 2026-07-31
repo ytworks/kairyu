@@ -1,0 +1,55 @@
+# G2 A8 two-replica gateway.  Both members are the same model and DeploymentSpec;
+# only their process-local KV caches and host GPU sets differ.
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  # AccessLogMiddleware assigns the response X-Request-ID that exactly joins
+  # each measured response to its placement JSONL row.  The log itself retains
+  # only method/path/status/duration and never prompt text.
+  access_log: true
+  # Leaves headroom for the predeclared open-loop saturation sweep while still
+  # bounding queued gateway work.  Each replica independently caps at 128.
+  max_concurrency: 256
+
+pools:
+  qwen3-32b:
+    replicas:
+      - backend: openai
+        health_url: http://replica0:8000/readyz
+        options:
+          base_url: http://replica0:8000/v1
+          model: qwen3-32b
+          api_key_env: null
+          upstream: kairyu
+      - backend: openai
+        health_url: http://replica1:8000/readyz
+        options:
+          base_url: http://replica1:8000/v1
+          model: qwen3-32b
+          api_key_env: null
+          upstream: kairyu
+    unhealthy_after: 2
+    probe_interval_s: 1.0
+    # Keep every declared A8 session on its HRW-selected cache.  Unaffined
+    # saturation traffic still uses least-outstanding placement.
+    queue_depth_threshold: 256
+    # DeploymentSpec constructs the bounded JsonlRouterLog writer.  The Compose
+    # stack binds /evidence to the caller-owned, provenance-scoped run directory.
+    placement_log_path: /evidence/placements.jsonl
+
+tenants:
+  default_tenant: default
+  limits:
+    default:
+      # These are admission guardrails, not A8 load generators.  They exceed
+      # the predeclared saturation sweep and 512-request multi-turn affinity
+      # trace, so the gate measures engines and routing rather than rate-limit
+      # rejection.
+      requests_per_minute: 1000000
+      tokens_per_minute: 50000000
+      request_burst: 4096
+      token_burst: 50000000
+      max_in_flight: 256
+      interactive_priority: 0
+      batch_priority: 1

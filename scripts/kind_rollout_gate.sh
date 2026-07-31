@@ -259,6 +259,8 @@ SOURCE_ARCHIVE_DIR=$(mktemp -d /tmp/kairyu-f1b-source.XXXXXX)
 ARCHIVE_KIND_CONFIG="${SOURCE_ARCHIVE_DIR}/${KIND_CONFIG}"
 ARCHIVE_APPLY_DIR="${SOURCE_ARCHIVE_DIR}/${APPLY_DIR}"
 ARCHIVE_MOCK_DIR="${SOURCE_ARCHIVE_DIR}/deploy/kind/f1a/mock"
+GATEWAY_IMAGE_ARCHIVE="${SOURCE_ARCHIVE_DIR}/gateway-image.tar"
+MOCK_IMAGE_ARCHIVE="${SOURCE_ARCHIVE_DIR}/mock-image.tar"
 if [[ ! -f "$ARCHIVE_KIND_CONFIG" ||
       ! -f "${ARCHIVE_APPLY_DIR}/kustomization.yaml" ||
       ! -f "${ARCHIVE_MOCK_DIR}/Dockerfile" ]]; then
@@ -302,10 +304,14 @@ fi
   --provenance=false \
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"
+# Freeze each tag before kind startup; ``load docker-image`` would resolve and
+# export the mutable host tag only after the cluster has been created.
+"$DOCKER" image save --output "$GATEWAY_IMAGE_ARCHIVE" "$GATEWAY_IMAGE"
 "$DOCKER" build --ulimit nofile=65536:65536 \
   --provenance=false \
   --label "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
   -t "$MOCK_IMAGE" "$ARCHIVE_MOCK_DIR"
+"$DOCKER" image save --output "$MOCK_IMAGE_ARCHIVE" "$MOCK_IMAGE"
 assert_clean_source
 
 GATEWAY_IMAGE_DIGEST=$(
@@ -351,7 +357,7 @@ if ((${#kind_nodes[@]} != 1)); then
   exit 1
 fi
 CONTROL_PLANE=${kind_nodes[0]}
-"$KIND" load docker-image "$GATEWAY_IMAGE" "$MOCK_IMAGE" \
+"$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE" \
   --name "$CLUSTER_NAME"
 
 run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \

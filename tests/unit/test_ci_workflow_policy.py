@@ -64,6 +64,28 @@ def test_f1b_pull_requests_always_run_the_local_smoke_gate() -> None:
     assert step["run"] == 'bash scripts/kind_rollout_gate.sh "--${PROFILE}"'
 
 
+def test_f1b_rollout_freezes_each_image_before_kind_cluster_creation() -> None:
+    script = (_ROOT / "scripts" / "kind_rollout_gate.sh").read_text(
+        encoding="utf-8"
+    )
+    gateway_build = script.index('-t "$GATEWAY_IMAGE" "$SOURCE_ARCHIVE_DIR"')
+    gateway_save = script.index(
+        '"$DOCKER" image save --output "$GATEWAY_IMAGE_ARCHIVE" "$GATEWAY_IMAGE"'
+    )
+    mock_build = script.index('-t "$MOCK_IMAGE" "$ARCHIVE_MOCK_DIR"')
+    mock_save = script.index(
+        '"$DOCKER" image save --output "$MOCK_IMAGE_ARCHIVE" "$MOCK_IMAGE"'
+    )
+    cluster_create = script.index('"$KIND" create cluster')
+    archive_load = script.index(
+        '"$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE"'
+    )
+
+    assert gateway_build < gateway_save < mock_build < mock_save < cluster_create
+    assert cluster_create < archive_load
+    assert '"$KIND" load docker-image' not in script
+
+
 def test_f1c_pull_requests_always_run_the_real_gateway_gate() -> None:
     workflow, text = _load_workflow("f1c-gateway.yml")
     pull_request = workflow["on"]["pull_request"]

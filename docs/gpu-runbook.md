@@ -297,7 +297,99 @@ GPU-only remainder (design m5 §4.2).
   (TP4 direct/gateway 87.6725%/87.3531%; TP8 direct/gateway
   87.6725%/87.3531%; 512/512 successful requests per cell; all eight binding
   checks pass independent raw replay).
-- Gates A8–A9: `--dp-replicas 2` + `multiturn_prefix.py --replicas 2`; DP-vs-TP sweep.
+- Gate A8 / issue #158: use the pinned Qwen3-32B checkpoint and the dedicated
+  two-replica TP4 stack. The caller owns the evidence directory; the wrapper
+  never removes it. Resolve and record the immutable image ID, then launch the
+  two TP4 replicas on GPU partitions 0–3 and 4–7 plus the L2 gateway:
+
+  ```bash
+  export KAIRYU_A8_IMAGE='<image-reference>'
+  export KAIRYU_A8_IMAGE_ID='sha256:<64-lowercase-hex>'
+  export KAIRYU_A8_RUN_DIR='bench/results/g2-a8-dp-qwen3-32b-<gpu>-<date>'
+  examples/qwen3-32b-multi-gpu/a8-stack.sh "$KAIRYU_A8_RUN_DIR" \
+    up -d --force-recreate --wait
+  curl -fsS http://127.0.0.1:8200/readyz
+  curl -fsS http://127.0.0.1:8201/readyz
+  curl -fsS http://127.0.0.1:8202/readyz
+  ```
+
+  Run the formal operator from that clean committed tree. The operator verifies
+  the immutable A6 trace bundle, retained A7 checkpoint evidence, image ID,
+  eight-GPU topology, container layout, Kairyu backend metadata, and the live
+  model volume's 17 weight shards/index/tokenizer/config before sending formal
+  traffic:
+
+  ```bash
+  export KAIRYU_A8_TRACE_BUNDLE='/tmp/a6-traces/g2-a6-traces.json'
+  export KAIRYU_A8_EXPECTED_COMMIT='<40-lowercase-hex-commit>'
+  uv run --frozen python bench/dp_scaling_g2_a8_bench.py measure \
+    --single-url http://127.0.0.1:8200/v1 \
+    --dp-url http://127.0.0.1:8202/v1 \
+    --trace-bundle "$KAIRYU_A8_TRACE_BUNDLE" \
+    --gateway-placement-log "$KAIRYU_A8_RUN_DIR/placements.jsonl" \
+    --output-dir "$KAIRYU_A8_RUN_DIR" \
+    --image-id "$KAIRYU_A8_IMAGE_ID" \
+    --expected-commit "$KAIRYU_A8_EXPECTED_COMMIT" \
+    --assert-gate
+  uv run --frozen python bench/dp_scaling_g2_a8_bench.py verify \
+    --artifact "$KAIRYU_A8_RUN_DIR" --assert-gate
+  uv run --frozen python bench/dp_scaling_g2_a8_bench.py replay \
+    --artifact "$KAIRYU_A8_RUN_DIR" --assert-gate
+  ```
+
+  The operator's formal config predeclares the complete open-loop arrival-rate
+  grid, the TTFT SLO, and at least three paired seed-0 repeats. It alternates
+  the single/DP arm order and excludes warmup. The single baseline addresses
+  replica 0 directly; the DP arm addresses the gateway. Do not use A6's
+  synchronized c128 burst as an A8 binding substitute. The operator computes
+  each repeat's peak SLO-goodput from the same predeclared grid and binds the
+  median paired DP/single ratio to ≥1.9.
+
+  The gateway writes
+  `$KAIRYU_A8_RUN_DIR/placements.jsonl`. Every formal DP response must correlate
+  to exactly one placement row by request ID. Recompute nearest-rank p99 over
+  the recorded outer-ingress-to-selection intervals and require <10 ms. Run the
+  fixed 64-session × 8-turn trace (512-token shared prefix, 128 new prompt
+  tokens per turn, one output token) against replica 0 and through the
+  two-replica gateway, retaining stable `X-Session-ID` values and all response
+  usage. Recompute KV hit rates only from engine-originated
+  `prompt_tokens_details.cached_tokens / prompt_tokens`; require the
+  gateway/single ratio to be ≥0.90. Routing counters and placement reasons are
+  supporting evidence only.
+
+  The `verify` and independent `replay` commands must retain and hash the config,
+  every raw performance sample, every correlated placement row, every per-turn
+  cache-usage record, physical topology, pinned checkpoint identity, immutable
+  image ID, and clean source identity. Missing/failed requests, incomplete
+  placement correlation, non-finite values, a changed predeclared grid, or any
+  failed threshold must fail closed. Offline replay and CPU tests cannot report
+  an A8 threshold PASS. Any closure despite a failed threshold must be an
+  explicit accepted deviation recorded in the goal and progress log; it must
+  not rewrite the artifact or operator verdict.
+
+  Retained result (2026-07-31):
+  `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/` records all 2,992
+  retry-free successful requests and 1,496 correlated placement rows. The
+  three paired peak-goodput ratios are 1.9988×, 1.7342×, and 1.7993×, for a
+  1.7993× median against the original 1.9× threshold. Router p99 is 3.723 ms
+  and affinity-cache retention is 99.53%. Verify and raw-only replay both
+  reproduce `passed: false` solely for goodput. The product owner accepted the
+  measured median for issue #158 closure as a documented deviation; the
+  original 1.9× verdict remains unchanged. SHA-256:
+  raw `b637489302a9b818a0c34790c4059946994ff6070f76ac9e1bc7d128bbbd803f`,
+  manifest
+  `da439f153c04d05178ddf96c489aca7fb1cc270ba982736c1bc98197730e3946`,
+  placements
+  `76ca1a5f709ccf8492238bdcc4193776f94fdb7a88a40a7e970a517db30270c3`.
+
+  Stop only the scoped A8 project after evidence is safely retained:
+
+  ```bash
+  examples/qwen3-32b-multi-gpu/a8-stack.sh "$KAIRYU_A8_RUN_DIR" down
+  ```
+
+- Gate A9: retain the separate DP=2×TP4 vs TP8 goodput/TPOT crossover across
+  the arrival sweep; A9 remains report-only and is not implied by an A8 pass.
 - Gate A10 / issue #223: cross-device P-D handoff uses a dedicated source-copy
   stream on the prefill GPU and a destination dependency/completion stream on
   the decode GPU. Select two distinct GPUs for which CUDA peer access is

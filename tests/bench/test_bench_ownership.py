@@ -27,7 +27,7 @@ def test_package_manifest_is_complete_and_sorted() -> None:
     manifest = resources.files("kairyu.bench").joinpath(MANIFEST_NAME)
     assert manifest.is_file()
     entries = load_entrypoints()
-    assert len(entries) == 52
+    assert len(entries) == 53
     assert [entry.path for entry in entries] == sorted(
         entry.path for entry in entries
     )
@@ -95,7 +95,7 @@ def test_entrypoints_json_is_stable_and_explicit() -> None:
         source: list(targets)
         for source, targets in load_compatibility_imports().items()
     }
-    assert len(payload["entrypoints"]) == 52
+    assert len(payload["entrypoints"]) == 53
 
 
 def test_bench_entrypoints_parser_dispatches(capsys) -> None:
@@ -104,7 +104,7 @@ def test_bench_entrypoints_parser_dispatches(capsys) -> None:
     assert args.bench_command == "entrypoints"
     assert bench_cli.handle(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["entrypoints"]) == 52
+    assert len(payload["entrypoints"]) == 53
 
 
 def test_bench_entrypoints_check_failure_is_nonzero(

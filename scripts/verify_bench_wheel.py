@@ -28,6 +28,7 @@ FIXTURE_FILES = (
 FIXTURE_PREFIX = "kairyu/bench/fixtures/"
 ENTRYPOINT_MANIFEST = "kairyu/bench/entrypoints.toml"
 CONSOLE_TARGET = "kairyu.entrypoints.cli:main"
+EXPECTED_ENTRYPOINTS = 53
 
 
 class VerificationError(RuntimeError):
@@ -186,9 +187,10 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         raise VerificationError(
             f"`kairyu bench entrypoints --json` was not JSON: {entrypoint_result.stdout!r}"
         ) from error
-    if len(registry.get("entrypoints", ())) != 52:
+    if len(registry.get("entrypoints", ())) != EXPECTED_ENTRYPOINTS:
         raise VerificationError(
-            "packaged benchmark entrypoint registry does not contain all 52 wrappers"
+            "packaged benchmark entrypoint registry does not contain all "
+            f"{EXPECTED_ENTRYPOINTS} wrappers"
         )
 
     for command in (

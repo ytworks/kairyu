@@ -111,6 +111,7 @@ bench/auto_params_bench.py
 bench/batched_prefill_qwen.py
 bench/batched_spec_verify_qwen.py
 bench/decode_page_table_cache_qwen.py
+bench/dp_scaling_g2_a8_bench.py
 bench/fleet_churn_bench.py
 bench/fleet_gateway_bench.py
 bench/fleet_rollout_bench.py
@@ -159,6 +160,46 @@ bench/usage_architecture_bench.py
 bench/vllm_quant_kernel_bench.py
 ```
 
+### G2 A8 DP scaling evidence
+
+`bench/dp_scaling_g2_a8_bench.py` is the checkout-only formal operator for
+G2 A8. It compares one Qwen3-32B TP4 replica with two independent TP4 replicas
+behind the L2 gateway on the same eight-GPU host. The performance arm uses a
+predeclared open-loop arrival-rate grid, at least three fixed-seed paired runs,
+with explicit seed 0, and excludes warmup. It does not substitute A6's synchronized-concurrency
+binding point for A8's saturation sweep.
+
+The operator retains every request sample and correlates gateway responses with
+the replica-placement JSONL log. Its independent verifier recomputes all three
+binding verdicts:
+
+- the median paired peak-goodput ratio is at least 1.9;
+- nearest-rank ingress-to-replica-selection latency p99 is below 10 ms; and
+- the engine-originated multi-turn KV hit rate through the two-replica
+  session-affinity gateway is at least 90% of the single-replica value.
+
+Gateway counters and placement reasons prove routing behavior but are never
+used as cache-hit truth; cache hits come only from response
+`prompt_tokens_details.cached_tokens`. A report cannot say PASS without
+complete raw performance, placement, and cache-usage evidence from a real
+eight-GPU run. Offline fixtures and unit tests validate the verifier only.
+Before traffic, the live read-only model volume is full-hashed (all 17 weight
+shards plus index, tokenizer, and model config) and compared with the pinned A7
+checkpoint evidence.
+The exact launch and replay procedure is in `docs/gpu-runbook.md` §6.
+
+The retained 2026-07-31 eight-GPU artifact contains 2,992/2,992 successful,
+retry-free requests and 1,496 correlated placement rows. Router p99 is
+3.723 ms and DP retains 99.53% of the single-replica cache-hit rate. The three
+paired peak-goodput ratios are 1.9988×, 1.7342×, and 1.7993×; the 1.7993×
+median misses the original 1.9× threshold, so verify and replay intentionally
+report `passed: false`. The product owner accepted this measured median as an
+explicit closure deviation; neither the artifact nor the operator rewrites the
+original threshold or claims a formal PASS. Evidence is retained under
+`bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`.
+
+### G4 E-KV FP8 KV evidence
+
 `bench/fp8_kv_g4_ekv_bench.py` is the formal G4 E-KV correctness operator.
 It measures the pinned Qwen3-32B checkpoint on one visible SM120 GPU, writes
 raw JSONL plus a derived manifest even on failure, and supports independent
@@ -200,7 +241,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 52 registered wrappers through
+The first command separately exercises all 53 registered wrappers through
 both their path and module `--help` forms. It runs once in CI, on Python 3.12,
 after the declared development dependencies are synced, without duplicating
-102 subprocesses in every portable test cell.
+106 subprocesses in every portable test cell.

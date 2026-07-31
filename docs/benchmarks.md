@@ -39,7 +39,7 @@ uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
 After the declared development dependencies are synced, the first verifier
-exercises all 52 registered wrappers through both their path and module
+exercises all 53 registered wrappers through both their path and module
 `--help` forms without executing workloads or contacting external runtimes.
 The last command builds and imports a real wheel from an isolated temporary
 directory. It verifies the public CLI dispatch, packaged manifest and all eight
