@@ -1251,6 +1251,8 @@ def test_pd_separation_builds_a_coordinator_backed_loop(model_dir):
     assert loop._scheduler is scheduler and loop._runner is scheduler
     assert scheduler.coordinator is coordinator
     assert cache is coordinator.decode_cache
+    assert loop.kv_cache_dtype_requested == "auto"
+    assert loop.kv_cache_dtype_resolved == "role-specific"
     if torch.cuda.is_available():
         assert isinstance(coordinator._handoff, StreamCopyKVHandoff)
 
@@ -1369,12 +1371,13 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
 
     names = tuple(inspect.signature(KairyuBackend).parameters)
     legacy_tail = names.index("cuda_graph_warmup_iters")
-    assert names[legacy_tail + 1 :] == (
+    assert names[legacy_tail + 1 : legacy_tail + 5] == (
         "pd_prefill_device",
         "pd_decode_device",
         "pd_defer_handoff",
         "max_model_len",
     )
+    assert names[legacy_tail + 5 :] == ("kv_cache_dtype",)
 
 
 def test_pd_rejects_a_mixed_cpu_cuda_role_pair(model_dir):

@@ -40,6 +40,7 @@ from kairyu.engine.core.engine_service import (
     run_engine_service,
     sampling_params_to_wire,
 )
+from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
 from kairyu.engine.core.sampling_types import stable_request_seed
 from kairyu.engine.engine_loop import _validate_max_model_len
 from kairyu.engine.prompt import (
@@ -161,10 +162,76 @@ def _decision_from_startup_frame(frame) -> AttentionBackendDecision | None:
     return _attention_backend_decision_from_wire(frame.get("attention_backend_decision"))
 
 
+def _kv_cache_dtype_from_startup_frame(
+    frame,
+) -> tuple[str | None, str | None]:
+    """Validate optional KV metadata added compatibly to startup wire v1."""
+
+    requested = frame.get("kv_cache_dtype_requested")
+    resolved = frame.get("kv_cache_dtype_resolved")
+    if requested is None and resolved is None:
+        return None, None
+    if not isinstance(requested, str) or not requested:
+        raise EngineServiceError(
+            "engine startup kv_cache_dtype_requested must be a non-empty string"
+        )
+    if not isinstance(resolved, str) or not resolved:
+        raise EngineServiceError(
+            "engine startup kv_cache_dtype_resolved must be a non-empty string"
+        )
+    try:
+        validate_kv_cache_dtype(requested)
+    except (ValueError, RuntimeError) as error:
+        raise EngineServiceError(
+            "engine startup kv_cache_dtype_requested is unavailable: "
+            f"{error}"
+        ) from error
+    return requested, resolved
+
+
+def _validate_startup_kv_cache_dtype_identity(
+    configured: str,
+    requested: str | None,
+    resolved: str | None,
+) -> None:
+    """Reject a child that did not construct the parent's requested KV policy."""
+
+    if requested is None:
+        if configured != "auto":
+            raise EngineServiceError(
+                "engine service did not report KV cache dtype metadata for "
+                f"explicit request {configured!r}"
+            )
+        return
+    if requested != configured:
+        raise EngineServiceError(
+            "engine startup KV cache dtype request mismatch: "
+            f"parent={configured!r}, child={requested!r}"
+        )
+    allowed_resolutions = {
+        "auto": frozenset(
+            {
+                "float16",
+                "float32",
+                "bfloat16",
+                "not-applicable",
+                "role-specific",
+            }
+        ),
+        "bfloat16": frozenset({"bfloat16"}),
+        "fp8_e4m3": frozenset({"fp8_e4m3"}),
+    }
+    if resolved not in allowed_resolutions[configured]:
+        raise EngineServiceError(
+            "engine startup KV cache dtype resolution is inconsistent: "
+            f"requested={configured!r}, resolved={resolved!r}"
+        )
+
+
 def _recv_optional_startup_frame(
     parent_pipe,
     process,
-) -> AttentionBackendDecision | None:
+) -> tuple[AttentionBackendDecision | None, str | None, str | None]:
     """Receive a new child's second frame; EOF from a live child means legacy."""
 
     try:
@@ -172,11 +239,13 @@ def _recv_optional_startup_frame(
     except EOFError:
         if process.is_alive():
             # Old services close the Pipe immediately after the integer port.
-            return None
+            return None, None, None
         raise EngineServiceError(
             "engine service exited before reporting startup metadata"
         ) from None
-    return _decision_from_startup_frame(frame)
+    decision = _decision_from_startup_frame(frame)
+    requested, resolved = _kv_cache_dtype_from_startup_frame(frame)
+    return decision, requested, resolved
 
 
 @dataclass
@@ -391,10 +460,16 @@ class ZmqEngineBackend:
         cuda_graph_max_pages: int = 512,
         cuda_graph_warmup_iters: int = 3,
         max_model_len: int | None = None,
+        kv_cache_dtype: str = "auto",
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
         _validate_max_model_len(max_model_len)
+        kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
+        if kv_cache_dtype != "auto" and model_path is None:
+            raise ValueError(
+                "kairyu-proc explicit KV cache dtype requires a real model_path"
+            )
         self._config = {
             "num_pages": num_pages,
             "page_size": page_size,
@@ -411,6 +486,7 @@ class ZmqEngineBackend:
             "cuda_graph_max_batch": cuda_graph_max_batch,
             "cuda_graph_max_pages": cuda_graph_max_pages,
             "cuda_graph_warmup_iters": cuda_graph_warmup_iters,
+            "kv_cache_dtype": kv_cache_dtype,
         }
         self._death_timeout_s = death_timeout_s
         self._process = None
@@ -428,6 +504,8 @@ class ZmqEngineBackend:
         self._wire_version = WIRE_VERSION
         self._active_request_ids: set[str] = set()
         self.attention_backend_decision: AttentionBackendDecision | None = None
+        self.kv_cache_dtype_requested = kv_cache_dtype
+        self.kv_cache_dtype_resolved: str | None = None
         self._start_lock = asyncio.Lock()
         self._startup_task: asyncio.Task[int] | None = None
         self._startup_abandoned: threading.Event | None = None
@@ -504,7 +582,14 @@ class ZmqEngineBackend:
                     raise EngineServiceError(
                         "engine service exited before reporting startup metadata"
                     )
-            decision = _recv_optional_startup_frame(parent_pipe, process)
+            decision, requested_kv_dtype, resolved_kv_dtype = (
+                _recv_optional_startup_frame(parent_pipe, process)
+            )
+            _validate_startup_kv_cache_dtype_identity(
+                self.kv_cache_dtype_requested,
+                requested_kv_dtype,
+                resolved_kv_dtype,
+            )
             if abandoned is not None and abandoned.is_set():
                 raise EngineServiceError("engine service startup was cancelled")
             if not process.is_alive():
@@ -513,6 +598,7 @@ class ZmqEngineBackend:
                 raise EngineServiceError("engine service startup ownership was lost")
         except BaseException as error:
             self.attention_backend_decision = None
+            self.kv_cache_dtype_resolved = None
             reaped = _kill_and_reap_process(process, timeout_s=1.0)
             if self._process is process and reaped:
                 self._process = None
@@ -525,6 +611,9 @@ class ZmqEngineBackend:
         finally:
             parent_pipe.close()
         self.attention_backend_decision = decision
+        if requested_kv_dtype is not None:
+            self.kv_cache_dtype_requested = requested_kv_dtype
+        self.kv_cache_dtype_resolved = resolved_kv_dtype
         if not self._atexit_registered:
             atexit.register(self._kill_process)
             self._atexit_registered = True
@@ -592,6 +681,7 @@ class ZmqEngineBackend:
         generation = self._live_generation
         self._live_generation = None
         self.attention_backend_decision = None
+        self.kv_cache_dtype_resolved = None
         self._fail_generation_once(
             generation,
             EngineServiceError(
@@ -707,6 +797,7 @@ class ZmqEngineBackend:
             generation = self._live_generation
             self._live_generation = None
             self.attention_backend_decision = None
+            self.kv_cache_dtype_resolved = None
             self._fail_generation_once(
                 generation,
                 EngineServiceError("engine service shut down before completing the request"),
@@ -741,6 +832,7 @@ class ZmqEngineBackend:
             finally:
                 self._close_transport_locked()
                 self.attention_backend_decision = None
+                self.kv_cache_dtype_resolved = None
             if cleanup_error is not None:
                 # Keep the Process object so a later shutdown attempt can reap
                 # it and no future code can mistake the backend for child-free.
@@ -894,6 +986,7 @@ class ZmqEngineBackend:
             if self._live_generation == generation:
                 self._live_generation = None
                 self.attention_backend_decision = None
+                self.kv_cache_dtype_resolved = None
             self._fail_generation_once(generation, error)
 
     def _deliver_event(self, event: dict) -> None:

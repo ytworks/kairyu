@@ -119,6 +119,15 @@ installed = false
 invocations = ["path", "module"]
 
 [[entrypoints]]
+path = "bench/fp8_kv_g4_ekv_bench.py"
+module = "bench.fp8_kv_g4_ekv_bench"
+kind = "formal-gate"
+requires = ["engine", "gpu", "hf"]
+documentation = ["bench/README.md", "docs/goals/g4-moe-engine.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
 path = "bench/frontier_compare.py"
 module = "bench.frontier_compare"
 kind = "operator"

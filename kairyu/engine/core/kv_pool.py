@@ -48,6 +48,44 @@ class PagedKVPool:
         self.head_dim = head_dim
         self.v_head_dim = v_dim
 
+    @staticmethod
+    def _cache_payload(
+        payload: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Convert one projected K/V payload to its storage representation.
+
+        E4M3 KV uses an explicit unit-scale quantizer.  Relying on indexed
+        assignment to perform the conversion is not portable: PyTorch rejects
+        BF16-to-FP8 ``index_put`` on both CPU and CUDA.  Direct writes and the
+        torch fallbacks convert here; the fused Triton slot mappers implement
+        the same SATFINITE boundary while storing, avoiding a separate launch.
+        """
+        if dtype == torch.float8_e4m3fn and payload.dtype != dtype:
+            # Match NVIDIA's SATFINITE E4M3 conversion contract.  PyTorch's
+            # plain cast emits NaN for sufficiently large finite inputs instead
+            # of saturating them, which would poison every later attention
+            # result that reads the affected cache slot.
+            limit = torch.finfo(dtype).max
+            return payload.clamp(min=-limit, max=limit).to(dtype=dtype)
+        return payload
+
+    def _layer_scale(self, layer: int, dtype: torch.dtype) -> float | None:
+        if not 0 <= layer < self.num_layers:
+            raise IndexError(
+                f"KV layer {layer} is outside [0, {self.num_layers})"
+            )
+        return 1.0 if dtype == torch.float8_e4m3fn else None
+
+    def k_scale(self, layer: int) -> float | None:
+        """Unit calibration scale for an FP8 K cache, otherwise ``None``."""
+        return self._layer_scale(layer, self.k.dtype)
+
+    def v_scale(self, layer: int) -> float | None:
+        """Unit calibration scale for an FP8 V cache, otherwise ``None``."""
+        return self._layer_scale(layer, self.v.dtype)
+
     @classmethod
     def for_cache(
         cls,
@@ -92,6 +130,8 @@ class PagedKVPool:
     ) -> None:
         """keys/values: [T, num_kv_heads, head_dim] at absolute positions [T]."""
         flat = self._flat_indices(page_table, positions)
+        keys = self._cache_payload(keys, dtype=self.k.dtype)
+        values = self._cache_payload(values, dtype=self.v.dtype)
         self.k[layer].reshape(-1, self.num_kv_heads, self.head_dim)[flat] = keys
         if self.v_head_dim:  # MLA pools have no v payload (width 0)
             self.v[layer].reshape(-1, self.num_kv_heads, self.v_head_dim)[flat] = values
@@ -128,6 +168,8 @@ class PagedKVPool:
                 write_from,
             ):
                 return
+        keys = self._cache_payload(keys, dtype=self.k.dtype)
+        values = self._cache_payload(values, dtype=self.v.dtype)
         page_index = torch.div(positions, self.page_size, rounding_mode="floor")
         slot = positions - page_index * self.page_size
         pages = page_tables.gather(1, page_index.unsqueeze(1).long()).squeeze(1)
@@ -189,6 +231,8 @@ class PagedKVPool:
             ):
                 return
 
+        keys = self._cache_payload(keys, dtype=self.k.dtype)
+        values = self._cache_payload(values, dtype=self.v.dtype)
         owners = row_ids.long()
         page_index = torch.div(
             positions, self.page_size, rounding_mode="floor"

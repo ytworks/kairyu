@@ -116,6 +116,7 @@ bench/fleet_churn_bench.py
 bench/fleet_gateway_bench.py
 bench/fleet_rollout_bench.py
 bench/fleet_usage_replay.py
+bench/fp8_kv_g4_ekv_bench.py
 bench/frontier_compare.py
 bench/future_token_bench.py
 bench/g2_a6_vllm_bench.py
@@ -187,6 +188,18 @@ shards plus index, tokenizer, and model config) and compared with the pinned A7
 checkpoint evidence.
 The exact launch and replay procedure is in `docs/gpu-runbook.md` §6.
 
+### G4 E-KV FP8 KV evidence
+
+`bench/fp8_kv_g4_ekv_bench.py` is the formal G4 E-KV correctness operator.
+It measures the pinned Qwen3-32B checkpoint on one visible SM120 GPU, writes
+raw JSONL plus a derived manifest even on failure, and supports independent
+`verify` and raw-only `replay` commands. BF16 KV remains the product default;
+the E4M3 candidate arm is explicit and timing is non-binding. The retained
+2026-07-31 bake failed output, common-prefix logprob, and cache-NRMSE gates, so
+public `fp8_e4m3` startup remains disabled. The exact mounted source-JIT
+procedure, thresholds, and retained evidence are in `docs/gpu-runbook.md`
+§9.9.
+
 ## Fixtures, results, and wheel verification
 
 The eight installed fixtures are synthetic plumbing inputs, never substitutes
@@ -218,7 +231,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 52 registered wrappers through
+The first command separately exercises all 53 registered wrappers through
 both their path and module `--help` forms. It runs once in CI, on Python 3.12,
 after the declared development dependencies are synced, without duplicating
-104 subprocesses in every portable test cell.
+106 subprocesses in every portable test cell.

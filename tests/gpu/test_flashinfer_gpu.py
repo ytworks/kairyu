@@ -91,3 +91,73 @@ def test_flashinfer_batched_decode_matches_torch_backend(cuda, dtype):
     for row, (out, expected) in enumerate(zip(actual, reference, strict=True)):
         max_error = (out - expected).abs().max().item()
         assert max_error < tolerance, f"row {row} max_error={max_error}"
+
+
+@pytest.mark.parametrize("chunk_len", [5, 1], ids=["prefill", "decode"])
+def test_flashinfer_fp8_kv_replans_and_matches_bf16(cuda, chunk_len):
+    from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
+    from kairyu.engine.core.kv_pool import PagedKVPool
+
+    torch.manual_seed(170)
+    heads, kv_heads, head_dim = 8, 2, 64
+    seq_len = PAGE * 3 + 5
+    page_table = list(range(-(-seq_len // PAGE)))
+    positions = torch.arange(seq_len, device=cuda)
+    keys = torch.randn(
+        seq_len, kv_heads, head_dim, dtype=torch.bfloat16, device=cuda
+    )
+    values = torch.randn(
+        seq_len, kv_heads, head_dim, dtype=torch.bfloat16, device=cuda
+    )
+    bf16_pool = PagedKVPool(
+        1,
+        8,
+        PAGE,
+        kv_heads,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=cuda,
+    )
+    fp8_pool = PagedKVPool(
+        1,
+        8,
+        PAGE,
+        kv_heads,
+        head_dim,
+        dtype=torch.float8_e4m3fn,
+        device=cuda,
+    )
+    bf16_pool.write(0, page_table, positions, keys, values)
+    fp8_pool.write(0, page_table, positions, keys, values)
+    query = torch.randn(
+        chunk_len,
+        heads,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=cuda,
+    )
+    chunk_start = seq_len - chunk_len
+    backend = FlashInferBackend(device=cuda)
+
+    bf16 = backend.attend(
+        query,
+        bf16_pool,
+        0,
+        page_table,
+        seq_len,
+        chunk_start,
+    )
+    fp8 = backend.attend(
+        query,
+        fp8_pool,
+        0,
+        page_table,
+        seq_len,
+        chunk_start,
+    )
+
+    assert backend.prefill_execution_stats()["plans"] == (2 if chunk_len > 1 else 0)
+    assert backend.decode_execution_stats()["plans"] == (2 if chunk_len == 1 else 0)
+    assert fp8.dtype == torch.bfloat16
+    assert torch.isfinite(fp8).all()
+    torch.testing.assert_close(fp8, bf16, atol=8e-2, rtol=2e-1)

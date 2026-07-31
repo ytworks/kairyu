@@ -39,17 +39,19 @@ RUN git clone --recursive --depth 1 --branch ${FLASHINFER_REF} \
     https://github.com/flashinfer-ai/flashinfer.git
 WORKDIR /src/flashinfer
 RUN pip install --no-cache-dir -v .        # pure-python package (fast); build_backend imports flashinfer
-# Scope the AOT op set to what kairyu's served models use: bf16/f16, head_dim
-# 64 (qwen2.5-0.5b) AND 128 (llama-3.x), FA2 class, no sliding-window /
-# logits-soft-cap. The default config compiles ~656 ops (all dtypes incl. FP8
-# e4m3/e5m2, head_dim 256, FA3); scoping to these two head dims keeps the build to
-# a handful of nvcc steps AND avoids the SM120 FP4/FP8 kernel risks (plan §9/§12.3).
-# The batch_prefill bf16 kernels also serve tensor-core decode. Add a (qk, vo)
-# pair here when serving a model with a new head_dim, else flashinfer will try to
-# JIT it at request time and fail (no nvcc in the -runtime image).
-RUN sed -i 's|config=None,  # Use default config|config={"fa2_head_dim": [(64, 64), (128, 128)], "fa3_head_dim": [], "f16_dtype": [__import__("torch").float16, __import__("torch").bfloat16], "f8_dtype": [], "use_sliding_window": [False], "use_logits_soft_cap": [False]},|' \
+# Scope the AOT op set to what kairyu's served models use: bf16/f16 queries with
+# bf16/f16 or E4M3 KV, head_dim 64 (qwen2.5-0.5b) and 128 (llama-3.x), FA2,
+# no sliding-window / logits-soft-cap. In FlashInfer v0.6.14 the AOT generator
+# crosses f16_dtype (query/output) with f16_dtype + f8_dtype (KV), then emits
+# FA2 prefill and decode modules. f8_dtype therefore must include E4M3: leaving
+# it empty silently omits production FP8-KV kernels and forces runtime JIT,
+# which cannot work in the nvcc-free runtime image.
+# Add a (qk, vo) pair here when serving a model with a new head_dim, else
+# flashinfer will try to JIT it at request time and fail.
+RUN sed -i 's|config=None,  # Use default config|config={"fa2_head_dim": [(64, 64), (128, 128)], "fa3_head_dim": [], "f16_dtype": [__import__("torch").float16, __import__("torch").bfloat16], "f8_dtype": [__import__("torch").float8_e4m3fn], "use_sliding_window": [False], "use_logits_soft_cap": [False]},|' \
     flashinfer-jit-cache/build_backend.py \
- && grep -n 'fa2_head_dim' flashinfer-jit-cache/build_backend.py
+ && grep -F -n '"fa2_head_dim": [(64, 64), (128, 128)]' flashinfer-jit-cache/build_backend.py \
+ && grep -F -n '"f8_dtype": [__import__("torch").float8_e4m3fn]' flashinfer-jit-cache/build_backend.py
 ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 RUN cd flashinfer-jit-cache && python -m build --no-isolation --wheel && ls -la dist/
 

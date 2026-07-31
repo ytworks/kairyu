@@ -75,7 +75,7 @@ checkpoint evidence. CPU/static tests validate only the operator and stack;
 A8 remains open with no PASS until the real artifact replays. The immediate
 live-run blocker is an external-namespace process retaining 26.8 GiB on GPU 0;
 the preflight correctly rejects that asymmetric inventory. Its packaged
-benchmark boundary now verifies all 52 registered entrypoints from the isolated
+benchmark boundary now verifies all 53 registered entrypoints from the isolated
 wheel as well as from the checkout.
 Issue #277's M13 extension exposes `auto`, torch, FlashInfer, FA3, and FA4 as
 strict public choices. FA3/FA4 use FlashAttention for prefill and retain
@@ -276,6 +276,15 @@ serving, preserves checkpoint ignore/exclusion rules and state-dict names, and
 fails closed instead of silently falling back. The contextual CPU acceptance
 gate passes 23/23 without skips; the actual SM120 FP8/INT8/AWQ/GPTQ/NVFP4
 kernel and full-model GPU gate passes 28/28 without skips.
+G4 E-KV / issue #170 has a retained real Qwen3-32B long-context **FAIL**. The
+unit-scale SM120/FlashInfer candidate passed all 7,522,091,008 SATFINITE write
+audits but diverged from BF16 output at 8K/32K, exceeded the 0.25
+common-prefix selected-logprob bound at every length, and reached cache NRMSE
+0.1047. `auto` and explicit BF16 behavior are unchanged; public
+`fp8_e4m3` startup is rejected with the failed-bake reason. Candidate E4M3
+pool/kernel/AOT plumbing remains available for offline calibration work but is
+not a deployability claim. Raw and replayed evidence is retained under
+`bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31/`.
 G6 P-B1 streaming orchestration is now closed. Direct routes already streamed;
 Conductor and MoA now keep pre-final work private and pull their final
 worker/synthesizer backend iterator through Orchestrator to OpenAI SSE.
@@ -654,7 +663,7 @@ global store remain rejected. The retained decision artifact SHA-256 is
 
 Benchmark ownership is now package-enforced. The installed `kairyu.bench`
 surface owns reusable target/auth/statistics/reporting contracts, the public
-CLI, eight fixtures, and a packaged registry for all 51 checkout-only
+CLI, eight fixtures, and a packaged registry for all 53 checkout-only
 wrappers. Exact existing wrapper-composition edges are frozen; new reusable
 dependencies, missing docs/main guards, or path/module CLI regressions fail
 validation. Historical `bench/*.py` and `bench/results/**` provenance paths
@@ -671,6 +680,57 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] G4 E-KV rejects unit-scale FP8 KV and stays BF16
+- What: ran the formal 8K/16K/32K Qwen3-32B BF16-versus-unit-scale-E4M3 bake
+  on one RTX PRO 6000 Blackwell. Source, checkpoint, runtime, GPU, compilers,
+  and all five FlashInfer shared objects were stable. All 7,522,091,008 K/V
+  values passed finite/range/SATFINITE-byte/error audits, but output tokens
+  diverged at 8K and 32K, common-prefix selected-logprob deltas were
+  0.3099/0.4518/0.2656 against a 0.25 limit, and cache NRMSE reached 0.1047
+  against a 0.05 limit. Public `fp8_e4m3` startup now fails closed with this
+  bake result; `auto`/BF16 remain unchanged. The replay verifier ignores only
+  GCC's nondeterministic timing footer and compares logprobs only while both
+  arms share the same generated-token prefix.
+- Why: issue #170 explicitly requires retaining a failed bake and keeping FP8
+  KV disabled. Post-hoc threshold relaxation or enabling an uncalibrated
+  candidate would violate that product-quality contract. Per-layer K/V static
+  calibration needs representative calibration data, headroom, a bound scale
+  artifact, and another independent long-context bake.
+- Refs: issue #170; G4 E-KV;
+  `bench/fp8_kv_g4_ekv_bench.py`;
+  `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31/`;
+  raw SHA-256
+  `f759fa3308f90f70c26e04e51ebf82515a2891d1b183ef3a8bbfa67acbada305`;
+  manifest SHA-256
+  `4c213ebfb7376755e98bddb7c16ad508ee8ac56ef88fd69c57971e78c2224a64`;
+  `kairyu/engine/core/kv_cache_dtype.py`
+
+### 2026-07-31 — [progress] G4 E-KV is ready for the real Qwen3-32B bake
+- What: implemented an opt-in `fp8_e4m3` KV cache without changing the BF16
+  default. Single-rank, TP, process-service, YAML validation, and `/backends`
+  reporting now carry requested and resolved cache dtype and reject unsupported
+  or cross-rank/cross-process mismatched identities. The SM120/FlashInfer-only
+  path stores K/V with unit-scale SATFINITE E4M3, passes unit K/V scales through
+  every FlashInfer prefill/decode path, and keeps speculative, MLA, unsupported
+  hardware/backend, and P-D combinations fail closed. FlashInfer v0.6.14 AOT
+  packaging now includes E4M3 KV for FP16/BF16 queries at heads 64/128 and has
+  a static non-empty-FP8 regression guard. Read-only inspection of the existing
+  `kairyu-depth-ab:20260731-issue156` image (`4dc6af1ddc97`) found 24 FA2
+  attention modules but zero FA2 E4M3-KV modules; that image was not rebuilt.
+- Why: host JIT and unit/GPU kernel tests can prove the implementation contract
+  but cannot satisfy G4 E-KV's binding long-context product gate or prove that a
+  nvcc-free production image contains the new AOT modules. The real Qwen3-32B
+  prompts, outputs, cache metadata, environment, checkpoint identity, and
+  BF16-vs-FP8 tolerance result must be retained before issue #170 can close.
+- Refs: issue #170; G4 E-KV; `Dockerfile.cuda`;
+  `kairyu/engine/core/{kv_cache_dtype.py,kv_pool.py,worker.py}`;
+  `kairyu/engine/core/attention/flashinfer_gpu.py`;
+  `kairyu/kernels/paged_kv_write_gpu.py`;
+  `kairyu/engine/{kairyu_backend.py,zmq_backend.py}`;
+  `bench/fp8_kv_g4_ekv_bench.py`;
+  `docs/design/flashinfer-sm120-aot.md`;
+  `tests/{unit/test_kv_cache_dtype.py,unit/test_kv_pool_fp8.py,gpu/test_flashinfer_gpu.py}`
 
 ### 2026-07-31 — [fix] G2 A8 packaged benchmark count follows its new operator
 - What: Raised the isolated-wheel registry assertion from 51 to 52 when A8 added the 52nd owned benchmark entrypoint. The real wheel now proves that the complete registry and CLI are installed instead of failing on the intentionally added wrapper.

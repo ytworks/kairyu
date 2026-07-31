@@ -296,6 +296,12 @@ def _startup_ready_frame(engine_loop) -> dict:
         "attention_backend_decision": _attention_backend_decision_to_wire(
             getattr(engine_loop, "attention_backend_decision", None)
         ),
+        "kv_cache_dtype_requested": getattr(
+            engine_loop, "kv_cache_dtype_requested", None
+        ),
+        "kv_cache_dtype_resolved": getattr(
+            engine_loop, "kv_cache_dtype_resolved", None
+        ),
     }
 
 
