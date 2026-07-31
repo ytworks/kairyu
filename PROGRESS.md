@@ -74,7 +74,9 @@ commit, and a fresh full hash of the live 17-shard model volume to retained A7
 checkpoint evidence. CPU/static tests validate only the operator and stack;
 A8 remains open with no PASS until the real artifact replays. The immediate
 live-run blocker is an external-namespace process retaining 26.8 GiB on GPU 0;
-the preflight correctly rejects that asymmetric inventory.
+the preflight correctly rejects that asymmetric inventory. Its packaged
+benchmark boundary now verifies all 52 registered entrypoints from the isolated
+wheel as well as from the checkout.
 Issue #277's M13 extension exposes `auto`, torch, FlashInfer, FA3, and FA4 as
 strict public choices. FA3/FA4 use FlashAttention for prefill and retain
 FlashInfer ownership of paged decode/CUDA graphs; `/backends` reports the
@@ -669,6 +671,10 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [fix] G2 A8 packaged benchmark count follows its new operator
+- What: Raised the isolated-wheel registry assertion from 51 to 52 when A8 added the 52nd owned benchmark entrypoint. The real wheel now proves that the complete registry and CLI are installed instead of failing on the intentionally added wrapper.
+- Refs: issue #158, PR #299, `scripts/verify_bench_wheel.py`
 
 ### 2026-07-31 — [progress] G2 A8 formal DP scaling gate reaches live-run readiness
 - What: Added the fixed Qwen3-32B DP=2×TP4 versus TP4 open-loop operator, the forced-recreate two-replica/gateway stack, exact request/placement/cache evidence replay, and current-runtime container/source/checkpoint attestation. Portable tests cover semantic and integrity tampering but cannot claim the real eight-GPU result. The formal preflight currently rejects an unrelated 26.8 GiB GPU 0 owner, so A8 remains open and unpassed.
