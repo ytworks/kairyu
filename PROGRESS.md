@@ -683,6 +683,10 @@ kind cluster. Loading those archives removes kind's delayed re-resolution and
 export of mutable host tags while preserving the canonical runtime image
 names, revision labels, Docker/CRI/containerd digest reconciliation, rollout
 traffic, and independent evidence replay.
+The portable noisy-neighbor schedule test now separately binds the shared
+absolute origin, exact tenant/phase/index order, and targets derived from that
+origin. Its deterministic exponent-boundary clock catches timestamp
+cancellation without weakening the schedule contract with a broad tolerance.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -691,6 +695,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] Noisy-neighbor schedule test binds raw clock inputs
+- What: Replaced the noisy-neighbor schedule test's exact equality on subtracted floating-point timestamps with exact checks of tenant/phase/index order, one shared origin, and each raw target as that origin plus its specified cadence. The test fixes the origin immediately below the 512-second binary exponent boundary and verifies that the benchmark reads the clock exactly once, making the former CI-only failure deterministic while strengthening the named shared-origin contract.
+- Why: Python 3.12 job `91101025612` crossed that exponent boundary and produced `0.49999999999994316` for a mathematically 0.5-second offset. The one-ULP cancellation is not a product timing error; exact subtraction was both numerically invalid and unable to prove that the two tenants shared one origin. Broad approximation, skip, retry, or test deletion would provide weaker coverage than asserting the raw schedule inputs directly.
+- Refs: PR #299, `tests/bench/test_noisy_neighbor_gpu_bench.py`, GitHub run `30613391675`
 
 ### 2026-07-31 — [progress] F1b freezes build images before kind startup
 - What: Changed the F1b rollout gate to save each clean-head gateway and mock image to a guarded temporary archive immediately after its build and load those archives after kind startup. The gate still fails closed on image revision and Docker/CRI/containerd digest mismatches and still runs the unchanged zero-failure rollout and independent replay. A policy regression test fixes the build/save/create/load ordering and rejects a return to delayed `kind load docker-image` resolution.

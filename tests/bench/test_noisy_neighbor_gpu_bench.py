@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import bench.noisy_neighbor_gpu_bench as gpu_bench
@@ -15,6 +16,15 @@ async def test_two_tenant_window_uses_one_origin_and_distinct_phase_labels(
     monkeypatch,
 ) -> None:
     calls = []
+    # Adding an offset crosses a binary exponent boundary here, so subtracting
+    # the absolute timestamps would introduce one ULP of cancellation error.
+    boundary_origin = math.nextafter(512.0, 0.0)
+    clock_calls = 0
+
+    def fake_perf_counter() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        return boundary_origin
 
     async def fake_one_stream(
         client,
@@ -25,10 +35,13 @@ async def test_two_tenant_window_uses_one_origin_and_distinct_phase_labels(
         target_s,
         origin_s,
     ):
-        calls.append((headers["tenant"], phase, index, target_s - origin_s))
+        calls.append(
+            (headers["tenant"], phase, index, target_s, origin_s)
+        )
         return {"phase": phase, "index": index}
 
     monkeypatch.setattr(gpu_bench, "_one_stream", fake_one_stream)
+    monkeypatch.setattr(gpu_bench.time, "perf_counter", fake_perf_counter)
 
     good, noisy, duration = await gpu_bench._two_tenant_window(
         object(),
@@ -42,15 +55,30 @@ async def test_two_tenant_window_uses_one_origin_and_distinct_phase_labels(
     )
 
     assert duration == 2.0
+    assert clock_calls == 1
     assert [item["phase"] for item in good] == ["control-good"] * 4
     assert [item["phase"] for item in noisy] == ["control-noisy"] * 2
-    assert calls == [
-        ("good", "control-good", 0, 0.0),
-        ("good", "control-good", 1, 0.5),
-        ("good", "control-good", 2, 1.0),
-        ("good", "control-good", 3, 1.5),
-        ("noisy", "control-noisy", 0, 0.0),
-        ("noisy", "control-noisy", 1, 1.0),
+    assert [
+        (tenant, call_phase, index)
+        for tenant, call_phase, index, _, _ in calls
+    ] == [
+        ("good", "control-good", 0),
+        ("good", "control-good", 1),
+        ("good", "control-good", 2),
+        ("good", "control-good", 3),
+        ("noisy", "control-noisy", 0),
+        ("noisy", "control-noisy", 1),
+    ]
+    origin = calls[0][4]
+    assert origin == boundary_origin
+    assert [call_origin for *_, call_origin in calls] == [origin] * 6
+    assert [target for *_, target, _ in calls] == [
+        origin + 0.0,
+        origin + 0.5,
+        origin + 1.0,
+        origin + 1.5,
+        origin + 0.0,
+        origin + 1.0,
     ]
 
 
