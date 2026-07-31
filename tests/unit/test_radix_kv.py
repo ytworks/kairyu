@@ -1,5 +1,6 @@
 import pytest
 
+import kairyu.engine.core.radix_kv as radix_kv_module
 from kairyu.engine.core.radix_kv import KVCacheFull, RadixKVCache
 
 PAGE = 4  # tokens per page in these tests
@@ -19,6 +20,28 @@ def test_first_allocation_is_all_misses():
     assert len(allocation.new_full_pages) == 2
     assert allocation.tail_page is None
     assert cache.hit_rate == 0.0
+
+
+def test_event_only_hash_chain_skips_full_dram_tier_digests(monkeypatch):
+    events: list[dict] = []
+
+    def unexpected_tier_digest(*_args, **_kwargs):
+        raise AssertionError("event-only cache computed a DRAM tier digest")
+
+    monkeypatch.setattr(
+        radix_kv_module,
+        "_snapshot_prefix_digest",
+        unexpected_tier_digest,
+    )
+    cache = RadixKVCache(num_pages=2, page_size=PAGE, event_sink=events.append)
+    tokens = _tokens([1, 2, 3, 4])
+    allocation = cache.allocate(tokens)
+    cache.mark_computed(allocation)
+
+    node = cache._root.children[tokens]
+    assert node.block_hashes
+    assert node.tier_keys == ()
+    assert [event["type"] for event in events] == ["BlockStored"]
 
 
 def test_second_allocation_hits_shared_prefix():
@@ -97,6 +120,76 @@ def test_eviction_reclaims_freed_pages_lru_first():
     cache.free(big)
     miss = cache.allocate(_tokens([1] * 4,))
     assert miss.cached_pages == ()  # old branch was evicted
+
+
+def test_block_removed_reentry_cannot_reacquire_the_evicting_page():
+    victim_tokens = _tokens([1, 2, 3, 4])
+    replacement_tokens = _tokens([5] * 4, [6] * 4)
+    events: list[dict] = []
+    reentrant_allocations = []
+
+    def reentrant_sink(event: dict) -> None:
+        events.append(event)
+        if event["type"] != "BlockRemoved":
+            return
+        assert cache.peek_cached_tokens(victim_tokens) == 0
+        cache.pin("during-removal", victim_tokens)
+        reentrant_allocations.append(cache.allocate(victim_tokens))
+
+    cache = RadixKVCache(num_pages=2, page_size=PAGE, event_sink=reentrant_sink)
+    victim = cache.allocate(victim_tokens)
+    cache.mark_computed(victim)
+    victim_pages = victim.new_full_pages
+    cache.free(victim)
+
+    # The sink consumes the one spare page while the original victim remains
+    # reserved by the outer eviction.  The outer two-page request therefore
+    # fails safely instead of sharing either physical page.
+    with pytest.raises(KVCacheFull):
+        cache.allocate(replacement_tokens)
+
+    assert len(reentrant_allocations) == 1
+    reentrant = reentrant_allocations[0]
+    assert reentrant.num_cached_tokens == 0
+    assert set(reentrant.pages).isdisjoint(victim_pages)
+    assert [event["type"] for event in events].count("BlockRemoved") == 1
+    cache.unpin("during-removal")
+    cache.release_preempted(reentrant)
+    assert cache.num_free_pages == 2
+
+
+def test_block_removed_failure_restores_victim_visibility_and_retryability():
+    victim_tokens = _tokens([7, 7, 7, 7])
+    replacement_tokens = _tokens([8, 8, 8, 8])
+    removed_attempts = 0
+    accepted: list[dict] = []
+
+    def fail_first_removed(event: dict) -> None:
+        nonlocal removed_attempts
+        if event["type"] == "BlockRemoved":
+            removed_attempts += 1
+            assert cache.peek_cached_tokens(victim_tokens) == 0
+            if removed_attempts == 1:
+                raise RuntimeError("removed sink failed")
+        accepted.append(event)
+
+    cache = RadixKVCache(num_pages=1, page_size=PAGE, event_sink=fail_first_removed)
+    victim = cache.allocate(victim_tokens)
+    cache.mark_computed(victim)
+    cache.free(victim)
+
+    with pytest.raises(RuntimeError, match="removed sink failed"):
+        cache.allocate(replacement_tokens)
+
+    assert cache.peek_cached_tokens(victim_tokens) == PAGE
+    hit = cache.allocate(victim_tokens)
+    assert hit.num_cached_tokens == PAGE
+    cache.free(hit)
+
+    replacement = cache.allocate(replacement_tokens)
+    assert replacement.num_cached_tokens == 0
+    assert removed_attempts == 2
+    assert [event["type"] for event in accepted].count("BlockRemoved") == 1
 
 
 def test_free_releases_tail_page_to_pool():

@@ -13,6 +13,9 @@ translates to runtime `ServerSettings` instead of inheriting its schema.
 **Amended 2026-07-29** (D3, issue #230): `kairyu validate` performs a
 deterministic offline preflight of the deployment schema and its declared local
 artifact graph without starting serving or model execution.
+**Amended 2026-08-01** (D6, issue #187): native per-replica RadixKV gains an
+optional bounded, NUMA-attested pinned-DRAM tier whose restore policy is loaded
+only from retained, runtime-identity-matched crossover evidence.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
@@ -152,6 +155,58 @@ M7 maps the OpenAI `user` field and/or `X-Session-ID` header to
 `CacheHint(session_id=...)` in `app.py`. Revisit trigger for a response
 cache: telemetry showing a material rate of byte-identical requests at
 temperature 0.
+
+#### D6 amendment (2026-08-01) — native per-replica pinned-DRAM KV tier
+
+**Decision:** extend each native replica's existing RadixKV cache with one
+optional, bounded pinned-DRAM tier. This is a local eviction/restore tier, not
+a global pool: each TP rank owns one startup-allocated slab fingerprinted to
+its model, TP rank, KV layout, dtype, and page geometry. CUDA ranks temporarily
+bind the calling thread to a disjoint share of GPU-local CPUs while creating
+the transfer stream, allocating and first-touching the complete slab, and
+attesting every mapped page through Linux sysfs/procfs. The caller's affinity
+is restored on exit; host checksums use the same scoped rank-local affinity.
+CPU-only construction keeps its existing non-NUMA path.
+
+Radix eviction snapshots only computed, page-aligned prefixes. The DRAM object
+key is the full SHA-256 prefix-chain digest rather than the compact 64-bit
+routing/display hash. Every host page also carries a full SHA-256 checksum and
+the rank-local physical-layout fingerprint. A restore must validate all three,
+complete into newly reserved HBM pages, and publish the restored Radix node
+only after physical H2D completion. A dedicated CUDA stream and timing events
+own asynchronous D2H/H2D work independently of the model stream. Host slots,
+source pages, and destination pages remain reserved until the completion
+handle finalizes exactly once. Cancellation, callback failure, checksum or
+identity mismatch, and especially unknown CUDA completion fail closed:
+ambiguous host slots and HBM page IDs are quarantined and never laundered back
+into either allocator through a retry or another logical key.
+
+TP model collectives remain NCCL. A separate Gloo control group serializes
+`available_prefix`, offload, restore, and discard on every rank, validates one
+ACK per rank, and publishes a logical restore only after unanimous all-rank
+success. A safely settled miss falls back to recompute; partial or unknown
+ownership is discarded where safe or raised without publishing/reusing the
+ambiguous pages. The existing Radix LRU stays the logical eviction owner, and
+an evicting node is temporarily invisible to matching, pinning, and reentrant
+cache callbacks.
+
+The feature is enabled only by supplying both a positive
+`dram_kv_tier_capacity_pages` and a retained `dram_kv_tier_profile`. The
+profile independently re-derives the first stable measured restore-winning
+suffix from nine paired repeats per prefix length, then must match the exact
+runtime identity: model config, complete installed Kairyu Python-source
+rollup, actual attention execution composition, batching limit, CPU/NUMA/PCIe
+cohort, GPU/Torch/CUDA identity, KV layout, and TP degree. Startup rejects a
+stale profile, a TP-rank identity disagreement, or capacity smaller than
+`ceil(min_restore_tokens / page_size)`. P-D separation is deliberately not
+supported by this first local tier and rejects the option at configuration
+time; it does not change the P-D `KVTransport` ownership contract.
+
+The implementation and fail-closed Qwen3-32B operator are ready. F4a remains
+open until separate, non-overlapping TP4 and TP8 runs from the same clean
+commit and immutable image produce retained raw evidence, identity-bound
+profiles, and a passing independent replay. No crossover value is asserted by
+this amendment before that measurement.
 
 #### D6 amendment (2026-07-31) — F4c global KV pool remains deferred
 

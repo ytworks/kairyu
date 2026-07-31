@@ -245,6 +245,36 @@ public `fp8_e4m3` startup remains disabled. The exact mounted source-JIT
 procedure, thresholds, and retained evidence are in `docs/gpu-runbook.md`
 §9.9.
 
+### G5 F4a DRAM KV crossover evidence
+
+`bench/dram_kv_tier_qwen.py` measures the production rank-local pinned-DRAM
+tier on Qwen3-32B at TP4 and TP8. Each shard uses the real RadixKV and
+all-rank Gloo control path, compares restore with uncached model recomputation
+over the fixed 16–8,192-token grid, and retains nine alternating paired
+measurements per length. The primary metric is the rank-0 controller wall from
+empty destination pages through one next-token result; pure CUDA D2H/H2D
+intervals remain diagnostic evidence rather than replacing the production
+boundary.
+
+Run TP4 and TP8 in separate, non-overlapping containers from the same clean
+commit, immutable image, and checkpoint, then seal and verify the artifact:
+
+```bash
+python bench/dram_kv_tier_qwen.py run --tp 4 ... --output tp4-raw.jsonl
+python bench/dram_kv_tier_qwen.py run --tp 8 ... --output tp8-raw.jsonl
+python bench/dram_kv_tier_qwen.py assemble \
+  --tp4-raw tp4-raw.jsonl --tp8-raw tp8-raw.jsonl \
+  --output-dir bench/results/<f4a-artifact> --assert-gate
+python bench/dram_kv_tier_qwen.py verify \
+  --artifact-dir bench/results/<f4a-artifact> --assert-gate
+```
+
+The generated TP-specific profiles are startup inputs, not editable tuning
+files. Runtime binding replays every raw pair, requires a stable measured
+suffix (median restore/recompute ratio below 1 with at least 8/9 restore wins),
+and rejects any model, TP, KV-layout, attention implementation, source,
+hardware-transport, or host-placement identity mismatch.
+
 ## Fixtures, results, and wheel verification
 
 The eight installed fixtures are synthetic plumbing inputs, never substitutes
@@ -276,7 +306,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 54 registered wrappers through
+The first command separately exercises all 55 registered wrappers through
 both their path and module `--help` forms. It runs once in CI, on Python 3.12,
 after the declared development dependencies are synced, without duplicating
-106 subprocesses in every portable test cell.
+110 subprocesses in every portable test cell.

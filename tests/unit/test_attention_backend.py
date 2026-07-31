@@ -1,5 +1,7 @@
 """m13: backend contract, MLA equivalence, fake-flashinfer pins, selector."""
 
+import hashlib
+import json
 import sys
 import types
 
@@ -14,6 +16,7 @@ from kairyu.engine.core.attention import (
 )
 from kairyu.engine.core.attention.mla_torch import mla_absorbed, mla_decompress, mla_scale
 from kairyu.engine.core.attention_selector import (
+    attention_backend_execution_identity,
     attention_backend_identity,
     compose_backend_decisions,
 )
@@ -820,6 +823,81 @@ class TestBackendDecision:
         )
 
         assert attention_backend_identity(decision) == attention_backend_identity(equivalent)
+
+    def test_execution_identity_binds_the_loaded_flashinfer_version(self, monkeypatch):
+        from kairyu.engine.core import attention_selector
+
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashinfer")
+        record = "flashinfer_aot.so,sha256=test,123\n"
+        distribution = types.SimpleNamespace(
+            version="0.6.4+aot",
+            read_text=lambda name: record if name == "RECORD" else None,
+        )
+        monkeypatch.setattr(
+            attention_selector.metadata,
+            "distribution",
+            lambda name: distribution,
+        )
+        decision = select_backend_decision(HardwareProfile(arch="cuda", sm=120))
+        backend = types.SimpleNamespace(
+            _flashinfer=types.SimpleNamespace(__version__="0.6.4")
+        )
+
+        identity = json.loads(attention_backend_execution_identity(decision, backend))
+
+        assert identity["component_versions"] == {
+            "decode": "0.6.4",
+            "prefill": "0.6.4",
+        }
+        assert identity["component_builds"] == {
+            "flashinfer-jit-cache": {
+                "installed": True,
+                "version": "0.6.4+aot",
+                "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
+            }
+        }
+
+    def test_execution_identity_binds_the_torch_version(self):
+        decision = select_backend_decision(HardwareProfile(arch="cpu"))
+        backend = TorchAttentionBackend()
+
+        identity = json.loads(attention_backend_execution_identity(decision, backend))
+
+        assert identity["component_versions"] == {
+            "decode": str(torch.__version__),
+            "prefill": str(torch.__version__),
+        }
+
+    def test_execution_identity_binds_fa_and_delegated_decode_versions(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")
+        decision = select_backend_decision(HardwareProfile(arch="cuda", sm=120))
+        backend = types.SimpleNamespace(
+            component_versions={"prefill": "4.0.0b24", "decode": "unknown"},
+            _decode_backend=types.SimpleNamespace(
+                _flashinfer=types.SimpleNamespace(__version__="0.6.4")
+            ),
+        )
+
+        identity = json.loads(attention_backend_execution_identity(decision, backend))
+
+        assert identity["component_versions"] == {
+            "decode": "0.6.4",
+            "prefill": "4.0.0b24",
+        }
+
+    def test_execution_identity_rejects_an_unversioned_accelerator_backend(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashinfer")
+        decision = select_backend_decision(HardwareProfile(arch="cuda", sm=120))
+        backend = types.SimpleNamespace(_flashinfer=types.SimpleNamespace())
+
+        with pytest.raises(RuntimeError, match="exact runtime __version__"):
+            attention_backend_execution_identity(decision, backend)
 
     def test_pd_role_decision_reports_both_architectures(self, monkeypatch):
         monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "flashattention4")

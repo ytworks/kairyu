@@ -57,8 +57,10 @@ RUN cd flashinfer-jit-cache && python -m build --no-isolation --wheel && ls -la 
 
 # ---- Stage 2: runtime (no nvcc) ----------------------------------------------
 FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04 AS base
+ARG KAIRYU_VCS_REF
+LABEL org.opencontainers.image.revision="${KAIRYU_VCS_REF}"
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-dev python3.12-venv gcc curl ca-certificates \
+    python3.12 python3.12-dev python3.12-venv gcc curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 # Triton's CUDA driver shim is compiled once against Python.h on first use.
 # FP8/INT8/AWQ/GPTQ GEMMs then JIT device code through Triton's bundled NVIDIA

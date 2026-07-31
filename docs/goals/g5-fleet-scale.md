@@ -249,9 +249,22 @@ and production-router SHA-256
 
 | Gate | Target | Where proven |
 |---|---|---|
-| F4a | DRAM offload: restore-from-DRAM beats recompute above a measured prefix-length crossover; the crossover is published, not assumed | GPU bench |
+| F4a | DRAM offload: restore-from-DRAM beats recompute above a measured prefix-length crossover; the crossover is published, not assumed | **Open** — native tier and formal operator ready; separate Qwen3-32B TP4/TP8 measurements pending |
 | F4b | Agentic multi-turn trace with tiering on: fleet prefix-hit-rate gain reported; TPOT p99 unregressed (offload work stays off the decode critical path) | GPU bench |
 | F4c | Global-pool decision doc: F2's telemetry quantifies cross-replica duplicate-prefix mass; buy (Mooncake/LMCache) vs build (KVTransport extension) decided with data — m7 D6's revisit trigger honored | decision doc |
+
+F4a's native implementation is an opt-in, bounded pinned-DRAM slab per replica
+and TP rank behind the existing RadixKV LRU. It uses GPU-local NUMA
+first-touch/attestation and scoped checksum affinity, full SHA-256 prefix and
+page integrity identities, a dedicated CUDA copy stream with completion
+events, and an auxiliary Gloo group for unanimous all-rank offload/restore
+ownership. Unknown physical completion quarantines host slots and HBM pages
+instead of publishing or recycling them. The measured profile is bound to the
+complete runtime/model/hardware identity; startup also requires the configured
+capacity to hold at least the measured crossover. P-D separation is not
+supported in this first tier. The formal operator is ready, but no crossover
+has yet been published: F4a remains open until its same-image, non-overlapping
+TP4 and TP8 Qwen3-32B artifacts pass assembly and independent replay.
 
 F4c is closed by the 2026-07-31 m7 D6 amendment and the independently
 replayable artifact at

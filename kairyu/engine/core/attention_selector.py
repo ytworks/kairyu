@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
+from importlib import metadata
 
 from kairyu.engine.core.hw_profile import HardwareProfile
 
@@ -70,6 +72,175 @@ def attention_backend_identity(decision: AttentionBackendDecision) -> str:
         },
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def validate_attention_backend_execution_identity(value: object) -> str:
+    """Validate the exact canonical execution identity accepted by policy files."""
+
+    if not isinstance(value, str) or not value:
+        raise ValueError("attention backend execution identity must be a non-empty string")
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("attention backend execution identity must be JSON") from error
+    expected = {
+        "requested",
+        "resolved",
+        "source",
+        "components",
+        "component_versions",
+        "component_builds",
+        "architecture",
+    }
+    if not isinstance(parsed, dict) or set(parsed) != expected:
+        raise ValueError("attention backend execution identity fields are invalid")
+    if any(
+        not isinstance(parsed.get(field), str) or not parsed[field]
+        for field in ("requested", "resolved", "source")
+    ):
+        raise ValueError("attention backend execution selection fields are invalid")
+    components = parsed["components"]
+    architecture = parsed["architecture"]
+    versions = parsed["component_versions"]
+    builds = parsed["component_builds"]
+    if (
+        not isinstance(components, dict)
+        or not components
+        or any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(component, str)
+            or not component
+            for name, component in components.items()
+        )
+        or not isinstance(architecture, dict)
+        or not isinstance(versions, dict)
+        or set(versions) != {"prefill", "decode"}
+        or any(
+            not isinstance(version, str) or not version or version == "unknown"
+            for version in versions.values()
+        )
+        or not isinstance(builds, dict)
+    ):
+        raise ValueError("attention backend execution components are invalid")
+    uses_flashinfer = "flashinfer" in components.values()
+    if uses_flashinfer:
+        if set(builds) != {"flashinfer-jit-cache"}:
+            raise ValueError("FlashInfer execution build identity is incomplete")
+        jit_cache = builds["flashinfer-jit-cache"]
+        if not isinstance(jit_cache, dict) or type(jit_cache.get("installed")) is not bool:
+            raise ValueError("FlashInfer JIT-cache build identity is invalid")
+        if jit_cache["installed"]:
+            digest = jit_cache.get("record_sha256")
+            if (
+                set(jit_cache) != {"installed", "version", "record_sha256"}
+                or not isinstance(jit_cache.get("version"), str)
+                or not jit_cache["version"]
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError("installed FlashInfer JIT-cache build identity is invalid")
+        elif set(jit_cache) != {"installed"}:
+            raise ValueError("absent FlashInfer JIT-cache build identity is invalid")
+    elif builds:
+        raise ValueError("non-FlashInfer execution identity has unexpected build metadata")
+    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+    if canonical != value:
+        raise ValueError("attention backend execution identity is not canonical")
+    return value
+
+
+def _reported_module_version(module: object, component: str) -> str:
+    value = getattr(module, "__version__", None)
+    if not isinstance(value, str) or not value or value == "unknown":
+        raise RuntimeError(
+            f"{component} does not expose an exact runtime __version__; "
+            "refusing to construct an attention execution identity"
+        )
+    return value
+
+
+def _distribution_build_identity(distribution_name: str) -> dict[str, object]:
+    """Exact installed-wheel identity; RECORD hashes distinguish equal versions."""
+
+    try:
+        distribution = metadata.distribution(distribution_name)
+    except metadata.PackageNotFoundError:
+        return {"installed": False}
+    record = distribution.read_text("RECORD")
+    if not isinstance(record, str) or not record:
+        raise RuntimeError(
+            f"{distribution_name} has no installed RECORD; refusing to construct "
+            "an attention execution identity"
+        )
+    return {
+        "installed": True,
+        "version": distribution.version,
+        "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
+    }
+
+
+def attention_backend_execution_identity(
+    decision: AttentionBackendDecision,
+    backend: object,
+) -> str:
+    """Canonical rank-invariant identity of the backend that actually runs.
+
+    Selection alone is insufficient for retained performance policy: replacing
+    a FlashInfer/FlashAttention wheel can change the restore-versus-recompute
+    crossover without changing the public backend name.  This identity extends
+    the selection contract with versions read from the constructed backend,
+    while deliberately excluding rank-local device indices and state.
+    """
+
+    if decision.resolved == "torch":
+        import torch
+
+        version = str(torch.__version__)
+        component_versions = {"decode": version, "prefill": version}
+    elif decision.resolved == "flashinfer":
+        module = getattr(backend, "_flashinfer", None)
+        version = _reported_module_version(module, "flashinfer")
+        component_versions = {"decode": version, "prefill": version}
+    elif decision.resolved in {"flashattention3", "flashattention4"}:
+        raw_versions = getattr(backend, "component_versions", None)
+        if not isinstance(raw_versions, dict):
+            raise RuntimeError(
+                f"{decision.resolved} does not expose component_versions; "
+                "refusing to construct an attention execution identity"
+            )
+        component_versions = dict(raw_versions)
+        decode_backend = getattr(backend, "_decode_backend", None)
+        decode_module = getattr(decode_backend, "_flashinfer", None)
+        if decode_module is not None:
+            component_versions["decode"] = _reported_module_version(
+                decode_module,
+                "flashinfer delegated decode",
+            )
+        if set(component_versions) != {"prefill", "decode"} or any(
+            not isinstance(value, str) or not value or value == "unknown"
+            for value in component_versions.values()
+        ):
+            raise RuntimeError(
+                f"{decision.resolved} component_versions are incomplete; "
+                "refusing to construct an attention execution identity"
+            )
+    else:  # selection validates the public set before constructing a backend
+        raise RuntimeError(
+            f"unsupported resolved attention backend {decision.resolved!r}"
+        )
+
+    selected = json.loads(attention_backend_identity(decision))
+    selected["component_versions"] = dict(sorted(component_versions.items()))
+    selected["component_builds"] = (
+        {"flashinfer-jit-cache": _distribution_build_identity("flashinfer-jit-cache")}
+        if "flashinfer" in decision.components.values()
+        else {}
+    )
+    return validate_attention_backend_execution_identity(
+        json.dumps(selected, sort_keys=True, separators=(",", ":"))
     )
 
 

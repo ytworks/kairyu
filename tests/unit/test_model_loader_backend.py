@@ -1,6 +1,7 @@
 """m12 D5: loader round-trip + KairyuBackend(model_path=) end to end."""
 
 import json
+from dataclasses import asdict
 
 import pytest
 import torch
@@ -118,6 +119,96 @@ async def test_backend_model_path_generates(checkpoint):
         )
     )
     assert again.completions[0].token_ids == completion.token_ids
+
+
+def test_backend_binds_the_measured_dram_tier_to_its_real_pool(
+    checkpoint,
+    tmp_path,
+    monkeypatch,
+):
+    from kairyu.engine.core import hw_profile
+    from kairyu.engine.core.attention import select_backend
+    from kairyu.engine.core.attention_selector import (
+        attention_backend_execution_identity,
+    )
+    from kairyu.engine.core.hw_profile import HardwareProfile
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.kv_tier_policy import (
+        POLICY_RULE,
+        SCHEMA_VERSION,
+        DramKVRuntimeIdentity,
+        model_config_sha256,
+    )
+
+    model_path, _ = checkpoint
+    cpu_profile = HardwareProfile(arch="cpu")
+    monkeypatch.setattr(hw_profile, "probe", lambda: cpu_profile)
+    attention_backend = select_backend(cpu_profile, device="cpu")
+    page_size = 4
+    pool_identity = DramKVRuntimeIdentity.from_pool(
+        PagedKVPool(
+            num_layers=2,
+            num_pages=32,
+            page_size=page_size,
+            num_kv_heads=2,
+            head_dim=16,
+        ),
+        model_config_digest=model_config_sha256(model_path),
+        tensor_parallel_size=1,
+        tensor_parallel_rank=0,
+        attention_backend_identity=attention_backend_execution_identity(
+            attention_backend.selection_decision,
+            attention_backend,
+        ),
+        max_num_batched_tokens=2048,
+    )
+    digest = "a" * 64
+    samples = [
+        {
+            "prefix_tokens": page_size,
+            "repeat": repeat,
+            "order": (
+                ["restore", "recompute"]
+                if repeat % 2 == 0
+                else ["recompute", "restore"]
+            ),
+            "restore_ns": 800,
+            "recompute_ns": 1000,
+            "restore_sha256": digest,
+            "recompute_sha256": digest,
+        }
+        for repeat in range(9)
+    ]
+    profile = {
+        "schema_version": SCHEMA_VERSION,
+        "runtime_identity": asdict(pool_identity),
+        "runtime_fingerprint": pool_identity.fingerprint,
+        "samples": samples,
+        "policy": {
+            "rule": POLICY_RULE,
+            "min_restore_tokens": page_size,
+        },
+        "evidence_sha256": "b" * 64,
+        "passed": True,
+    }
+    profile_path = tmp_path / "dram-kv-profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    backend = KairyuBackend(
+        num_pages=32,
+        page_size=page_size,
+        model_path=str(model_path),
+        tokenizer=_SmallVocabTokenizer(),
+        dram_kv_tier_capacity_pages=4,
+        dram_kv_tier_profile=profile_path,
+    )
+
+    assert backend.dram_kv_tier_enabled
+    assert backend.dram_kv_tier_capacity_pages == 4
+    assert backend.dram_kv_tier_min_restore_tokens == page_size
+    assert backend._cache.dram_tier_stats["offload_pages"] == 0
+    assert backend._loop._runner.dram_kv_tier.host_is_pinned is False
+    backend._loop.close()
 
 
 async def test_backend_reclaims_state_after_generate(checkpoint):

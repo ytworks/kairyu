@@ -32,7 +32,12 @@ closing its Pipe end immediately.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -302,6 +307,18 @@ def _startup_ready_frame(engine_loop) -> dict:
         "kv_cache_dtype_resolved": getattr(
             engine_loop, "kv_cache_dtype_resolved", None
         ),
+        "dram_kv_tier": {
+            "enabled": getattr(engine_loop, "dram_kv_tier_enabled", False),
+            "capacity_pages": getattr(
+                engine_loop, "dram_kv_tier_capacity_pages", 0
+            ),
+            "profile_sha256": getattr(
+                engine_loop, "dram_kv_tier_profile_sha256", None
+            ),
+            "min_restore_tokens": getattr(
+                engine_loop, "dram_kv_tier_min_restore_tokens", None
+            ),
+        },
     }
 
 
@@ -327,7 +344,45 @@ def _send_optional_startup_frame(port_pipe, frame: dict) -> bool:
     return True
 
 
-def run_engine_service(port_pipe, config: dict) -> None:
+@contextmanager
+def _engine_config_with_pinned_dram_profile(
+    config: dict,
+    profile_bytes: bytes | None,
+) -> Iterator[dict]:
+    """Materialize the parent's immutable profile bytes for one child load."""
+
+    if profile_bytes is None:
+        yield config
+        return
+    if not isinstance(profile_bytes, bytes) or not profile_bytes:
+        raise ValueError("pinned DRAM KV profile bytes must be non-empty bytes")
+    if not config.get("dram_kv_tier_profile"):
+        raise ValueError("pinned DRAM KV profile bytes require an enabled profile")
+
+    descriptor, snapshot_path = tempfile.mkstemp(
+        prefix="kairyu-dram-kv-profile-",
+        suffix=".json",
+    )
+    try:
+        snapshot = os.fdopen(descriptor, "wb")
+        descriptor = -1
+        with snapshot:
+            snapshot.write(profile_bytes)
+        child_config = dict(config)
+        child_config["dram_kv_tier_profile"] = snapshot_path
+        yield child_config
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(snapshot_path)
+
+
+def run_engine_service(
+    port_pipe,
+    config: dict,
+    dram_kv_tier_profile_bytes: bytes | None = None,
+) -> None:
     """Child-process main: bind, report the port, serve until shutdown."""
     import msgpack
     import zmq
@@ -341,7 +396,11 @@ def run_engine_service(port_pipe, config: dict) -> None:
     port = socket.bind_to_random_port("tcp://127.0.0.1")
     port_pipe.send(port)
     try:
-        engine_loop, _, _ = build_engine_loop(**config)
+        with _engine_config_with_pinned_dram_profile(
+            config,
+            dram_kv_tier_profile_bytes,
+        ) as child_config:
+            engine_loop, _, _ = build_engine_loop(**child_config)
     except BaseException as error:
         _send_optional_startup_frame(port_pipe, _startup_error_frame(error))
         port_pipe.close()

@@ -64,6 +64,8 @@ _KAIRYU_OPTIONS = frozenset(
         "cuda_graph_max_pages",
         "cuda_graph_warmup_iters",
         "kv_cache_dtype",
+        "dram_kv_tier_capacity_pages",
+        "dram_kv_tier_profile",
     }
 )
 _KAIRYU_PROC_OPTIONS = frozenset(
@@ -85,6 +87,8 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "cuda_graph_max_pages",
         "cuda_graph_warmup_iters",
         "kv_cache_dtype",
+        "dram_kv_tier_capacity_pages",
+        "dram_kv_tier_profile",
     }
 )
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
@@ -304,6 +308,35 @@ def _validate_native_common(
         raise ValueError(
             "native backend explicit KV cache dtype does not support P-D separation"
         )
+    dram_pages = _require_int_at_least(
+        backend,
+        "dram_kv_tier_capacity_pages",
+        options.get("dram_kv_tier_capacity_pages", 0),
+        0,
+    )
+    dram_profile = options.get("dram_kv_tier_profile")
+    if dram_profile is not None and (
+        not isinstance(dram_profile, (str, PathLike))
+        or not str(dram_profile)
+    ):
+        raise ValueError(
+            "native backend dram_kv_tier_profile must be a non-empty "
+            "local path or null"
+        )
+    if (dram_pages > 0) != (dram_profile is not None):
+        raise ValueError(
+            "native backend DRAM KV tier requires both a positive "
+            "dram_kv_tier_capacity_pages and dram_kv_tier_profile"
+        )
+    if dram_pages:
+        if model_path is None:
+            raise ValueError(
+                "native backend DRAM KV tier requires a real model_path"
+            )
+        if pd_separation:
+            raise ValueError(
+                "native backend DRAM KV tier does not support P-D separation"
+            )
     graph_decode = decode_mode == "cuda_graph"
     if graph_decode:
         if model_path is None:

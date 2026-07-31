@@ -744,6 +744,176 @@ image, and drill are unchanged.
   copies and token recomputation only; it must never be reported as measured
   physical KV bytes or byte-seconds.
 
+- 9.8a Native pinned-DRAM KV crossover (#187, G5 F4a): the implementation and
+  formal operator are ready, but this gate remains open until both Qwen3-32B
+  TP4 and TP8 evidence shards pass. Use one standalone clean clone of the exact
+  implementation commit and build one immutable image from it; an older image
+  is invalid. TP4 must exit successfully and release all GPUs before TP8
+  starts. Do not overlap the runs, reuse a tag that resolves to another image,
+  substitute a dirty bind mount, or invent a crossover when the retained
+  samples have no stable passing suffix.
+
+  The model volume contains a `qwen3-32b` subdirectory, so mount that exact
+  volume subpath. Run as the host UID/GID, leave Docker's default hostname in
+  place so it remains the container-ID prefix, and give the container only a
+  read-only source clone, read-only full-container-ID metadata directory, and
+  its own read-write output directory. `memlock=-1`, host IPC/network, and
+  loopback Gloo are part of the retained runtime contract.
+
+  ```bash
+  set -euo pipefail
+  COMMIT=$(git rev-parse HEAD)
+  SESSION_ROOT=$(mktemp -d /tmp/kairyu-f4a.XXXXXX)
+  SOURCE_ROOT="$SESSION_ROOT/source"
+  RUN_ROOT="$SESSION_ROOT/evidence"
+  HOST_UID=$(id -u)
+  HOST_GID=$(id -g)
+
+  git clone --no-hardlinks . "$SOURCE_ROOT"
+  git -C "$SOURCE_ROOT" switch --detach "$COMMIT"
+  test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$COMMIT"
+  test -z "$(git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all)"
+
+  IMAGE_REF="kairyu-f4a:$COMMIT"
+  docker build --build-arg "KAIRYU_VCS_REF=$COMMIT" \
+    -t "$IMAGE_REF" -f "$SOURCE_ROOT/Dockerfile.cuda" "$SOURCE_ROOT"
+  IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")
+  test "$(docker image inspect --format \
+    '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$IMAGE_ID")" = "$COMMIT"
+  mapfile -t REPO_DIGESTS < <(docker image inspect --format \
+    '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE_ID")
+  REPO_ARGS=()
+  for digest in "${REPO_DIGESTS[@]}"; do
+    if test -n "$digest"; then
+      REPO_ARGS+=(--repo-digest "$digest")
+    fi
+  done
+
+  mkdir -p "$RUN_ROOT/tp4" "$RUN_ROOT/tp8" \
+    "$RUN_ROOT/metadata/tp4" "$RUN_ROOT/metadata/tp8" \
+    "$RUN_ROOT/artifact"
+  docker image inspect "$IMAGE_ID" > "$RUN_ROOT/metadata/image-inspect.json"
+
+  TP4_CID=$(docker create \
+    --name "kairyu-f4a-tp4-${COMMIT:0:12}" \
+    --gpus 'device=0,1,2,3' \
+    --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    --ulimit memlock=-1:-1 --ipc=host --network=host \
+    -e GLOO_SOCKET_IFNAME=lo \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount \
+      type=volume,src=kairyu-qwen3-32b_qwen3-32b,dst=/models/qwen3-32b,volume-subpath=qwen3-32b,readonly \
+    --mount "type=bind,src=$RUN_ROOT/tp4,dst=/evidence" \
+    --mount \
+      "type=bind,src=$RUN_ROOT/metadata/tp4,dst=/run/kairyu-meta,readonly" \
+    "$IMAGE_ID" \
+    bench/dram_kv_tier_qwen.py run \
+      --tp 4 --model-path /models/qwen3-32b \
+      --output /evidence/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
+      --image-id "$IMAGE_ID" \
+      --container-id-file /run/kairyu-meta/container-id \
+      "${REPO_ARGS[@]}" --max-num-batched-tokens 2048 --timeout-s 1800)
+  test "${#TP4_CID}" -eq 64
+  printf '%s\n' "$TP4_CID" > "$RUN_ROOT/metadata/tp4/container-id"
+  docker inspect "$TP4_CID" \
+    > "$RUN_ROOT/metadata/tp4/container-inspect-created.json"
+  docker start -a "$TP4_CID" || {
+    docker inspect "$TP4_CID" \
+      > "$RUN_ROOT/metadata/tp4/container-inspect-exited.json"
+    exit 1
+  }
+  test "$(docker inspect --format '{{.State.ExitCode}}' "$TP4_CID")" = 0
+  test "$(docker inspect --format '{{.State.Running}}' "$TP4_CID")" = false
+  test -s "$RUN_ROOT/tp4/dram-kv-tier-qwen3-32b-tp4-raw.jsonl"
+  docker inspect "$TP4_CID" \
+    > "$RUN_ROOT/metadata/tp4/container-inspect-exited.json"
+
+  TP8_CID=$(docker create \
+    --name "kairyu-f4a-tp8-${COMMIT:0:12}" \
+    --gpus 'device=0,1,2,3,4,5,6,7' \
+    --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    --ulimit memlock=-1:-1 --ipc=host --network=host \
+    -e GLOO_SOCKET_IFNAME=lo \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount \
+      type=volume,src=kairyu-qwen3-32b_qwen3-32b,dst=/models/qwen3-32b,volume-subpath=qwen3-32b,readonly \
+    --mount "type=bind,src=$RUN_ROOT/tp8,dst=/evidence" \
+    --mount \
+      "type=bind,src=$RUN_ROOT/metadata/tp8,dst=/run/kairyu-meta,readonly" \
+    "$IMAGE_ID" \
+    bench/dram_kv_tier_qwen.py run \
+      --tp 8 --model-path /models/qwen3-32b \
+      --output /evidence/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
+      --image-id "$IMAGE_ID" \
+      --container-id-file /run/kairyu-meta/container-id \
+      "${REPO_ARGS[@]}" --max-num-batched-tokens 2048 --timeout-s 1800)
+  test "${#TP8_CID}" -eq 64
+  printf '%s\n' "$TP8_CID" > "$RUN_ROOT/metadata/tp8/container-id"
+  docker inspect "$TP8_CID" \
+    > "$RUN_ROOT/metadata/tp8/container-inspect-created.json"
+  docker start -a "$TP8_CID" || {
+    docker inspect "$TP8_CID" \
+      > "$RUN_ROOT/metadata/tp8/container-inspect-exited.json"
+    exit 1
+  }
+  test "$(docker inspect --format '{{.State.ExitCode}}' "$TP8_CID")" = 0
+  test "$(docker inspect --format '{{.State.Running}}' "$TP8_CID")" = false
+  test -s "$RUN_ROOT/tp8/dram-kv-tier-qwen3-32b-tp8-raw.jsonl"
+  docker inspect "$TP8_CID" \
+    > "$RUN_ROOT/metadata/tp8/container-inspect-exited.json"
+  ```
+
+  Keep both stopped containers and their inspect records until assembly and
+  verification finish. Run the offline steps from the same clean source and
+  immutable image; they need no GPU. `assemble --assert-gate` is allowed to
+  fail when the measured grid has no stable restore-winning suffix—that is an
+  honest open gate, not an environment skip or a value to fill manually.
+
+  ```bash
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
+    "$IMAGE_ID" bench/dram_kv_tier_qwen.py assemble \
+      --tp4-raw /evidence/tp4/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
+      --tp8-raw /evidence/tp8/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
+      --output-dir /evidence/artifact --assert-gate
+
+  cp -a "$RUN_ROOT/metadata" "$RUN_ROOT/artifact/container-metadata"
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
+    "$IMAGE_ID" bench/dram_kv_tier_qwen.py verify \
+      --artifact-dir /evidence/artifact --assert-gate
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
+    "$IMAGE_ID" bench/dram_kv_tier_qwen.py replay \
+      --tp4-raw /evidence/artifact/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
+      --tp8-raw /evidence/artifact/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
+      --assert-gate
+  ```
+
+  Retain both raw shards, the manifest, both runtime profiles, image inspect,
+  full container IDs, and created/exited inspect records together before
+  publishing a crossover. Only then copy the complete artifact into
+  `bench/results/g5-f4a-dram-kv-tier-qwen3-32b-<gpu>-<date>/` and update F4a.
+  After that retained copy independently verifies, the two named measurement
+  containers may be removed explicitly. Never use a broad Docker prune as
+  part of this procedure.
+
 - 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
   one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current
   retained production image predates E4M3 attention AOT and contains no
