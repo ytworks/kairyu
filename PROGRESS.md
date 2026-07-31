@@ -482,6 +482,9 @@ request IDs: inactive aborts are stateless, while an active abort interrupts and
 closes its backend stream without poisoning later reuse of the same ID.
 `OpenAICompatBackend` SSE preserves every observed choice index, including empty single
 choices and mixed empty/non-empty `n > 1` results, while rejecting streams with no choices.
+Its upstream SSE decoder now frames raw bytes with CR/LF only, preserving valid JSON
+U+0085/U+2028/U+2029 model output; all server SSE writers escape those separators so
+legacy universal-line clients also receive one complete JSON event line.
 `BatchStore` exposes owner-scoped lazy binary-line iteration, metadata-last streaming
 upload transactions, and transactional lazy JSONL writers. The files route reads fixed-size
 chunks, applies its byte limit incrementally, and removes partial uploads on rejection,
@@ -716,6 +719,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] SSE framing preserves Unicode model output
+- What: Replaced `httpx.aiter_lines()` in the OpenAI-compatible upstream path with a byte-oriented CR/LF SSE decoder, including BOM, comments, fragmented transport, and repeated `data:` fields. Kairyu's Chat Completions, Completions, and Responses writers also escape U+0085/U+2028/U+2029 so legacy universal-line clients retain one physical JSON event line. The regression suite covers all three separators and reconstructs their exact content.
+- Why: The first G2 A9 TP8 sweep failed one of 984 retry-free requests when a valid generated separator split the JSON string at the exact logged column. Retrying or ignoring it would hide a product bug; both sides of the eventual DP/TP8 comparison must run the same fixed transport.
+- Refs: issue #303, `kairyu/sse.py`, `kairyu/engine/openai_backend.py`, `kairyu/entrypoints/server/app.py`, `kairyu/entrypoints/server/responses_service.py`
 
 ### 2026-07-31 — [progress] P-C4 closes on Qwen3-VL-32B TP8 and the real Open WebUI upload path
 - What: the clean `b8971cb` stack passed every A18 gate on 8× RTX PRO 6000. RED and BLUE fixtures produced their corresponding distinct answers; unary RED/BLUE and streamed RED each reported exact processor usage of 1,060 input and 2 output tokens; a metadata-service URL failed pre-dispatch with `400 invalid_image`; and pinned Open WebUI uploaded the PNG through `/api/v1/files/`, sent its owned file ID/type/URL without a browser data-URL shortcut, and rendered RED. The vLLM command retained the pinned model/image/TP8 bounds and enabled the `hermes` parser matching the model's JSON-in-`<tool_call>` template. Correction to the preceding progress entry: the browser need not explicitly write `tool_choice=auto`; Open WebUI can inject built-in tools and vLLM normalizes an omitted choice to `auto`.

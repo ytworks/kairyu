@@ -46,6 +46,7 @@ from kairyu.engine.registry import register_backend
 from kairyu.engine.vision import ImageInputPolicy, InvalidImageInput
 from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import SamplingParams
+from kairyu.sse import iter_sse_data
 
 
 def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
@@ -58,7 +59,6 @@ def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
 
 
 _DEFAULT_TIMEOUT_S = 60.0
-_SSE_DATA_PREFIX = "data:"
 _SSE_DONE = "[DONE]"
 # OpenAI exposes token text and bytes in logprobs, but not tokenizer token IDs.
 _UNKNOWN_TOKEN_ID = -1
@@ -765,10 +765,8 @@ class OpenAICompatBackend:
             deltas_seen: dict[int, int] = {}
             logprobs: dict[int, list[TokenLogprob]] = {}
             usage: GenerationUsage | None = None
-            async for line in response.aiter_lines():
-                if not line.startswith(_SSE_DATA_PREFIX):
-                    continue
-                data_str = line[len(_SSE_DATA_PREFIX) :].strip()
+            async for data_str in iter_sse_data(response):
+                data_str = data_str.strip()
                 if data_str == _SSE_DONE:
                     break
                 chunk = json.loads(data_str)

@@ -1121,6 +1121,25 @@ _SSE_BODY = (
 )
 
 
+class _ChunkedAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, *chunks: bytes) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _chunked_sse_transport(*chunks: bytes) -> httpx.MockTransport:
+    return httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            stream=_ChunkedAsyncStream(*chunks),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+
 async def test_multimodal_stream_requires_and_returns_exact_final_usage():
     captured: dict = {}
 
@@ -1203,6 +1222,94 @@ async def test_stream_parses_sse_into_cumulative_partials(monkeypatch):
     assert [result.finished for result in results] == [False, False, True]
     assert results[-1].completions[0].finish_reason == "stop"
     await backend.shutdown()
+
+
+async def test_stream_preserves_unicode_line_separators_inside_json():
+    separators = "\u0085\u2028\u2029"
+    content_event = (
+        "data: "
+        + json.dumps(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": separators},
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+        + "\n\n"
+    ).encode()
+    finish = (
+        b'data: {"choices":[{"index":0,"delta":{},'
+        b'"finish_reason":"stop"}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    separator_start = content_event.index("\u2028".encode())
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_chunked_sse_transport(
+            content_event[: separator_start + 1],
+            content_event[separator_start + 1 :],
+            finish,
+        ),
+    )
+
+    results = [result async for result in backend.stream(_request("stream it"))]
+
+    assert [result.text for result in results] == [separators, separators]
+    assert results[-1].finished is True
+
+
+async def test_stream_parses_fragmented_multiline_sse_data_event():
+    body = (
+        b": keepalive\r\n"
+        b"event: ignored\r\n"
+        b'data: {"choices":[\r\n'
+        b'data: {"index":0,"delta":{"content":"hello"}}\r\n'
+        b"data: ]}\r\n"
+        b"\r\n"
+        b'data: {"choices":[{"index":0,"delta":{},'
+        b'"finish_reason":"stop"}]}\r\n'
+        b"\r\n"
+        b"data: [DONE]\r\n"
+        b"\r\n"
+    )
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_chunked_sse_transport(
+            body[:17],
+            body[17:31],
+            body[31:92],
+            body[92:-1],
+            body[-1:],
+        ),
+    )
+
+    results = [result async for result in backend.stream(_request("stream it"))]
+
+    assert [result.text for result in results] == ["hello", "hello"]
+    assert results[-1].completions[0].finish_reason == "stop"
+
+
+async def test_stream_rejects_complete_malformed_sse_json():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_chunked_sse_transport(
+            b'data: {"choices":[}\n\n',
+            b"data: [DONE]\n\n",
+        ),
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        _ = [result async for result in backend.stream(_request("stream it"))]
 
 
 async def test_stream_returns_empty_text_for_valid_empty_single_choice():
