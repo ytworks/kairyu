@@ -55,10 +55,8 @@ RUN sed -i 's|config=None,  # Use default config|config={"fa2_head_dim": [(64, 6
 ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 RUN cd flashinfer-jit-cache && python -m build --no-isolation --wheel && ls -la dist/
 
-# ---- Stage 2: runtime (no nvcc) ----------------------------------------------
-FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04 AS base
-ARG KAIRYU_VCS_REF
-LABEL org.opencontainers.image.revision="${KAIRYU_VCS_REF}"
+# ---- Stage 2: revision-independent runtime payload (no nvcc) -----------------
+FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04 AS runtime-payload
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-dev python3.12-venv gcc curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
@@ -70,7 +68,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 # Bytecode compilation is disabled: with the full GPU dep set (torch + CUDA
 # libs) uv's parallel compile exhausts file descriptors (EMFILE / os error 24).
-ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON=python3.12
+ENV UV_COMPILE_BYTECODE=0 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=python3.12 \
+    FLASHINFER_WORKSPACE_BASE=/tmp/flashinfer
 COPY pyproject.toml uv.lock README.md ./
 # `flashattention4` pins upstream's CUDA 13 recommendation:
 # flash-attn-4[cu13]==4.0.0b24.
@@ -88,3 +89,10 @@ ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
 ENTRYPOINT ["kairyu", "serve"]
 CMD ["/etc/kairyu/config.yaml"]
+
+# Keep source revision metadata outside the large dependency payload. A new
+# source commit therefore produces a new immutable image identity without
+# invalidating the CUDA/Python dependency layers above.
+FROM runtime-payload AS base
+ARG KAIRYU_VCS_REF
+LABEL org.opencontainers.image.revision="${KAIRYU_VCS_REF}"

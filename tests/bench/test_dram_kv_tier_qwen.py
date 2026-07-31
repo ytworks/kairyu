@@ -76,7 +76,7 @@ def _checkpoint() -> dict[str, object]:
         "weights_sha256": gate.sha256_json(weights),
         "pinned_weights_rollup": gate.EXPECTED_MODEL_WEIGHTS_ROLLUP,
         "metadata_sha256": {
-            "config.json": config_sha,
+            "config.json": gate.EXPECTED_MODEL_CONFIG_SHA256,
             "tokenizer.json": _digest("tokenizer"),
         },
         "model_config_sha256": config_sha,
@@ -981,6 +981,97 @@ def test_live_receipts_preserve_rank_order_and_ba_host_ownership() -> None:
             receipts=receipts,
             tokenizer=_Tokenizer(),
         )
+
+
+_MISSING_HEAD_DIM = object()
+
+
+def _write_checkpoint_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    head_dim: object = gate.HEAD_DIM,
+) -> Path:
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    config: dict[str, object] = {
+        "model_type": "qwen3",
+        "hidden_size": 5120,
+        "intermediate_size": 25600,
+        "num_hidden_layers": gate.NUM_LAYERS,
+        "num_attention_heads": 64,
+        "num_key_value_heads": gate.NUM_KV_HEADS,
+        "vocab_size": 151936,
+    }
+    if head_dim is not _MISSING_HEAD_DIM:
+        config["head_dim"] = head_dim
+    config_payload = json.dumps(config, sort_keys=True)
+    (model_path / "config.json").write_text(config_payload)
+    (model_path / "tokenizer.json").write_text("{}")
+
+    weights = []
+    for index in range(1, 18):
+        path = model_path / f"model-{index:05d}-of-00017.safetensors"
+        payload = f"fixture-shard-{index}".encode()
+        path.write_bytes(payload)
+        weights.append(
+            {
+                "file": path.name,
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    parity_rollup = hashlib.sha256(
+        json.dumps(weights, sort_keys=True).encode()
+    ).hexdigest()
+    monkeypatch.setattr(gate, "EXPECTED_MODEL_WEIGHTS_ROLLUP", parity_rollup)
+    monkeypatch.setattr(
+        gate,
+        "EXPECTED_MODEL_CONFIG_SHA256",
+        hashlib.sha256(config_payload.encode()).hexdigest(),
+    )
+    return model_path
+
+
+def test_checkpoint_provenance_uses_explicit_qwen_head_dim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = _write_checkpoint_fixture(tmp_path, monkeypatch)
+
+    checkpoint = gate._checkpoint_provenance_live(model_path)
+
+    assert checkpoint["architecture"]["head_dim"] == gate.HEAD_DIM
+    assert checkpoint["architecture"]["head_dim"] != 5120 // 64
+    assert gate._validate_checkpoint(checkpoint, "fixture checkpoint") == checkpoint
+
+
+@pytest.mark.parametrize(
+    ("head_dim", "message"),
+    [
+        (_MISSING_HEAD_DIM, "head dimension must be an integer"),
+        (None, "head dimension must be an integer"),
+        ("128", "head dimension must be an integer"),
+        (128.0, "head dimension must be an integer"),
+        (True, "head dimension must be an integer"),
+        (0, "head dimension must be >= 1"),
+        (-1, "head dimension must be >= 1"),
+    ],
+)
+def test_checkpoint_provenance_rejects_invalid_explicit_head_dim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    head_dim: object,
+    message: str,
+) -> None:
+    model_path = _write_checkpoint_fixture(
+        tmp_path,
+        monkeypatch,
+        head_dim=head_dim,
+    )
+
+    with pytest.raises(gate.EvidenceError, match=message):
+        gate._checkpoint_provenance_live(model_path)
 
 
 def test_run_cli_requires_explicit_inputs_and_routes_one_tp_shard(

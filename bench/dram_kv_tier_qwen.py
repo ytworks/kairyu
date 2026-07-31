@@ -86,6 +86,7 @@ PROFILE_NAMES = {
 MANIFEST_NAME = "dram-kv-tier-qwen3-32b-manifest.json"
 SOURCE_PATH = "bench/dram_kv_tier_qwen.py"
 EXPECTED_MODEL_WEIGHTS_ROLLUP = "6aa37b7da4e37d45b277d0bca47b00c2bfb58bb60986ba93e4c3e667df123955"
+EXPECTED_MODEL_CONFIG_SHA256 = "97e295b63283935788fac5e4f8860862a56d4089538cafc93f0431f2ebe483bb"
 REQUIRED_SOURCE_PATHS = frozenset(
     {
         SOURCE_PATH,
@@ -382,6 +383,10 @@ def _validate_checkpoint(value: object, name: str) -> dict[str, object]:
         and {"config.json", "tokenizer.json"} <= set(metadata)
         and all(_valid_sha256(digest) for digest in metadata.values()),
         f"{name} metadata digests are incomplete",
+    )
+    _require(
+        metadata["config.json"] == EXPECTED_MODEL_CONFIG_SHA256,
+        f"{name} config.json does not match the pinned Qwen3-32B revision",
     )
     _require(
         _valid_sha256(checkpoint.get("model_config_sha256")),
@@ -1782,6 +1787,21 @@ def _checkpoint_provenance_live(model_path: Path) -> dict[str, object]:
     """Full-hash the pinned local Qwen3-32B checkpoint."""
 
     _require(model_path.is_dir(), f"model path is not a directory: {model_path}")
+    config_path = model_path / "config.json"
+    tokenizer_path = model_path / "tokenizer.json"
+    _require(config_path.is_file(), "checkpoint config.json is missing")
+    _require(tokenizer_path.is_file(), "checkpoint tokenizer.json is missing")
+    config_file_sha256 = sha256_file(config_path)
+    _require(
+        config_file_sha256 == EXPECTED_MODEL_CONFIG_SHA256,
+        "checkpoint config.json differs from the pinned Qwen3-32B revision",
+    )
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    _require(isinstance(config, dict), "checkpoint config.json must be an object")
+    heads = _exact_int(config.get("num_attention_heads"), "attention heads", minimum=1)
+    hidden = _exact_int(config.get("hidden_size"), "hidden size", minimum=1)
+    head_dim = _exact_int(config.get("head_dim"), "head dimension", minimum=1)
+
     shards = sorted(model_path.glob("*.safetensors"))
     _require(len(shards) == 17, "Qwen3-32B checkpoint must contain 17 weight shards")
     with ThreadPoolExecutor(max_workers=min(8, len(shards))) as executor:
@@ -1799,14 +1819,6 @@ def _checkpoint_provenance_live(model_path: Path) -> dict[str, object]:
         parity_rollup == EXPECTED_MODEL_WEIGHTS_ROLLUP,
         "checkpoint weights differ from the pinned Qwen3-32B revision",
     )
-    config_path = model_path / "config.json"
-    tokenizer_path = model_path / "tokenizer.json"
-    _require(config_path.is_file(), "checkpoint config.json is missing")
-    _require(tokenizer_path.is_file(), "checkpoint tokenizer.json is missing")
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    _require(isinstance(config, dict), "checkpoint config.json must be an object")
-    heads = _exact_int(config.get("num_attention_heads"), "attention heads", minimum=1)
-    hidden = _exact_int(config.get("hidden_size"), "hidden size", minimum=1)
     architecture = {
         "model_type": config.get("model_type"),
         "hidden_size": hidden,
@@ -1814,7 +1826,7 @@ def _checkpoint_provenance_live(model_path: Path) -> dict[str, object]:
         "num_hidden_layers": config.get("num_hidden_layers"),
         "num_attention_heads": heads,
         "num_key_value_heads": config.get("num_key_value_heads"),
-        "head_dim": hidden // heads,
+        "head_dim": head_dim,
         "vocab_size": config.get("vocab_size"),
     }
     metadata: dict[str, str] = {}
@@ -2839,6 +2851,18 @@ def _live_rank_entry(rank: int, options: _LiveRankOptions) -> None:  # pragma: n
     try:
         profile = probe(device)
         attention_backend = select_backend(profile, device=device)
+        decision = getattr(attention_backend, "selection_decision", None)
+        _require(
+            decision is not None
+            and isinstance(decision.components, dict)
+            and "flashinfer" in decision.components.values(),
+            "formal F4a run requires a FlashInfer-backed attention path; "
+            "automatic Torch fallback is invalid",
+        )
+        attention_identity = attention_backend_execution_identity(
+            decision,
+            attention_backend,
+        )
         model, local_config, full_config = build_tp_model(
             options.model_path,
             options.tp_size,
@@ -2888,18 +2912,13 @@ def _live_rank_entry(rank: int, options: _LiveRankOptions) -> None:  # pragma: n
             if rank == 0
             else None
         )
-        decision = getattr(attention_backend, "selection_decision", None)
         startup = {
             "rank": rank,
             "hardware": hardware,
             "pool_fingerprint": tier.fingerprint_digest,
             "page_nbytes": tier.page_nbytes,
             "attention_backend": type(attention_backend).__name__,
-            "attention_backend_identity": (
-                attention_backend_execution_identity(decision, attention_backend)
-                if decision is not None
-                else None
-            ),
+            "attention_backend_identity": attention_identity,
         }
         startups = comm.all_gather(startup)
         if rank == 0:

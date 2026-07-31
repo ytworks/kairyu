@@ -759,9 +759,14 @@ image, and drill are unchanged.
   read-only source clone, read-only full-container-ID metadata directory, and
   its own read-write output directory. `memlock=-1`, host IPC, Docker's
   default bridge network, loopback Gloo, and an explicit writable Triton cache
-  are part of the retained runtime contract. Host networking is invalid here:
-  it replaces the container-ID hostname with the host name and breaks the
-  provenance binding.
+  and FlashInfer workspace are part of the retained runtime contract. Without
+  the vendor-specific FlashInfer workspace, a non-root container falls back to
+  Torch when the library tries to create `/.cache`; the formal operator rejects
+  that fallback before loading the model. Host networking is invalid here: it
+  replaces the container-ID hostname with the host name and breaks the provenance
+  binding. `Dockerfile.cuda` keeps the revision label in a metadata-only final
+  stage so changing the source commit does not invalidate the large dependency
+  payload.
 
   ```bash
   set -euo pipefail
@@ -806,6 +811,7 @@ image, and drill are unchanged.
     --ulimit memlock=-1:-1 --ipc=host \
     -e GLOO_SOCKET_IFNAME=lo \
     -e TRITON_CACHE_DIR=/evidence/triton-cache \
+    -e FLASHINFER_WORKSPACE_BASE=/evidence/flashinfer-workspace \
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount \
@@ -847,6 +853,7 @@ image, and drill are unchanged.
     --ulimit memlock=-1:-1 --ipc=host \
     -e GLOO_SOCKET_IFNAME=lo \
     -e TRITON_CACHE_DIR=/evidence/triton-cache \
+    -e FLASHINFER_WORKSPACE_BASE=/evidence/flashinfer-workspace \
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount \
