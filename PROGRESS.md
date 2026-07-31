@@ -497,6 +497,9 @@ request IDs: inactive aborts are stateless, while an active abort interrupts and
 closes its backend stream without poisoning later reuse of the same ID.
 `OpenAICompatBackend` SSE preserves every observed choice index, including empty single
 choices and mixed empty/non-empty `n > 1` results, while rejecting streams with no choices.
+Its upstream SSE decoder now frames raw bytes with CR/LF only, preserving valid JSON
+U+0085/U+2028/U+2029 model output; all server SSE writers escape those separators so
+legacy universal-line clients also receive one complete JSON event line.
 `BatchStore` exposes owner-scoped lazy binary-line iteration, metadata-last streaming
 upload transactions, and transactional lazy JSONL writers. The files route reads fixed-size
 chunks, applies its byte limit incrementally, and removes partial uploads on rejection,
@@ -731,6 +734,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] SSE framing preserves Unicode model output
+- What: Replaced `httpx.aiter_lines()` in the OpenAI-compatible upstream path with a byte-oriented CR/LF SSE decoder, including BOM, comments, fragmented transport, and repeated `data:` fields. Kairyu's Chat Completions, Completions, and Responses writers also escape U+0085/U+2028/U+2029 so legacy universal-line clients retain one physical JSON event line. The regression suite covers all three separators and reconstructs their exact content.
+- Why: The first G2 A9 TP8 sweep failed one of 984 retry-free requests when a valid generated separator split the JSON string at the exact logged column. Retrying or ignoring it would hide a product bug; both sides of the eventual DP/TP8 comparison must run the same fixed transport.
+- Refs: issue #303, `kairyu/sse.py`, `kairyu/engine/openai_backend.py`, `kairyu/entrypoints/server/app.py`, `kairyu/entrypoints/server/responses_service.py`
 
 ### 2026-07-31 — [progress] G2 A9 reuses A8 DP evidence and reaches TP8-run readiness
 - What: added the report-only A9 operator, a dedicated all-eight-GPU TP8 engine plus one-replica gateway stack, immutable A8 raw/manifest/placement replay, exact request/placement verification, and independent goodput/TTFT/terminal-TPOT/crossover recomputation. The operator measures only the missing 24 warmups and 960 TP8 requests. It uses A8 image `sha256:2c73b577...` plus the exact source tree materialized from A8 commit `4924b4d`, verifies the fixed source archive, all 196 mounted runtime files, and the delegated A8 helper, and repeats both source and full-checkpoint attestation after traffic. TP8 uses the retained DP one-token namespace, and the formal config discloses both topologies' per-engine and aggregate KV/sequence/batch/graph capacity.

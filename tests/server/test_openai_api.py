@@ -199,6 +199,39 @@ async def test_streaming_reassembles_to_full_answer(app):
     assert "".join(deltas) == full_text
 
 
+async def test_streaming_escapes_unicode_line_separators_on_the_wire():
+    separators = "before\u0085middle\u2028after\u2029"
+    app = create_app(
+        engines={"mock": MockBackend(responses={"unicode": separators})}
+    )
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "mock",
+                "messages": [{"role": "user", "content": "unicode"}],
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert not any(character in response.text for character in "\u0085\u2028\u2029")
+    assert all(escape in response.text for escape in ("\\u0085", "\\u2028", "\\u2029"))
+    chunks = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.split("\n")
+        if line.startswith("data: {")
+    ]
+    assert (
+        "".join(
+            choice["delta"].get("content") or ""
+            for chunk in chunks
+            for choice in chunk["choices"]
+        )
+        == separators
+    )
+
+
 async def test_tool_call_is_parsed_into_openai_schema(app):
     tools = [
         {

@@ -35,6 +35,7 @@ from kairyu.entrypoints.server.metering import (
     stream_usage_owner_from_state,
 )
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.sse import escape_json_line_separators
 
 logger = logging.getLogger(__name__)
 
@@ -791,9 +792,12 @@ def _response_envelope(
 
 def _sse(event_type: str, sequence_number: int, **payload) -> str:
     event = {"type": event_type, "sequence_number": sequence_number, **payload}
+    serialized = escape_json_line_separators(
+        json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    )
     return (
         f"event: {event_type}\n"
-        f"data: {json.dumps(event, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        f"data: {serialized}\n\n"
     )
 
 
