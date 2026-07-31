@@ -104,6 +104,7 @@ from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.outputs import CompletionOutput
 from kairyu.pricing import InvoiceExportError, PriceSheet, export_invoice_csv
 from kairyu.sampling_params import SamplingParams
+from kairyu.sse import escape_json_line_separators
 
 if TYPE_CHECKING:
     from kairyu.entrypoints.server.extra_routes import EmbeddingBackend
@@ -285,14 +286,20 @@ def _sse_chunk(
     exclude = set(_KAIRYU_CHAT_EXTENSION_FIELDS)
     if not include_usage:
         exclude.add("usage")
-    return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
+    serialized = escape_json_line_separators(
+        payload.model_dump_json(exclude=exclude)
+    )
+    return f"data: {serialized}\n\n"
 
 
 def _usage_chunk(response_id: str, created: int, model: str, usage: Usage) -> str:
     payload = ChatCompletionChunk(
         id=response_id, created=created, model=model, choices=[], usage=usage
     )
-    return f"data: {payload.model_dump_json(exclude=_KAIRYU_CHAT_EXTENSION_FIELDS)}\n\n"
+    serialized = escape_json_line_separators(
+        payload.model_dump_json(exclude=_KAIRYU_CHAT_EXTENSION_FIELDS)
+    )
+    return f"data: {serialized}\n\n"
 
 
 def _orchestrator_metadata_chunk(
@@ -331,7 +338,10 @@ def _orchestrator_metadata_chunk(
         exclude.update(_KAIRYU_CHAT_EXTENSION_FIELDS)
     elif trace is None:
         exclude.add("kairyu_trace_v2")
-    return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
+    serialized = escape_json_line_separators(
+        payload.model_dump_json(exclude=exclude)
+    )
+    return f"data: {serialized}\n\n"
 
 
 async def _stream_engine(
@@ -572,7 +582,8 @@ async def _stream_orchestrator(
                         break
         except Exception as error:  # surface as an SSE error event, then close
             logger.exception("orchestrator stream error")
-            yield f'data: {{"error": {{"message": "{type(error).__name__}"}}}}\n\n'
+            payload = {"error": {"message": type(error).__name__}}
+            yield f"data: {json.dumps(payload)}\n\n"
             yield "data: [DONE]\n\n"
             return
         if terminal_error_type is not None and final_result is not None:
@@ -769,7 +780,10 @@ async def _stream_completions(
             usage=usage,
         )
         exclude = None if include_usage else {"usage"}
-        return f"data: {payload.model_dump_json(exclude=exclude)}\n\n"
+        serialized = escape_json_line_separators(
+            payload.model_dump_json(exclude=exclude)
+        )
+        return f"data: {serialized}\n\n"
 
     try:
         try:

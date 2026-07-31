@@ -160,6 +160,26 @@ def test_create_stream_true_returns_sdk_typed_events(tmp_path):
     assert "".join(deltas) == "streamed hello"
 
 
+def test_responses_stream_escapes_unicode_line_separators_on_the_wire(tmp_path):
+    separators = "before\u0085middle\u2028after\u2029"
+    backend = MockBackend({"unicode": separators})
+    with TestClient(_app(tmp_path, backend)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={"model": "m", "input": "unicode", "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert not any(character in response.text for character in "\u0085\u2028\u2029")
+    assert all(escape in response.text for escape in ("\\u0085", "\\u2028", "\\u2029"))
+    deltas = [
+        event["delta"]
+        for event in _sse_events(response.text)
+        if event["type"] == "response.output_text.delta"
+    ]
+    assert "".join(deltas) == separators
+
+
 @pytest.mark.asyncio
 async def test_official_async_sdk_stream_is_typed(tmp_path):
     transport = httpx.ASGITransport(app=_app(tmp_path))
