@@ -48,24 +48,24 @@ TPOT_DEFINITION = (
     "includes final usage, finish, [DONE], and stream-terminal tail"
 )
 
-A8_SOURCE_COMMIT = "4924b4d71b8fae0af087979908819aed6939a871"
+A8_SOURCE_COMMIT = "86d49223ffcdba6052428474bf0d9094c6791fed"
 A8_SOURCE_ARCHIVE_SHA256 = (
-    "3e4adc43898caba5d820728926d83c16a97bd3c33debe52f9164ab8056f8db29"
+    "18ff0eabe0dd63862e00230d93cc8edb18c52c97f9544b7ded3e8088e5e3d66d"
 )
-A8_RUNTIME_FILE_COUNT = 196
+A8_RUNTIME_FILE_COUNT = 199
 A8_RUNTIME_FILES_SHA256 = (
-    "e253ab1c33cf281bae6f0989459214ae195e024827244e35116c48ecfe0d907a"
+    "2e695979ef6cf4eb9e5708549af82f8ee6776a49765f1f1408a598ceac893417"
 )
 A8_IMAGE_ID = "sha256:2c73b577b5213264493c6aeba24c1f6318214d20bf6df7780158fd1ef2c70a50"
-A8_RAW_SHA256 = "b637489302a9b818a0c34790c4059946994ff6070f76ac9e1bc7d128bbbd803f"
+A8_RAW_SHA256 = "b024d71741eea71f9aa698fd0bf44e27c245584b524835c79acd4e72426f22d4"
 A8_MANIFEST_SHA256 = (
-    "da439f153c04d05178ddf96c489aca7fb1cc270ba982736c1bc98197730e3946"
+    "833a7ef269ad2f427f8e88bf6f91773de1e876f5baa441fc01cfce04b1cd3b28"
 )
 A8_PLACEMENTS_SHA256 = (
-    "76ca1a5f709ccf8492238bdcc4193776f94fdb7a88a40a7e970a517db30270c3"
+    "3be490d1a17a7d20a8cb98fa3eee8cb8bee60e5f6b8624dfea187f45394ab320"
 )
 A8_ARTIFACT_DIR = Path(
-    "bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31"
+    "bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix"
 )
 A8_ACCEPTED_FALSE_CHECK = "median_peak_goodput_ratio_at_least_1_9"
 A8_HELPER_PATH = Path("bench/dp_scaling_g2_a8_bench.py")
@@ -462,13 +462,20 @@ def load_a8_dp_evidence(
 
     descriptor = _a8_descriptor(artifact_dir)
     manifest = a8.verify_artifact(artifact_dir, assert_gate=False)
-    _require(manifest.get("passed") is False, "A8 verdict unexpectedly changed")
+    _require(
+        isinstance(manifest.get("passed"), bool),
+        "A8 verdict is missing or invalid",
+    )
     checks = manifest.get("checks")
     _require(isinstance(checks, dict), "A8 checks are missing")
     failed = {name for name, passed in checks.items() if passed is not True}
     _require(
-        failed == {A8_ACCEPTED_FALSE_CHECK},
-        "A8 must retain only its accepted 1.9x scaling deviation",
+        failed in (set(), {A8_ACCEPTED_FALSE_CHECK}),
+        "A8 may retain only its accepted 1.9x scaling deviation",
+    )
+    _require(
+        manifest.get("passed") is (not failed),
+        "A8 verdict differs from its checks",
     )
     provenance = manifest.get("provenance")
     _require(isinstance(provenance, dict), "A8 provenance is missing")
@@ -1835,9 +1842,14 @@ def recompute_manifest(
         and end.get("placement_count") == len(placements),
         "A9 runtime identity changed during measurement",
     )
+    a8_checks = a8_manifest.get("checks")
+    _require(isinstance(a8_checks, dict), "A8 checks are missing")
+    a8_failed_checks = sorted(
+        name for name, passed in a8_checks.items() if passed is not True
+    )
     checks = {
         "a8_raw_manifest_and_placements_match_fixed_sha256": True,
-        "a8_only_failure_is_the_accepted_1_9x_deviation": True,
+        "a8_verdict_is_pass_or_only_accepted_1_9x_deviation": True,
         "runtime_package_tree_matches_a8_source": True,
         "runtime_package_unchanged_after_measurement": True,
         "image_checkpoint_model_and_trace_match_a8": True,
@@ -1865,9 +1877,11 @@ def recompute_manifest(
         "rate_metrics": rate_metrics,
         "crossover": crossover,
         "provenance": provenance,
-        "a8_accepted_deviation": {
-            "artifact_passed": False,
-            "sole_false_check": A8_ACCEPTED_FALSE_CHECK,
+        "a8_input_verdict": {
+            "artifact_passed": a8_manifest["passed"],
+            "accepted_false_check": (
+                A8_ACCEPTED_FALSE_CHECK if a8_failed_checks else None
+            ),
             "not_an_a9_threshold": True,
         },
         "raw": {

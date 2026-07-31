@@ -203,8 +203,12 @@ original threshold or claims a formal PASS. Evidence is retained under
 
 `bench/g2_a9_dp_tp_crossover_bench.py` produces the report-only Qwen3-32B
 DP=2×TP4 versus TP8 arrival-sweep artifact. It independently replays the
-immutable A8 DP raw evidence, then measures only the missing TP8 arm through a
-one-replica production gateway with the same image, exact commit-materialized
+post-SSE-fix A8 DP evidence retained under
+`bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`, then
+measures only the missing TP8 arm through a one-replica production gateway.
+That comparator has 2,992/2,992 retry-free successes and 1,496 exact
+placements; its sole false check is the accepted 1.9× target at a measured
+1.7711× median. Both arms use the same image, commit-`86d4922` materialized
 read-only runtime source, checkpoint, workload,
 per-engine 8,192 usable KV pages, scheduler limits, pipeline depth, and CUDA
 Graph envelope. The report explicitly records that two DP replicas therefore

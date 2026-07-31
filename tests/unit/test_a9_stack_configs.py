@@ -28,7 +28,7 @@ RUNTIME_EXPR = (
     "${KAIRYU_A9_RUNTIME_DIR:?"
     "run a9-tp8-stack.sh to materialize the pinned A8 source}"
 )
-A8_SOURCE_COMMIT = "4924b4d71b8fae0af087979908819aed6939a871"
+A8_SOURCE_COMMIT = "86d49223ffcdba6052428474bf0d9094c6791fed"
 A8_REPLICA0_CPUS = set(range(0, 15)) | set(range(16, 31)) | set(
     range(64, 79)
 ) | set(range(80, 95))

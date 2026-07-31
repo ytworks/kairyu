@@ -390,16 +390,19 @@ GPU-only remainder (design m5 §4.2).
 
 - Gate A9: retain the separate DP=2×TP4 vs TP8 goodput/TPOT crossover across
   the arrival sweep; A9 remains report-only and is not implied by an A8 pass.
-  The formal operator reuses the immutable A8 DP samples only after replaying
-  their raw/manifest/placement SHA-256s and confirming that the accepted 1.9×
-  deviation remains their sole false check. It then measures the missing TP8
-  arm through a one-replica gateway. The TP8 engine and gateway use the exact
-  A8 image plus a read-only source tree that `a9-tp8-stack.sh` materializes
-  directly from `git archive` of A8 commit `4924b4d`, matching A8's runtime
-  mount rather than the image's older baked package or the current checkout.
-  Preflight verifies the fixed archive digest, all 196 runtime files, and the
-  delegated A8 helper blob. Runtime-source and full-checkpoint attestations
-  both repeat after traffic.
+  The formal operator uses the post-SSE-fix A8 comparator retained at
+  `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/` only after
+  replaying its raw/manifest/placement SHA-256s. All 2,992 requests succeeded
+  without retry, all 1,496 placements correlated, and raw-only replay retained
+  only the accepted 1.9× deviation (measured median 1.7711×). A future fully
+  passing A8 rerun is also valid; every other false check is rejected. A9 then
+  measures the missing TP8 arm through a one-replica gateway. The TP8 engine
+  and gateway use the exact A8 image plus a read-only source tree that
+  `a9-tp8-stack.sh` materializes directly from `git archive` of A8 commit
+  `86d4922`, matching A8's runtime mount rather than the image's older baked
+  package or the current checkout. Preflight verifies the fixed archive digest,
+  all 199 runtime files, and the delegated A8 helper blob. Runtime-source and
+  full-checkpoint attestations both repeat after traffic.
   This keeps both arms on the same runtime while allowing the current clean
   commit to own the A9 operator and evidence schema.
 

@@ -239,6 +239,8 @@ bench/data/
 !bench/results/g2-a6-vllm-*/*
 !bench/results/g2-a7-kv-hit-*/
 !bench/results/g2-a7-kv-hit-*/*
+!bench/results/g2-a8-dp-*/
+!bench/results/g2-a8-dp-*/*
 !bench/results/g2-a9-dp-tp-*/
 !bench/results/g2-a9-dp-tp-*/*
 !bench/results/quant-gemm-*.json

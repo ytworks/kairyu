@@ -226,7 +226,7 @@ def _patch_synthetic_dependencies(
     monkeypatch.setattr(
         a9,
         "load_a8_dp_evidence",
-        lambda _artifact_dir: (a8_rows, {}, {}),
+        lambda _artifact_dir: (a8_rows, _a8_manifest(), {}),
     )
     monkeypatch.setattr(
         a9,
@@ -573,10 +573,16 @@ def test_a8_descriptor_rejects_each_tampered_file(
 @pytest.mark.parametrize(
     ("manifest", "message"),
     [
-        (_a8_manifest(passed=True), "verdict unexpectedly changed"),
         (
-            _a8_manifest(checks={a9.A8_ACCEPTED_FALSE_CHECK: True}),
-            "must retain only",
+            _a8_manifest(passed=True),
+            "verdict differs",
+        ),
+        (
+            _a8_manifest(
+                passed=False,
+                checks={a9.A8_ACCEPTED_FALSE_CHECK: True},
+            ),
+            "verdict differs",
         ),
         (
             _a8_manifest(
@@ -585,7 +591,7 @@ def test_a8_descriptor_rejects_each_tampered_file(
                     "unaccepted_failure": False,
                 }
             ),
-            "must retain only",
+            "may retain only",
         ),
     ],
 )
@@ -614,12 +620,41 @@ def test_a8_reuse_rejects_any_verdict_drift(
         a9.load_a8_dp_evidence(Path("unused"))
 
 
+def test_a8_reuse_accepts_an_improved_fully_passing_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row_count = a9.REPEATS * len(a9.RATES_RPS) * a9.REQUESTS_PER_CELL
+    manifest = _a8_manifest(
+        passed=True,
+        checks={a9.A8_ACCEPTED_FALSE_CHECK: True},
+    )
+    monkeypatch.setattr(a9, "_a8_descriptor", lambda _path: {})
+    monkeypatch.setattr(
+        a8,
+        "verify_artifact",
+        lambda _path, *, assert_gate: copy.deepcopy(manifest),
+    )
+    monkeypatch.setattr(
+        a8,
+        "_read_jsonl",
+        lambda _path: [
+            {"type": "request", "phase": "scaling", "arm": "dp"}
+            for _ in range(row_count)
+        ],
+    )
+
+    rows, verified, _descriptor = a9.load_a8_dp_evidence(Path("unused"))
+
+    assert len(rows) == row_count
+    assert verified["passed"] is True
+
+
 def test_expected_runtime_package_is_derived_from_the_pinned_a8_source() -> None:
     package = a9._expected_runtime_package()
 
     assert package["source_commit"] == a9.A8_SOURCE_COMMIT
     assert package["source_archive_sha256"] == a9.A8_SOURCE_ARCHIVE_SHA256
-    assert package["file_count"] == a9.A8_RUNTIME_FILE_COUNT == 196
+    assert package["file_count"] == a9.A8_RUNTIME_FILE_COUNT == 199
     assert package["files_sha256"] == a9.A8_RUNTIME_FILES_SHA256
 
 

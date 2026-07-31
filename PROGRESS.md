@@ -87,8 +87,11 @@ placement artifacts, retaining A8's accepted 1.9× deviation as false rather
 than converting it into a PASS. Only the missing 24 TP8 warmups and 960
 open-loop requests are newly measured. The TP8 engine and one-replica gateway
 use the exact A8 image plus a read-only source tree materialized directly from
-A8 commit `4924b4d`; its fixed archive and complete 196-file rollup must match
-before traffic. The report recomputes per-repeat/per-rate
+A8 commit `86d4922`; its fixed archive and complete 199-file rollup must match
+before traffic. That comparator was freshly rerun after the SSE transport fix:
+all 2,992 requests succeeded without retry or event loss, all 1,496 placements
+correlated, and independent verify/replay reproduced the sole accepted 1.9×
+deviation at a 1.7711× median. The report recomputes per-repeat/per-rate
 goodput, TTFT, versioned terminal-stream TPOT, maximum in-flight work, and every
 measured topology-order transition without a numeric performance threshold or
 interpolation. TP8 reuses the retained DP cache namespace so request bytes and
@@ -734,6 +737,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] G2 A9 pins a fresh post-SSE-fix A8 comparator
+- What: reran the complete A8 single-TP4 versus DP=2×TP4 sweep on merged source `86d4922` and repinned A9 to its immutable source archive, 199-file runtime rollup, and new raw/manifest/placement digests. All 2,992 requests completed with HTTP 200, `[DONE]`, exact terminal usage, and zero retry; all 1,496 DP placements correlated. Verify and raw-only replay reproduced every value. The sole false check remains the explicitly accepted 1.9× scaling target, with repeat ratios 1.7810×/1.7711×/1.6422× and median 1.7711×. A9 now accepts either a fully passing A8 artifact or exactly that one accepted false check, while rejecting any other failure or verdict/check inconsistency.
+- Why: the first TP8 run exposed and then led to fixing Unicode SSE framing. Rerunning the A8 comparator on the same repaired runtime removes a transport/version confound without retrying or discarding any failed request, so the forthcoming TP8 arm will compare the same source, image, checkpoint, trace, and configuration.
+- Refs: issue #159; issue #303; source commit `86d49223ffcdba6052428474bf0d9094c6791fed`; `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`; raw SHA-256 `b024d71741eea71f9aa698fd0bf44e27c245584b524835c79acd4e72426f22d4`; manifest SHA-256 `833a7ef269ad2f427f8e88bf6f91773de1e876f5baa441fc01cfce04b1cd3b28`; placements SHA-256 `3be490d1a17a7d20a8cb98fa3eee8cb8bee60e5f6b8624dfea187f45394ab320`
 
 ### 2026-07-31 — [progress] SSE framing preserves Unicode model output
 - What: Replaced `httpx.aiter_lines()` in the OpenAI-compatible upstream path with a byte-oriented CR/LF SSE decoder, including BOM, comments, fragmented transport, and repeated `data:` fields. Kairyu's Chat Completions, Completions, and Responses writers also escape U+0085/U+2028/U+2029 so legacy universal-line clients retain one physical JSON event line. The regression suite covers all three separators and reconstructs their exact content.
