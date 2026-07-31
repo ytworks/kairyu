@@ -223,6 +223,16 @@ any measured ordering transition exists and attaches both arms' observed
 concurrency to every transition bracket. The exact launch and replay procedure is
 in `docs/gpu-runbook.md`.
 
+The retained 2026-07-31 A9 artifact passed all 14 checks with 984/984
+retry-free TP8 successes and placements. Median DP/TP8 goodput at
+4/8/16/32/64 offered req/s was 3.884/3.902, 7.383/7.313,
+12.948/8.994, 16.042/11.707, and 19.612/12.440 req/s. The measured
+ordering transition is between 4 and 8 req/s with no interpolation, and DP is
+first noninferior at 8 req/s. TP8 retains lower terminal-stream TPOT at
+16–64 req/s, while DP retains higher goodput and lower TTFT under load.
+Evidence is retained under
+`bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`.
+
 ### G4 E-KV FP8 KV evidence
 
 `bench/fp8_kv_g4_ekv_bench.py` is the formal G4 E-KV correctness operator.

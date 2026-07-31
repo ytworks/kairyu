@@ -81,24 +81,21 @@ The product owner accepted the measured 1.7993× as an explicit closure
 deviation, not as a 1.9× PASS; the original operator threshold is unchanged.
 Its packaged benchmark boundary verifies all 54 registered entrypoints from
 the isolated wheel as well as from the checkout.
-G2 A9 now has a fail-closed report-only operator ready for its clean-commit
-Qwen3-32B TP8 run. It independently replays the fixed A8 DP raw, manifest, and
-placement artifacts, retaining A8's accepted 1.9× deviation as false rather
-than converting it into a PASS. Only the missing 24 TP8 warmups and 960
-open-loop requests are newly measured. The TP8 engine and one-replica gateway
-use the exact A8 image plus a read-only source tree materialized directly from
-A8 commit `86d4922`; its fixed archive and complete 199-file rollup must match
-before traffic. That comparator was freshly rerun after the SSE transport fix:
-all 2,992 requests succeeded without retry or event loss, all 1,496 placements
-correlated, and independent verify/replay reproduced the sole accepted 1.9×
-deviation at a 1.7711× median. The report recomputes per-repeat/per-rate
-goodput, TTFT, versioned terminal-stream TPOT, maximum in-flight work, and every
-measured topology-order transition without a numeric performance threshold or
-interpolation. TP8 reuses the retained DP cache namespace so request bytes and
-token IDs match exactly; the artifact discloses that matched per-engine limits
-give two DP replicas twice TP8's aggregate configured capacity. Full checkpoint
-attestation repeats after traffic. The real TP8 artifact remains the active
-closure step.
+G2 A9 is closed for the Qwen3-32B DP=2×TP4 versus TP8 report. The post-SSE-fix
+A8 comparator and TP8 arm use the same image, checkpoint, trace, cache namespace,
+per-engine limits, and read-only commit-`86d4922` 199-file runtime. The retained
+TP8 run passed all 14 report-integrity checks with 984/984 retry-free successes
+and exact placements; verify and raw-only replay both pass. Median goodput
+(DP/TP8 req/s) was 3.884/3.902, 7.383/7.313, 12.948/8.994,
+16.042/11.707, and 19.612/12.440 at 4/8/16/32/64 offered req/s. The measured
+ordering transition is between 4 and 8 req/s without interpolation; DP is first
+noninferior at 8 req/s and remains above TP8 thereafter. TP8 has lower median
+terminal-stream TPOT at 16–64 req/s, while DP has materially higher goodput and
+lower TTFT under load; those latency and throughput findings remain separate.
+Matched per-engine limits give the two DP replicas twice TP8's aggregate
+configured capacity, so this is explicitly a production-topology comparison.
+The PCIe DP×1/PP=2/TP=2 report is not fabricated from `pipeline_depth`; real
+stage-sharded production PP remains a separate roadmap dependency.
 Issue #277's M13 extension exposes `auto`, torch, FlashInfer, FA3, and FA4 as
 strict public choices. FA3/FA4 use FlashAttention for prefill and retain
 FlashInfer ownership of paged decode/CUDA graphs; `/backends` reports the
@@ -737,6 +734,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [progress] G2 A9 DP-versus-TP crossover report passes
+- What: completed the fresh Qwen3-32B TP8 arm against the post-SSE-fix A8 comparator. All 984 TP8 requests completed with HTTP 200, exact 32-token output and usage, `[DONE]`, zero retry, and one exact gateway placement; all 14 report-integrity checks passed. `verify --assert-gate` and raw-only `replay --assert-gate` independently reproduced the report. Median DP/TP8 goodput was 3.884/3.902, 7.383/7.313, 12.948/8.994, 16.042/11.707, and 19.612/12.440 req/s across 4/8/16/32/64 offered req/s. The only ordering transition is bracketed at 4–8 req/s with no interpolation; DP is first noninferior at 8 req/s. The portable test job now checks out full history so its fixed-ancestor `git archive`/helper-blob contract runs in Actions instead of failing under a depth-1 checkout.
+- Why: this supplies the missing matched-runtime evidence after fixing the one real Unicode SSE transport failure instead of retrying or ignoring it. It also keeps throughput, TTFT, and TPOT separate: TP8's per-token latency is lower at 16–64 req/s, but DP sustains 1.37–1.58× its goodput at 16–64 req/s and much lower TTFT under load. The report is intentionally threshold-free and describes the production topology with its doubled DP aggregate capacity.
+- Refs: issue #159; G2 A9; operator source commit `d4c8e121d285a08843e5aa69d2de4a747d574c95`; runtime source commit `86d49223ffcdba6052428474bf0d9094c6791fed`; `bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`; raw SHA-256 `6c6d11deeb5735ecf37de48663e553a88a90e606196bb432111fe70772d4a664`; manifest SHA-256 `799813e087bd9aca9d62c45a995e7eed6471534f18fdaa09fca0666412786bdc`; placements SHA-256 `0276059cd9822ce9e046fce088102b372a324689d620375ce23e13829f4ec020`
 
 ### 2026-07-31 — [progress] G2 A9 pins a fresh post-SSE-fix A8 comparator
 - What: reran the complete A8 single-TP4 versus DP=2×TP4 sweep on merged source `86d4922` and repinned A9 to its immutable source archive, 199-file runtime rollup, and new raw/manifest/placement digests. All 2,992 requests completed with HTTP 200, `[DONE]`, exact terminal usage, and zero retry; all 1,496 DP placements correlated. Verify and raw-only replay reproduced every value. The sole false check remains the explicitly accepted 1.9× scaling target, with repeat ratios 1.7810×/1.7711×/1.6422× and median 1.7711×. A9 now accepts either a fully passing A8 artifact or exactly that one accepted false check, while rejecting any other failure or verdict/check inconsistency.

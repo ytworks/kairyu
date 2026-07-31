@@ -454,6 +454,31 @@ GPU-only remainder (design m5 §4.2).
   `none_in_measured_range`. There is no performance threshold and no
   interpolation.
 
+  Retained result (2026-07-31):
+  `bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`
+  passed all 14 report-integrity checks. The TP8 arm recorded 984/984 exact,
+  retry-free successful requests and 984/984 correlated placements; both
+  `verify --assert-gate` and raw-only `replay --assert-gate` pass.
+
+  | Offered req/s | DP goodput | TP8 goodput | DP/TP8 | DP/TP8 TTFT p50 (ms) | DP/TP8 TPOT p50 (ms/token) |
+  |---:|---:|---:|---:|---:|---:|
+  | 4 | 3.884 | 3.902 | 0.995× | 181.0 / 174.9 | 20.3 / 21.1 |
+  | 8 | 7.383 | 7.313 | 1.010× | 190.2 / 339.9 | 25.4 / 50.5 |
+  | 16 | 12.948 | 8.994 | 1.440× | 350.8 / 1,258.3 | 49.5 / 42.4 |
+  | 32 | 16.042 | 11.707 | 1.370× | 507.7 / 1,304.1 | 42.3 / 30.0 |
+  | 64 | 19.612 | 12.440 | 1.577× | 617.6 / 1,627.8 | 33.4 / 29.2 |
+
+  The measured goodput ordering changes between 4 and 8 offered req/s; DP is
+  first noninferior at 8 req/s, with median observed in-flight counts 9 for DP
+  and 17 for TP8. No interpolated crossover is claimed. TP8's lower TPOT at
+  16–64 req/s does not offset DP's higher goodput and lower TTFT under load;
+  these are reported as distinct metrics. SHA-256: TP8 raw
+  `6c6d11deeb5735ecf37de48663e553a88a90e606196bb432111fe70772d4a664`,
+  manifest
+  `799813e087bd9aca9d62c45a995e7eed6471534f18fdaa09fca0666412786bdc`,
+  placements
+  `0276059cd9822ce9e046fce088102b372a324689d620375ce23e13829f4ec020`.
+
   Stop only this scoped project after retaining and replaying the artifact:
 
   ```bash
