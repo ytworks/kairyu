@@ -105,7 +105,7 @@ raw replay passes all eight binding checks:
 | A8 (DP scaling) | `bench/dp_scaling_g2_a8_bench.py` compares DP=2 × TP=4 (same 8 GPUs) vs 1 × TP=4: goodput ≥1.9× (replicas are independent — near-linear is fair to demand); L2 Router added latency p99 <10 ms (m4 budget); session-affinity routing keeps multi-turn KV hit rate ≥90% of the single-replica value (naive round-robin destroys prefix locality — affinity is part of the acceptance contract) | saturation |
 | A9 (DP vs TP crossover) | Report DP=2×TP=4 vs TP=8 goodput and TPOT across the arrival sweep. No threshold — the crossover concurrency must appear in the results file | saturation |
 
-**A8 formal procedure (evidence pending):** run the pinned Qwen3-32B checkpoint
+**A8 formal procedure:** run the pinned Qwen3-32B checkpoint
 on one TP4 replica for the baseline and on two independent TP4 replicas behind
 `ReplicaPool` for the DP arm. Both arms run on the same eight-GPU host; the
 single arm uses one of the same TP4 partitions, while the DP arm uses both
@@ -135,8 +135,21 @@ read-only volume's 17 weight shards, safetensors index, tokenizer, and model
 config, then compare those bytes with the pinned A7 checkpoint evidence.
 The verifier recomputes all three thresholds from those raw records and fails
 closed on omissions or correlation mismatches. Unit tests or offline replay can
-validate only the operator: A8 remains incomplete and no PASS may be reported
-until a complete real eight-GPU artifact passes independent replay.
+validate only the operator. No threshold PASS may be reported unless a complete
+real eight-GPU artifact passes independent replay.
+
+**A8 retained result and accepted deviation (2026-07-31).** The complete real
+Qwen3-32B run recorded 2,992/2,992 successful requests with no retry and 1,496
+correlated placement rows. Paired peak-goodput ratios were
+1.9988×/1.7342×/1.7993×, giving a 1.7993× median against the original 1.9×
+target. Router p99 was 3.723 ms and DP/single affinity-cache retention was
+99.53%; all other checks passed. Independent verify and raw-only replay
+therefore retain `passed: false` solely for the goodput threshold. The product
+owner explicitly accepted the measured median as a closure deviation. A8 is
+closed by that product decision, not by relabeling the result as a 1.9× PASS;
+the operator and artifact preserve the original threshold and residual.
+Evidence:
+`bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`.
 
 ### Stage 5.3 — P-D disaggregation, intra-node (blocked on 5.1)
 

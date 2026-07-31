@@ -188,6 +188,16 @@ shards plus index, tokenizer, and model config) and compared with the pinned A7
 checkpoint evidence.
 The exact launch and replay procedure is in `docs/gpu-runbook.md` §6.
 
+The retained 2026-07-31 eight-GPU artifact contains 2,992/2,992 successful,
+retry-free requests and 1,496 correlated placement rows. Router p99 is
+3.723 ms and DP retains 99.53% of the single-replica cache-hit rate. The three
+paired peak-goodput ratios are 1.9988×, 1.7342×, and 1.7993×; the 1.7993×
+median misses the original 1.9× threshold, so verify and replay intentionally
+report `passed: false`. The product owner accepted this measured median as an
+explicit closure deviation; neither the artifact nor the operator rewrites the
+original threshold or claims a formal PASS. Evidence is retained under
+`bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`.
+
 ### G4 E-KV FP8 KV evidence
 
 `bench/fp8_kv_g4_ekv_bench.py` is the formal G4 E-KV correctness operator.

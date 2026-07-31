@@ -362,9 +362,25 @@ GPU-only remainder (design m5 §4.2).
   cache-usage record, physical topology, pinned checkpoint identity, immutable
   image ID, and clean source identity. Missing/failed requests, incomplete
   placement correlation, non-finite values, a changed predeclared grid, or any
-  failed threshold must fail closed. Offline replay and CPU tests cannot close
-  A8: do not report PASS or close #158 until the complete artifact from all
-  eight real GPUs passes.
+  failed threshold must fail closed. Offline replay and CPU tests cannot report
+  an A8 threshold PASS. Any closure despite a failed threshold must be an
+  explicit accepted deviation recorded in the goal and progress log; it must
+  not rewrite the artifact or operator verdict.
+
+  Retained result (2026-07-31):
+  `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/` records all 2,992
+  retry-free successful requests and 1,496 correlated placement rows. The
+  three paired peak-goodput ratios are 1.9988×, 1.7342×, and 1.7993×, for a
+  1.7993× median against the original 1.9× threshold. Router p99 is 3.723 ms
+  and affinity-cache retention is 99.53%. Verify and raw-only replay both
+  reproduce `passed: false` solely for goodput. The product owner accepted the
+  measured median for issue #158 closure as a documented deviation; the
+  original 1.9× verdict remains unchanged. SHA-256:
+  raw `b637489302a9b818a0c34790c4059946994ff6070f76ac9e1bc7d128bbbd803f`,
+  manifest
+  `da439f153c04d05178ddf96c489aca7fb1cc270ba982736c1bc98197730e3946`,
+  placements
+  `76ca1a5f709ccf8492238bdcc4193776f94fdb7a88a40a7e970a517db30270c3`.
 
   Stop only the scoped A8 project after evidence is safely retained:
 

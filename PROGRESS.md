@@ -72,11 +72,15 @@ and session-affinity cache retention. Runtime provenance binds the forced-new
 containers, exact GPU/CPU partitions, Compose configuration, clean source
 commit, and a fresh full hash of the live 17-shard model volume to retained A7
 checkpoint evidence. CPU/static tests validate only the operator and stack;
-A8 remains open with no PASS until the real artifact replays. The immediate
-live-run blocker is an external-namespace process retaining 26.8 GiB on GPU 0;
-the preflight correctly rejects that asymmetric inventory. Its packaged
-benchmark boundary now verifies all 53 registered entrypoints from the isolated
-wheel as well as from the checkout.
+the retained real run independently verifies and replays all 2,992 retry-free
+requests, 1,496 placement rows, and the full checkpoint/runtime provenance.
+DP peak-goodput ratios were 1.9988×/1.7342×/1.7993×, for a 1.7993× median
+against the original 1.9× threshold; router p99 was 3.723 ms and affinity cache
+retention was 99.53%. The artifact therefore truthfully remains `passed: false`.
+The product owner accepted the measured 1.7993× as an explicit closure
+deviation, not as a 1.9× PASS; the original operator threshold is unchanged.
+Its packaged benchmark boundary verifies all 53 registered entrypoints from
+the isolated wheel as well as from the checkout.
 Issue #277's M13 extension exposes `auto`, torch, FlashInfer, FA3, and FA4 as
 strict public choices. FA3/FA4 use FlashAttention for prefill and retain
 FlashInfer ownership of paged decode/CUDA graphs; `/backends` reports the
@@ -680,6 +684,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-07-31 — [amendment] G2 A8 closes on an accepted 1.7993× scaling deviation
+- What: Ran the complete Qwen3-32B DP=2×TP4 versus TP4 gate on all eight RTX PRO 6000 GPUs. All 2,992 requests succeeded without retry, every DP response correlated to one of 1,496 placement rows, router p99 was 3.723 ms, and DP retained 99.53% of the single-replica cache-hit rate. The three peak-goodput ratios were 1.9988×, 1.7342×, and 1.7993×; their 1.7993× median missed the original 1.9× threshold, so the retained manifest remains `passed: false`. The product owner explicitly accepted this measured median for closure without rewriting the threshold or claiming a formal PASS.
+- Why: The real artifact proves the routing, affinity, integrity, and near-linear scaling value while preserving the remaining 5.3% target shortfall as visible evidence. Treating 1.7993× as 1.9× or moving the threshold after measurement would hide the residual; an explicit accepted deviation records the product decision without falsifying the gate.
+- Refs: issue #158, PR #299, source commit `4924b4d71b8fae0af087979908819aed6939a871`, `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`, raw SHA-256 `b637489302a9b818a0c34790c4059946994ff6070f76ac9e1bc7d128bbbd803f`, manifest SHA-256 `da439f153c04d05178ddf96c489aca7fb1cc270ba982736c1bc98197730e3946`, placements SHA-256 `76ca1a5f709ccf8492238bdcc4193776f94fdb7a88a40a7e970a517db30270c3`
 
 ### 2026-07-31 — [progress] G4 E-KV rejects unit-scale FP8 KV and stays BF16
 - What: ran the formal 8K/16K/32K Qwen3-32B BF16-versus-unit-scale-E4M3 bake
