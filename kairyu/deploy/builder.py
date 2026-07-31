@@ -27,13 +27,14 @@ from kairyu.engine.backend import (
     EngineBackend,
     shutdown_all,
 )
+from kairyu.engine.embedding import (
+    EmbeddingBackend,
+    FastEmbedEmbeddingBackend,
+    MockEmbeddingBackend,
+)
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
-from kairyu.entrypoints.server.extra_routes import (
-    EmbeddingBackend,
-    MockEmbeddingBackend,
-)
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
@@ -41,7 +42,8 @@ from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.router import JsonlRouterLog
 
 _EMBEDDING_BACKEND_FACTORIES: dict[str, Callable[..., EmbeddingBackend]] = {
-    "mock": MockEmbeddingBackend
+    "fastembed": FastEmbedEmbeddingBackend,
+    "mock": MockEmbeddingBackend,
 }
 _SERVICE_ACCOUNT_NAMESPACE_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 
@@ -101,12 +103,19 @@ class _DynamicPoolHTTPClientFactory:
         )
 
 
-def _create_embedding_backend(backend: str, *, dimensions: int) -> EmbeddingBackend:
-    factory = _EMBEDDING_BACKEND_FACTORIES.get(backend)
+def _create_embedding_backend(section, base_dir: Path | None) -> EmbeddingBackend:
+    factory = _EMBEDDING_BACKEND_FACTORIES.get(section.backend)
     if factory is None:
         known = ", ".join(sorted(_EMBEDDING_BACKEND_FACTORIES))
-        raise ValueError(f"unknown embedding backend {backend!r}; known backends: {known}")
-    return factory(dimensions=dimensions)
+        raise ValueError(
+            f"unknown embedding backend {section.backend!r}; "
+            f"known backends: {known}"
+        )
+    options = section.model_dump(exclude={"backend"}, exclude_none=True)
+    model_path = options.get("model_path")
+    if isinstance(model_path, str):
+        options["model_path"] = _resolve_path(model_path, base_dir)
+    return factory(**options)
 
 
 def _resolve_path(path: str, base_dir: Path | None) -> Path:
@@ -170,7 +179,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                 f"batch PostgreSQL DSN environment variable {spec.batch.dsn_env!r} is not set"
             )
     embedding_backends = {
-        name: _create_embedding_backend(section.backend, dimensions=section.dimensions)
+        name: _create_embedding_backend(section, base_dir)
         for name, section in spec.embeddings.items()
     }
     engines: dict[str, EngineBackend] = {
@@ -181,7 +190,10 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     # Pools own their replicas for shutdown, but keep the concrete replicas here
     # as startup targets because the pool itself intentionally has no startup
     # protocol. Dynamic replicas are remote resources discovered after startup.
-    startup_resources: list[EngineBackend] = list(engines.values())
+    startup_resources: list[object] = [
+        *engines.values(),
+        *embedding_backends.values(),
+    ]
 
     probers: list[HealthProber] = []
     reconcilers: list[tuple[PoolReconciler, float]] = []
@@ -381,6 +393,7 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
                     except Exception as error:
                         shutdown_errors.append(error)
             resources = list(engines.values())
+            resources.extend(embedding_backends.values())
             if orchestrator is not None:
                 resources.append(orchestrator)
             resources.extend(orchestrators.values())

@@ -10,7 +10,7 @@ compose, they do not merge.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import (
@@ -224,11 +224,32 @@ class OrchestratorSection(BaseModel):
     spec: str = Field(description="Path to an OrchestratorSpec YAML (kairyu.dsl).")
 
 
-class EmbeddingSection(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class MockEmbeddingSection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     backend: Literal["mock"]
     dimensions: int = Field(default=64, ge=1)
+
+
+class FastEmbedEmbeddingSection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    backend: Literal["fastembed"]
+    dimensions: int = Field(ge=1)
+    model: str = Field(min_length=1)
+    model_path: str = Field(min_length=1)
+    revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    model_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provenance_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    batch_size: int = Field(default=64, ge=1, le=2048)
+    threads: int = Field(default=2, ge=1, le=128)
+    max_concurrency: int = Field(default=2, ge=1, le=64)
+
+
+EmbeddingSection = Annotated[
+    MockEmbeddingSection | FastEmbedEmbeddingSection,
+    Field(discriminator="backend"),
+]
 
 
 class BatchSection(BaseModel):

@@ -1,7 +1,7 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — CPU Complete
 
-Status: **Implemented** (2026-07-03; D1/D2/D4/D6 amended 2026-07-28;
-D3 amended 2026-07-27). Reviewed
+Status: **Implemented** (2026-07-03; D4/D7 amended 2026-07-31;
+D1/D2/D4/D6 amended 2026-07-28; D3 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
 Milestone: M11 (roadmap P-B/P-C + F5 CPU halves; goal G6)
@@ -232,6 +232,20 @@ handler resolves that bounded registry before work, returns `model_not_found`
 for misses, exposes every configured ID through `/v1/models`, and uses only the
 resolved ID for the response, request metrics, and usage accounting.
 
+**Production embedding amendment (2026-07-31, issue #202).** The protocol
+returns ordered vectors plus tokenizer usage and whether that usage is exact.
+The `fastembed` backend validates a prefetched repository revision, externally
+pinned provenance-manifest SHA, every recorded file size/hash, catalog
+dimension, and ONNX SHA-256 before constructing one offline CPU session.
+Startup warms and validates finite, normalized output in a
+dedicated bounded executor; readiness remains false until warmup completes,
+startup integrity/load failures are fatal, and shutdown drains accepted work
+before releasing the session. The route caps both item count and aggregate
+UTF-8 bytes before dispatch, validates result count/dimensions/finiteness,
+sanitizes backend failures as 502, and refunds conservative tenant reservations
+only when the backend returns exact usage. The deterministic mock remains for
+wire/unit tests and never claims authoritative tokenizer usage.
+
 **Typed stream/tool amendment (2026-07-28, issue #201).** Responses requests
 normalize into the existing Chat Completions validation/execution boundary so
 model-specific templates, sampling, structured output, named/required tool
@@ -389,6 +403,21 @@ ephemeral test database and cannot reuse or delete the normal demo's data.
 CI runs this as an independent mandatory job in parallel with the existing
 Compose drill. The only planned custom chat UI remains the orchestration-trace
 viewer tracked by G6's non-goals; Kairyu does not fork Open WebUI.
+
+**Kairyu-only RAG amendment (2026-07-31, issue #202).** The Kairyu image used
+by this topology opts into the production FastEmbed dependency and embeds an
+immutable all-MiniLM-L6-v2 ONNX snapshot; the default image remains lean.
+Open WebUI sends bounded embedding batches and chat requests only to Kairyu,
+with query generation, full-context bypass, and reranking disabled. The
+browser gate uploads a unique document, proves the query does not contain its
+canary, retrieves that canary through `embed-small`, and obtains a
+citation-bearing mock-chat response whose configured trigger can only be
+present after retrieval. It repeats retrieval and answer after restarting only
+Kairyu, while the direct contract gate also fixes two-input ordering, 384
+dimensions, finite L2-normalized vectors, and exact tokenizer usage. Optional
+reranking is explicitly deferred and is not a substitute for this retrieval
+proof.
+
 `bench/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
 quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
@@ -531,3 +560,10 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   admitted to response, metric, and ledger labels; limiter charging occurs
   only after resolution. Misses use the shared 404 `model_not_found` response
   and record no usage.
+- **A17 (D4/D7, Issue #202)**: one production backend must load a pinned local
+  model without runtime network access, participate in lifecycle/health, return
+  validated ordered vectors and exact tokenizer usage, and bound CPU
+  concurrency. The mandatory Compose gate must use that real backend to ingest
+  and retrieve a document through Open WebUI, prove retrieved context reaches a
+  Kairyu chat model, and repeat after a Kairyu-only restart. Optional reranking
+  may remain disabled but cannot replace the retrieval gate.

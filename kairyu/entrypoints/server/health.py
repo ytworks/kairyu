@@ -39,8 +39,11 @@ def add_health_routes(
     engines: Mapping[str, EngineBackend],
     metrics: ServerMetrics | None,
     admin_keys: Iterable[str] = (),
+    *,
+    embedding_backends: Mapping[str, object] | None = None,
 ) -> None:
     admin_key_set = frozenset(admin_keys)
+    embedding_resources = dict(embedding_backends or {})
 
     def _forbidden_if_not_admin(request: Request) -> JSONResponse | None:
         # when admin keys are configured, /admin/* state changes require one, so
@@ -78,6 +81,21 @@ def add_health_routes(
                 )
         return reported
 
+    def _embedding_readiness() -> dict[str, EngineReadiness]:
+        reported = {}
+        for name, backend in embedding_resources.items():
+            probe_readiness = getattr(backend, "readiness", None)
+            if probe_readiness is None:
+                continue
+            try:
+                reported[name] = probe_readiness()
+            except Exception as error:
+                reported[name] = EngineReadiness(
+                    False,
+                    f"readiness check raised {type(error).__name__}",
+                )
+        return reported
+
     @app.get("/health")
     async def health():
         """Liveness. A FATAL engine fault answers 503 so an orchestrator replaces
@@ -86,8 +104,18 @@ def add_health_routes(
         fatal = {
             name: status.detail for name, status in _engine_readiness().items() if status.fatal
         }
-        if fatal:
-            return JSONResponse(status_code=503, content={"status": "fatal", "engines": fatal})
+        fatal_embeddings = {
+            name: status.detail
+            for name, status in _embedding_readiness().items()
+            if status.fatal
+        }
+        if fatal or fatal_embeddings:
+            content: dict[str, object] = {"status": "fatal"}
+            if fatal:
+                content["engines"] = fatal
+            if fatal_embeddings:
+                content["embeddings"] = fatal_embeddings
+            return JSONResponse(status_code=503, content=content)
         return {"status": "ok"}
 
     @app.post("/admin/drain")
@@ -149,8 +177,18 @@ def add_health_routes(
         failed = {
             name: status.detail for name, status in _engine_readiness().items() if not status.ready
         }
-        if failed:
-            return JSONResponse(status_code=503, content={"status": "unready", "engines": failed})
+        failed_embeddings = {
+            name: status.detail
+            for name, status in _embedding_readiness().items()
+            if not status.ready
+        }
+        if failed or failed_embeddings:
+            content: dict[str, object] = {"status": "unready"}
+            if failed:
+                content["engines"] = failed
+            if failed_embeddings:
+                content["embeddings"] = failed_embeddings
+            return JSONResponse(status_code=503, content=content)
         return {"status": "ready"}
 
     @app.get("/backends")

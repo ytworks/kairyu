@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
 from kairyu.engine.backend import GenerationResult, GenerationUsage
+from kairyu.engine.embedding import EmbeddingResult
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import create_backend
 from kairyu.entrypoints.server.app import create_app
@@ -1290,7 +1291,7 @@ class TestResponsesApi:
         assert "event: response.failed" in streamed_failure.text
         assert failed_response.status_code == 502
         assert invalid_embedding.status_code == 400
-        assert failed_embedding.status_code == 500
+        assert failed_embedding.status_code == 502
         totals = UsageLedger(ledger_path).totals()["tenant-a"]
         # The streaming request crossed the dispatch boundary, so it is counted
         # exactly once even though the backend failed before its first chunk.
@@ -1410,6 +1411,54 @@ class TestEmbeddings:
         assert response.status_code == 200
         assert app.state.tenant_limiter.token_balance("default") == pytest.approx(
             63,
+            abs=0.1,
+        )
+        assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
+
+    def test_embedding_exact_usage_refunds_conservative_reservation(self):
+        class ExactEmbeddingBackend(MockEmbeddingBackend):
+            def __init__(self, dimensions):
+                super().__init__(dimensions=dimensions)
+                self.reports_exact_usage = True
+
+            async def embed(self, texts):
+                result = await super().embed(texts)
+                return EmbeddingResult(
+                    vectors=result.vectors,
+                    prompt_tokens=1,
+                    usage_exact=True,
+                )
+
+        config = TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=100,
+                    token_burst=100,
+                )
+            }
+        )
+        app = create_app(
+            {"m": MockBackend()},
+            tenant_config=config,
+            embedding_backends={
+                "embedding-model": ExactEmbeddingBackend(dimensions=8)
+            },
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/embeddings",
+                json={"model": "embedding-model", "input": "hello"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["usage"] == {
+            "prompt_tokens": 1,
+            "total_tokens": 1,
+        }
+        assert app.state.tenant_limiter.token_balance("default") == pytest.approx(
+            99,
             abs=0.1,
         )
         assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0

@@ -10,8 +10,10 @@ import httpx
 import pytest
 import yaml
 
+from kairyu.deploy import builder as builder_module
 from kairyu.deploy.builder import build_app_from_config
 from kairyu.deploy.spec import load_deployment_spec
+from kairyu.engine.embedding import MockEmbeddingBackend
 
 COMPOSE_DIR = Path("deploy/compose")
 COMPOSE_FILES = sorted(COMPOSE_DIR.glob("docker-compose*.yaml"))
@@ -31,6 +33,15 @@ OTEL_TRACE_VERIFIER = Path("scripts/verify_otel_trace.py")
 WEBUI_SMOKE = Path("scripts/webui_smoke.sh")
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
 DOCKERFILE = Path("Dockerfile")
+DOCKERIGNORE = Path(".dockerignore")
+EMBEDDING_MODEL_REPOSITORY = "Qdrant/all-MiniLM-L6-v2-onnx"
+EMBEDDING_MODEL_REVISION = "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
+EMBEDDING_MODEL_SHA256 = (
+    "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5"
+)
+EMBEDDING_PROVENANCE_SHA256 = (
+    "57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c"
+)
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -66,6 +77,7 @@ def _webui_smoke_env(
     rendered_base_url: str = "http://kairyu:8000/v1",
     docker_fail_phase: str | None = None,
     curl_exit: int = 0,
+    curl_fail_path: str | None = None,
 ) -> tuple[dict[str, str], Path, Path]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -92,10 +104,56 @@ def _webui_smoke_env(
     curl_log = tmp_path / "curl.log"
     _write_executable(
         fake_bin / "curl",
-        "#!/bin/sh\n"
-        'printf "%s\\n" "$*" >> "$CURL_LOG"\n'
-        f"if [ {curl_exit} -ne 0 ]; then exit {curl_exit}; fi\n"
-        "printf '{\"ready\":true}'\n",
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+arguments = sys.argv[1:]
+with open(os.environ["CURL_LOG"], "a", encoding="utf-8") as log:
+    log.write(" ".join(arguments) + "\\n")
+
+url = next(
+    (
+        argument
+        for argument in reversed(arguments)
+        if argument.startswith(("http://", "https://"))
+    ),
+    "",
+)
+exit_code = int(os.environ["CURL_EXIT"])
+fail_path = os.environ["CURL_FAIL_PATH"]
+if exit_code and (not fail_path or url.endswith(fail_path)):
+    raise SystemExit(exit_code)
+
+if url.endswith("/readyz"):
+    json.dump({"ready": True}, sys.stdout)
+elif url.endswith("/v1/embeddings"):
+    vectors = []
+    for index in range(2):
+        vector = [0.0] * 384
+        vector[index] = 1.0
+        vectors.append(
+            {"object": "embedding", "index": index, "embedding": vector}
+        )
+    json.dump(
+        {
+            "object": "list",
+            "model": "embed-small",
+            "data": vectors,
+            "usage": {"prompt_tokens": 10, "total_tokens": 10},
+        },
+        sys.stdout,
+    )
+elif url.endswith("/metrics"):
+    sys.stdout.write(
+        'kairyu_requests_total{code="200",method="POST",'
+        'model="embed-small",path="/v1/embeddings",tenant="default"} 10.0\\n'
+    )
+else:
+    print(f"unexpected fake curl URL: {url!r}", file=sys.stderr)
+    raise SystemExit(64)
+""",
     )
     _write_executable(fake_bin / "sleep", "#!/bin/sh\nexit 0\n")
     return (
@@ -104,6 +162,8 @@ def _webui_smoke_env(
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
             "DOCKER_LOG": str(docker_log),
             "CURL_LOG": str(curl_log),
+            "CURL_EXIT": str(curl_exit),
+            "CURL_FAIL_PATH": curl_fail_path or "",
             "WEBUI_RENDERED_BASE_URL": rendered_base_url,
             "WEBUI_SMOKE_PROJECT_NAME": WEBUI_SMOKE_PROJECT,
         },
@@ -177,9 +237,52 @@ def test_webui_compose_pins_full_authenticated_browser_topology():
         source = mount.partition(":")[0]
         assert (WEBUI_COMPOSE.parent / source).resolve() == source_file.resolve()
 
+    assert kairyu["build"] == {
+        "context": "../..",
+        "args": {
+            "KAIRYU_EMBEDDINGS": "1",
+            "KAIRYU_EMBEDDING_MODEL_REPOSITORY": EMBEDDING_MODEL_REPOSITORY,
+            "KAIRYU_EMBEDDING_MODEL_REVISION": EMBEDDING_MODEL_REVISION,
+            "KAIRYU_EMBEDDING_MODEL_SHA256": EMBEDDING_MODEL_SHA256,
+            "KAIRYU_EMBEDDING_PROVENANCE_SHA256": EMBEDDING_PROVENANCE_SHA256,
+        },
+    }
+
     environment = webui["environment"]
     assert environment["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert environment["OPENAI_API_KEY"] == "sk-local"
+    assert {
+        key: environment[key]
+        for key in (
+            "RAG_EMBEDDING_ENGINE",
+            "RAG_EMBEDDING_MODEL",
+            "RAG_OPENAI_API_BASE_URL",
+            "RAG_OPENAI_API_KEY",
+            "RAG_EMBEDDING_BATCH_SIZE",
+            "ENABLE_ASYNC_EMBEDDING",
+            "RAG_EMBEDDING_CONCURRENT_REQUESTS",
+            "ENABLE_RETRIEVAL_QUERY_GENERATION",
+            "RAG_TOP_K",
+            "RAG_RELEVANCE_THRESHOLD",
+            "RAG_FULL_CONTEXT",
+            "BYPASS_EMBEDDING_AND_RETRIEVAL",
+            "RAG_RERANKING_ENGINE",
+        )
+    } == {
+        "RAG_EMBEDDING_ENGINE": "openai",
+        "RAG_EMBEDDING_MODEL": "embed-small",
+        "RAG_OPENAI_API_BASE_URL": "http://kairyu:8000/v1",
+        "RAG_OPENAI_API_KEY": "sk-local",
+        "RAG_EMBEDDING_BATCH_SIZE": "32",
+        "ENABLE_ASYNC_EMBEDDING": "true",
+        "RAG_EMBEDDING_CONCURRENT_REQUESTS": "2",
+        "ENABLE_RETRIEVAL_QUERY_GENERATION": "false",
+        "RAG_TOP_K": "1",
+        "RAG_RELEVANCE_THRESHOLD": "0",
+        "RAG_FULL_CONTEXT": "false",
+        "BYPASS_EMBEDDING_AND_RETRIEVAL": "false",
+        "RAG_RERANKING_ENGINE": "",
+    }
     assert environment["WEBUI_AUTH"] == "true"
     assert environment["ENABLE_SIGNUP"] == "true"
     assert "WEBUI_SECRET_KEY" not in environment
@@ -241,9 +344,23 @@ def test_webui_browser_gate_binds_results_to_new_assistant_messages():
     assert "UI chat completed with a visible error" in smoke
     assert "await sendUiMessage(autoModel, reconnectMarker)" in smoke
     assert "page.locator('body').filter" not in smoke
+    assert "/api/v1/files/?process=true&process_in_background=false" in smoke
+    assert "/api/v1/retrieval/query/doc" in smoke
+    assert "!ragQuery.includes(ragNeedle)" in smoke
+    assert "!ragQuery.includes(ragAnswer)" in smoke
+    assert "retrieval.text.includes(ragNeedle)" in smoke
+    assert "answer.includes(ragAnswer)" in smoke
+    assert "answer.includes('[1]')" in smoke
+    assert (
+        "document ingest, vector retrieval, and RAG answer"
+        in smoke
+    )
+    assert "RAG retrieval and answer after gateway restart" in smoke
 
 
-async def test_webui_mounted_config_discovers_direct_and_auto_models():
+async def test_webui_mounted_config_discovers_chat_and_embedding_models(
+    monkeypatch,
+):
     assert WEBUI_CONFIG.is_file(), "WebUI DeploymentSpec is missing"
     assert WEBUI_ORCHESTRATOR.is_file(), "WebUI orchestrator spec is missing"
     spec = load_deployment_spec(WEBUI_CONFIG)
@@ -256,19 +373,55 @@ async def test_webui_mounted_config_discovers_direct_and_auto_models():
     assert spec.server.host == "0.0.0.0"
     assert spec.server.port == 8000
     assert spec.server.api_keys_env is None
+    assert list(spec.embeddings) == ["embed-small"]
+    embedding = spec.embeddings["embed-small"]
+    assert embedding.backend == "fastembed"
+    assert embedding.model == "sentence-transformers/all-MiniLM-L6-v2"
+    assert embedding.model_path == "/opt/kairyu/models/all-MiniLM-L6-v2"
+    assert embedding.revision == EMBEDDING_MODEL_REVISION
+    assert embedding.model_sha256 == EMBEDDING_MODEL_SHA256
+    assert embedding.provenance_sha256 == EMBEDDING_PROVENANCE_SHA256
+    assert embedding.dimensions == 384
+    assert embedding.batch_size == 64
+    assert embedding.threads == 2
+    assert embedding.max_concurrency == 2
 
+    constructed: dict[str, object] = {}
+
+    def fake_fastembed(**options):
+        constructed.update(options)
+        return MockEmbeddingBackend(dimensions=options["dimensions"])
+
+    monkeypatch.setitem(
+        builder_module._EMBEDDING_BACKEND_FACTORIES,
+        "fastembed",
+        fake_fastembed,
+    )
     app = build_app_from_config(WEBUI_CONFIG)
-    async with _client(app) as client:
-        assert (await client.get("/readyz")).status_code == 200
-        models = await client.get(
-            "/v1/models", headers={"Authorization": "Bearer sk-local"}
-        )
+    async with app.router.lifespan_context(app):
+        async with _client(app) as client:
+            assert (await client.get("/readyz")).status_code == 200
+            models = await client.get(
+                "/v1/models", headers={"Authorization": "Bearer sk-local"}
+            )
 
     assert models.status_code == 200
     assert [entry["id"] for entry in models.json()["data"]] == [
         "default",
         "kairyu-auto",
+        "embed-small",
     ]
+    assert constructed == {
+        "dimensions": 384,
+        "model": "sentence-transformers/all-MiniLM-L6-v2",
+        "model_path": Path("/opt/kairyu/models/all-MiniLM-L6-v2"),
+        "revision": EMBEDDING_MODEL_REVISION,
+        "model_sha256": EMBEDDING_MODEL_SHA256,
+        "provenance_sha256": EMBEDDING_PROVENANCE_SHA256,
+        "batch_size": 64,
+        "threads": 2,
+        "max_concurrency": 2,
+    }
 
 
 def test_validator_accepts_checked_in_inventory_from_any_cwd(tmp_path):
@@ -545,6 +698,25 @@ def test_cpu_image_bounds_uv_install_concurrency_for_high_core_builders():
     assert "UV_CONCURRENT_INSTALLS=8" in dockerfile
 
 
+def test_root_docker_context_is_an_explicit_source_allowlist():
+    rules = DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+
+    assert rules[0] == "**"
+    assert {
+        "!Dockerfile",
+        "!Dockerfile.cuda",
+        "!README.md",
+        "!pyproject.toml",
+        "!uv.lock",
+        "!kairyu/**",
+        "!scripts/prefetch_embedding_model.py",
+        "!deploy/compose/Dockerfile.webui-browser",
+        "!deploy/compose/webui-browser/package.json",
+        "!deploy/compose/webui-browser/package-lock.json",
+    }.issubset(rules)
+    assert not any(rule in rules for rule in ("!.git", "!.venv", "!.claude", "!bench"))
+
+
 def test_compose_smoke_runs_real_cross_process_otel_trace_gate():
     compose = _load_yaml(COMPOSE_DIR / "docker-compose.yaml")
     services = compose["services"]
@@ -556,7 +728,13 @@ def test_compose_smoke_runs_real_cross_process_otel_trace_gate():
     assert load_deployment_spec(COMPOSE_DIR / "gateway.yaml").server.tracing
     assert load_deployment_spec(COMPOSE_DIR / "replica.yaml").server.tracing
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
-    assert dockerfile.count("--extra fleet --extra otel") == 2
+    assert dockerfile.count("--extra fleet --extra otel ;;") == 2
+    assert (
+        dockerfile.count(
+            "--extra fleet --extra otel --extra embeddings ;;"
+        )
+        == 2
+    )
 
     smoke = COMPOSE_SMOKE.read_text(encoding="utf-8")
     assert OTEL_TRACE_VERIFIER.is_file()
@@ -669,7 +847,14 @@ def test_webui_smoke_runs_full_browser_outage_recovery_contract(tmp_path):
         ),
         f"{compose} --profile browser-smoke down --volumes --remove-orphans",
     ]
-    assert curl_log.read_text(encoding="utf-8").splitlines()
+    curl_commands = curl_log.read_text(encoding="utf-8").splitlines()
+    assert len(curl_commands) == 4
+    assert all("--connect-timeout 2 --max-time 10" in line for line in curl_commands)
+    assert "/v1/embeddings" in curl_commands[0]
+    assert '"model":"embed-small"' in curl_commands[0]
+    assert curl_commands[1].endswith("http://localhost:8000/metrics")
+    assert curl_commands[2].endswith("http://localhost:8000/readyz")
+    assert curl_commands[3].endswith("http://localhost:8000/metrics")
 
 
 def test_webui_smoke_tears_down_if_browser_phase_fails(tmp_path):
@@ -695,7 +880,11 @@ def test_webui_smoke_tears_down_if_browser_phase_fails(tmp_path):
 
 
 def test_webui_smoke_bounds_recovery_readiness_and_always_tears_down(tmp_path):
-    env, docker_log, curl_log = _webui_smoke_env(tmp_path, curl_exit=22)
+    env, docker_log, curl_log = _webui_smoke_env(
+        tmp_path,
+        curl_exit=22,
+        curl_fail_path="/readyz",
+    )
 
     result = subprocess.run(
         ["/bin/bash", str(WEBUI_SMOKE.resolve())],
@@ -716,10 +905,16 @@ def test_webui_smoke_bounds_recovery_readiness_and_always_tears_down(tmp_path):
         "down --volumes --remove-orphans"
     )
     curl_commands = curl_log.read_text(encoding="utf-8").splitlines()
-    assert 1 <= len(curl_commands) <= 120
+    assert 4 <= len(curl_commands) <= 120
     assert all("--connect-timeout" in command for command in curl_commands)
     assert all("--max-time" in command for command in curl_commands)
-    assert all("/readyz" in command for command in curl_commands)
+    assert "/v1/embeddings" in curl_commands[0]
+    assert curl_commands[1].endswith("/metrics")
+    readiness_commands = [
+        command for command in curl_commands if command.endswith("/readyz")
+    ]
+    assert 1 <= len(readiness_commands) <= 90
+    assert len(readiness_commands) == len(curl_commands) - 2
 
 
 def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
@@ -742,6 +937,11 @@ def test_ci_runs_webui_smoke_in_dedicated_parallel_job():
     assert "compose stop kairyu" in smoke
     assert "compose start kairyu" in smoke
     assert '"$BASE_URL/readyz"' in smoke
+    assert "assert_embedding_contract" in smoke
+    assert "assert_embedding_metrics 4" in smoke
+    assert "assert_embedding_metrics 2" in smoke
+    assert '"$BASE_URL/v1/embeddings"' in smoke
+    assert '"$BASE_URL/metrics"' in smoke
 
     jobs = _load_yaml(CI_WORKFLOW)["jobs"]
     compose_steps = jobs["compose-smoke"]["steps"]

@@ -1,6 +1,6 @@
 # Goal G6: Product Surface — Truthful API, Fugu-Class Orchestrated Product, Competitive Proof (Roadmap Track P)
 
-Status: Goal defined (2026-07-03). P-A, all of P-B, and P-C2 are green;
+Status: Goal defined (2026-07-03). P-A, all of P-B, P-C2, and P-C3 are green;
 P-C's scoreboard needs real engines for the Kairyu column but runs against
 frontier APIs immediately.
 Depends on: M1/M7 server stack; real token accounting quality gates depend on
@@ -98,7 +98,7 @@ malformed-tail recovery and shutdown drain.
 |---|---|---|
 | P-C1 (MUST — the headline artifact) | `bench/frontier_compare.py`: multi-target (Kairyu, Anthropic, OpenAI, DeepSeek), identical prompt sets, TTFT/TPOT/goodput/$-per-Mtok + small quality eval; nightly unattended run publishing a dated scoreboard + methodology (prompts, sampling, region, time-of-day, provider cache state) to `bench/results/` | scheduled run |
 | P-C2 (Responses API — COMPLETE) | `/v1/responses` developer surface (`input`, canonical streaming events, flat/namespace tool calls, `previous_response_id` server-side state): OpenAI SDK sync/async clients and a Codex-class agent work unmodified (Fugu parity) | `tests/server/test_responses_api.py`, Qwen3-32B TP8 Codex smoke |
-| P-C3 (embeddings) | `/v1/embeddings` (+optional rerank) as a new engine-backend kind; Open WebUI RAG works end-to-end against Kairyu alone | compose smoke |
+| P-C3 (embeddings — COMPLETE) | `/v1/embeddings` (+optional rerank) as a new engine-backend kind; Open WebUI RAG works end-to-end against Kairyu alone | compose smoke |
 | P-C4 (vision) | Content-parts (`[{type:"text"|"image_url"}]`) through template + engine; image chat works in Open WebUI against a VLM replica | manual + tests |
 | P-C5 (pricing signals) | Per-tenant cached-token discount fields in the ledger + price-sheet config; invoice-grade CSV export distinguishes cached vs uncached input | `tests/server/test_pricing_invoice.py` |
 
@@ -113,6 +113,18 @@ loop against Qwen3-32B TP8 on all eight RTX PRO 6000 GPUs. The exact Codex
 version, HTTP attempts, usage, command result, and unsupported hosted-search
 negative gate are recorded in
 `bench/results/responses-codex-qwen3-32b-tp8-2026-07-28.json`.
+
+P-C3 is CPU-green as of 2026-07-31 (issue #202). The production `fastembed`
+backend loads a revision- and SHA-pinned all-MiniLM-L6-v2 ONNX snapshot
+offline, validates 384-dimensional normalized output, reports exact tokenizer
+usage, bounds concurrent work, and participates in startup, readiness,
+liveness, and shutdown. The pinned Open WebUI Compose topology sends both
+embedding and chat traffic only to Kairyu. Its mandatory smoke proves a
+two-input embedding request, document ingestion, vector retrieval of a
+query-only canary, a citation-bearing Kairyu answer that requires the retrieved
+context, visible gateway outage, and retrieval/answer recovery after restarting
+only Kairyu. Optional reranking remains explicitly disabled and deferred; it
+does not weaken the required retrieval gate.
 
 ## 3. Non-goals
 
