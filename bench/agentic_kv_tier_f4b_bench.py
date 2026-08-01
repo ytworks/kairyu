@@ -46,12 +46,18 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 SCHEMA_VERSION = "kairyu.g5.f4b.agentic-kv-tier.v1"
+VERDICT_REVISION = "kairyu.g5.f4b.agentic-kv-tier-verdict.v2"
 PROFILE_SCHEMA_VERSION = "kairyu.dram-kv-crossover.v2"
 MEASUREMENT_KIND = "qwen3-32b-agentic-multiturn-dram-kv-tier"
 SOURCE_PATH = "bench/agentic_kv_tier_f4b_bench.py"
 RAW_NAME = "agentic-kv-tier-f4b-raw.jsonl"
 MANIFEST_NAME = "agentic-kv-tier-f4b-manifest.json"
+QUALITY_SCHEMA_VERSION = "kairyu.g5.f4b.agentic-kv-tier-quality.v1"
+QUALITY_MEASUREMENT_KIND = f"{MEASUREMENT_KIND}-distribution-quality"
+QUALITY_RAW_NAME = "agentic-kv-tier-f4b-quality-raw.jsonl"
+QUALITY_MANIFEST_NAME = "agentic-kv-tier-f4b-quality-manifest.json"
 CONTAINER_METADATA_DIR = "container-metadata"
+QUALITY_CONTAINER_METADATA_DIR = "quality-container-metadata"
 IMAGE_INSPECT_NAME = "image-inspect.json"
 CONTAINER_ID_NAME = "container-id"
 CONTAINER_CREATED_NAME = "container-inspect-created.json"
@@ -81,6 +87,13 @@ TURN_TOKENS = 512
 OUTPUT_TOKENS = 32
 REQUESTS_PER_SHARD = SESSIONS * TURNS
 TPOT_RATIO_LIMIT = 1.10
+QUALITY_TOP_LOGPROBS = 64
+QUALITY_LOGPROB_ABS_TOLERANCE = 0.25
+QUALITY_PLAN = (("off", "A"), ("on", "A"))
+QUALITY_SHARD_LABELS = {
+    ("off", "A"): "quality-off",
+    ("on", "A"): "quality-on",
+}
 TIER_STATS_FIELDS = (
     "offload_pages",
     "offload_bypassed_pages",
@@ -259,6 +272,25 @@ def formal_config() -> dict[str, object]:
         "shard_plan": [
             {"round": round_index, "tier": arm, "cohort": cohort}
             for round_index, arm, cohort in SHARD_PLAN
+        ],
+    }
+
+
+def quality_config() -> dict[str, object]:
+    config = formal_config()
+    return {
+        **config,
+        "schema_version": QUALITY_SCHEMA_VERSION,
+        "measurement_kind": QUALITY_MEASUREMENT_KIND,
+        "sampling": {
+            **config["sampling"],
+            "logprobs": QUALITY_TOP_LOGPROBS,
+        },
+        "timing_is_binding": False,
+        "logprob_abs_tolerance": QUALITY_LOGPROB_ABS_TOLERANCE,
+        "quality_plan": [
+            {"tier": arm, "cohort": cohort}
+            for arm, cohort in QUALITY_PLAN
         ],
     }
 
@@ -603,7 +635,11 @@ def _resolve_container_id(
     return str(resolved)
 
 
-def _command_options(command: object) -> dict[str, list[str]]:
+def _command_options(
+    command: object,
+    *,
+    entrypoint: str | None = None,
+) -> dict[str, list[str]]:
     _require(
         isinstance(command, list)
         and len(command) >= 2
@@ -611,8 +647,10 @@ def _command_options(command: object) -> dict[str, list[str]]:
         "container command is missing",
     )
     _require(
-        command[0].endswith(SOURCE_PATH) and command[1] == "run",
-        "container command is not the F4b run entrypoint",
+        command[0].endswith(SOURCE_PATH)
+        and command[1] in {"run", "quality-run"}
+        and (entrypoint is None or command[1] == entrypoint),
+        "container command is not the expected F4b entrypoint",
     )
     options: dict[str, list[str]] = {}
     index = 2
@@ -770,7 +808,7 @@ def _validate_run_command(
     checkpoint: Mapping[str, object],
     profile: Mapping[str, object] | None,
 ) -> None:
-    options = _command_options(container["command"])
+    options = _command_options(container["command"], entrypoint="run")
     allowed = {
         "--round",
         "--arm",
@@ -813,6 +851,67 @@ def _validate_run_command(
         _require(
             len(profile_arguments) == 1 and bool(profile_arguments[0]),
             "tier-on container command lacks exactly one profile",
+        )
+
+
+def _validate_quality_run_command(
+    header: Mapping[str, object],
+    *,
+    container: Mapping[str, object],
+    checkpoint: Mapping[str, object],
+    profile: Mapping[str, object] | None,
+) -> None:
+    command = container["command"]
+    options = _command_options(command, entrypoint="quality-run")
+    allowed = {
+        "--arm",
+        "--cohort",
+        "--performance-raw-sha256",
+        "--model-path",
+        "--profile",
+        "--output",
+        "--image-id",
+        "--container-id",
+        "--container-id-file",
+        "--repo-digest",
+    }
+    _require(set(options) <= allowed, "quality container command has unknown options")
+    _require(
+        _one_command_argument(options, "--arm") == header["arm"]
+        and _one_command_argument(options, "--cohort") == header["cohort"],
+        "quality container command shard identity differs",
+    )
+    _require(
+        _one_command_argument(options, "--performance-raw-sha256")
+        == header["parent_performance_raw_sha256"],
+        "quality container command parent raw digest differs",
+    )
+    _require(
+        _one_command_argument(options, "--model-path") == checkpoint.get("read_from"),
+        "quality container command model path differs",
+    )
+    _require(
+        _one_command_argument(options, "--output") == header.get("output_path"),
+        "quality container command output path differs",
+    )
+    _require(
+        _one_command_argument(options, "--image-id") == container["image_id"],
+        "quality container command image id differs",
+    )
+    _require(
+        options.get("--repo-digest", []) == container["repo_digests"],
+        "quality container command repository digests differ",
+    )
+    profile_arguments = options.get("--profile", [])
+    if profile is None:
+        _require(
+            not profile_arguments,
+            "tier-off quality container command has a profile",
+        )
+    else:
+        _require(
+            len(profile_arguments) == 1 and bool(profile_arguments[0]),
+            "tier-on quality container command lacks exactly one profile",
         )
 
 
@@ -1019,7 +1118,7 @@ def _run_one_request(
         "cached_tokens": terminal_update.num_cached_tokens,
         "completion_tokens": len(output),
     }
-    return {
+    result = {
         "row_type": "request",
         "sequence": trace_row["sequence"],
         "session": trace_row["session"],
@@ -1038,6 +1137,39 @@ def _run_one_request(
         "final_tier_stats": backend._cache.dram_tier_stats,
         "final_num_free_pages": backend._cache.num_free_pages,
     }
+    if getattr(params, "logprobs", None) is not None:
+        distributions = terminal_update.logprobs
+        _require(
+            isinstance(distributions, tuple)
+            and len(distributions) == len(output),
+            "quality request did not retain one logprob distribution per token",
+        )
+        records = []
+        for position, (token_id, distribution) in enumerate(
+            zip(output, distributions, strict=True)
+        ):
+            _require(
+                isinstance(distribution, dict)
+                and token_id in distribution,
+                f"quality token {position} lacks its selected logprob",
+            )
+            ordered = sorted(
+                (
+                    {"token_id": int(candidate), "logprob": float(logprob)}
+                    for candidate, logprob in distribution.items()
+                ),
+                key=lambda item: (-item["logprob"], item["token_id"]),
+            )
+            records.append(
+                {
+                    "position": position,
+                    "selected_token_id": token_id,
+                    "selected_logprob": float(distribution[token_id]),
+                    "top_logprobs": ordered,
+                }
+            )
+        result["logprob_records"] = records
+    return result
 
 
 async def _run_live_shard(
@@ -1173,6 +1305,172 @@ async def _run_live_shard(
         "schema_version": SCHEMA_VERSION,
         "shard": list(parsed["identity"]),
         "requests": len(parsed["requests"]),
+        "raw_sha256": sha256_file(output),
+        "output": str(output),
+    }
+
+
+async def _run_live_quality_shard(
+    *,
+    arm: str,
+    cohort: str,
+    performance_raw_sha256: str,
+    model_path: Path,
+    profile_path: Path | None,
+    output: Path,
+    container: Mapping[str, object],
+) -> dict[str, object]:
+    """Record distribution quality without contaminating TPOT measurements."""
+
+    from kairyu.engine.kairyu_backend import KairyuBackend
+    from kairyu.engine.tokenizer import resolve_tokenizer
+    from kairyu.sampling_params import SamplingParams
+
+    _require((arm, cohort) in QUALITY_PLAN, "quality run is outside the fixed plan")
+    _require(
+        _valid_sha256(performance_raw_sha256),
+        "quality parent performance raw digest is invalid",
+    )
+    _require(model_path.is_dir(), f"model path is not a directory: {model_path}")
+    if arm == "on":
+        _require(
+            profile_path is not None,
+            "tier-on quality run requires retained TP4 F4a profile",
+        )
+        profile = _profile_descriptor_live(profile_path)
+        tier_capacity = DRAM_PAGES
+        tier_profile: Path | None = profile_path
+    else:
+        _require(
+            profile_path is None,
+            "tier-off quality run must not receive a profile",
+        )
+        profile = None
+        tier_capacity = 0
+        tier_profile = None
+
+    source_start = _source_provenance_live()
+    checkpoint = _checkpoint_provenance_live(model_path)
+    tokenizer = resolve_tokenizer(str(model_path))
+    trace, request_specs = build_trace(
+        tokenizer,
+        tokenizer_sha256=checkpoint["metadata_sha256"]["tokenizer.json"],
+    )
+    hardware = _hardware_live(cohort)
+    params = SamplingParams(
+        temperature=0.0,
+        min_tokens=OUTPUT_TOKENS,
+        max_tokens=OUTPUT_TOKENS,
+        ignore_eos=True,
+        seed=0,
+        logprobs=QUALITY_TOP_LOGPROBS,
+    )
+    backend = KairyuBackend(
+        model_path=str(model_path),
+        tokenizer=str(model_path),
+        tensor_parallel_size=TP_SIZE,
+        num_pages=HBM_PAGES,
+        page_size=PAGE_SIZE,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        max_num_seqs=1,
+        max_model_len=MAX_MODEL_LEN,
+        pipeline_depth=1,
+        decode_mode="eager",
+        dram_kv_tier_capacity_pages=tier_capacity,
+        dram_kv_tier_profile=tier_profile,
+    )
+    runtime = _runtime_live(backend, source_start, arm)
+    if arm == "on":
+        _require(
+            runtime["dram_kv_tier_enabled"] is True
+            and runtime["dram_kv_tier_capacity_pages"] == DRAM_PAGES
+            and runtime["dram_kv_tier_profile_sha256"] == profile["file_sha256"],
+            "tier-on quality backend did not bind the retained tier profile",
+        )
+    else:
+        _require(
+            runtime["dram_kv_tier_enabled"] is False
+            and runtime["dram_kv_tier_capacity_pages"] == 0
+            and runtime["dram_kv_tier_profile_sha256"] is None,
+            "tier-off quality backend unexpectedly enabled DRAM",
+        )
+
+    run_id = f"issue-188-quality-{arm}-{cohort}-{uuid.uuid4().hex}"
+    started_utc = datetime.now(UTC).isoformat()
+    started_unix_ns = time.time_ns()
+    requests: list[dict[str, object]] = []
+    try:
+        for spec in request_specs:
+            request = _run_one_request(backend, spec, params)
+            requests.append(
+                {
+                    key: request[key]
+                    for key in (
+                        "sequence",
+                        "session",
+                        "turn",
+                        "request_id",
+                        "status",
+                        "retry_count",
+                        "prompt_tokens",
+                        "prompt_token_ids",
+                        "prompt_token_ids_sha256",
+                        "output_token_ids",
+                        "usage",
+                        "initial_tier_stats",
+                        "final_tier_stats",
+                        "logprob_records",
+                    )
+                }
+            )
+    finally:
+        await backend.shutdown()
+    ended_unix_ns = time.time_ns()
+    ended_utc = datetime.now(UTC).isoformat()
+    source_end = _source_provenance_live()
+    _require(source_start == source_end, "source changed during the quality shard")
+    rows: list[dict[str, object]] = [
+        {
+            "row_type": "quality_run",
+            "schema_version": QUALITY_SCHEMA_VERSION,
+            "measurement_kind": QUALITY_MEASUREMENT_KIND,
+            "run_id": run_id,
+            "output_path": str(output),
+            "arm": arm,
+            "cohort": cohort,
+            "parent_performance_raw_sha256": performance_raw_sha256,
+            "config": quality_config(),
+            "trace": trace,
+            "source": source_start,
+            "checkpoint": checkpoint,
+            "profile": profile,
+            "container": dict(container),
+            "hardware": hardware,
+            "runtime": runtime,
+            "measurement_started_at": started_utc,
+            "measurement_started_unix_ns": started_unix_ns,
+        },
+        *({"row_type": "quality_request", **request} for request in requests),
+        {
+            "row_type": "quality_run_end",
+            "run_id": run_id,
+            "arm": arm,
+            "cohort": cohort,
+            "status": "complete",
+            "errors": [],
+            "request_count": len(requests),
+            "source": source_end,
+            "final_tier_stats": requests[-1]["final_tier_stats"],
+            "measurement_ended_at": ended_utc,
+            "measurement_ended_unix_ns": ended_unix_ns,
+        },
+    ]
+    write_jsonl(output, rows)
+    parse_quality_shard(read_jsonl(output))
+    return {
+        "schema_version": QUALITY_SCHEMA_VERSION,
+        "shard": [arm, cohort],
+        "requests": len(requests),
         "raw_sha256": sha256_file(output),
         "output": str(output),
     }
@@ -1738,10 +2036,316 @@ def parse_shard(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     }
 
 
-def _metadata_relative_paths() -> tuple[str, ...]:
+def _validate_quality_logprob_records(
+    value: object,
+    output: Sequence[int],
+    *,
+    sequence: int,
+) -> list[dict[str, object]]:
+    _require(
+        isinstance(value, list) and len(value) == OUTPUT_TOKENS,
+        f"quality request {sequence} logprob record count differs",
+    )
+    records: list[dict[str, object]] = []
+    for position, (record_value, selected_token) in enumerate(
+        zip(value, output, strict=True)
+    ):
+        _require(
+            isinstance(record_value, dict),
+            f"quality request {sequence} logprob record {position} is invalid",
+        )
+        record = dict(record_value)
+        _require(
+            set(record)
+            == {
+                "position",
+                "selected_token_id",
+                "selected_logprob",
+                "top_logprobs",
+            }
+            and record.get("position") == position
+            and record.get("selected_token_id") == selected_token,
+            f"quality request {sequence} selected token record differs",
+        )
+        selected_logprob = record.get("selected_logprob")
+        _require(
+            type(selected_logprob) in (int, float)
+            and math.isfinite(float(selected_logprob))
+            and float(selected_logprob) <= 0,
+            f"quality request {sequence} selected logprob is invalid",
+        )
+        top = record.get("top_logprobs")
+        _require(
+            isinstance(top, list) and len(top) == QUALITY_TOP_LOGPROBS,
+            f"quality request {sequence} top-logprob inventory differs",
+        )
+        normalized_top: list[dict[str, object]] = []
+        for candidate in top:
+            _require(
+                isinstance(candidate, dict)
+                and set(candidate) == {"token_id", "logprob"}
+                and type(candidate.get("token_id")) is int
+                and candidate["token_id"] >= 0
+                and type(candidate.get("logprob")) in (int, float)
+                and math.isfinite(float(candidate["logprob"]))
+                and float(candidate["logprob"]) <= 0,
+                f"quality request {sequence} top-logprob entry is invalid",
+            )
+            normalized_top.append(
+                {
+                    "token_id": int(candidate["token_id"]),
+                    "logprob": float(candidate["logprob"]),
+                }
+            )
+        _require(
+            len({candidate["token_id"] for candidate in normalized_top})
+            == QUALITY_TOP_LOGPROBS,
+            f"quality request {sequence} top-logprob token ids are duplicated",
+        )
+        expected_order = sorted(
+            normalized_top,
+            key=lambda candidate: (
+                -candidate["logprob"],
+                candidate["token_id"],
+            ),
+        )
+        _require(
+            normalized_top == expected_order,
+            f"quality request {sequence} top-logprobs are not ordered",
+        )
+        by_token = {
+            candidate["token_id"]: candidate["logprob"]
+            for candidate in normalized_top
+        }
+        _require(
+            selected_token in by_token
+            and by_token[selected_token] == float(selected_logprob),
+            f"quality request {sequence} selected logprob differs from top-64",
+        )
+        records.append(
+            {
+                **record,
+                "selected_logprob": float(selected_logprob),
+                "top_logprobs": normalized_top,
+            }
+        )
+    return records
+
+
+def _validate_quality_request(
+    row: Mapping[str, object],
+    sequence: int,
+) -> dict[str, object]:
+    session, turn = _request_identity(sequence)
+    _require(
+        row.get("row_type") == "quality_request"
+        and row.get("sequence") == sequence
+        and row.get("session") == session
+        and row.get("turn") == turn,
+        f"quality request {sequence} identity/order differs",
+    )
+    _require(
+        row.get("status") == "success" and row.get("retry_count") == 0,
+        f"quality request {sequence} failed or retried",
+    )
+    prompt = row.get("prompt_token_ids")
+    expected_prompt_tokens = SHARED_TOKENS + (turn + 1) * TURN_TOKENS
+    _require(
+        isinstance(prompt, list)
+        and len(prompt) == expected_prompt_tokens
+        and all(type(token) is int and token >= 0 for token in prompt)
+        and row.get("prompt_tokens") == len(prompt)
+        and row.get("prompt_token_ids_sha256") == sha256_json(prompt),
+        f"quality request {sequence} prompt identity differs",
+    )
+    output = row.get("output_token_ids")
+    _require(
+        isinstance(output, list)
+        and len(output) == OUTPUT_TOKENS
+        and all(type(token) is int and token >= 0 for token in output),
+        f"quality request {sequence} output differs",
+    )
+    usage = row.get("usage")
+    _require(
+        isinstance(usage, dict)
+        and usage.get("prompt_tokens") == expected_prompt_tokens
+        and type(usage.get("cached_tokens")) is int
+        and 0 <= usage["cached_tokens"] <= expected_prompt_tokens
+        and usage.get("completion_tokens") == OUTPUT_TOKENS,
+        f"quality request {sequence} engine usage is invalid",
+    )
+    initial = _tier_stats(
+        row.get("initial_tier_stats"),
+        f"quality request {sequence} initial",
+    )
+    final = _tier_stats(
+        row.get("final_tier_stats"),
+        f"quality request {sequence} final",
+    )
+    records = _validate_quality_logprob_records(
+        row.get("logprob_records"),
+        output,
+        sequence=sequence,
+    )
+    return {
+        **dict(row),
+        "initial_tier_stats": initial,
+        "final_tier_stats": final,
+        "logprob_records": records,
+    }
+
+
+def parse_quality_shard(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    _require(
+        len(rows) == REQUESTS_PER_SHARD + 2,
+        "quality shard row count differs",
+    )
+    header = dict(rows[0])
+    end = dict(rows[-1])
+    _require(
+        header.get("row_type") == "quality_run"
+        and end.get("row_type") == "quality_run_end",
+        "quality shard framing differs",
+    )
+    _require(
+        header.get("schema_version") == QUALITY_SCHEMA_VERSION
+        and header.get("measurement_kind") == QUALITY_MEASUREMENT_KIND
+        and header.get("config") == quality_config(),
+        "quality shard schema/config differs",
+    )
+    identity = (header.get("arm"), header.get("cohort"))
+    _require(identity in QUALITY_PLAN, "quality shard identity is outside fixed plan")
+    arm, cohort = identity
+    _require(
+        _valid_sha256(header.get("parent_performance_raw_sha256")),
+        "quality parent performance raw digest is invalid",
+    )
+    _require(
+        isinstance(header.get("run_id"), str)
+        and bool(header["run_id"])
+        and isinstance(header.get("output_path"), str)
+        and Path(header["output_path"]).is_absolute(),
+        "quality raw output/run identity is invalid",
+    )
+    source = _validate_source(header.get("source"))
+    checkpoint = _validate_checkpoint(
+        header.get("checkpoint"),
+        "F4b quality checkpoint",
+    )
+    container = _validate_container(header.get("container"))
+    profile = _validate_profile(
+        header.get("profile"),
+        arm=arm,
+        engine_source_sha256=source["engine_source_sha256"],
+    )
+    _validate_quality_run_command(
+        header,
+        container=container,
+        checkpoint=checkpoint,
+        profile=profile,
+    )
+    hardware = _validate_hardware(header.get("hardware"), cohort)
+    runtime = _validate_runtime(
+        header.get("runtime"),
+        arm=arm,
+        source=source,
+        profile=profile,
+    )
+    trace = _validate_trace(header.get("trace"))
+    start_ns = _exact_int(
+        header.get("measurement_started_unix_ns"),
+        "quality measurement start",
+        minimum=1,
+    )
+    end_ns = _exact_int(
+        end.get("measurement_ended_unix_ns"),
+        "quality measurement end",
+        minimum=1,
+    )
+    _require(end_ns > start_ns, "quality measurement interval is empty or reversed")
+    _require(
+        end.get("run_id") == header["run_id"]
+        and (end.get("arm"), end.get("cohort")) == identity
+        and end.get("status") == "complete"
+        and end.get("errors") == []
+        and end.get("request_count") == REQUESTS_PER_SHARD
+        and end.get("source") == source,
+        "quality run_end identity/status/provenance differs",
+    )
+    requests = [
+        _validate_quality_request(row, sequence)
+        for sequence, row in enumerate(rows[1:-1])
+    ]
+    previous_final: Mapping[str, int] | None = None
+    for request in requests:
+        initial_stats = request["initial_tier_stats"]
+        final_stats = request["final_tier_stats"]
+        _require(
+            previous_final is None or initial_stats == previous_final,
+            "quality cumulative tier stats are discontinuous between requests",
+        )
+        _require(
+            all(final_stats[field] >= initial_stats[field] for field in TIER_STATS_FIELDS),
+            "quality cumulative tier stats decreased within a request",
+        )
+        previous_final = final_stats
+    _require(
+        _trace_rows_from_requests(requests) == trace["value"]["rows"],
+        "quality requests differ from the bound trace",
+    )
+    shared = requests[0]["prompt_token_ids"][:SHARED_TOKENS]
+    _require(
+        sha256_json(shared) == trace["value"]["shared_prefix_sha256"],
+        "quality shared prefix differs from its trace",
+    )
+    for request in requests:
+        _require(
+            request["prompt_token_ids"][:SHARED_TOKENS] == shared,
+            "quality shared prefix differs between requests",
+        )
+        if request["turn"]:
+            previous = requests[
+                (request["turn"] - 1) * SESSIONS + request["session"]
+            ]
+            _require(
+                request["prompt_token_ids"][
+                    : len(previous["prompt_token_ids"])
+                ]
+                == previous["prompt_token_ids"],
+                "quality session prompt is not append-only",
+            )
+    _require(
+        end.get("final_tier_stats") == requests[-1]["final_tier_stats"],
+        "quality run_end tier stats differ",
+    )
+    return {
+        "identity": identity,
+        "header": {
+            **header,
+            "source": source,
+            "checkpoint": checkpoint,
+            "container": container,
+            "profile": profile,
+            "hardware": hardware,
+            "runtime": runtime,
+            "trace": trace,
+        },
+        "requests": requests,
+        "end": end,
+        "interval": (start_ns, end_ns),
+    }
+
+
+def _metadata_relative_paths(
+    *,
+    plan: Sequence[tuple[object, ...]] = SHARD_PLAN,
+    labels: Mapping[tuple[object, ...], str] = SHARD_LABELS,
+) -> tuple[str, ...]:
     paths = [IMAGE_INSPECT_NAME]
-    for identity in SHARD_PLAN:
-        label = SHARD_LABELS[identity]
+    for identity in plan:
+        label = labels[identity]
         paths.extend(
             (
                 f"{label}/{CONTAINER_ID_NAME}",
@@ -1777,9 +2381,14 @@ def _metadata_descriptor(metadata_dir: Path, relative_path: str) -> dict[str, ob
     }
 
 
-def _load_container_lifecycle(metadata_dir: Path) -> dict[str, object]:
+def _load_container_lifecycle(
+    metadata_dir: Path,
+    *,
+    plan: Sequence[tuple[object, ...]] = SHARD_PLAN,
+    labels: Mapping[tuple[object, ...], str] = SHARD_LABELS,
+) -> dict[str, object]:
     _require(metadata_dir.is_dir(), f"container metadata directory is missing: {metadata_dir}")
-    expected_paths = set(_metadata_relative_paths())
+    expected_paths = set(_metadata_relative_paths(plan=plan, labels=labels))
     actual_paths = {
         path.relative_to(metadata_dir).as_posix()
         for path in metadata_dir.rglob("*")
@@ -1787,8 +2396,8 @@ def _load_container_lifecycle(metadata_dir: Path) -> dict[str, object]:
     }
     _require(actual_paths == expected_paths, "container metadata fixed layout differs")
     shards = []
-    for identity in SHARD_PLAN:
-        label = SHARD_LABELS[identity]
+    for identity in plan:
+        label = labels[identity]
         shards.append(
             {
                 "identity": list(identity),
@@ -1976,7 +2585,11 @@ def _container_env_inventory(value: object, label: str) -> dict[str, str]:
 
 def _validate_container_lifecycle(
     value: object,
-    shards: Mapping[tuple[int, str, str], Mapping[str, object]],
+    shards: Mapping[tuple[object, ...], Mapping[str, object]],
+    *,
+    plan: Sequence[tuple[object, ...]] = SHARD_PLAN,
+    labels: Mapping[tuple[object, ...], str] = SHARD_LABELS,
+    cohort_index: int = 2,
 ) -> dict[str, object]:
     _require(isinstance(value, dict), "container lifecycle metadata is missing")
     lifecycle = dict(value)
@@ -1991,7 +2604,7 @@ def _validate_container_lifecycle(
 
     entries = lifecycle.get("shards")
     _require(
-        isinstance(entries, list) and len(entries) == len(SHARD_PLAN),
+        isinstance(entries, list) and len(entries) == len(plan),
         "container lifecycle shard inventory differs",
     )
     previous_finished_ns: int | None = None
@@ -1999,8 +2612,8 @@ def _validate_container_lifecycle(
     model_volume_host_path: str | None = None
     evidence_host_paths: set[str] = set()
     metadata_host_paths: set[str] = set()
-    for index, identity in enumerate(SHARD_PLAN):
-        label = SHARD_LABELS[identity]
+    for index, identity in enumerate(plan):
+        label = labels[identity]
         entry_value = entries[index]
         _require(isinstance(entry_value, dict), f"container lifecycle entry differs: {label}")
         entry = dict(entry_value)
@@ -2100,7 +2713,7 @@ def _validate_container_lifecycle(
             {
                 "Driver": "",
                 "Count": 0,
-                "DeviceIDs": list(COHORT_DEVICE_IDS[identity[2]]),
+                "DeviceIDs": list(COHORT_DEVICE_IDS[str(identity[cohort_index])]),
                 "Capabilities": [["gpu"]],
                 "Options": {},
             }
@@ -2149,8 +2762,8 @@ def _validate_container_lifecycle(
             )
         previous_finished_ns = finished_ns
     _require(
-        len(evidence_host_paths) == len(SHARD_PLAN)
-        and len(metadata_host_paths) == len(SHARD_PLAN),
+        len(evidence_host_paths) == len(plan)
+        and len(metadata_host_paths) == len(plan),
         "Docker per-arm cache/evidence metadata mounts are not isolated",
     )
     return lifecycle
@@ -2163,6 +2776,20 @@ def _metadata_digest_map(lifecycle: Mapping[str, object]) -> dict[str, str]:
             (entry["container_id"], entry["created_inspect"], entry["exited_inspect"])
         )
     return {descriptor["relative_path"]: descriptor["file_sha256"] for descriptor in descriptors}
+
+
+def _container_lifecycle_bounds(
+    lifecycle: Mapping[str, object],
+) -> tuple[int, int]:
+    entries = lifecycle["shards"]
+    _require(isinstance(entries, list) and entries, "container lifecycle is empty")
+    first = _single_docker_inspect(entries[0]["created_inspect"], "first created inspect")
+    last = _single_docker_inspect(entries[-1]["exited_inspect"], "last exited inspect")
+    last_state = _docker_mapping(last.get("State"), "last exited State")
+    return (
+        _rfc3339_unix_ns(first.get("Created"), "first container created"),
+        _rfc3339_unix_ns(last_state.get("FinishedAt"), "last container finished"),
+    )
 
 
 def assemble_rows(
@@ -2280,6 +2907,607 @@ def _parse_combined(
     _require(cursor == len(rows) - 1, "combined raw contains unexpected rows")
     lifecycle = _validate_container_lifecycle(rows[0].get("container_lifecycle"), shards)
     return shards, lifecycle
+
+
+def assemble_quality_rows(
+    paths: Sequence[Path],
+    *,
+    parent_performance_raw_sha256: str,
+    metadata_dir: Path,
+) -> list[dict[str, object]]:
+    _require(
+        len(paths) == len(QUALITY_PLAN),
+        "quality assemble requires exactly two raw shards",
+    )
+    _require(
+        _valid_sha256(parent_performance_raw_sha256),
+        "quality parent performance raw digest is invalid",
+    )
+    shards: dict[
+        tuple[object, object],
+        tuple[dict[str, object], str],
+    ] = {}
+    for path in paths:
+        parsed = parse_quality_shard(read_jsonl(path))
+        identity = tuple(parsed["identity"])
+        _require(identity not in shards, f"duplicate quality shard {identity}")
+        shards[identity] = (parsed, sha256_file(path))
+    _require(
+        set(shards) == set(QUALITY_PLAN),
+        "two-shard quality plan is incomplete",
+    )
+    _require(
+        all(
+            parsed["header"]["parent_performance_raw_sha256"]
+            == parent_performance_raw_sha256
+            for parsed, _digest in shards.values()
+        ),
+        "quality shard parent performance raw digest differs",
+    )
+    parsed_shards = {
+        identity: parsed for identity, (parsed, _digest) in shards.items()
+    }
+    lifecycle = _validate_container_lifecycle(
+        _load_container_lifecycle(
+            metadata_dir,
+            plan=QUALITY_PLAN,
+            labels=QUALITY_SHARD_LABELS,
+        ),
+        parsed_shards,
+        plan=QUALITY_PLAN,
+        labels=QUALITY_SHARD_LABELS,
+        cohort_index=1,
+    )
+    combined: list[dict[str, object]] = [
+        {
+            "row_type": "quality_run",
+            "schema_version": QUALITY_SCHEMA_VERSION,
+            "measurement_kind": QUALITY_MEASUREMENT_KIND,
+            "config": quality_config(),
+            "parent_performance_raw_sha256": parent_performance_raw_sha256,
+            "container_lifecycle": lifecycle,
+        }
+    ]
+    for identity in QUALITY_PLAN:
+        parsed, digest = shards[identity]
+        header = parsed["header"]
+        combined.append(
+            {
+                **{
+                    key: value
+                    for key, value in header.items()
+                    if key not in {"row_type", "row_index"}
+                },
+                "row_type": "quality_shard_start",
+                "input_raw_sha256": digest,
+            }
+        )
+        combined.extend(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "row_index"
+            }
+            for request in parsed["requests"]
+        )
+        combined.append(
+            {
+                **{
+                    key: value
+                    for key, value in parsed["end"].items()
+                    if key not in {"row_type", "row_index"}
+                },
+                "row_type": "quality_shard_end",
+            }
+        )
+    combined.append(
+        {
+            "row_type": "quality_run_end",
+            "shard_count": len(QUALITY_PLAN),
+            "request_count": len(QUALITY_PLAN) * REQUESTS_PER_SHARD,
+        }
+    )
+    return combined
+
+
+def _parse_quality_combined(
+    rows: Sequence[Mapping[str, object]],
+) -> tuple[
+    dict[tuple[str, str], dict[str, object]],
+    dict[str, object],
+]:
+    _require(
+        len(rows) >= 2
+        and rows[0].get("row_type") == "quality_run"
+        and rows[-1].get("row_type") == "quality_run_end",
+        "combined quality raw framing differs",
+    )
+    _require(
+        rows[0].get("schema_version") == QUALITY_SCHEMA_VERSION
+        and rows[0].get("measurement_kind") == QUALITY_MEASUREMENT_KIND
+        and rows[0].get("config") == quality_config()
+        and _valid_sha256(rows[0].get("parent_performance_raw_sha256")),
+        "combined quality raw header differs",
+    )
+    _require(
+        rows[-1].get("shard_count") == len(QUALITY_PLAN)
+        and rows[-1].get("request_count")
+        == len(QUALITY_PLAN) * REQUESTS_PER_SHARD,
+        "combined quality raw end counts differ",
+    )
+    parent_digest = rows[0]["parent_performance_raw_sha256"]
+    shards: dict[tuple[str, str], dict[str, object]] = {}
+    cursor = 1
+    for expected_identity in QUALITY_PLAN:
+        _require(
+            cursor < len(rows) - 1
+            and rows[cursor].get("row_type") == "quality_shard_start",
+            "combined quality shard start is missing",
+        )
+        start = dict(rows[cursor])
+        cursor += 1
+        requests = [
+            dict(row)
+            for row in rows[cursor : cursor + REQUESTS_PER_SHARD]
+        ]
+        cursor += REQUESTS_PER_SHARD
+        _require(
+            cursor < len(rows) - 1
+            and rows[cursor].get("row_type") == "quality_shard_end",
+            "combined quality shard end is missing",
+        )
+        end = dict(rows[cursor])
+        cursor += 1
+        identity = (start.get("arm"), start.get("cohort"))
+        _require(
+            identity == expected_identity,
+            "combined quality shard plan order differs",
+        )
+        raw_header = {**start, "row_type": "quality_run"}
+        raw_header.pop("input_raw_sha256", None)
+        raw_rows = [
+            raw_header,
+            *requests,
+            {**end, "row_type": "quality_run_end"},
+        ]
+        parsed = parse_quality_shard(raw_rows)
+        _require(
+            _valid_sha256(start.get("input_raw_sha256")),
+            "quality input shard digest is invalid",
+        )
+        _require(
+            parsed["header"]["parent_performance_raw_sha256"]
+            == parent_digest,
+            "quality shard parent raw digest differs from combined header",
+        )
+        shards[expected_identity] = parsed
+    _require(
+        cursor == len(rows) - 1,
+        "combined quality raw contains unexpected rows",
+    )
+    lifecycle = _validate_container_lifecycle(
+        rows[0].get("container_lifecycle"),
+        shards,
+        plan=QUALITY_PLAN,
+        labels=QUALITY_SHARD_LABELS,
+        cohort_index=1,
+    )
+    return shards, lifecycle
+
+
+def _quality_distribution_comparison(
+    off_requests: Sequence[Mapping[str, object]],
+    on_requests: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, bool], dict[str, object]]:
+    aligned_deltas: list[float] = []
+    aligned_failures: list[dict[str, object]] = []
+    first_divergence_deltas: list[float] = []
+    first_divergences: list[dict[str, object]] = []
+    missing_cross_selected: list[dict[str, object]] = []
+    first_divergence_failures: list[dict[str, object]] = []
+    for off_request, on_request in zip(
+        off_requests,
+        on_requests,
+        strict=True,
+    ):
+        for position, (
+            off_token,
+            on_token,
+            off_record,
+            on_record,
+        ) in enumerate(
+            zip(
+                off_request["output_token_ids"],
+                on_request["output_token_ids"],
+                off_request["logprob_records"],
+                on_request["logprob_records"],
+                strict=True,
+            )
+        ):
+            off_distribution = {
+                candidate["token_id"]: candidate["logprob"]
+                for candidate in off_record["top_logprobs"]
+            }
+            on_distribution = {
+                candidate["token_id"]: candidate["logprob"]
+                for candidate in on_record["top_logprobs"]
+            }
+            if off_token == on_token:
+                delta = abs(
+                    float(off_record["selected_logprob"])
+                    - float(on_record["selected_logprob"])
+                )
+                aligned_deltas.append(delta)
+                if delta > QUALITY_LOGPROB_ABS_TOLERANCE:
+                    aligned_failures.append(
+                        {
+                            "sequence": off_request["sequence"],
+                            "position": position,
+                            "token_id": off_token,
+                            "absolute_delta": delta,
+                        }
+                    )
+                continue
+
+            divergence = {
+                "sequence": off_request["sequence"],
+                "session": off_request["session"],
+                "turn": off_request["turn"],
+                "position": position,
+                "off_token_id": off_token,
+                "on_token_id": on_token,
+            }
+            first_divergences.append(divergence)
+            cross_views = (
+                (
+                    "off_selected_seen_by_on",
+                    off_token,
+                    float(off_record["selected_logprob"]),
+                    on_distribution.get(off_token),
+                ),
+                (
+                    "on_selected_seen_by_off",
+                    on_token,
+                    float(on_record["selected_logprob"]),
+                    off_distribution.get(on_token),
+                ),
+            )
+            for view, token_id, owner_logprob, other_logprob in cross_views:
+                if other_logprob is None:
+                    missing_cross_selected.append(
+                        {
+                            **divergence,
+                            "view": view,
+                            "token_id": token_id,
+                        }
+                    )
+                    continue
+                delta = abs(owner_logprob - float(other_logprob))
+                first_divergence_deltas.append(delta)
+                if delta > QUALITY_LOGPROB_ABS_TOLERANCE:
+                    first_divergence_failures.append(
+                        {
+                            **divergence,
+                            "view": view,
+                            "token_id": token_id,
+                            "owner_logprob": owner_logprob,
+                            "other_arm_logprob": float(other_logprob),
+                            "absolute_delta": delta,
+                        }
+                    )
+            # Later positions are conditioned on different generated prefixes.
+            break
+    checks = {
+        "aligned_prefix_selected_logprob_abs_delta_at_most_0_25": (
+            not aligned_failures
+        ),
+        "first_divergence_reciprocal_cross_selected_top64_complete": (
+            not missing_cross_selected
+        ),
+        "first_divergence_reciprocal_cross_selected_abs_delta_at_most_0_25": (
+            not missing_cross_selected and not first_divergence_failures
+        ),
+    }
+    diagnostics = {
+        "aligned_prefix_position_count": len(aligned_deltas),
+        "aligned_prefix_selected_logprob_max_abs_delta": max(
+            aligned_deltas,
+            default=None,
+        ),
+        "aligned_prefix_failures": aligned_failures,
+        "first_divergence_count": len(first_divergences),
+        "first_divergences": first_divergences,
+        "first_divergence_cross_selected_comparison_count": len(
+            first_divergence_deltas
+        ),
+        "first_divergence_cross_selected_max_abs_delta": max(
+            first_divergence_deltas,
+            default=None,
+        ),
+        "missing_cross_selected": missing_cross_selected,
+        "first_divergence_failures": first_divergence_failures,
+        "post_divergence_distribution_comparison_performed": False,
+        "free_running_output_equality_is_binding": False,
+    }
+    return checks, diagnostics
+
+
+def recompute_quality_manifest(
+    performance_raw_path: Path,
+    quality_rows: Sequence[Mapping[str, object]],
+    *,
+    quality_raw_sha256: str,
+) -> dict[str, object]:
+    _require(
+        performance_raw_path.is_file(),
+        f"parent performance raw is missing: {performance_raw_path}",
+    )
+    _require(
+        _valid_sha256(quality_raw_sha256),
+        "quality combined raw digest is invalid",
+    )
+    performance_raw_sha256 = sha256_file(performance_raw_path)
+    performance_rows = read_jsonl(performance_raw_path)
+    performance_manifest = recompute_manifest(
+        performance_rows,
+        raw_sha256=performance_raw_sha256,
+    )
+    performance_shards, performance_lifecycle = _parse_combined(performance_rows)
+    quality_shards, quality_lifecycle = _parse_quality_combined(quality_rows)
+    off = quality_shards[("off", "A")]
+    on = quality_shards[("on", "A")]
+    quality_pair = (off, on)
+    performance_by_arm = {
+        "off": performance_shards[(0, "off", "A")],
+        "on": performance_shards[(1, "on", "A")],
+    }
+
+    quality_sources = [shard["header"]["source"] for shard in quality_pair]
+    performance_source = performance_shards[SHARD_PLAN[0]]["header"]["source"]
+    stable_performance_bound = {
+        path: digest
+        for path, digest in performance_source["bound_file_sha256"].items()
+        if path != SOURCE_PATH
+    }
+    source_compatible = all(
+        source["engine_source_sha256"]
+        == performance_source["engine_source_sha256"]
+        and {
+            path: digest
+            for path, digest in source["bound_file_sha256"].items()
+            if path != SOURCE_PATH
+        }
+        == stable_performance_bound
+        for source in quality_sources
+    )
+    quality_source_same = (
+        len({canonical_json(source) for source in quality_sources}) == 1
+    )
+    checkpoint_exact = all(
+        shard["header"]["checkpoint"]
+        == performance_by_arm[shard["identity"][0]]["header"]["checkpoint"]
+        for shard in quality_pair
+    )
+    trace_exact = all(
+        shard["header"]["trace"]
+        == performance_by_arm[shard["identity"][0]]["header"]["trace"]
+        for shard in quality_pair
+    )
+    def stable_hardware(
+        shard: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {
+            key: value
+            for key, value in shard["header"]["hardware"].items()
+            if key != "hostname"
+        }
+
+    hardware_exact = (
+        stable_hardware(off) == stable_hardware(on)
+        and all(
+            stable_hardware(shard)
+            == stable_hardware(
+                performance_by_arm[shard["identity"][0]]
+            )
+            for shard in quality_pair
+        )
+    )
+    runtime_exact = all(
+        shard["header"]["runtime"]
+        == performance_by_arm[shard["identity"][0]]["header"]["runtime"]
+        for shard in quality_pair
+    )
+    container_exact = all(
+        shard["header"]["container"]["image_id"]
+        == performance_by_arm[shard["identity"][0]]["header"]["container"][
+            "image_id"
+        ]
+        and shard["header"]["container"]["repo_digests"]
+        == performance_by_arm[shard["identity"][0]]["header"]["container"][
+            "repo_digests"
+        ]
+        for shard in quality_pair
+    )
+    performance_container_ids = {
+        shard["header"]["container"]["container_id"]
+        for shard in performance_shards.values()
+    }
+    quality_container_ids = {
+        shard["header"]["container"]["container_id"]
+        for shard in quality_pair
+    }
+    fresh_containers = (
+        len(quality_container_ids) == len(QUALITY_PLAN)
+        and not (quality_container_ids & performance_container_ids)
+    )
+    performance_lifecycle_bounds = _container_lifecycle_bounds(
+        performance_lifecycle
+    )
+    quality_lifecycle_bounds = _container_lifecycle_bounds(quality_lifecycle)
+    quality_intervals_sequential = (
+        max(shard["interval"][1] for shard in performance_shards.values())
+        < off["interval"][0]
+        and off["interval"][1] < on["interval"][0]
+        and performance_lifecycle_bounds[1] <= quality_lifecycle_bounds[0]
+    )
+    parent_digest_exact = all(
+        shard["header"]["parent_performance_raw_sha256"]
+        == performance_raw_sha256
+        for shard in quality_pair
+    )
+
+    outputs_cache_and_tier_stats_match = True
+    prompts_match = True
+    for shard in quality_pair:
+        reference = performance_by_arm[shard["identity"][0]]
+        for quality_request, performance_request in zip(
+            shard["requests"],
+            reference["requests"],
+            strict=True,
+        ):
+            prompts_match &= (
+                quality_request["prompt_token_ids"]
+                == performance_request["prompt_token_ids"]
+            )
+            outputs_cache_and_tier_stats_match &= (
+                quality_request["output_token_ids"]
+                == performance_request["output_token_ids"]
+                and quality_request["usage"] == performance_request["usage"]
+                and quality_request["initial_tier_stats"]
+                == performance_request["initial_tier_stats"]
+                and quality_request["final_tier_stats"]
+                == performance_request["final_tier_stats"]
+            )
+
+    off_tier_zero = all(
+        all(
+            request[boundary][field] == 0
+            for boundary in ("initial_tier_stats", "final_tier_stats")
+            for field in TIER_STATS_FIELDS
+        )
+        for request in off["requests"]
+    )
+    on_final = on["requests"][-1]["final_tier_stats"]
+    on_tier_activity = (
+        on_final["offload_pages"] > 0
+        and on_final["restore_pages"] > 0
+        and on_final["restore_attempts"] > 0
+        and on_final["restore_fallbacks"] == 0
+        and on_final["ownership_failures"] == 0
+    )
+    distribution_checks, distribution_diagnostics = (
+        _quality_distribution_comparison(
+            off["requests"],
+            on["requests"],
+        )
+    )
+    first_divergence_sequences = sorted(
+        {
+            int(divergence["sequence"])
+            for divergence in distribution_diagnostics["first_divergences"]
+        }
+    )
+    first_divergence_restore_observations = []
+    for sequence in first_divergence_sequences:
+        request = on["requests"][sequence]
+        initial_stats = request["initial_tier_stats"]
+        final_stats = request["final_tier_stats"]
+        first_divergence_restore_observations.append(
+            {
+                "sequence": sequence,
+                "restore_attempts_delta": (
+                    final_stats["restore_attempts"]
+                    - initial_stats["restore_attempts"]
+                ),
+                "restore_pages_delta": (
+                    final_stats["restore_pages"] - initial_stats["restore_pages"]
+                ),
+                "restore_fallbacks_delta": (
+                    final_stats["restore_fallbacks"]
+                    - initial_stats["restore_fallbacks"]
+                ),
+                "ownership_failures_delta": (
+                    final_stats["ownership_failures"]
+                    - initial_stats["ownership_failures"]
+                ),
+            }
+        )
+    first_divergence_requests_observe_restore = all(
+        observation["restore_attempts_delta"] > 0
+        and observation["restore_pages_delta"] > 0
+        and observation["restore_fallbacks_delta"] == 0
+        and observation["ownership_failures_delta"] == 0
+        for observation in first_divergence_restore_observations
+    )
+    checks = {
+        "parent_performance_artifact_passes": performance_manifest["passed"]
+        is True,
+        "parent_performance_raw_digest_exact": parent_digest_exact,
+        "quality_container_lifecycle_metadata_exact_and_sequential": True,
+        "quality_two_fresh_sequential_same_cohort_containers": (
+            fresh_containers and quality_intervals_sequential and hardware_exact
+        ),
+        "quality_clean_source_and_engine_equal_parent": (
+            quality_source_same and source_compatible
+        ),
+        "quality_checkpoint_trace_image_and_runtime_equal_parent": (
+            checkpoint_exact
+            and trace_exact
+            and container_exact
+            and runtime_exact
+        ),
+        "quality_prompts_equal_parent_performance_trace": prompts_match,
+        "quality_outputs_cache_and_tier_stats_equal_parent_arms": (
+            outputs_cache_and_tier_stats_match
+        ),
+        "quality_tier_on_activity_without_failure_and_tier_off_zero": (
+            on_tier_activity and off_tier_zero
+        ),
+        "first_divergence_requests_observe_tier_on_restore": (
+            first_divergence_requests_observe_restore
+        ),
+        **distribution_checks,
+    }
+    distribution_diagnostics["first_divergence_tier_on_restore_observations"] = (
+        first_divergence_restore_observations
+    )
+    return {
+        "schema_version": QUALITY_SCHEMA_VERSION,
+        "measurement_kind": QUALITY_MEASUREMENT_KIND,
+        "config": quality_config(),
+        "parent_performance_raw": {
+            "name": RAW_NAME,
+            "sha256": performance_raw_sha256,
+            "row_count": len(performance_rows),
+        },
+        "raw": {
+            "name": QUALITY_RAW_NAME,
+            "sha256": quality_raw_sha256,
+            "row_count": len(quality_rows),
+        },
+        "container_metadata": {
+            "directory": QUALITY_CONTAINER_METADATA_DIR,
+            "file_sha256": dict(
+                sorted(_metadata_digest_map(quality_lifecycle).items())
+            ),
+            "files_sha256": sha256_json(
+                dict(sorted(_metadata_digest_map(quality_lifecycle).items()))
+            ),
+            "lifecycle_value_sha256": sha256_json(quality_lifecycle),
+        },
+        "quality_source": {
+            "commit": quality_sources[0]["commit"],
+            "bound_files_sha256": quality_sources[0][
+                "bound_files_sha256"
+            ],
+            "engine_source_sha256": quality_sources[0][
+                "engine_source_sha256"
+            ],
+        },
+        "checks": checks,
+        "diagnostics": distribution_diagnostics,
+        "passed": all(checks.values()),
+    }
 
 
 def nearest_rank_percentile(values: Sequence[float], quantile: float) -> float:
@@ -2435,16 +3663,100 @@ def recompute_manifest(
     )
 
     reference = shards[SHARD_PLAN[0]]["requests"]
-    parity = True
+    prompt_order_identity = True
     for shard in all_shards[1:]:
-        parity &= all(
+        prompt_order_identity &= all(
             candidate["sequence"] == base["sequence"]
             and candidate["session"] == base["session"]
             and candidate["turn"] == base["turn"]
             and candidate["prompt_token_ids"] == base["prompt_token_ids"]
-            and candidate["output_token_ids"] == base["output_token_ids"]
             for base, candidate in zip(reference, shard["requests"], strict=True)
         )
+
+    def output_agreement(
+        left: Mapping[str, object],
+        right: Mapping[str, object],
+    ) -> dict[str, object]:
+        left_requests = left["requests"]
+        right_requests = right["requests"]
+        exact_requests = 0
+        matching_token_positions = 0
+        first_divergences = []
+        for left_request, right_request in zip(
+            left_requests,
+            right_requests,
+            strict=True,
+        ):
+            left_output = left_request["output_token_ids"]
+            right_output = right_request["output_token_ids"]
+            exact_requests += left_output == right_output
+            matching_token_positions += sum(
+                left_token == right_token
+                for left_token, right_token in zip(
+                    left_output,
+                    right_output,
+                    strict=True,
+                )
+            )
+            first_divergence = next(
+                (
+                    position
+                    for position, (left_token, right_token) in enumerate(
+                        zip(left_output, right_output, strict=True)
+                    )
+                    if left_token != right_token
+                ),
+                None,
+            )
+            if first_divergence is not None:
+                first_divergences.append(
+                    {
+                        "sequence": left_request["sequence"],
+                        "session": left_request["session"],
+                        "turn": left_request["turn"],
+                        "position": first_divergence,
+                        "left_token_id": left_output[first_divergence],
+                        "right_token_id": right_output[first_divergence],
+                    }
+                )
+        request_total = len(left_requests)
+        token_total = request_total * OUTPUT_TOKENS
+        return {
+            "exact_request_matches": exact_requests,
+            "request_total": request_total,
+            "exact_request_match_rate": exact_requests / request_total,
+            "matching_token_positions": matching_token_positions,
+            "token_position_total": token_total,
+            "token_position_match_rate": matching_token_positions / token_total,
+            "first_divergences": first_divergences,
+        }
+
+    output_agreements = {
+        "tier_off_cross_cohort": output_agreement(
+            shards[(0, "off", "A")],
+            shards[(1, "off", "B")],
+        ),
+        "tier_on_cross_cohort": output_agreement(
+            shards[(1, "on", "A")],
+            shards[(0, "on", "B")],
+        ),
+        "tier_off_vs_on_cohort_a": output_agreement(
+            shards[(0, "off", "A")],
+            shards[(1, "on", "A")],
+        ),
+        "tier_off_vs_on_cohort_b": output_agreement(
+            shards[(1, "off", "B")],
+            shards[(0, "on", "B")],
+        ),
+    }
+    all_arm_exact_requests = sum(
+        all(
+            shard["requests"][sequence]["output_token_ids"]
+            == reference[sequence]["output_token_ids"]
+            for shard in all_shards[1:]
+        )
+        for sequence in range(REQUESTS_PER_SHARD)
+    )
 
     metrics: dict[str, dict[str, object]] = {}
     for identity in SHARD_PLAN:
@@ -2554,7 +3866,7 @@ def recompute_manifest(
             for shard in all_shards
             for request in shard["requests"]
         ),
-        "prompt_order_and_greedy_output_parity_exact": parity,
+        "prompt_order_identity_exact_across_all_arms": prompt_order_identity,
         "tier_on_prefix_hit_rate_strictly_higher_pooled_and_per_cohort": (
             arm_metrics["on"]["prefix_hit_rate"] > arm_metrics["off"]["prefix_hit_rate"]
             and all(gain > 0 for gain in cohort_cache_gain.values())
@@ -2577,9 +3889,24 @@ def recompute_manifest(
         "tpot_p99_ratio_cohort_geometric_mean": cohort_ratio_geomean,
         "individual_cohort_ratios_are_diagnostic_not_individual_gates": True,
         "critical_path_scope": "fixed representative serial agentic trace only",
+        "free_running_output_equality_is_binding": False,
+        "same_arm_cross_cohort_output_reproducibility_is_binding": False,
+        "same_arm_cross_cohort_output_reproducibility_scope": (
+            "artifact-specific diagnostic"
+        ),
+        "same_arm_cross_cohort_output_reproducibility_exact": (
+            output_agreements["tier_off_cross_cohort"]["exact_request_matches"]
+            == REQUESTS_PER_SHARD
+            and output_agreements["tier_on_cross_cohort"]["exact_request_matches"]
+            == REQUESTS_PER_SHARD
+        ),
+        "all_arm_exact_free_running_requests": all_arm_exact_requests,
+        "all_arm_exact_free_running_request_total": REQUESTS_PER_SHARD,
+        "output_agreement": output_agreements,
     }
     return {
         "schema_version": SCHEMA_VERSION,
+        "verdict_revision": VERDICT_REVISION,
         "measurement_kind": MEASUREMENT_KIND,
         "config": formal_config(),
         "raw": {"name": RAW_NAME, "sha256": raw_sha256, "row_count": len(rows)},
@@ -2673,15 +4000,201 @@ def verify_artifact(path: Path, *, assert_gate: bool = False) -> dict[str, objec
     return recomputed
 
 
+def replay_quality_raw(
+    performance_raw_path: Path,
+    quality_raw_path: Path,
+    *,
+    assert_gate: bool = False,
+) -> dict[str, object]:
+    rows = read_jsonl(quality_raw_path)
+    manifest = recompute_quality_manifest(
+        performance_raw_path,
+        rows,
+        quality_raw_sha256=sha256_file(quality_raw_path),
+    )
+    if assert_gate and manifest["passed"] is not True:
+        failed = [
+            name
+            for name, passed in manifest["checks"].items()
+            if not passed
+        ]
+        raise EvidenceError(
+            f"G5 F4b quality evidence failed: {', '.join(failed)}"
+        )
+    return manifest
+
+
+def seal_quality_artifact(
+    performance_artifact: Path,
+    quality_raw_paths: Sequence[Path],
+    output_dir: Path,
+    *,
+    quality_metadata_dir: Path,
+    assert_gate: bool = False,
+) -> dict[str, object]:
+    performance_manifest = verify_artifact(
+        performance_artifact,
+        assert_gate=True,
+    )
+    performance_raw_path, _performance_manifest_path = _artifact_paths(
+        performance_artifact
+    )
+    performance_raw_sha256 = sha256_file(performance_raw_path)
+    combined_quality = assemble_quality_rows(
+        quality_raw_paths,
+        parent_performance_raw_sha256=performance_raw_sha256,
+        metadata_dir=quality_metadata_dir,
+    )
+    _require(
+        not output_dir.exists(),
+        f"quality artifact output already exists: {output_dir}",
+    )
+    shutil.copytree(performance_raw_path.parent, output_dir)
+    retained_quality_metadata = output_dir / QUALITY_CONTAINER_METADATA_DIR
+    source_quality_metadata = quality_metadata_dir.resolve()
+    destination_quality_metadata = retained_quality_metadata.resolve()
+    _require(
+        not destination_quality_metadata.is_relative_to(source_quality_metadata),
+        "quality artifact container metadata cannot be nested in its source",
+    )
+    _require(
+        not retained_quality_metadata.exists(),
+        f"retained quality container metadata already exists: {retained_quality_metadata}",
+    )
+    shutil.copytree(quality_metadata_dir, retained_quality_metadata)
+    retained_performance_raw = output_dir / RAW_NAME
+    _require(
+        sha256_file(retained_performance_raw) == performance_raw_sha256,
+        "sealing quality changed the parent performance raw bytes",
+    )
+    quality_raw_path = output_dir / QUALITY_RAW_NAME
+    write_jsonl(quality_raw_path, combined_quality)
+    quality_manifest = replay_quality_raw(
+        retained_performance_raw,
+        quality_raw_path,
+        assert_gate=False,
+    )
+    (output_dir / QUALITY_MANIFEST_NAME).write_text(
+        canonical_json(quality_manifest) + "\n",
+        encoding="utf-8",
+    )
+    if assert_gate and quality_manifest["passed"] is not True:
+        failed = [
+            name
+            for name, passed in quality_manifest["checks"].items()
+            if not passed
+        ]
+        raise EvidenceError(
+            f"G5 F4b quality evidence failed: {', '.join(failed)}"
+        )
+    return {
+        "performance": performance_manifest,
+        "quality": quality_manifest,
+        "passed": (
+            performance_manifest["passed"] is True
+            and quality_manifest["passed"] is True
+        ),
+    }
+
+
+def verify_quality_artifact(
+    path: Path,
+    *,
+    assert_gate: bool = False,
+) -> dict[str, object]:
+    _require(path.is_dir(), "quality artifact must be a directory")
+    performance_manifest = verify_artifact(path, assert_gate=False)
+    performance_raw_path = path / RAW_NAME
+    quality_raw_path = path / QUALITY_RAW_NAME
+    quality_manifest_path = path / QUALITY_MANIFEST_NAME
+    _require(
+        quality_raw_path.is_file(),
+        f"combined quality raw is missing: {quality_raw_path}",
+    )
+    _require(
+        quality_manifest_path.is_file(),
+        f"quality manifest is missing: {quality_manifest_path}",
+    )
+    recomputed = replay_quality_raw(
+        performance_raw_path,
+        quality_raw_path,
+        assert_gate=False,
+    )
+    try:
+        retained = json.loads(
+            quality_manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise EvidenceError("cannot read retained quality manifest") from error
+    _require(
+        isinstance(retained, dict) and retained == recomputed,
+        "retained quality manifest differs from independent raw replay",
+    )
+    quality_rows = read_jsonl(quality_raw_path)
+    embedded_lifecycle = quality_rows[0].get("container_lifecycle")
+    retained_lifecycle = _load_container_lifecycle(
+        path / QUALITY_CONTAINER_METADATA_DIR,
+        plan=QUALITY_PLAN,
+        labels=QUALITY_SHARD_LABELS,
+    )
+    _require(
+        retained_lifecycle == embedded_lifecycle,
+        "retained quality container metadata bytes/value differ from combined raw",
+    )
+    result = {
+        "performance": performance_manifest,
+        "quality": recomputed,
+        "passed": (
+            performance_manifest["passed"] is True
+            and recomputed["passed"] is True
+        ),
+    }
+    if assert_gate and result["passed"] is not True:
+        failed = [
+            *(
+                f"performance:{name}"
+                for name, passed in performance_manifest["checks"].items()
+                if not passed
+            ),
+            *(
+                f"quality:{name}"
+                for name, passed in recomputed["checks"].items()
+                if not passed
+            ),
+        ]
+        raise EvidenceError(
+            f"G5 F4b sealed evidence failed: {', '.join(failed)}"
+        )
+    return result
+
+
 def schema_summary() -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
+        "verdict_revision": VERDICT_REVISION,
         "measurement_kind": MEASUREMENT_KIND,
         "formal_config": formal_config(),
         "raw_shards": len(SHARD_PLAN),
         "requests_per_shard": REQUESTS_PER_SHARD,
-        "commands": ["run", "assemble", "verify", "replay", "schema"],
-        "retained_files": [RAW_NAME, MANIFEST_NAME, f"{CONTAINER_METADATA_DIR}/"],
+        "commands": [
+            "run",
+            "assemble",
+            "quality-run",
+            "seal-quality",
+            "verify",
+            "verify-quality",
+            "replay",
+            "replay-quality",
+            "schema",
+        ],
+        "retained_files": [
+            RAW_NAME,
+            MANIFEST_NAME,
+            QUALITY_RAW_NAME,
+            QUALITY_MANIFEST_NAME,
+            f"{CONTAINER_METADATA_DIR}/",
+            f"{QUALITY_CONTAINER_METADATA_DIR}/",
+        ],
     }
 
 
@@ -2701,6 +4214,28 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--container-id-file", type=Path)
     run.add_argument("--repo-digest", action="append", default=[])
 
+    quality_run = subparsers.add_parser(
+        "quality-run",
+        help="record one timing-independent TP4 distribution-quality shard",
+    )
+    quality_run.add_argument("--arm", choices=("off", "on"), required=True)
+    quality_run.add_argument("--cohort", choices=("A",), required=True)
+    quality_run.add_argument(
+        "--performance-raw-sha256",
+        required=True,
+    )
+    quality_run.add_argument("--model-path", type=Path, required=True)
+    quality_run.add_argument("--profile", type=Path)
+    quality_run.add_argument("--output", type=Path, required=True)
+    quality_run.add_argument("--image-id", required=True)
+    quality_run.add_argument("--container-id")
+    quality_run.add_argument("--container-id-file", type=Path)
+    quality_run.add_argument(
+        "--repo-digest",
+        action="append",
+        default=[],
+    )
+
     assemble = subparsers.add_parser("assemble", help="seal four raw shards")
     assemble.add_argument("--raw", type=Path, action="append", required=True)
     assemble.add_argument("--metadata-dir", type=Path, required=True)
@@ -2711,9 +4246,51 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--artifact", type=Path, required=True)
     verify.add_argument("--assert-gate", action="store_true")
 
+    seal_quality = subparsers.add_parser(
+        "seal-quality",
+        help="add two quality shards to a passing performance artifact",
+    )
+    seal_quality.add_argument(
+        "--performance-artifact",
+        type=Path,
+        required=True,
+    )
+    seal_quality.add_argument(
+        "--quality-raw",
+        type=Path,
+        action="append",
+        required=True,
+    )
+    seal_quality.add_argument(
+        "--quality-metadata-dir",
+        type=Path,
+        required=True,
+    )
+    seal_quality.add_argument("--output-dir", type=Path, required=True)
+    seal_quality.add_argument("--assert-gate", action="store_true")
+
+    verify_quality = subparsers.add_parser(
+        "verify-quality",
+        help="verify the retained performance and quality evidence",
+    )
+    verify_quality.add_argument("--artifact", type=Path, required=True)
+    verify_quality.add_argument("--assert-gate", action="store_true")
+
     replay = subparsers.add_parser("replay", help="derive manifest from combined raw")
     replay.add_argument("--raw", type=Path, required=True)
     replay.add_argument("--assert-gate", action="store_true")
+
+    replay_quality = subparsers.add_parser(
+        "replay-quality",
+        help="derive the quality manifest from both combined raw files",
+    )
+    replay_quality.add_argument(
+        "--performance-raw",
+        type=Path,
+        required=True,
+    )
+    replay_quality.add_argument("--quality-raw", type=Path, required=True)
+    replay_quality.add_argument("--assert-gate", action="store_true")
 
     subparsers.add_parser("schema", help="print the fixed evidence contract")
     return parser
@@ -2743,6 +4320,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 container=container,
             )
         )
+    elif args.command == "quality-run":
+        container_id = _resolve_container_id(
+            container_id=args.container_id,
+            container_id_file=args.container_id_file,
+        )
+        container = _container_provenance_live(
+            container_id=container_id,
+            image_id=args.image_id,
+            repo_digests=args.repo_digest,
+            command=list(
+                sys.argv if argv is None else (SOURCE_PATH, *argv)
+            ),
+        )
+        result = asyncio.run(
+            _run_live_quality_shard(
+                arm=args.arm,
+                cohort=args.cohort,
+                performance_raw_sha256=args.performance_raw_sha256,
+                model_path=args.model_path.resolve(),
+                profile_path=(
+                    args.profile.resolve() if args.profile else None
+                ),
+                output=args.output.resolve(),
+                container=container,
+            )
+        )
     elif args.command == "assemble":
         result = assemble_artifact(
             tuple(args.raw),
@@ -2752,8 +4355,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     elif args.command == "verify":
         result = verify_artifact(args.artifact, assert_gate=args.assert_gate)
+    elif args.command == "seal-quality":
+        result = seal_quality_artifact(
+            args.performance_artifact,
+            tuple(args.quality_raw),
+            args.output_dir,
+            quality_metadata_dir=args.quality_metadata_dir,
+            assert_gate=args.assert_gate,
+        )
+    elif args.command == "verify-quality":
+        result = verify_quality_artifact(
+            args.artifact,
+            assert_gate=args.assert_gate,
+        )
     elif args.command == "replay":
         result = replay_raw(args.raw, assert_gate=args.assert_gate)
+    elif args.command == "replay-quality":
+        result = replay_quality_raw(
+            args.performance_raw,
+            args.quality_raw,
+            assert_gate=args.assert_gate,
+        )
     else:
         result = schema_summary()
     print(json.dumps(result, indent=2, sort_keys=True))

@@ -81,6 +81,19 @@ def _source() -> dict[str, object]:
     }
 
 
+def _quality_source() -> dict[str, object]:
+    source = copy.deepcopy(_source())
+    source["commit"] = "2" * 40
+    source["bound_file_sha256"][gate.SOURCE_PATH] = gate.sha256_json(
+        "quality-script"
+    )
+    source["script_sha256"] = source["bound_file_sha256"][gate.SOURCE_PATH]
+    source["bound_files_sha256"] = gate.sha256_json(
+        dict(sorted(source["bound_file_sha256"].items()))
+    )
+    return source
+
+
 def _profile(source: dict[str, object]) -> dict[str, object]:
     value = {
         "schema_version": gate.PROFILE_SCHEMA_VERSION,
@@ -336,6 +349,145 @@ def _shard(identity: tuple[int, str, str], index: int) -> list[dict[str, object]
     ]
 
 
+def _quality_logprob_records(output: list[int]) -> list[dict[str, object]]:
+    records = []
+    for position, selected in enumerate(output):
+        top = [{"token_id": selected, "logprob": -0.125}]
+        top.extend(
+            {
+                "token_id": 200_000 + position * 100 + index,
+                "logprob": -1.0 - index,
+            }
+            for index in range(gate.QUALITY_TOP_LOGPROBS - 1)
+        )
+        records.append(
+            {
+                "position": position,
+                "selected_token_id": selected,
+                "selected_logprob": -0.125,
+                "top_logprobs": top,
+            }
+        )
+    return records
+
+
+def _quality_shard(
+    identity: tuple[str, str],
+    index: int,
+    *,
+    parent_raw_sha256: str,
+) -> list[dict[str, object]]:
+    arm, cohort = identity
+    source = _quality_source()
+    profile = _profile(source) if arm == "on" else None
+    requests = []
+    for sequence in range(gate.REQUESTS_PER_SHARD):
+        request = _request(sequence, arm=arm)
+        requests.append(
+            {
+                "row_type": "quality_request",
+                **{
+                    key: request[key]
+                    for key in (
+                        "sequence",
+                        "session",
+                        "turn",
+                        "request_id",
+                        "status",
+                        "retry_count",
+                        "prompt_tokens",
+                        "prompt_token_ids",
+                        "prompt_token_ids_sha256",
+                        "output_token_ids",
+                        "usage",
+                        "initial_tier_stats",
+                        "final_tier_stats",
+                    )
+                },
+                "logprob_records": _quality_logprob_records(
+                    request["output_token_ids"]
+                ),
+            }
+        )
+    run_id = f"fixture-quality-{arm}-{cohort}"
+    container_id = str(index + 8) * 64
+    output_path = f"/evidence/quality-{arm}.jsonl"
+    repo_digest = (
+        "kairyu-f4a@sha256:"
+        + gate.F4A_CALIBRATED_IMAGE_ID.removeprefix("sha256:")
+    )
+    command = [
+        gate.SOURCE_PATH,
+        "quality-run",
+        "--arm",
+        arm,
+        "--cohort",
+        cohort,
+        "--performance-raw-sha256",
+        parent_raw_sha256,
+        "--model-path",
+        "/models/qwen3-32b",
+        "--output",
+        output_path,
+        "--image-id",
+        gate.F4A_CALIBRATED_IMAGE_ID,
+        "--container-id",
+        container_id,
+        "--repo-digest",
+        repo_digest,
+    ]
+    if profile is not None:
+        command.extend(("--profile", "/evidence/f4a-tp4-profile.json"))
+    started_ns = 2_000_000_000 + index * 2_000_000
+    return [
+        {
+            "row_type": "quality_run",
+            "schema_version": gate.QUALITY_SCHEMA_VERSION,
+            "measurement_kind": gate.QUALITY_MEASUREMENT_KIND,
+            "run_id": run_id,
+            "output_path": output_path,
+            "arm": arm,
+            "cohort": cohort,
+            "parent_performance_raw_sha256": parent_raw_sha256,
+            "config": gate.quality_config(),
+            "trace": _trace(requests),
+            "source": source,
+            "checkpoint": _checkpoint(),
+            "profile": profile,
+            "container": {
+                "container_id": container_id,
+                "image_id": gate.F4A_CALIBRATED_IMAGE_ID,
+                "repo_digests": [repo_digest],
+                "command": command,
+                "container_id_binding": {
+                    "option": "--container-id",
+                    "argument": container_id,
+                    "resolved_container_id": container_id,
+                },
+                "hostname": container_id[:12],
+            },
+            "hardware": _hardware(cohort),
+            "runtime": _runtime(arm, source, profile),
+            "measurement_started_at": "2026-08-01T00:00:00+00:00",
+            "measurement_started_unix_ns": started_ns,
+        },
+        *requests,
+        {
+            "row_type": "quality_run_end",
+            "run_id": run_id,
+            "arm": arm,
+            "cohort": cohort,
+            "status": "complete",
+            "errors": [],
+            "request_count": gate.REQUESTS_PER_SHARD,
+            "source": source,
+            "final_tier_stats": requests[-1]["final_tier_stats"],
+            "measurement_ended_at": "2026-08-01T00:00:00+00:00",
+            "measurement_ended_unix_ns": started_ns + 1_000_000,
+        },
+    ]
+
+
 def _timestamp(unix_ns: int) -> str:
     seconds, fraction = divmod(unix_ns, 1_000_000_000)
     prefix = datetime.fromtimestamp(seconds, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")
@@ -347,18 +499,14 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
-    paths: list[Path] = []
-    shards: dict[tuple[int, str, str], list[dict[str, object]]] = {}
-    for index, identity in enumerate(gate.SHARD_PLAN):
-        rows = _shard(identity, index)
-        path = root / f"shard-{index}.jsonl"
-        gate.write_jsonl(path, rows)
-        paths.append(path)
-        shards[identity] = rows
-
-    metadata = root / "metadata"
-    first_header = shards[gate.SHARD_PLAN[0]][0]
+def _write_lifecycle_metadata(
+    metadata: Path,
+    shards: dict[tuple[object, ...], list[dict[str, object]]],
+    *,
+    plan: tuple[tuple[object, ...], ...],
+    labels: dict[tuple[object, ...], str],
+) -> Path:
+    first_header = shards[plan[0]][0]
     image_id = first_header["container"]["image_id"]
     _write_json(
         metadata / gate.IMAGE_INSPECT_NAME,
@@ -374,8 +522,8 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
             }
         ],
     )
-    for identity in gate.SHARD_PLAN:
-        label = gate.SHARD_LABELS[identity]
+    for identity in plan:
+        label = labels[identity]
         rows = shards[identity]
         header = rows[0]
         end = rows[-1]
@@ -406,7 +554,7 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
                 {
                     "Driver": "",
                     "Count": 0,
-                    "DeviceIDs": list(gate.COHORT_DEVICE_IDS[identity[2]]),
+                    "DeviceIDs": list(gate.COHORT_DEVICE_IDS[str(identity[-1])]),
                     "Capabilities": [["gpu"]],
                     "Options": {},
                 }
@@ -478,7 +626,98 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
         (label_dir / gate.CONTAINER_ID_NAME).write_text(container_id + "\n", encoding="utf-8")
         _write_json(label_dir / gate.CONTAINER_CREATED_NAME, [created])
         _write_json(label_dir / gate.CONTAINER_EXITED_NAME, [exited])
+    return metadata
+
+
+def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
+    paths: list[Path] = []
+    shards: dict[tuple[object, ...], list[dict[str, object]]] = {}
+    for index, identity in enumerate(gate.SHARD_PLAN):
+        rows = _shard(identity, index)
+        path = root / f"shard-{index}.jsonl"
+        gate.write_jsonl(path, rows)
+        paths.append(path)
+        shards[identity] = rows
+
+    metadata = _write_lifecycle_metadata(
+        root / "metadata",
+        shards,
+        plan=gate.SHARD_PLAN,
+        labels=gate.SHARD_LABELS,
+    )
     return paths, metadata
+
+
+def _write_quality_inputs(
+    performance_artifact: Path,
+    root: Path,
+) -> tuple[list[Path], Path]:
+    parent_raw_sha256 = gate.sha256_file(
+        performance_artifact / gate.RAW_NAME
+    )
+    paths = []
+    shards: dict[tuple[object, ...], list[dict[str, object]]] = {}
+    for index, identity in enumerate(gate.QUALITY_PLAN):
+        path = root / f"quality-{identity[0]}.jsonl"
+        rows = _quality_shard(
+            identity,
+            index,
+            parent_raw_sha256=parent_raw_sha256,
+        )
+        gate.write_jsonl(
+            path,
+            rows,
+        )
+        paths.append(path)
+        shards[identity] = rows
+    metadata = _write_lifecycle_metadata(
+        root / "metadata",
+        shards,
+        plan=gate.QUALITY_PLAN,
+        labels=gate.QUALITY_SHARD_LABELS,
+    )
+    return paths, metadata
+
+
+def _set_performance_first_output(path: Path, token_id: int) -> None:
+    rows = gate.read_jsonl(path)
+    request = rows[1]
+    request["output_token_ids"][0] = token_id
+    for event in request["events"]:
+        if event["output_token_ids"]:
+            event["output_token_ids"][0] = token_id
+    gate.write_jsonl(path, rows)
+
+
+def _set_quality_first_distribution(
+    path: Path,
+    *,
+    selected_token_id: int,
+    reciprocal_token_id: int,
+) -> None:
+    rows = gate.read_jsonl(path)
+    request = rows[1]
+    request["output_token_ids"][0] = selected_token_id
+    record = request["logprob_records"][0]
+    record["selected_token_id"] = selected_token_id
+    record["selected_logprob"] = -0.125
+    retained = [
+        candidate
+        for candidate in record["top_logprobs"]
+        if candidate["token_id"]
+        not in {selected_token_id, reciprocal_token_id}
+    ]
+    retained.extend(
+        (
+            {"token_id": selected_token_id, "logprob": -0.125},
+            {"token_id": reciprocal_token_id, "logprob": -0.2},
+        )
+    )
+    retained.sort(
+        key=lambda candidate: (-candidate["logprob"], candidate["token_id"])
+    )
+    record["top_logprobs"] = retained[: gate.QUALITY_TOP_LOGPROBS]
+    gate.write_jsonl(path, rows)
 
 
 @pytest.fixture(scope="module")
@@ -594,6 +833,9 @@ def test_passing_artifact_replays_and_verifies(passing_artifact) -> None:
     output, _rows, manifest = passing_artifact
 
     assert manifest["passed"] is True
+    assert "same_arm_cross_cohort_output_reproducibility_exact" not in manifest[
+        "checks"
+    ]
     assert gate.replay_raw(output / gate.RAW_NAME, assert_gate=True) == manifest
     assert gate.verify_artifact(output, assert_gate=True) == manifest
     assert manifest["diagnostics"]["cache_gain_percentage_points_pooled"] > 0
@@ -612,6 +854,474 @@ def test_passing_artifact_replays_and_verifies(passing_artifact) -> None:
     assert (
         manifest["calibrated_execution_image"]["image_id"]
         == gate.F4A_CALIBRATED_IMAGE_ID
+    )
+    assert (
+        manifest["checks"]["prompt_order_identity_exact_across_all_arms"]
+        is True
+    )
+    assert manifest["diagnostics"]["free_running_output_equality_is_binding"] is False
+    assert manifest["verdict_revision"] == gate.VERDICT_REVISION
+
+
+def test_free_running_output_difference_is_retained_as_diagnostic(
+    passing_artifact,
+) -> None:
+    _output, original, _manifest_value = passing_artifact
+    rows = copy.deepcopy(original)
+    on_indices = _request_indices("on")
+    targets = (on_indices[0], on_indices[gate.REQUESTS_PER_SHARD])
+    replacement_token = rows[targets[0]]["output_token_ids"][0] + 1
+    for target in targets:
+        row = rows[target]
+        row["output_token_ids"][0] = replacement_token
+        for event in row["events"]:
+            if event["output_token_ids"]:
+                event["output_token_ids"][0] = replacement_token
+
+    manifest = _manifest(rows)
+
+    assert manifest["passed"] is True
+    assert (
+        manifest["checks"]["prompt_order_identity_exact_across_all_arms"]
+        is True
+    )
+    agreement = manifest["diagnostics"]["output_agreement"]
+    assert agreement["tier_on_cross_cohort"]["exact_request_matches"] == 128
+    assert (
+        manifest["diagnostics"]["same_arm_cross_cohort_output_reproducibility_exact"]
+        is True
+    )
+    assert agreement["tier_off_vs_on_cohort_b"]["exact_request_matches"] == 127
+    assert agreement["tier_off_vs_on_cohort_b"]["first_divergences"] == [
+        {
+            "sequence": 0,
+            "session": 0,
+            "turn": 0,
+            "position": 0,
+            "left_token_id": 1000,
+            "right_token_id": replacement_token,
+        }
+    ]
+
+
+def test_quality_companion_seals_and_replays_without_changing_performance_raw(
+    passing_artifact,
+    tmp_path: Path,
+) -> None:
+    performance_artifact, _rows, _manifest_value = passing_artifact
+    quality_paths, quality_metadata = _write_quality_inputs(
+        performance_artifact,
+        tmp_path / "quality-inputs",
+    )
+    output = tmp_path / "sealed"
+    original_performance_sha = gate.sha256_file(
+        performance_artifact / gate.RAW_NAME
+    )
+
+    sealed = gate.seal_quality_artifact(
+        performance_artifact,
+        quality_paths,
+        output,
+        quality_metadata_dir=quality_metadata,
+        assert_gate=True,
+    )
+
+    assert sealed["passed"] is True
+    assert gate.sha256_file(output / gate.RAW_NAME) == original_performance_sha
+    assert gate.verify_quality_artifact(
+        output,
+        assert_gate=True,
+    ) == sealed
+    assert sealed["quality"]["diagnostics"][
+        "aligned_prefix_position_count"
+    ] == gate.REQUESTS_PER_SHARD * gate.OUTPUT_TOKENS
+    assert sealed["quality"]["diagnostics"]["first_divergence_count"] == 0
+    assert sealed["quality"]["checks"][
+        "quality_container_lifecycle_metadata_exact_and_sequential"
+    ] is True
+    assert (
+        output
+        / gate.QUALITY_CONTAINER_METADATA_DIR
+        / gate.IMAGE_INSPECT_NAME
+    ).is_file()
+
+
+def test_quality_first_divergence_passes_sealed_replay_with_reciprocal_top64(
+    tmp_path: Path,
+) -> None:
+    performance_paths, performance_metadata = _write_fixture_inputs(
+        tmp_path / "performance-inputs"
+    )
+    for path, identity in zip(
+        performance_paths,
+        gate.SHARD_PLAN,
+        strict=True,
+    ):
+        if identity[1] == "on":
+            _set_performance_first_output(path, 1001)
+    performance_artifact = tmp_path / "performance-artifact"
+    gate.assemble_artifact(
+        performance_paths,
+        performance_artifact,
+        metadata_dir=performance_metadata,
+        assert_gate=True,
+    )
+    quality_paths, quality_metadata = _write_quality_inputs(
+        performance_artifact,
+        tmp_path / "quality-inputs",
+    )
+    _set_quality_first_distribution(
+        quality_paths[0],
+        selected_token_id=1000,
+        reciprocal_token_id=1001,
+    )
+    _set_quality_first_distribution(
+        quality_paths[1],
+        selected_token_id=1001,
+        reciprocal_token_id=1000,
+    )
+    output = tmp_path / "sealed"
+
+    sealed = gate.seal_quality_artifact(
+        performance_artifact,
+        quality_paths,
+        output,
+        quality_metadata_dir=quality_metadata,
+        assert_gate=True,
+    )
+
+    replayed = gate.replay_quality_raw(
+        output / gate.RAW_NAME,
+        output / gate.QUALITY_RAW_NAME,
+        assert_gate=True,
+    )
+    assert replayed == sealed["quality"]
+    assert replayed["diagnostics"]["first_divergence_count"] == 1
+    assert replayed["diagnostics"][
+        "first_divergence_cross_selected_max_abs_delta"
+    ] == pytest.approx(0.075)
+    assert replayed["checks"][
+        "first_divergence_requests_observe_tier_on_restore"
+    ] is True
+    assert replayed["diagnostics"][
+        "first_divergence_tier_on_restore_observations"
+    ] == [
+        {
+            "sequence": 0,
+            "restore_attempts_delta": 1,
+            "restore_pages_delta": 1,
+            "restore_fallbacks_delta": 0,
+            "ownership_failures_delta": 0,
+        }
+    ]
+
+
+def test_quality_common_prefix_material_logprob_delta_fails_sealed_manifest(
+    passing_artifact,
+    tmp_path: Path,
+) -> None:
+    performance_artifact, _rows, _manifest_value = passing_artifact
+    quality_paths, quality_metadata = _write_quality_inputs(
+        performance_artifact,
+        tmp_path / "quality-inputs",
+    )
+    rows = gate.read_jsonl(quality_paths[1])
+    record = rows[1]["logprob_records"][0]
+    record["selected_logprob"] = -0.5
+    selected_token = record["selected_token_id"]
+    next(
+        candidate
+        for candidate in record["top_logprobs"]
+        if candidate["token_id"] == selected_token
+    )["logprob"] = -0.5
+    record["top_logprobs"].sort(
+        key=lambda candidate: (-candidate["logprob"], candidate["token_id"])
+    )
+    gate.write_jsonl(quality_paths[1], rows)
+    output = tmp_path / "sealed"
+
+    sealed = gate.seal_quality_artifact(
+        performance_artifact,
+        quality_paths,
+        output,
+        quality_metadata_dir=quality_metadata,
+        assert_gate=False,
+    )
+
+    assert sealed["passed"] is False
+    assert sealed["quality"]["checks"][
+        "aligned_prefix_selected_logprob_abs_delta_at_most_0_25"
+    ] is False
+    assert gate.replay_quality_raw(
+        output / gate.RAW_NAME,
+        output / gate.QUALITY_RAW_NAME,
+    ) == sealed["quality"]
+    with pytest.raises(gate.EvidenceError, match="quality"):
+        gate.verify_quality_artifact(output, assert_gate=True)
+
+
+def test_quality_tier_stats_parent_binding_rejects_continuous_tamper(
+    passing_artifact,
+    tmp_path: Path,
+) -> None:
+    performance_artifact, _rows, _manifest_value = passing_artifact
+    quality_paths, quality_metadata = _write_quality_inputs(
+        performance_artifact,
+        tmp_path / "quality-inputs",
+    )
+    rows = gate.read_jsonl(quality_paths[1])
+    for sequence, request in enumerate(rows[1:-1]):
+        if sequence:
+            request["initial_tier_stats"]["offload_pages"] += 1
+        request["final_tier_stats"]["offload_pages"] += 1
+    rows[-1]["final_tier_stats"]["offload_pages"] += 1
+    gate.write_jsonl(quality_paths[1], rows)
+
+    sealed = gate.seal_quality_artifact(
+        performance_artifact,
+        quality_paths,
+        tmp_path / "sealed",
+        quality_metadata_dir=quality_metadata,
+        assert_gate=False,
+    )
+
+    assert sealed["passed"] is False
+    assert sealed["quality"]["checks"][
+        "quality_outputs_cache_and_tier_stats_equal_parent_arms"
+    ] is False
+
+
+@pytest.mark.parametrize("failure", ("discontinuous", "decreased"))
+def test_quality_tier_stats_invalid_sequence_is_rejected_during_parse(
+    failure: str,
+) -> None:
+    rows = _quality_shard(
+        gate.QUALITY_PLAN[1],
+        1,
+        parent_raw_sha256="f" * 64,
+    )
+    if failure == "discontinuous":
+        rows[2]["initial_tier_stats"]["offload_pages"] += 1
+    else:
+        rows[2]["final_tier_stats"]["offload_pages"] = 0
+
+    with pytest.raises(gate.EvidenceError, match=failure):
+        gate.parse_quality_shard(rows)
+
+
+def test_quality_command_accepts_absolute_source_path() -> None:
+    rows = _quality_shard(
+        gate.QUALITY_PLAN[0],
+        0,
+        parent_raw_sha256="f" * 64,
+    )
+    rows[0]["container"]["command"][0] = (
+        "/workspace/kairyu/" + gate.SOURCE_PATH
+    )
+
+    assert gate.parse_quality_shard(rows)["identity"] == gate.QUALITY_PLAN[0]
+
+
+def test_quality_lifecycle_exit_failure_is_rejected_before_seal(
+    passing_artifact,
+    tmp_path: Path,
+) -> None:
+    performance_artifact, _rows, _manifest_value = passing_artifact
+    quality_paths, quality_metadata = _write_quality_inputs(
+        performance_artifact,
+        tmp_path / "quality-inputs",
+    )
+    exited_path = (
+        quality_metadata
+        / gate.QUALITY_SHARD_LABELS[gate.QUALITY_PLAN[0]]
+        / gate.CONTAINER_EXITED_NAME
+    )
+    exited = _inspect_value(exited_path)
+    exited["State"]["ExitCode"] = 1
+    _replace_inspect(exited_path, exited)
+
+    with pytest.raises(gate.EvidenceError, match="clean exit"):
+        gate.seal_quality_artifact(
+            performance_artifact,
+            quality_paths,
+            tmp_path / "sealed",
+            quality_metadata_dir=quality_metadata,
+        )
+
+
+def test_verify_quality_detects_retained_metadata_byte_tamper(
+    passing_artifact,
+    tmp_path: Path,
+) -> None:
+    performance_artifact, _rows, _manifest_value = passing_artifact
+    quality_paths, quality_metadata = _write_quality_inputs(
+        performance_artifact,
+        tmp_path / "quality-inputs",
+    )
+    output = tmp_path / "sealed"
+    gate.seal_quality_artifact(
+        performance_artifact,
+        quality_paths,
+        output,
+        quality_metadata_dir=quality_metadata,
+        assert_gate=True,
+    )
+    identifier = (
+        output
+        / gate.QUALITY_CONTAINER_METADATA_DIR
+        / gate.QUALITY_SHARD_LABELS[gate.QUALITY_PLAN[0]]
+        / gate.CONTAINER_ID_NAME
+    )
+    identifier.write_text(
+        identifier.read_text(encoding="utf-8") + " ",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(gate.EvidenceError, match="quality container metadata"):
+        gate.verify_quality_artifact(output)
+
+
+def _one_position_quality_request(
+    selected_token: int,
+    selected_logprob: float,
+    other_token: int,
+    other_logprob: float,
+) -> dict[str, object]:
+    top = [
+        {"token_id": selected_token, "logprob": selected_logprob},
+        {"token_id": other_token, "logprob": other_logprob},
+    ]
+    top.extend(
+        {
+            "token_id": 10_000 + index,
+            "logprob": -10.0 - index,
+        }
+        for index in range(gate.QUALITY_TOP_LOGPROBS - 2)
+    )
+    top.sort(key=lambda candidate: (-candidate["logprob"], candidate["token_id"]))
+    return {
+        "sequence": 0,
+        "session": 0,
+        "turn": 0,
+        "output_token_ids": [selected_token],
+        "logprob_records": [
+            {
+                "selected_logprob": selected_logprob,
+                "top_logprobs": top,
+            }
+        ],
+    }
+
+
+def test_quality_first_divergence_uses_reciprocal_selected_logprobs() -> None:
+    off = _one_position_quality_request(11, -1.0, 13, -1.2)
+    on = _one_position_quality_request(13, -1.1, 11, -1.125)
+
+    checks, diagnostics = gate._quality_distribution_comparison(
+        [off],
+        [on],
+    )
+
+    assert all(checks.values())
+    assert diagnostics["first_divergence_count"] == 1
+    assert diagnostics[
+        "first_divergence_cross_selected_comparison_count"
+    ] == 2
+    assert diagnostics[
+        "first_divergence_cross_selected_max_abs_delta"
+    ] == pytest.approx(0.125)
+
+
+@pytest.mark.parametrize("failure", ("delta", "missing"))
+def test_quality_first_divergence_fails_material_or_missing_cross_view(
+    failure: str,
+) -> None:
+    off = _one_position_quality_request(11, -1.0, 13, -1.2)
+    on = _one_position_quality_request(13, -1.1, 11, -1.125)
+    if failure == "delta":
+        next(
+            candidate
+            for candidate in on["logprob_records"][0]["top_logprobs"]
+            if candidate["token_id"] == 11
+        )["logprob"] = -2.0
+    else:
+        on["logprob_records"][0]["top_logprobs"] = [
+            candidate
+            for candidate in on["logprob_records"][0]["top_logprobs"]
+            if candidate["token_id"] != 11
+        ]
+
+    checks, _diagnostics = gate._quality_distribution_comparison(
+        [off],
+        [on],
+    )
+
+    if failure == "delta":
+        assert (
+            checks[
+                "first_divergence_reciprocal_cross_selected_abs_delta_at_most_0_25"
+            ]
+            is False
+        )
+    else:
+        assert (
+            checks[
+                "first_divergence_reciprocal_cross_selected_top64_complete"
+            ]
+            is False
+        )
+
+
+def test_same_arm_output_difference_is_nonbinding_artifact_diagnostic(
+    passing_artifact,
+) -> None:
+    _output, original, _manifest_value = passing_artifact
+    rows = copy.deepcopy(original)
+    target = _request_indices("on")[0]
+    row = rows[target]
+    replacement_token = row["output_token_ids"][0] + 1
+    row["output_token_ids"][0] = replacement_token
+    for event in row["events"]:
+        if event["output_token_ids"]:
+            event["output_token_ids"][0] = replacement_token
+
+    manifest = _manifest(rows)
+
+    assert manifest["passed"] is True
+    assert (
+        manifest["diagnostics"]["same_arm_cross_cohort_output_reproducibility_exact"]
+        is False
+    )
+    assert (
+        manifest["diagnostics"][
+            "same_arm_cross_cohort_output_reproducibility_is_binding"
+        ]
+        is False
+    )
+
+
+def test_cross_arm_prompt_difference_remains_binding(passing_artifact) -> None:
+    _output, original, _manifest_value = passing_artifact
+    rows = copy.deepcopy(original)
+    shard_index = 1
+    start_index = _shard_start_index(shard_index)
+    request_start = start_index + 1
+    requests = rows[
+        request_start : request_start + gate.REQUESTS_PER_SHARD
+    ]
+    for request in requests:
+        request["prompt_token_ids"][0] = 99
+        request["prompt_token_ids_sha256"] = gate.sha256_json(
+            request["prompt_token_ids"]
+        )
+    rows[start_index]["trace"] = _trace(requests)
+
+    manifest = _manifest(rows)
+
+    assert manifest["passed"] is False
+    assert (
+        manifest["checks"]["prompt_order_identity_exact_across_all_arms"]
+        is False
     )
 
 
@@ -1005,10 +1715,21 @@ def test_replay_revalidates_embedded_container_metadata(
 def test_schema_exposes_all_offline_commands_and_fixed_capacity() -> None:
     schema = gate.schema_summary()
 
-    assert schema["commands"] == ["run", "assemble", "verify", "replay", "schema"]
+    assert schema["commands"] == [
+        "run",
+        "assemble",
+        "quality-run",
+        "seal-quality",
+        "verify",
+        "verify-quality",
+        "replay",
+        "replay-quality",
+        "schema",
+    ]
     assert schema["formal_config"]["hbm_pages"] == 1024
     assert schema["formal_config"]["dram_pages_when_enabled"] == 2048
     assert f"{gate.CONTAINER_METADATA_DIR}/" in schema["retained_files"]
+    assert f"{gate.QUALITY_CONTAINER_METADATA_DIR}/" in schema["retained_files"]
     assert json.loads(gate.canonical_json(schema)) == schema
 
 
@@ -1019,6 +1740,23 @@ def test_assemble_cli_requires_metadata_dir() -> None:
                 "assemble",
                 "--raw",
                 "one.jsonl",
+                "--output-dir",
+                "artifact",
+            ]
+        )
+
+
+def test_seal_quality_cli_requires_quality_metadata_dir() -> None:
+    with pytest.raises(SystemExit):
+        gate.build_parser().parse_args(
+            [
+                "seal-quality",
+                "--performance-artifact",
+                "performance",
+                "--quality-raw",
+                "quality-off.jsonl",
+                "--quality-raw",
+                "quality-on.jsonl",
                 "--output-dir",
                 "artifact",
             ]

@@ -330,6 +330,27 @@ real decode-page allocation rather than making the zero tier-delta check
 vacuous. Raw request timing, cached-token usage, output tokens, and tier/cache
 events are retained for independent replay.
 
+Free-running greedy output equality across tier-off and tier-on is retained as
+a diagnostic, not treated as a semantic invariant. A BF16 near-tie can choose
+a different first token after the cache-prefill shape changes even when both
+paths remain numerically equivalent; later tokens then have different
+generated prefixes and cannot be compared as though they had the same input.
+The performance arms still bind the prompt/order exactly and report same-arm
+cross-cohort output stability.
+
+Distribution quality is therefore measured in a separate timing-nonbinding
+companion run so that requesting logprobs cannot alter the TPOT evidence. Two
+fresh, sequential cohort-A containers repeat the exact tier-off and tier-on
+trace with top-64 logprobs. Their checkpoint, trace, GPU cohort, calibrated
+image, engine/runtime identity, output tokens, cached-token usage, and
+tier-state behavior must match the corresponding performance arms. While the
+generated prefix is still common, every selected-token logprob must agree
+within 0.25 nat. At the first divergent token, each arm's selected token must
+be present in the other arm's top 64 and both cross-arm differences must also
+be at most 0.25 nat. Positions after that divergence are not compared. The
+quality artifact retains and independently validates the two containers'
+created/exited Docker records just as the performance artifact does.
+
 After four raw arms have completed from the same clean source, checkpoint,
 retained TP4 F4a runtime profile, and the exact immutable image in which that
 profile was calibrated, assemble and replay the evidence without editing a
@@ -349,25 +370,44 @@ python bench/agentic_kv_tier_f4b_bench.py assemble \
   --raw round1-on-raw.jsonl \
   --raw round1-off-raw.jsonl \
   --metadata-dir metadata \
-  --output-dir bench/results/<f4b-artifact> --assert-gate
+  --output-dir bench/results/<f4b-performance-artifact> --assert-gate
 python bench/agentic_kv_tier_f4b_bench.py verify \
-  --artifact bench/results/<f4b-artifact> --assert-gate
+  --artifact bench/results/<f4b-performance-artifact> --assert-gate
 python bench/agentic_kv_tier_f4b_bench.py replay \
-  --raw bench/results/<f4b-artifact>/agentic-kv-tier-f4b-raw.jsonl \
+  --raw \
+    bench/results/<f4b-performance-artifact>/agentic-kv-tier-f4b-raw.jsonl \
+  --assert-gate
+python bench/agentic_kv_tier_f4b_bench.py seal-quality \
+  --performance-artifact bench/results/<f4b-performance-artifact> \
+  --quality-raw quality-off-raw.jsonl \
+  --quality-raw quality-on-raw.jsonl \
+  --quality-metadata-dir quality-metadata \
+  --output-dir bench/results/<f4b-artifact> --assert-gate
+python bench/agentic_kv_tier_f4b_bench.py verify-quality \
+  --artifact bench/results/<f4b-artifact> --assert-gate
+python bench/agentic_kv_tier_f4b_bench.py replay-quality \
+  --performance-raw \
+    bench/results/<f4b-artifact>/agentic-kv-tier-f4b-raw.jsonl \
+  --quality-raw \
+    bench/results/<f4b-artifact>/agentic-kv-tier-f4b-quality-raw.jsonl \
   --assert-gate
 ```
 
 `replay` recomputes the verdict from the combined raw and validates its
 embedded container lifecycle. `verify` does that same replay, checks the
 retained manifest, and additionally rehashes every retained
-`container-metadata/` byte against the embedded descriptors. A publishable
-artifact therefore retains the combined raw, manifest, and complete
-`container-metadata/` tree together.
+`container-metadata/` byte against the embedded descriptors.
+`replay-quality` independently recomputes the distribution verdict from the
+unchanged performance raw plus the quality raw, while `verify-quality` also
+rehashes both metadata trees and both retained manifests. A publishable
+artifact therefore retains the performance and quality combined raw files,
+both manifests, and the complete `container-metadata/` and
+`quality-container-metadata/` trees together.
 
 The complete clean-source container procedure is in
-`docs/gpu-runbook.md` §9.8b. Until those four real arms pass assembly,
-verification, and independent replay, F4b remains unmeasured; unit and offline
-fixtures validate only the fail-closed operator.
+`docs/gpu-runbook.md` §9.8b. Until the four performance arms and two quality
+arms pass assembly, verification, and independent replay, F4b remains
+unmeasured; unit and offline fixtures validate only the fail-closed operator.
 
 ## Fixtures, results, and wheel verification
 
