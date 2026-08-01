@@ -148,6 +148,14 @@ outside this issue's construction/checkpoint scope. A measured slowdown is
 reported and does not become an automatic serving default. Gate failures still
 write the complete artifact before returning nonzero.
 
+The retained source-`d8dbdba` run passes all gates at
+`bench/results/issue-234-draft-quant-qwen3-32b-rtxpro6000-2026-07-31.json`
+(SHA-256 `850191a039edd6e3ff5ae4bf974eadeef3227b3700b1747d281c595daad63c59`).
+The selected arm is `fp8_dense_fc`: 33.33% acceptance (identical to dense),
+44.94% less module memory, and 98.74% retained standalone-cycle goodput. Its
+draft median is 1.2171× dense, so this is retained as an opt-in memory tradeoff
+and not enabled as a performance default.
+
 ## 4. Acceptance targets (goal)
 
 | Criterion | Where measured |

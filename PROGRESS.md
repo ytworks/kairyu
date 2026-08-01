@@ -734,8 +734,12 @@ pinned standalone-cycle gate. Accepted prefixes remain exact; cross-shape
 target correction uses the established 0.25-nat reciprocal selected-logprob
 quality bound while reporting every exact mismatch. Focused CPU tests pass 80
 checks and the fused
-CUDA draft tests pass 3/3 without skips; the clean-commit multi-prompt
-Qwen3-32B acceptance/latency/memory/goodput run is the remaining #234 gate.
+CUDA draft tests pass 3/3 without skips; the complete CPU/benchmark suite passes
+3,573 tests with 30 deselected. The clean source-`d8dbdba`
+Qwen3-32B run passes every formal gate: all arms retain 33.33% acceptance,
+`fp8_dense_fc` reduces module memory 44.94% and retains 98.74% of dense
+standalone-cycle goodput. Its draft latency is 1.2171x dense, so quantized draft
+loading is an opt-in memory tradeoff rather than a performance default.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -744,6 +748,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-01 — [progress] Quantized EAGLE/MTP draft-head support reaches formal closure
+- What: the clean source-`d8dbdba` public Qwen3-32B/EAGLE-3 run passed all 13 formal checks on one RTX PRO 6000 Blackwell with FlashInfer target verification. Dense and four offline-packed dynamic-FP8 arms each accepted 90/270 proposals (33.33%). The selected `fp8_dense_fc` arm used 861,854,720 bytes versus dense 1,565,296,640 (55.06%), and retained 25.842/26.172 = 98.74% standalone-cycle goodput; its 5.218/4.287 ms draft median is an explicit 1.2171x latency cost, so it remains opt-in rather than a default. Every teacher prefix was exact. Corrections were exact in 87/90 repeated rows per arm; the one unique cross-shape selection differed by 0.13118 nat and the maximum correction delta was 0.16395 nat, both within the fixed 0.25-nat reciprocal bound. CPU draft coverage passes 80 checks, attention coverage passes 55, the complete CPU/benchmark suite passes 3,573 tests with 30 deselected, and the fused CUDA draft suite passes 3/3 without skips.
+- Why: this supplies the issue's required real trained-head latency, memory, acceptance, correction, and target-corrected cycle comparison without converting a measured draft slowdown into a speedup claim. The environment has no compatible trained public MTP target/checkpoint, so MTP closure is deliberately limited to canonical packed-checkpoint loading, numerical tolerance, and real fused-CUDA execution; native trained EAGLE/MTP serving-state integration remains G4.
+- Refs: issue #234; implementation commits `bacd23f`, `d8dbdba`; m14 §9; m17 A21–A25; `bench/results/issue-234-draft-quant-qwen3-32b-rtxpro6000-2026-07-31.json` (SHA-256 `850191a039edd6e3ff5ae4bf974eadeef3227b3700b1747d281c595daad63c59`)
 
 ### 2026-08-01 — [progress] F4b proves agentic DRAM-tier fleet value without TPOT regression
 - What: closed F4b with a retained six-container Qwen3-32B TP4 artifact. Four sequential AB/BA performance arms raised the pooled engine prefix-hit rate from 47.7941% to 60.2338% (+12.4397 points); the pooled tier-on/off TPOT p99 ratio was 1.03721 and the cohort-ratio geometric mean was 1.04488, both within 1.10. Synchronous step evidence observed the decode allocation control with no tier transfer after first content. Two fresh sequential cohort-A quality arms exactly reproduced their parent performance output, cache usage, and per-request tier counters. The maximum selected-logprob difference across 3,968 comparable positions was 0.195256 nat; the maximum reciprocal difference at four first divergences was 0.213124 nat, with every tier-on divergence restoring 160 pages and no fallback or ownership failure. Seal, retained-copy byte verification, and independent raw replay passed.
