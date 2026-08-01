@@ -230,6 +230,48 @@ output (DeepSeek convention).
   parity and deterministic counter reductions decide retention; wall/CUDA
   timing is diagnostic because OS jitter cannot decide correctness.
 
+### 2026-07-31 quantized draft-head amendment
+
+- **A21 (format ownership):** an external EAGLE checkpoint owns its standard
+  `quantization_config` and never inherits target-model packing. An MTP layer
+  embedded in the target checkpoint inherits target quantization unless
+  `draft_quantization_config` is present; `null` or `{}` is an explicit dense
+  override. Both loaders require `config.json` and compare the complete
+  checkpoint semantics with the caller configuration before constructing the
+  head.
+- **A22 (initial supported dialect):** the only admitted quantized draft format
+  is compressed-tensors dynamic FP8 with one Linear group, per-channel FP8
+  weights, and dynamic per-token FP8 activations. Unsupported methods,
+  strategies, layouts, or ambiguous metadata fail before tensor loading.
+  Eligible projections are built through the contextual draft factory while
+  retaining checkpoint-canonical names. MTP router and MLA `kv_b_proj`
+  projections remain dense and must be covered by canonical checkpoint ignore
+  rules.
+- **A23 (packed-only serving boundary):** loading never quantizes a dense draft
+  online, dequantizes a packed draft, or substitutes another execution format.
+  Packed weight dtype/shape is exact; FP8 scale tensors may be losslessly
+  normalized to the registered FP32 ABI only after finite and positive checks.
+  `pack_dynamic_fp8_draft_state` is an explicit offline conversion helper and
+  preserves the source dtype of dense members.
+- **A24 (public EAGLE geometry and evidence):** EAGLE parsing retains explicit
+  query-head, KV-head, and even rotary head-width geometry; Qwen3-32B therefore
+  executes 64-query/8-KV-head GQA instead of deriving a false MHA shape.
+  Default auxiliary captures translate SGLang's before-layer taps to Kairyu
+  after-layer outputs: `(1, N/2-1, N-4)`, or `(1, 31, 60)` for 64 layers.
+  Draft input follows the trained EAGLE target-root contract: auxiliary row
+  `t` pairs with the target embedding for token `t+1`, so the shifted embedding
+  sequence ends with the target-produced root. Verification evaluates
+  `[root, *proposals]`; proposal decisions use all but the final target-logit
+  row, and the final row supplies the all-accepted bonus/correction.
+  The fixed public trained head is compared dense versus offline-packed FP8 on
+  one real Qwen3-32B target with identical teacher traces, exact greedy target
+  correction, acceptance, latency, memory, and committed-token goodput.
+- **A25 (scope boundary):** issue #234 owns draft construction, checkpoint
+  compatibility, fused-kernel execution, and trained-head verification. Native
+  serving still accepts only the established n-gram speculative source;
+  wiring EAGLE/MTP proposal state into `ModelDraftSource` remains the existing
+  G4 runtime milestone and is not implied by the standalone trained-head gate.
+
 - **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
   synthetic requests x 32 output tokens, torch attention: tensor eager wall
   8.844 s, TPOT 192.075 ms/token, 0.90 req/s; CUDA graph wall 7.196 s,

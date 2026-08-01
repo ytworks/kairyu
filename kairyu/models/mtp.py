@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 from kairyu.engine.core.kv_pool import PagedKVPool
-from kairyu.models.config import ModelConfig
+from kairyu.models.config import ModelConfig, parse_model_config
 from kairyu.models.layers import RMSNorm
 from kairyu.models.llama import DecoderLayer
 from kairyu.quant.linear import LinearRole, ModelScope, make_linear
@@ -64,8 +64,17 @@ class MtpDraftHead(nn.Module):
             layer_index=layer_index,
         )
 
-    def fresh_pool(self, num_pages: int = 64, page_size: int = 4) -> PagedKVPool:
-        """The head's own 1-layer KV (dense per-proposal recompute on CPU)."""
+    def fresh_pool(
+        self,
+        num_pages: int = 64,
+        page_size: int = 4,
+        *,
+        dtype: torch.dtype | None = None,
+        device: str | torch.device | None = None,
+    ) -> PagedKVPool:
+        """The head's own 1-layer KV for one dense proposal recompute."""
+
+        reference = self.embed_tokens.weight
         return PagedKVPool(
             num_layers=1,
             num_pages=num_pages,
@@ -73,6 +82,8 @@ class MtpDraftHead(nn.Module):
             num_kv_heads=self.config.kv_cache_num_heads,
             head_dim=self.config.kv_cache_head_dim,
             v_head_dim=self.config.kv_cache_v_head_dim,
+            dtype=reference.dtype if dtype is None else dtype,
+            device=reference.device if device is None else device,
         )
 
     @torch.no_grad()
@@ -84,11 +95,25 @@ class MtpDraftHead(nn.Module):
     ) -> torch.Tensor:
         """One MTP application over the context: [T] tokens + [T, H] target
         hidden -> [T, H] draft hidden (last row feeds ``logits``)."""
+        if token_ids.device != target_hidden.device:
+            raise ValueError(
+                "MTP token ids and target hidden states must share a device: "
+                f"got {token_ids.device} and {target_hidden.device}"
+            )
         embedding = self.embed_tokens(token_ids)
+        if embedding.device != target_hidden.device:
+            raise ValueError(
+                "MTP token embeddings and target hidden states must share a device: "
+                f"got {embedding.device} and {target_hidden.device}"
+            )
         fused = self.eh_proj(torch.cat([self.enorm(embedding), self.hnorm(target_hidden)], dim=-1))
         length = token_ids.shape[0]
-        pool = self.fresh_pool(num_pages=-(-length // 4) + 1)
-        positions = torch.arange(length)
+        pool = self.fresh_pool(
+            num_pages=-(-length // 4) + 1,
+            dtype=target_hidden.dtype,
+            device=target_hidden.device,
+        )
+        positions = torch.arange(length, device=target_hidden.device)
         cos, sin = rotary_emb(positions)
         page_table = list(range(pool.num_pages))
         return self.decoder(fused, cos, sin, pool, 0, page_table, positions, length, 0)
@@ -97,16 +122,75 @@ class MtpDraftHead(nn.Module):
         return self.head(self.shared_head["norm"](hidden))
 
 
-def load_mtp_head(path, config: ModelConfig, *, linear_factory=None) -> MtpDraftHead:
+def load_mtp_head(
+    path,
+    config: ModelConfig,
+    *,
+    linear_factory=None,
+    target_quantization=None,
+    dtype: torch.dtype = torch.float32,
+    target_device: str | torch.device = "cpu",
+    linear_capabilities=None,
+) -> MtpDraftHead:
     """DeepSeek checkpoint MTP-extra layer -> MtpDraftHead.
 
     Maps ``model.layers.{L}.`` names (L = num_hidden_layers); the decoder
     block reuses the standard in-layer names.
-    """
-    from kairyu.engine.core.weights import CheckpointReader
 
+    ``target_device`` is the logical execution target used for linear-kernel
+    selection.  Checkpoint tensors remain CPU-resident until the runtime caller
+    explicitly moves the returned head, matching ``load_model``.
+    """
+    import json
+    from pathlib import Path
+
+    from kairyu.engine.core.quant_config import detect_quantization
+    from kairyu.engine.core.weights import CheckpointReader
+    from kairyu.models.draft_quant import (
+        coerce_draft_state_for_load,
+        draft_linear_factory,
+        load_draft_quantization,
+    )
+
+    checkpoint = Path(path)
+    config_path = checkpoint / "config.json"
+    if not config_path.is_file():
+        raise ValueError(f"MTP checkpoint has no config.json at {config_path}")
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_config, dict):
+        raise ValueError("MTP config.json must contain a JSON object")
+    checkpoint_config = parse_model_config(raw_config)
+    if checkpoint_config != config:
+        mismatches = [
+            f"{name}: caller={getattr(config, name)!r}, "
+            f"checkpoint={getattr(checkpoint_config, name)!r}"
+            for name in config.__dataclass_fields__
+            if getattr(config, name) != getattr(checkpoint_config, name)
+        ]
+        raise ValueError(
+            "MTP caller config does not match checkpoint semantics: " + "; ".join(mismatches)
+        )
+    if target_quantization is None:
+        target_quantization = detect_quantization(raw_config)
+    metadata = load_draft_quantization(
+        checkpoint,
+        expected_scope=ModelScope.MTP_DRAFT,
+        target_quantization=target_quantization,
+    )
+    if metadata is not None and metadata.is_quantized:
+        if linear_factory is not None:
+            raise ValueError(
+                "quantized MTP checkpoint metadata cannot be combined with "
+                "an explicit linear_factory"
+            )
+        linear_factory = draft_linear_factory(
+            metadata,
+            device=target_device,
+            dtype=dtype,
+            capabilities=linear_capabilities,
+        )
     head = MtpDraftHead(config, linear_factory=linear_factory)
-    reader = CheckpointReader(path)
+    reader = CheckpointReader(checkpoint)
     prefix = f"model.layers.{config.num_hidden_layers}."
     direct = {
         "embed_tokens.weight": "embed_tokens.weight",
@@ -135,6 +219,9 @@ def load_mtp_head(path, config: ModelConfig, *, linear_factory=None) -> MtpDraft
     missing = set(head.state_dict()) - set(state)
     if missing:
         raise KeyError(f"MTP layer missing tensors: {sorted(missing)[:5]}")
-    head.load_state_dict(state)
+    head.load_state_dict(
+        coerce_draft_state_for_load(head, state, dtype=dtype),
+        assign=True,
+    )
     head.eval()
     return head

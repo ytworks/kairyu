@@ -271,3 +271,29 @@ resolved device, dtype, and placement into the factory. Offline checkpoint
 shape validation deliberately keeps the factory's logical target at CPU while
 allocating tensors under `torch.device("meta")`: it performs no CUDA probe or
 allocation and does not claim runtime kernel readiness.
+
+## 9. Quantized draft-head amendment (2026-07-31, issue #234)
+
+Draft quantization is a checkpoint-owned policy rather than an accidental copy
+of target construction. External EAGLE reads its own standard
+`quantization_config`; embedded MTP inherits target quantization unless its
+`draft_quantization_config` explicitly overrides it, with `null` or `{}` meaning
+dense. Both loaders require semantic `config.json` metadata and fail before
+loading tensors when caller and checkpoint geometry disagree.
+
+The first supported draft dialect is deliberately narrow: one
+compressed-tensors Linear group with FP8 per-channel weights and dynamic
+per-token FP8 activations. EAGLE and MTP projections use their existing
+checkpoint-canonical contextual identities. Architectural dense exclusions
+remain authoritative; MTP metadata must explicitly ignore the MoE router and
+MLA `kv_b_proj`. Other methods, strategies, target sets, or missing exclusions
+are rejected rather than silently repacked or routed through a dense fallback.
+
+Runtime loading accepts packed payloads only. Weight shapes and FP8 dtypes are
+exact, scale tensors are finite and positive before their value-preserving FP32
+ABI normalization, and dense members retain the requested compute dtype.
+Offline dense-to-FP8 conversion is a separate explicit helper. CUDA tests call
+the fused production modules while making any `dequantize()` path fatal; the
+real Qwen3-32B/EAGLE-3 gate separately reports dense-relative acceptance,
+latency, memory, target-corrected committed-token goodput, and complete
+checkpoint provenance.

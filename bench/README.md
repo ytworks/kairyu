@@ -113,6 +113,7 @@ bench/batched_prefill_qwen.py
 bench/batched_spec_verify_qwen.py
 bench/decode_page_table_cache_qwen.py
 bench/dp_scaling_g2_a8_bench.py
+bench/draft_quant_qwen.py
 bench/dram_kv_tier_qwen.py
 bench/fleet_churn_bench.py
 bench/fleet_gateway_bench.py
@@ -200,6 +201,25 @@ report `passed: false`. The product owner accepted this measured median as an
 explicit closure deviation; neither the artifact nor the operator rewrites the
 original threshold or claims a formal PASS. Evidence is retained under
 `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`.
+
+### Quantized EAGLE-3 draft-head evidence
+
+`bench/draft_quant_qwen.py` compares the pinned public
+`thoughtworks/Qwen3-32B-Eagle3` dense checkpoint with four offline-packed
+dynamic FP8 variants against the same real Qwen3-32B target traces. Each arm
+receives identical target embeddings, auxiliary residuals, KV contents, and
+verification positions. The report retains exact greedy proposals,
+target-corrected committed-token counts, draft and verification timing,
+acceptance, module/CUDA memory, generated-checkpoint hashes, and environment
+provenance. The operator selects the highest-goodput quantized arm that retains
+at least 95% of dense acceptance, then requires memory reduction and at least
+95% of dense standalone-cycle committed-token goodput. Five prompts and three
+repeats rotate all five arm orders after every measured context; every draft
+and target-verify shape is warmed first. This is not production serving E2E: it
+includes context construction through target correction but excludes scheduler
+and serving overhead. It does not enable model-draft serving or turn a slower
+quantized result into a default. The exact invocation and pinned public-weight
+digest are in `docs/gpu-runbook.md` §3.1.
 
 ### G2 A9 DP-versus-TP crossover evidence
 
