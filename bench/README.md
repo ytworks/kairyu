@@ -105,6 +105,7 @@ and documentation metadata are authoritative in the TOML and in the
 `entrypoints --json` output.
 
 ```text
+bench/agentic_kv_tier_f4b_bench.py
 bench/attention_backend_profile_bench.py
 bench/audit_io_bench.py
 bench/auto_params_bench.py
@@ -112,6 +113,7 @@ bench/batched_prefill_qwen.py
 bench/batched_spec_verify_qwen.py
 bench/decode_page_table_cache_qwen.py
 bench/dp_scaling_g2_a8_bench.py
+bench/dram_kv_tier_qwen.py
 bench/fleet_churn_bench.py
 bench/fleet_gateway_bench.py
 bench/fleet_rollout_bench.py
@@ -293,6 +295,131 @@ from the retained copy, and independent raw replay all pass. The raw shards,
 profiles, manifest, and full container provenance are retained at
 `bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
 
+### G5 F4b agentic DRAM-tier evidence
+
+`bench/agentic_kv_tier_f4b_bench.py` is the checkout-only formal operator for
+the Qwen3-32B TP4 agentic tier on/off gate. The predeclared transcript has 16
+sessions and eight turns per session. Every prompt contains a 2,048-token
+fleet-shared prefix plus 512 new session-history tokens per turn, and every
+request generates exactly 32 output tokens. Cached-prompt truth comes from the
+production engine's own cached-token accounting, not from an expected prefix
+length or a benchmark-side cache model.
+
+The experiment uses two disjoint four-GPU cohorts and four fresh, sequential,
+non-overlapping arms. Round 0 runs tier off on GPUs 0--3 and tier on on GPUs
+4--7; round 1 swaps the arm assignment, running tier on on GPUs 0--3 and tier
+off on GPUs 4--7. This AB/BA cohort swap separates the tier effect from a
+fixed cohort effect. Assembly requires a positive engine cached-token-rate
+gain in the pooled requests and independently in each cohort, and reports both
+absolute and relative gains.
+
+TPOT is request-level `stream-terminal-token-v1`: each request retains its
+stream token-boundary timestamps, including the terminal boundary, and p99 is
+computed by nearest rank. Tier-on is noninferior only when both the pooled
+tier-on/off p99 ratio and the geometric mean of the two cohort ratios are at
+most 1.10. The 10% bound is predeclared to tolerate ordinary host and OS
+timing variation; it does not permit missing requests, retries, overlapping
+arms, or replacement of real stream timestamps with model-only CUDA timing.
+
+Decode-path exclusion is measured at synchronous `EngineLoop` step
+boundaries. The raw evidence records DRAM-tier counters and free-page counts
+at every output boundary. Offload and restore counters must not advance after
+the first output token. The expected free-page decrease from output 16 to 17
+must also be observed, proving that the same boundary instrumentation sees a
+real decode-page allocation rather than making the zero tier-delta check
+vacuous. Raw request timing, cached-token usage, output tokens, and tier/cache
+events are retained for independent replay.
+
+Free-running greedy output equality across tier-off and tier-on is retained as
+a diagnostic, not treated as a semantic invariant. A BF16 near-tie can choose
+a different first token after the cache-prefill shape changes even when both
+paths remain numerically equivalent; later tokens then have different
+generated prefixes and cannot be compared as though they had the same input.
+The performance arms still bind the prompt/order exactly and report same-arm
+cross-cohort output stability.
+
+Distribution quality is therefore measured in a separate timing-nonbinding
+companion run so that requesting logprobs cannot alter the TPOT evidence. Two
+fresh, sequential cohort-A containers repeat the exact tier-off and tier-on
+trace with top-64 logprobs. Their checkpoint, trace, GPU cohort, calibrated
+image, engine/runtime identity, output tokens, cached-token usage, and
+tier-state behavior must match the corresponding performance arms. While the
+generated prefix is still common, every selected-token logprob must agree
+within 0.25 nat. At the first divergent token, each arm's selected token must
+be present in the other arm's top 64 and both cross-arm differences must also
+be at most 0.25 nat. Positions after that divergence are not compared. The
+quality artifact retains and independently validates the two containers'
+created/exited Docker records just as the performance artifact does.
+
+After four raw arms have completed from the same clean source, checkpoint,
+retained TP4 F4a runtime profile, and the exact immutable image in which that
+profile was calibrated, assemble and replay the evidence without editing a
+measured verdict. The calibrated execution image and the read-only
+bind-mounted measured source are separate provenance authorities: the image
+pins the compiled runtime dependencies, while the source record pins every
+executed Kairyu Python file and the engine rollup. Assembly requires the image
+inspect plus each arm's full container ID and created/exited inspect pair. It
+validates both provenance authorities and those lifecycle records, embeds
+their descriptors in the combined raw, and copies the exact input files into
+the artifact's `container-metadata/` directory.
+
+```bash
+python bench/agentic_kv_tier_f4b_bench.py assemble \
+  --raw round0-off-raw.jsonl \
+  --raw round0-on-raw.jsonl \
+  --raw round1-on-raw.jsonl \
+  --raw round1-off-raw.jsonl \
+  --metadata-dir metadata \
+  --output-dir bench/results/<f4b-performance-artifact> --assert-gate
+python bench/agentic_kv_tier_f4b_bench.py verify \
+  --artifact bench/results/<f4b-performance-artifact> --assert-gate
+python bench/agentic_kv_tier_f4b_bench.py replay \
+  --raw \
+    bench/results/<f4b-performance-artifact>/agentic-kv-tier-f4b-raw.jsonl \
+  --assert-gate
+python bench/agentic_kv_tier_f4b_bench.py seal-quality \
+  --performance-artifact bench/results/<f4b-performance-artifact> \
+  --quality-raw quality-off-raw.jsonl \
+  --quality-raw quality-on-raw.jsonl \
+  --quality-metadata-dir quality-metadata \
+  --output-dir bench/results/<f4b-artifact> --assert-gate
+python bench/agentic_kv_tier_f4b_bench.py verify-quality \
+  --artifact bench/results/<f4b-artifact> --assert-gate
+python bench/agentic_kv_tier_f4b_bench.py replay-quality \
+  --performance-raw \
+    bench/results/<f4b-artifact>/agentic-kv-tier-f4b-raw.jsonl \
+  --quality-raw \
+    bench/results/<f4b-artifact>/agentic-kv-tier-f4b-quality-raw.jsonl \
+  --assert-gate
+```
+
+`replay` recomputes the verdict from the combined raw and validates its
+embedded container lifecycle. `verify` does that same replay, checks the
+retained manifest, and additionally rehashes every retained
+`container-metadata/` byte against the embedded descriptors.
+`replay-quality` independently recomputes the distribution verdict from the
+unchanged performance raw plus the quality raw, while `verify-quality` also
+rehashes both metadata trees and both retained manifests. A publishable
+artifact therefore retains the performance and quality combined raw files,
+both manifests, and the complete `container-metadata/` and
+`quality-container-metadata/` trees together.
+
+The complete clean-source container procedure is in
+`docs/gpu-runbook.md` §9.8b. F4b is closed by the retained Qwen3-32B TP4
+artifact at
+`bench/results/g5-f4b-agentic-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
+Tiering raised the pooled engine prefix-hit rate from 47.7941% to 60.2338%
+(+12.4397 percentage points). The pooled TPOT p99 ratio was 1.03721 and the
+cohort-ratio geometric mean was 1.04488, both within 1.10. No tier counter
+advanced after first content, while the decode allocation control fired.
+The separate quality arms reproduced their parent outputs, cache usage, and
+per-request tier counters exactly. Across 3,968 comparable generated-prefix
+positions the maximum selected-logprob difference was 0.195256 nat; the
+maximum reciprocal difference at four first divergences was 0.213124 nat.
+Every divergent tier-on request restored 160 pages with no fallback or
+ownership failure. Sealing, retained-copy verification, and independent raw
+replay all passed.
+
 ## Fixtures, results, and wheel verification
 
 The eight installed fixtures are synthetic plumbing inputs, never substitutes
@@ -324,7 +451,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 55 registered wrappers through
+The first command separately exercises all 56 registered wrappers through
 both their path and module `--help` forms. It runs once in CI, on Python 3.12,
 after the declared development dependencies are synced, without duplicating
 110 subprocesses in every portable test cell.

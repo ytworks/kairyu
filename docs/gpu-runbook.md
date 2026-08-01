@@ -975,6 +975,325 @@ image, and drill are unchanged.
   and
   `2947d27dcb51a227ec9e21c72a4e435e693dbb675ff683632dd285cfc86d6611`.
 
+- 9.8b Agentic DRAM-tier on/off trace (#188, G5 F4b): run four fresh Qwen3-32B
+  TP4 arms from one detached clean source commit and the exact immutable
+  runtime image used to calibrate the retained F4a TP4 profile. Cohort A is
+  physical GPUs 0--3 and cohort B is physical GPUs 4--7. Execute, in order,
+  round-0 off on A, round-0 on on B, round-1 on on A, and round-1 off on B.
+  Every container must exit and release its four GPUs before the next starts;
+  never run any pair concurrently. This AB/BA arm order and cohort swap
+  controls for both elapsed-time order and a fixed four-GPU cohort effect.
+
+  The trace and gates are fixed before measurement: 16 sessions by eight
+  turns, a 2,048-token fleet-shared prefix, 512 new session-history tokens per
+  turn, and exactly 32 output tokens per request. The tier-on arms must use the
+  retained F4a Qwen3-32B TP4 profile, without editing it; tier-off arms must not
+  receive a profile. Assembly independently recomputes pooled and per-cohort
+  engine cached-token rates, request-level nearest-rank
+  `stream-terminal-token-v1` TPOT p99, and the pooled plus cohort-geometric-mean
+  1.10 noninferiority gates. Synchronous `EngineLoop` step-boundary evidence
+  must show no post-first-token offload/restore counter movement and must see
+  the free-page decrease from output 16 to 17. That page-boundary control makes
+  the decode-critical-path exclusion check non-vacuous.
+
+  Cross-arm free-running output equality is diagnostic, not a correctness
+  gate. A different cache-prefill shape can resolve a BF16 near-tie to another
+  greedy token; positions after that first token then no longer share an input
+  prefix. Instead, after the timing run, execute a timing-nonbinding quality
+  companion on cohort A: one fresh tier-off container followed by one fresh
+  tier-on container, both requesting top-64 logprobs. Before the first
+  divergence, selected-token logprobs must differ by at most 0.25 nat. At the
+  first divergence, both selected tokens must appear in the reciprocal top-64
+  view and each cross-arm difference must be at most 0.25 nat. Never compare
+  positions after divergence. The quality runs must exactly reproduce the
+  corresponding cohort-A performance arm's prompts, outputs, cached-token
+  usage, runtime, and tier behavior, and retain full Docker lifecycle records.
+  Logprob-enabled timestamps are never substituted for the performance TPOT.
+
+  Commit the implementation and focused tests before measurement. Reuse the
+  content-addressed F4a image below; rebuilding the same package versions is
+  not equivalent because the retained profile binds the compiled attention
+  runtime identity. The image's OCI revision records the source used to build
+  that calibrated runtime, while the read-only source mount independently
+  records and supplies the Kairyu code under measurement. Do not use a dirty
+  source bind mount, a moving image tag, another image or revision, an F4a
+  profile from a different checkpoint/TP/layout/backend, host networking, or a
+  shared arm cache. The model checkpoint, container provenance, measured
+  source, calibrated image, and F4a profile identities must remain stable
+  across all four arms.
+
+  ```bash
+  set -euo pipefail
+  COMMIT=$(git rev-parse HEAD)
+  SESSION_ROOT=$(mktemp -d /tmp/kairyu-f4b.XXXXXX)
+  SOURCE_ROOT="$SESSION_ROOT/source"
+  RUN_ROOT="$SESSION_ROOT/evidence"
+  HOST_UID=$(id -u)
+  HOST_GID=$(id -g)
+
+  git clone --no-hardlinks . "$SOURCE_ROOT"
+  git -C "$SOURCE_ROOT" switch --detach "$COMMIT"
+  test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$COMMIT"
+  test -z "$(git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all)"
+
+  F4A_PROFILE=/workspace/kairyu/bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/dram-kv-tier-qwen3-32b-tp4-profile.json
+  test -s "$SOURCE_ROOT/${F4A_PROFILE#/workspace/kairyu/}"
+
+  IMAGE_ID=sha256:25543ae9cbc9d2e80f1b4be2193d138486adb91c89a02cdbd0be0e62a1cc67be
+  IMAGE_REVISION=edd535f7018695fc03c479a86fbd690174cca5ef
+  test "$(docker image inspect --format '{{.Id}}' "$IMAGE_ID")" = "$IMAGE_ID"
+  test "$(docker image inspect --format \
+    '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$IMAGE_ID")" = "$IMAGE_REVISION"
+  mapfile -t REPO_DIGESTS < <(docker image inspect --format \
+    '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE_ID")
+  REPO_ARGS=()
+  for digest in "${REPO_DIGESTS[@]}"; do
+    if test -n "$digest"; then
+      REPO_ARGS+=(--repo-digest "$digest")
+    fi
+  done
+
+  mkdir -p "$RUN_ROOT/metadata" "$RUN_ROOT/artifact"
+  docker image inspect "$IMAGE_ID" > "$RUN_ROOT/metadata/image-inspect.json"
+
+  run_arm() {
+    label=$1
+    arm=$2
+    round=$3
+    cohort=$4
+    physical_gpus=$5
+    mkdir -p \
+      "$RUN_ROOT/$label/triton-cache" \
+      "$RUN_ROOT/$label/flashinfer-workspace" \
+      "$RUN_ROOT/metadata/$label"
+
+    PROFILE_ARGS=()
+    if test "$arm" = on; then
+      PROFILE_ARGS=(--profile "$F4A_PROFILE")
+    fi
+
+    CID=$(docker create \
+      --name "kairyu-f4b-${label}-${COMMIT:0:12}" \
+      --gpus "\"device=$physical_gpus\"" \
+      --user "$HOST_UID:$HOST_GID" \
+      --entrypoint /app/.venv/bin/python \
+      --ulimit memlock=-1:-1 --ipc=host \
+      -e GLOO_SOCKET_IFNAME=lo \
+      -e TRITON_CACHE_DIR=/evidence/triton-cache \
+      -e FLASHINFER_WORKSPACE_BASE=/evidence/flashinfer-workspace \
+      -w /workspace/kairyu \
+      --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+      --mount \
+        type=volume,src=kairyu-qwen3-32b_qwen3-32b,dst=/models/qwen3-32b,volume-subpath=qwen3-32b,readonly \
+      --mount "type=bind,src=$RUN_ROOT/$label,dst=/evidence" \
+      --mount \
+        "type=bind,src=$RUN_ROOT/metadata/$label,dst=/run/kairyu-meta,readonly" \
+      "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py run \
+        --arm "$arm" --round "$round" --cohort "$cohort" \
+        --model-path /models/qwen3-32b \
+        "${PROFILE_ARGS[@]}" \
+        --output "/evidence/$label-raw.jsonl" \
+        --image-id "$IMAGE_ID" \
+        --container-id-file /run/kairyu-meta/container-id \
+        "${REPO_ARGS[@]}")
+    test "${#CID}" -eq 64
+    test "$(docker inspect --format '{{.Config.Hostname}}' "$CID")" \
+      = "${CID:0:12}"
+    test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$CID")" \
+      != host
+    printf '%s\n' "$CID" > "$RUN_ROOT/metadata/$label/container-id"
+    docker inspect "$CID" \
+      > "$RUN_ROOT/metadata/$label/container-inspect-created.json"
+    docker start -a "$CID" || {
+      docker inspect "$CID" \
+        > "$RUN_ROOT/metadata/$label/container-inspect-exited.json"
+      exit 1
+    }
+    test "$(docker inspect --format '{{.State.ExitCode}}' "$CID")" = 0
+    test "$(docker inspect --format '{{.State.Running}}' "$CID")" = false
+    test -s "$RUN_ROOT/$label/$label-raw.jsonl"
+    docker inspect "$CID" \
+      > "$RUN_ROOT/metadata/$label/container-inspect-exited.json"
+  }
+
+  run_arm round0-off off 0 A 0,1,2,3
+  run_arm round0-on  on  0 B 4,5,6,7
+  run_arm round1-on  on  1 A 0,1,2,3
+  run_arm round1-off off 1 B 4,5,6,7
+  ```
+
+  Keep all four stopped containers until sealing and replay finish. Assemble,
+  verify, and independently replay inside the same immutable image; these
+  offline commands use no GPU. A failed gate is a measured failure, not an
+  environment skip, and must not be edited into a pass.
+
+  ```bash
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
+    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py assemble \
+      --raw /evidence/round0-off/round0-off-raw.jsonl \
+      --raw /evidence/round0-on/round0-on-raw.jsonl \
+      --raw /evidence/round1-on/round1-on-raw.jsonl \
+      --raw /evidence/round1-off/round1-off-raw.jsonl \
+      --metadata-dir /evidence/metadata \
+      --output-dir /evidence/artifact --assert-gate
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
+    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py verify \
+      --artifact /evidence/artifact --assert-gate
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
+    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py replay \
+      --raw /evidence/artifact/agentic-kv-tier-f4b-raw.jsonl \
+      --assert-gate
+  ```
+
+  Run and seal the quality companion only after the performance artifact
+  passes. A previously retained performance artifact may be extended from a
+  later clean harness commit without rerunning its timing arms only when the
+  verifier proves that the engine and every other bound runtime/source file
+  are byte-identical; only this benchmark script may differ. The quality
+  outputs and cached-token usage must still exactly reproduce the matching
+  parent arms.
+
+  ```bash
+  PERFORMANCE_ARTIFACT="$RUN_ROOT/artifact"
+  PERFORMANCE_RAW="$PERFORMANCE_ARTIFACT/agentic-kv-tier-f4b-raw.jsonl"
+  PERFORMANCE_RAW_SHA256=$(sha256sum "$PERFORMANCE_RAW" | awk '{print $1}')
+  QUALITY_METADATA="$RUN_ROOT/quality-metadata"
+  mkdir -p "$QUALITY_METADATA"
+  docker image inspect "$IMAGE_ID" > "$QUALITY_METADATA/image-inspect.json"
+
+  run_quality_arm() {
+    label=$1
+    arm=$2
+    mkdir -p \
+      "$RUN_ROOT/$label/triton-cache" \
+      "$RUN_ROOT/$label/flashinfer-workspace" \
+      "$QUALITY_METADATA/$label"
+    PROFILE_ARGS=()
+    if test "$arm" = on; then
+      PROFILE_ARGS=(--profile "$F4A_PROFILE")
+    fi
+
+    CID=$(docker create \
+      --name "kairyu-f4b-${label}-${COMMIT:0:12}" \
+      --gpus '"device=0,1,2,3"' \
+      --user "$HOST_UID:$HOST_GID" \
+      --entrypoint /app/.venv/bin/python \
+      --ulimit memlock=-1:-1 --ipc=host \
+      -e GLOO_SOCKET_IFNAME=lo \
+      -e TRITON_CACHE_DIR=/evidence/triton-cache \
+      -e FLASHINFER_WORKSPACE_BASE=/evidence/flashinfer-workspace \
+      -w /workspace/kairyu \
+      --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+      --mount \
+        type=volume,src=kairyu-qwen3-32b_qwen3-32b,dst=/models/qwen3-32b,volume-subpath=qwen3-32b,readonly \
+      --mount "type=bind,src=$RUN_ROOT/$label,dst=/evidence" \
+      --mount \
+        "type=bind,src=$QUALITY_METADATA/$label,dst=/run/kairyu-meta,readonly" \
+      "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py quality-run \
+        --arm "$arm" --cohort A \
+        --performance-raw-sha256 "$PERFORMANCE_RAW_SHA256" \
+        --model-path /models/qwen3-32b \
+        "${PROFILE_ARGS[@]}" \
+        --output "/evidence/$label-raw.jsonl" \
+        --image-id "$IMAGE_ID" \
+        --container-id-file /run/kairyu-meta/container-id \
+        "${REPO_ARGS[@]}")
+    test "${#CID}" -eq 64
+    printf '%s\n' "$CID" > "$QUALITY_METADATA/$label/container-id"
+    docker inspect "$CID" \
+      > "$QUALITY_METADATA/$label/container-inspect-created.json"
+    docker start -a "$CID" || {
+      docker inspect "$CID" \
+        > "$QUALITY_METADATA/$label/container-inspect-exited.json"
+      exit 1
+    }
+    test "$(docker inspect --format '{{.State.ExitCode}}' "$CID")" = 0
+    test "$(docker inspect --format '{{.State.Running}}' "$CID")" = false
+    test -s "$RUN_ROOT/$label/$label-raw.jsonl"
+    docker inspect "$CID" \
+      > "$QUALITY_METADATA/$label/container-inspect-exited.json"
+  }
+
+  run_quality_arm quality-off off
+  run_quality_arm quality-on on
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
+    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py seal-quality \
+      --performance-artifact /evidence/artifact \
+      --quality-raw /evidence/quality-off/quality-off-raw.jsonl \
+      --quality-raw /evidence/quality-on/quality-on-raw.jsonl \
+      --quality-metadata-dir /evidence/quality-metadata \
+      --output-dir /evidence/artifact-with-quality --assert-gate
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
+    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py verify-quality \
+      --artifact /evidence/artifact-with-quality --assert-gate
+
+  docker run --rm --user "$HOST_UID:$HOST_GID" \
+    --entrypoint /app/.venv/bin/python \
+    -w /workspace/kairyu \
+    --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
+    --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
+    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py replay-quality \
+      --performance-raw \
+        /evidence/artifact-with-quality/agentic-kv-tier-f4b-raw.jsonl \
+      --quality-raw \
+        /evidence/artifact-with-quality/agentic-kv-tier-f4b-quality-raw.jsonl \
+      --assert-gate
+  ```
+
+  Assembly validates the image inspect and all four full-container-ID plus
+  created/exited inspect sets, embeds normalized lifecycle descriptors in the
+  combined raw, and copies those exact files to
+  `artifact/container-metadata/`; do not copy or rewrite them manually.
+  `replay` validates the embedded lifecycle from the combined raw, while
+  `verify` additionally rehashes every retained metadata file against those
+  descriptors. Quality sealing performs the same checks for its two
+  containers and retains them under `quality-container-metadata/`. Retain the
+  six input raw JSONL files, both sealed combined raw files and manifests, F4a
+  profile identity, and both complete metadata trees together. Copy
+  `artifact-with-quality/` to
+  `bench/results/g5-f4b-agentic-kv-tier-qwen3-32b-<gpu>-<date>/` only after the
+  retained copy itself passes `verify-quality` and `replay-quality`. Then
+  remove only the six named measurement containers; never use a broad Docker
+  prune here.
+
+  The retained closure artifact is
+  `bench/results/g5-f4b-agentic-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
+  Its unchanged performance raw SHA-256 is
+  `63ee8bc89bd19e331354419e1f1511428b90b60c2785f71c218c7df113637e05`;
+  its quality raw SHA-256 is
+  `aaa989e790aa3c857048fd4ab6d6be9e47a1e05c61f136774a8a182f07492109`.
+  The pooled prefix-hit-rate gain was 12.4397 percentage points, the pooled
+  TPOT p99 ratio was 1.03721, and the cohort-ratio geometric mean was 1.04488.
+  Quality replay compared 3,968 aligned positions with a 0.195256-nat maximum
+  difference and four reciprocal first-divergence pairs with a 0.213124-nat
+  maximum difference. Seal, retained-copy verification, and independent
+  replay all passed.
+
 - 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
   one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current
   retained production image predates E4M3 attention AOT and contains no

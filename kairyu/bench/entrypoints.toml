@@ -21,6 +21,15 @@ schema_version = 1
 "bench.tp_sampling_owner_qwen" = ["bench.parity_tp"]
 
 [[entrypoints]]
+path = "bench/agentic_kv_tier_f4b_bench.py"
+module = "bench.agentic_kv_tier_f4b_bench"
+kind = "formal-gate"
+requires = ["engine", "gpu", "hf"]
+documentation = ["bench/README.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
 path = "bench/attention_backend_profile_bench.py"
 module = "bench.attention_backend_profile_bench"
 kind = "operator"

@@ -250,7 +250,7 @@ and production-router SHA-256
 | Gate | Target | Where proven |
 |---|---|---|
 | F4a | DRAM offload: restore-from-DRAM beats recompute above a measured prefix-length crossover; the crossover is published, not assumed | **Closed** — retained schema-v2 Qwen3-32B evidence publishes TP4=1,024 tokens and TP8≤16 tokens |
-| F4b | Agentic multi-turn trace with tiering on: fleet prefix-hit-rate gain reported; TPOT p99 unregressed (offload work stays off the decode critical path) | GPU bench |
+| F4b | Agentic multi-turn trace with tiering on: fleet prefix-hit-rate gain reported; TPOT p99 unregressed (offload work stays off the decode critical path) | **Closed** — retained Qwen3-32B TP4 performance plus distribution-quality evidence |
 | F4c | Global-pool decision doc: F2's telemetry quantifies cross-replica duplicate-prefix mass; buy (Mooncake/LMCache) vs build (KVTransport extension) decided with data — m7 D6's revisit trigger honored | decision doc |
 
 F4a's native implementation is an opt-in, bounded pinned-DRAM slab per replica
@@ -278,6 +278,30 @@ clean commit `edd535f7018695fc03c479a86fbd690174cca5ef`, immutable image
 the same checkpoint, and the exact versioned transfer backend. Assembly,
 retained-copy verification, and independent raw replay all passed without
 editing or dropping a sample.
+
+F4b is closed by the retained six-container Qwen3-32B TP4 artifact at
+`bench/results/g5-f4b-agentic-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
+Four sequential AB/BA performance arms raised the pooled engine prefix-hit
+rate from 47.7941% to 60.2338%, a 12.4397-point gain that was identical in
+both GPU cohorts. The pooled tier-on/off TPOT p99 ratio was 1.03721 and the
+geometric mean of the cohort ratios was 1.04488, both within the predeclared
+1.10 noninferiority bound. Step-level evidence saw the decode page-allocation
+control but no offload or restore counter movement after first content.
+
+Two fresh sequential cohort-A quality arms requested top-64 logprobs without
+contributing timing evidence. They exactly reproduced the corresponding
+performance arms' prompts, outputs, cached-token usage, and per-request tier
+counters. The maximum selected-logprob difference across 3,968 positions
+before any generated-prefix divergence was 0.195256 nat. The maximum
+reciprocal selected-token difference at the four first divergences was
+0.213124 nat, below the fixed 0.25-nat bound; all four tier-on requests
+restored 160 pages with zero fallback or ownership failure. The performance
+raw SHA-256 is
+`63ee8bc89bd19e331354419e1f1511428b90b60c2785f71c218c7df113637e05`,
+the quality raw SHA-256 is
+`aaa989e790aa3c857048fd4ab6d6be9e47a1e05c61f136774a8a182f07492109`,
+and sealing, retained-copy byte verification, and independent replay all
+passed.
 
 F4c is closed by the 2026-07-31 m7 D6 amendment and the independently
 replayable artifact at
