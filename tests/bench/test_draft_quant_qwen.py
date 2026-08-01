@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from bench import draft_quant_qwen as gate
 
@@ -14,6 +15,9 @@ def _row(*, accepted: int, draft_ms: float, verify_ms: float) -> dict[str, objec
         "verify_ms": verify_ms,
         "cycle_ms": draft_ms + verify_ms,
         "target_logits_finite": True,
+        "teacher_prefix_valid": True,
+        "target_correction_exact": True,
+        "target_correction_logprob_delta": 0.02,
         "target_correction_valid": True,
     }
 
@@ -70,6 +74,45 @@ def test_eagle_verification_includes_root_and_scores_rejection_or_bonus():
     ) == (0, 14, True)
 
 
+def test_reciprocal_selected_logprob_delta_accepts_near_tie_not_material_shift():
+    assert gate.DEFAULT_TARGET_LOGPROB_ABS_DELTA == 0.25
+    reference_logits = torch.tensor([1.00, 0.99, -3.0])
+    reference_logprobs = torch.log_softmax(reference_logits, dim=-1)
+    near_tie_logits = torch.tensor([0.99, 1.00, -3.0])
+    material_shift_logits = torch.tensor([-1.0, 2.0, -3.0])
+
+    near_tie = gate.reciprocal_selected_logprob_delta(
+        reference_logprobs,
+        near_tie_logits,
+        reference_token=0,
+        candidate_token=1,
+    )
+    material = gate.reciprocal_selected_logprob_delta(
+        reference_logprobs,
+        material_shift_logits,
+        reference_token=0,
+        candidate_token=1,
+    )
+    evidence = gate.reciprocal_selected_logprob_evidence(
+        reference_logprobs,
+        near_tie_logits,
+        reference_token=0,
+        candidate_token=1,
+    )
+
+    assert near_tie < gate.DEFAULT_TARGET_LOGPROB_ABS_DELTA
+    assert material > gate.DEFAULT_TARGET_LOGPROB_ABS_DELTA
+    assert evidence["teacher_selected_token"] == 0
+    assert evidence["verification_selected_token"] == 1
+    assert evidence["max_abs_delta"] == pytest.approx(near_tie)
+    assert {
+        "teacher_selected_logprob_under_teacher",
+        "teacher_selected_logprob_under_verification",
+        "verification_selected_logprob_under_teacher",
+        "verification_selected_logprob_under_verification",
+    } <= evidence.keys()
+
+
 def test_fp8_metadata_declares_the_validated_dialect_and_dense_exclusions():
     config = gate.fp8_config(("fc", "lm_head"))
     group = config["config_groups"]["group_0"]
@@ -117,6 +160,10 @@ def test_summary_uses_committed_tokens_and_full_cycle_wall_time():
     assert summary["forward_peak_extra_bytes"] == 32
     assert summary["draft_logits_finite"] is True
     assert summary["target_logits_finite"] is True
+    assert summary["teacher_prefixes_valid"] is True
+    assert summary["target_corrections_exact"] is True
+    assert summary["target_correction_exact_count"] == 2
+    assert summary["max_target_correction_logprob_delta"] == 0.02
     assert summary["target_corrections_valid"] is True
 
 

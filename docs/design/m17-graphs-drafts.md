@@ -263,6 +263,12 @@ output (DeepSeek convention).
   sequence ends with the target-produced root. Verification evaluates
   `[root, *proposals]`; proposal decisions use all but the final target-logit
   row, and the final row supplies the all-accepted bonus/correction.
+  Accepted proposal prefixes remain exact against the sequential teacher.
+  Because sequential and multi-token target shapes can cross a BF16 near tie,
+  correction parity binds both selected tokens under both distributions to the
+  established 0.25-nat reciprocal log-probability limit; exact correction
+  equality remains a reported diagnostic rather than an impossible bitwise
+  cross-shape requirement.
   The fixed public trained head is compared dense versus offline-packed FP8 on
   one real Qwen3-32B target with identical teacher traces, exact greedy target
   correction, acceptance, latency, memory, and committed-token goodput.

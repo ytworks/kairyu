@@ -211,7 +211,14 @@ receives identical target embeddings, auxiliary residuals, KV contents, and
 verification positions. The report retains exact greedy proposals,
 target-corrected committed-token counts, draft and verification timing,
 acceptance, module/CUDA memory, generated-checkpoint hashes, and environment
-provenance. The operator selects the highest-goodput quantized arm that retains
+provenance. Accepted prefixes must exactly match the independently generated
+teacher trace. Target verification and sequential teacher shapes may choose
+different tokens only when both selected tokens remain within the established
+0.25-nat reciprocal selected-logprob bound; exact correction counts and the
+two token IDs, four cross-distribution log-probabilities, individual deltas,
+and maximum delta remain visible in the artifact. The bound is fixed by the
+formal operator and is not a CLI-adjustable pass criterion. The operator selects the
+highest-goodput quantized arm that retains
 at least 95% of dense acceptance, then requires memory reduction and at least
 95% of dense standalone-cycle committed-token goodput. Five prompts and three
 repeats rotate all five arm orders after every measured context; every draft

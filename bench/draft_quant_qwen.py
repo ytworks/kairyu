@@ -15,6 +15,7 @@ import concurrent.futures
 import gc
 import hashlib
 import json
+import math
 import statistics
 import subprocess
 import tempfile
@@ -23,7 +24,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+DEFAULT_TARGET_LOGPROB_ABS_DELTA = 0.25
 PUBLIC_DRAFT_REPOSITORY = "thoughtworks/Qwen3-32B-Eagle3"
 PUBLIC_DRAFT_REVISION = "ba10360e72cc5208048695e713c2d45781921013"
 PUBLIC_DRAFT_WEIGHTS_SHA256 = "65fd3a6ad0f78f82e44e948e61096c914159912c31948bbfd90a73af5c973562"
@@ -76,6 +78,7 @@ class PromptTrace:
     prompt_index: int
     prompt_tokens: int
     sequence: tuple[int, ...]
+    teacher_logprobs: dict[int, Any]
     aux_hidden: Any
     pool: Any
     page_table: list[int]
@@ -278,6 +281,75 @@ def score_eagle_verification(
     return accepted, correction, valid
 
 
+def reciprocal_selected_logprob_evidence(
+    reference_logprobs,
+    candidate_logits,
+    reference_token: int,
+    candidate_token: int,
+) -> dict[str, float | int]:
+    """Compare both selected tokens under two same-prefix target distributions."""
+
+    import torch
+
+    if reference_logprobs.ndim != 1 or candidate_logits.ndim != 1:
+        raise ValueError("target parity distributions must be rank-1")
+    if reference_logprobs.shape != candidate_logits.shape:
+        raise ValueError("target parity distributions must have the same vocabulary width")
+    token_ids = sorted({reference_token, candidate_token})
+    if not token_ids or token_ids[0] < 0 or token_ids[-1] >= reference_logprobs.shape[0]:
+        raise ValueError("target parity selected token falls outside the vocabulary")
+    candidate_logprobs = torch.log_softmax(candidate_logits.float(), dim=-1)
+    reference_under_reference = float(reference_logprobs[reference_token])
+    reference_under_candidate = float(candidate_logprobs[reference_token].item())
+    candidate_under_reference = float(reference_logprobs[candidate_token])
+    candidate_under_candidate = float(candidate_logprobs[candidate_token].item())
+    reference_delta = abs(reference_under_reference - reference_under_candidate)
+    candidate_delta = abs(candidate_under_reference - candidate_under_candidate)
+    maximum = max(reference_delta, candidate_delta)
+    if not all(
+        math.isfinite(value)
+        for value in (
+            reference_under_reference,
+            reference_under_candidate,
+            candidate_under_reference,
+            candidate_under_candidate,
+            reference_delta,
+            candidate_delta,
+            maximum,
+        )
+    ):
+        maximum = float("inf")
+    return {
+        "teacher_selected_token": reference_token,
+        "verification_selected_token": candidate_token,
+        "teacher_selected_logprob_under_teacher": reference_under_reference,
+        "teacher_selected_logprob_under_verification": reference_under_candidate,
+        "verification_selected_logprob_under_teacher": candidate_under_reference,
+        "verification_selected_logprob_under_verification": candidate_under_candidate,
+        "teacher_selected_abs_delta": reference_delta,
+        "verification_selected_abs_delta": candidate_delta,
+        "max_abs_delta": maximum,
+    }
+
+
+def reciprocal_selected_logprob_delta(
+    reference_logprobs,
+    candidate_logits,
+    reference_token: int,
+    candidate_token: int,
+) -> float:
+    """Return only the binding maximum from reciprocal evidence."""
+
+    return float(
+        reciprocal_selected_logprob_evidence(
+            reference_logprobs,
+            candidate_logits,
+            reference_token,
+            candidate_token,
+        )["max_abs_delta"]
+    )
+
+
 def _percentile(values: list[float], fraction: float) -> float:
     if not values:
         raise ValueError("cannot summarize an empty sample")
@@ -333,6 +405,18 @@ def summarize_arm(
         "cycle_committed_tokens_per_second": committed / total_seconds,
         "draft_logits_finite": draft_logits_finite,
         "target_logits_finite": all(bool(row["target_logits_finite"]) for row in rows),
+        "teacher_prefixes_valid": all(
+            bool(row["teacher_prefix_valid"]) for row in rows
+        ),
+        "target_corrections_exact": all(
+            bool(row["target_correction_exact"]) for row in rows
+        ),
+        "target_correction_exact_count": sum(
+            bool(row["target_correction_exact"]) for row in rows
+        ),
+        "max_target_correction_logprob_delta": max(
+            float(row["target_correction_logprob_delta"]) for row in rows
+        ),
         "target_corrections_valid": all(bool(row["target_correction_valid"]) for row in rows),
     }
 
@@ -422,8 +506,20 @@ def _build_trace(
         aux_layer_ids=aux_layer_ids,
     )
     sequence = list(prompt_ids)
+    teacher_logprobs: dict[int, torch.Tensor] = {}
     for _ in range(teacher_tokens):
-        next_token = int(torch.argmax(target.logits(hidden[-1])).item())
+        next_logits = target.logits(hidden[-1])
+        # Retain the complete reference distribution outside the measured
+        # cycle. It lets target-verify shape differences be judged by the
+        # established reciprocal selected-logprob bound instead of requiring
+        # brittle bit-identical greedy output across different target shapes.
+        # Key by the output token index predicted by this row. That lets the
+        # verifier use the same ``teacher_index`` for the expected token and
+        # its reference distribution without a second off-by-one convention.
+        teacher_logprobs[len(sequence)] = (
+            torch.log_softmax(next_logits.float(), dim=-1).detach().cpu()
+        )
+        next_token = int(torch.argmax(next_logits).item())
         position = len(sequence)
         sequence.append(next_token)
         hidden, aux_row = target.forward_tokens_with_aux(
@@ -444,6 +540,7 @@ def _build_trace(
         prompt_index=prompt_index,
         prompt_tokens=len(prompt_ids),
         sequence=tuple(sequence),
+        teacher_logprobs=teacher_logprobs,
         aux_hidden=aux_hidden,
         pool=pool,
         page_table=page_table,
@@ -458,6 +555,7 @@ def _evaluate_trace(
     *,
     draft_tokens: int,
     aux_layer_ids: tuple[int, ...],
+    max_target_logprob_delta: float,
     check_draft_finite: bool = False,
     device,
 ):
@@ -543,16 +641,57 @@ def _evaluate_trace(
         verify_seconds = time.perf_counter() - started
 
         target_tokens = [int(token) for token in torch.argmax(verify_logits[:-1], dim=-1).tolist()]
-        accepted, correction, target_correction_valid = score_eagle_verification(
-            trace.sequence,
-            anchor,
-            proposals,
-            target_tokens,
-            int(torch.argmax(verify_logits[-1]).item()),
+        accepted = accepted_prefix(proposals, target_tokens)
+        bonus_token = (
+            int(torch.argmax(verify_logits[-1]).item())
+            if accepted == draft_tokens
+            else -1
         )
-        target_logits_finite = bool(torch.isfinite(verify_logits).all())
+        correction = (
+            target_tokens[accepted]
+            if accepted < draft_tokens
+            else bonus_token
+        )
         torch.cuda.synchronize(device)
         cycle_seconds = time.perf_counter() - cycle_started
+
+        scored_accepted, scored_correction, target_correction_exact = (
+            score_eagle_verification(
+                trace.sequence,
+                anchor,
+                proposals,
+                target_tokens,
+                bonus_token,
+            )
+        )
+        if (scored_accepted, scored_correction) != (accepted, correction):
+            raise AssertionError("EAGLE correction scorer disagrees with measured selection")
+
+        teacher_index = anchor + 1 + accepted
+        teacher_correction = trace.sequence[teacher_index]
+        teacher_prefix_valid = (
+            proposals[:accepted]
+            == list(trace.sequence[anchor + 1 : teacher_index])
+        )
+        correction_logits = (
+            verify_logits[accepted]
+            if accepted < draft_tokens
+            else verify_logits[-1]
+        )
+        target_correction_logprob_evidence = reciprocal_selected_logprob_evidence(
+            trace.teacher_logprobs[teacher_index],
+            correction_logits,
+            teacher_correction,
+            correction,
+        )
+        target_correction_logprob_delta = float(
+            target_correction_logprob_evidence["max_abs_delta"]
+        )
+        target_logits_finite = bool(torch.isfinite(verify_logits).all())
+        target_correction_valid = (
+            teacher_prefix_valid
+            and target_correction_logprob_delta <= max_target_logprob_delta
+        )
         rows.append(
             {
                 "prompt_index": trace.prompt_index,
@@ -569,6 +708,11 @@ def _evaluate_trace(
                 "verification_tokens": verification_tokens,
                 "target_tokens": target_tokens,
                 "correction": correction,
+                "teacher_correction": teacher_correction,
+                "teacher_prefix_valid": teacher_prefix_valid,
+                "target_correction_exact": target_correction_exact,
+                "target_correction_logprob_delta": target_correction_logprob_delta,
+                "target_correction_logprob_evidence": target_correction_logprob_evidence,
                 "draft_logits_finite": draft_logits_finite,
                 "target_logits_finite": target_logits_finite,
                 "target_correction_valid": target_correction_valid,
@@ -783,6 +927,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         trace,
                         draft_tokens=args.draft_tokens,
                         aux_layer_ids=aux_layer_ids,
+                        max_target_logprob_delta=DEFAULT_TARGET_LOGPROB_ABS_DELTA,
                         check_draft_finite=True,
                         device=device,
                     )
@@ -814,6 +959,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         trace,
                         draft_tokens=args.draft_tokens,
                         aux_layer_ids=aux_layer_ids,
+                        max_target_logprob_delta=DEFAULT_TARGET_LOGPROB_ABS_DELTA,
                         device=device,
                     )
                     peak = torch.cuda.max_memory_allocated(device) - baseline
@@ -886,6 +1032,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "balanced_arm_order": len(measurement_schedule) % len(ARMS) == 0,
         "at_least_three_repeats": args.repeats >= 3,
         "flashinfer_target_verification": "flashinfer" in backend_components.values(),
+        "target_logprob_bound_pinned": DEFAULT_TARGET_LOGPROB_ABS_DELTA == 0.25,
         "dense_acceptance_sane": float(dense["acceptance_rate"]) >= args.min_dense_acceptance,
         "all_finite": all(
             bool(summary["draft_logits_finite"]) and bool(summary["target_logits_finite"])
@@ -921,6 +1068,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "min_acceptance_retention": args.min_acceptance_retention,
             "min_goodput_retention": args.min_goodput_retention,
             "min_dense_acceptance": args.min_dense_acceptance,
+            "max_target_logprob_delta": DEFAULT_TARGET_LOGPROB_ABS_DELTA,
             "measurement_scope": (
                 "standalone speculative cycle from context tensor construction "
                 "through target correction; excludes scheduler and serving"

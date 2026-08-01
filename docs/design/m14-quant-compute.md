@@ -296,4 +296,7 @@ Offline dense-to-FP8 conversion is a separate explicit helper. CUDA tests call
 the fused production modules while making any `dequantize()` path fatal; the
 real Qwen3-32B/EAGLE-3 gate separately reports dense-relative acceptance,
 latency, memory, target-corrected committed-token goodput, and complete
-checkpoint provenance.
+checkpoint provenance. Its target correctness gate requires exact teacher
+prefixes and bounds any cross-shape correction divergence using reciprocal
+selected-token log-probabilities within 0.25 nat; it does not silently discard
+or relabel divergent target output.

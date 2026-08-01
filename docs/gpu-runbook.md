@@ -136,7 +136,13 @@ provenance. Five prompts × three repeats balance all arm-order positions after
 warming every draft and multi-token verification shape.
 Quantization is opt-in: the selected arm must reduce memory while retaining at
 least 95% of dense acceptance and standalone-cycle goodput, and dense absolute
-acceptance must be at least 20%. The cycle begins with context tensor
+acceptance must be at least 20%. Accepted prefixes must equal the independently
+generated teacher trace. A target correction may differ across sequential and
+multi-token verification shapes only when reciprocal selected-token
+log-probabilities differ by at most 0.25 nat; the artifact retains exact-match
+counts, both token IDs, all four cross-distribution log-probabilities, and the
+individual/maximum deltas. The 0.25-nat bound is fixed, not operator-adjustable.
+The cycle begins with context tensor
 construction and ends after exact target correction; scheduler/HTTP serving is
 outside this issue's construction/checkpoint scope. A measured slowdown is
 reported and does not become an automatic serving default. Gate failures still
