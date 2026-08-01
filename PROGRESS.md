@@ -79,7 +79,7 @@ against the original 1.9× threshold; router p99 was 3.723 ms and affinity cache
 retention was 99.53%. The artifact therefore truthfully remains `passed: false`.
 The product owner accepted the measured 1.7993× as an explicit closure
 deviation, not as a 1.9× PASS; the original operator threshold is unchanged.
-Its packaged benchmark boundary verifies all 55 registered entrypoints from
+Its packaged benchmark boundary verifies all 56 registered entrypoints from
 the isolated wheel as well as from the checkout.
 G2 A9 is closed for the Qwen3-32B DP=2×TP4 versus TP8 report. The post-SSE-fix
 A8 comparator and TP8 arm use the same image, checkpoint, trace, cache namespace,

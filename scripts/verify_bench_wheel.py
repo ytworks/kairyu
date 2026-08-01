@@ -28,7 +28,7 @@ FIXTURE_FILES = (
 FIXTURE_PREFIX = "kairyu/bench/fixtures/"
 ENTRYPOINT_MANIFEST = "kairyu/bench/entrypoints.toml"
 CONSOLE_TARGET = "kairyu.entrypoints.cli:main"
-EXPECTED_ENTRYPOINTS = 55
+EXPECTED_ENTRYPOINTS = 56
 
 
 class VerificationError(RuntimeError):
