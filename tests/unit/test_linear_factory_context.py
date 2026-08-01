@@ -210,6 +210,7 @@ def test_mtp_loader_maps_all_packed_fusion_and_head_payloads(tmp_path):
         else:
             target = prefix + name
         checkpoint[target] = tensor.detach().contiguous()
+    (tmp_path / "config.json").write_text(json.dumps(_DSV3_RAW), encoding="utf-8")
     save_file(checkpoint, tmp_path / "model.safetensors")
 
     loaded = load_mtp_head(tmp_path, config, linear_factory=factory)

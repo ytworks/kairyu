@@ -93,6 +93,69 @@ consumes a queue — wire it), incremental detokenizer, ZMQ/msgpack process spli
 Then M3 items per m3 doc: EAGLE draft, CUDA graph capture (decode buckets), spec-decode
 scheduler protocol §2.1.
 
+### 3.1 Quantized EAGLE-3 draft checkpoint gate (#234)
+
+Run the fixed public Qwen3-32B EAGLE-3 checkpoint against the local Qwen3-32B
+target on one supported GPU. The operator converts eligible draft projections
+offline into the validated dynamic compressed-tensors FP8 dialect, reloads each
+generated checkpoint through the serving loader, and gives dense and quantized
+arms identical target embeddings, auxiliary hidden states, KV contents, and
+verification geometry:
+
+```bash
+docker run --rm --gpus device=0 --entrypoint python \
+  --user "$(id -u):$(id -g)" \
+  -e PYTHONPATH=/workspace \
+  -e FLASHINFER_WORKSPACE_BASE=/host-tmp/kairyu-issue234-flashinfer \
+  -e XDG_CACHE_HOME=/host-tmp/kairyu-issue234-cache \
+  -e TRITON_CACHE_DIR=/host-tmp/kairyu-issue234-triton \
+  -v "$PWD:/workspace:ro" \
+  -v kairyu-qwen3-32b_qwen3-32b:/model:ro \
+  -v /tmp/kairyu-issue234-eagle:/draft:ro \
+  -v /tmp:/host-tmp \
+  -w /workspace \
+  kairyu-depth-ab:20260731-issue156 \
+  /workspace/bench/draft_quant_qwen.py \
+  --model-path /model/qwen3-32b \
+  --draft-path /draft \
+  --source-commit "$(git rev-parse HEAD)" \
+  --output /host-tmp/issue-234-draft-quant-qwen3-32b-<gpu>-<date>.json \
+  --assert-gate
+```
+
+The public draft weights must match SHA-256
+`65fd3a6ad0f78f82e44e948e61096c914159912c31948bbfd90a73af5c973562`.
+Do not add `CUDA_VISIBLE_DEVICES` inside this host: its managed NVIDIA runtime
+already isolates Docker GPU 0, while the host venv's explicit override prevents
+NVML initialization. The retained invocation uses FlashInfer from the pinned
+image rather than the host venv's Torch fallback. The artifact full-hashes all
+17 target weight shards and retains per-cycle draft/target timing, exact greedy
+acceptance, target-correction validity, static and forward-peak CUDA memory,
+source identity, generated packed-checkpoint hashes, and environment
+provenance. Five prompts × three repeats balance all arm-order positions after
+warming every draft and multi-token verification shape.
+Quantization is opt-in: the selected arm must reduce memory while retaining at
+least 95% of dense acceptance and standalone-cycle goodput, and dense absolute
+acceptance must be at least 20%. Accepted prefixes must equal the independently
+generated teacher trace. A target correction may differ across sequential and
+multi-token verification shapes only when reciprocal selected-token
+log-probabilities differ by at most 0.25 nat; the artifact retains exact-match
+counts, both token IDs, all four cross-distribution log-probabilities, and the
+individual/maximum deltas. The 0.25-nat bound is fixed, not operator-adjustable.
+The cycle begins with context tensor
+construction and ends after exact target correction; scheduler/HTTP serving is
+outside this issue's construction/checkpoint scope. A measured slowdown is
+reported and does not become an automatic serving default. Gate failures still
+write the complete artifact before returning nonzero.
+
+The retained source-`d8dbdba` run passes all gates at
+`bench/results/issue-234-draft-quant-qwen3-32b-rtxpro6000-2026-07-31.json`
+(SHA-256 `850191a039edd6e3ff5ae4bf974eadeef3227b3700b1747d281c595daad63c59`).
+The selected arm is `fp8_dense_fc`: 33.33% acceptance (identical to dense),
+44.94% less module memory, and 98.74% retained standalone-cycle goodput. Its
+draft median is 1.2171× dense, so this is retained as an opt-in memory tradeoff
+and not enabled as a performance default.
+
 ## 4. Acceptance targets (goal)
 
 | Criterion | Where measured |

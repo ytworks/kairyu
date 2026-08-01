@@ -93,6 +93,15 @@ installed = false
 invocations = ["path", "module"]
 
 [[entrypoints]]
+path = "bench/draft_quant_qwen.py"
+module = "bench.draft_quant_qwen"
+kind = "formal-gate"
+requires = ["engine", "gpu", "hf"]
+documentation = ["bench/README.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
 path = "bench/dram_kv_tier_qwen.py"
 module = "bench.dram_kv_tier_qwen"
 kind = "formal-gate"

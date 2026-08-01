@@ -283,6 +283,56 @@ class DenseDecoder(nn.Module):
         return self.model.norm(hidden)
 
     @torch.no_grad()
+    def forward_tokens_with_aux(
+        self,
+        token_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_pool: PagedKVPool,
+        page_table: list[int],
+        seq_len: int,
+        aux_layer_ids: tuple[int, ...],
+        write_from: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one target pass and retain selected pre-final-norm residuals.
+
+        ``aux_layer_ids`` names decoder outputs using zero-based layer ids.
+        The returned auxiliary tensor concatenates those residual-added layer
+        outputs in ascending order along the hidden dimension.  This is the
+        EAGLE-3 target feature contract: capture happens in the same pass that
+        writes target KV, and the ordinary post-final-norm output is unchanged.
+        """
+
+        if not aux_layer_ids:
+            raise ValueError("aux_layer_ids must contain at least one layer")
+        if tuple(sorted(set(aux_layer_ids))) != aux_layer_ids:
+            raise ValueError("aux_layer_ids must be unique and strictly increasing")
+        if aux_layer_ids[0] < 0 or aux_layer_ids[-1] >= len(self.model.layers):
+            raise ValueError(
+                "aux_layer_ids must be within "
+                f"[0, {len(self.model.layers) - 1}], got {aux_layer_ids}"
+            )
+
+        hidden = self.model.embed_tokens(token_ids)
+        cos, sin = self.model.rotary_emb(positions)
+        captures: list[torch.Tensor] = []
+        capture_ids = frozenset(aux_layer_ids)
+        for index, layer in enumerate(self.model.layers):
+            hidden = layer(
+                hidden,
+                cos,
+                sin,
+                kv_pool,
+                index,
+                page_table,
+                positions,
+                seq_len,
+                write_from,
+            )
+            if index in capture_ids:
+                captures.append(hidden)
+        return self.model.norm(hidden), torch.cat(captures, dim=-1)
+
+    @torch.no_grad()
     def forward_decode_batch(
         self,
         token_ids: torch.Tensor,  # [B] one new token per sequence

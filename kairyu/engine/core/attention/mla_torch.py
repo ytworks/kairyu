@@ -30,8 +30,8 @@ def mla_scale(qk_nope_head_dim: int, qk_rope_head_dim: int) -> float:
 def _masked_softmax(scores: torch.Tensor, causal_offset: int) -> torch.Tensor:
     """scores [H, T, S]; query i attends keys [0, causal_offset + i]."""
     chunk_len, seq_len = scores.shape[-2], scores.shape[-1]
-    positions = torch.arange(chunk_len)[:, None] + causal_offset
-    mask = torch.arange(seq_len)[None, :] <= positions
+    positions = torch.arange(chunk_len, device=scores.device)[:, None] + causal_offset
+    mask = torch.arange(seq_len, device=scores.device)[None, :] <= positions
     scores = scores.masked_fill(~mask[None], float("-inf"))
     return torch.softmax(scores, dim=-1)
 
@@ -54,8 +54,7 @@ def mla_decompress(
     values = torch.einsum("sr,hrd->hsd", c_kv, w_uv)  # [H, S, d_v]
     # shared k_pe broadcast into every head
     scores = (
-        torch.einsum("thd,hsd->hts", q_nope, k_nope)
-        + torch.einsum("thd,sd->hts", q_pe, k_pe)
+        torch.einsum("thd,hsd->hts", q_nope, k_nope) + torch.einsum("thd,sd->hts", q_pe, k_pe)
     ) * scale
     attention = _masked_softmax(scores, causal_offset)
     return torch.einsum("hts,hsd->thd", attention, values)
@@ -75,8 +74,7 @@ def mla_absorbed(
     attention runs in latent space (MQA-shaped: the kv side has one head)."""
     q_latent = torch.einsum("thd,hrd->thr", q_nope, w_uk)  # [T, H, kv_lora_rank]
     scores = (
-        torch.einsum("thr,sr->hts", q_latent, c_kv)
-        + torch.einsum("thd,sd->hts", q_pe, k_pe)
+        torch.einsum("thr,sr->hts", q_latent, c_kv) + torch.einsum("thd,sd->hts", q_pe, k_pe)
     ) * scale
     attention = _masked_softmax(scores, causal_offset)
     context_latent = torch.einsum("hts,sr->thr", attention, c_kv)

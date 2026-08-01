@@ -113,6 +113,7 @@ bench/batched_prefill_qwen.py
 bench/batched_spec_verify_qwen.py
 bench/decode_page_table_cache_qwen.py
 bench/dp_scaling_g2_a8_bench.py
+bench/draft_quant_qwen.py
 bench/dram_kv_tier_qwen.py
 bench/fleet_churn_bench.py
 bench/fleet_gateway_bench.py
@@ -200,6 +201,52 @@ report `passed: false`. The product owner accepted this measured median as an
 explicit closure deviation; neither the artifact nor the operator rewrites the
 original threshold or claims a formal PASS. Evidence is retained under
 `bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/`.
+
+### Quantized EAGLE-3 draft-head evidence
+
+`bench/draft_quant_qwen.py` compares the pinned public
+`thoughtworks/Qwen3-32B-Eagle3` dense checkpoint with four offline-packed
+dynamic FP8 variants against the same real Qwen3-32B target traces. Each arm
+receives identical target embeddings, auxiliary residuals, KV contents, and
+verification positions. The report retains exact greedy proposals,
+target-corrected committed-token counts, draft and verification timing,
+acceptance, module/CUDA memory, generated-checkpoint hashes, and environment
+provenance. Accepted prefixes must exactly match the independently generated
+teacher trace. Target verification and sequential teacher shapes may choose
+different tokens only when both selected tokens remain within the established
+0.25-nat reciprocal selected-logprob bound; exact correction counts and the
+two token IDs, four cross-distribution log-probabilities, individual deltas,
+and maximum delta remain visible in the artifact. The bound is fixed by the
+formal operator and is not a CLI-adjustable pass criterion. The operator selects the
+highest-goodput quantized arm that retains
+at least 95% of dense acceptance, then requires memory reduction and at least
+95% of dense standalone-cycle committed-token goodput. Five prompts and three
+repeats rotate all five arm orders after every measured context; every draft
+and target-verify shape is warmed first. This is not production serving E2E: it
+includes context construction through target correction but excludes scheduler
+and serving overhead. It does not enable model-draft serving or turn a slower
+quantized result into a default. The exact invocation and pinned public-weight
+digest are in `docs/gpu-runbook.md` §3.1.
+
+The retained RTX PRO 6000 Blackwell run on source `d8dbdba` passes every gate.
+Dense and all four FP8 arms accepted exactly 90/270 proposals (33.33%); the
+selected `fp8_dense_fc` arm retained 100% of acceptance, used 55.06% of dense
+module memory (861,854,720 versus 1,565,296,640 bytes), and retained 98.74% of
+dense standalone-cycle goodput (25.842 versus 26.172 committed token/s). Its
+draft median was 5.218 ms versus dense 4.287 ms, so the measured result is a
+memory win with a 21.71% draft-latency cost and a 1.26% cycle-goodput cost, not
+a speedup claim. Every teacher prefix was exact. Corrections were exact in
+87/90 repeated rows per arm; the one unique cross-shape divergence had a
+0.13118-nat reciprocal delta, and the maximum over every compared correction
+was 0.16395 nat, both below the fixed 0.25-nat bound. Evidence:
+`bench/results/issue-234-draft-quant-qwen3-32b-rtxpro6000-2026-07-31.json`
+(SHA-256 `850191a039edd6e3ff5ae4bf974eadeef3227b3700b1747d281c595daad63c59`).
+
+No compatible trained public MTP target/checkpoint is present in this
+environment. MTP therefore makes no trained acceptance or performance claim:
+its evidence is canonical packed-checkpoint loading, numerical tolerance, and
+the real fused CUDA path with dequantization made fatal. Native EAGLE/MTP
+proposal-state integration remains the existing G4 runtime boundary.
 
 ### G2 A9 DP-versus-TP crossover evidence
 
