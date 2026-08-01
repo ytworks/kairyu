@@ -405,9 +405,20 @@ both manifests, and the complete `container-metadata/` and
 `quality-container-metadata/` trees together.
 
 The complete clean-source container procedure is in
-`docs/gpu-runbook.md` §9.8b. Until the four performance arms and two quality
-arms pass assembly, verification, and independent replay, F4b remains
-unmeasured; unit and offline fixtures validate only the fail-closed operator.
+`docs/gpu-runbook.md` §9.8b. F4b is closed by the retained Qwen3-32B TP4
+artifact at
+`bench/results/g5-f4b-agentic-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
+Tiering raised the pooled engine prefix-hit rate from 47.7941% to 60.2338%
+(+12.4397 percentage points). The pooled TPOT p99 ratio was 1.03721 and the
+cohort-ratio geometric mean was 1.04488, both within 1.10. No tier counter
+advanced after first content, while the decode allocation control fired.
+The separate quality arms reproduced their parent outputs, cache usage, and
+per-request tier counters exactly. Across 3,968 comparable generated-prefix
+positions the maximum selected-logprob difference was 0.195256 nat; the
+maximum reciprocal difference at four first divergences was 0.213124 nat.
+Every divergent tier-on request restored 160 pages with no fallback or
+ownership failure. Sealing, retained-copy verification, and independent raw
+replay all passed.
 
 ## Fixtures, results, and wheel verification
 

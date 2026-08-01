@@ -1281,6 +1281,19 @@ image, and drill are unchanged.
   remove only the six named measurement containers; never use a broad Docker
   prune here.
 
+  The retained closure artifact is
+  `bench/results/g5-f4b-agentic-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/`.
+  Its unchanged performance raw SHA-256 is
+  `63ee8bc89bd19e331354419e1f1511428b90b60c2785f71c218c7df113637e05`;
+  its quality raw SHA-256 is
+  `aaa989e790aa3c857048fd4ab6d6be9e47a1e05c61f136774a8a182f07492109`.
+  The pooled prefix-hit-rate gain was 12.4397 percentage points, the pooled
+  TPOT p99 ratio was 1.03721, and the cohort-ratio geometric mean was 1.04488.
+  Quality replay compared 3,968 aligned positions with a 0.195256-nat maximum
+  difference and four reciprocal first-divergence pairs with a 0.213124-nat
+  maximum difference. Seal, retained-copy verification, and independent
+  replay all passed.
+
 - 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
   one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current
   retained production image predates E4M3 attention AOT and contains no
