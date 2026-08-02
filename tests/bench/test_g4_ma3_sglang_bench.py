@@ -818,6 +818,33 @@ def test_exact_sglang_v0516_identity_and_working_argv() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "captured",
+    (
+        ["SYS_NICE", "SYS_PTRACE"],
+        ["CAP_SYS_NICE", "CAP_SYS_PTRACE"],
+        ["CAP_SYS_PTRACE", "SYS_NICE"],
+    ),
+)
+def test_docker_capability_prefix_is_strictly_canonicalized(captured: list[str]) -> None:
+    assert gate._canonical_cap_add(captured) == ["SYS_NICE", "SYS_PTRACE"]
+
+
+@pytest.mark.parametrize(
+    "captured",
+    (
+        ["SYS_NICE", "CAP_SYS_NICE"],
+        ["SYS_NICE", "SYS_PTRACE", "SYS_ADMIN"],
+        ["SYS_NICE", "SYS_ADMIN"],
+    ),
+)
+def test_docker_capability_canonicalization_rejects_duplicate_extra_or_unknown(
+    captured: list[str],
+) -> None:
+    with pytest.raises(gate.GateEvidenceError, match="capabilit"):
+        gate._canonical_cap_add(captured)
+
+
 def test_provenance_pins_versions_image_and_all_checkpoint_shards() -> None:
     provenance = _provenance(
         arm="sglang",
@@ -1471,7 +1498,7 @@ def _mock_capture_observations(
         "HostConfig": {
             "IpcMode": "host",
             "ShmSize": 32 * 1024**3,
-            "CapAdd": ["SYS_NICE", "SYS_PTRACE"],
+            "CapAdd": ["CAP_SYS_NICE", "CAP_SYS_PTRACE"],
             "DeviceRequests": [
                 {
                     "Driver": "nvidia",

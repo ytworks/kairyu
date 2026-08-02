@@ -106,6 +106,7 @@ KAIRYU_FP4_GEMM_BACKEND = "flashinfer_cutlass"
 ARMS = ("kairyu", "sglang")
 GPU_COUNT = 4
 PHYSICAL_GPU_INDICES = (4, 5, 6, 7)
+EXPECTED_CAP_ADD = ("SYS_NICE", "SYS_PTRACE")
 REPEATS = 4
 PAIR_ORDER = (
     ("kairyu", "sglang"),
@@ -1014,7 +1015,7 @@ def benchmark_config(
                 "gpu_device_indices": list(PHYSICAL_GPU_INDICES),
                 "ipc_mode": "host",
                 "shm_size_bytes": 32 * 1024**3,
-                "cap_add": ["SYS_NICE", "SYS_PTRACE"],
+                "cap_add": list(EXPECTED_CAP_ADD),
                 "model_mount_destination": CHECKPOINT_ROOT,
                 "model_mount_read_only": True,
             },
@@ -1179,7 +1180,7 @@ def _container_valid(value: object, *, arm: str) -> bool:
         and value["shm_size_bytes"] == 32 * 1024**3
         and isinstance(value["cap_add"], list)
         and len(value["cap_add"]) == 2
-        and set(value["cap_add"]) == {"SYS_NICE", "SYS_PTRACE"}
+        and set(value["cap_add"]) == set(EXPECTED_CAP_ADD)
     )
     if not common:
         return False
@@ -1536,6 +1537,19 @@ def _capture_env(value: object) -> dict[str, str]:
             raise GateEvidenceError(f"container environment repeats {key!r}")
         result[key] = item_value
     return result
+
+
+def _canonical_cap_add(value: object) -> list[str]:
+    """Normalize Docker's optional ``CAP_`` display prefix, and nothing else."""
+
+    if not isinstance(value, list) or len(value) != len(EXPECTED_CAP_ADD) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise GateEvidenceError("container capability list is absent or malformed")
+    normalized = [item.removeprefix("CAP_") for item in value]
+    if len(set(normalized)) != len(normalized) or set(normalized) != set(EXPECTED_CAP_ADD):
+        raise GateEvidenceError("container capabilities differ from SYS_NICE/SYS_PTRACE")
+    return list(EXPECTED_CAP_ADD)
 
 
 def _checkpoint_volume_valid(value: object) -> bool:
@@ -2144,11 +2158,10 @@ def capture_provenance(
     ):
         raise GateEvidenceError("HostConfig model volume-subpath contract is invalid")
 
+    cap_add = _canonical_cap_add(host_config.get("CapAdd"))
     if (
         host_config.get("IpcMode") != "host"
         or host_config.get("ShmSize") != 32 * 1024**3
-        or set(host_config.get("CapAdd") or ()) != {"SYS_NICE", "SYS_PTRACE"}
-        or len(host_config.get("CapAdd") or ()) != 2
     ):
         raise GateEvidenceError("container IPC/shared-memory/capability contract is invalid")
     device_requests = host_config.get("DeviceRequests")
@@ -2288,7 +2301,7 @@ def capture_provenance(
             "gpu_device_indices": list(PHYSICAL_GPU_INDICES),
             "ipc_mode": "host",
             "shm_size_bytes": 32 * 1024**3,
-            "cap_add": ["SYS_NICE", "SYS_PTRACE"],
+            "cap_add": cap_add,
         },
         "source": source_value,
         "checkpoint": checkpoint_capture_value["checkpoint"]["value"],
@@ -2472,10 +2485,11 @@ def capture_live_observation(provenance: Mapping[str, object]) -> dict[str, obje
         == f"volume:{model_volume}/{MODEL_VOLUME_SUBPATH}"
     ):
         raise GateEvidenceError("measured model volume/subpath/read-only state changed")
+    cap_add = _canonical_cap_add(host_config.get("CapAdd"))
     if (
         host_config.get("IpcMode") != recorded_container.get("ipc_mode")
         or host_config.get("ShmSize") != recorded_container.get("shm_size_bytes")
-        or set(host_config.get("CapAdd") or ()) != set(recorded_container.get("cap_add") or ())
+        or cap_add != recorded_container.get("cap_add")
     ):
         raise GateEvidenceError("measured container resource contract changed")
     device_requests = host_config.get("DeviceRequests")
