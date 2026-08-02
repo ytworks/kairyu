@@ -1,8 +1,8 @@
 # G4.1 Design: Mid-tier MoE — Real NVFP4 Loading and Correctness
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-01; the M-A1 best
+Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-02; the M-A1 best
 implementation is retained with its formal FAIL, while M-A2 production
-integration and formal hardware evidence are in progress).
+integration and formal hardware evidence are complete).
 Milestone: G4.1 M-A1, with explicit seams for M-A2 and M-A3.
 Depends on: M12 (Qwen model), M13 (paged attention), M14 (native NVFP4
 projection kernels), M15 (Qwen3-MoE math), M16 (NCCL communicator and EP
@@ -333,6 +333,15 @@ The formal GPU operator drives the same production L1 `DistEPLauncher`
 directly so it can arm the all-rank recorder and attach the raw radix event
 sink; CPU/server regression tests separately bind the L3 construction and
 reporting path.
+
+The clean-commit real run at `d2d33e0472fb3101b680f4085d22e80a4ac7ceca`
+passed all 12 binding checks on 4× RTX PRO 6000. All 512 requests completed;
+the one logical engine rate was 491,008 / 557,056 = 0.8814338235, all four
+ranks reported those exact totals and identical page identities, and the raw
+trace retained 512 `BlockStored` events and 4,128 unique blocks. Manifest
+verification and raw-only replay both pass. The complete evidence is retained
+under
+`bench/results/g4-ma2-ep-kv-qwen3-235b-rtxpro6000-2026-08-02/`.
 
 M-A3 must replace correctness-mode attention duplication with request-owned
 attention-DP and add an overlap strategy chosen from measured throughput. It

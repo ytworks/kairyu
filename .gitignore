@@ -243,6 +243,8 @@ bench/data/
 !bench/results/g2-a8-dp-*/*
 !bench/results/g2-a9-dp-tp-*/
 !bench/results/g2-a9-dp-tp-*/*
+!bench/results/g4-ma2-ep-kv-*/
+!bench/results/g4-ma2-ep-kv-*/*
 !bench/results/quant-gemm-*.json
 !bench/results/quant-vllm-*.json
 !bench/results/orchestration-stream-*.json

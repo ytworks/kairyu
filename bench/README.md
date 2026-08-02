@@ -299,6 +299,13 @@ manifest verification, and raw-only replay rather than pretending to have the
 four-GPU 235B environment. The exact hardware procedure is in
 `docs/gpu-runbook.md` §9.12.
 
+The clean-commit real EP4 run passed all 12 checks: 512/512 requests,
+491,008 cached / 557,056 prompt tokens (88.143382%), identical totals and page
+identities on all four ranks, 512 raw cache events, and 4,128 retained blocks.
+Both retained-copy verification and raw-only replay pass. Evidence, including
+the running-container inspect record, is retained under
+`bench/results/g4-ma2-ep-kv-qwen3-235b-rtxpro6000-2026-08-02/`.
+
 ### G4 E-KV FP8 KV evidence
 
 `bench/fp8_kv_g4_ekv_bench.py` is the formal G4 E-KV correctness operator.

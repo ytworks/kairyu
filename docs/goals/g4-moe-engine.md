@@ -1,10 +1,10 @@
 # Goal G4: MoE Engine — Fused Experts, EP, MTP, NVFP4 (Roadmap Track E4–E5)
 
 Status: G4.1 M-A1 retains its formal FAIL; M-A2 production integration and
-formal evidence are in progress (2026-08-02).
+formal evidence are complete (2026-08-02).
 Lifts the G2 §6 "MoE / expert parallelism" non-goal (amendment recorded in
 PROGRESS.md). The reviewed mid-MoE design is `docs/design/g4-mid-moe.md`;
-M-A2 retains its independent cache gate; M-A3 remains pending.
+M-A2 passed its independent cache gate; M-A3 remains pending.
 Depends on: Roadmap Track E1–E3 (`docs/roadmap.md` §4): real single-GPU engine,
 scheduler multi-token commit (E2), NcclCommunicator (E3). Frontier-class gates
 additionally depend on the E3 hardware decision record (PCIe-switch chassis,
