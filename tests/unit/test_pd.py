@@ -1339,6 +1339,39 @@ def _adapter(**kwargs):
     return PDLoopAdapter(coordinator), coordinator, prefill_kv, decode_kv
 
 
+class _DeferredAdapterHandle:
+    def __init__(self, runner, scheduled, states) -> None:
+        self._runner = runner
+        self._scheduled = scheduled
+        self._states = states
+
+    def result(self):
+        return self._runner.resolve(self._scheduled, self._states)
+
+
+class _DeferredAdapterRunner:
+    """Native-submit wrapper exposing the P-D adapter's unresolved depth."""
+
+    def __init__(self, adapter) -> None:
+        self._adapter = adapter
+        self.outstanding = 0
+        self.max_outstanding = 0
+
+    def submit(self, _step_index, scheduled, states):
+        self.outstanding += 1
+        self.max_outstanding = max(self.max_outstanding, self.outstanding)
+        return _DeferredAdapterHandle(self, scheduled, states)
+
+    def resolve(self, scheduled, states):
+        try:
+            return self._adapter.execute(scheduled, states)
+        finally:
+            self.outstanding -= 1
+
+    def release(self, request_id: str) -> None:
+        self._adapter.release(request_id)
+
+
 def test_submissions_enter_at_prefill_not_at_the_decode_scheduler() -> None:
     # EngineLoop._drain_ops calls add_request on the scheduler it was given, so
     # a bare coordinator wired as that scheduler admits requests into DECODE
@@ -1375,6 +1408,68 @@ def test_chunked_prefill_reports_control_progress_with_an_empty_decode_plan() ->
     assert adapter.has_unfinished()
     assert adapter.reject_waiting_head() is None
     assert adapter.made_control_progress()
+
+
+def test_pd_dynamic_horizon_waits_for_handoff_then_restores_decode_depth() -> None:
+    from kairyu.engine.core.pd_loop import PDLoopAdapter
+    from kairyu.engine.engine_loop import EngineLoop
+    from kairyu.engine.tokenizer import ToyTokenizer
+    from kairyu.sampling_params import SamplingParams
+
+    provider = _HeldProvider()
+    coordinator, _ = _deferred_coordinator(provider=provider)
+    adapter = PDLoopAdapter(coordinator)
+
+    # Keep independent decode work available while a new prompt's KV handoff
+    # remains physically incomplete. This is the P-D state in which a deeper
+    # decode horizon must not hide admission/control progress.
+    decode_request = EngineRequest(
+        "decode",
+        prompt_token_ids=(1, 2, 3, 4),
+        max_new_tokens=20,
+        ignore_eos=True,
+    )
+    allocation = coordinator.decode_cache.allocate(decode_request.prompt_token_ids)
+    coordinator.decode_cache.mark_computed(allocation)
+    coordinator.decode_scheduler.resume_with_kv(
+        decode_request,
+        allocation,
+        first_token=7,
+    )
+
+    runner = _DeferredAdapterRunner(adapter)
+    loop = EngineLoop(
+        ToyTokenizer(),
+        adapter,
+        runner,
+        pipeline_depth=5,
+    )
+    loop.submit(
+        "prefill",
+        "one two three four",
+        SamplingParams(max_tokens=20, ignore_eos=True),
+    )
+
+    loop.step()
+
+    assert coordinator._handover is not None
+    assert len(provider.recorded) == 1
+    assert runner.max_outstanding == 2
+
+    provider.recorded[0]._complete()
+    loop.step()
+
+    assert coordinator._handover is None
+    assert runner.max_outstanding == 5
+
+    for _ in range(100):
+        if not loop.has_work():
+            break
+        loop.step()
+    else:
+        raise AssertionError("P-D dynamic-horizon loop did not drain")
+    adapter.forget("decode")
+    loop.close()
 
 
 def test_a_request_still_at_prefill_is_visible_under_its_public_id() -> None:

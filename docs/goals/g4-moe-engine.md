@@ -81,10 +81,17 @@ with no read-write consumer, and live runtime evidence. All operator commands
 execute the detached clean `SOURCE_ROOT`; provenance receives
 `--checkpoint-start`, while assembly requires both checkpoint boundaries. The
 Kairyu hardware load/graph smoke does not satisfy M-A3 by itself. The formal
-metrics, artifact path, and PASS/FAIL verdict are explicitly pending until the
-complete clean-commit raw JSONL passes both manifest verification and raw-only
-replay. The exact procedure and provenance contract are in
-`docs/gpu-runbook.md` §9.13.
+matrix at clean commit `55f3a8ca4513e158182d4b9b4a818c24f5ae7b34`
+completed all ten generations and every non-performance binding check, but
+retained a FAIL: exact median completion tok/s/GPU was 0.783818× SGLang and
+TTFT p99 was 1.352633× SGLang. All four throughput pairs were below one, so the
+result is not reclassified as jitter. The next candidate keeps configured
+depth 5 for pure decode, bounds unresolved admission/prefill work to two
+forwards, stops fill on producer arrivals, and removes the pure-greedy final
+Gloo reply by adding fail-closed rank status to the existing NCCL token packet.
+Those changes require a new complete clean-commit matrix; the earlier FAIL
+remains authoritative until then. The exact procedure and provenance contract
+are in `docs/gpu-runbook.md` §9.13.
 
 Recorded 2026-07-31: **FAIL** on the pinned Qwen3-32B revision and one RTX PRO
 6000 Blackwell. All K/V write audits passed across 7,522,091,008 values with

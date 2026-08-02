@@ -1864,6 +1864,16 @@ PY
   than relabelled: Kairyu replicates QKV/output at TP1, while the SGLang CLI
   records TP4 together with `--enable-dp-attention`.
 
+  Pipeline depth 5 is the configured maximum, not permission to freeze five
+  admission-sensitive plans. Kairyu limits unresolved waiting/prefill work to
+  the previous and current forwards, stops additional fill when a producer
+  operation arrives, and returns to depth 5 only for pure decode. Its
+  pure-greedy attention-DP token packet also carries one explicit status slot
+  per rank and therefore replaces the final Gloo reply gather; non-fast
+  sampling retains that gather. These are binding implementation properties
+  of the candidate under test, not benchmark-side delays or subtracted
+  overhead.
+
   First materialize one detached clean Kairyu source. Derive a metadata-only
   image from the retained M-A2 GPU runtime payload, set the exact source
   revision label, and push it through a loopback registry so it has a

@@ -67,6 +67,7 @@ class _ResolvedHandle:
 class _PendingStep:
     handle: _StepHandle
     request_ids: tuple[str, ...]
+    contains_prefill: bool
 
 
 @dataclass(frozen=True)
@@ -551,10 +552,8 @@ class EngineLoop:
             self._forget(request_id)
 
     def has_work(self) -> bool:
-        with self._ops_lock:
-            has_ops = bool(self._ops)
         return (
-            has_ops
+            self._has_queued_ops()
             or bool(self._pending_steps)
             or self._scheduler.has_unfinished()
         )
@@ -573,6 +572,12 @@ class EngineLoop:
             batches = tuple(self._ops)
             self._ops.clear()
         return batches
+
+    def _has_queued_ops(self) -> bool:
+        """Whether a producer wrote after the current step boundary."""
+
+        with self._ops_lock:
+            return bool(self._ops)
 
     def _restore_ops(self, batches: list[_OpBatch]) -> None:
         """Put unprocessed older work ahead of concurrent producer batches."""
@@ -657,10 +662,15 @@ class EngineLoop:
         allowing scheduling and the oldest device execution to overlap.
         """
         self._drain_ops()
-        while (
-            self._scheduler.has_unfinished()
-            and len(self._pending_steps) < self._pipeline_depth
+        while self._scheduler.has_unfinished() and (
+            len(self._pending_steps) < self._schedule_ahead_limit()
         ):
+            if self._has_queued_ops():
+                # A producer arrived after this step's frozen op snapshot. Do
+                # not bury that admission/abort behind the remaining decode
+                # horizon: commit the oldest already-submitted handle, then
+                # drain the producer queue at the next public step boundary.
+                break
             drain_before_admission = getattr(
                 self._scheduler,
                 "should_drain_before_admission",
@@ -763,12 +773,37 @@ class EngineLoop:
                 self._runner.execute(step.chunks, step.states_view())
             )
         request_ids = tuple(dict.fromkeys(chunk.request_id for chunk in step.chunks))
-        self._pending_steps.append(_PendingStep(handle, request_ids))
+        self._pending_steps.append(
+            _PendingStep(
+                handle,
+                request_ids,
+                contains_prefill=any(chunk.is_prefill for chunk in step.chunks),
+            )
+        )
         for request_id in request_ids:
             self._pending_by_request[request_id] = (
                 self._pending_by_request.get(request_id, 0) + 1
             )
         self._step_index += 1
+
+    def _schedule_ahead_limit(self) -> int:
+        """Bound unresolved admission work while retaining deep decode overlap.
+
+        SGLang's overlap scheduler and vLLM's async scheduler both keep at most
+        the previous and current batches unresolved while incoming/prefill work
+        can still change the cohort.  Kairyu may use its deeper configured
+        horizon once every outstanding snapshot and scheduler request is pure
+        decode.  A scheduler adapter without the read-only prefill signal cannot
+        prove that condition, so it stays on the fail-safe two-step horizon.
+        """
+
+        admission_depth = min(self._pipeline_depth, 2)
+        if any(step.contains_prefill for step in self._pending_steps):
+            return admission_depth
+        has_prefill_work = getattr(self._scheduler, "has_prefill_work", None)
+        if not callable(has_prefill_work) or has_prefill_work():
+            return admission_depth
+        return self._pipeline_depth
 
     def _needs_commit_barrier(self, scheduled: tuple) -> bool:
         """Whether the next plan depends on this step's variable-length result.

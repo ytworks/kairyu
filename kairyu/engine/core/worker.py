@@ -2330,6 +2330,8 @@ _EP_ATTENTION_DP_ASSIGNMENT_LOG_LIMIT = 4096
 _EP_ATTENTION_DP_ASSIGNMENT_FIELDS = frozenset(
     {"sequence", "request_id", "owner_rank", "cache_affine"}
 )
+_EP_ATTENTION_DP_PACKET_OK = 0
+_EP_ATTENTION_DP_PACKET_FAILED = 1
 _EP_METADATA_FILES = (
     "config.json",
     "hf_quant_config.json",
@@ -4069,25 +4071,27 @@ def _ep_attention_dp_local_token_packet(
     dummy_ids: tuple[str, ...],
     failed: bool,
 ):
-    """Encode owner-local pure-greedy ids in one fixed device packet."""
+    """Encode rank status plus owner-local greedy ids in one device packet."""
 
     import torch
 
     from kairyu.engine.core.comm import FakeCommunicator
 
     chunks = payload.delta.chunks
+    packet_device = (
+        torch.device("cpu")
+        if isinstance(model_comm, FakeCommunicator)
+        else torch.device(local_runner._device)
+    )
     if failed:
-        packet_device = (
-            torch.device("cpu")
-            if isinstance(model_comm, FakeCommunicator)
-            else torch.device(local_runner._device)
-        )
-        return torch.full(
-            (len(chunks),),
+        packet = torch.full(
+            (len(chunks) + 1,),
             -1,
             dtype=torch.int64,
             device=packet_device,
         )
+        packet[0] = _EP_ATTENTION_DP_PACKET_FAILED
+        return packet
     owner_map = _ep_attention_dp_owner_map(
         payload.owners,
         chunks,
@@ -4114,28 +4118,25 @@ def _ep_attention_dp_local_token_packet(
             f"expected={sorted(expected)}, got={sorted(public_records)}"
         )
 
-    packet_device = None
+    sampled_device = None
     for values in records.values():
         for record in values:
             sample = getattr(record, "sample", None)
             token_id = getattr(sample, "token_id", None)
             if isinstance(token_id, torch.Tensor):
-                packet_device = token_id.device
+                sampled_device = token_id.device
                 break
-        if packet_device is not None:
+        if sampled_device is not None:
             break
-    if packet_device is None:
-        packet_device = (
-            torch.device("cpu")
-            if isinstance(model_comm, FakeCommunicator)
-            else torch.device(local_runner._device)
-        )
+    if sampled_device is not None:
+        packet_device = sampled_device
     packet = torch.full(
-        (len(chunks),),
+        (len(chunks) + 1,),
         -1,
         dtype=torch.int64,
         device=packet_device,
     )
+    packet[0] = _EP_ATTENTION_DP_PACKET_OK
     for index, chunk in enumerate(chunks):
         if (
             owner_map[chunk.request_id] != model_comm.rank
@@ -4155,7 +4156,7 @@ def _ep_attention_dp_local_token_packet(
         if isinstance(record, SampledToken):
             if record.token_id < 0:
                 raise RuntimeError("attention-DP sampler returned a negative token id")
-            packet[index] = record.token_id
+            packet[index + 1] = record.token_id
             continue
         sample = getattr(record, "sample", None)
         token_id = getattr(sample, "token_id", None)
@@ -4168,8 +4169,46 @@ def _ep_attention_dp_local_token_packet(
             raise RuntimeError(
                 "attention-DP sampler returned a malformed device token"
             )
-        packet[index].copy_(token_id)
+        packet[index + 1].copy_(token_id)
     return packet
+
+
+def _ep_attention_dp_token_matrix(
+    gathered,
+    *,
+    chunk_count: int,
+    world_size: int,
+):
+    """Validate every rank's device status and return rank-major token slots."""
+
+    import torch
+
+    packet_width = chunk_count + 1
+    if (
+        not isinstance(gathered, torch.Tensor)
+        or gathered.dtype is not torch.int64
+        or tuple(gathered.shape) != (world_size * packet_width,)
+    ):
+        raise RuntimeError(
+            "attention-DP gathered token packet has malformed shape or dtype"
+        )
+    matrix = gathered.reshape(world_size, packet_width)
+    statuses = tuple(int(status) for status in matrix[:, 0].tolist())
+    failures: list[str] = []
+    for rank, status in enumerate(statuses):
+        if status == _EP_ATTENTION_DP_PACKET_OK:
+            continue
+        if status == _EP_ATTENTION_DP_PACKET_FAILED:
+            failures.append(
+                f"rank {rank}: local execution or token-packet encoding failed"
+            )
+        else:
+            failures.append(f"rank {rank}: malformed status {status}")
+    if failures:
+        raise RuntimeError(
+            "attention-DP device-packet rank failures: " + "; ".join(failures)
+        )
+    return matrix[:, 1:]
 
 
 def _ep_attention_dp_deferred_packet_output(
@@ -4183,28 +4222,22 @@ def _ep_attention_dp_deferred_packet_output(
 ):
     """Select owner slots D2D and defer their one vector D2H to commit."""
 
-    import torch
-
     from kairyu.engine.core.model_runner import (
         _DeferredStepOutput,
         _PendingDeviceToken,
     )
     from kairyu.engine.core.sampler import DeviceSample
 
-    if (
-        not isinstance(gathered, torch.Tensor)
-        or gathered.dtype is not torch.int64
-        or tuple(gathered.shape) != (world_size * len(chunks),)
-    ):
-        raise RuntimeError(
-            "attention-DP gathered token packet has malformed shape or dtype"
-        )
+    matrix = _ep_attention_dp_token_matrix(
+        gathered,
+        chunk_count=len(chunks),
+        world_size=world_size,
+    )
     owner_map = _ep_attention_dp_owner_map(
         owners,
         chunks,
         world_size=world_size,
     )
-    matrix = gathered.reshape(world_size, len(chunks))
     records: dict[str, tuple[object, ...]] = {}
     for index, chunk in enumerate(chunks):
         if not _ep_attention_dp_chunk_emits(
@@ -4247,7 +4280,6 @@ def _validate_ep_attention_dp_replies(
     chunks: tuple[ScheduledChunk, ...],
     states: dict[str, RequestSnapshot],
     world_size: int,
-    fast_path: bool = False,
 ) -> dict[str, tuple[SampledToken, ...]]:
     if not isinstance(replies, (tuple, list)) or len(replies) != world_size:
         raise RuntimeError(
@@ -4271,12 +4303,6 @@ def _validate_ep_attention_dp_replies(
         by_rank[reply.rank] = reply
         if reply.error is not None:
             failures.append(f"rank {reply.rank}: {reply.error}")
-            continue
-        if fast_path:
-            if reply.sampled != {}:
-                failures.append(
-                    f"rank {reply.rank}: device-packet status carried host samples"
-                )
             continue
         if not isinstance(reply.sampled, dict):
             failures.append(f"rank {reply.rank}: sampled payload is not a dict")
@@ -4310,7 +4336,7 @@ def _validate_ep_attention_dp_replies(
         failures.append(
             "scheduled step emits more than one sampled row for a request"
         )
-    if not fast_path and set(merged) != set(expected):
+    if set(merged) != set(expected):
         failures.append(
             "sampled request set mismatch: "
             f"expected={sorted(set(expected))}, got={sorted(merged)}"
@@ -4713,14 +4739,6 @@ class DistEPModelRunner:
                     payload,
                     view,
                 )
-                gathered = delegate._control_comm.all_gather(local.reply)
-                sampled = _validate_ep_attention_dp_replies(
-                    gathered,
-                    chunks=chunks,
-                    states=view,
-                    world_size=self.expert_parallel_size,
-                    fast_path=fast_path,
-                )
                 if fast_path:
                     sampled = _ep_attention_dp_deferred_packet_output(
                         local.gathered_token_packet,
@@ -4729,6 +4747,14 @@ class DistEPModelRunner:
                         owners=owner_pairs,
                         world_size=self.expert_parallel_size,
                         local_runner=delegate._local,
+                    )
+                else:
+                    gathered = delegate._control_comm.all_gather(local.reply)
+                    sampled = _validate_ep_attention_dp_replies(
+                        gathered,
+                        chunks=chunks,
+                        states=view,
+                        world_size=self.expert_parallel_size,
                     )
                 self._request_owners = staged_owners
                 self._kv_page_owners = staged_page_owners
@@ -4983,14 +5009,20 @@ def worker_step_loop(
                 payload,
                 view,
             )
-            gathered = control_comm.all_gather(local.reply)
-            _validate_ep_attention_dp_replies(
-                gathered,
-                chunks=payload.delta.chunks,
-                states=view,
-                world_size=control_comm.world_size,
-                fast_path=fast_path,
-            )
+            if fast_path:
+                _ep_attention_dp_token_matrix(
+                    local.gathered_token_packet,
+                    chunk_count=len(payload.delta.chunks),
+                    world_size=control_comm.world_size,
+                )
+            else:
+                gathered = control_comm.all_gather(local.reply)
+                _validate_ep_attention_dp_replies(
+                    gathered,
+                    chunks=payload.delta.chunks,
+                    states=view,
+                    world_size=control_comm.world_size,
+                )
             steps += 1
             continue
         if not isinstance(payload, StepDelta):

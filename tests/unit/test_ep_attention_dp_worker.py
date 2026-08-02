@@ -7,7 +7,7 @@ import pytest
 
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.comm import FakeCommunicator
-from kairyu.engine.core.sampling_types import SampledToken
+from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.step_input import RequestSnapshot
 
@@ -66,6 +66,7 @@ def _snapshot(
     computed_prompt: int,
     pages: tuple[int, ...],
     cached_tokens: int = 0,
+    sampling: EngineSampling | None = None,
 ) -> RequestSnapshot:
     return RequestSnapshot(
         request_id=request_id,
@@ -78,10 +79,11 @@ def _snapshot(
         eos_token_id=None,
         max_new_tokens=1,
         num_cached_tokens=cached_tokens,
+        sampling=EngineSampling() if sampling is None else sampling,
     )
 
 
-def test_attention_dp_worker_executes_only_owner_and_preserves_cache_affinity(
+def test_attention_dp_fast_worker_omits_final_gather_and_preserves_affinity(
     monkeypatch,
 ):
     from kairyu.models import moe_parallel
@@ -194,6 +196,10 @@ def test_attention_dp_worker_executes_only_owner_and_preserves_cache_affinity(
     assert evidence["active_request_count"] == 4
     assert evidence["owner_counts"] == {"0": 1, "1": 1, "2": 1, "3": 1}
     assert tuple(
+        (control_comm._gather_round, model_comm._gather_round)
+        for control_comm, model_comm in zip(control, model, strict=True)
+    ) == ((3, 3),) * world_size
+    assert tuple(
         (row["request_id"], row["owner_rank"], row["cache_affine"])
         for row in evidence["assignments"]
     ) == (
@@ -239,7 +245,7 @@ def test_attention_dp_worker_executes_only_owner_and_preserves_cache_affinity(
         ]
 
 
-def test_fast_packet_encode_failure_still_enters_all_rank_model_gather(
+def test_one_rank_fast_packet_status_failure_rejects_on_every_rank(
     monkeypatch,
 ) -> None:
     from kairyu.models import moe_parallel
@@ -300,14 +306,85 @@ def test_fast_packet_encode_failure_still_enters_all_rank_model_gather(
             )
             for rank, request_id in enumerate(requests)
         }
-        with pytest.raises(RuntimeError, match="malformed device token"):
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "rank 2: local execution or token-packet encoding failed"
+            ),
+        ):
             driver.execute(chunks, states)
         driver.shutdown()
         for worker in workers:
-            with pytest.raises(RuntimeError, match="malformed device token"):
+            with pytest.raises(
+                RuntimeError,
+                match=(
+                    "rank 2: local execution or token-packet encoding failed"
+                ),
+            ):
                 worker.result(timeout=2)
 
     assert [communicator._gather_round for communicator in model] == [1] * 4
+    assert [communicator._gather_round for communicator in control] == [1] * 4
+
+
+def test_non_fast_sampling_retains_final_control_gather_with_rank_symmetry(
+    monkeypatch,
+) -> None:
+    from kairyu.models import moe_parallel
+
+    monkeypatch.setattr(
+        moe_parallel,
+        "prepare_attention_dp_layouts",
+        lambda model, layouts: setattr(model, "current_layouts", layouts),
+    )
+    monkeypatch.setattr(
+        moe_parallel,
+        "assert_attention_dp_layouts_consumed",
+        lambda model: delattr(model, "current_layouts"),
+    )
+
+    world_size = 4
+    control = FakeCommunicator.create_group(world_size, timeout_s=1)
+    model = FakeCommunicator.create_group(world_size, timeout_s=1)
+    local = tuple(_AttentionDPRunner(rank) for rank in range(world_size))
+    driver = worker_module.DistEPModelRunner(
+        control[0],
+        local[0],
+        model[0],
+        expert_parallel_size=world_size,
+        attention_dp=True,
+        pipeline_depth=1,
+        page_size=16,
+    )
+    state = _snapshot(
+        "logprobs",
+        prompt_tokens=1,
+        computed_prompt=1,
+        pages=(1,),
+        sampling=EngineSampling(logprobs=0),
+    )
+    with ThreadPoolExecutor(max_workers=world_size - 1) as pool:
+        workers = tuple(
+            pool.submit(
+                worker_module.worker_step_loop,
+                control[rank],
+                local[rank],
+                model[rank],
+                parallelism_prefix="EP",
+            )
+            for rank in range(1, world_size)
+        )
+        assert driver.execute(
+            (ScheduledChunk("logprobs", 1, True),),
+            {"logprobs": state},
+        ) == {"logprobs": (SampledToken(0),)}
+        driver.shutdown()
+        assert [worker.result(timeout=2) for worker in workers] == [1, 1, 1]
+
+    assert tuple(
+        (control_comm._gather_round, model_comm._gather_round)
+        for control_comm, model_comm in zip(control, model, strict=True)
+    ) == ((2, 0),) * world_size
 
 
 @pytest.mark.parametrize(

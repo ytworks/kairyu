@@ -481,6 +481,20 @@ class Scheduler:
     def has_unfinished(self) -> bool:
         return bool(self._waiting or self._running)
 
+    def has_prefill_work(self) -> bool:
+        """Whether admission or an unfinished prompt can change the next plan.
+
+        Waiting requests count even when their prompt is fully radix-cached: the
+        scheduler still admits them through one prompt-completing prefill chunk.
+        This read-only signal lets ``EngineLoop`` bound immutable schedule-ahead
+        without weakening the configured depth once every live request decodes.
+        """
+
+        return bool(self._waiting) or any(
+            not self._states[request_id].prefill_done
+            for request_id in self._running
+        )
+
     @property
     def states(self) -> dict[str, _RequestState]:
         """Read view of request states for the ModelRunner (do not mutate)."""

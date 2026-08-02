@@ -76,6 +76,58 @@ class _PositionRunner:
         self.released.append(request_id)
 
 
+class _DeferredPositionHandle:
+    def __init__(self, runner, scheduled, states) -> None:
+        self._runner = runner
+        self._scheduled = scheduled
+        self._states = states
+
+    def result(self):
+        return self._runner.resolve(self._scheduled, self._states)
+
+
+class _DeferredPositionRunner(_PositionRunner):
+    """Native-submit runner that makes unresolved depth deterministic in tests."""
+
+    def __init__(self, *, base: int = 0) -> None:
+        super().__init__(base=base)
+        self.submitted: list[tuple] = []
+        self._outstanding_prefill: list[bool] = []
+        self.max_outstanding = 0
+        self.max_prefill_horizon = 0
+        self.on_next_submit = None
+        self.on_first_resolve = None
+
+    def submit(self, _step_index, scheduled, states):
+        scheduled = tuple(scheduled)
+        self.submitted.append(scheduled)
+        self._outstanding_prefill.append(
+            any(chunk.is_prefill for chunk in scheduled)
+        )
+        self.max_outstanding = max(
+            self.max_outstanding,
+            len(self._outstanding_prefill),
+        )
+        if any(self._outstanding_prefill):
+            self.max_prefill_horizon = max(
+                self.max_prefill_horizon,
+                len(self._outstanding_prefill),
+            )
+        callback, self.on_next_submit = self.on_next_submit, None
+        if callback is not None:
+            callback()
+        return _DeferredPositionHandle(self, scheduled, states)
+
+    def resolve(self, scheduled, states):
+        callback, self.on_first_resolve = self.on_first_resolve, None
+        if callback is not None:
+            callback()
+        try:
+            return super().execute(scheduled, states)
+        finally:
+            self._outstanding_prefill.pop(0)
+
+
 def _loop(
     depth: int,
     runner: object,
@@ -138,6 +190,173 @@ def test_depth_two_schedules_next_snapshot_before_oldest_execute_finishes() -> N
     _drive(loop)
 
     assert events.index("scheduled:1") < events.index("executed:0")
+    loop.close()
+
+
+def test_prefill_horizon_is_two_then_pure_decode_restores_depth_five() -> None:
+    runner = _DeferredPositionRunner(base=1000)
+    loop, _ = _loop(5, runner, budget=32)
+    loop.submit(
+        "request",
+        TokensPrompt((1, 2, 3, 4)),
+        SamplingParams(max_tokens=16, ignore_eos=True),
+    )
+
+    loop.step()
+
+    assert len(runner.submitted) == 2
+    assert runner.max_prefill_horizon == 2
+    assert any(chunk.is_prefill for chunk in runner.submitted[0])
+    assert all(not chunk.is_prefill for chunk in runner.submitted[1])
+
+    loop.step()
+
+    assert runner.max_outstanding == 5
+    assert len(loop._pending_steps) == 4
+    _drive(loop)
+    loop.close()
+
+
+def test_arrivals_during_prefill_join_one_next_admission_cohort() -> None:
+    runner = _DeferredPositionRunner(base=1000)
+    loop, _ = _loop(5, runner, budget=32)
+    newcomer_ids = tuple(f"new-{index}" for index in range(4))
+
+    def submit_newcomers() -> None:
+        for index, request_id in enumerate(newcomer_ids):
+            loop.submit(
+                request_id,
+                TokensPrompt((10 + index,)),
+                SamplingParams(max_tokens=2, ignore_eos=True),
+            )
+
+    runner.on_first_resolve = submit_newcomers
+    loop.submit(
+        "first",
+        TokensPrompt((1, 2, 3, 4)),
+        SamplingParams(max_tokens=8, ignore_eos=True),
+    )
+
+    loop.step()
+    loop.step()
+
+    admitted = tuple(
+        chunk.request_id for chunk in runner.submitted[2] if chunk.is_prefill
+    )
+    assert admitted == newcomer_ids
+    assert runner.max_prefill_horizon == 2
+    _drive(loop)
+    loop.close()
+
+
+def test_waiter_drains_existing_decode_horizon_before_prefill_schedule() -> None:
+    runner = _DeferredPositionRunner(base=1000)
+    loop, _ = _loop(5, runner, budget=32)
+    loop.submit(
+        "decode",
+        TokensPrompt((1, 2, 3, 4)),
+        SamplingParams(max_tokens=20, ignore_eos=True),
+    )
+    loop.step()
+    loop.step()
+    assert len(loop._pending_steps) == 4
+    submitted_before_waiter = len(runner.submitted)
+
+    loop.submit(
+        "waiter",
+        TokensPrompt((9,)),
+        SamplingParams(max_tokens=2, ignore_eos=True),
+    )
+    for expected_pending in (3, 2, 1):
+        loop.step()
+        assert len(loop._pending_steps) == expected_pending
+        assert len(runner.submitted) == submitted_before_waiter
+
+    loop.step()
+
+    assert any(chunk.request_id == "waiter" for chunk in runner.submitted[-1])
+    assert any(chunk.is_prefill for chunk in runner.submitted[-1])
+    _drive(loop)
+    loop.close()
+
+
+def test_arrival_inside_submit_stops_the_current_decode_fill() -> None:
+    runner = _DeferredPositionRunner(base=1000)
+    loop, _ = _loop(5, runner, budget=32)
+    loop.submit(
+        "decode",
+        TokensPrompt((1, 2, 3, 4)),
+        SamplingParams(max_tokens=20, ignore_eos=True),
+    )
+    loop.step()
+    assert len(loop._pending_steps) == 1
+    submitted_before_arrival = len(runner.submitted)
+
+    runner.on_next_submit = lambda: loop.submit(
+        "arrival",
+        TokensPrompt((9,)),
+        SamplingParams(max_tokens=2, ignore_eos=True),
+    )
+    loop.step()
+
+    # submit() ran from inside the first new runner submission. The producer
+    # op is not safe to mutate into the scheduler mid-snapshot, but it must stop
+    # this public step from filling the remaining depth-five decode horizon.
+    assert len(runner.submitted) == submitted_before_arrival + 1
+    assert len(loop._pending_steps) == 1
+
+    loop.step()
+
+    assert any(
+        chunk.request_id == "arrival" and chunk.is_prefill
+        for chunk in runner.submitted[-1]
+    )
+    _drive(loop)
+    loop.close()
+
+
+@pytest.mark.parametrize(("depth", "expected_horizon"), [(1, 1), (5, 2)])
+def test_chunked_prefill_respects_dynamic_horizon(
+    depth: int,
+    expected_horizon: int,
+) -> None:
+    runner = _DeferredPositionRunner(base=1000)
+    loop, _ = _loop(depth, runner, budget=2)
+    loop.submit(
+        "chunked",
+        TokensPrompt(tuple(range(1, 10))),
+        SamplingParams(max_tokens=3, ignore_eos=True),
+    )
+
+    _drive(loop)
+
+    assert sum(
+        any(chunk.is_prefill for chunk in scheduled)
+        for scheduled in runner.submitted
+    ) >= 5
+    assert runner.max_prefill_horizon == expected_horizon
+    loop.close()
+
+
+def test_scheduler_without_prefill_signal_stays_on_fail_safe_horizon() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=64, page_size=4),
+        max_num_batched_tokens=16,
+        max_num_seqs=8,
+        page_size=4,
+    )
+    scheduler.has_prefill_work = None
+    runner = _DeferredPositionRunner(base=1000)
+    loop, _ = _loop(5, runner, scheduler=scheduler)
+    loop.submit(
+        "unknown-adapter",
+        TokensPrompt((1, 2, 3, 4)),
+        SamplingParams(max_tokens=8, ignore_eos=True),
+    )
+
+    _drive(loop)
+
+    assert runner.max_outstanding == 2
     loop.close()
 
 
@@ -417,7 +636,7 @@ def test_grammar_termination_trims_scheduled_ahead_token_and_releases_late() -> 
     loop.close()
 
 
-def test_speculative_verification_runs_inside_depth_two_loop() -> None:
+def test_speculative_verification_barrier_overrides_depth_five_loop() -> None:
     class _MatchingDraft:
         def propose(self, context: tuple[int, ...], max_draft: int) -> tuple[int, ...]:
             last = context[-1]
@@ -434,7 +653,7 @@ def test_speculative_verification_runs_inside_depth_two_loop() -> None:
     )
     target = _PositionRunner(base=1000)
     speculative = SpeculativeRunner(target, draft_source=_MatchingDraft())
-    loop, _ = _loop(2, speculative, scheduler=scheduler)
+    loop, _ = _loop(5, speculative, scheduler=scheduler)
     loop.submit(
         "spec",
         "repeated repeated",

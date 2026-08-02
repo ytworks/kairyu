@@ -2,9 +2,8 @@
 
 Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-03; the M-A1 best
 implementation is retained with its formal FAIL, M-A2 production integration
-and formal hardware evidence are complete, and the M-A3 production candidate
-and fail-closed comparison operator are implemented with the formal verdict
-still pending).
+and formal hardware evidence are complete, and M-A3 retains its first formal
+performance FAIL while an optimized production candidate awaits remeasurement).
 Milestone: G4.1 M-A1/M-A2/M-A3.
 Depends on: M12 (Qwen model), M13 (paged attention), M14 (native NVFP4
 projection kernels), M15 (Qwen3-MoE math), M16 (NCCL communicator and EP
@@ -413,6 +412,24 @@ must keep every structural field and counter fixed except for a strictly
 increased replay count. Lazy capture or fallback during measurement is a
 formal failure, not benchmark overhead to subtract.
 
+Configured pipeline depth remains 5, but admission-sensitive work has a
+smaller unresolved horizon. While the scheduler has a waiter or unfinished
+prompt, or an already-submitted snapshot contains prefill, at most the
+previous and current forwards may remain unresolved. A producer add/abort that
+arrives during fill stops further schedule-ahead at the next loop observation.
+Once all scheduler and pending work is pure decode, the configured depth 5 is
+restored. This matches the bounded previous/current structure used by pinned
+SGLang and vLLM async scheduling without reducing steady decode overlap.
+Adapters that cannot prove a read-only prefill state fail safe at depth 2.
+
+Pure-greedy attention-DP sampling also has one fewer host-control transaction.
+The fixed NCCL token packet begins with one status slot per gathered rank,
+followed by the existing owner-token slots. Every rank validates the same
+status matrix; one execution or packet-encoding failure aborts the step on all
+ranks. The driver and passive ranks therefore skip the final Gloo reply gather
+only on this fast path. Logprobs, grammar, and every other non-fast sampling
+path retain the former all-rank Gloo reply and validation.
+
 The comparison uses the same four physical GPUs, immutable checkpoint,
 BF16 KV, four request owners, EP4 ownership, FCFS policy, prompt/completion
 trace, aggregate 65,536-token cache, and disabled speculative decoding. The
@@ -464,11 +481,16 @@ it uses FlashInfer CUTLASS rather than the SM100-only TRTLLM-gen MoE path,
 prefill CUDA graph is disabled while decode graph remains enabled, and
 MTP/speculative decoding is deferred to M-A4.
 
-As of this amendment, the implementation, production launcher, hardware load
-smoke, and evidence operator are ready, but the complete clean-commit paired
-artifact has not yet been accepted. No throughput, TTFT, PASS, or issue-closure
-claim may be inferred until both retained-copy verification and raw-only replay
-pass the complete matrix.
+The first clean-commit matrix at
+`55f3a8ca4513e158182d4b9b4a818c24f5ae7b34` completed all ten fresh
+generations, 4,630 raw rows, and every non-performance binding check. Its four
+throughput ratios were 0.741839/0.798127/0.829296/0.769510 and its exact median
+was 0.783818; the exact median TTFT-p99 ratio was 1.352633. Both performance
+checks therefore failed and retained verification/raw replay correctly reject
+`--assert-gate`. The optimized horizon/status-packet candidate described above
+is CPU-validated but not yet GPU-measured. The failed verdict remains
+authoritative until a new complete clean-commit matrix independently passes;
+no diagnostic or mixed-commit result can close M-A3.
 
 ## 5. Verification
 
