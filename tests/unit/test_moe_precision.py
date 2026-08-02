@@ -50,6 +50,42 @@ class _NvFp4Expert(nn.Module):
         self.down_proj.input_scale.fill_(down_scale)
 
 
+class _MixedExpert(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate_proj = nn.Linear(16, 16, bias=False)
+        self.up_proj = NvFp4Linear(16, 16, False)
+        self.down_proj = nn.Linear(16, 16, bias=False)
+        self.up_proj.input_scale.fill_(2.5)
+
+
+class _CopyCommunicator:
+    def tensor_all_to_all_single(
+        self,
+        output: torch.Tensor,
+        input_: torch.Tensor,
+        _output_split_sizes: list[int],
+        _input_split_sizes: list[int],
+    ) -> None:
+        output.copy_(input_)
+
+
+class _PrecisionMoeBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.experts = nn.ModuleList(
+            [_ConstantExpert(-5.84375), _ConstantExpert(-7.5625)]
+        )
+
+    def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        indices = torch.tensor([[0, 1]], device=hidden.device)
+        weights = torch.tensor(
+            [[0.5715058445930481, 0.4284941852092743]],
+            device=hidden.device,
+        )
+        return indices, weights
+
+
 def test_qwen_router_retains_fp32_weights_for_final_combine() -> None:
     hidden = torch.zeros(3, 16, dtype=torch.bfloat16)
 
@@ -94,9 +130,51 @@ def test_nvfp4_moe_uses_layer_global_fc1_and_fc2_input_scales() -> None:
 
     w13_scale, w2_scale = apply_nvfp4_moe_global_input_scales(experts)
 
+    assert w13_scale is not None
+    assert w2_scale is not None
     assert w13_scale.item() == 1.5
     assert w2_scale.item() == 3.0
     for expert in experts:
         assert expert.gate_proj.input_scale.item() == 1.5
         assert expert.up_proj.input_scale.item() == 1.5
         assert expert.down_proj.input_scale.item() == 3.0
+
+
+def test_nvfp4_moe_globalizes_only_quantized_projections() -> None:
+    mixed = _MixedExpert()
+    quantized = _NvFp4Expert(1.0, 1.5, 4.0)
+    experts = nn.ModuleList([mixed, quantized])
+
+    w13_scale, w2_scale = apply_nvfp4_moe_global_input_scales(experts)
+
+    assert w13_scale is not None
+    assert w2_scale is not None
+    assert w13_scale.item() == 2.5
+    assert w2_scale.item() == 4.0
+    assert mixed.up_proj.input_scale.item() == 2.5
+    assert quantized.gate_proj.input_scale.item() == 2.5
+    assert quantized.up_proj.input_scale.item() == 2.5
+    assert quantized.down_proj.input_scale.item() == 4.0
+
+
+def test_ep_moe_combines_fp32_router_weights_before_final_bf16_cast() -> None:
+    from kairyu.models.moe_parallel import EpMoeBlock
+
+    hidden = torch.zeros(1, 1, dtype=torch.bfloat16)
+    block = EpMoeBlock(
+        _PrecisionMoeBlock(),
+        _CopyCommunicator(),
+        ep_rank=0,
+        ep_size=1,
+    )
+
+    actual = block(hidden)
+
+    expert_values = torch.tensor([[-5.84375, -7.5625]], dtype=torch.bfloat16)
+    weights = torch.tensor([[0.5715058445930481, 0.4284941852092743]])
+    expected = (expert_values.float() * weights).sum(dim=1).to(torch.bfloat16)
+    premature_bf16 = (
+        expert_values * weights.to(torch.bfloat16)
+    ).sum(dim=1)
+    torch.testing.assert_close(actual[:, 0], expected, rtol=0, atol=0)
+    assert not torch.equal(actual[:, 0], premature_bf16)

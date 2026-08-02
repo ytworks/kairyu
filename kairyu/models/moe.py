@@ -102,7 +102,7 @@ def apply_nvfp4_moe_global_input_scales(
     *,
     w13_input_scale: torch.Tensor | None = None,
     w2_input_scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Apply the fused-NVFP4 MoE activation-scale contract to local experts.
 
     ModelOpt checkpoints retain one calibrated input scale per expert. Fused
@@ -116,16 +116,21 @@ def apply_nvfp4_moe_global_input_scales(
     if not local_experts:
         raise ValueError("NVFP4 MoE scale normalization requires a local expert")
 
-    projections: list[tuple[NvFp4Linear, NvFp4Linear, NvFp4Linear]] = []
+    w13_projections: list[NvFp4Linear] = []
+    w2_projections: list[NvFp4Linear] = []
     for expert in local_experts:
-        candidate = (
+        candidate = [
             getattr(expert, "gate_proj", None),
             getattr(expert, "up_proj", None),
             getattr(expert, "down_proj", None),
+        ]
+        if any(module is None for module in candidate):
+            raise TypeError("MoE experts require gate/up/down projection modules")
+        w13_projections.extend(
+            module for module in candidate[:2] if isinstance(module, NvFp4Linear)
         )
-        if not all(isinstance(module, NvFp4Linear) for module in candidate):
-            raise TypeError("NVFP4 MoE experts require gate/up/down NvFp4Linear modules")
-        projections.append(candidate)
+        if isinstance(candidate[2], NvFp4Linear):
+            w2_projections.append(candidate[2])
 
     def validated_scale(scale: torch.Tensor, label: str) -> torch.Tensor:
         value = scale.detach().to(dtype=torch.float32).reshape(-1)
@@ -140,31 +145,34 @@ def apply_nvfp4_moe_global_input_scales(
     if w13_input_scale is None:
         w13_values = [
             validated_scale(module.input_scale, "NVFP4 FC1 input scale")
-            for gate, up, _down in projections
-            for module in (gate, up)
+            for module in w13_projections
         ]
-        w13_input_scale = torch.stack(w13_values).max()
+        w13_input_scale = torch.stack(w13_values).max() if w13_values else None
     else:
         w13_input_scale = validated_scale(
             w13_input_scale, "NVFP4 FC1 global input scale"
         )
     if w2_input_scale is None:
         w2_values = [
-            validated_scale(down.input_scale, "NVFP4 FC2 input scale")
-            for _gate, _up, down in projections
+            validated_scale(module.input_scale, "NVFP4 FC2 input scale")
+            for module in w2_projections
         ]
-        w2_input_scale = torch.stack(w2_values).max()
+        w2_input_scale = torch.stack(w2_values).max() if w2_values else None
     else:
         w2_input_scale = validated_scale(
             w2_input_scale, "NVFP4 FC2 global input scale"
         )
 
-    for gate, up, down in projections:
-        for module in (gate, up):
+    if w13_input_scale is not None:
+        for module in w13_projections:
             module.input_scale.copy_(
                 w13_input_scale.to(device=module.input_scale.device)
             )
-        down.input_scale.copy_(w2_input_scale.to(device=down.input_scale.device))
+    if w2_input_scale is not None:
+        for module in w2_projections:
+            module.input_scale.copy_(
+                w2_input_scale.to(device=module.input_scale.device)
+            )
     return w13_input_scale, w2_input_scale
 
 

@@ -48,11 +48,12 @@ def _write_checkpoint(
     bad_dtype: str | None = None,
     bad_kv_scale: float | None = None,
     expert_input_scales: dict[tuple[int, str], float] | None = None,
+    ignored_modules: tuple[str, ...] = (),
     unexpected: bool = False,
 ) -> dict[str, torch.Tensor]:
     path.mkdir()
     (path / "config.json").write_text(json.dumps(_RAW))
-    excludes = ["model.layers.0.mlp.gate", "lm_head"]
+    excludes = ["model.layers.0.mlp.gate", "lm_head", *ignored_modules]
     (path / "hf_quant_config.json").write_text(
         json.dumps(
             {
@@ -167,7 +168,7 @@ def test_ep_nvfp4_uses_global_scales_from_owned_and_remote_experts(tmp_path):
         (expert, projection): value
         for expert, values in enumerate(
             (
-                (0.5, 0.5, 4.0),
+                (0.5, 0.5, 9.0),
                 (3.0, 3.0, 2.0),
                 (1.5, 1.5, 8.0),
                 (2.0, 2.0, 6.0),
@@ -191,13 +192,13 @@ def test_ep_nvfp4_uses_global_scales_from_owned_and_remote_experts(tmp_path):
         expert = block.local_expert(expert_index)
         assert expert.gate_proj.input_scale.item() == 3.0
         assert expert.up_proj.input_scale.item() == 3.0
-        assert expert.down_proj.input_scale.item() == 8.0
+        assert expert.down_proj.input_scale.item() == 9.0
 
     full_model, _config, _generation = load_model(checkpoint)
     for expert in full_model.model.layers[0].mlp.experts:
         assert expert.gate_proj.input_scale.item() == 3.0
         assert expert.up_proj.input_scale.item() == 3.0
-        assert expert.down_proj.input_scale.item() == 8.0
+        assert expert.down_proj.input_scale.item() == 9.0
 
 
 def test_ep_nvfp4_rejects_invalid_remote_input_scale(tmp_path):
@@ -217,6 +218,30 @@ def test_ep_nvfp4_rejects_invalid_remote_input_scale(tmp_path):
             ep_rank=1,
             comm=_UnusedEpComm(),
         )
+
+
+def test_ep_nvfp4_preserves_homogeneous_dense_ignored_projection(tmp_path):
+    checkpoint = tmp_path / "ignored-gates"
+    ignored = tuple(
+        f"model.layers.0.mlp.experts.{expert}.gate_proj"
+        for expert in range(_RAW["num_experts"])
+    )
+    _write_checkpoint(checkpoint, ignored_modules=ignored)
+
+    model, _config, _info = build_ep_model(
+        checkpoint,
+        ep_size=2,
+        ep_rank=1,
+        comm=_UnusedEpComm(),
+    )
+
+    block = model.model.layers[0].mlp
+    for expert_index in block.owned_expert_indices:
+        expert = block.local_expert(expert_index)
+        assert isinstance(expert.gate_proj, torch.nn.Linear)
+        assert not getattr(expert.gate_proj, "is_quantized", False)
+        assert getattr(expert.up_proj, "quant_scheme", None) == "nvfp4"
+        assert getattr(expert.down_proj, "quant_scheme", None) == "nvfp4"
 
 
 def test_ep_contract_requires_remote_expert_tensors(tmp_path):

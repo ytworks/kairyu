@@ -407,19 +407,41 @@ def _global_nvfp4_dtype_contract(
 def _checkpoint_nvfp4_moe_global_input_scales(
     reader,
     blocks: tuple[tuple[str, EpMoeBlock], ...],
-) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[str, tuple[torch.Tensor | None, torch.Tensor | None]]:
     """Read layer-global FC1/FC2 activation scales, including remote experts."""
 
     requested: dict[str, tuple[str, str]] = {}
+    expected_counts: dict[tuple[str, str], int] = {}
     for block_name, block in blocks:
+        template = block.local_expert(block.owned_expert_indices[0])
+        w13_projections = tuple(
+            projection
+            for projection in ("gate_proj", "up_proj")
+            if isinstance(getattr(template, projection, None), NvFp4Linear)
+        )
+        w2_projections = (
+            ("down_proj",)
+            if isinstance(getattr(template, "down_proj", None), NvFp4Linear)
+            else ()
+        )
+        expected_counts[(block_name, "w13")] = (
+            len(block.experts) * len(w13_projections)
+        )
+        expected_counts[(block_name, "w2")] = (
+            len(block.experts) * len(w2_projections)
+        )
         for expert_index in range(len(block.experts)):
             prefix = f"{block_name}.experts.{expert_index}"
-            for projection in ("gate_proj", "up_proj"):
+            for projection in w13_projections:
                 requested[f"{prefix}.{projection}.input_scale"] = (
                     block_name,
                     "w13",
                 )
-            requested[f"{prefix}.down_proj.input_scale"] = (block_name, "w2")
+            for projection in w2_projections:
+                requested[f"{prefix}.{projection}.input_scale"] = (
+                    block_name,
+                    "w2",
+                )
 
     grouped: dict[tuple[str, str], list[torch.Tensor]] = {}
     for name, scale in reader.selected_items(requested):
@@ -435,16 +457,21 @@ def _checkpoint_nvfp4_moe_global_input_scales(
             )
         grouped.setdefault(requested[name], []).append(value.reshape(()))
 
-    result: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    for block_name, block in blocks:
-        expected_experts = len(block.experts)
+    result: dict[str, tuple[torch.Tensor | None, torch.Tensor | None]] = {}
+    for block_name, _block in blocks:
         w13 = grouped.get((block_name, "w13"), [])
         w2 = grouped.get((block_name, "w2"), [])
-        if len(w13) != expected_experts * 2 or len(w2) != expected_experts:
+        if (
+            len(w13) != expected_counts[(block_name, "w13")]
+            or len(w2) != expected_counts[(block_name, "w2")]
+        ):
             raise RuntimeError(
                 f"checkpoint NVFP4 MoE scales for {block_name!r} are incomplete"
             )
-        result[block_name] = (torch.stack(w13).max(), torch.stack(w2).max())
+        result[block_name] = (
+            torch.stack(w13).max() if w13 else None,
+            torch.stack(w2).max() if w2 else None,
+        )
     return result
 
 
