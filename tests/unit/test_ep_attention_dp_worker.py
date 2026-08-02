@@ -1,5 +1,6 @@
 """Request-owned attention-DP worker protocol coverage for G4 M-A3 (#168)."""
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from types import MethodType, SimpleNamespace
 
@@ -59,6 +60,20 @@ class _MalformedPacketRunner(_AttentionDPRunner):
         return sampled
 
 
+class _DeferredStatusProbe:
+    def __init__(self, ready: bool) -> None:
+        self._ready = ready
+        self.ready_calls = 0
+        self.resolve_calls = 0
+
+    def ready(self) -> bool:
+        self.ready_calls += 1
+        return self._ready
+
+    def resolve_sidecars(self) -> None:
+        self.resolve_calls += 1
+
+
 def _snapshot(
     request_id: str,
     *,
@@ -81,6 +96,56 @@ def _snapshot(
         num_cached_tokens=cached_tokens,
         sampling=EngineSampling() if sampling is None else sampling,
     )
+
+
+def test_status_boundary_never_branches_on_rank_local_event_readiness() -> None:
+    probes = tuple(
+        _DeferredStatusProbe(ready)
+        for ready in (True, False, True, False)
+    )
+    queues = tuple(deque((probe,)) for probe in probes)
+
+    for pending in queues:
+        worker_module._resolve_attention_dp_status_boundary(
+            pending,
+            drain_all=False,
+        )
+
+    assert all(not pending for pending in queues)
+    assert [probe.resolve_calls for probe in probes] == [1, 1, 1, 1]
+    assert [probe.ready_calls for probe in probes] == [0, 0, 0, 0]
+
+    shutdown_tail = deque(
+        (_DeferredStatusProbe(False), _DeferredStatusProbe(True))
+    )
+    worker_module._resolve_attention_dp_status_boundary(
+        shutdown_tail,
+        drain_all=True,
+    )
+    assert not shutdown_tail
+
+
+def test_public_resolution_then_control_boundary_is_idempotent() -> None:
+    import torch
+
+    from kairyu.engine.core.model_runner import _DeferredStepOutput
+
+    output = _DeferredStepOutput(
+        {"request": (SampledToken(7),)},
+        device_sidecars=worker_module._ep_attention_dp_status_sidecars(
+            torch.zeros(4, dtype=torch.int64),
+            world_size=4,
+        ),
+    )
+
+    assert output["request"] == (SampledToken(7),)
+    pending = deque((output,))
+    worker_module._resolve_attention_dp_status_boundary(
+        pending,
+        drain_all=False,
+    )
+
+    assert not pending
 
 
 def test_attention_dp_fast_worker_omits_final_gather_and_preserves_affinity(

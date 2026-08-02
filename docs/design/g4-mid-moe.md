@@ -426,9 +426,16 @@ Pure-greedy attention-DP sampling also has one fewer host-control transaction.
 The fixed NCCL token packet begins with one status slot per gathered rank,
 followed by the existing owner-token slots. Every rank validates the same
 status matrix; one execution or packet-encoding failure aborts the step on all
-ranks. The driver and passive ranks therefore skip the final Gloo reply gather
-only on this fast path. Logprobs, grammar, and every other non-fast sampling
-path retain the former all-rank Gloo reply and validation.
+ranks. Status columns are copied asynchronously to pinned host memory on the
+same copy stream/event as deferred public tokens rather than being converted
+on the current CUDA stream. Driver and passive ranks retain the preceding
+sidecar and, after the next common control broadcast, all resolve exactly one
+FIFO entry without branching on rank-local event readiness; shutdown drains
+the remaining tail. The driver and passive ranks therefore skip the final
+Gloo reply gather only on this fast path without introducing either an eager
+CUDA-to-host synchronization or divergent failure participation. Logprobs,
+grammar, and every other non-fast sampling path retain the former all-rank
+Gloo reply and validation.
 
 The comparison uses the same four physical GPUs, immutable checkpoint,
 BF16 KV, four request owners, EP4 ownership, FCFS policy, prompt/completion

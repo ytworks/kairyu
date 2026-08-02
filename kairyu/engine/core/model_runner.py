@@ -83,19 +83,53 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
             str, tuple[SampledToken | _PendingDeviceToken, ...]
         ],
         copy_stream: torch.cuda.Stream | None = None,
+        *,
+        device_sidecars: tuple[
+            tuple[torch.Tensor, Callable[[torch.Tensor], None]], ...
+        ] = (),
     ) -> None:
+        if type(device_sidecars) is not tuple or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], torch.Tensor)
+            or not callable(item[1])
+            for item in device_sidecars
+        ):
+            raise TypeError(
+                "deferred output device_sidecars must be "
+                "(tensor, validator) tuples"
+            )
         self._records = dict(records)
         self._resolved: dict[str, tuple[SampledToken, ...]] | None = None
         self._event: torch.cuda.Event | None = None
+        self._sidecars_resolved = False
+        self._sidecar_error: Exception | None = None
         pending = [
             record
             for values in self._records.values()
             for record in values
             if isinstance(record, _PendingDeviceToken)
         ]
-        has_cuda = bool(
-            pending and pending[0].sample.token_id.device.type == "cuda"
+        sidecar_sources = tuple(item[0] for item in device_sidecars)
+        cuda_sources = tuple(
+            source
+            for source in (
+                *(record.sample.token_id for record in pending),
+                *sidecar_sources,
+            )
+            if source.device.type == "cuda"
         )
+        has_cuda = bool(cuda_sources)
+        if has_cuda:
+            device = cuda_sources[0].device
+            all_sources = (
+                *(record.sample.token_id for record in pending),
+                *sidecar_sources,
+            )
+            if any(source.device != device for source in all_sources):
+                raise ValueError(
+                    "deferred output tokens and sidecars must share one CUDA device"
+                )
 
         # One token vector per step, not B scalar D2H operations.  The vector is
         # immutable and retained by this output, so a dedicated copy stream can
@@ -134,8 +168,28 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
         # storage and overwrite a public token with its ``-1`` sentinel.
         self._copy_sources = tuple(
             source
-            for source in (device_tokens, device_logprob_tensor)
+            for source in (
+                device_tokens,
+                device_logprob_tensor,
+                *sidecar_sources,
+            )
             if source is not None
+        )
+        host_sidecars = tuple(
+            torch.empty_like(
+                source,
+                device="cpu",
+                pin_memory=source.device.type == "cuda",
+            )
+            for source in sidecar_sources
+        )
+        self._sidecars = tuple(
+            (host, validator)
+            for host, (_source, validator) in zip(
+                host_sidecars,
+                device_sidecars,
+                strict=True,
+            )
         )
         host_logprobs = (
             torch.empty(
@@ -161,6 +215,12 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
                 host_logprobs.copy_(
                     device_logprob_tensor, non_blocking=has_cuda
                 )
+            for source, host in zip(
+                sidecar_sources,
+                host_sidecars,
+                strict=True,
+            ):
+                host.copy_(source, non_blocking=source.device.type == "cuda")
             for record in pending:
                 sample = record.sample
                 if sample.top_indices is not None:
@@ -186,7 +246,7 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
         if has_cuda:
             if copy_stream is None:
                 raise ValueError("CUDA deferred output requires a copy stream")
-            producer = torch.cuda.current_stream(device_tokens.device)
+            producer = torch.cuda.current_stream(cuda_sources[0].device)
             copy_stream.wait_stream(producer)
             with torch.cuda.stream(copy_stream):
                 enqueue_copies()
@@ -199,11 +259,39 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
     def ready(self) -> bool:
         return self._resolved is not None or self._event is None or self._event.query()
 
+    def resolve_sidecars(self) -> None:
+        """Resolve bounded auxiliary device evidence at a later host boundary.
+
+        Attention-DP attaches its all-rank status vector here so the same copy
+        stream and event as the public token vector carry failure evidence.
+        Calling this at the next control boundary preserves one-step overlap;
+        calling it again from the public commit path is idempotent.
+        """
+
+        if self._sidecar_error is not None:
+            raise self._sidecar_error
+        if self._sidecars_resolved:
+            return
+        if self._event is not None:
+            # Normal control-boundary callers first observed ``ready()``. Do
+            # not turn that non-blocking poll back into a host synchronization;
+            # only commit/shutdown callers that arrive early wait here.
+            if not self._event.query():
+                self._event.synchronize()
+            self._event = None
+        try:
+            for host, validator in self._sidecars:
+                validator(host)
+        except Exception as error:
+            self._sidecar_error = error
+            raise
+        self._sidecars_resolved = True
+        self._sidecars = ()
+
     def _resolve(self) -> dict[str, tuple[SampledToken, ...]]:
         if self._resolved is not None:
             return self._resolved
-        if self._event is not None:
-            self._event.synchronize()
+        self.resolve_sidecars()
         resolved: dict[str, tuple[SampledToken, ...]] = {}
         for request_id, values in self._records.items():
             host_values: list[SampledToken] = []

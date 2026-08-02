@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import wraps
@@ -2956,6 +2957,22 @@ class DistTPModelRunner:
             if parallelism_prefix == "EP"
             else None
         )
+        self._post_control_boundary = None
+
+    def _broadcast_control(self, payload: object) -> object:
+        """Broadcast one payload, then settle any rank-symmetric sidecar.
+
+        Request-owned attention-DP installs a callback that resolves the prior
+        step's asynchronously copied status only after every passive rank has
+        crossed this same broadcast boundary. Other parallel modes leave the
+        hook unset and retain their exact former protocol.
+        """
+
+        delivered = self._control_comm.broadcast(payload, src=0)
+        callback = self._post_control_boundary
+        if callable(callback):
+            callback(delivered)
+        return delivered
 
     def _snapshot_pending_releases(self) -> tuple[tuple[str, int], ...]:
         with self._pending_release_lock:
@@ -2994,7 +3011,7 @@ class DistTPModelRunner:
                     states,
                     released_ids=released_ids,
                 )
-                self._control_comm.broadcast(delta, src=0)
+                self._broadcast_control(delta)
                 # Match the worker ordering: stale per-request local state and
                 # StateSync identity are gone before a new snapshot with the
                 # same request id is installed or executed.
@@ -3031,7 +3048,7 @@ class DistTPModelRunner:
             ) from self._fatal_error
         operation = _dram_kv_operation(payload)
         try:
-            delivered = self._control_comm.broadcast(payload, src=0)
+            delivered = self._broadcast_control(payload)
             if delivered != payload:
                 raise RuntimeError(
                     f"DRAM KV {operation} broadcast returned a malformed payload"
@@ -3171,7 +3188,7 @@ class DistTPModelRunner:
             model_world_size = self._model_comm.world_size
             control_backend = _communicator_backend(self._control_comm)
             model_backend = _communicator_backend(self._model_comm)
-            delivered = self._control_comm.broadcast(_SamplingOwnershipProbe(), src=0)
+            delivered = self._broadcast_control(_SamplingOwnershipProbe())
             if not isinstance(delivered, _SamplingOwnershipProbe):
                 raise RuntimeError(
                     "sampling ownership probe broadcast returned a malformed "
@@ -3210,7 +3227,7 @@ class DistTPModelRunner:
             ) from self._fatal_error
         try:
             payload = _BatchedPrefillMode(enabled)
-            delivered = self._control_comm.broadcast(payload, src=0)
+            delivered = self._broadcast_control(payload)
             if delivered != payload:
                 raise RuntimeError("batched prefill mode broadcast returned a malformed payload")
             self._local.set_batched_prefill_enabled(enabled)
@@ -3230,7 +3247,7 @@ class DistTPModelRunner:
             ) from self._fatal_error
         try:
             probe = _PrefillStatsProbe(reset)
-            delivered = self._control_comm.broadcast(probe, src=0)
+            delivered = self._broadcast_control(probe)
             if delivered != probe:
                 raise RuntimeError("prefill stats probe broadcast returned a malformed payload")
             packet = _prefill_stats_packet(
@@ -3263,7 +3280,7 @@ class DistTPModelRunner:
             ) from self._fatal_error
         try:
             payload = _BatchedVerificationMode(enabled)
-            delivered = self._control_comm.broadcast(payload, src=0)
+            delivered = self._broadcast_control(payload)
             if delivered != payload:
                 raise RuntimeError(
                     "batched verification mode broadcast returned a malformed payload"
@@ -3289,7 +3306,7 @@ class DistTPModelRunner:
             ) from self._fatal_error
         try:
             probe = _VerificationStatsProbe(reset)
-            delivered = self._control_comm.broadcast(probe, src=0)
+            delivered = self._broadcast_control(probe)
             if delivered != probe:
                 raise RuntimeError(
                     "verification stats probe broadcast returned a malformed payload"
@@ -3324,7 +3341,7 @@ class DistTPModelRunner:
             ) from self._fatal_error
         try:
             payload = _DecodePageTableCacheMode(enabled)
-            delivered = self._control_comm.broadcast(payload, src=0)
+            delivered = self._broadcast_control(payload)
             if delivered != payload:
                 raise RuntimeError(
                     "decode page-table cache mode broadcast returned a malformed payload"
@@ -3350,7 +3367,7 @@ class DistTPModelRunner:
             ) from self._fatal_error
         try:
             probe = _DecodePageTableCacheStatsProbe(reset)
-            delivered = self._control_comm.broadcast(probe, src=0)
+            delivered = self._broadcast_control(probe)
             if delivered != probe:
                 raise RuntimeError(
                     "decode page-table stats probe broadcast returned a malformed payload"
@@ -3396,10 +3413,7 @@ class DistTPModelRunner:
             self._sync.discard(released_ids)
             try:
                 if self._fatal_error is None:
-                    self._control_comm.broadcast(
-                        _ShutdownRequest(released_ids),
-                        src=0,
-                    )
+                    self._broadcast_control(_ShutdownRequest(released_ids))
             finally:
                 _release_runner_requests(self._local, released_ids)
                 self._ack_pending_releases(pending_releases)
@@ -4173,13 +4187,13 @@ def _ep_attention_dp_local_token_packet(
     return packet
 
 
-def _ep_attention_dp_token_matrix(
+def _ep_attention_dp_packet_views(
     gathered,
     *,
     chunk_count: int,
     world_size: int,
 ):
-    """Validate every rank's device status and return rank-major token slots."""
+    """Return device-resident rank-major token and status packet views."""
 
     import torch
 
@@ -4193,9 +4207,26 @@ def _ep_attention_dp_token_matrix(
             "attention-DP gathered token packet has malformed shape or dtype"
         )
     matrix = gathered.reshape(world_size, packet_width)
-    statuses = tuple(int(status) for status in matrix[:, 0].tolist())
+    return matrix[:, 1:], matrix[:, 0].contiguous()
+
+
+def _ep_attention_dp_validate_statuses(statuses, *, world_size: int) -> None:
+    """Validate one asynchronously copied all-rank status vector on the host."""
+
+    import torch
+
+    if (
+        not isinstance(statuses, torch.Tensor)
+        or statuses.device.type != "cpu"
+        or statuses.dtype is not torch.int64
+        or tuple(statuses.shape) != (world_size,)
+    ):
+        raise RuntimeError(
+            "attention-DP copied status sidecar has malformed shape or dtype"
+        )
+    values = tuple(int(status) for status in statuses.tolist())
     failures: list[str] = []
-    for rank, status in enumerate(statuses):
+    for rank, status in enumerate(values):
         if status == _EP_ATTENTION_DP_PACKET_OK:
             continue
         if status == _EP_ATTENTION_DP_PACKET_FAILED:
@@ -4208,7 +4239,16 @@ def _ep_attention_dp_token_matrix(
         raise RuntimeError(
             "attention-DP device-packet rank failures: " + "; ".join(failures)
         )
-    return matrix[:, 1:]
+
+
+def _ep_attention_dp_status_sidecars(statuses, *, world_size: int):
+    def validate(host_statuses) -> None:
+        _ep_attention_dp_validate_statuses(
+            host_statuses,
+            world_size=world_size,
+        )
+
+    return ((statuses, validate),)
 
 
 def _ep_attention_dp_deferred_packet_output(
@@ -4228,7 +4268,7 @@ def _ep_attention_dp_deferred_packet_output(
     )
     from kairyu.engine.core.sampler import DeviceSample
 
-    matrix = _ep_attention_dp_token_matrix(
+    matrix, statuses = _ep_attention_dp_packet_views(
         gathered,
         chunk_count=len(chunks),
         world_size=world_size,
@@ -4271,7 +4311,50 @@ def _ep_attention_dp_deferred_packet_output(
     return _DeferredStepOutput(
         records,
         getattr(local_runner, "_output_copy_stream", None),
+        device_sidecars=_ep_attention_dp_status_sidecars(
+            statuses,
+            world_size=world_size,
+        ),
     )
+
+
+def _ep_attention_dp_deferred_status_output(
+    gathered,
+    *,
+    chunk_count: int,
+    world_size: int,
+    local_runner,
+):
+    """Retain a passive rank's status sidecar until the next control boundary."""
+
+    from kairyu.engine.core.model_runner import _DeferredStepOutput
+
+    _tokens, statuses = _ep_attention_dp_packet_views(
+        gathered,
+        chunk_count=chunk_count,
+        world_size=world_size,
+    )
+    return _DeferredStepOutput(
+        {},
+        getattr(local_runner, "_output_copy_stream", None),
+        device_sidecars=_ep_attention_dp_status_sidecars(
+            statuses,
+            world_size=world_size,
+        ),
+    )
+
+
+def _resolve_attention_dp_status_boundary(pending, *, drain_all: bool) -> None:
+    """Resolve the same FIFO status prefix on every rank after a broadcast.
+
+    Readiness must never choose whether a rank participates: CUDA copy events
+    can become ready at different host-observation times. Normal boundaries
+    settle exactly the preceding step; shutdown settles the entire tail.
+    """
+
+    count = len(pending) if drain_all else min(1, len(pending))
+    for _ in range(count):
+        pending.popleft().resolve_sidecars()
 
 
 def _validate_ep_attention_dp_replies(
@@ -4412,6 +4495,11 @@ class DistEPModelRunner:
         self._owner_assignment_sequence = 0
         self._owner_assignment_log: list[dict[str, object]] = []
         self._owner_assignment_dropped = 0
+        self._pending_attention_dp_status = deque()
+        if attention_dp:
+            self._delegate._post_control_boundary = (
+                self._resolve_pending_attention_dp_status
+            )
         self.expert_parallel_size = expert_parallel_size
         self.parallelism = "expert_parallel"
         self.execution_mode = (
@@ -4431,6 +4519,14 @@ class DistEPModelRunner:
         )
         self.pipeline_depth = pipeline_depth
         self.decode_mode = decode_mode
+
+    def _resolve_pending_attention_dp_status(self, payload: object) -> None:
+        """Resolve the rank-symmetric prior step; shutdown drains the tail."""
+
+        _resolve_attention_dp_status_boundary(
+            self._pending_attention_dp_status,
+            drain_all=isinstance(payload, _ShutdownRequest),
+        )
 
     def __getattr__(self, name: str):
         """Delegate the proven SPMD control protocol without becoming a TP type."""
@@ -4723,7 +4819,7 @@ class DistEPModelRunner:
                     owner_pairs,
                     graph_plan,
                 )
-                delivered = delegate._control_comm.broadcast(payload, src=0)
+                delivered = delegate._broadcast_control(payload)
                 if delivered != payload:
                     raise RuntimeError(
                         "attention-DP control broadcast returned a malformed payload"
@@ -4748,6 +4844,7 @@ class DistEPModelRunner:
                         world_size=self.expert_parallel_size,
                         local_runner=delegate._local,
                     )
+                    self._pending_attention_dp_status.append(sampled)
                 else:
                     gathered = delegate._control_comm.all_gather(local.reply)
                     sampled = _validate_ep_attention_dp_replies(
@@ -4779,9 +4876,8 @@ class DistEPModelRunner:
             model_world_size = delegate._model_comm.world_size
             control_backend = _communicator_backend(delegate._control_comm)
             model_backend = _communicator_backend(delegate._model_comm)
-            delivered = delegate._control_comm.broadcast(
-                _SamplingOwnershipProbe(),
-                src=0,
+            delivered = delegate._broadcast_control(
+                _SamplingOwnershipProbe()
             )
             if not isinstance(delivered, _SamplingOwnershipProbe):
                 raise RuntimeError(
@@ -4871,7 +4967,7 @@ class DistEPModelRunner:
             ) from delegate._fatal_error
         try:
             payload = _EPKVAccountingControl(action)
-            delivered = delegate._control_comm.broadcast(payload, src=0)
+            delivered = delegate._broadcast_control(payload)
             if not isinstance(delivered, _EPKVAccountingControl):
                 raise RuntimeError(
                     "EP KV accounting control returned a malformed payload"
@@ -4929,9 +5025,8 @@ class DistEPModelRunner:
                     "EP kernel inventory requires the bounded control communicator "
                     f"(gloo), got {backend!r}"
                 )
-            delivered = delegate._control_comm.broadcast(
-                _EPKernelInventoryProbe(),
-                src=0,
+            delivered = delegate._broadcast_control(
+                _EPKernelInventoryProbe()
             )
             if not isinstance(delivered, _EPKernelInventoryProbe):
                 raise RuntimeError(
@@ -4990,8 +5085,16 @@ def worker_step_loop(
         if parallelism_prefix == "EP"
         else None
     )
+    pending_attention_dp_status = deque()
     while True:
         payload = control_comm.broadcast(_SHUTDOWN, src=0)
+        drain_statuses = isinstance(payload, _ShutdownRequest) or (
+            payload is _SHUTDOWN or payload is None
+        )
+        _resolve_attention_dp_status_boundary(
+            pending_attention_dp_status,
+            drain_all=drain_statuses,
+        )
         if isinstance(payload, _EPAttentionDPStep):
             _release_runner_requests(
                 local_runner,
@@ -5010,10 +5113,13 @@ def worker_step_loop(
                 view,
             )
             if fast_path:
-                _ep_attention_dp_token_matrix(
-                    local.gathered_token_packet,
-                    chunk_count=len(payload.delta.chunks),
-                    world_size=control_comm.world_size,
+                pending_attention_dp_status.append(
+                    _ep_attention_dp_deferred_status_output(
+                        local.gathered_token_packet,
+                        chunk_count=len(payload.delta.chunks),
+                        world_size=control_comm.world_size,
+                        local_runner=local_runner,
+                    )
                 )
             else:
                 gathered = control_comm.all_gather(local.reply)

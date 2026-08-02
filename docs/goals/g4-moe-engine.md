@@ -89,9 +89,12 @@ result is not reclassified as jitter. The next candidate keeps configured
 depth 5 for pure decode, bounds unresolved admission/prefill work to two
 forwards, stops fill on producer arrivals, and removes the pure-greedy final
 Gloo reply by adding fail-closed rank status to the existing NCCL token packet.
-Those changes require a new complete clean-commit matrix; the earlier FAIL
-remains authoritative until then. The exact procedure and provenance contract
-are in `docs/gpu-runbook.md` §9.13.
+That status is copied asynchronously beside deferred public tokens and resolved
+by every rank after the next common control broadcast, so validation neither
+eagerly synchronizes the current CUDA stream nor branches on rank-local event
+readiness. Those changes require a new complete clean-commit matrix; the
+earlier FAIL remains authoritative until then. The exact procedure and
+provenance contract are in `docs/gpu-runbook.md` §9.13.
 
 Recorded 2026-07-31: **FAIL** on the pinned Qwen3-32B revision and one RTX PRO
 6000 Blackwell. All K/V write audits passed across 7,522,091,008 values with
