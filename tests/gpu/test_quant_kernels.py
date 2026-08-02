@@ -131,6 +131,35 @@ def test_fused_kernel_matches_cpu_oracle_without_dequantizing_weight(
         torch.testing.assert_close(gpu_out, cpu_out, rtol=0.03, atol=atol)
 
 
+def test_nvfp4_qkv_pack_matches_separate_and_replays_cuda_graph(cuda):
+    """One activation quantization must preserve Q/K/V values and graph safety."""
+    from kairyu.models.packed_linear import NvFp4LinearPack
+
+    torch.manual_seed(168)
+    modules = tuple(_nvfp4_module(64, rows).to(cuda) for rows in (64, 32, 32))
+    for module in modules[1:]:
+        module.input_scale.copy_(modules[0].input_scale)
+        module.weight_scale_2.copy_(modules[0].weight_scale_2)
+    pack = NvFp4LinearPack.create(modules)
+    assert pack is not None
+    hidden = torch.randn(3, 64, device=cuda, dtype=torch.bfloat16)
+    expected = tuple(module(hidden) for module in modules)
+    actual = pack(hidden)
+    for result, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+    for _ in range(3):
+        pack(hidden)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = pack(hidden)
+    graph.replay()
+    torch.cuda.synchronize()
+    for result, reference in zip(replayed, expected, strict=True):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+
+
 def test_fused_kernel_rejects_unsupported_activation_dtype(cuda):
     module = _awq_module().to(cuda)
     with pytest.raises(RuntimeError, match="float16/bfloat16"):

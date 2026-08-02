@@ -32,18 +32,15 @@ _ENGINE_LABELS = {
 # Engine backends that run attention locally in-process (so the resolved
 # attention backend applies to them); remote/echo engines report null.
 _LOCAL_ATTENTION_BACKENDS = frozenset({"kairyu", "kairyu-proc"})
-_EP_STRING_METADATA_FIELDS = (
-    "attention_placement",
-    "attention_output_placement",
-    "attention_output_partial_dtype",
-    "execution_mode",
-    "decode_mode",
-    "kv_cache_dtype",
-)
-_EP_INT_METADATA_FIELDS = (
-    "expert_parallel_size",
-    "attention_output_parallel_size",
-    "pipeline_depth",
+_EP_COLLECTIVE_TRANSPORT_FIELDS = frozenset(
+    {
+        "selected_backend",
+        "fallback_backend",
+        "direct_nccl_active",
+        "direct_nccl_library",
+        "direct_nccl_version",
+        "selection_reason",
+    }
 )
 
 
@@ -52,31 +49,143 @@ def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
 
     if not isinstance(value, Mapping) or value.get("parallelism") != "expert_parallel":
         return None
-    metadata: dict[str, object] = {"parallelism": "expert_parallel"}
-    for field in _EP_STRING_METADATA_FIELDS:
-        field_value = value.get(field)
-        if not isinstance(field_value, str) or not field_value:
-            return None
-        metadata[field] = field_value
-    for field in _EP_INT_METADATA_FIELDS:
-        field_value = value.get(field)
-        if type(field_value) is not int or field_value < 1:
-            return None
-        metadata[field] = field_value
+    expert_parallel_size = value.get("expert_parallel_size")
+    output_parallel_size = value.get("attention_output_parallel_size")
+    pipeline_depth = value.get("pipeline_depth")
+    decode_mode = value.get("decode_mode")
     if (
-        metadata["expert_parallel_size"] not in {2, 4}
-        or metadata["attention_output_parallel_size"]
-        != metadata["expert_parallel_size"]
-        or metadata["attention_placement"] != "replicated"
-        or metadata["attention_output_placement"] != "row_parallel"
-        or metadata["attention_output_partial_dtype"] != "bfloat16"
-        or metadata["execution_mode"] != "replicated-attention-correctness"
-        or metadata["pipeline_depth"] != 1
-        or metadata["decode_mode"] != "eager"
-        or metadata["kv_cache_dtype"] != "bfloat16"
+        type(expert_parallel_size) is not int
+        or expert_parallel_size not in {2, 4}
+        or type(output_parallel_size) is not int
+        or output_parallel_size < 1
+        or type(pipeline_depth) is not int
+        or pipeline_depth < 1
+        or decode_mode not in {"eager", "cuda_graph"}
+        or value.get("kv_cache_dtype") != "bfloat16"
     ):
         return None
-    return metadata
+    execution_mode = value.get("execution_mode")
+    common = {
+        "parallelism": "expert_parallel",
+        "expert_parallel_size": expert_parallel_size,
+        "attention_placement": value.get("attention_placement"),
+        "attention_output_placement": value.get("attention_output_placement"),
+        "attention_output_parallel_size": output_parallel_size,
+        "attention_output_partial_dtype": value.get(
+            "attention_output_partial_dtype"
+        ),
+        "execution_mode": execution_mode,
+        "pipeline_depth": pipeline_depth,
+        "decode_mode": decode_mode,
+        "kv_cache_dtype": "bfloat16",
+    }
+    if execution_mode == "replicated-attention-correctness":
+        if (
+            expert_parallel_size not in {2, 4}
+            or output_parallel_size != expert_parallel_size
+            or common["attention_placement"] != "replicated"
+            or common["attention_output_placement"] != "row_parallel"
+            or common["attention_output_partial_dtype"] != "bfloat16"
+            or pipeline_depth != 1
+            or decode_mode != "eager"
+        ):
+            return None
+        return common
+    if execution_mode != "request-owned-attention-dp":
+        return None
+    transport = value.get("moe_collective_transport")
+    if not isinstance(transport, Mapping) or set(transport) != (
+        _EP_COLLECTIVE_TRANSPORT_FIELDS
+    ):
+        return None
+    direct_active = transport.get("direct_nccl_active")
+    selected_backend = transport.get("selected_backend")
+    fallback_backend = transport.get("fallback_backend")
+    selection_reason = transport.get("selection_reason")
+    direct_library = transport.get("direct_nccl_library")
+    direct_version = transport.get("direct_nccl_version")
+    if (
+        type(direct_active) is not bool
+        or fallback_backend != "torch.distributed:nccl"
+        or not isinstance(selection_reason, str)
+        or not selection_reason
+        or (
+            direct_active
+            and (
+                selected_backend != "direct_nccl_ctypes"
+                or not isinstance(direct_library, str)
+                or not direct_library
+                or not isinstance(direct_version, str)
+                or not direct_version
+            )
+        )
+        or (
+            not direct_active
+            and (
+                selected_backend not in {fallback_backend, "unavailable"}
+                or direct_library is not None
+                or direct_version is not None
+            )
+        )
+    ):
+        return None
+    cuda_graph_decode = value.get("cuda_graph_decode")
+    graph_buckets = value.get("cuda_graph_buckets")
+    graph_captures = value.get("cuda_graph_captures")
+    graph_replays = value.get("cuda_graph_replays")
+    graph_fallbacks = value.get("cuda_graph_eager_fallbacks")
+    prefill_scratch = value.get("attention_dp_prefill_scratch_pages")
+    decode_scratch = value.get("attention_dp_decode_scratch_pages")
+    graph_scratch = value.get("attention_dp_graph_scratch_pages")
+    total_scratch = value.get("attention_dp_scratch_pages")
+    if (
+        expert_parallel_size != 4
+        or output_parallel_size != 1
+        or common["attention_placement"] != "request_owned_data_parallel"
+        or common["attention_output_placement"] != "replicated"
+        or common["attention_output_partial_dtype"] is not None
+        or value.get("attention_data_parallel_size") != 4
+        or value.get("attention_tensor_parallel_size") != 1
+        or value.get("moe_dispatcher") != "nvfp4_allgather_reduce_scatter"
+        or value.get("sampling_ownership") != "request_owner"
+        or value.get("kv_cache_ownership") != "request_owner"
+        or type(cuda_graph_decode) is not bool
+        or cuda_graph_decode != (decode_mode == "cuda_graph")
+        or not isinstance(graph_buckets, (tuple, list))
+        or any(type(bucket) is not int or bucket < 1 for bucket in graph_buckets)
+        or tuple(graph_buckets) != tuple(sorted(set(graph_buckets)))
+        or (cuda_graph_decode and not graph_buckets)
+        or (not cuda_graph_decode and bool(graph_buckets))
+        or any(
+            type(count) is not int or count < 0
+            for count in (graph_captures, graph_replays, graph_fallbacks)
+        )
+        or prefill_scratch != 2
+        or type(decode_scratch) is not int
+        or decode_scratch < 1
+        or graph_scratch != int(cuda_graph_decode)
+        or total_scratch
+        != prefill_scratch + decode_scratch + graph_scratch
+    ):
+        return None
+    return {
+        **common,
+        "attention_data_parallel_size": 4,
+        "attention_tensor_parallel_size": 1,
+        "moe_dispatcher": "nvfp4_allgather_reduce_scatter",
+        "sampling_ownership": "request_owner",
+        "kv_cache_ownership": "request_owner",
+        "cuda_graph_decode": cuda_graph_decode,
+        "cuda_graph_buckets": list(graph_buckets),
+        "cuda_graph_captures": graph_captures,
+        "cuda_graph_replays": graph_replays,
+        "cuda_graph_eager_fallbacks": graph_fallbacks,
+        "attention_dp_prefill_scratch_pages": prefill_scratch,
+        "attention_dp_decode_scratch_pages": decode_scratch,
+        "attention_dp_graph_scratch_pages": graph_scratch,
+        "attention_dp_scratch_pages": total_scratch,
+        "moe_collective_transport": dict(transport),
+    }
 
 
 def add_health_routes(
@@ -386,9 +495,17 @@ def add_health_routes(
                         "versions": _versions_for(engine_decision.components),
                     }
                 )
-            ep_metadata = _expert_parallel_metadata(
-                getattr(engine, "parallelism_metadata", None)
+            metadata_snapshot = getattr(
+                engine,
+                "parallelism_metadata_snapshot",
+                None,
             )
+            raw_parallelism_metadata = (
+                metadata_snapshot()
+                if callable(metadata_snapshot)
+                else getattr(engine, "parallelism_metadata", None)
+            )
+            ep_metadata = _expert_parallel_metadata(raw_parallelism_metadata)
             if ep_metadata is not None:
                 entry.update(ep_metadata)
             else:

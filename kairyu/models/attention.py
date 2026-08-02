@@ -16,7 +16,7 @@ from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.engine.core.prefill import PrefillBatch
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, apply_rope
-from kairyu.models.packed_linear import DenseLinearPack
+from kairyu.models.packed_linear import DenseLinearPack, NvFp4LinearPack
 from kairyu.quant.linear import LinearRole, ModelScope, make_linear
 
 
@@ -98,21 +98,37 @@ class Attention(nn.Module):
             self.q_norm = None
             self.k_norm = None
         # Preserve canonical q/k/v modules and checkpoint members while using
-        # one GEMM for compatible dense projections.
-        object.__setattr__(
-            self,
-            "_qkv_pack",
-            DenseLinearPack.create((self.q_proj, self.k_proj, self.v_proj)),
-        )
+        # one GEMM for compatible dense or NVFP4 projections.
+        self.refresh_dense_pack()
 
     def refresh_dense_pack(self) -> None:
-        """Rebuild the execution view after assign-load or module ``to()``."""
+        """Rebuild QKV execution views and invariant NVFP4 operands."""
 
+        projections = (self.q_proj, self.k_proj, self.v_proj)
+        packed = DenseLinearPack.create(projections)
+        if packed is None:
+            packed = NvFp4LinearPack.create(projections)
         object.__setattr__(
             self,
             "_qkv_pack",
-            DenseLinearPack.create((self.q_proj, self.k_proj, self.v_proj)),
+            packed,
         )
+        if packed is None:
+            for projection in projections:
+                self._prepare_nvfp4_projection(projection)
+        self._prepare_nvfp4_projection(self.o_proj)
+
+    @staticmethod
+    def _prepare_nvfp4_projection(projection: nn.Module) -> None:
+        """Prepare a resident dense NVFP4 projection at model load/move time."""
+
+        from kairyu.quant.linear import NvFp4Linear
+
+        if type(projection) is not NvFp4Linear or projection.weight.device.type != "cuda":
+            return
+        from kairyu.kernels.quant_gemm_gpu import prepare_nvfp4_linear
+
+        prepare_nvfp4_linear(projection, projection.weight.device)
 
     def _project_qkv(
         self,

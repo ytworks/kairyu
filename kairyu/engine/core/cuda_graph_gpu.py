@@ -21,6 +21,18 @@ class CudaGraphBackend:
         self.captures = 0
         self.replays = 0
 
+    @property
+    def capture_model_forward_count(self) -> int:
+        """Exact Python model-forward entries made by a new capture.
+
+        ``capture`` executes one forward for every configured warmup and one
+        further forward inside ``torch.cuda.graph``.  The immediate graph
+        replay performed by ``GraphStepExecutor`` is deliberately absent: it
+        launches recorded work and does not re-enter the Python model.
+        """
+
+        return self._warmup_iters + 1
+
     def invalidate(self) -> None:
         # An output from the old graph may still be owned by a caller when the
         # model swaps weights.  Reusing that graph's pool token while such a

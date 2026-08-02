@@ -1,10 +1,11 @@
 # Goal G4: MoE Engine — Fused Experts, EP, MTP, NVFP4 (Roadmap Track E4–E5)
 
 Status: G4.1 M-A1 retains its formal FAIL; M-A2 production integration and
-formal evidence are complete (2026-08-02).
+formal evidence are complete; M-A3 has an implemented production candidate
+and formal operator, with the clean paired verdict still pending (2026-08-03).
 Lifts the G2 §6 "MoE / expert parallelism" non-goal (amendment recorded in
 PROGRESS.md). The reviewed mid-MoE design is `docs/design/g4-mid-moe.md`;
-M-A2 passed its independent cache gate; M-A3 remains pending.
+M-A2 passed its independent cache gate; M-A3 measurement remains pending.
 Depends on: Roadmap Track E1–E3 (`docs/roadmap.md` §4): real single-GPU engine,
 scheduler multi-token commit (E2), NcclCommunicator (E3). Frontier-class gates
 additionally depend on the E3 hardware decision record (PCIe-switch chassis,
@@ -53,6 +54,31 @@ All numbers from committed `bench/` scripts (G2 §8 evidence rules carry forward
 | M-A3 (baseline comparison) | tok/s/GPU and TTFT p99 ≥ SGLang, same box, same checkpoint, same config — SGLang is the credible MoE-on-SM120 baseline; disclose its known SM120 limitations in the results file | saturation |
 | M-A4 (MTP value) | MTP acceptance ≥2 tokens/step measured; decode throughput ≥1.5× MTP-off at equal quality (spec ≡ non-spec greedy invariant pinned by test, E2 lineage) | latency-bound |
 | E-KV (FP8 KV bake) | `bench/fp8_kv_g4_ekv_bench.py` runs the pinned Qwen3-32B checkpoint on one SM120 with exact 8K/16K/32K prompts, 2,048-token native ragged-prefill chunks, and 16 greedy decode tokens in BF16-KV and explicit unit-scale E4M3-KV arms. PASS requires exact output token IDs/stopping, finite common-prefix selected logprobs with max absolute delta ≤0.25, complete finite/in-range SATFINITE write audits with bit-exact stored E4M3 bytes and the declared quantization-error bound, and fixed cross-cache samples with NRMSE ≤0.05 and cosine ≥0.99. BF16 remains the default; the operator alone may construct the candidate arm, and any runtime or quality failure is retained as FAIL and keeps public FP8 KV disabled. | — |
+
+M-A3 implementation state (2026-08-03): Kairyu now has a bounded Qwen3-235B
+NVFP4 TP1/attention-DP4/EP4 serving path with request-owned attention, KV, and
+sampling; grouped direct-NCCL packed-MoE exchange; one compatible packed QKV
+projection call; coordinated CUDA-graph decode; and production `/backends`
+witnesses. A same-checkpoint implementation diagnostic selected pipeline
+depth 5 over depth 1; depth 5 is fixed before the formal comparison and that
+diagnostic timing is not gate evidence. The comparison pins SGLang v0.5.16 and
+its immutable image/source, uses the same four physical GPUs and checkpoint,
+and matches four request owners, EP4, BF16 KV, FCFS, aggregate 65,536-token
+cache capacity, and the fixed 128-request ShareGPT workload. Kairyu's internal
+TP1 replicated-attention projection layout and SGLang's recorded
+TP4/DP4/EP4 layout remain explicitly visible rather than being relabelled as
+identical.
+
+The binding operator uses four fresh-server pairs in K/S, S/K, S/K, K/S order
+and gates the exact median of the four ratios: Kairyu completion tok/s/GPU over
+SGLang must be at least 1, while Kairyu/SGLang TTFT p99 must be at most 1.
+Failures and retries are retained; there is no outlier removal, rounding before
+the gate, or exclusion. A separately retained five-point open-loop sweep is
+report-only. The Kairyu hardware load/graph smoke does not satisfy M-A3 by
+itself. The formal metrics, artifact path, and PASS/FAIL verdict are explicitly
+pending until the complete clean-commit raw JSONL passes both manifest
+verification and raw-only replay. The exact procedure and provenance contract
+are in `docs/gpu-runbook.md` §9.13.
 
 Recorded 2026-07-31: **FAIL** on the pinned Qwen3-32B revision and one RTX PRO
 6000 Blackwell. All K/V write audits passed across 7,522,091,008 values with

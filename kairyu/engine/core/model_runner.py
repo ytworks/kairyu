@@ -52,6 +52,7 @@ from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.step_executor import (
     DecodePageTableCache,
     DecodeRowOwner,
+    GraphDecodeDecision,
     build_decode_batch,
 )
 from kairyu.models.llama import DenseDecoder
@@ -586,6 +587,132 @@ class PagedModelRunner:
         if self._graph is not None:
             self._graph.invalidate()
         self._decode_page_table_cache.invalidate()
+
+    def decode_graph_decision(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> GraphDecodeDecision | None:
+        """Preview graph dispatch for this step's single-token decode.
+
+        This is a strictly read-only shape query.  It intentionally does not
+        call ``_decode_inputs``: that execution helper trims retained future
+        tokens.  Only chunk kind/count and the already-owned page metadata are
+        inspected, so a distributed coordinator can stage capture-time side
+        inputs without advancing request, token, or graph state.
+        """
+
+        decodes = tuple(
+            chunk
+            for chunk in scheduled
+            if not chunk.is_prefill and chunk.num_tokens == 1
+        )
+        if not decodes:
+            return None
+        page_widths: list[int] = []
+        for chunk in decodes:
+            state = states[chunk.request_id]
+            allocation = state.allocation
+            if allocation is None:
+                raise RuntimeError(
+                    f"decode request {chunk.request_id!r} has no KV allocation"
+                )
+            page_widths.append(
+                len(allocation.pages) + len(state.decode_pages)
+            )
+        max_pages = max(page_widths)
+        if max_pages < 1:
+            raise RuntimeError("decode request has an empty KV page table")
+        return self.decode_graph_decision_for_shape(
+            batch_size=len(decodes),
+            max_pages=max_pages,
+        )
+
+    def decode_graph_decision_for_shape(
+        self,
+        *,
+        batch_size: int,
+        max_pages: int,
+    ) -> GraphDecodeDecision:
+        """Preview decode dispatch for coordinator-supplied global geometry."""
+
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("decode batch_size must be an integer >= 1")
+        if type(max_pages) is not int or max_pages < 1:
+            raise ValueError("decode max_pages must be an integer >= 1")
+        if self._graph is None:
+            return GraphDecodeDecision(
+                kind="eager_fallback",
+                bucket_size=batch_size,
+                capture_model_forward_count=1,
+            )
+        return self._graph.decode_decision(
+            batch_size=batch_size,
+            max_pages=max_pages,
+        )
+
+    def coordinate_decode_graph_decision(
+        self,
+        decision: GraphDecodeDecision,
+    ) -> None:
+        """Make one distributed decision authoritative for the next decode."""
+
+        if self._graph is None:
+            if decision != GraphDecodeDecision(
+                kind="eager_fallback",
+                bucket_size=decision.bucket_size,
+                capture_model_forward_count=1,
+            ):
+                raise RuntimeError(
+                    "an eager runner cannot arm a captured graph decision"
+                )
+            return
+        self._graph.coordinate_next_decode(decision)
+
+    def assert_coordinated_decode_graph_decision_consumed(self) -> None:
+        """Assert the armed distributed graph branch was entered once."""
+
+        if self._graph is not None:
+            self._graph.assert_coordinated_decode_consumed()
+
+    def cancel_coordinated_decode_graph_decision(self) -> None:
+        """Disarm an override while propagating an already-fatal step error."""
+
+        if self._graph is not None:
+            self._graph.cancel_coordinated_decode()
+
+    def decode_graph_metadata(self) -> dict[str, object]:
+        """Return actual configured buckets and live structural dispatch counts."""
+
+        if self._graph is None:
+            return {
+                "decode_mode": "eager",
+                "cuda_graph_decode": False,
+                "cuda_graph_buckets": (),
+                "cuda_graph_captures": 0,
+                "cuda_graph_replays": 0,
+                "cuda_graph_eager_fallbacks": 0,
+            }
+        stats = self._graph.execution_stats()
+        captured = stats["captured_buckets"]
+        return {
+            "decode_mode": "cuda_graph",
+            "cuda_graph_decode": True,
+            "cuda_graph_buckets": self._graph.configured_buckets,
+            "cuda_graph_captures": len(captured),
+            "cuda_graph_replays": stats["graph_executions"],
+            "cuda_graph_eager_fallbacks": stats["eager_fallbacks"],
+        }
+
+    def required_decode_model_forward_count(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> int:
+        """Return Python model-forward repetitions required by the preview."""
+
+        decision = self.decode_graph_decision(scheduled, states)
+        return 0 if decision is None else decision.capture_model_forward_count
 
     @property
     def sampler(self) -> Sampler | None:

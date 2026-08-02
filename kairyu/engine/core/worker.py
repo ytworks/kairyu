@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 from threading import Lock
 
-from kairyu.engine.core.step_input import StateSync, StepDelta
+from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
+from kairyu.engine.core.scheduler import ScheduledChunk
+from kairyu.engine.core.step_executor import GraphDecodeDecision
+from kairyu.engine.core.step_input import RequestSnapshot, StateSync, StepDelta
 from kairyu.engine.tokenizer import GrammarVocabulary
 
 _SHUTDOWN = None
@@ -49,6 +53,56 @@ class _ShutdownRequest:
     """Terminal control payload carrying cleanup not consumed by another step."""
 
     released_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _EPAttentionDPGraphPlan:
+    """One globally coordinated decode shape and immutable dispatch branch."""
+
+    cuda_graph_decode: bool
+    batch_size: int
+    max_pages: int
+    decision: GraphDecodeDecision
+
+
+@dataclass(frozen=True)
+class _EPAttentionDPStep:
+    """One request-owned attention-DP transaction.
+
+    ``delta`` remains the canonical scheduler snapshot. ``owners`` is limited
+    to requests present in this step and is rank ordered by first chunk
+    appearance, so every process derives the same local work and collective
+    layout without another control exchange.
+    """
+
+    delta: StepDelta
+    owners: tuple[tuple[str, int], ...]
+    graph_plan: _EPAttentionDPGraphPlan | None = None
+
+
+@dataclass(frozen=True)
+class _EPAttentionDPReply:
+    """Pickle-safe owner-local sampling result or bounded rank failure."""
+
+    rank: int
+    sampled: dict[str, tuple[SampledToken, ...]] | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _EPAttentionDPLocalResult:
+    """Rank-local status plus the device packet kept off the gloo path."""
+
+    reply: _EPAttentionDPReply
+    gathered_token_packet: object | None = None
+
+
+@dataclass(frozen=True)
+class _EPAttentionDPGraphValidationReply:
+    """Bounded pre-model validation result gathered on the control group."""
+
+    rank: int
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -343,6 +397,45 @@ _EP_ATTENTION_OUTPUT_FIELDS = frozenset(
     }
 )
 _EP_ATTENTION_OUTPUT_BLOCK_COUNT = 94
+_EP_FUSED_MOE_BLOCK_FIELDS = frozenset(
+    {
+        "backend",
+        "global_expert_count",
+        "local_expert_count",
+        "local_expert_start",
+        "weight_order",
+        "scale_layout",
+        "output_dtype",
+        "ep_partial",
+        "enable_alltoall",
+        "successful_forward",
+    }
+)
+_EP_ATTENTION_DP_FUSED_MOE_BLOCK_FIELDS = _EP_FUSED_MOE_BLOCK_FIELDS | {
+    "attention_dp",
+    "attention_placement",
+    "attention_output_placement",
+    "dispatcher",
+    "row_layout",
+    "activation_collective",
+    "activation_collective_dtype",
+    "scale_collective_dtype",
+    "combine_collective",
+    "post_combine_all_reduce",
+    "layout_queue_depth",
+    "layout_queue_consumed",
+    "completed_layout_steps",
+    "last_rank_row_layout",
+    "last_local_real_rows",
+    "last_padded_rows_per_rank",
+    "total_collective_rows",
+}
+_EP_FUSED_MOE_SUMMARY_FIELDS = (
+    _EP_FUSED_MOE_BLOCK_FIELDS - {"successful_forward"}
+) | {"block_count", "successful_forward_block_count"}
+_EP_ATTENTION_DP_FUSED_MOE_SUMMARY_FIELDS = (
+    _EP_ATTENTION_DP_FUSED_MOE_BLOCK_FIELDS - {"successful_forward"}
+) | {"block_count", "successful_forward_block_count"}
 _EP_KERNEL_LOAD_INFO_FIELDS = frozenset(
     {
         "ep_rank",
@@ -834,8 +927,12 @@ def _ep_attention_output_summary(
     *,
     rank: int,
     world_size: int,
+    attention_dp: bool = False,
 ) -> dict[str, object]:
     """Validate every canonical NVFP4 ``o_proj`` and reduce its live geometry."""
+
+    if type(attention_dp) is not bool:
+        raise TypeError("attention_dp must be a boolean")
 
     import torch
 
@@ -866,7 +963,7 @@ def _ep_attention_output_summary(
         )
 
     geometry: tuple[int, int, int] | None = None
-    successful = 0
+    successful: int | None = None if attention_dp else 0
     for layer, name in enumerate(expected_names):
         module = by_name.get(name)
         if not isinstance(module, NvFp4Linear):
@@ -875,25 +972,43 @@ def _ep_attention_output_summary(
             )
         context = getattr(module, "linear_context", None)
         placement = getattr(context, "tensor_parallel", None)
-        if (
+        common_malformed = (
             context is None
             or context.qualified_name != name
             or context.role is not LinearRole.ATTENTION_OUTPUT
             or context.layer_index != layer
             or context.dtype is not torch.bfloat16
             or placement is None
-            or placement.mode is not TensorParallelMode.ROW
-            or placement.rank != rank
-            or placement.world_size != world_size
-            or placement.shard_dim != 1
-            or placement.global_in_features
-            != placement.local_in_features * world_size
-            or placement.global_out_features != placement.local_out_features
             or module.in_features != placement.local_in_features
             or module.out_features != placement.local_out_features
-        ):
+        )
+        if attention_dp:
+            malformed_placement = (
+                common_malformed
+                or placement.mode is not TensorParallelMode.REPLICATED
+                or placement.rank != 0
+                or placement.world_size != 1
+                or placement.shard_dim is not None
+                or placement.global_in_features != placement.local_in_features
+                or placement.global_out_features != placement.local_out_features
+            )
+            placement_name = "replicated"
+        else:
+            malformed_placement = (
+                common_malformed
+                or placement.mode is not TensorParallelMode.ROW
+                or placement.rank != rank
+                or placement.world_size != world_size
+                or placement.shard_dim != 1
+                or placement.global_in_features
+                != placement.local_in_features * world_size
+                or placement.global_out_features != placement.local_out_features
+            )
+            placement_name = "row_parallel"
+        if malformed_placement:
             raise RuntimeError(
-                f"rank {rank} attention output {name!r} has malformed row placement"
+                f"rank {rank} attention output {name!r} has malformed "
+                f"{placement_name} placement"
             )
         if (
             tuple(module.weight.shape)
@@ -902,7 +1017,7 @@ def _ep_attention_output_summary(
             != (placement.local_out_features, placement.local_in_features // 16)
         ):
             raise RuntimeError(
-                f"rank {rank} attention output {name!r} has malformed NVFP4 shard"
+                f"rank {rank} attention output {name!r} has malformed NVFP4 weights"
             )
         selection = getattr(module, "linear_selection", None)
         if getattr(selection, "kernel", None) is not LinearKernel.FLASHINFER_NVFP4:
@@ -910,34 +1025,55 @@ def _ep_attention_output_summary(
                 f"rank {rank} attention output {name!r} does not select "
                 "FlashInfer NVFP4"
             )
-        input_binding = getattr(module, "_kairyu_replicated_input_shard", None)
-        reduce_binding = getattr(module, "_kairyu_row_parallel", None)
-        reduce_comm = getattr(reduce_binding, "comm", None)
-        if (
-            input_binding is None
-            or input_binding.rank != rank
-            or input_binding.world_size != world_size
-            or input_binding.local_features != placement.local_in_features
-            or reduce_binding is None
-            or reduce_binding.context is not None
-            or getattr(reduce_comm, "rank", None) != rank
-            or getattr(reduce_comm, "world_size", None) != world_size
-        ):
-            raise RuntimeError(
-                f"rank {rank} attention output {name!r} lacks its EP row bindings"
+        if attention_dp:
+            forbidden_bindings = (
+                "_kairyu_replicated_input_shard",
+                "_kairyu_row_parallel",
+                "_kairyu_row_parallel_executed",
+                "_kairyu_row_parallel_partial_dtype",
             )
-        executed = getattr(module, "_kairyu_row_parallel_executed", None)
-        partial_dtype = getattr(module, "_kairyu_row_parallel_partial_dtype", None)
-        if (
-            type(executed) is not bool
-            or (executed and partial_dtype is not torch.bfloat16)
-            or (not executed and partial_dtype is not None)
-        ):
-            raise RuntimeError(
-                f"rank {rank} attention output {name!r} has malformed "
-                "execution/dtype markers"
+            present = tuple(
+                binding for binding in forbidden_bindings if hasattr(module, binding)
             )
-        successful += int(executed)
+            if present:
+                raise RuntimeError(
+                    f"rank {rank} attention output {name!r} unexpectedly has "
+                    f"row-parallel bindings {present}"
+                )
+        else:
+            input_binding = getattr(module, "_kairyu_replicated_input_shard", None)
+            reduce_binding = getattr(module, "_kairyu_row_parallel", None)
+            reduce_comm = getattr(reduce_binding, "comm", None)
+            if (
+                input_binding is None
+                or input_binding.rank != rank
+                or input_binding.world_size != world_size
+                or input_binding.local_features != placement.local_in_features
+                or reduce_binding is None
+                or reduce_binding.context is not None
+                or getattr(reduce_comm, "rank", None) != rank
+                or getattr(reduce_comm, "world_size", None) != world_size
+            ):
+                raise RuntimeError(
+                    f"rank {rank} attention output {name!r} lacks its EP row bindings"
+                )
+            executed = getattr(module, "_kairyu_row_parallel_executed", None)
+            partial_dtype = getattr(
+                module,
+                "_kairyu_row_parallel_partial_dtype",
+                None,
+            )
+            if (
+                type(executed) is not bool
+                or (executed and partial_dtype is not torch.bfloat16)
+                or (not executed and partial_dtype is not None)
+            ):
+                raise RuntimeError(
+                    f"rank {rank} attention output {name!r} has malformed "
+                    "execution/dtype markers"
+                )
+            assert successful is not None
+            successful += int(executed)
         current = (
             placement.global_in_features,
             placement.local_in_features,
@@ -955,14 +1091,14 @@ def _ep_attention_output_summary(
     global_in_features, local_in_features, out_features = geometry
     return {
         "backend": "flashinfer.mm_fp4",
-        "placement": "row_parallel",
-        "parallel_size": world_size,
+        "placement": "replicated" if attention_dp else "row_parallel",
+        "parallel_size": 1 if attention_dp else world_size,
         "rank": rank,
-        "shard_axis": 1,
+        "shard_axis": None if attention_dp else 1,
         "global_in_features": global_in_features,
         "local_in_features": local_in_features,
         "out_features": out_features,
-        "partial_dtype": "bfloat16",
+        "partial_dtype": None if attention_dp else "bfloat16",
         "block_count": _EP_ATTENTION_OUTPUT_BLOCK_COUNT,
         "successful_forward_block_count": successful,
     }
@@ -982,6 +1118,24 @@ def _ep_kernel_inventory_row(
     if type(rank) is not int or type(world_size) is not int or world_size < 1:
         raise RuntimeError(
             "EP kernel inventory communicator metadata must be positive integers"
+        )
+    execution_mode = getattr(
+        local_runner,
+        "execution_mode",
+        _EP_CORRECTNESS_MODE,
+    )
+    if execution_mode not in {_EP_CORRECTNESS_MODE, _EP_ATTENTION_DP_MODE}:
+        raise RuntimeError(
+            f"rank {rank} runner has unknown EP execution_mode={execution_mode!r}"
+        )
+    attention_dp = execution_mode == _EP_ATTENTION_DP_MODE
+    if attention_dp and (
+        world_size != _EP_ATTENTION_DP_SIZE
+        or getattr(local_runner, "moe_dispatcher", None)
+        != _EP_ATTENTION_DP_DISPATCHER
+    ):
+        raise RuntimeError(
+            f"rank {rank} runner has malformed attention-DP dispatcher topology"
         )
     model = getattr(local_runner, "_model", None)
     if model is None or not callable(getattr(model, "named_modules", None)):
@@ -1042,35 +1196,20 @@ def _ep_kernel_inventory_row(
     )
     fused_moe = None
     if fused_blocks:
-        expected_fields = {
-            "backend",
-            "global_expert_count",
-            "local_expert_count",
-            "local_expert_start",
-            "weight_order",
-            "scale_layout",
-            "output_dtype",
-            "ep_partial",
-            "enable_alltoall",
-            "successful_forward",
-        }
+        expected_fields = (
+            _EP_ATTENTION_DP_FUSED_MOE_BLOCK_FIELDS
+            if attention_dp
+            else _EP_FUSED_MOE_BLOCK_FIELDS
+        )
         metadata_rows = [metadata for _name, metadata in fused_blocks]
         if any(
-            not isinstance(metadata, dict) or set(metadata) != expected_fields
+            not isinstance(metadata, dict)
+            or set(metadata) != expected_fields
+            or type(metadata["successful_forward"]) is not bool
             for metadata in metadata_rows
         ):
             raise RuntimeError(f"rank {rank} has malformed fused-MoE metadata")
-        invariant_fields = (
-            "backend",
-            "global_expert_count",
-            "local_expert_count",
-            "local_expert_start",
-            "weight_order",
-            "scale_layout",
-            "output_dtype",
-            "ep_partial",
-            "enable_alltoall",
-        )
+        invariant_fields = expected_fields - {"successful_forward"}
         first = metadata_rows[0]
         if any(
             any(metadata[field] != first[field] for field in invariant_fields)
@@ -1085,6 +1224,14 @@ def _ep_kernel_inventory_row(
                 for metadata in metadata_rows
             ),
         }
+    if attention_dp and (
+        fused_moe is None
+        or fused_moe["block_count"] != _EP_ATTENTION_OUTPUT_BLOCK_COUNT
+    ):
+        raise RuntimeError(
+            f"rank {rank} attention-DP requires fused NVFP4 metadata for all "
+            f"{_EP_ATTENTION_OUTPUT_BLOCK_COUNT} sparse layers"
+        )
     return {
         "rank": rank,
         "projection_count": len(names),
@@ -1094,6 +1241,7 @@ def _ep_kernel_inventory_row(
             modules,
             rank=rank,
             world_size=world_size,
+            attention_dp=attention_dp,
         ),
         "fused_moe": fused_moe,
         "meta_count": {
@@ -1185,55 +1333,67 @@ def _validate_ep_kernel_inventory_rows(
                 f"EP kernel inventory rank {rank} has malformed kernel_counts"
             )
         attention_output = row["attention_output"]
-        if (
-            not isinstance(attention_output, dict)
-            or set(attention_output) != _EP_ATTENTION_OUTPUT_FIELDS
-            or attention_output["backend"] != "flashinfer.mm_fp4"
-            or attention_output["placement"] != "row_parallel"
-            or type(attention_output["parallel_size"]) is not int
-            or attention_output["parallel_size"] != world_size
+        if not isinstance(attention_output, dict) or set(
+            attention_output
+        ) != _EP_ATTENTION_OUTPUT_FIELDS:
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has malformed attention_output"
+            )
+        attention_dp = attention_output["placement"] == "replicated"
+        common_attention_malformed = (
+            attention_output["backend"] != "flashinfer.mm_fp4"
+            or attention_output["placement"] not in {"row_parallel", "replicated"}
             or type(attention_output["rank"]) is not int
             or attention_output["rank"] != rank
-            or type(attention_output["shard_axis"]) is not int
-            or attention_output["shard_axis"] != 1
             or type(attention_output["global_in_features"]) is not int
             or type(attention_output["local_in_features"]) is not int
             or type(attention_output["out_features"]) is not int
             or attention_output["global_in_features"] < 1
             or attention_output["local_in_features"] < 1
             or attention_output["out_features"] < 1
-            or attention_output["global_in_features"]
-            != attention_output["local_in_features"] * world_size
-            or attention_output["partial_dtype"] != "bfloat16"
             or type(attention_output["block_count"]) is not int
             or attention_output["block_count"]
             != _EP_ATTENTION_OUTPUT_BLOCK_COUNT
-            or type(attention_output["successful_forward_block_count"]) is not int
-            or not 0
-            <= attention_output["successful_forward_block_count"]
-            <= _EP_ATTENTION_OUTPUT_BLOCK_COUNT
-        ):
+        )
+        if attention_dp:
+            mode_attention_malformed = (
+                type(attention_output["parallel_size"]) is not int
+                or attention_output["parallel_size"] != 1
+                or attention_output["shard_axis"] is not None
+                or attention_output["global_in_features"]
+                != attention_output["local_in_features"]
+                or attention_output["partial_dtype"] is not None
+                or attention_output["successful_forward_block_count"] is not None
+            )
+        else:
+            mode_attention_malformed = (
+                type(attention_output["parallel_size"]) is not int
+                or attention_output["parallel_size"] != world_size
+                or type(attention_output["shard_axis"]) is not int
+                or attention_output["shard_axis"] != 1
+                or attention_output["global_in_features"]
+                != attention_output["local_in_features"] * world_size
+                or attention_output["partial_dtype"] != "bfloat16"
+                or type(attention_output["successful_forward_block_count"])
+                is not int
+                or not 0
+                <= attention_output["successful_forward_block_count"]
+                <= _EP_ATTENTION_OUTPUT_BLOCK_COUNT
+            )
+        if common_attention_malformed or mode_attention_malformed:
             raise RuntimeError(
                 f"EP kernel inventory rank {rank} has malformed attention_output"
             )
         fused_moe = row["fused_moe"]
         if fused_moe is not None:
-            if (
+            expected_fused_fields = (
+                _EP_ATTENTION_DP_FUSED_MOE_SUMMARY_FIELDS
+                if attention_dp
+                else _EP_FUSED_MOE_SUMMARY_FIELDS
+            )
+            common_fused_malformed = (
                 not isinstance(fused_moe, dict)
-                or set(fused_moe)
-                != {
-                    "backend",
-                    "global_expert_count",
-                    "local_expert_count",
-                    "local_expert_start",
-                    "weight_order",
-                    "scale_layout",
-                    "output_dtype",
-                    "ep_partial",
-                    "enable_alltoall",
-                    "block_count",
-                    "successful_forward_block_count",
-                }
+                or set(fused_moe) != expected_fused_fields
                 or fused_moe["backend"] != "flashinfer.cutlass_fused_moe"
                 or type(fused_moe["global_expert_count"]) is not int
                 or fused_moe["global_expert_count"] < 1
@@ -1252,10 +1412,94 @@ def _validate_ep_kernel_inventory_rows(
                 or not 0
                 <= fused_moe["successful_forward_block_count"]
                 <= fused_moe["block_count"]
-            ):
+            )
+            mode_fused_malformed = False
+            if not common_fused_malformed and attention_dp:
+                last_layout = fused_moe["last_rank_row_layout"]
+                completed_steps = fused_moe["completed_layout_steps"]
+                no_completed_layout = (
+                    completed_steps == 0
+                    and last_layout is None
+                    and fused_moe["last_local_real_rows"] is None
+                    and fused_moe["last_padded_rows_per_rank"] is None
+                    and fused_moe["total_collective_rows"] is None
+                    and fused_moe["successful_forward_block_count"] == 0
+                )
+                idle_layout = (
+                    no_completed_layout
+                    and fused_moe["dispatcher"] == _EP_ATTENTION_DP_DISPATCHER
+                    and fused_moe["row_layout"] == "rank_major_zero_padded"
+                    and fused_moe["activation_collective"]
+                    == "tensor_all_gather_many"
+                    and fused_moe["combine_collective"]
+                    == "tensor_reduce_scatter"
+                )
+                completed_layout_common = (
+                    type(completed_steps) is int
+                    and completed_steps > 0
+                    and isinstance(last_layout, tuple)
+                    and len(last_layout) == world_size
+                    and all(type(count) is int and count > 0 for count in last_layout)
+                    and fused_moe["last_local_real_rows"] == last_layout[rank]
+                    and fused_moe["successful_forward_block_count"]
+                    == fused_moe["block_count"]
+                )
+                padded_layout = (
+                    completed_layout_common
+                    and fused_moe["dispatcher"] == _EP_ATTENTION_DP_DISPATCHER
+                    and fused_moe["row_layout"] == "rank_major_zero_padded"
+                    and fused_moe["activation_collective"]
+                    == "tensor_all_gather_many"
+                    and fused_moe["combine_collective"]
+                    == "tensor_reduce_scatter"
+                    and fused_moe["last_padded_rows_per_rank"]
+                    == max(last_layout)
+                    and fused_moe["total_collective_rows"]
+                    == max(last_layout) * world_size
+                )
+                ragged_layout = (
+                    completed_layout_common
+                    and fused_moe["dispatcher"]
+                    == "nvfp4_allgatherv_reduce_scatterv"
+                    and fused_moe["row_layout"] == "rank_major_ragged"
+                    and fused_moe["activation_collective"]
+                    == "tensor_all_gatherv_many"
+                    and fused_moe["combine_collective"]
+                    == "tensor_reduce_scatterv"
+                    and fused_moe["last_padded_rows_per_rank"] is None
+                    and fused_moe["total_collective_rows"] == sum(last_layout)
+                )
+                mode_fused_malformed = (
+                    fused_moe["attention_dp"] is not True
+                    or fused_moe["attention_placement"]
+                    != "request_owned_data_parallel"
+                    or fused_moe["attention_output_placement"] != "replicated"
+                    or fused_moe["activation_collective_dtype"]
+                    != "nvfp4_packed_uint8"
+                    or fused_moe["scale_collective_dtype"] != "uint8"
+                    or fused_moe["post_combine_all_reduce"] is not False
+                    or type(fused_moe["layout_queue_depth"]) is not int
+                    or fused_moe["layout_queue_depth"] != 0
+                    or type(fused_moe["layout_queue_consumed"]) is not int
+                    or fused_moe["layout_queue_consumed"] != 0
+                    or type(completed_steps) is not int
+                    or completed_steps < 0
+                    or fused_moe["block_count"]
+                    != _EP_ATTENTION_OUTPUT_BLOCK_COUNT
+                    or not (
+                        idle_layout
+                        or padded_layout
+                        or ragged_layout
+                    )
+                )
+            if common_fused_malformed or mode_fused_malformed:
                 raise RuntimeError(
                     f"EP kernel inventory rank {rank} has malformed fused_moe"
                 )
+        elif attention_dp:
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} attention-DP has no fused_moe"
+            )
         meta_count = row["meta_count"]
         if (
             not isinstance(meta_count, dict)
@@ -1341,6 +1585,22 @@ def _validate_ep_kernel_inventory_rows(
         raise RuntimeError(
             "EP kernel inventory attention_output geometry differs across ranks"
         )
+    if first_attention["placement"] == "replicated":
+        invariant_fused_fields = (
+            _EP_ATTENTION_DP_FUSED_MOE_SUMMARY_FIELDS
+            - {"local_expert_start", "last_local_real_rows"}
+        )
+        first_fused = by_rank[0]["fused_moe"]
+        if any(
+            any(
+                row["fused_moe"][field] != first_fused[field]
+                for field in invariant_fused_fields
+            )
+            for row in by_rank.values()
+        ):
+            raise RuntimeError(
+                "EP kernel inventory attention-DP fused_moe differs across ranks"
+            )
     return tuple(by_rank[rank] for rank in range(world_size))
 
 
@@ -1825,8 +2085,11 @@ def _validate_sampling_ownership_rows(
     model_world_size: int,
     control_backend: str,
     model_backend: str,
+    request_owner_sampling: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Reject incomplete or forged topology evidence with rank-specific errors."""
+    if type(request_owner_sampling) is not bool:
+        raise TypeError("request_owner_sampling must be a boolean")
     if not isinstance(rows, (tuple, list)):
         raise RuntimeError(
             "sampling ownership replies are malformed: expected a rank sequence, "
@@ -1903,14 +2166,19 @@ def _validate_sampling_ownership_rows(
                 f"sampling ownership reply for rank {rank} disagrees with rank 0 "
                 f"topology (reported, expected)={mismatches}"
             )
-        expected_owner = rank == 0
+        expected_owner = True if request_owner_sampling else rank == 0
         if (
             row["sampling_owner"] is not expected_owner
             or row["sampler_present"] is not expected_owner
         ):
+            contract = (
+                "all-rank request-owner sampler"
+                if request_owner_sampling
+                else "rank-0-only sampler"
+            )
             raise RuntimeError(
                 f"sampling ownership reply for rank {rank} violates the "
-                "rank-0-only sampler contract: "
+                f"{contract} contract: "
                 f"sampling_owner={row['sampling_owner']!r}, "
                 f"sampler_present={row['sampler_present']!r}, "
                 f"expected={expected_owner!r}"
@@ -1932,6 +2200,7 @@ def _validate_sampling_ownership_replies(
     model_world_size: int,
     control_backend: str,
     model_backend: str,
+    request_owner_sampling: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Validate all-rank envelopes before exposing sampling topology rows."""
 
@@ -1989,6 +2258,7 @@ def _validate_sampling_ownership_replies(
         model_world_size=model_world_size,
         control_backend=control_backend,
         model_backend=model_backend,
+        request_owner_sampling=request_owner_sampling,
     )
 
 
@@ -2051,7 +2321,15 @@ def validate_handshake(
 
 
 _EP_CORRECTNESS_MODE = "replicated-attention-correctness"
+_EP_ATTENTION_DP_MODE = "request-owned-attention-dp"
 _EP_SUPPORTED_SIZES = frozenset({2, 4})
+_EP_ATTENTION_DP_SIZE = 4
+_EP_ATTENTION_DP_SCRATCH_PAGES = 2
+_EP_ATTENTION_DP_DISPATCHER = "nvfp4_allgather_reduce_scatter"
+_EP_ATTENTION_DP_ASSIGNMENT_LOG_LIMIT = 4096
+_EP_ATTENTION_DP_ASSIGNMENT_FIELDS = frozenset(
+    {"sequence", "request_id", "owner_rank", "cache_affine"}
+)
 _EP_METADATA_FILES = (
     "config.json",
     "hf_quant_config.json",
@@ -2068,6 +2346,9 @@ def _validate_ep_correctness_mode(
     kv_cache_dtype: object = "bfloat16",
     pd_separation: object = False,
     graph_scratch_page: object = None,
+    graph_max_batch: object = 0,
+    graph_max_pages: object = 0,
+    graph_warmup_iters: object = 3,
     dram_kv_tier_capacity_pages: object = 0,
     dram_kv_tier_profile: object = None,
     speculative: object = None,
@@ -2125,6 +2406,131 @@ def _validate_ep_correctness_mode(
         raise ValueError(
             "replicated-QKV/KV EP correctness mode does not support speculative decoding"
         )
+
+
+def _validate_ep_attention_dp_mode(
+    *,
+    expert_parallel_size: object,
+    pipeline_depth: object = 1,
+    decode_mode: object = "eager",
+    kv_cache_dtype: object = "bfloat16",
+    pd_separation: object = False,
+    graph_scratch_page: object = None,
+    graph_max_batch: object = 0,
+    graph_max_pages: object = 0,
+    graph_warmup_iters: object = 3,
+    dram_kv_tier_capacity_pages: object = 0,
+    dram_kv_tier_profile: object = None,
+    speculative: object = None,
+) -> None:
+    """Fail closed outside the first measured Qwen3-235B attention-DP path."""
+
+    if (
+        type(expert_parallel_size) is not int
+        or expert_parallel_size != _EP_ATTENTION_DP_SIZE
+    ):
+        raise ValueError(
+            "request-owned attention-DP currently requires "
+            f"expert_parallel_size={_EP_ATTENTION_DP_SIZE}; "
+            f"got {expert_parallel_size!r}"
+        )
+    if type(pipeline_depth) is not int or pipeline_depth < 1:
+        raise ValueError(
+            "request-owned attention-DP requires pipeline_depth to be a "
+            "positive integer"
+        )
+    if decode_mode not in {"eager", "cuda_graph"}:
+        raise ValueError(
+            "request-owned attention-DP decode_mode must be 'eager' or "
+            "'cuda_graph'"
+        )
+    if kv_cache_dtype != "bfloat16":
+        raise ValueError(
+            "request-owned attention-DP requires kv_cache_dtype='bfloat16'"
+        )
+    if type(pd_separation) is not bool:
+        raise TypeError("pd_separation must be a boolean")
+    if pd_separation:
+        raise ValueError(
+            "request-owned attention-DP does not support P-D separation"
+        )
+    if decode_mode == "cuda_graph":
+        if type(graph_scratch_page) is not int or graph_scratch_page < 0:
+            raise ValueError(
+                "request-owned attention-DP CUDA graph decode requires a "
+                "reserved graph_scratch_page"
+            )
+        if type(graph_max_batch) is not int or graph_max_batch < 1:
+            raise ValueError(
+                "request-owned attention-DP graph_max_batch must be >= 1"
+            )
+        if type(graph_max_pages) is not int or graph_max_pages < 1:
+            raise ValueError(
+                "request-owned attention-DP graph_max_pages must be >= 1"
+            )
+        if type(graph_warmup_iters) is not int or graph_warmup_iters < 0:
+            raise ValueError(
+                "request-owned attention-DP graph_warmup_iters must be >= 0"
+            )
+    elif graph_scratch_page is not None:
+        raise ValueError(
+            "request-owned attention-DP eager decode cannot reserve a CUDA "
+            "graph scratch page"
+        )
+    if (
+        type(dram_kv_tier_capacity_pages) is not int
+        or dram_kv_tier_capacity_pages != 0
+        or dram_kv_tier_profile is not None
+    ):
+        raise ValueError(
+            "request-owned attention-DP does not support a DRAM KV tier"
+        )
+    if speculative is not None:
+        raise ValueError(
+            "request-owned attention-DP does not support speculative decoding"
+        )
+
+
+def _validate_attention_dp_batched_prefill_runner(local_runner) -> None:
+    """Require the single-forward prefill contract used by row-layout queues."""
+
+    getter = getattr(local_runner, "prefill_execution_stats", None)
+    if not callable(getter):
+        raise RuntimeError(
+            "request-owned attention-DP runner exposes no batched-prefill "
+            "capability state"
+        )
+    stats = getter(reset=False)
+    if not isinstance(stats, dict):
+        raise RuntimeError(
+            "request-owned attention-DP batched-prefill capability state is "
+            "malformed"
+        )
+    if stats.get("enabled") is not True:
+        raise RuntimeError(
+            "request-owned attention-DP requires batched prefill to remain enabled"
+        )
+    gap = stats.get("capability_gap")
+    if gap is not None:
+        raise RuntimeError(
+            "request-owned attention-DP requires native batched prefill: "
+            f"{gap}"
+        )
+
+
+def _validate_ep_mode(
+    *,
+    attention_dp: bool,
+    **options: object,
+) -> None:
+    if type(attention_dp) is not bool:
+        raise TypeError("expert_parallel_attention_dp must be a boolean")
+    validator = (
+        _validate_ep_attention_dp_mode
+        if attention_dp
+        else _validate_ep_correctness_mode
+    )
+    validator(**options)
 
 
 def _ep_checkpoint_identity(model_dir: str) -> dict[str, object]:
@@ -2202,10 +2608,30 @@ def _make_ep_handshake(
     page_size: int,
     attention_backend_identity: str,
     kv_cache_dtype_resolved: str,
+    *,
+    attention_dp: bool = False,
+    pipeline_depth: int = 1,
+    decode_mode: str = "eager",
+    graph_max_batch: int = 0,
+    graph_max_pages: int = 0,
+    graph_warmup_iters: int = 3,
 ) -> dict[str, object]:
-    """Exact all-rank identity for replicated-QKV/KV EP correctness mode."""
+    """Exact all-rank identity for either explicit EP execution mode."""
 
-    _validate_ep_correctness_mode(expert_parallel_size=expert_parallel_size)
+    _validate_ep_mode(
+        attention_dp=attention_dp,
+        expert_parallel_size=expert_parallel_size,
+        pipeline_depth=pipeline_depth,
+        decode_mode=decode_mode,
+        graph_scratch_page=(
+            num_pages + _EP_ATTENTION_DP_SCRATCH_PAGES + graph_max_batch
+            if attention_dp and decode_mode == "cuda_graph"
+            else None
+        ),
+        graph_max_batch=graph_max_batch,
+        graph_max_pages=graph_max_pages,
+        graph_warmup_iters=graph_warmup_iters,
+    )
     handshake = make_handshake(
         model_dir,
         num_pages,
@@ -2214,20 +2640,63 @@ def _make_ep_handshake(
         kv_cache_dtype_requested="bfloat16",
         kv_cache_dtype_resolved=kv_cache_dtype_resolved,
     )
-    handshake.update(
-        {
-            "parallelism": "expert_parallel",
-            "expert_parallel_size": expert_parallel_size,
-            "attention_placement": "replicated",
-            "attention_output_placement": "row_parallel",
-            "attention_output_parallel_size": expert_parallel_size,
-            "attention_output_partial_dtype": "bfloat16",
-            "execution_mode": _EP_CORRECTNESS_MODE,
-            "decode_mode": "eager",
-            "pipeline_depth": 1,
-            "checkpoint_identity": _ep_checkpoint_identity(model_dir),
-        }
-    )
+    if attention_dp:
+        graph_decode = decode_mode == "cuda_graph"
+        decode_scratch_pages = graph_max_batch if graph_decode else 1
+        graph_scratch_pages = int(graph_decode)
+        scratch_pages = (
+            _EP_ATTENTION_DP_SCRATCH_PAGES
+            + decode_scratch_pages
+            + graph_scratch_pages
+        )
+        handshake.update(
+            {
+                "parallelism": "expert_parallel",
+                "expert_parallel_size": expert_parallel_size,
+                "attention_placement": "request_owned_data_parallel",
+                "attention_data_parallel_size": expert_parallel_size,
+                "attention_tensor_parallel_size": 1,
+                "attention_output_placement": "replicated",
+                "attention_output_parallel_size": 1,
+                "attention_output_partial_dtype": None,
+                "moe_dispatcher": _EP_ATTENTION_DP_DISPATCHER,
+                "sampling_ownership": "request_owner",
+                "kv_cache_ownership": "request_owner",
+                "execution_mode": _EP_ATTENTION_DP_MODE,
+                "decode_mode": decode_mode,
+                "cuda_graph_decode": graph_decode,
+                "cuda_graph_max_batch": graph_max_batch if graph_decode else 0,
+                "cuda_graph_max_pages": graph_max_pages if graph_decode else 0,
+                "cuda_graph_warmup_iters": (
+                    graph_warmup_iters if graph_decode else 0
+                ),
+                "pipeline_depth": pipeline_depth,
+                "usable_kv_pages": num_pages,
+                "physical_kv_pages": num_pages + scratch_pages,
+                "attention_dp_prefill_scratch_pages": (
+                    _EP_ATTENTION_DP_SCRATCH_PAGES
+                ),
+                "attention_dp_decode_scratch_pages": decode_scratch_pages,
+                "attention_dp_graph_scratch_pages": graph_scratch_pages,
+                "attention_dp_scratch_pages": scratch_pages,
+                "checkpoint_identity": _ep_checkpoint_identity(model_dir),
+            }
+        )
+    else:
+        handshake.update(
+            {
+                "parallelism": "expert_parallel",
+                "expert_parallel_size": expert_parallel_size,
+                "attention_placement": "replicated",
+                "attention_output_placement": "row_parallel",
+                "attention_output_parallel_size": expert_parallel_size,
+                "attention_output_partial_dtype": "bfloat16",
+                "execution_mode": _EP_CORRECTNESS_MODE,
+                "decode_mode": "eager",
+                "pipeline_depth": 1,
+                "checkpoint_identity": _ep_checkpoint_identity(model_dir),
+            }
+        )
     return handshake
 
 
@@ -2239,6 +2708,13 @@ def _validate_ep_handshake(
     page_size: int,
     attention_backend_identity: str,
     kv_cache_dtype_resolved: str,
+    *,
+    attention_dp: bool = False,
+    pipeline_depth: int = 1,
+    decode_mode: str = "eager",
+    graph_max_batch: int = 0,
+    graph_max_pages: int = 0,
+    graph_warmup_iters: int = 3,
 ) -> None:
     expected = _make_ep_handshake(
         model_dir,
@@ -2247,12 +2723,18 @@ def _validate_ep_handshake(
         page_size,
         attention_backend_identity,
         kv_cache_dtype_resolved,
+        attention_dp=attention_dp,
+        pipeline_depth=pipeline_depth,
+        decode_mode=decode_mode,
+        graph_max_batch=graph_max_batch,
+        graph_max_pages=graph_max_pages,
+        graph_warmup_iters=graph_warmup_iters,
     )
     if handshake != expected:
         raise RuntimeError(
             f"EP worker mismatch: driver={handshake} worker={expected} — "
-            "expert topology, replicated QKV/KV, row-parallel attention output, "
-            "eager execution, BF16 KV, pool sizing/config, and backend identity "
+            "expert topology, attention/KV ownership, MoE dispatcher, eager "
+            "decode/graph execution, BF16 KV, pool sizing/config, and backend identity "
             "must match on every rank"
         )
 
@@ -2926,12 +3408,925 @@ class DistTPModelRunner:
             invalidate()
 
 
-class DistEPModelRunner:
-    """Driver facade for replicated-QKV/KV expert-parallel correctness.
+_EP_ATTENTION_DP_SCRATCH_PREFIX = "__kairyu_attention_dp_scratch__"
 
-    The rank protocol is intentionally the same SPMD/single-sampling-owner
-    protocol as TP, but the public topology is not: QKV, attention core, and KV
-    are replicated while NVFP4 attention output and routed experts are sharded.
+
+def _ep_attention_dp_owner_map(
+    owners: tuple[tuple[str, int], ...],
+    chunks: tuple[ScheduledChunk, ...],
+    *,
+    world_size: int,
+) -> dict[str, int]:
+    if not isinstance(owners, tuple):
+        raise RuntimeError("attention-DP owners must be a tuple")
+    result: dict[str, int] = {}
+    for item in owners:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not item[0]
+            or type(item[1]) is not int
+            or not 0 <= item[1] < world_size
+        ):
+            raise RuntimeError(f"attention-DP owner entry is malformed: {item!r}")
+        request_id, rank = item
+        if request_id.startswith(_EP_ATTENTION_DP_SCRATCH_PREFIX):
+            raise RuntimeError(
+                "request id uses the reserved attention-DP scratch namespace"
+            )
+        if request_id in result:
+            raise RuntimeError(
+                f"attention-DP owners contain duplicate request {request_id!r}"
+            )
+        result[request_id] = rank
+    expected = tuple(dict.fromkeys(chunk.request_id for chunk in chunks))
+    if tuple(result) != expected:
+        raise RuntimeError(
+            "attention-DP owners do not match scheduled request order: "
+            f"expected={expected!r}, got={tuple(result)!r}"
+        )
+    return result
+
+
+def _ep_attention_dp_dummy_state(
+    request_id: str,
+    *,
+    page_id: int,
+    prefill: bool,
+) -> RequestSnapshot:
+    prompt = (0, 0) if prefill else (0,)
+    return RequestSnapshot(
+        request_id=request_id,
+        prompt_token_ids=prompt,
+        computed_prompt=1,
+        outputs=(),
+        in_flight=0,
+        page_ids=(page_id,),
+        decode_page_ids=(),
+        eos_token_id=None,
+        max_new_tokens=1,
+        num_cached_tokens=0,
+        sampling=EngineSampling(),
+    )
+
+
+def _ep_attention_dp_rank_chunks(
+    chunks: tuple[ScheduledChunk, ...],
+    owner_map: dict[str, int],
+    rank: int,
+) -> tuple[ScheduledChunk, ...]:
+    return tuple(chunk for chunk in chunks if owner_map[chunk.request_id] == rank)
+
+
+def _ep_attention_dp_decode_shape(
+    chunks: tuple[ScheduledChunk, ...],
+    owners: tuple[tuple[str, int], ...],
+    states: Mapping[str, RequestSnapshot],
+    *,
+    world_size: int,
+) -> tuple[int, int] | None:
+    """Return global ``(max rows/rank, max page width)`` for decode only."""
+
+    decodes = tuple(chunk for chunk in chunks if not chunk.is_prefill)
+    if not decodes:
+        return None
+    if any(chunk.num_tokens != 1 for chunk in decodes):
+        raise RuntimeError(
+            "attention-DP does not support multi-token verification chunks"
+        )
+    owner_map = _ep_attention_dp_owner_map(
+        owners,
+        chunks,
+        world_size=world_size,
+    )
+    counts = [0] * world_size
+    max_pages = 0
+    for chunk in decodes:
+        counts[owner_map[chunk.request_id]] += 1
+        state = states[chunk.request_id]
+        allocation = getattr(state, "allocation", None)
+        if allocation is None:
+            raise RuntimeError(
+                f"decode request {chunk.request_id!r} has no KV allocation"
+            )
+        width = len(tuple(allocation.pages)) + len(tuple(state.decode_pages))
+        if width < 1:
+            raise RuntimeError(
+                f"decode request {chunk.request_id!r} has an empty KV page table"
+            )
+        max_pages = max(max_pages, width)
+    return max(counts), max_pages
+
+
+def _ep_attention_dp_local_graph_decision(
+    local_runner,
+    *,
+    cuda_graph_decode: bool,
+    batch_size: int,
+    max_pages: int,
+) -> GraphDecodeDecision:
+    getter = getattr(local_runner, "decode_graph_decision_for_shape", None)
+    if callable(getter):
+        decision = getter(batch_size=batch_size, max_pages=max_pages)
+    elif cuda_graph_decode:
+        raise RuntimeError(
+            "attention-DP CUDA graph runner has no prospective decision API"
+        )
+    else:
+        decision = GraphDecodeDecision(
+            kind="eager_fallback",
+            bucket_size=batch_size,
+            capture_model_forward_count=1,
+        )
+    if not isinstance(decision, GraphDecodeDecision):
+        raise RuntimeError(
+            "attention-DP prospective graph decision has a malformed type"
+        )
+    return decision
+
+
+def _ep_attention_dp_make_graph_plan(
+    local_runner,
+    chunks: tuple[ScheduledChunk, ...],
+    owners: tuple[tuple[str, int], ...],
+    states: Mapping[str, RequestSnapshot],
+    *,
+    world_size: int,
+    cuda_graph_decode: bool,
+) -> _EPAttentionDPGraphPlan | None:
+    shape = _ep_attention_dp_decode_shape(
+        chunks,
+        owners,
+        states,
+        world_size=world_size,
+    )
+    if shape is None:
+        return None
+    batch_size, max_pages = shape
+    decision = _ep_attention_dp_local_graph_decision(
+        local_runner,
+        cuda_graph_decode=cuda_graph_decode,
+        batch_size=batch_size,
+        max_pages=max_pages,
+    )
+    if not cuda_graph_decode and decision.kind != "eager_fallback":
+        raise RuntimeError("eager attention-DP produced a CUDA graph decision")
+    return _EPAttentionDPGraphPlan(
+        cuda_graph_decode=cuda_graph_decode,
+        batch_size=batch_size,
+        max_pages=max_pages,
+        decision=decision,
+    )
+
+
+def _ep_attention_dp_validate_graph_plan(
+    local_runner,
+    payload: _EPAttentionDPStep,
+    states: Mapping[str, RequestSnapshot],
+    *,
+    world_size: int,
+) -> None:
+    """Validate payload geometry and rank-local graph state without CUDA work."""
+
+    expected_shape = _ep_attention_dp_decode_shape(
+        payload.delta.chunks,
+        payload.owners,
+        states,
+        world_size=world_size,
+    )
+    plan = payload.graph_plan
+    if expected_shape is None:
+        if plan is not None:
+            raise RuntimeError("attention-DP prefill-only step has a graph plan")
+        return
+    if not isinstance(plan, _EPAttentionDPGraphPlan):
+        raise RuntimeError("attention-DP decode step is missing its graph plan")
+    if (plan.batch_size, plan.max_pages) != expected_shape:
+        raise RuntimeError(
+            "attention-DP graph plan shape disagrees with request ownership/KV "
+            f"state: payload={(plan.batch_size, plan.max_pages)!r}, "
+            f"local={expected_shape!r}"
+        )
+    if type(plan.cuda_graph_decode) is not bool:
+        raise RuntimeError("attention-DP graph enable flag is malformed")
+    local = _ep_attention_dp_local_graph_decision(
+        local_runner,
+        cuda_graph_decode=plan.cuda_graph_decode,
+        batch_size=plan.batch_size,
+        max_pages=plan.max_pages,
+    )
+    if local != plan.decision:
+        raise RuntimeError(
+            "attention-DP graph decision differs across ranks: "
+            f"payload={plan.decision!r}, local={local!r}"
+        )
+    decision = plan.decision
+    if decision.kind == "eager_fallback":
+        valid = (
+            decision.bucket_size == plan.batch_size
+            and decision.capture_model_forward_count == 1
+        )
+    elif decision.kind == "capture":
+        valid = (
+            plan.cuda_graph_decode
+            and decision.bucket_size >= plan.batch_size
+            and decision.capture_model_forward_count >= 1
+        )
+    else:
+        valid = (
+            decision.kind == "replay"
+            and plan.cuda_graph_decode
+            and decision.bucket_size >= plan.batch_size
+            and decision.capture_model_forward_count == 0
+        )
+    if not valid:
+        raise RuntimeError(
+            f"attention-DP graph plan has malformed decision {decision!r}"
+        )
+
+
+def _ep_attention_dp_validate_graph_replies(
+    replies: object,
+    *,
+    world_size: int,
+) -> None:
+    if not isinstance(replies, (tuple, list)) or len(replies) != world_size:
+        raise RuntimeError(
+            "attention-DP graph validation reply count does not match EP size"
+        )
+    by_rank: dict[int, _EPAttentionDPGraphValidationReply] = {}
+    for reply in replies:
+        if (
+            not isinstance(reply, _EPAttentionDPGraphValidationReply)
+            or type(reply.rank) is not int
+            or not 0 <= reply.rank < world_size
+            or reply.rank in by_rank
+            or (
+                reply.error is not None
+                and (not isinstance(reply.error, str) or not reply.error)
+            )
+        ):
+            raise RuntimeError("attention-DP graph validation reply is malformed")
+        by_rank[reply.rank] = reply
+    if set(by_rank) != set(range(world_size)):
+        raise RuntimeError("attention-DP graph validation ranks are incomplete")
+    failures = tuple(
+        f"rank {rank}: {by_rank[rank].error}"
+        for rank in range(world_size)
+        if by_rank[rank].error is not None
+    )
+    if failures:
+        raise RuntimeError(
+            "attention-DP graph preflight failed before model collectives: "
+            + "; ".join(failures)
+        )
+
+
+def _ep_attention_dp_plan(
+    payload: _EPAttentionDPStep,
+    states: dict[str, RequestSnapshot],
+    *,
+    rank: int,
+    world_size: int,
+    prefill_scratch_pages: tuple[int, int],
+    decode_scratch_pages: tuple[int, ...],
+) -> tuple[
+    tuple[ScheduledChunk, ...],
+    dict[str, RequestSnapshot],
+    tuple[tuple[int, ...], ...],
+    tuple[str, ...],
+]:
+    """Derive one rank's work plus identical per-forward collective layouts."""
+
+    chunks = payload.delta.chunks
+    if not chunks:
+        raise RuntimeError("attention-DP step must schedule at least one chunk")
+    if (
+        not isinstance(prefill_scratch_pages, tuple)
+        or len(prefill_scratch_pages) != _EP_ATTENTION_DP_SCRATCH_PAGES
+        or any(type(page) is not int or page < 0 for page in prefill_scratch_pages)
+        or len(set(prefill_scratch_pages)) != len(prefill_scratch_pages)
+    ):
+        raise RuntimeError("attention-DP prefill scratch page contract is malformed")
+    if (
+        not isinstance(decode_scratch_pages, tuple)
+        or not decode_scratch_pages
+        or any(type(page) is not int or page < 0 for page in decode_scratch_pages)
+        or len(set(decode_scratch_pages)) != len(decode_scratch_pages)
+        or set(decode_scratch_pages) & set(prefill_scratch_pages)
+    ):
+        raise RuntimeError("attention-DP decode scratch page contract is malformed")
+    owner_map = _ep_attention_dp_owner_map(
+        payload.owners,
+        chunks,
+        world_size=world_size,
+    )
+    if set(states) != set(owner_map):
+        raise RuntimeError(
+            "attention-DP state view does not match scheduled requests"
+        )
+    if any(not chunk.is_prefill and chunk.num_tokens != 1 for chunk in chunks):
+        raise RuntimeError(
+            "attention-DP does not support multi-token verification chunks"
+        )
+    global_prefill = any(chunk.is_prefill for chunk in chunks)
+    global_decode = any(not chunk.is_prefill for chunk in chunks)
+    layouts: list[tuple[int, ...]] = []
+    per_rank_chunks = tuple(
+        _ep_attention_dp_rank_chunks(chunks, owner_map, owner)
+        for owner in range(world_size)
+    )
+    if global_prefill:
+        prefill_rows: list[int] = []
+        for owned in per_rank_chunks:
+            prefills = tuple(chunk for chunk in owned if chunk.is_prefill)
+            dummy_count = max(0, 2 - len(prefills))
+            prefill_rows.append(
+                sum(chunk.num_tokens for chunk in prefills) + dummy_count
+            )
+        layouts.append(tuple(prefill_rows))
+    if global_decode:
+        graph_plan = payload.graph_plan
+        if not isinstance(graph_plan, _EPAttentionDPGraphPlan):
+            raise RuntimeError("attention-DP decode step has no graph plan")
+        decision = graph_plan.decision
+        if decision.kind in {"capture", "replay"}:
+            graph_layout = (decision.bucket_size,) * world_size
+            layouts.extend(
+                graph_layout
+                for _ in range(decision.capture_model_forward_count)
+            )
+        else:
+            decode_rows = tuple(
+                max(1, sum(not chunk.is_prefill for chunk in owned))
+                for owned in per_rank_chunks
+            )
+            layouts.append(decode_rows)
+
+    owned = list(per_rank_chunks[rank])
+    local_states = {
+        chunk.request_id: states[chunk.request_id]
+        for chunk in owned
+    }
+    dummy_ids: list[str] = []
+    if global_prefill:
+        local_prefills = sum(chunk.is_prefill for chunk in owned)
+        for slot in range(max(0, 2 - local_prefills)):
+            request_id = (
+                f"{_EP_ATTENTION_DP_SCRATCH_PREFIX}:rank={rank}:prefill={slot}"
+            )
+            owned.append(ScheduledChunk(request_id, 1, True, 0))
+            local_states[request_id] = _ep_attention_dp_dummy_state(
+                request_id,
+                page_id=prefill_scratch_pages[slot],
+                prefill=True,
+            )
+            dummy_ids.append(request_id)
+    if global_decode:
+        graph_plan = payload.graph_plan
+        assert graph_plan is not None
+        local_decode_count = sum(not chunk.is_prefill for chunk in owned)
+        if graph_plan.decision.kind in {"capture", "replay"}:
+            dummy_count = graph_plan.decision.bucket_size - local_decode_count
+        else:
+            dummy_count = int(local_decode_count == 0)
+        if dummy_count < 0 or dummy_count > len(decode_scratch_pages):
+            raise RuntimeError(
+                "attention-DP decode scratch capacity cannot pad the shared bucket"
+            )
+        for slot in range(dummy_count):
+            request_id = (
+                f"{_EP_ATTENTION_DP_SCRATCH_PREFIX}:rank={rank}:decode={slot}"
+            )
+            owned.append(ScheduledChunk(request_id, 1, False, 0))
+            local_states[request_id] = _ep_attention_dp_dummy_state(
+                request_id,
+                page_id=decode_scratch_pages[slot],
+                prefill=False,
+            )
+            dummy_ids.append(request_id)
+    return tuple(owned), local_states, tuple(layouts), tuple(dummy_ids)
+
+
+def _ep_attention_dp_local_reply(
+    control_comm,
+    model_comm,
+    local_runner,
+    payload: _EPAttentionDPStep,
+    states: dict[str, RequestSnapshot],
+) -> _EPAttentionDPLocalResult:
+    """Execute owner-local work and retain pure-greedy tokens on the device."""
+
+    rank = control_comm.rank
+    dummy_ids: tuple[str, ...] = ()
+    fast_path = _ep_attention_dp_fast_sampling(
+        payload.delta.chunks,
+        states,
+    )
+    failure: BaseException | None = None
+    sampled = None
+    try:
+        try:
+            _ep_attention_dp_validate_graph_plan(
+                local_runner,
+                payload,
+                states,
+                world_size=control_comm.world_size,
+            )
+            validation = _EPAttentionDPGraphValidationReply(rank=rank)
+        except BaseException as error:
+            validation = _EPAttentionDPGraphValidationReply(
+                rank=rank,
+                error=(f"{type(error).__name__}: {error}")[:2048],
+            )
+        validation_replies = control_comm.all_gather(validation)
+        _ep_attention_dp_validate_graph_replies(
+            validation_replies,
+            world_size=control_comm.world_size,
+        )
+
+        prefill_scratch_pages = getattr(
+            local_runner,
+            "attention_dp_scratch_pages",
+            None,
+        )
+        decode_scratch_pages = getattr(
+            local_runner,
+            "attention_dp_decode_scratch_pages",
+            None,
+        )
+        if decode_scratch_pages is None and isinstance(
+            prefill_scratch_pages,
+            tuple,
+        ):
+            # Compatibility for eager-only fake runners. Production runners
+            # expose a disjoint decode reservation.
+            decode_scratch_pages = (max(prefill_scratch_pages) + 1,)
+        local_chunks, local_states, layouts, dummy_ids = _ep_attention_dp_plan(
+            payload,
+            states,
+            rank=rank,
+            world_size=control_comm.world_size,
+            prefill_scratch_pages=prefill_scratch_pages,
+            decode_scratch_pages=decode_scratch_pages,
+        )
+        ragged_layouts = tuple(
+            dict.fromkeys(
+                layout for layout in layouts if len(set(layout)) > 1
+            )
+        )
+        if (
+            ragged_layouts
+            and getattr(
+                model_comm,
+                "attention_dp_direct_nccl_active",
+                False,
+            )
+            is True
+        ):
+            synchronize = getattr(
+                model_comm,
+                "synchronize_attention_dp_ragged_layouts",
+                None,
+            )
+            if not callable(synchronize):
+                raise RuntimeError(
+                    "active attention-DP direct NCCL communicator cannot "
+                    "synchronize ragged layouts"
+                )
+            synchronized = synchronize(ragged_layouts)
+            if synchronized != ragged_layouts:
+                raise RuntimeError(
+                    "attention-DP ragged layout synchronization changed the "
+                    "worker plan"
+                )
+        from kairyu.models.moe_parallel import (
+            assert_attention_dp_layouts_consumed,
+            assert_attention_dp_layouts_idle,
+            prepare_attention_dp_layouts,
+        )
+
+        model = getattr(local_runner, "_model", None)
+        if model is None:
+            raise RuntimeError("attention-DP local runner exposes no model")
+        if layouts:
+            prepare_attention_dp_layouts(model, layouts)
+        else:
+            assert_attention_dp_layouts_idle(model)
+        graph_plan = payload.graph_plan
+        if graph_plan is not None and graph_plan.cuda_graph_decode:
+            coordinate = getattr(
+                local_runner,
+                "coordinate_decode_graph_decision",
+                None,
+            )
+            if not callable(coordinate):
+                raise RuntimeError(
+                    "attention-DP CUDA graph runner has no coordinated override"
+                )
+            coordinate(graph_plan.decision)
+        sampled = local_runner.execute(local_chunks, local_states)
+        if graph_plan is not None and graph_plan.cuda_graph_decode:
+            consumed = getattr(
+                local_runner,
+                "assert_coordinated_decode_graph_decision_consumed",
+                None,
+            )
+            if not callable(consumed):
+                raise RuntimeError(
+                    "attention-DP CUDA graph runner cannot verify override consumption"
+                )
+            consumed()
+        if layouts:
+            assert_attention_dp_layouts_consumed(model)
+        else:
+            assert_attention_dp_layouts_idle(model)
+    except BaseException as error:
+        cancel = getattr(
+            local_runner,
+            "cancel_coordinated_decode_graph_decision",
+            None,
+        )
+        if callable(cancel):
+            cancel()
+        failure = error
+
+    try:
+        if fast_path:
+            try:
+                packet = _ep_attention_dp_local_token_packet(
+                    model_comm,
+                    local_runner,
+                    payload,
+                    states,
+                    sampled,
+                    dummy_ids=dummy_ids,
+                    failed=failure is not None,
+                )
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+                packet = _ep_attention_dp_local_token_packet(
+                    model_comm,
+                    local_runner,
+                    payload,
+                    states,
+                    None,
+                    dummy_ids=dummy_ids,
+                    failed=True,
+                )
+            gathered = model_comm.tensor_all_gather(packet)
+            reply = _EPAttentionDPReply(
+                rank=rank,
+                sampled={} if failure is None else None,
+                error=(
+                    None
+                    if failure is None
+                    else (f"{type(failure).__name__}: {failure}")[:2048]
+                ),
+            )
+            return _EPAttentionDPLocalResult(reply, gathered)
+
+        if failure is not None:
+            raise failure
+        assert sampled is not None
+        resolved = {
+            request_id: tuple(tokens)
+            for request_id, tokens in sampled.items()
+            if request_id not in set(dummy_ids)
+        }
+        if any(
+            not isinstance(token, SampledToken)
+            for tokens in resolved.values()
+            for token in tokens
+        ):
+            raise RuntimeError(
+                "attention-DP sampler returned a malformed token record"
+            )
+        return _EPAttentionDPLocalResult(
+            _EPAttentionDPReply(rank=rank, sampled=resolved)
+        )
+    except BaseException as error:
+        return _EPAttentionDPLocalResult(
+            _EPAttentionDPReply(
+                rank=rank,
+                error=(f"{type(error).__name__}: {error}")[:2048],
+            )
+        )
+    finally:
+        release = getattr(local_runner, "release", None)
+        if callable(release):
+            for request_id in dummy_ids:
+                release(request_id)
+
+
+def _ep_attention_dp_chunk_emits(
+    chunk: ScheduledChunk,
+    state: RequestSnapshot,
+) -> bool:
+    return (
+        chunk.num_tokens > 0
+        if not chunk.is_prefill
+        else bool(
+            state.prefill_done
+            and state.computed_prompt == len(state.prompt_token_ids)
+        )
+    )
+
+
+def _ep_attention_dp_fast_sampling(
+    chunks: tuple[ScheduledChunk, ...],
+    states: dict[str, RequestSnapshot],
+) -> bool:
+    """Use the future-token device path only when no metadata can be lost."""
+
+    emitting = tuple(
+        chunk
+        for chunk in chunks
+        if _ep_attention_dp_chunk_emits(chunk, states[chunk.request_id])
+    )
+    return bool(emitting) and all(
+        states[chunk.request_id].sampling.is_greedy_pure
+        and states[chunk.request_id].sampling.logprobs is None
+        and not states[chunk.request_id].sampling.needs_grammar
+        for chunk in emitting
+    )
+
+
+def _ep_attention_dp_raw_records(sampled):
+    raw_records = getattr(sampled, "raw_records", None)
+    return raw_records() if callable(raw_records) else sampled
+
+
+def _ep_attention_dp_local_token_packet(
+    model_comm,
+    local_runner,
+    payload: _EPAttentionDPStep,
+    states: dict[str, RequestSnapshot],
+    sampled,
+    *,
+    dummy_ids: tuple[str, ...],
+    failed: bool,
+):
+    """Encode owner-local pure-greedy ids in one fixed device packet."""
+
+    import torch
+
+    from kairyu.engine.core.comm import FakeCommunicator
+
+    chunks = payload.delta.chunks
+    if failed:
+        packet_device = (
+            torch.device("cpu")
+            if isinstance(model_comm, FakeCommunicator)
+            else torch.device(local_runner._device)
+        )
+        return torch.full(
+            (len(chunks),),
+            -1,
+            dtype=torch.int64,
+            device=packet_device,
+        )
+    owner_map = _ep_attention_dp_owner_map(
+        payload.owners,
+        chunks,
+        world_size=model_comm.world_size,
+    )
+    records = {} if sampled is None else _ep_attention_dp_raw_records(sampled)
+    if not isinstance(records, Mapping):
+        raise RuntimeError("attention-DP sampler records are not a mapping")
+    dummy = set(dummy_ids)
+    public_records = {
+        request_id: values
+        for request_id, values in records.items()
+        if request_id not in dummy
+    }
+    expected = {
+        chunk.request_id
+        for chunk in chunks
+        if owner_map[chunk.request_id] == model_comm.rank
+        and _ep_attention_dp_chunk_emits(chunk, states[chunk.request_id])
+    }
+    if not failed and set(public_records) != expected:
+        raise RuntimeError(
+            "attention-DP owner-local sampled request set mismatch: "
+            f"expected={sorted(expected)}, got={sorted(public_records)}"
+        )
+
+    packet_device = None
+    for values in records.values():
+        for record in values:
+            sample = getattr(record, "sample", None)
+            token_id = getattr(sample, "token_id", None)
+            if isinstance(token_id, torch.Tensor):
+                packet_device = token_id.device
+                break
+        if packet_device is not None:
+            break
+    if packet_device is None:
+        packet_device = (
+            torch.device("cpu")
+            if isinstance(model_comm, FakeCommunicator)
+            else torch.device(local_runner._device)
+        )
+    packet = torch.full(
+        (len(chunks),),
+        -1,
+        dtype=torch.int64,
+        device=packet_device,
+    )
+    for index, chunk in enumerate(chunks):
+        if (
+            owner_map[chunk.request_id] != model_comm.rank
+            or not _ep_attention_dp_chunk_emits(
+                chunk,
+                states[chunk.request_id],
+            )
+        ):
+            continue
+        values = public_records[chunk.request_id]
+        if not isinstance(values, tuple) or len(values) != 1:
+            raise RuntimeError(
+                "attention-DP pure-greedy packet requires exactly one token for "
+                f"{chunk.request_id!r}"
+            )
+        record = values[0]
+        if isinstance(record, SampledToken):
+            if record.token_id < 0:
+                raise RuntimeError("attention-DP sampler returned a negative token id")
+            packet[index] = record.token_id
+            continue
+        sample = getattr(record, "sample", None)
+        token_id = getattr(sample, "token_id", None)
+        if (
+            not isinstance(token_id, torch.Tensor)
+            or token_id.numel() != 1
+            or token_id.dtype is not torch.int64
+            or token_id.device != packet.device
+        ):
+            raise RuntimeError(
+                "attention-DP sampler returned a malformed device token"
+            )
+        packet[index].copy_(token_id)
+    return packet
+
+
+def _ep_attention_dp_deferred_packet_output(
+    gathered,
+    *,
+    chunks: tuple[ScheduledChunk, ...],
+    states: dict[str, RequestSnapshot],
+    owners: tuple[tuple[str, int], ...],
+    world_size: int,
+    local_runner,
+):
+    """Select owner slots D2D and defer their one vector D2H to commit."""
+
+    import torch
+
+    from kairyu.engine.core.model_runner import (
+        _DeferredStepOutput,
+        _PendingDeviceToken,
+    )
+    from kairyu.engine.core.sampler import DeviceSample
+
+    if (
+        not isinstance(gathered, torch.Tensor)
+        or gathered.dtype is not torch.int64
+        or tuple(gathered.shape) != (world_size * len(chunks),)
+    ):
+        raise RuntimeError(
+            "attention-DP gathered token packet has malformed shape or dtype"
+        )
+    owner_map = _ep_attention_dp_owner_map(
+        owners,
+        chunks,
+        world_size=world_size,
+    )
+    matrix = gathered.reshape(world_size, len(chunks))
+    records: dict[str, tuple[object, ...]] = {}
+    for index, chunk in enumerate(chunks):
+        if not _ep_attention_dp_chunk_emits(
+            chunk,
+            states[chunk.request_id],
+        ):
+            continue
+        if chunk.request_id in records:
+            raise RuntimeError(
+                "attention-DP device packet cannot emit twice for one request"
+            )
+
+        def validate_token(
+            token: SampledToken,
+            request_id: str = chunk.request_id,
+        ) -> None:
+            if token.token_id < 0:
+                raise RuntimeError(
+                    "attention-DP owner packet omitted token for "
+                    f"{request_id!r}"
+                )
+
+        records[chunk.request_id] = (
+            _PendingDeviceToken(
+                sample=DeviceSample(
+                    matrix[owner_map[chunk.request_id], index]
+                ),
+                on_resolve=validate_token,
+            ),
+        )
+    return _DeferredStepOutput(
+        records,
+        getattr(local_runner, "_output_copy_stream", None),
+    )
+
+
+def _validate_ep_attention_dp_replies(
+    replies: object,
+    *,
+    chunks: tuple[ScheduledChunk, ...],
+    states: dict[str, RequestSnapshot],
+    world_size: int,
+    fast_path: bool = False,
+) -> dict[str, tuple[SampledToken, ...]]:
+    if not isinstance(replies, (tuple, list)) or len(replies) != world_size:
+        raise RuntimeError(
+            "attention-DP gathered malformed rank count: "
+            f"expected {world_size}, got "
+            f"{len(replies) if isinstance(replies, (tuple, list)) else type(replies).__name__}"
+        )
+    by_rank: dict[int, _EPAttentionDPReply] = {}
+    failures: list[str] = []
+    merged: dict[str, tuple[SampledToken, ...]] = {}
+    for reply in replies:
+        if (
+            not isinstance(reply, _EPAttentionDPReply)
+            or type(reply.rank) is not int
+            or not 0 <= reply.rank < world_size
+            or reply.rank in by_rank
+        ):
+            raise RuntimeError(
+                f"attention-DP gathered malformed reply: {reply!r}"
+            )
+        by_rank[reply.rank] = reply
+        if reply.error is not None:
+            failures.append(f"rank {reply.rank}: {reply.error}")
+            continue
+        if fast_path:
+            if reply.sampled != {}:
+                failures.append(
+                    f"rank {reply.rank}: device-packet status carried host samples"
+                )
+            continue
+        if not isinstance(reply.sampled, dict):
+            failures.append(f"rank {reply.rank}: sampled payload is not a dict")
+            continue
+        for request_id, tokens in reply.sampled.items():
+            if request_id in merged:
+                failures.append(
+                    f"request {request_id!r} was sampled by more than one rank"
+                )
+                continue
+            if (
+                not isinstance(request_id, str)
+                or not isinstance(tokens, tuple)
+                or any(not isinstance(token, SampledToken) for token in tokens)
+            ):
+                failures.append(
+                    f"rank {reply.rank}: malformed sampled row {request_id!r}"
+                )
+                continue
+            merged[request_id] = tokens
+    missing_ranks = sorted(set(range(world_size)) - set(by_rank))
+    if missing_ranks:
+        failures.append(f"missing ranks={missing_ranks}")
+    expected: list[str] = []
+    for chunk in chunks:
+        state = states[chunk.request_id]
+        emits = _ep_attention_dp_chunk_emits(chunk, state)
+        if emits:
+            expected.append(chunk.request_id)
+    if len(expected) != len(set(expected)):
+        failures.append(
+            "scheduled step emits more than one sampled row for a request"
+        )
+    if not fast_path and set(merged) != set(expected):
+        failures.append(
+            "sampled request set mismatch: "
+            f"expected={sorted(set(expected))}, got={sorted(merged)}"
+        )
+    if failures:
+        raise RuntimeError("attention-DP rank failures: " + "; ".join(failures))
+    return merged
+
+
+class DistEPModelRunner:
+    """Driver facade for explicit replicated or request-owned EP execution.
+
+    The default retains M-A1/M-A2's replicated-attention correctness protocol.
+    The opt-in M-A3 path fixes one owner rank per request; only that rank runs
+    attention, owns KV, and samples, while every rank enters the same packed
+    NVFP4 MoE all-gather/reduce-scatter sequence.
     """
 
     def __init__(
@@ -2941,9 +4336,24 @@ class DistEPModelRunner:
         model_comm=None,
         *,
         expert_parallel_size: int,
+        attention_dp: bool = False,
+        pipeline_depth: int = 1,
+        page_size: int = 16,
+        decode_mode: str = "eager",
+        graph_scratch_page: int | None = None,
+        graph_max_batch: int = 0,
+        graph_max_pages: int = 0,
+        graph_warmup_iters: int = 3,
     ) -> None:
-        _validate_ep_correctness_mode(
+        _validate_ep_mode(
+            attention_dp=attention_dp,
             expert_parallel_size=expert_parallel_size,
+            pipeline_depth=pipeline_depth,
+            decode_mode=decode_mode,
+            graph_scratch_page=graph_scratch_page,
+            graph_max_batch=graph_max_batch,
+            graph_max_pages=graph_max_pages,
+            graph_warmup_iters=graph_warmup_iters,
         )
         if control_comm.world_size != expert_parallel_size:
             raise ValueError(
@@ -2959,28 +4369,63 @@ class DistEPModelRunner:
             control_comm,
             local_runner,
             model_comm,
-            parallelism_display="expert-parallel correctness-mode",
+            parallelism_display=(
+                "request-owned expert-parallel attention-DP"
+                if attention_dp
+                else "expert-parallel correctness-mode"
+            ),
             parallelism_prefix="EP",
         )
+        if type(page_size) is not int or page_size < 1:
+            raise ValueError("EP page_size must be a positive integer")
+        self._attention_dp = attention_dp
+        self._page_size = page_size
+        self._request_owners: dict[str, int] = {}
+        self._kv_page_owners: dict[int, int] = {}
+        self._next_owner = 0
+        self._owner_assignment_sequence = 0
+        self._owner_assignment_log: list[dict[str, object]] = []
+        self._owner_assignment_dropped = 0
         self.expert_parallel_size = expert_parallel_size
         self.parallelism = "expert_parallel"
-        self.execution_mode = _EP_CORRECTNESS_MODE
-        self.attention_placement = "replicated"
-        self.attention_output_placement = "row_parallel"
-        self.attention_output_parallel_size = expert_parallel_size
-        self.attention_output_partial_dtype = "bfloat16"
-        self.pipeline_depth = 1
-        self.decode_mode = "eager"
+        self.execution_mode = (
+            _EP_ATTENTION_DP_MODE if attention_dp else _EP_CORRECTNESS_MODE
+        )
+        self.attention_placement = (
+            "request_owned_data_parallel" if attention_dp else "replicated"
+        )
+        self.attention_output_placement = (
+            "replicated" if attention_dp else "row_parallel"
+        )
+        self.attention_output_parallel_size = (
+            1 if attention_dp else expert_parallel_size
+        )
+        self.attention_output_partial_dtype = (
+            None if attention_dp else "bfloat16"
+        )
+        self.pipeline_depth = pipeline_depth
+        self.decode_mode = decode_mode
 
     def __getattr__(self, name: str):
         """Delegate the proven SPMD control protocol without becoming a TP type."""
 
         return getattr(object.__getattribute__(self, "_delegate"), name)
 
+    def set_batched_prefill_enabled(self, enabled: bool) -> None:
+        """Keep attention-DP's one-layout-per-forward invariant fail-closed."""
+
+        if type(enabled) is not bool:
+            raise TypeError("batched prefill enabled flag must be bool")
+        if self._attention_dp and not enabled:
+            raise ValueError(
+                "request-owned attention-DP cannot disable batched prefill"
+            )
+        self._delegate.set_batched_prefill_enabled(enabled)
+
     def parallelism_metadata(self) -> dict[str, object]:
         """Unambiguous topology metadata for gates and serving surfaces."""
 
-        return {
+        metadata: dict[str, object] = {
             "parallelism": self.parallelism,
             "expert_parallel_size": self.expert_parallel_size,
             "attention_placement": self.attention_placement,
@@ -2992,12 +4437,404 @@ class DistEPModelRunner:
             "decode_mode": self.decode_mode,
             "kv_cache_dtype": "bfloat16",
         }
+        if self._attention_dp:
+            delegate = object.__getattribute__(self, "_delegate")
+            graph_probe = getattr(
+                delegate._local,
+                "decode_graph_metadata",
+                None,
+            )
+            if callable(graph_probe):
+                graph_metadata = graph_probe()
+            elif self.decode_mode == "eager":
+                graph_metadata = {
+                    "decode_mode": "eager",
+                    "cuda_graph_decode": False,
+                    "cuda_graph_buckets": (),
+                    "cuda_graph_captures": 0,
+                    "cuda_graph_replays": 0,
+                    "cuda_graph_eager_fallbacks": 0,
+                }
+            else:
+                raise RuntimeError(
+                    "attention-DP CUDA graph runner exposes no graph metadata"
+                )
+            if graph_metadata.get("decode_mode") != self.decode_mode:
+                raise RuntimeError(
+                    "attention-DP runner graph metadata disagrees with its "
+                    "configured decode mode"
+                )
+            transport_probe = getattr(
+                delegate._model_comm,
+                "attention_dp_collective_metadata",
+                None,
+            )
+            if callable(transport_probe):
+                collective_transport = transport_probe()
+            else:
+                backend = _communicator_backend(delegate._model_comm)
+                collective_transport = {
+                    "selected_backend": backend,
+                    "fallback_backend": backend,
+                    "direct_nccl_active": False,
+                    "direct_nccl_library": None,
+                    "direct_nccl_version": None,
+                    "selection_reason": (
+                        "communicator does not expose a direct NCCL transport"
+                    ),
+                }
+            metadata.update(
+                {
+                    "attention_data_parallel_size": self.expert_parallel_size,
+                    "attention_tensor_parallel_size": 1,
+                    "moe_dispatcher": _EP_ATTENTION_DP_DISPATCHER,
+                    "sampling_ownership": "request_owner",
+                    "kv_cache_ownership": "request_owner",
+                    **graph_metadata,
+                    "attention_dp_prefill_scratch_pages": (
+                        _EP_ATTENTION_DP_SCRATCH_PAGES
+                    ),
+                    "attention_dp_decode_scratch_pages": len(
+                        getattr(
+                            delegate._local,
+                            "attention_dp_decode_scratch_pages",
+                            (0,),
+                        )
+                    ),
+                    "attention_dp_graph_scratch_pages": int(
+                        graph_metadata["cuda_graph_decode"]
+                    ),
+                    "attention_dp_scratch_pages": getattr(
+                        delegate._local,
+                        "attention_dp_reserved_page_count",
+                        _EP_ATTENTION_DP_SCRATCH_PAGES + 1,
+                    )
+                    + int(graph_metadata["cuda_graph_decode"]),
+                    "moe_collective_transport": collective_transport,
+                }
+            )
+        return metadata
+
+    @staticmethod
+    def _state_page_contract(
+        state: object,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], int]:
+        allocation = getattr(state, "allocation", None)
+        if allocation is None:
+            raise RuntimeError("scheduled attention-DP request has no KV allocation")
+        pages = tuple(getattr(allocation, "pages", ()))
+        decode_pages = tuple(getattr(state, "decode_pages", ()))
+        cached_tokens = getattr(allocation, "num_cached_tokens", None)
+        if (
+            any(type(page) is not int or page < 0 for page in pages + decode_pages)
+            or type(cached_tokens) is not int
+            or cached_tokens < 0
+        ):
+            raise RuntimeError("scheduled attention-DP request has malformed KV state")
+        return pages, decode_pages, cached_tokens
+
+    def _stage_attention_dp_owners(
+        self,
+        chunks: tuple[ScheduledChunk, ...],
+        states,
+        *,
+        released_ids: tuple[str, ...],
+    ) -> tuple[
+        dict[str, int],
+        dict[int, int],
+        int,
+        tuple[tuple[str, int], ...],
+        tuple[dict[str, object], ...],
+    ]:
+        owners = dict(self._request_owners)
+        page_owners = dict(self._kv_page_owners)
+        for request_id in released_ids:
+            owners.pop(request_id, None)
+        next_owner = self._next_owner
+        active_counts = [
+            sum(owner == rank for owner in owners.values())
+            for rank in range(self.expert_parallel_size)
+        ]
+        ordered_ids = tuple(dict.fromkeys(chunk.request_id for chunk in chunks))
+        new_log: list[dict[str, object]] = []
+        for request_id in ordered_ids:
+            pages, decode_pages, cached_tokens = self._state_page_contract(
+                states[request_id]
+            )
+            cached_page_count = min(
+                len(pages),
+                (cached_tokens + self._page_size - 1) // self._page_size,
+            )
+            cached_pages = pages[:cached_page_count]
+            cached_owners = {
+                page_owners[page]
+                for page in cached_pages
+                if page in page_owners
+            }
+            if cached_pages and len(cached_owners) != 1:
+                raise RuntimeError(
+                    "attention-DP cached prefix has missing or mixed KV owners "
+                    f"for request {request_id!r}"
+                )
+            cached_owner = next(iter(cached_owners)) if cached_owners else None
+            owner = owners.get(request_id)
+            if owner is None:
+                if cached_owner is not None:
+                    owner = cached_owner
+                else:
+                    minimum = min(active_counts)
+                    candidates = {
+                        rank
+                        for rank, count in enumerate(active_counts)
+                        if count == minimum
+                    }
+                    owner = next(
+                        (next_owner + offset) % self.expert_parallel_size
+                        for offset in range(self.expert_parallel_size)
+                        if (next_owner + offset) % self.expert_parallel_size
+                        in candidates
+                    )
+                    next_owner = (owner + 1) % self.expert_parallel_size
+                owners[request_id] = owner
+                active_counts[owner] += 1
+                new_log.append(
+                    {
+                        "sequence": self._owner_assignment_sequence
+                        + len(new_log),
+                        "request_id": request_id,
+                        "owner_rank": owner,
+                        "cache_affine": cached_owner is not None,
+                    }
+                )
+            elif cached_owner is not None and cached_owner != owner:
+                raise RuntimeError(
+                    "attention-DP request owner disagrees with cached KV owner "
+                    f"for request {request_id!r}: request={owner}, cache={cached_owner}"
+                )
+            for page in pages + decode_pages:
+                page_owners[page] = owner
+        owner_pairs = tuple((request_id, owners[request_id]) for request_id in ordered_ids)
+        return owners, page_owners, next_owner, owner_pairs, tuple(new_log)
+
+    def _retain_attention_dp_assignments(
+        self,
+        assignments: tuple[dict[str, object], ...],
+    ) -> None:
+        """Commit a contiguous sequence while retaining only the newest bound."""
+
+        if not isinstance(assignments, tuple):
+            raise RuntimeError("attention-DP assignment evidence must be a tuple")
+        for offset, assignment in enumerate(assignments):
+            expected_sequence = self._owner_assignment_sequence + offset
+            if (
+                not isinstance(assignment, dict)
+                or set(assignment) != _EP_ATTENTION_DP_ASSIGNMENT_FIELDS
+                or type(assignment["sequence"]) is not int
+                or assignment["sequence"] != expected_sequence
+                or not isinstance(assignment["request_id"], str)
+                or not assignment["request_id"]
+                or type(assignment["owner_rank"]) is not int
+                or not 0
+                <= assignment["owner_rank"]
+                < self.expert_parallel_size
+                or type(assignment["cache_affine"]) is not bool
+            ):
+                raise RuntimeError(
+                    "attention-DP assignment evidence is malformed at sequence "
+                    f"{expected_sequence}"
+                )
+        self._owner_assignment_log.extend(assignments)
+        self._owner_assignment_sequence += len(assignments)
+        overflow = max(
+            0,
+            len(self._owner_assignment_log)
+            - _EP_ATTENTION_DP_ASSIGNMENT_LOG_LIMIT,
+        )
+        if overflow:
+            del self._owner_assignment_log[:overflow]
+            self._owner_assignment_dropped += overflow
+
+    def execute(self, scheduled, states) -> dict:
+        if not self._attention_dp:
+            return self._delegate.execute(scheduled, states)
+        delegate = object.__getattribute__(self, "_delegate")
+        with delegate._protocol_lock:
+            if delegate._fatal_error is not None:
+                raise RuntimeError(
+                    "request-owned attention-DP runner is unavailable after a "
+                    "fatal step failure"
+                ) from delegate._fatal_error
+            chunks = tuple(scheduled)
+            pending_releases = delegate._snapshot_pending_releases()
+            released_ids = tuple(request_id for request_id, _ in pending_releases)
+            try:
+                delta = delegate._sync.diff(
+                    chunks,
+                    states,
+                    released_ids=released_ids,
+                )
+                (
+                    staged_owners,
+                    staged_page_owners,
+                    staged_next_owner,
+                    owner_pairs,
+                    new_log,
+                ) = self._stage_attention_dp_owners(
+                    chunks,
+                    states,
+                    released_ids=released_ids,
+                )
+                graph_plan = _ep_attention_dp_make_graph_plan(
+                    delegate._local,
+                    chunks,
+                    owner_pairs,
+                    states,
+                    world_size=self.expert_parallel_size,
+                    cuda_graph_decode=self.decode_mode == "cuda_graph",
+                )
+                payload = _EPAttentionDPStep(
+                    delta,
+                    owner_pairs,
+                    graph_plan,
+                )
+                delivered = delegate._control_comm.broadcast(payload, src=0)
+                if delivered != payload:
+                    raise RuntimeError(
+                        "attention-DP control broadcast returned a malformed payload"
+                    )
+                _release_runner_requests(delegate._local, released_ids)
+                view = delegate._sync.apply(delta)
+                delegate._ack_pending_releases(pending_releases)
+                fast_path = _ep_attention_dp_fast_sampling(chunks, view)
+                local = _ep_attention_dp_local_reply(
+                    delegate._control_comm,
+                    delegate._model_comm,
+                    delegate._local,
+                    payload,
+                    view,
+                )
+                gathered = delegate._control_comm.all_gather(local.reply)
+                sampled = _validate_ep_attention_dp_replies(
+                    gathered,
+                    chunks=chunks,
+                    states=view,
+                    world_size=self.expert_parallel_size,
+                    fast_path=fast_path,
+                )
+                if fast_path:
+                    sampled = _ep_attention_dp_deferred_packet_output(
+                        local.gathered_token_packet,
+                        chunks=chunks,
+                        states=view,
+                        owners=owner_pairs,
+                        world_size=self.expert_parallel_size,
+                        local_runner=delegate._local,
+                    )
+                self._request_owners = staged_owners
+                self._kv_page_owners = staged_page_owners
+                self._next_owner = staged_next_owner
+                self._retain_attention_dp_assignments(new_log)
+                return sampled
+            except Exception as error:
+                delegate._fatal_error = error
+                raise
+
+    @_serialized_protocol
+    def sampling_ownership_metadata(self) -> tuple[dict[str, object], ...]:
+        """Validate the sampler contract for the selected EP execution mode."""
+
+        delegate = object.__getattribute__(self, "_delegate")
+        if delegate._fatal_error is not None:
+            raise RuntimeError(
+                "expert-parallel runner is unavailable after a fatal step failure"
+            ) from delegate._fatal_error
+        try:
+            control_world_size = delegate._control_comm.world_size
+            model_world_size = delegate._model_comm.world_size
+            control_backend = _communicator_backend(delegate._control_comm)
+            model_backend = _communicator_backend(delegate._model_comm)
+            delivered = delegate._control_comm.broadcast(
+                _SamplingOwnershipProbe(),
+                src=0,
+            )
+            if not isinstance(delivered, _SamplingOwnershipProbe):
+                raise RuntimeError(
+                    "sampling ownership probe broadcast returned a malformed payload"
+                )
+            local = _sampling_ownership_reply(
+                delegate._control_comm,
+                delegate._model_comm,
+                delegate._local,
+            )
+            gathered = delegate._control_comm.all_gather(local)
+            return _validate_sampling_ownership_replies(
+                gathered,
+                control_world_size=control_world_size,
+                model_world_size=model_world_size,
+                control_backend=control_backend,
+                model_backend=model_backend,
+                request_owner_sampling=self._attention_dp,
+            )
+        except Exception as error:
+            failure = RuntimeError(
+                f"EP sampling ownership metadata probe failed: {error}"
+            )
+            delegate._fatal_error = failure
+            raise failure from error
+
+    def attention_dp_ownership_metadata(self) -> dict[str, object]:
+        """Return bounded exact ownership evidence outside the hot path."""
+
+        if not self._attention_dp:
+            raise RuntimeError(
+                "attention-DP ownership metadata requires request-owned mode"
+            )
+        delegate = object.__getattribute__(self, "_delegate")
+        with delegate._protocol_lock:
+            retained = len(self._owner_assignment_log)
+            if (
+                retained > _EP_ATTENTION_DP_ASSIGNMENT_LOG_LIMIT
+                or self._owner_assignment_dropped + retained
+                != self._owner_assignment_sequence
+                or any(
+                    assignment["sequence"]
+                    != self._owner_assignment_dropped + offset
+                    for offset, assignment in enumerate(self._owner_assignment_log)
+                )
+            ):
+                raise RuntimeError(
+                    "attention-DP assignment retention accounting is inconsistent"
+                )
+            owner_counts = {
+                str(rank): sum(
+                    owner == rank for owner in self._request_owners.values()
+                )
+                for rank in range(self.expert_parallel_size)
+            }
+            return {
+                "execution_mode": self.execution_mode,
+                "assignment_count": self._owner_assignment_sequence,
+                "assignment_retention_limit": (
+                    _EP_ATTENTION_DP_ASSIGNMENT_LOG_LIMIT
+                ),
+                "retained_assignment_count": retained,
+                "dropped_assignment_count": self._owner_assignment_dropped,
+                "active_request_count": len(self._request_owners),
+                "tracked_kv_page_count": len(self._kv_page_owners),
+                "owner_counts": owner_counts,
+                "assignments": tuple(self._owner_assignment_log),
+            }
 
     @_serialized_protocol
     def _ep_kv_accounting_collect(
         self,
         action: str,
     ) -> tuple[dict[str, object], ...]:
+        if self._attention_dp:
+            raise RuntimeError(
+                "M-A2 replicated-rank KV accounting is not valid for "
+                "request-owned attention-DP"
+            )
         delegate = object.__getattribute__(self, "_delegate")
         if action not in {"start", "finish"}:
             raise ValueError("EP KV accounting action must be start or finish")
@@ -3057,8 +4894,7 @@ class DistEPModelRunner:
         delegate = object.__getattribute__(self, "_delegate")
         if delegate._fatal_error is not None:
             raise RuntimeError(
-                "expert-parallel correctness-mode runner is unavailable after "
-                "a fatal step failure"
+                "expert-parallel runner is unavailable after a fatal step failure"
             ) from delegate._fatal_error
         try:
             backend = _communicator_backend(delegate._control_comm)
@@ -3130,6 +4966,33 @@ def worker_step_loop(
     )
     while True:
         payload = control_comm.broadcast(_SHUTDOWN, src=0)
+        if isinstance(payload, _EPAttentionDPStep):
+            _release_runner_requests(
+                local_runner,
+                payload.delta.released_ids,
+            )
+            view = sync.apply(payload.delta)
+            fast_path = _ep_attention_dp_fast_sampling(
+                payload.delta.chunks,
+                view,
+            )
+            local = _ep_attention_dp_local_reply(
+                control_comm,
+                model_comm,
+                local_runner,
+                payload,
+                view,
+            )
+            gathered = control_comm.all_gather(local.reply)
+            _validate_ep_attention_dp_replies(
+                gathered,
+                chunks=payload.delta.chunks,
+                states=view,
+                world_size=control_comm.world_size,
+                fast_path=fast_path,
+            )
+            steps += 1
+            continue
         if not isinstance(payload, StepDelta):
             if payload is _SHUTDOWN or payload is None:
                 return steps
@@ -3524,16 +5387,20 @@ def build_ep_runner(
     vocab: list[str] | GrammarVocabulary,
     placement: _EPPlacement | None = None,
     *,
+    attention_dp: bool = False,
     pipeline_depth: int = 1,
     decode_mode: str = "eager",
     kv_cache_dtype: str = "bfloat16",
     pd_separation: bool = False,
     graph_scratch_page: int | None = None,
+    graph_max_batch: int = 0,
+    graph_max_pages: int = 0,
+    graph_warmup_iters: int = 3,
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     speculative: str | None = None,
 ):
-    """Build one replicated-QKV/KV, row-output-parallel EP2/EP4 rank."""
+    """Build one explicit replicated-attention or request-owned EP rank."""
 
     import torch
 
@@ -3549,13 +5416,17 @@ def build_ep_runner(
     from kairyu.engine.core.sampler import Sampler
     from kairyu.models.moe_parallel import build_ep_model
 
-    _validate_ep_correctness_mode(
+    _validate_ep_mode(
+        attention_dp=attention_dp,
         expert_parallel_size=expert_parallel_size,
         pipeline_depth=pipeline_depth,
         decode_mode=decode_mode,
         kv_cache_dtype=kv_cache_dtype,
         pd_separation=pd_separation,
         graph_scratch_page=graph_scratch_page,
+        graph_max_batch=graph_max_batch,
+        graph_max_pages=graph_max_pages,
+        graph_warmup_iters=graph_warmup_iters,
         dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
         dram_kv_tier_profile=dram_kv_tier_profile,
         speculative=speculative,
@@ -3572,8 +5443,7 @@ def build_ep_runner(
         or placement.dtype is not torch.bfloat16
     ):
         raise ValueError(
-            "replicated-QKV/KV EP correctness mode requires a CUDA/NCCL "
-            "BF16 placement"
+            "expert parallelism requires a CUDA/NCCL BF16 placement"
         )
     profile = probe(placement.device)
     attention_backend = select_backend(profile, device=placement.device)
@@ -3588,6 +5458,7 @@ def build_ep_runner(
         dtype=placement.dtype,
         device=placement.device,
         attention_backend=attention_backend,
+        attention_dp=attention_dp,
     )
     resolved_kv_cache_dtype = resolve_kv_cache_dtype(
         kv_cache_dtype,
@@ -3598,11 +5469,36 @@ def build_ep_runner(
     )
     if resolved_kv_cache_dtype is not torch.bfloat16:
         raise RuntimeError(
-            "replicated-QKV/KV EP correctness mode resolved a non-BF16 KV cache"
+            "expert-parallel execution resolved a non-BF16 KV cache"
         )
+    graph_decode = decode_mode == "cuda_graph"
+    decode_scratch_capacity = (
+        graph_max_batch if graph_decode else 1
+    ) if attention_dp else 0
+    attention_dp_reserved_pages = (
+        _EP_ATTENTION_DP_SCRATCH_PAGES + decode_scratch_capacity
+        if attention_dp
+        else 0
+    )
+    expected_graph_scratch_page = (
+        num_pages + attention_dp_reserved_pages
+        if attention_dp and graph_decode
+        else None
+    )
+    if graph_scratch_page != expected_graph_scratch_page:
+        raise ValueError(
+            "attention-DP graph scratch page does not match the reserved "
+            f"physical layout: got {graph_scratch_page!r}, "
+            f"expected {expected_graph_scratch_page!r}"
+        )
+    physical_num_pages = (
+        num_pages
+        + attention_dp_reserved_pages
+        + int(expected_graph_scratch_page is not None)
+    )
     pool = PagedKVPool(
         num_layers=full_config.num_hidden_layers,
-        num_pages=num_pages,
+        num_pages=physical_num_pages,
         page_size=page_size,
         num_kv_heads=full_config.kv_cache_num_heads,
         head_dim=full_config.kv_cache_head_dim,
@@ -3612,16 +5508,29 @@ def build_ep_runner(
     grammar_vocab = (
         vocab if isinstance(vocab, GrammarVocabulary) else GrammarVocabulary(list(vocab))
     )
+    graph_options: dict[str, object] = {}
+    if graph_decode:
+        from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
+
+        graph_options = {
+            "graph_backend": CudaGraphBackend(warmup_iters=graph_warmup_iters),
+            "graph_max_batch": graph_max_batch,
+            "graph_max_pages": graph_max_pages,
+            "graph_scratch_page": graph_scratch_page,
+        }
     runner = PagedModelRunner(
         model,
         pool,
         sampler=(
             Sampler(vocab_provider=lambda: grammar_vocab)
-            if rank == 0
+            if attention_dp or rank == 0
             else None
         ),
-        sampling_owner=rank == 0,
+        sampling_owner=attention_dp or rank == 0,
+        **graph_options,
     )
+    if attention_dp:
+        _validate_attention_dp_batched_prefill_runner(runner)
     runner.attention_backend_decision = attention_backend.selection_decision
     runner.attention_backend_identity = selected_attention_backend_identity
     runner.kv_cache_dtype_requested = "bfloat16"
@@ -3635,13 +5544,49 @@ def build_ep_runner(
     runner.parallelism = "expert_parallel"
     runner.expert_parallel_size = expert_parallel_size
     runner.expert_parallel_rank = rank
-    runner.attention_placement = "replicated"
-    runner.attention_output_placement = "row_parallel"
-    runner.attention_output_parallel_size = expert_parallel_size
-    runner.attention_output_partial_dtype = "bfloat16"
-    runner.execution_mode = _EP_CORRECTNESS_MODE
-    runner.pipeline_depth = 1
-    runner.decode_mode = "eager"
+    runner.attention_placement = (
+        "request_owned_data_parallel" if attention_dp else "replicated"
+    )
+    runner.attention_output_placement = (
+        "replicated" if attention_dp else "row_parallel"
+    )
+    runner.attention_output_parallel_size = (
+        1 if attention_dp else expert_parallel_size
+    )
+    runner.attention_output_partial_dtype = (
+        None if attention_dp else "bfloat16"
+    )
+    runner.execution_mode = (
+        _EP_ATTENTION_DP_MODE if attention_dp else _EP_CORRECTNESS_MODE
+    )
+    runner.pipeline_depth = pipeline_depth
+    runner.decode_mode = decode_mode
+    runner.attention_data_parallel_size = (
+        expert_parallel_size if attention_dp else 1
+    )
+    runner.attention_tensor_parallel_size = 1
+    runner.moe_dispatcher = (
+        _EP_ATTENTION_DP_DISPATCHER if attention_dp else "replicated_allreduce"
+    )
+    runner.attention_dp_scratch_pages = (
+        (num_pages, num_pages + 1) if attention_dp else None
+    )
+    runner.attention_dp_decode_scratch_pages = (
+        tuple(
+            range(
+                num_pages + _EP_ATTENTION_DP_SCRATCH_PAGES,
+                num_pages
+                + _EP_ATTENTION_DP_SCRATCH_PAGES
+                + decode_scratch_capacity,
+            )
+        )
+        if attention_dp
+        else None
+    )
+    runner.attention_dp_graph_scratch_page = expected_graph_scratch_page
+    runner.attention_dp_reserved_page_count = attention_dp_reserved_pages
+    runner.usable_kv_pages = num_pages
+    runner.physical_kv_pages = physical_num_pages
     runner.expert_parallel_load_info = load_info
     return runner, full_config, load_info
 
@@ -3752,15 +5697,29 @@ def _ep_worker_entry(
     num_pages: int,
     page_size: int,
     vocab: list[str] | GrammarVocabulary,
+    attention_dp: bool = False,
+    pipeline_depth: int = 1,
+    decode_mode: str = "eager",
+    graph_scratch_page: int | None = None,
+    graph_max_batch: int = 0,
+    graph_max_pages: int = 0,
+    graph_warmup_iters: int = 3,
 ) -> None:
-    """Spawned EP correctness worker; rank 0 remains in the driver process."""
+    """Spawned EP worker; rank 0 remains in the driver process."""
 
     import torch
 
     from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
 
-    _validate_ep_correctness_mode(
+    _validate_ep_mode(
+        attention_dp=attention_dp,
         expert_parallel_size=expert_parallel_size,
+        pipeline_depth=pipeline_depth,
+        decode_mode=decode_mode,
+        graph_scratch_page=graph_scratch_page,
+        graph_max_batch=graph_max_batch,
+        graph_max_pages=graph_max_pages,
+        graph_warmup_iters=graph_warmup_iters,
     )
     rank = spawn_index + 1
     torch.set_num_threads(1)
@@ -3785,6 +5744,13 @@ def _ep_worker_entry(
         page_size,
         vocab,
         placement,
+        attention_dp=attention_dp,
+        pipeline_depth=pipeline_depth,
+        decode_mode=decode_mode,
+        graph_scratch_page=graph_scratch_page,
+        graph_max_batch=graph_max_batch,
+        graph_max_pages=graph_max_pages,
+        graph_warmup_iters=graph_warmup_iters,
     )
     if (
         runner.expert_parallel_size != expert_parallel_size
@@ -3802,10 +5768,19 @@ def _ep_worker_entry(
         page_size,
         runner.attention_backend_identity,
         runner.kv_cache_dtype_resolved,
+        attention_dp=attention_dp,
+        pipeline_depth=pipeline_depth,
+        decode_mode=decode_mode,
+        graph_max_batch=graph_max_batch,
+        graph_max_pages=graph_max_pages,
+        graph_warmup_iters=graph_warmup_iters,
     )
     groups = serving_groups(placement.backend)
-    comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
     control_comm = TorchDistCommunicator(group=groups.control)
+    model_comm = TorchDistCommunicator(group=groups.model, device=placement.device)
+    if attention_dp:
+        model_comm.enable_attention_dp_direct_nccl(control_comm)
+    comm.bind(model_comm)
     try:
         worker_step_loop(
             control_comm,
@@ -3814,11 +5789,18 @@ def _ep_worker_entry(
             parallelism_prefix="EP",
         )
     finally:
+        import contextlib
+
         import torch.distributed as dist
 
+        invalidate = getattr(runner, "invalidate_graphs", None)
+        if callable(invalidate):
+            invalidate()
         if placement.backend == "nccl":
             torch.cuda.synchronize()
             comm.barrier()
+        with contextlib.suppress(Exception):
+            comm.close_direct_nccl()
         dist.destroy_process_group(comm.group)
         dist.destroy_process_group(control_comm.group)
         dist.destroy_process_group()
@@ -4035,6 +6017,8 @@ class DistTPLauncher:
         Gloo needs no abort, and the hook is absent on older torch — both are
         "nothing to abort" rather than an error.
         """
+        import contextlib
+
         import torch
         import torch.distributed as dist
 
@@ -4043,6 +6027,8 @@ class DistTPLauncher:
         groups = []
         model_comm = getattr(self, "_comm", None)
         if model_comm is not None:
+            with contextlib.suppress(Exception):
+                model_comm.abort_direct_nccl()
             groups.append(model_comm.group)
         groups.append(dist.distributed_c10d._get_default_group())
         seen: set[int] = set()
@@ -4096,6 +6082,8 @@ class DistTPLauncher:
             # CUDA graphs.  Without this, TP graph serving can complete all
             # inference steps and then hang forever in process-group teardown.
             self._comm.barrier()
+        with contextlib.suppress(Exception):
+            self._comm.close_direct_nccl()
         # BEFORE the join, not after: NCCL's destroy_process_group waits for every
         # rank to reach it, so joining first deadlocks rank 0 against workers that
         # are already sitting in their own destroy. gloo never blocks here, which
@@ -4123,7 +6111,7 @@ class _DistLauncherLifecycle:
 
 
 class DistEPLauncher(_DistLauncherLifecycle):
-    """Own one EP2/EP4 replicated-QKV/KV correctness-mode process group.
+    """Own one explicit EP2/EP4 replicated or attention-DP process group.
 
     This is a distinct public topology from :class:`DistTPLauncher`. Every rank
     holds complete QKV, attention-core, and KV state. ``build_ep_model`` loads
@@ -4139,11 +6127,15 @@ class DistEPLauncher(_DistLauncherLifecycle):
         page_size: int,
         vocab: list[str] | GrammarVocabulary,
         *,
+        attention_dp: bool = False,
         pipeline_depth: int = 1,
         decode_mode: str = "eager",
         kv_cache_dtype: str = "bfloat16",
         pd_separation: bool = False,
         graph_scratch_page: int | None = None,
+        graph_max_batch: int = 0,
+        graph_max_pages: int = 0,
+        graph_warmup_iters: int = 3,
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | Path | None = None,
         speculative: str | None = None,
@@ -4155,26 +6147,57 @@ class DistEPLauncher(_DistLauncherLifecycle):
 
         from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
 
-        _validate_ep_correctness_mode(
+        _validate_ep_mode(
+            attention_dp=attention_dp,
             expert_parallel_size=expert_parallel_size,
             pipeline_depth=pipeline_depth,
             decode_mode=decode_mode,
             kv_cache_dtype=kv_cache_dtype,
             pd_separation=pd_separation,
             graph_scratch_page=graph_scratch_page,
+            graph_max_batch=graph_max_batch,
+            graph_max_pages=graph_max_pages,
+            graph_warmup_iters=graph_warmup_iters,
             dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
             dram_kv_tier_profile=dram_kv_tier_profile,
             speculative=speculative,
         )
+        if attention_dp and decode_mode == "cuda_graph":
+            expected_graph_scratch = (
+                num_pages + _EP_ATTENTION_DP_SCRATCH_PAGES + graph_max_batch
+            )
+            if graph_scratch_page != expected_graph_scratch:
+                raise ValueError(
+                    "request-owned attention-DP graph_scratch_page must follow "
+                    "the scheduler-invisible prefill/decode reservations: "
+                    f"got {graph_scratch_page!r}, expected "
+                    f"{expected_graph_scratch}"
+                )
+            if graph_max_pages >= num_pages:
+                raise ValueError(
+                    "request-owned attention-DP graph_max_pages must be smaller "
+                    "than scheduler-visible num_pages"
+                )
         self.expert_parallel_size = expert_parallel_size
+        self.attention_dp = attention_dp
         self.parallelism = "expert_parallel"
-        self.execution_mode = _EP_CORRECTNESS_MODE
-        self.attention_placement = "replicated"
-        self.attention_output_placement = "row_parallel"
-        self.attention_output_parallel_size = expert_parallel_size
-        self.attention_output_partial_dtype = "bfloat16"
-        self.pipeline_depth = 1
-        self.decode_mode = "eager"
+        self.execution_mode = (
+            _EP_ATTENTION_DP_MODE if attention_dp else _EP_CORRECTNESS_MODE
+        )
+        self.attention_placement = (
+            "request_owned_data_parallel" if attention_dp else "replicated"
+        )
+        self.attention_output_placement = (
+            "replicated" if attention_dp else "row_parallel"
+        )
+        self.attention_output_parallel_size = (
+            1 if attention_dp else expert_parallel_size
+        )
+        self.attention_output_partial_dtype = (
+            None if attention_dp else "bfloat16"
+        )
+        self.pipeline_depth = pipeline_depth
+        self.decode_mode = decode_mode
         self._init_file = tempfile.mktemp(prefix="kairyu-ep-")  # noqa: S306
         placement = _ep_placement(expert_parallel_size, 0)
         self._placement_backend = placement.backend
@@ -4187,6 +6210,13 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 num_pages,
                 page_size,
                 vocab,
+                attention_dp,
+                pipeline_depth,
+                decode_mode,
+                graph_scratch_page,
+                graph_max_batch,
+                graph_max_pages,
+                graph_warmup_iters,
             ),
             nprocs=expert_parallel_size - 1,
             join=False,
@@ -4212,11 +6242,15 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 page_size,
                 vocab,
                 placement,
+                attention_dp=attention_dp,
                 pipeline_depth=pipeline_depth,
                 decode_mode=decode_mode,
                 kv_cache_dtype=kv_cache_dtype,
                 pd_separation=pd_separation,
                 graph_scratch_page=graph_scratch_page,
+                graph_max_batch=graph_max_batch,
+                graph_max_pages=graph_max_pages,
+                graph_warmup_iters=graph_warmup_iters,
                 dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
                 dram_kv_tier_profile=dram_kv_tier_profile,
                 speculative=speculative,
@@ -4235,22 +6269,37 @@ class DistEPLauncher(_DistLauncherLifecycle):
                     page_size,
                     self.attention_backend_identity,
                     self.kv_cache_dtype_resolved,
+                    attention_dp=attention_dp,
+                    pipeline_depth=pipeline_depth,
+                    decode_mode=decode_mode,
+                    graph_max_batch=graph_max_batch,
+                    graph_max_pages=graph_max_pages,
+                    graph_warmup_iters=graph_warmup_iters,
                 ),
                 src=0,
             )
             groups = serving_groups(placement.backend)
-            self._comm.bind(
-                TorchDistCommunicator(
-                    group=groups.model,
-                    device=placement.device,
-                )
-            )
             self._control_comm = TorchDistCommunicator(group=groups.control)
+            model_comm = TorchDistCommunicator(
+                group=groups.model,
+                device=placement.device,
+            )
+            if attention_dp:
+                model_comm.enable_attention_dp_direct_nccl(self._control_comm)
+            self._comm.bind(model_comm)
             self.runner = DistEPModelRunner(
                 self._control_comm,
                 runner,
                 self._comm,
                 expert_parallel_size=expert_parallel_size,
+                attention_dp=attention_dp,
+                pipeline_depth=pipeline_depth,
+                page_size=page_size,
+                decode_mode=decode_mode,
+                graph_scratch_page=graph_scratch_page,
+                graph_max_batch=graph_max_batch,
+                graph_max_pages=graph_max_pages,
+                graph_warmup_iters=graph_warmup_iters,
             )
         except BaseException:
             self._abandon_start()

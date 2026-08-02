@@ -1327,6 +1327,79 @@ def test_dist_ep_builder_assembles_topology_neutral_serving_loop(
         loop.close()
 
 
+def test_dist_ep_attention_dp_propagates_cuda_graph_capacity_and_scratch(
+    monkeypatch,
+    tmp_path,
+):
+    (tmp_path / "config.json").write_text('{"vocab_size": 50000}')
+    created = []
+
+    class _FakeEPLauncher:
+        def __init__(
+            self,
+            model_path,
+            expert_parallel_size,
+            num_pages,
+            page_size,
+            **kwargs,
+        ):
+            self.runner = object()
+            self.kwargs = kwargs
+            self.attention_backend_decision = None
+            self.kv_cache_dtype_requested = "bfloat16"
+            self.kv_cache_dtype_resolved = "bfloat16"
+            created.append(self)
+
+        def parallelism_metadata(self):
+            return {
+                "parallelism": "expert_parallel",
+                "expert_parallel_size": 4,
+                "attention_placement": "request_owned_data_parallel",
+                "attention_output_placement": "replicated",
+                "attention_output_parallel_size": 1,
+                "attention_output_partial_dtype": None,
+                "execution_mode": "request-owned-attention-dp",
+                "pipeline_depth": 5,
+                "decode_mode": "cuda_graph",
+                "kv_cache_dtype": "bfloat16",
+            }
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(
+        "kairyu.engine.core.worker.DistEPLauncher",
+        _FakeEPLauncher,
+    )
+    loop, _cache, _scheduler = kairyu_backend_module._build_dist_ep_loop(
+        model_path=str(tmp_path),
+        expert_parallel_size=4,
+        expert_parallel_attention_dp=True,
+        num_pages=64,
+        page_size=16,
+        max_num_batched_tokens=64,
+        max_num_seqs=16,
+        max_model_len=2048,
+        priority_age_s=60.0,
+        tokenizer=ToyTokenizer(),
+        pipeline_depth=5,
+        decode_mode="cuda_graph",
+        cuda_graph_max_batch=8,
+        cuda_graph_max_pages=32,
+        cuda_graph_warmup_iters=2,
+        kv_cache_dtype="bfloat16",
+    )
+
+    try:
+        assert created[0].kwargs["graph_scratch_page"] == 74
+        assert created[0].kwargs["graph_max_batch"] == 8
+        assert created[0].kwargs["graph_max_pages"] == 32
+        assert created[0].kwargs["graph_warmup_iters"] == 2
+        assert created[0].kwargs["decode_mode"] == "cuda_graph"
+    finally:
+        loop.close()
+
+
 async def test_full_stack_openai_server_over_engine_core():
     app = create_app(engines={"kairyu-cpu": KairyuBackend(num_pages=256)})
     transport = httpx.ASGITransport(app=app)

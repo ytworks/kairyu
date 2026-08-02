@@ -18,10 +18,35 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
 from kairyu.engine.core.graph_buckets import bucket_for, decode_buckets
+
+GraphDecodeKind = Literal["eager_fallback", "capture", "replay"]
+
+
+@dataclass(frozen=True)
+class GraphDecodeDecision:
+    """Read-only dispatch plan for one prospective decode batch.
+
+    ``bucket_size`` is the number of rows the selected execution runs.  Graph
+    decisions report their padded static bucket; eager fallback reports the
+    unpadded prospective batch size.  ``capture_model_forward_count`` is the
+    number of times the Python model-forward function must be entered before
+    this dispatch can complete.  A first capture enters it once per backend
+    warmup plus once for capture itself.  Replaying the resulting graph enters
+    no Python model code, while eager fallback enters it exactly once.
+
+    The slightly capture-specific field name is intentional: consumers need
+    this count to stage capture-time side inputs (for example one collective
+    layout per warmup/capture invocation), not to estimate GPU graph replays.
+    """
+
+    kind: GraphDecodeKind
+    bucket_size: int
+    capture_model_forward_count: int
 
 
 @dataclass(frozen=True)
@@ -450,6 +475,18 @@ class FakeGraphBackend:
         self.captures = 0
         self.replays = 0
 
+    @property
+    def capture_model_forward_count(self) -> int:
+        """Logical no-warmup capture count used by graph-policy tests.
+
+        This lightweight backend evaluates ``fn`` from ``replay`` so CPU tests
+        can observe current tensor contents.  The reported count models the
+        equivalent production capture boundary: one capture forward and no
+        warmups.
+        """
+
+        return 1
+
     def capture(self, fn: DecodeFn, static_batch: DecodeBatch):
         self.captures += 1
         backend = self
@@ -477,6 +514,12 @@ class SnapshotGraphBackend:
     def __init__(self) -> None:
         self.captures = 0
         self.replays = 0
+
+    @property
+    def capture_model_forward_count(self) -> int:
+        """Logical no-warmup capture count; see ``FakeGraphBackend``."""
+
+        return 1
 
     def capture(self, fn: DecodeFn, static_batch: DecodeBatch):
         self.captures += 1
@@ -552,6 +595,24 @@ class GraphStepExecutor:
         self._page_table_elements_copied = 0
         self._page_table_row_hits = 0
         self._page_table_released_rows = 0
+        # Distributed attention-DP chooses one graph/eager branch for every
+        # rank before any model collective.  The one-shot override below makes
+        # that global decision authoritative at the local executor boundary;
+        # without it a rank whose smaller local shape fits a graph could enter
+        # capture while a peer takes the globally-required eager fallback.
+        self._coordinated_decision: GraphDecodeDecision | None = None
+
+    @property
+    def configured_buckets(self) -> tuple[int, ...]:
+        """Static capture buckets in ascending execution order."""
+
+        return self._buckets
+
+    @property
+    def max_pages(self) -> int:
+        """Maximum page-table width accepted by captured decode."""
+
+        return self._max_pages
 
     def can_execute_graph(self, batch: DecodeBatch) -> bool:
         """Whether ``batch`` fits one configured static graph bucket."""
@@ -559,6 +620,101 @@ class GraphStepExecutor:
             bucket_for(batch.batch_size, self._buckets) is not None
             and batch.max_pages <= self._max_pages
         )
+
+    def decode_decision(
+        self,
+        *,
+        batch_size: int,
+        max_pages: int,
+    ) -> GraphDecodeDecision:
+        """Return the dispatch decision without capturing or mutating counters.
+
+        The caller supplies only prospective shape metadata.  In particular,
+        this method never builds/copies a ``DecodeBatch`` and never changes the
+        captured-bucket set, so distributed callers can coordinate any required
+        capture-time Python forwards before entering ``execute_decode``.
+        """
+
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("decode batch_size must be an integer >= 1")
+        if type(max_pages) is not int or max_pages < 1:
+            raise ValueError("decode max_pages must be an integer >= 1")
+        bucket = bucket_for(batch_size, self._buckets)
+        if bucket is None or max_pages > self._max_pages:
+            return GraphDecodeDecision(
+                kind="eager_fallback",
+                bucket_size=batch_size,
+                capture_model_forward_count=1,
+            )
+        if bucket in self._captured:
+            return GraphDecodeDecision(
+                kind="replay",
+                bucket_size=bucket,
+                capture_model_forward_count=0,
+            )
+        count = getattr(self._backend, "capture_model_forward_count", None)
+        if type(count) is not int or count < 1:
+            raise RuntimeError(
+                "graph backend must expose a positive integer "
+                "capture_model_forward_count for prospective dispatch"
+            )
+        return GraphDecodeDecision(
+            kind="capture",
+            bucket_size=bucket,
+            capture_model_forward_count=count,
+        )
+
+    def coordinate_next_decode(self, decision: GraphDecodeDecision) -> None:
+        """Arm exactly one authoritative distributed decode decision.
+
+        The coordinator has already compared this decision on every rank.  It
+        is deliberately consumed by the next :meth:`execute_decode` call only;
+        double arming or skipping that call is protocol drift and fails closed.
+        """
+
+        if not isinstance(decision, GraphDecodeDecision):
+            raise TypeError("coordinated graph decision must be GraphDecodeDecision")
+        if self._coordinated_decision is not None:
+            raise RuntimeError(
+                "coordinated graph decision is already armed for the next decode"
+            )
+        if decision.kind == "eager_fallback":
+            valid = (
+                decision.bucket_size >= 1
+                and decision.capture_model_forward_count == 1
+            )
+        elif decision.kind == "capture":
+            count = getattr(self._backend, "capture_model_forward_count", None)
+            valid = (
+                decision.bucket_size in self._buckets
+                and type(count) is int
+                and count >= 1
+                and decision.capture_model_forward_count == count
+            )
+        else:
+            valid = (
+                decision.kind == "replay"
+                and decision.bucket_size in self._buckets
+                and decision.capture_model_forward_count == 0
+            )
+        if not valid:
+            raise ValueError(
+                f"malformed coordinated graph decision: {decision!r}"
+            )
+        self._coordinated_decision = decision
+
+    def assert_coordinated_decode_consumed(self) -> None:
+        """Prove the one-step override reached exactly one decode dispatch."""
+
+        if self._coordinated_decision is not None:
+            raise RuntimeError(
+                "coordinated graph decision was not consumed by model decode"
+            )
+
+    def cancel_coordinated_decode(self) -> None:
+        """Clear an armed decision while tearing down an already-failed step."""
+
+        self._coordinated_decision = None
 
     def execution_stats(self, *, reset: bool = False) -> dict[str, object]:
         """Structural dispatch counts, independent of wall-clock jitter."""
@@ -614,6 +770,29 @@ class GraphStepExecutor:
         return result
 
     def execute_decode(self, batch: DecodeBatch) -> torch.Tensor:
+        coordinated = self._coordinated_decision
+        self._coordinated_decision = None
+        if coordinated is not None:
+            if coordinated.kind == "eager_fallback":
+                self._eager_fallbacks += 1
+                self._page_table_eager_fallbacks += 1
+                self._plan(batch)
+                return self._decode_fn(batch)
+            if batch.batch_size != coordinated.bucket_size:
+                raise RuntimeError(
+                    "coordinated graph bucket disagrees with the local padded "
+                    f"decode: decision={coordinated.bucket_size}, "
+                    f"batch={batch.batch_size}"
+                )
+            local = self.decode_decision(
+                batch_size=batch.batch_size,
+                max_pages=batch.max_pages,
+            )
+            if local != coordinated:
+                raise RuntimeError(
+                    "coordinated graph decision disagrees with local executor "
+                    f"state: coordinated={coordinated!r}, local={local!r}"
+                )
         bucket = bucket_for(batch.batch_size, self._buckets)
         # oversize batch OR a page table wider than the captured static buffer:
         # never crash, run eager (D2)

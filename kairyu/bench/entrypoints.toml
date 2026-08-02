@@ -12,6 +12,7 @@ schema_version = 1
 "bench.g4_ma1_qwen3_235b_nvfp4_bench" = ["bench.parity_tp"]
 "bench.g4_ma1_qwen3_235b_nvfp4_capture" = ["bench.g4_ma1_qwen3_235b_nvfp4_bench"]
 "bench.g4_ma2_qwen3_235b_ep_kv_bench" = ["bench.g4_ma1_qwen3_235b_nvfp4_capture", "bench.tp_kv_hit_g2_a7_bench"]
+"bench.g4_ma3_sglang_bench" = ["bench.g2_a6_vllm_bench", "bench.g4_ma1_qwen3_235b_nvfp4_bench"]
 "bench.gate_a1" = ["bench.parity_tp"]
 "bench.gate_a2" = ["bench.parity_hf", "bench.parity_tp"]
 "bench.global_kv_pool_decision" = ["bench.kv_aware_ttft_f2c_bench"]
@@ -218,6 +219,24 @@ module = "bench.g4_ma2_qwen3_235b_ep_kv_bench"
 kind = "formal-gate"
 requires = ["engine", "gpu", "hf"]
 documentation = ["bench/README.md", "docs/design/g4-mid-moe.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "bench/g4_ma3_kairyu_server.py"
+module = "bench.g4_ma3_kairyu_server"
+kind = "operator"
+requires = ["engine", "gpu", "hf", "service"]
+documentation = ["bench/README.md", "docs/design/g4-mid-moe.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "bench/g4_ma3_sglang_bench.py"
+module = "bench.g4_ma3_sglang_bench"
+kind = "operator"
+requires = ["bench", "docker", "engine", "gpu", "hf", "service", "sglang"]
+documentation = ["bench/README.md"]
 installed = false
 invocations = ["path", "module"]
 

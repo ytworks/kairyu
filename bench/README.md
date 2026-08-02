@@ -61,8 +61,8 @@ Formal G2/G4/G5/G6 artifacts bind source paths, hashes, commands, and result
 locations. A refactor may delegate a stable wrapper to package-owned code, but
 must not silently rename the wrapper, invocation form, or recorded evidence
 path. Existing wrapper-to-wrapper imports are compatibility dependencies; new
-shared behavior belongs in the installed package. The exact seventeen retained
-composition edges are allowlisted in the manifest's
+shared behavior belongs in the installed package. The exact retained composition
+edges are allowlisted in the manifest's
 `[compatibility_imports]` table; checkout validation fails on any undeclared,
 removed, or redirected edge.
 
@@ -126,6 +126,7 @@ bench/g2_a6_vllm_bench.py
 bench/g2_a9_dp_tp_crossover_bench.py
 bench/g4_ma1_qwen3_235b_nvfp4_bench.py
 bench/g4_ma1_qwen3_235b_nvfp4_capture.py
+bench/g4_ma3_sglang_bench.py
 bench/gate_a1.py
 bench/gate_a2.py
 bench/global_kv_pool_decision.py
@@ -305,6 +306,60 @@ identities on all four ranks, 512 raw cache events, and 4,128 retained blocks.
 Both retained-copy verification and raw-only replay pass. Evidence, including
 the running-container inspect record, is retained under
 `bench/results/g4-ma2-ep-kv-qwen3-235b-rtxpro6000-2026-08-02/`.
+
+### G4 M-A3 SGLang comparison evidence
+
+`bench/g4_ma3_sglang_bench.py` is the fail-closed evidence operator for the
+fixed Qwen3-235B NVFP4 comparison against SGLang v0.5.16. It is deliberately
+not a Docker supervisor: every `run` measures one already-started fresh server
+and writes one immutable raw JSONL shard. The companion
+`bench/g4_ma3_kairyu_server.py` launches the bounded production Kairyu arm;
+model geometry, TP1/attention-DP4/EP4, BF16 KV, FCFS limits, 65,536 aggregate
+cache tokens, packed-QKV/native-NVFP4 execution, direct NCCL, and CUDA-graph
+limits are fixed, while its sole performance choice is the already-selected
+pipeline depth 5. SGLang is pinned by source commit and immutable image digest
+with TP4/DP4/EP4, `--enable-dp-attention`, FlashInfer CUTLASS FP4/MoE, no MoE
+A2A, BF16 KV, and 16,384 cache tokens per owner.
+
+`prepare` hashes the exact seed-0 ShareGPT dataset, Qwen tokenizer, 128-request
+trace, and a disjoint 348-request graph-warmup trace. Every scenario first
+runs four serial requests and global graph bursts of
+`4,8,16,32,64,96,128`, retaining each request for 16 completion tokens so the
+HTTP arrival wave reaches steady decode. Those bursts cover Kairyu's seven local owner buckets
+`1,2,4,8,16,24,32` without charging lazy capture to the measurement. For a
+Kairyu shard, `/backends` must show direct NCCL active, all seven buckets
+captured, zero eager fallback, no capture/fallback change across traffic, and
+a strictly increased replay count.
+
+The retained preflight contains one fixed candidate per arm and freezes its
+raw hashes before formal traffic. The eight binding formal shards use fresh,
+strictly sequential servers in K/S, S/K, S/K, K/S order. Each releases the
+same 128 prompts at concurrency 128 and requires exactly 128 streamed output
+tokens per request. Throughput is successful completion tokens divided by the
+first-start-to-last-terminal span and four GPUs; TTFT p99 is nearest-rank over
+all 128 requests. The verdict is the exact median of four paired K/S ratios,
+requiring throughput at least 1 and TTFT at most 1, with no retry/failure
+exclusion, outlier removal, or round-before-gate. Two additional shards retain
+a five-point, 32-request-per-point open-loop sweep derived from SGLang's
+preflight capacity; it is report-only and cannot alter either performance
+verdict.
+
+Each shard binds the exact checkpoint, trace/selection, clean source, image
+RepoDigest/platform/config identities, fresh container generation, read-only
+model mount, physical GPUs 4–7, runtime argv and package versions, and stable
+start/end provenance. Assembly writes authoritative
+`g4-ma3-sglang-raw.jsonl` plus derived
+`g4-ma3-sglang-manifest.json`. `verify` checks the stored manifest against a
+fresh raw replay; `replay` ignores the manifest entirely. The report always
+discloses that SM120 uses FlashInfer CUTLASS instead of the SM100-only
+TRTLLM-gen MoE path, disables prefill CUDA graph while retaining decode graph,
+and leaves MTP/speculation to M-A4. These limitations never change the gate.
+
+The production implementation and hardware load/graph smoke are complete, but
+the final paired metrics, artifact path, and PASS/FAIL verdict remain pending;
+do not substitute smoke or diagnostic samples for the complete artifact. The
+clean-server launch order, CLI sequence, and full provenance contract are in
+`docs/gpu-runbook.md` §9.13.
 
 ### G4 E-KV FP8 KV evidence
 

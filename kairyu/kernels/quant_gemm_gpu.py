@@ -379,7 +379,13 @@ _CAPABILITY_FLOORS = {
 }
 
 
-def _prepare(x: torch.Tensor, module, scheme: str) -> tuple[torch.Tensor, torch.Tensor]:
+def _prepare(
+    x: torch.Tensor,
+    module,
+    scheme: str,
+    *,
+    allocate_output: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     if triton is None and scheme in ("fp8", "int8", "awq", "gptq"):
         raise RuntimeError(
             f"{scheme} CUDA execution requires Triton; install the gpu extra"
@@ -412,8 +418,14 @@ def _prepare(x: torch.Tensor, module, scheme: str) -> tuple[torch.Tensor, torch.
         )
     _validate_layout(module, scheme)
     flat = x.reshape(-1, x.shape[-1]).contiguous()
-    output = torch.empty(
-        (flat.shape[0], module.out_features), device=x.device, dtype=x.dtype
+    output = (
+        torch.empty(
+            (flat.shape[0], module.out_features),
+            device=x.device,
+            dtype=x.dtype,
+        )
+        if allocate_output
+        else None
     )
     return flat, output
 
@@ -715,6 +727,44 @@ def gptq_linear_forward(
     return output.reshape(*x.shape[:-1], module.out_features)
 
 
+def _native_nvfp4_weight(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build FlashInfer's invariant weight operands from canonical buffers."""
+
+    n_size, packed_k = weight.shape
+    n_padded = _ceil_div(n_size, 32) * 32
+    k_size = packed_k * 2
+    k_padded = _ceil_div(k_size, 32) * 32
+    pad_k = k_padded // 2 - packed_k
+    pad_n = n_padded - n_size
+    if pad_k == 0 and pad_n == 0 and weight.is_contiguous():
+        # Real Qwen3 NVFP4 expert matrices already satisfy FlashInfer's N/K
+        # alignment.  ``F.pad(..., zeros)`` still allocates and copies the full
+        # packed weight; warming every expert in a 235B EP2 model would retain a
+        # second ~64 GiB weight set and eventually OOM.  Keep the checkpoint
+        # buffer itself as the native operand when no padding is required.
+        native_weight = weight
+    else:
+        native_weight = torch.nn.functional.pad(
+            weight,
+            (0, pad_k, 0, pad_n),
+        ).contiguous()
+
+    scale = weight_scale
+    scale_n_padded = _ceil_div(scale.shape[0], 128) * 128
+    scale_k_padded = _ceil_div(k_padded // 16, 4) * 4
+    scale = torch.nn.functional.pad(
+        scale,
+        (0, scale_k_padded - scale.shape[1], 0, scale_n_padded - scale.shape[0]),
+    )
+    scale = scale.reshape(1, scale_n_padded // 128, 4, 32, scale_k_padded // 4, 4)
+    scale = scale.permute(0, 1, 4, 3, 2, 5).contiguous()
+    scale = scale.reshape(scale_n_padded, scale_k_padded)
+    return native_weight, scale
+
+
 def _prepare_nvfp4_weight(module, device: torch.device):
     source_key = (
         id(module.weight),
@@ -734,35 +784,7 @@ def _prepare_nvfp4_weight(module, device: torch.device):
         elif cached_weight.device == device and cached_scale.device == device:
             return cached_weight, cached_scale
 
-    n_size, packed_k = module.weight.shape
-    n_padded = _ceil_div(n_size, 32) * 32
-    k_size = packed_k * 2
-    k_padded = _ceil_div(k_size, 32) * 32
-    pad_k = k_padded // 2 - packed_k
-    pad_n = n_padded - n_size
-    if pad_k == 0 and pad_n == 0 and module.weight.is_contiguous():
-        # Real Qwen3 NVFP4 expert matrices already satisfy FlashInfer's N/K
-        # alignment.  ``F.pad(..., zeros)`` still allocates and copies the full
-        # packed weight; warming every expert in a 235B EP2 model would retain a
-        # second ~64 GiB weight set and eventually OOM.  Keep the checkpoint
-        # buffer itself as the native operand when no padding is required.
-        weight = module.weight
-    else:
-        weight = torch.nn.functional.pad(
-            module.weight,
-            (0, pad_k, 0, pad_n),
-        ).contiguous()
-
-    scale = module.weight_scale
-    scale_n_padded = _ceil_div(scale.shape[0], 128) * 128
-    scale_k_padded = _ceil_div(k_padded // 16, 4) * 4
-    scale = torch.nn.functional.pad(
-        scale,
-        (0, scale_k_padded - scale.shape[1], 0, scale_n_padded - scale.shape[0]),
-    )
-    scale = scale.reshape(1, scale_n_padded // 128, 4, 32, scale_k_padded // 4, 4)
-    scale = scale.permute(0, 1, 4, 3, 2, 5).contiguous()
-    scale = scale.reshape(scale_n_padded, scale_k_padded)
+    weight, scale = _native_nvfp4_weight(module.weight, module.weight_scale)
     if weight is module.weight:
         # Do not retain a plain tensor alias: unlike a registered buffer it is
         # invisible to ``Module._apply`` and would keep the old GPU allocation
@@ -778,13 +800,81 @@ def _prepare_nvfp4_weight(module, device: torch.device):
     return weight, scale
 
 
+def invalidate_nvfp4_linear_cache(module) -> None:
+    """Drop derived operands after canonical checkpoint buffers are replaced."""
+
+    for name in (
+        "_weight_native",
+        "_weight_scale_swizzled",
+        "_nvfp4_input_scale_inv",
+        "_nvfp4_alpha",
+    ):
+        module._buffers.pop(name, None)
+        module.__dict__.pop(name, None)
+    module.__dict__.pop("_nvfp4_native_source_key", None)
+    module.__dict__.pop("_nvfp4_scalar_source_key", None)
+
+
+def prepare_nvfp4_linear(
+    module,
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare and cache every input-invariant FlashInfer linear operand.
+
+    Checkpoint weights and the three scalar scale buffers are immutable during
+    inference.  Preparing them when a loaded model reaches its execution
+    device avoids a scale-layout transform, reciprocal, and scalar product in
+    every layer of every token.  Source identities and tensor versions keep
+    assign-loads and in-place test updates safe.
+    """
+
+    target = module.weight.device if device is None else torch.device(device)
+    if target.type == "cuda" and target.index is None:
+        target = module.weight.device
+    if module.weight.device != target or module.weight_scale.device != target:
+        raise RuntimeError(
+            f"NVFP4 canonical weight payload is on {module.weight.device}, not {target}"
+        )
+    native_weight, native_scale = _prepare_nvfp4_weight(module, target)
+    source_key = (
+        id(module.input_scale),
+        module.input_scale._version,
+        id(module.weight_scale_2),
+        module.weight_scale_2._version,
+        target.type,
+        target.index,
+    )
+    cached_source_key = getattr(module, "_nvfp4_scalar_source_key", None)
+    input_scale_inv = getattr(module, "_nvfp4_input_scale_inv", None)
+    alpha = getattr(module, "_nvfp4_alpha", None)
+    if (
+        cached_source_key != source_key
+        or input_scale_inv is None
+        or alpha is None
+        or input_scale_inv.device != target
+        or alpha.device != target
+    ):
+        input_scale_inv = module.input_scale.float().reciprocal().reshape(1)
+        alpha = (
+            module.input_scale.float() * module.weight_scale_2.float()
+        ).reshape(())
+        module.register_buffer(
+            "_nvfp4_input_scale_inv",
+            input_scale_inv,
+            persistent=False,
+        )
+        module.register_buffer("_nvfp4_alpha", alpha, persistent=False)
+        object.__setattr__(module, "_nvfp4_scalar_source_key", source_key)
+    return native_weight, native_scale, input_scale_inv, alpha
+
+
 def nvfp4_linear_forward(
     x: torch.Tensor,
     module,
     *,
     add_bias: bool = True,
 ) -> torch.Tensor:
-    flat, _ = _prepare(x, module, "nvfp4")
+    flat, _ = _prepare(x, module, "nvfp4", allocate_output=False)
     try:
         from flashinfer import SfLayout, mm_fp4, nvfp4_quantize
     except ImportError as error:
@@ -793,18 +883,19 @@ def nvfp4_linear_forward(
             "no W4A16 or dequantized fallback is enabled"
         ) from error
 
-    native_weight, native_scale = _prepare_nvfp4_weight(module, flat.device)
+    native_weight, native_scale, input_scale_inv, alpha = prepare_nvfp4_linear(
+        module,
+        flat.device,
+    )
     k_padded = native_weight.shape[1] * 2
     if flat.shape[1] != k_padded:
         flat = torch.nn.functional.pad(flat, (0, k_padded - flat.shape[1]))
-    input_scale_inv = module.input_scale.float().reciprocal().reshape(1)
     x_fp4, x_scale = nvfp4_quantize(
         flat,
         input_scale_inv,
         sfLayout=SfLayout.layout_128x4,
         do_shuffle=False,
     )
-    alpha = (module.input_scale.float() * module.weight_scale_2.float()).reshape(())
     output = mm_fp4(
         x_fp4,
         native_weight.T,
@@ -819,6 +910,51 @@ def nvfp4_linear_forward(
     else:
         output = output[:, : module.out_features]
     return output.reshape(*x.shape[:-1], module.out_features)
+
+
+def nvfp4_packed_linear_forward(
+    x: torch.Tensor,
+    pack,
+) -> tuple[torch.Tensor, ...]:
+    """Run compatible canonical Q/K/V projections as one FlashInfer GEMM."""
+
+    flat, _ = _prepare(x, pack, "nvfp4", allocate_output=False)
+    try:
+        from flashinfer import SfLayout, mm_fp4, nvfp4_quantize
+    except ImportError as error:
+        raise RuntimeError(
+            "NVFP4 CUDA execution requires FlashInfer's native FP4 kernels; "
+            "no W4A16 or dequantized fallback is enabled"
+        ) from error
+
+    (
+        native_weight,
+        native_scale,
+        input_scale_inv,
+        alpha,
+    ) = pack.prepare_native_operands(flat.device)
+    k_padded = native_weight.shape[1] * 2
+    if flat.shape[1] != k_padded:
+        flat = torch.nn.functional.pad(flat, (0, k_padded - flat.shape[1]))
+    x_fp4, x_scale = nvfp4_quantize(
+        flat,
+        input_scale_inv,
+        sfLayout=SfLayout.layout_128x4,
+        do_shuffle=False,
+    )
+    output = mm_fp4(
+        x_fp4,
+        native_weight.T,
+        x_scale,
+        native_scale,
+        alpha=alpha,
+        out_dtype=x.dtype,
+        backend="auto",
+    )[:, : pack.out_features]
+    if pack.bias is not None:
+        output = output + pack.bias
+    output = output.reshape(*x.shape[:-1], pack.out_features)
+    return output.split(pack.split_features, dim=-1)
 
 
 def linear_forward(

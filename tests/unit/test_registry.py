@@ -123,6 +123,23 @@ def test_unsupported_expert_parallel_modes_fail_static_preflight(options):
         validate_backend_options("kairyu", options)
 
 
+def test_attention_dp_cuda_graph_passes_static_preflight() -> None:
+    validate_backend_options(
+        "kairyu",
+        {
+            "model_path": "/models/qwen3-235b",
+            "expert_parallel_size": 4,
+            "expert_parallel_attention_dp": True,
+            "kv_cache_dtype": "bfloat16",
+            "pipeline_depth": 5,
+            "decode_mode": "cuda_graph",
+            "cuda_graph_max_batch": 8,
+            "cuda_graph_max_pages": 512,
+            "cuda_graph_warmup_iters": 2,
+        },
+    )
+
+
 def test_cross_device_pd_options_pass_preflight_without_runtime_import():
     validate_backend_options(
         "kairyu",
