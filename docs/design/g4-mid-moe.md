@@ -252,7 +252,10 @@ only to non-binding timing fields.
 
 ### D6 — Evidence and replay
 
-The raw JSONL is the authority. It records run/cell/rank lifecycle,
+`bench/g4_ma1_qwen3_235b_nvfp4_capture.py` produces the source-bound arm
+fragments and canonical JSONL; `bench/g4_ma1_qwen3_235b_nvfp4_bench.py`
+performs run, verify, and raw-only replay. The raw JSONL is the authority. It
+records run/cell/rank lifecycle,
 configuration, complete environment and topology, checkpoint members and
 digests, projection/kernel inventory, prompts, free-running outputs, and all
 teacher-forced position records. A manifest is derived only from raw rows.
