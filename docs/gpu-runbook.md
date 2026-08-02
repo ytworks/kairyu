@@ -1822,12 +1822,14 @@ PY
   rerun this four-GPU 235B cell.
 
 - 9.13 G4 M-A3 Qwen3-235B-A22B NVFP4 versus SGLang (#168): run the complete
-  matrix only from a clean tracked Kairyu commit after all implementation and
-  operator changes are final. M-A3 uses physical GPUs 4–7 for every arm on the
-  same eight-GPU host. Every server is fresh and strictly sequential; stop it,
-  prove the cohort is free, and only then start the next server. Do not run
-  Kairyu and SGLang in parallel, reuse a warmed server, retry/drop a failed
-  request, or substitute an earlier M-A1/M-A2 or diagnostic timing result.
+  ten-generation matrix only from a clean tracked Kairyu commit after all
+  implementation and operator changes are final. It consists of two
+  one-candidate preflights followed by eight formal generations. M-A3 uses
+  physical GPUs 4–7 for every arm on the same eight-GPU host. Every server is
+  fresh and strictly sequential; stop it, prove the cohort is free, and only
+  then start the next server. Do not run Kairyu and SGLang in parallel, reuse a
+  warmed server, retry/drop a failed request, or substitute an earlier
+  M-A1/M-A2 or diagnostic timing result.
 
   The immutable model is
   `nvidia/Qwen3-235B-A22B-NVFP4@21cfa2c9e152032eb60647ee7b46a2bbcd8d76d2`.
@@ -1853,17 +1855,23 @@ PY
   2,048 resolved prefill tokens per owner, and 65,536 aggregate KV tokens.
   Kairyu configures an 8,192-token global batched-prefill limit. SGLang uses
   `--chunked-prefill-size 8192` (divided across DP4 by v0.5.16) and explicit
-  `--max-prefill-tokens 2048` per owner. Kairyu owns one global 4,096-page pool; SGLang receives
+  `--max-prefill-tokens 2048` per owner. It fixes
+  `--log-level-http warning`, `--cuda-graph-max-bs-decode 32`, and disabled
+  prefill CUDA graph. Kairyu owns one global 4,096-page pool; SGLang receives
   `--max-total-tokens 16384` per owner. Do not give SGLang 65,536 tokens per
   owner: that is four times Kairyu's matched capacity. The implementations'
   internal attention-projection sharding is intentionally disclosed rather
   than relabelled: Kairyu replicates QKV/output at TP1, while the SGLang CLI
   records TP4 together with `--enable-dp-attention`.
 
-  First materialize one detached clean Kairyu source, build it with the exact
-  revision label, push it through a loopback registry so it has a RepoDigest,
-  and resolve the Kairyu and SGLang RepoDigest, platform manifest digest, and
-  config image ID. The model/source mounts are read-only. Both server
+  First materialize one detached clean Kairyu source. Derive a metadata-only
+  image from the retained M-A2 GPU runtime payload, set the exact source
+  revision label, and push it through a loopback registry so it has a
+  RepoDigest. The server imports all executed Kairyu Python from the clean
+  read-only source mount; the parent supplies the already-validated CUDA,
+  FlashInfer, and Python payload without recompiling it. Resolve the Kairyu and
+  SGLang RepoDigest, platform manifest digest, and config image ID. The
+  model/source mounts are read-only. Both server
   containers must use host IPC, 32 GiB shared memory, exactly the
   `SYS_NICE`/`SYS_PTRACE` capabilities, and physical GPU devices 4–7. The
   container-visible devices are consequently numbered 0–3.
@@ -1881,11 +1889,16 @@ PY
   SOURCE_ROOT="$SESSION_ROOT/source"
   RESULT_ROOT="$SESSION_ROOT/results"
   MODEL_VOLUME=kairyu-qwen3-235b-nvfp4
+  MODEL_VOLUME_SUBPATH=qwen3-235b-nvfp4
   MODEL_PATH=/models/qwen3-235b-nvfp4
-  MODEL_PATH_ON_HOST=/path/to/qwen3-235b-nvfp4
   SHAREGPT_JSON=/path/to/ShareGPT_V3_unfiltered_cleaned_split.json
+  LOCAL_REGISTRY=127.0.0.1:5167
+  BASE_KAIRYU_REPO_DIGEST=127.0.0.1:5167/kairyu-g4-ma2@sha256:3c707079fabfa60326176ec5321633b5f4963e09fa8af32d77e7eb48bd1f5781
+  KAIRYU_TAG="$LOCAL_REGISTRY/kairyu-g4-ma3:$COMMIT"
   TRACE="$RESULT_ROOT/g4-ma3-trace.json"
   SELECTION="$RESULT_ROOT/g4-ma3-selection.json"
+  CHECKPOINT_START="$RESULT_ROOT/checkpoint-start.json"
+  CHECKPOINT_END="$RESULT_ROOT/checkpoint-end.json"
   ARTIFACT="$RESULT_ROOT/artifact"
 
   git clone --no-hardlinks "$CHECKOUT" "$SOURCE_ROOT"
@@ -1894,18 +1907,77 @@ PY
   test -z "$(git -C "$SOURCE_ROOT" status \
     --porcelain=v1 --untracked-files=all)"
   mkdir -p "$RESULT_ROOT/preflight" "$RESULT_ROOT/formal" \
-    "$RESULT_ROOT/open-loop" "$RESULT_ROOT/provenance" "$ARTIFACT"
+    "$RESULT_ROOT/provenance" "$ARTIFACT"
 
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py prepare \
-    --tokenizer "$MODEL_PATH_ON_HOST" \
-    --dataset "$SHAREGPT_JSON" \
-    --output "$TRACE"
+  docker run -d --name kairyu-g4-ma3-registry \
+    -p 127.0.0.1:5167:5000 registry:2
+  docker image inspect "$BASE_KAIRYU_REPO_DIGEST" >/dev/null
+  docker tag "$BASE_KAIRYU_REPO_DIGEST" \
+    "$LOCAL_REGISTRY/kairyu-g4-ma2:retained-payload"
+  docker push "$LOCAL_REGISTRY/kairyu-g4-ma2:retained-payload"
+  docker build --build-arg "KAIRYU_VCS_REF=$COMMIT" \
+    -t "$KAIRYU_TAG" -f - "$SOURCE_ROOT" <<EOF
+  FROM $BASE_KAIRYU_REPO_DIGEST
+  ARG KAIRYU_VCS_REF
+  LABEL org.opencontainers.image.revision="\${KAIRYU_VCS_REF}"
+  EOF
+  docker push "$KAIRYU_TAG"
+  KAIRYU_REPO_DIGEST=$(
+    docker image inspect --format '{{index .RepoDigests 0}}' "$KAIRYU_TAG"
+  )
+  test "$(docker image inspect --format \
+    '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    "$KAIRYU_REPO_DIGEST")" = "$COMMIT"
+
+  docker run --rm --user "$(id -u):$(id -g)" \
+    -e PYTHONPATH=/workspace -e HOME=/tmp \
+    -v "$SOURCE_ROOT:/workspace:ro" \
+    --mount "type=volume,source=$MODEL_VOLUME,destination=$MODEL_PATH,volume-subpath=$MODEL_VOLUME_SUBPATH,readonly" \
+    -v "$SHAREGPT_JSON:/inputs/sharegpt.json:ro" \
+    -v "$RESULT_ROOT:/results" \
+    -w /workspace --entrypoint /app/.venv/bin/python \
+    "$KAIRYU_REPO_DIGEST" \
+    /workspace/bench/g4_ma3_sglang_bench.py prepare \
+      --tokenizer "$MODEL_PATH" --dataset /inputs/sharegpt.json \
+      --output /results/g4-ma3-trace.json
+
+  capture_checkpoint() {
+    phase=$1
+    output_name=$2
+    capture_container="kairyu-g4-ma3-checkpoint-$phase"
+    docker create --name "$capture_container" --network none \
+      -e PYTHONPATH=/workspace \
+      -v "$SOURCE_ROOT:/workspace:ro" \
+      --mount "type=volume,source=$MODEL_VOLUME,destination=$MODEL_PATH,volume-subpath=$MODEL_VOLUME_SUBPATH,readonly" \
+      -w /workspace --entrypoint sleep "$KAIRYU_REPO_DIGEST" infinity
+    docker start "$capture_container" >/dev/null
+    PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+      "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" capture-checkpoint \
+        --phase "$phase" --container "$capture_container" \
+        --source-root "$SOURCE_ROOT" \
+        --output "$RESULT_ROOT/$output_name"
+    docker stop "$capture_container" >/dev/null
+    docker rm "$capture_container" >/dev/null
+  }
+  capture_checkpoint start checkpoint-start.json
   ```
 
   The working checkout may contain unrelated protected untracked worktrees or
   retained results; they are not mounted into the server. Binding source
   cleanliness is the detached `SOURCE_ROOT`, while both tracked and staged
-  changes in `CHECKOUT` are rejected before it is cloned.
+  changes in `CHECKOUT` are rejected before it is cloned. Every operator
+  command below executes `SOURCE_ROOT/bench/g4_ma3_sglang_bench.py` (or its
+  `/workspace` read-only mount); `CHECKOUT` supplies only the already-created
+  Python environment for host-side commands.
+
+  `capture-checkpoint` hashes all checkpoint metadata, tokenizer files, and 27
+  weight shards through a running GPU-less capture-only container. The host
+  operator verifies that container's clean source mount, exact read-only model
+  volume/subpath, and absence of a read-write volume consumer before accepting
+  the bytes. Run it exactly once here and once after all ten generations; do
+  not rehash the 134 GB checkpoint per scenario. Stop and remove each capture
+  container before starting a server generation. Both boundary captures use
+  the host monotonic clock domain.
 
   The prepared trace pins 128 seed-0 ShareGPT prompts of 4–1,024 tokens and
   exactly 128 completion tokens. It also includes four serial warmups and a
@@ -1924,11 +1996,12 @@ PY
     --cap-add SYS_NICE --cap-add SYS_PTRACE \
     -p 127.0.0.1:30000:30000 \
     -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    -e PYTHONPATH=/workspace \
     -e GIT_CONFIG_COUNT=1 \
     -e GIT_CONFIG_KEY_0=safe.directory \
     -e GIT_CONFIG_VALUE_0=/workspace \
     -v "$SOURCE_ROOT:/workspace:ro" \
-    -v "$MODEL_VOLUME:$MODEL_PATH:ro" \
+    --mount "type=volume,source=$MODEL_VOLUME,destination=$MODEL_PATH,volume-subpath=$MODEL_VOLUME_SUBPATH,readonly" \
     -w /workspace --entrypoint /app/.venv/bin/python \
     "$KAIRYU_REPO_DIGEST" \
     /workspace/bench/g4_ma3_kairyu_server.py \
@@ -1943,7 +2016,7 @@ PY
     --cap-add SYS_NICE --cap-add SYS_PTRACE \
     -p 127.0.0.1:30000:30000 \
     -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
-    -v "$MODEL_VOLUME:$MODEL_PATH:ro" \
+    --mount "type=volume,source=$MODEL_VOLUME,destination=$MODEL_PATH,volume-subpath=$MODEL_VOLUME_SUBPATH,readonly" \
     --entrypoint sglang \
     'lmsysorg/sglang@sha256:984699c298a95b73c469b2191403ddc85fd780506e13c39c4afff3845e27bc6c' \
     serve --model-path "$MODEL_PATH" --host 0.0.0.0 --port 30000 \
@@ -1954,6 +2027,7 @@ PY
       --page-size 16 --max-running-requests 256 \
       --max-total-tokens 16384 --chunked-prefill-size 8192 \
       --max-prefill-tokens 2048 --schedule-policy fcfs \
+      --log-level-http warning --cuda-graph-max-bs-decode 32 \
       --cuda-graph-backend-prefill disabled
   ```
 
@@ -1968,19 +2042,69 @@ PY
     ID, read-only model mount, physical GPU indices, IPC/shm/capabilities;
   - clean source identity (the Kairyu commit, or the exact SGLang repository,
     version, tag, tag object, and commit);
-  - `expected_checkpoint()` without removing or replacing a shard/tokenizer
-    member;
+  - the exact start-boundary checkpoint descriptor, the same read-only volume
+    and subpath as the running container, and zero read-write consumers of that
+    volume;
   - visible-to-physical GPU mapping, UUIDs, PCI bus IDs, names, and memory;
   - stable host ID, driver, CUDA, NCCL, Torch, FlashInfer, engine version, and
     `gpu_jobs_exclusive: true`; and
-  - the complete resolved runtime topology/argv, including cache, graph,
-    scheduler, fused-MoE, no-fallback, and no-post-MoE-all-reduce fields.
+  - the resolved runtime topology/argv, including cache, graph, scheduler, and
+    fused-MoE fields, matched against the raw live Kairyu `/backends` or SGLang
+    `/server_info` response retained in the provenance.
 
-  The operator hashes this JSON at scenario start and rereads it after traffic;
-  any edit or runtime-identity change fails the shard. Container IDs and server
-  generations may never repeat. After every shard, stop the server, retain its
-  inspect/provenance material, and require `nvidia-smi` to show the selected
-  cohort free before proceeding.
+  Do not hand-write that JSON. Start each already-created container and record
+  its host-monotonic timestamp in one wrapper, wait for the common OpenAI
+  endpoint, then let `capture-provenance` observe Docker, the host and
+  container GPU inventories, GPU-process ownership, the clean Kairyu source,
+  image/mount/argv/resources, and live package versions. Set `ARM`,
+  `CANDIDATE`, `CONTAINER`, and `PROVENANCE` for the current scenario:
+
+  ```bash
+  SERVER_GENERATION_ID=$(
+    "$CHECKOUT/.venv/bin/python" -c \
+      'import uuid; print(uuid.uuid4().hex)'
+  )
+  SERVER_STARTED_NS=$(
+    "$CHECKOUT/.venv/bin/python" - "$CONTAINER" <<'PY'
+  import subprocess
+  import sys
+  import time
+  subprocess.run(
+      ["docker", "start", sys.argv[1]],
+      check=True,
+      stdout=subprocess.DEVNULL,
+  )
+  print(time.perf_counter_ns())
+  PY
+  )
+  for _ in $(seq 1 900); do
+    curl -fsS http://127.0.0.1:30000/v1/models >/dev/null && break
+    sleep 1
+  done
+  curl -fsS http://127.0.0.1:30000/v1/models >/dev/null
+
+  SOURCE_ARGS=()
+  if test "$ARM" = kairyu; then
+    SOURCE_ARGS=(--source-root "$SOURCE_ROOT")
+  fi
+  PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" capture-provenance \
+      --arm "$ARM" --candidate "$CANDIDATE" --container "$CONTAINER" \
+      --server-generation-id "$SERVER_GENERATION_ID" \
+      --server-started-ns "$SERVER_STARTED_NS" \
+      --model-volume "$MODEL_VOLUME" \
+      --checkpoint-start "$CHECKPOINT_START" "${SOURCE_ARGS[@]}" \
+      --output "$PROVENANCE"
+  ```
+
+  The operator hashes this JSON at scenario start and rereads it after traffic
+  to reject any edit. It then independently re-observes the still-running
+  container/image/argv/mounts, clean source, package versions, live runtime
+  endpoint, host/container GPU identity and process ownership, and model-volume
+  consumers; that end observation is retained in the shard and must match the
+  start contract. Container IDs and server generations may never repeat. After
+  every shard, stop the server, retain its inspect/provenance material, and
+  require `nvidia-smi` to show the selected cohort free before proceeding.
 
   Run the two one-candidate preflights sequentially. A `run` invocation performs
   all serial/graph warmups itself, then one synchronized 32-request × 32-token
@@ -1990,19 +2114,22 @@ PY
   replay count must increase.
 
   ```bash
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py run \
+  PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" run \
     --phase preflight --arm kairyu --candidate depth-5 \
     --endpoint http://127.0.0.1:30000 --trace-bundle "$TRACE" \
     --provenance "$RESULT_ROOT/provenance/preflight-kairyu.json" \
     --output "$RESULT_ROOT/preflight/kairyu.jsonl"
 
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py run \
+  PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" run \
     --phase preflight --arm sglang --candidate default \
     --endpoint http://127.0.0.1:30000 --trace-bundle "$TRACE" \
     --provenance "$RESULT_ROOT/provenance/preflight-sglang.json" \
     --output "$RESULT_ROOT/preflight/sglang.jsonl"
 
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py assemble \
+  PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" assemble \
     --preflight-only \
     --preflight-raw "$RESULT_ROOT/preflight/kairyu.jsonl" \
     --preflight-raw "$RESULT_ROOT/preflight/sglang.jsonl" \
@@ -2014,22 +2141,23 @@ PY
   `preflight_completed_ns`. Run the exact fresh-server formal order below. The
   repeat number belongs to the pair, not the global server ordinal:
 
-  | Server ordinal | Repeat | Arm | Raw shard |
-  |---:|---:|---|---|
-  | 0 | 0 | Kairyu | `formal-r0-kairyu.jsonl` |
-  | 1 | 0 | SGLang | `formal-r0-sglang.jsonl` |
-  | 2 | 1 | SGLang | `formal-r1-sglang.jsonl` |
-  | 3 | 1 | Kairyu | `formal-r1-kairyu.jsonl` |
-  | 4 | 2 | SGLang | `formal-r2-sglang.jsonl` |
-  | 5 | 2 | Kairyu | `formal-r2-kairyu.jsonl` |
-  | 6 | 3 | Kairyu | `formal-r3-kairyu.jsonl` |
-  | 7 | 3 | SGLang | `formal-r3-sglang.jsonl` |
+  | Formal ordinal | Global generation | Repeat | Arm | Raw shard |
+  |---:|---:|---:|---|---|
+  | 0 | 2 | 0 | Kairyu | `formal-r0-kairyu.jsonl` |
+  | 1 | 3 | 0 | SGLang | `formal-r0-sglang.jsonl` |
+  | 2 | 4 | 1 | SGLang | `formal-r1-sglang.jsonl` |
+  | 3 | 5 | 1 | Kairyu | `formal-r1-kairyu.jsonl` |
+  | 4 | 6 | 2 | SGLang | `formal-r2-sglang.jsonl` |
+  | 5 | 7 | 2 | Kairyu | `formal-r2-kairyu.jsonl` |
+  | 6 | 8 | 3 | Kairyu | `formal-r3-kairyu.jsonl` |
+  | 7 | 9 | 3 | SGLang | `formal-r3-sglang.jsonl` |
 
   For each table row, start the named fresh container and create its unique
   provenance, then run this template without `--candidate`:
 
   ```bash
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py run \
+  PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" run \
     --phase formal --arm '<kairyu-or-sglang>' --repeat '<0-through-3>' \
     --endpoint http://127.0.0.1:30000 --trace-bundle "$TRACE" \
     --selection "$SELECTION" --provenance '<scenario-provenance.json>' \
@@ -2044,34 +2172,19 @@ PY
   and four GPUs. TTFT p99 is nearest-rank over all 128 rows. No failed/retried
   row is removed from either metric.
 
-  Finally, start two more fresh sequential servers and run one report-only
-  open-loop shard per arm. The selection fixes five rates at 0.25, 0.5, 0.75,
-  1.0, and 1.25 times the SGLang preflight-derived request capacity; each point
-  has 32 requests. These rows and their checks are published but cannot change
-  the two paired formal verdicts.
+  After the last formal cell, stop its server, prove GPUs 4–7 are free, and run
+  the second complete checkpoint capture. Assemble only after all ten server
+  generations have stopped. The assembler requires identical start/end
+  checkpoint bytes, proves the start capture completed before generation 0,
+  and proves the end capture started after generation 9. Pass all eight formal
+  shards explicitly; it independently reconstructs the chronological K/S,
+  S/K, S/K, K/S order and rejects overlap or reuse:
 
   ```bash
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py run \
-    --phase open-loop --arm kairyu \
-    --endpoint http://127.0.0.1:30000 --trace-bundle "$TRACE" \
-    --selection "$SELECTION" \
-    --provenance "$RESULT_ROOT/provenance/open-loop-kairyu.json" \
-    --output "$RESULT_ROOT/open-loop/kairyu.jsonl"
+  capture_checkpoint end checkpoint-end.json
 
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py run \
-    --phase open-loop --arm sglang \
-    --endpoint http://127.0.0.1:30000 --trace-bundle "$TRACE" \
-    --selection "$SELECTION" \
-    --provenance "$RESULT_ROOT/provenance/open-loop-sglang.json" \
-    --output "$RESULT_ROOT/open-loop/sglang.jsonl"
-  ```
-
-  Assemble only after all 12 server generations have stopped. Pass all eight
-  formal shards explicitly; the assembler independently reconstructs the
-  chronological K/S, S/K, S/K, K/S order and rejects overlap or reuse:
-
-  ```bash
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py assemble \
+  PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" assemble \
     --preflight-raw "$RESULT_ROOT/preflight/kairyu.jsonl" \
     --preflight-raw "$RESULT_ROOT/preflight/sglang.jsonl" \
     --selection "$SELECTION" \
@@ -2083,13 +2196,15 @@ PY
     --raw "$RESULT_ROOT/formal/formal-r2-kairyu.jsonl" \
     --raw "$RESULT_ROOT/formal/formal-r3-kairyu.jsonl" \
     --raw "$RESULT_ROOT/formal/formal-r3-sglang.jsonl" \
-    --sweep-raw "$RESULT_ROOT/open-loop/kairyu.jsonl" \
-    --sweep-raw "$RESULT_ROOT/open-loop/sglang.jsonl" \
+    --checkpoint-start "$CHECKPOINT_START" \
+    --checkpoint-end "$CHECKPOINT_END" \
     --output-dir "$ARTIFACT" --assert-gate
 
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py verify \
+  PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" verify \
     --artifact "$ARTIFACT" --assert-gate
-  "$CHECKOUT/.venv/bin/python" bench/g4_ma3_sglang_bench.py replay \
+  PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
+    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" replay \
     --artifact "$ARTIFACT" --assert-gate
   ```
 

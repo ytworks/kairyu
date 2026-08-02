@@ -3,11 +3,12 @@
 
 The module is deliberately an evidence operator, not a Docker supervisor.  One
 ``run`` invocation measures one already-started fresh server and writes a raw
-JSONL shard.  ``assemble`` requires the complete preflight/formal/report-only
-matrix, proves that every server generation is unique and sequential, and
-writes canonical raw JSONL plus a derived manifest.  ``replay`` ignores the
-manifest entirely; ``verify`` additionally proves that the retained manifest
-is byte-equivalent to a fresh raw replay.
+JSONL shard.  ``assemble`` requires the complete ten-generation matrix: one
+preflight generation per arm followed by eight formal generations.  It proves
+that every server generation is unique and sequential, then writes canonical
+raw JSONL plus a derived manifest.  ``replay`` ignores the manifest entirely;
+``verify`` additionally proves that the retained manifest is byte-equivalent
+to a fresh raw replay.
 
 The binding workload is one fixed ShareGPT population of 128 simultaneous
 requests, exactly 128 completion tokens each, on the same four physical GPUs.
@@ -19,19 +20,20 @@ aggregate.
 
 Before formal capture, one short retained preflight confirms the pinned
 production choices. ``assemble --preflight-only`` freezes that selection for
-the formal run. A five-point open-loop sweep derived from the selected SGLang
-preflight capacity is retained as report-only evidence and cannot affect the
-performance verdict.
+the formal run.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import hashlib
 import json
 import math
 import re
+import socket
+import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -48,12 +50,15 @@ import httpx  # noqa: E402
 
 from bench import g2_a6_vllm_bench as a6  # noqa: E402
 from bench import g4_ma1_qwen3_235b_nvfp4_bench as ma1  # noqa: E402
+from bench import g4_ma1_qwen3_235b_nvfp4_capture as ma1_capture  # noqa: E402
 from kairyu.bench.reporting import atomic_write_json, atomic_write_text  # noqa: E402
 from kairyu.engine.tokenizer import HFTokenizer  # noqa: E402
 
 SCHEMA_VERSION = "kairyu.g4.ma3.sglang-comparison.v1"
 TRACE_SCHEMA_VERSION = "kairyu.g4.ma3.sharegpt-trace.v1"
 SELECTION_SCHEMA_VERSION = "kairyu.g4.ma3.preflight-selection.v1"
+CHECKPOINT_CAPTURE_SCHEMA_VERSION = "kairyu.g4.ma3.checkpoint-capture.v1"
+LIVE_OBSERVATION_SCHEMA_VERSION = "kairyu.g4.ma3.live-observation.v1"
 GATE = "G4-M-A3"
 RAW_NAME = "g4-ma3-sglang-raw.jsonl"
 MANIFEST_NAME = "g4-ma3-sglang-manifest.json"
@@ -65,6 +70,12 @@ TOKENIZER_SHA256 = next(
 )
 CHECKPOINT_ROOT = "/models/qwen3-235b-nvfp4"
 SERVED_MODEL_NAME = CHECKPOINT_ROOT
+MODEL_VOLUME_SUBPATH = "qwen3-235b-nvfp4"
+FORMAL_ENDPOINT = "http://127.0.0.1:30000"
+CAPTURE_SOURCE_ROOT = "/workspace"
+CAPTURE_HELPER = "/workspace/bench/g4_ma3_sglang_bench.py"
+CAPTURE_PYTHON = "/app/.venv/bin/python"
+_CHECKPOINT_HELPER_COMMAND = "_checkpoint-helper"
 
 SGLANG_VERSION = "0.5.16"
 SGLANG_TAG = "v0.5.16"
@@ -164,7 +175,6 @@ MAX_RUNNING_REQUESTS = 256
 # cache used by the Kairyu arm.
 MAX_TOTAL_TOKENS = 65_536
 MAX_TOTAL_TOKENS_PER_OWNER = MAX_TOTAL_TOKENS // GPU_COUNT
-NUM_LAYERS = ma1.NUM_LAYERS
 DEFAULT_TIMEOUT_S = 600.0
 
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -538,6 +548,308 @@ def expected_checkpoint() -> dict[str, object]:
     }
 
 
+def _checkpoint_capture_container_valid(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "id",
+        "image_repo_digest",
+        "image_config_id",
+        "source_mount",
+        "model_mount",
+        "network_mode",
+        "gpu_device_requests",
+        "resolved_argv",
+    }:
+        return False
+    source_mount = value["source_mount"]
+    model_mount = value["model_mount"]
+    return (
+        isinstance(value["id"], str)
+        and _CONTAINER_ID.fullmatch(value["id"]) is not None
+        and isinstance(value["image_repo_digest"], str)
+        and _REPO_DIGEST.fullmatch(value["image_repo_digest"]) is not None
+        and isinstance(value["image_config_id"], str)
+        and _IMAGE_ID.fullmatch(value["image_config_id"]) is not None
+        and isinstance(source_mount, dict)
+        and set(source_mount) == {"source", "destination", "read_only"}
+        and isinstance(source_mount["source"], str)
+        and bool(source_mount["source"])
+        and source_mount["destination"] == CAPTURE_SOURCE_ROOT
+        and source_mount["read_only"] is True
+        and isinstance(model_mount, dict)
+        and set(model_mount) == {"source", "destination", "read_only"}
+        and isinstance(model_mount["source"], str)
+        and model_mount["source"].startswith("volume:")
+        and model_mount["source"].endswith(f"/{MODEL_VOLUME_SUBPATH}")
+        and model_mount["destination"] == CHECKPOINT_ROOT
+        and model_mount["read_only"] is True
+        and value["network_mode"] == "none"
+        and value["gpu_device_requests"] == []
+        and value["resolved_argv"] == ["sleep", "infinity"]
+    )
+
+
+def _checkpoint_capture_value_valid(value: object, *, phase: str) -> bool:
+    if phase not in {"start", "end"} or not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "type",
+        "phase",
+        "capture_started_ns",
+        "capture_completed_ns",
+        "capture_container",
+        "source",
+        "checkpoint_volume",
+        "checkpoint",
+    }:
+        return False
+    container = value["capture_container"]
+    source = value["source"]
+    volume = value["checkpoint_volume"]
+    checkpoint = value["checkpoint"]
+    if (
+        not _checkpoint_capture_container_valid(container)
+        or not _source_valid(source, arm="kairyu")
+        or not _checkpoint_volume_valid(volume)
+        or not isinstance(container, dict)
+        or not isinstance(volume, dict)
+    ):
+        return False
+    model_mount = container["model_mount"]
+    return (
+        value["schema_version"] == CHECKPOINT_CAPTURE_SCHEMA_VERSION
+        and value["type"] == "checkpoint_capture"
+        and value["phase"] == phase
+        and type(value["capture_started_ns"]) is int
+        and type(value["capture_completed_ns"]) is int
+        and 0 < value["capture_started_ns"] < value["capture_completed_ns"]
+        and model_mount["source"]
+        == f"volume:{volume['name']}/{volume['subpath']}"
+        and _descriptor_valid(checkpoint)
+        and isinstance(checkpoint, dict)
+        and checkpoint["value"] == expected_checkpoint()
+        and ma1._checkpoint_valid(checkpoint["value"])
+    )
+
+
+def load_checkpoint_capture(path: Path, *, phase: str) -> dict[str, object]:
+    descriptor = hashed_descriptor(_read_json_object(path))
+    if not _descriptor_valid(descriptor) or not _checkpoint_capture_value_valid(
+        descriptor["value"], phase=phase
+    ):
+        raise GateEvidenceError(
+            f"{path} does not satisfy the G4 M-A3 {phase} checkpoint capture schema"
+        )
+    return descriptor
+
+
+def capture_checkpoint(
+    output: Path,
+    *,
+    phase: str,
+    container_name: str,
+    source_root: Path,
+) -> dict[str, object]:
+    """Hash the observed read-only model volume inside one capture container."""
+
+    if phase not in {"start", "end"}:
+        raise GateEvidenceError("checkpoint capture phase must be start or end")
+    if not container_name or not source_root.is_dir():
+        raise GateEvidenceError("checkpoint capture requires a container and source root")
+    capture_started_ns = time.perf_counter_ns()
+
+    container = _capture_single_object(
+        ("docker", "inspect", container_name),
+        label="checkpoint capture container inspect",
+    )
+    config = container.get("Config")
+    host_config = container.get("HostConfig")
+    state = container.get("State")
+    mounts = container.get("Mounts")
+    if not all(isinstance(item, dict) for item in (config, host_config, state)) or not isinstance(
+        mounts, list
+    ):
+        raise GateEvidenceError("checkpoint capture inspect is incomplete")
+    assert isinstance(config, dict) and isinstance(host_config, dict) and isinstance(state, dict)
+    if state.get("Running") is not True:
+        raise GateEvidenceError("checkpoint capture container is not running")
+    if not (
+        host_config.get("NetworkMode") == "none"
+        and not host_config.get("DeviceRequests")
+        and not host_config.get("PortBindings")
+        and container.get("Path") == "sleep"
+        and container.get("Args") == ["infinity"]
+    ):
+        raise GateEvidenceError("checkpoint capture container is not dedicated and GPU-less")
+    container_id = container.get("Id")
+    image_config_id = container.get("Image")
+    image_repo_digest = config.get("Image")
+    if (
+        not isinstance(container_id, str)
+        or _CONTAINER_ID.fullmatch(container_id) is None
+        or not isinstance(image_config_id, str)
+        or _IMAGE_ID.fullmatch(image_config_id) is None
+        or not isinstance(image_repo_digest, str)
+        or _REPO_DIGEST.fullmatch(image_repo_digest) is None
+    ):
+        raise GateEvidenceError("checkpoint capture container/image identity is not immutable")
+    image = _capture_single_object(
+        ("docker", "image", "inspect", image_repo_digest),
+        label="checkpoint capture image inspect",
+    )
+    if image.get("Id") != image_config_id or image_repo_digest not in (
+        image.get("RepoDigests") or ()
+    ):
+        raise GateEvidenceError("checkpoint capture image does not match its RepoDigest")
+
+    resolved_source = source_root.resolve()
+    source_mounts = [
+        mount
+        for mount in mounts
+        if isinstance(mount, dict) and mount.get("Destination") == CAPTURE_SOURCE_ROOT
+    ]
+    model_mounts = [
+        mount
+        for mount in mounts
+        if isinstance(mount, dict) and mount.get("Destination") == CHECKPOINT_ROOT
+    ]
+    if len(source_mounts) != 1 or len(model_mounts) != 1:
+        raise GateEvidenceError("checkpoint capture requires singular source/model mounts")
+    source_mount = source_mounts[0]
+    model_mount = model_mounts[0]
+    model_volume = model_mount.get("Name")
+    if not (
+        source_mount.get("Type") == "bind"
+        and isinstance(source_mount.get("Source"), str)
+        and Path(str(source_mount["Source"])).resolve() == resolved_source
+        and source_mount.get("RW") is False
+        and config.get("WorkingDir") == CAPTURE_SOURCE_ROOT
+        and model_mount.get("Type") == "volume"
+        and isinstance(model_volume, str)
+        and bool(model_volume)
+        and model_mount.get("RW") is False
+        and model_mount.get("Subpath") in (None, MODEL_VOLUME_SUBPATH)
+    ):
+        raise GateEvidenceError("checkpoint capture source/model live mounts are invalid")
+    configured_mounts = host_config.get("Mounts")
+    configured_source = [
+        mount
+        for mount in configured_mounts or ()
+        if isinstance(mount, dict) and mount.get("Target") == CAPTURE_SOURCE_ROOT
+    ]
+    configured_model = [
+        mount
+        for mount in configured_mounts or ()
+        if isinstance(mount, dict) and mount.get("Target") == CHECKPOINT_ROOT
+    ]
+    if len(configured_source) != 1 or len(configured_model) != 1:
+        raise GateEvidenceError("checkpoint capture HostConfig mounts are incomplete")
+    source_config = configured_source[0]
+    model_config = configured_model[0]
+    volume_options = model_config.get("VolumeOptions")
+    if not (
+        source_config.get("Type") == "bind"
+        and Path(str(source_config.get("Source"))).resolve() == resolved_source
+        and source_config.get("ReadOnly") is True
+        and model_config.get("Type") == "volume"
+        and model_config.get("Source") == model_volume
+        and model_config.get("ReadOnly") is True
+        and isinstance(volume_options, dict)
+        and volume_options.get("Subpath") == MODEL_VOLUME_SUBPATH
+    ):
+        raise GateEvidenceError("checkpoint capture configured mounts are invalid")
+
+    commit = _capture_command(("git", "-C", str(resolved_source), "rev-parse", "HEAD")).strip()
+    status = _capture_command(
+        (
+            "git",
+            "-C",
+            str(resolved_source),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+    )
+    tracked = _capture_command(
+        (
+            "git",
+            "-C",
+            str(resolved_source),
+            "ls-files",
+            "--error-unmatch",
+            "bench/g4_ma3_sglang_bench.py",
+            "bench/g4_ma1_qwen3_235b_nvfp4_capture.py",
+        )
+    ).splitlines()
+    if (
+        _HEX40.fullmatch(commit) is None
+        or status
+        or tracked
+        != [
+            "bench/g4_ma1_qwen3_235b_nvfp4_capture.py",
+            "bench/g4_ma3_sglang_bench.py",
+        ]
+    ):
+        raise GateEvidenceError("checkpoint capture source is not one clean tracked commit")
+    checkpoint_volume = _capture_checkpoint_volume(
+        container_id=container_id,
+        model_volume=model_volume,
+    )
+    try:
+        helper_output = _capture_command(
+            (
+                "docker",
+                "exec",
+                container_id,
+                CAPTURE_PYTHON,
+                CAPTURE_HELPER,
+                _CHECKPOINT_HELPER_COMMAND,
+            )
+        )
+        checkpoint = strict_json_loads(helper_output.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError, OSError, ValueError) as error:
+        raise GateEvidenceError(f"checkpoint byte capture failed: {error}") from error
+    capture_completed_ns = time.perf_counter_ns()
+    if checkpoint != expected_checkpoint():
+        raise GateEvidenceError("mounted checkpoint differs from the pinned M-A1 identity")
+    value: dict[str, object] = {
+        "schema_version": CHECKPOINT_CAPTURE_SCHEMA_VERSION,
+        "type": "checkpoint_capture",
+        "phase": phase,
+        "capture_started_ns": capture_started_ns,
+        "capture_completed_ns": capture_completed_ns,
+        "capture_container": {
+            "id": container_id,
+            "image_repo_digest": image_repo_digest,
+            "image_config_id": image_config_id,
+            "source_mount": {
+                "source": str(resolved_source),
+                "destination": CAPTURE_SOURCE_ROOT,
+                "read_only": True,
+            },
+            "model_mount": {
+                "source": f"volume:{model_volume}/{MODEL_VOLUME_SUBPATH}",
+                "destination": CHECKPOINT_ROOT,
+                "read_only": True,
+            },
+            "network_mode": "none",
+            "gpu_device_requests": [],
+            "resolved_argv": ["sleep", "infinity"],
+        },
+        "source": {
+            "repository": "https://github.com/ytworks/kairyu",
+            "commit": commit,
+            "clean": True,
+        },
+        "checkpoint_volume": checkpoint_volume,
+        "checkpoint": hashed_descriptor(checkpoint),
+    }
+    if not _checkpoint_capture_value_valid(value, phase=phase):
+        raise GateEvidenceError("captured checkpoint does not satisfy the strict schema")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(output, value, indent=2, sort_keys=True, ensure_ascii=False)
+    load_checkpoint_capture(output, phase=phase)
+    return value
+
+
 def expected_sglang_argv(
     *,
     overlap_mode: str,
@@ -591,6 +903,10 @@ def expected_sglang_argv(
         str(SGLANG_MAX_PREFILL_TOKENS_PER_OWNER),
         "--schedule-policy",
         "fcfs",
+        "--log-level-http",
+        "warning",
+        "--cuda-graph-max-bs-decode",
+        str(KAIRYU_CUDA_GRAPH_MAX_BATCH),
         "--cuda-graph-backend-prefill",
         "disabled",
     ]
@@ -716,12 +1032,6 @@ def benchmark_config(
             "outlier_removal": False,
             "round_before_gate": False,
             "failure_or_retry_exclusion": False,
-        },
-        "open_loop": {
-            "binding": False,
-            "points": OPEN_LOOP_POINTS,
-            "requests_per_point": OPEN_LOOP_REQUESTS_PER_POINT,
-            "rates": "derived and frozen from selected SGLang preflight capacity",
         },
         "m_a1_status": "formal_fail_independent",
     }
@@ -948,11 +1258,6 @@ def _runtime_valid(
         "sampling_owner",
         "moe_a2a_backend",
         "moe_runner_backend",
-        "fp4_gemm_backend",
-        "enable_alltoall",
-        "moe_block_count",
-        "fallback_count",
-        "post_moe_allreduce",
         "pipeline_depth",
         "overlap_mode",
         "prefill_cuda_graph",
@@ -990,12 +1295,6 @@ def _runtime_valid(
         and bool(value["moe_a2a_backend"])
         and isinstance(value["moe_runner_backend"], str)
         and bool(value["moe_runner_backend"])
-        and isinstance(value["fp4_gemm_backend"], str)
-        and bool(value["fp4_gemm_backend"])
-        and type(value["enable_alltoall"]) is bool
-        and value["moe_block_count"] == NUM_LAYERS
-        and value["fallback_count"] == 0
-        and type(value["post_moe_allreduce"]) is bool
         and value["prefill_cuda_graph"] == "disabled"
         and type(value["decode_cuda_graph"]) is bool
         and value["max_running_requests"] == MAX_RUNNING_REQUESTS
@@ -1022,9 +1321,6 @@ def _runtime_valid(
             and value["tensor_parallel_size"] == 1
             and value["moe_a2a_backend"] == KAIRYU_MOE_A2A_BACKEND
             and value["moe_runner_backend"] == KAIRYU_MOE_RUNNER_BACKEND
-            and value["fp4_gemm_backend"] == KAIRYU_FP4_GEMM_BACKEND
-            and value["enable_alltoall"] is False
-            and value["post_moe_allreduce"] is False
             and value["configured_max_prefill_tokens"] == CONFIGURED_PREFILL_TOKENS
             and value["decode_cuda_graph"] is True
             and value["cuda_graph_max_batch"] == KAIRYU_CUDA_GRAPH_MAX_BATCH
@@ -1048,8 +1344,6 @@ def _runtime_valid(
         and value["overlap_mode"] == candidate
         and value["moe_a2a_backend"] == moe_a2a_backend
         and value["moe_runner_backend"] == SGLANG_MOE_RUNNER_BACKEND
-        and value["fp4_gemm_backend"] == SGLANG_FP4_GEMM_BACKEND
-        and value["enable_alltoall"] is (moe_a2a_backend != "none")
         and value["configured_max_prefill_tokens"]
         == SGLANG_MAX_PREFILL_TOKENS_PER_OWNER
         and value["resolved_argv"]
@@ -1090,6 +1384,40 @@ def _kairyu_resolved_argv_valid(value: object, *, pipeline_depth: object) -> boo
     )
 
 
+def _provenance_checkpoint_binding_valid(value: Mapping[str, object]) -> bool:
+    capture = value.get("checkpoint_capture_start")
+    container = value.get("container")
+    volume = value.get("checkpoint_volume")
+    if (
+        not _descriptor_valid(capture)
+        or not isinstance(capture, dict)
+        or not _checkpoint_capture_value_valid(capture.get("value"), phase="start")
+        or not isinstance(capture.get("value"), dict)
+        or not isinstance(container, dict)
+        or not isinstance(container.get("model_mount"), dict)
+        or not _checkpoint_volume_valid(volume)
+        or not isinstance(volume, dict)
+    ):
+        return False
+    capture_value = capture["value"]
+    checkpoint = capture_value["checkpoint"]
+    capture_container = capture_value["capture_container"]
+    if not isinstance(capture_container, dict):
+        return False
+    mount = capture_container["model_mount"]
+    container_mount = container["model_mount"]
+    volume_source = f"volume:{volume['name']}/{volume['subpath']}"
+    return (
+        isinstance(checkpoint, dict)
+        and checkpoint.get("value") == value.get("checkpoint")
+        and capture_value["checkpoint_volume"] == volume
+        and mount == container_mount
+        and mount.get("source") == volume_source
+        and container_mount.get("source") == volume_source
+        and capture_value["capture_completed_ns"] < value.get("server_started_ns", 0)
+    )
+
+
 def _provenance_value_valid(
     value: object,
     *,
@@ -1108,9 +1436,12 @@ def _provenance_value_valid(
             "container",
             "source",
             "checkpoint",
+            "checkpoint_capture_start",
+            "checkpoint_volume",
             "gpus",
             "environment",
             "runtime",
+            "runtime_witness",
         }
         and value["schema_version"] == SCHEMA_VERSION
         and value["arm"] == arm
@@ -1121,6 +1452,8 @@ def _provenance_value_valid(
         and _container_valid(value["container"], arm=arm)
         and _source_valid(value["source"], arm=arm)
         and ma1._checkpoint_valid(value["checkpoint"])
+        and value["checkpoint"] == expected_checkpoint()
+        and _provenance_checkpoint_binding_valid(value)
         and _gpu_inventory_valid(value["gpus"])
         and _arm_environment_valid(value["environment"], arm=arm)
         and _runtime_valid(
@@ -1128,6 +1461,11 @@ def _provenance_value_valid(
             arm=arm,
             candidate=candidate,
             moe_a2a_backend=moe_a2a_backend,
+        )
+        and _runtime_witness_valid(
+            value["runtime_witness"],
+            arm=arm,
+            runtime=value["runtime"],
         )
     )
 
@@ -1148,6 +1486,1131 @@ def load_provenance(
     ):
         raise GateEvidenceError(f"{path} does not satisfy the G4 M-A3 provenance schema")
     return result
+
+
+def _capture_command(command: Sequence[str]) -> str:
+    """Run one read-only provenance observation without a shell."""
+
+    try:
+        result = subprocess.run(
+            list(command),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise GateEvidenceError(
+            f"cannot execute provenance observation {command[0]!r}: {error}"
+        ) from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise GateEvidenceError(
+            f"provenance observation failed ({' '.join(command)}): {detail[:500]}"
+        )
+    return result.stdout
+
+
+def _capture_single_object(command: Sequence[str], *, label: str) -> dict[str, object]:
+    try:
+        value = strict_json_loads(_capture_command(command))
+    except json.JSONDecodeError as error:
+        raise GateEvidenceError(f"{label} is not valid JSON") from error
+    if (
+        not isinstance(value, list)
+        or len(value) != 1
+        or not isinstance(value[0], dict)
+    ):
+        raise GateEvidenceError(f"{label} must contain exactly one object")
+    return value[0]
+
+
+def _capture_env(value: object) -> dict[str, str]:
+    if not isinstance(value, list):
+        raise GateEvidenceError("container environment is not a list")
+    result: dict[str, str] = {}
+    for item in value:
+        if not isinstance(item, str) or "=" not in item:
+            raise GateEvidenceError("container environment contains a malformed item")
+        key, item_value = item.split("=", 1)
+        if key in result:
+            raise GateEvidenceError(f"container environment repeats {key!r}")
+        result[key] = item_value
+    return result
+
+
+def _checkpoint_volume_valid(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value)
+        == {
+            "name",
+            "driver",
+            "scope",
+            "mountpoint",
+            "subpath",
+            "rw_consumer_count",
+        }
+        and isinstance(value["name"], str)
+        and bool(value["name"])
+        and isinstance(value["driver"], str)
+        and bool(value["driver"])
+        and isinstance(value["scope"], str)
+        and bool(value["scope"])
+        and isinstance(value["mountpoint"], str)
+        and bool(value["mountpoint"])
+        and value["subpath"] == MODEL_VOLUME_SUBPATH
+        and value["rw_consumer_count"] == 0
+    )
+
+
+def _capture_checkpoint_volume(
+    *,
+    container_id: str,
+    model_volume: str,
+) -> dict[str, object]:
+    """Bind Docker's live volume identity and reject every RW consumer."""
+
+    volume = _capture_single_object(
+        ("docker", "volume", "inspect", model_volume),
+        label="docker model volume inspect",
+    )
+    identity: dict[str, object] = {
+        "name": volume.get("Name"),
+        "driver": volume.get("Driver"),
+        "scope": volume.get("Scope"),
+        "mountpoint": volume.get("Mountpoint"),
+        "subpath": MODEL_VOLUME_SUBPATH,
+        "rw_consumer_count": 0,
+    }
+    if not _checkpoint_volume_valid(identity) or identity["name"] != model_volume:
+        raise GateEvidenceError("Docker model volume identity is absent or malformed")
+
+    consumer_ids = sorted(
+        {
+            line.strip()
+            for line in _capture_command(
+                (
+                    "docker",
+                    "ps",
+                    "--all",
+                    "--quiet",
+                    "--no-trunc",
+                    "--filter",
+                    f"volume={model_volume}",
+                )
+            ).splitlines()
+            if line.strip()
+        }
+    )
+    if container_id not in consumer_ids:
+        raise GateEvidenceError("running server is absent from Docker volume consumers")
+    try:
+        consumers = strict_json_loads(
+            _capture_command(("docker", "inspect", *consumer_ids))
+        )
+    except json.JSONDecodeError as error:
+        raise GateEvidenceError("Docker volume consumer inspect is not valid JSON") from error
+    if (
+        not isinstance(consumers, list)
+        or len(consumers) != len(consumer_ids)
+        or not all(isinstance(consumer, dict) for consumer in consumers)
+    ):
+        raise GateEvidenceError("Docker volume consumer inspect is incomplete")
+    observed_ids = {consumer.get("Id") for consumer in consumers}
+    if observed_ids != set(consumer_ids):
+        raise GateEvidenceError("Docker volume consumer identities changed during capture")
+    for consumer in consumers:
+        live_mounts = [
+            mount
+            for mount in consumer.get("Mounts") or ()
+            if isinstance(mount, dict)
+            and mount.get("Type") == "volume"
+            and mount.get("Name") == model_volume
+        ]
+        host_config = consumer.get("HostConfig")
+        configured_mounts = [
+            mount
+            for mount in (
+                host_config.get("Mounts") if isinstance(host_config, dict) else None
+            )
+            or ()
+            if isinstance(mount, dict)
+            and mount.get("Type") == "volume"
+            and mount.get("Source") == model_volume
+        ]
+        if not live_mounts or not configured_mounts:
+            raise GateEvidenceError(
+                f"Docker volume consumer {consumer.get('Id')} has ambiguous mounts"
+            )
+        if any(mount.get("RW") is not False for mount in live_mounts) or any(
+            mount.get("ReadOnly") is not True for mount in configured_mounts
+        ):
+            raise GateEvidenceError(
+                f"model volume has a read-write consumer {consumer.get('Id')}"
+            )
+    return identity
+
+
+def _capture_host_gpus() -> list[dict[str, object]]:
+    output = _capture_command(
+        (
+            "nvidia-smi",
+            "--query-gpu=index,uuid,pci.bus_id,name,driver_version,memory.total",
+            "--format=csv,noheader,nounits",
+        )
+    )
+    rows: list[dict[str, object]] = []
+    for raw in csv.reader(output.splitlines(), skipinitialspace=True):
+        if len(raw) != 6:
+            raise GateEvidenceError(f"host GPU inventory has an invalid row: {raw!r}")
+        index, uuid, pci, name, driver, memory_mib = (item.strip() for item in raw)
+        try:
+            parsed_index = int(index)
+            parsed_memory = int(memory_mib) * 1024**2
+        except ValueError as error:
+            raise GateEvidenceError("host GPU inventory has a non-integer field") from error
+        if parsed_index in PHYSICAL_GPU_INDICES:
+            rows.append(
+                {
+                    "physical_index": parsed_index,
+                    "uuid": uuid,
+                    "pci_bus_id": pci,
+                    "name": name,
+                    "driver_version": driver,
+                    "total_memory_bytes": parsed_memory,
+                }
+            )
+    rows.sort(key=lambda row: int(row["physical_index"]))
+    if (
+        [row["physical_index"] for row in rows] != list(PHYSICAL_GPU_INDICES)
+        or len({row["uuid"] for row in rows}) != GPU_COUNT
+        or len({row["pci_bus_id"] for row in rows}) != GPU_COUNT
+        or len({row["driver_version"] for row in rows}) != 1
+    ):
+        raise GateEvidenceError("host GPU inventory does not contain fixed GPUs 4-7")
+    return rows
+
+
+def _capture_container_gpus(
+    container_name: str,
+    host_gpus: Sequence[Mapping[str, object]],
+) -> None:
+    output = _capture_command(
+        (
+            "docker",
+            "exec",
+            container_name,
+            "nvidia-smi",
+            "--query-gpu=index,uuid,pci.bus_id,name,memory.total",
+            "--format=csv,noheader,nounits",
+        )
+    )
+    rows = list(csv.reader(output.splitlines(), skipinitialspace=True))
+    if len(rows) != GPU_COUNT or any(len(row) != 5 for row in rows):
+        raise GateEvidenceError("container GPU inventory must contain exactly four rows")
+    for visible_index, (raw, host) in enumerate(zip(rows, host_gpus, strict=True)):
+        index, uuid, pci, name, memory_mib = (item.strip() for item in raw)
+        try:
+            parsed_index = int(index)
+            parsed_memory = int(memory_mib) * 1024**2
+        except ValueError as error:
+            raise GateEvidenceError("container GPU inventory has a non-integer field") from error
+        if not (
+            parsed_index == visible_index
+            and uuid == host["uuid"]
+            and pci.casefold() == str(host["pci_bus_id"]).casefold()
+            and name == host["name"]
+            and parsed_memory == host["total_memory_bytes"]
+        ):
+            raise GateEvidenceError(
+                "container-visible GPU order differs from physical GPUs 4-7"
+            )
+
+
+def _capture_gpu_exclusivity(
+    container_name: str,
+    host_gpus: Sequence[Mapping[str, object]],
+) -> None:
+    top = _capture_command(("docker", "top", container_name, "-eo", "pid"))
+    lines = [line.strip() for line in top.splitlines() if line.strip()]
+    if len(lines) < 2 or lines[0].split()[0].casefold() != "pid":
+        raise GateEvidenceError("docker top did not return container host PIDs")
+    try:
+        container_pids = {int(line.split()[0]) for line in lines[1:]}
+    except (IndexError, ValueError) as error:
+        raise GateEvidenceError("docker top returned an invalid PID") from error
+
+    applications = _capture_command(
+        (
+            "nvidia-smi",
+            "--query-compute-apps=gpu_uuid,pid",
+            "--format=csv,noheader,nounits",
+        )
+    )
+    selected = {str(row["uuid"]) for row in host_gpus}
+    observed_uuids: set[str] = set()
+    for raw in csv.reader(applications.splitlines(), skipinitialspace=True):
+        if len(raw) != 2:
+            raise GateEvidenceError(f"GPU process inventory has an invalid row: {raw!r}")
+        uuid, pid_value = (item.strip() for item in raw)
+        if uuid not in selected:
+            continue
+        try:
+            pid = int(pid_value)
+        except ValueError as error:
+            raise GateEvidenceError("GPU process inventory has a non-integer PID") from error
+        observed_uuids.add(uuid)
+        if pid not in container_pids:
+            raise GateEvidenceError(
+                f"physical GPU cohort has a foreign compute process PID {pid}"
+            )
+    if observed_uuids != selected:
+        raise GateEvidenceError("the running server does not own a process on every selected GPU")
+
+
+def _normalize_captured_nccl_version(value: object) -> str:
+    if isinstance(value, list) and value and all(type(item) is int for item in value):
+        return ".".join(str(item) for item in value)
+    if type(value) is int:
+        return f"{value // 10000}.{(value // 100) % 100}.{value % 100}"
+    if isinstance(value, str) and value:
+        return value
+    raise GateEvidenceError("container NCCL version is absent or malformed")
+
+
+def _capture_runtime_versions(container_name: str, arm: str) -> dict[str, str]:
+    python = "/app/.venv/bin/python" if arm == "kairyu" else "python3"
+    engine_distribution = "kairyu" if arm == "kairyu" else "sglang"
+    probe = (
+        "import importlib.metadata as m,json,torch\n"
+        "def version(*names):\n"
+        "  for name in names:\n"
+        "    try: return m.version(name)\n"
+        "    except m.PackageNotFoundError: pass\n"
+        "  raise RuntimeError('missing distribution: '+','.join(names))\n"
+        f"engine={engine_distribution!r}\n"
+        "print(json.dumps({'cuda':torch.version.cuda,'nccl':torch.cuda.nccl.version(),"
+        "'torch':version('torch'),'flashinfer':version('flashinfer-python','flashinfer'),"
+        "'engine':version(engine)}))"
+    )
+    output = _capture_command(("docker", "exec", container_name, python, "-c", probe))
+    try:
+        value = strict_json_loads(output.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise GateEvidenceError("container runtime-version probe is not valid JSON") from error
+    if not isinstance(value, dict) or set(value) != {
+        "cuda",
+        "nccl",
+        "torch",
+        "flashinfer",
+        "engine",
+    }:
+        raise GateEvidenceError("container runtime-version probe is incomplete")
+    strings = {
+        "cuda_version": value["cuda"],
+        "torch_version": value["torch"],
+        "flashinfer_version": value["flashinfer"],
+        "engine_version": value["engine"],
+    }
+    if not all(isinstance(item, str) and item for item in strings.values()):
+        raise GateEvidenceError("container runtime-version probe has an empty version")
+    return {
+        **strings,
+        "nccl_version": _normalize_captured_nccl_version(value["nccl"]),
+    }
+
+
+def _captured_runtime(
+    *,
+    arm: str,
+    candidate: str,
+    resolved_argv: list[str],
+) -> dict[str, object]:
+    common: dict[str, object] = {
+        "served_model_name": SERVED_MODEL_NAME,
+        "world_size": GPU_COUNT,
+        "tensor_parallel_size": 1 if arm == "kairyu" else GPU_COUNT,
+        "data_parallel_size": GPU_COUNT,
+        "expert_parallel_size": GPU_COUNT,
+        "attention_data_parallel": True,
+        "request_owned_attention": True,
+        "kv_cache_owner": "request-owner",
+        "sampling_owner": "request-owner",
+        "moe_a2a_backend": (
+            KAIRYU_MOE_A2A_BACKEND if arm == "kairyu" else DEFAULT_SGLANG_MOE_A2A_BACKEND
+        ),
+        "moe_runner_backend": (
+            KAIRYU_MOE_RUNNER_BACKEND if arm == "kairyu" else SGLANG_MOE_RUNNER_BACKEND
+        ),
+        "pipeline_depth": 5 if arm == "kairyu" else None,
+        "overlap_mode": candidate if arm == "sglang" else None,
+        "prefill_cuda_graph": "disabled",
+        "decode_cuda_graph": True,
+        "cuda_graph_max_batch": KAIRYU_CUDA_GRAPH_MAX_BATCH if arm == "kairyu" else None,
+        "cuda_graph_max_pages": KAIRYU_CUDA_GRAPH_MAX_PAGES if arm == "kairyu" else None,
+        "cuda_graph_warmup_iters": (
+            KAIRYU_CUDA_GRAPH_WARMUP_ITERS if arm == "kairyu" else None
+        ),
+        "cuda_graph_buckets": list(KAIRYU_CUDA_GRAPH_BUCKETS) if arm == "kairyu" else None,
+        "max_running_requests": MAX_RUNNING_REQUESTS,
+        "configured_chunked_prefill_tokens": CONFIGURED_PREFILL_TOKENS,
+        "resolved_chunked_prefill_tokens_per_owner": RESOLVED_PREFILL_TOKENS_PER_OWNER,
+        "configured_max_prefill_tokens": (
+            CONFIGURED_PREFILL_TOKENS if arm == "kairyu" else SGLANG_MAX_PREFILL_TOKENS_PER_OWNER
+        ),
+        "resolved_max_prefill_tokens_per_owner": RESOLVED_PREFILL_TOKENS_PER_OWNER,
+        "page_size": PAGE_SIZE,
+        "max_total_tokens": MAX_TOTAL_TOKENS,
+        "max_total_tokens_per_owner": MAX_TOTAL_TOKENS_PER_OWNER,
+        "kv_cache_dtype": KV_CACHE_DTYPE,
+        "prefix_cache": True,
+        "scheduler_policy": "fcfs",
+        "speculative_decoding": False,
+        "access_log": False,
+        "resolved_argv": resolved_argv,
+    }
+    return common
+
+
+def _capture_runtime_witness(arm: str) -> dict[str, object]:
+    endpoint = "/backends" if arm == "kairyu" else "/server_info"
+    try:
+        response = httpx.get(f"http://127.0.0.1:30000{endpoint}", timeout=30.0)
+    except httpx.HTTPError as error:
+        raise GateEvidenceError(f"live runtime endpoint {endpoint} failed: {error}") from error
+    if response.status_code != 200:
+        raise GateEvidenceError(
+            f"live runtime endpoint {endpoint} returned HTTP {response.status_code}"
+        )
+    try:
+        payload = strict_json_loads(canonical_json(response.json()))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise GateEvidenceError(f"live runtime endpoint {endpoint} is not strict JSON") from error
+    if not isinstance(payload, dict):
+        raise GateEvidenceError(f"live runtime endpoint {endpoint} did not return an object")
+    return {"endpoint": endpoint, "response": payload}
+
+
+def _sglang_runtime_witness_matches(
+    response: Mapping[str, object], runtime: Mapping[str, object]
+) -> bool:
+    graph = response.get("cuda_graph_config")
+    decode = graph.get("decode") if isinstance(graph, dict) else None
+    prefill = graph.get("prefill") if isinstance(graph, dict) else None
+    internal_states = response.get("internal_states")
+    required_rank_values = {
+        "served_model_name": SERVED_MODEL_NAME,
+        "tp_size": GPU_COUNT,
+        "dp_size": GPU_COUNT,
+        "ep_size": GPU_COUNT,
+        "enable_dp_attention": True,
+        "load_balance_method": "round_robin",
+        "dtype": "bfloat16",
+        "kv_cache_dtype": KV_CACHE_DTYPE,
+        "fp4_gemm_runner_backend": SGLANG_FP4_GEMM_BACKEND,
+        "moe_a2a_backend": runtime.get("moe_a2a_backend"),
+        "moe_runner_backend": runtime.get("moe_runner_backend"),
+        "page_size": PAGE_SIZE,
+        "max_running_requests": MAX_RUNNING_REQUESTS,
+        "max_total_tokens": MAX_TOTAL_TOKENS_PER_OWNER,
+        "chunked_prefill_size": RESOLVED_PREFILL_TOKENS_PER_OWNER,
+        "max_prefill_tokens": SGLANG_MAX_PREFILL_TOKENS_PER_OWNER,
+        "schedule_policy": "fcfs",
+        "disable_radix_cache": False,
+        "speculative_algorithm": None,
+        "log_requests": False,
+        "log_level_http": "warning",
+        "enable_single_batch_overlap": False,
+        "enable_two_batch_overlap": False,
+    }
+    return (
+        response.get("version") == SGLANG_VERSION
+        and response.get("model_path") == SERVED_MODEL_NAME
+        and all(response.get(key) == expected for key, expected in required_rank_values.items())
+        and response.get("max_total_num_tokens") == MAX_TOTAL_TOKENS_PER_OWNER
+        and isinstance(decode, dict)
+        and decode.get("backend") == "full"
+        and decode.get("max_bs") == KAIRYU_CUDA_GRAPH_MAX_BATCH
+        and isinstance(prefill, dict)
+        and prefill.get("backend") == "disabled"
+        and isinstance(internal_states, list)
+        and len(internal_states) == GPU_COUNT
+        and all(
+            isinstance(state, dict)
+            and all(state.get(key) == expected for key, expected in required_rank_values.items())
+            for state in internal_states
+        )
+        and runtime.get("world_size") == response.get("tp_size")
+        and runtime.get("tensor_parallel_size") == response.get("tp_size")
+        and runtime.get("data_parallel_size") == response.get("dp_size")
+        and runtime.get("expert_parallel_size") == response.get("ep_size")
+        and runtime.get("attention_data_parallel") == response.get("enable_dp_attention")
+        and runtime.get("resolved_chunked_prefill_tokens_per_owner")
+        == response.get("chunked_prefill_size")
+        and runtime.get("resolved_max_prefill_tokens_per_owner")
+        == response.get("max_prefill_tokens")
+        and runtime.get("page_size") == response.get("page_size")
+        and type(response.get("max_total_tokens")) is int
+        and runtime.get("max_total_tokens") == response.get("max_total_tokens") * GPU_COUNT
+        and runtime.get("max_total_tokens_per_owner") == response.get("max_total_tokens")
+        and runtime.get("kv_cache_dtype") == response.get("kv_cache_dtype")
+        and runtime.get("prefix_cache") is (not response.get("disable_radix_cache"))
+        and runtime.get("scheduler_policy") == response.get("schedule_policy")
+        and runtime.get("speculative_decoding")
+        is (response.get("speculative_algorithm") is not None)
+        and runtime.get("access_log") is False
+        and response.get("log_level_http") == "warning"
+        and runtime.get("prefill_cuda_graph") == prefill.get("backend")
+        and runtime.get("decode_cuda_graph") is True
+    )
+
+
+def _kairyu_runtime_witness_matches(
+    response: Mapping[str, object], runtime: Mapping[str, object]
+) -> bool:
+    engines = response.get("engines")
+    if not isinstance(engines, list):
+        return False
+    selected = [
+        engine
+        for engine in engines
+        if isinstance(engine, dict) and engine.get("model") == SERVED_MODEL_NAME
+    ]
+    if len(selected) != 1:
+        return False
+    engine = selected[0]
+    transport = engine.get("moe_collective_transport")
+    return (
+        response.get("role") == "engine-host"
+        and engine.get("engine_backend") == "kairyu"
+        and engine.get("parallelism") == "expert_parallel"
+        and engine.get("expert_parallel_size") == runtime.get("expert_parallel_size")
+        and engine.get("attention_data_parallel_size") == runtime.get("data_parallel_size")
+        and engine.get("attention_tensor_parallel_size")
+        == runtime.get("tensor_parallel_size")
+        and engine.get("attention_placement") == "request_owned_data_parallel"
+        and engine.get("attention_output_placement") == "replicated"
+        and engine.get("execution_mode") == "request-owned-attention-dp"
+        and engine.get("pipeline_depth") == runtime.get("pipeline_depth")
+        and engine.get("decode_mode") == "cuda_graph"
+        and engine.get("kv_cache_dtype") == runtime.get("kv_cache_dtype")
+        and engine.get("moe_dispatcher") == runtime.get("moe_runner_backend")
+        and engine.get("sampling_ownership") == "request_owner"
+        and engine.get("kv_cache_ownership") == "request_owner"
+        and engine.get("cuda_graph_decode") is runtime.get("decode_cuda_graph")
+        and engine.get("cuda_graph_buckets") == runtime.get("cuda_graph_buckets")
+        and type(engine.get("cuda_graph_captures")) is int
+        and type(engine.get("cuda_graph_replays")) is int
+        and engine.get("cuda_graph_eager_fallbacks") == 0
+        and isinstance(transport, dict)
+        and transport.get("selected_backend") == runtime.get("moe_a2a_backend")
+        and transport.get("direct_nccl_active") is True
+    )
+
+
+def _runtime_witness_valid(
+    value: object,
+    *,
+    arm: str,
+    runtime: object,
+) -> bool:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"endpoint", "response"}
+        or not isinstance(value["response"], dict)
+        or not isinstance(runtime, dict)
+    ):
+        return False
+    if arm == "sglang":
+        return value["endpoint"] == "/server_info" and _sglang_runtime_witness_matches(
+            value["response"], runtime
+        )
+    return arm == "kairyu" and value["endpoint"] == "/backends" and (
+        _kairyu_runtime_witness_matches(value["response"], runtime)
+    )
+
+
+def capture_provenance(
+    output: Path,
+    *,
+    arm: str,
+    candidate: str,
+    container_name: str,
+    server_generation_id: str,
+    server_started_ns: int,
+    model_volume: str,
+    checkpoint_start_path: Path,
+    source_root: Path | None,
+) -> dict[str, object]:
+    """Capture one already-running formal server without supervising it."""
+
+    if candidate not in PREFLIGHT_CANDIDATES.get(arm, ()):
+        raise GateEvidenceError(f"candidate {candidate!r} is invalid for {arm!r}")
+    if not container_name or not server_generation_id or not model_volume:
+        raise GateEvidenceError("container, generation, and model volume must be non-empty")
+    if type(server_started_ns) is not int or server_started_ns <= 0:
+        raise GateEvidenceError("server_started_ns must be a positive host monotonic timestamp")
+    if (arm == "kairyu") != (source_root is not None):
+        raise GateEvidenceError("source_root is required only for the Kairyu arm")
+    checkpoint_capture_start = load_checkpoint_capture(
+        checkpoint_start_path,
+        phase="start",
+    )
+    checkpoint_capture_value = checkpoint_capture_start["value"]
+    assert isinstance(checkpoint_capture_value, dict)
+    if checkpoint_capture_value["capture_completed_ns"] >= server_started_ns:
+        raise GateEvidenceError("server started before the checkpoint start capture completed")
+
+    container = _capture_single_object(
+        ("docker", "inspect", container_name),
+        label="docker container inspect",
+    )
+    config = container.get("Config")
+    host_config = container.get("HostConfig")
+    state = container.get("State")
+    mounts = container.get("Mounts")
+    if not all(isinstance(item, dict) for item in (config, host_config, state)) or not isinstance(
+        mounts, list
+    ):
+        raise GateEvidenceError("docker inspect omitted Config/HostConfig/State/Mounts")
+    assert isinstance(config, dict) and isinstance(host_config, dict) and isinstance(state, dict)
+    if state.get("Running") is not True:
+        raise GateEvidenceError("provenance requires one already-running container")
+
+    container_id = container.get("Id")
+    image_config_id = container.get("Image")
+    image_repo_digest = config.get("Image")
+    if (
+        not isinstance(container_id, str)
+        or _CONTAINER_ID.fullmatch(container_id) is None
+        or not isinstance(image_config_id, str)
+        or _IMAGE_ID.fullmatch(image_config_id) is None
+        or not isinstance(image_repo_digest, str)
+        or _REPO_DIGEST.fullmatch(image_repo_digest) is None
+    ):
+        raise GateEvidenceError("container/image identities are not immutable digests")
+    image_platform_digest = image_repo_digest.split("@", 1)[1]
+    if arm == "sglang" and (
+        image_repo_digest != SGLANG_IMAGE_REPO_DIGEST
+        or image_platform_digest != SGLANG_AMD64_MANIFEST_DIGEST
+    ):
+        raise GateEvidenceError("SGLang container does not use the pinned amd64 RepoDigest")
+    image = _capture_single_object(
+        ("docker", "image", "inspect", image_repo_digest),
+        label="docker image inspect",
+    )
+    repo_digests = image.get("RepoDigests")
+    if (
+        image.get("Id") != image_config_id
+        or image.get("Os") != "linux"
+        or image.get("Architecture") != "amd64"
+        or not isinstance(repo_digests, list)
+        or image_repo_digest not in repo_digests
+    ):
+        raise GateEvidenceError("container image does not match its local amd64 image record")
+
+    model_mounts = [
+        mount
+        for mount in mounts
+        if isinstance(mount, dict) and mount.get("Destination") == CHECKPOINT_ROOT
+    ]
+    if len(model_mounts) != 1:
+        raise GateEvidenceError("container must have one model mount at the checkpoint root")
+    model_mount = model_mounts[0]
+    observed_subpath = model_mount.get("Subpath")
+    if not (
+        model_mount.get("Type") == "volume"
+        and model_mount.get("Name") == model_volume
+        and model_mount.get("RW") is False
+        and (observed_subpath is None or observed_subpath == MODEL_VOLUME_SUBPATH)
+    ):
+        raise GateEvidenceError("container model volume/name/subpath/read-only state is invalid")
+    host_mounts = host_config.get("Mounts")
+    host_model_mounts = [
+        mount
+        for mount in host_mounts or ()
+        if isinstance(mount, dict) and mount.get("Target") == CHECKPOINT_ROOT
+    ]
+    if len(host_model_mounts) != 1:
+        raise GateEvidenceError("HostConfig does not retain one model volume mount")
+    host_model_mount = host_model_mounts[0]
+    volume_options = host_model_mount.get("VolumeOptions")
+    if not (
+        host_model_mount.get("Type") == "volume"
+        and host_model_mount.get("Source") == model_volume
+        and host_model_mount.get("ReadOnly") is True
+        and isinstance(volume_options, dict)
+        and volume_options.get("Subpath") == MODEL_VOLUME_SUBPATH
+    ):
+        raise GateEvidenceError("HostConfig model volume-subpath contract is invalid")
+
+    if (
+        host_config.get("IpcMode") != "host"
+        or host_config.get("ShmSize") != 32 * 1024**3
+        or set(host_config.get("CapAdd") or ()) != {"SYS_NICE", "SYS_PTRACE"}
+        or len(host_config.get("CapAdd") or ()) != 2
+    ):
+        raise GateEvidenceError("container IPC/shared-memory/capability contract is invalid")
+    device_requests = host_config.get("DeviceRequests")
+    gpu_requests = [
+        request
+        for request in device_requests or ()
+        if isinstance(request, dict)
+        and (
+            request.get("Driver") == "nvidia"
+            or any("gpu" in group for group in request.get("Capabilities") or ())
+        )
+    ]
+    if len(gpu_requests) != 1 or gpu_requests[0].get("DeviceIDs") != ["4", "5", "6", "7"]:
+        raise GateEvidenceError("container does not request exactly physical GPUs 4-7")
+    port_bindings = host_config.get("PortBindings")
+    published = (
+        port_bindings.get("30000/tcp") if isinstance(port_bindings, dict) else None
+    )
+    if published != [{"HostIp": "127.0.0.1", "HostPort": "30000"}]:
+        raise GateEvidenceError("container does not publish only the fixed loopback endpoint")
+    environment = _capture_env(config.get("Env"))
+    if environment.get("CUDA_VISIBLE_DEVICES") != "0,1,2,3":
+        raise GateEvidenceError("container CUDA_VISIBLE_DEVICES is not the local 0-3 mapping")
+    if arm == "kairyu" and any(
+        environment.get(key) != expected
+        for key, expected in {
+            "PYTHONPATH": "/workspace",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": "/workspace",
+        }.items()
+    ):
+        raise GateEvidenceError("Kairyu source-import/safe-directory environment is invalid")
+
+    path = container.get("Path")
+    arguments = container.get("Args")
+    if not isinstance(path, str) or not path or not isinstance(arguments, list) or not all(
+        isinstance(item, str) for item in arguments
+    ):
+        raise GateEvidenceError("container runtime argv is absent or malformed")
+    resolved_argv = [path, *arguments]
+
+    labels = image.get("Config")
+    labels = labels.get("Labels") if isinstance(labels, dict) else None
+    if arm == "kairyu":
+        assert source_root is not None
+        resolved_source = source_root.resolve()
+        source_mounts = [
+            mount
+            for mount in mounts
+            if isinstance(mount, dict) and mount.get("Destination") == "/workspace"
+        ]
+        if len(source_mounts) != 1:
+            raise GateEvidenceError("Kairyu container has no singular /workspace source mount")
+        source_mount = source_mounts[0]
+        source = source_mount.get("Source")
+        if not (
+            source_mount.get("Type") == "bind"
+            and isinstance(source, str)
+            and Path(source).resolve() == resolved_source
+            and source_mount.get("RW") is False
+            and config.get("WorkingDir") == "/workspace"
+        ):
+            raise GateEvidenceError("Kairyu source mount is not the clean read-only checkout")
+        commit = _capture_command(("git", "-C", str(resolved_source), "rev-parse", "HEAD")).strip()
+        status = _capture_command(
+            (
+                "git",
+                "-C",
+                str(resolved_source),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            )
+        )
+        _capture_command(
+            (
+                "git",
+                "-C",
+                str(resolved_source),
+                "ls-files",
+                "--error-unmatch",
+                "bench/g4_ma3_kairyu_server.py",
+            )
+        )
+        if _HEX40.fullmatch(commit) is None or status:
+            raise GateEvidenceError("Kairyu detached source is not a clean tracked commit")
+        if (
+            not isinstance(labels, dict)
+            or labels.get("org.opencontainers.image.revision") != commit
+        ):
+            raise GateEvidenceError("Kairyu image revision label differs from mounted source")
+        source_value: dict[str, object] = {
+            "repository": "https://github.com/ytworks/kairyu",
+            "commit": commit,
+            "clean": True,
+        }
+    else:
+        source_value = {
+            "repository": SGLANG_SOURCE_REPOSITORY,
+            "version": SGLANG_VERSION,
+            "tag": SGLANG_TAG,
+            "tag_object": SGLANG_TAG_OBJECT,
+            "commit": SGLANG_SOURCE_COMMIT,
+            "clean": True,
+        }
+
+    host_gpus = _capture_host_gpus()
+    _capture_container_gpus(container_name, host_gpus)
+    _capture_gpu_exclusivity(container_name, host_gpus)
+    checkpoint_volume = _capture_checkpoint_volume(
+        container_id=container_id,
+        model_volume=model_volume,
+    )
+    versions = _capture_runtime_versions(container_name, arm)
+    runtime = _captured_runtime(
+        arm=arm,
+        candidate=candidate,
+        resolved_argv=resolved_argv,
+    )
+    runtime_witness = _capture_runtime_witness(arm)
+    value: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
+        "arm": arm,
+        "server_generation_id": server_generation_id,
+        "server_started_ns": server_started_ns,
+        "container": {
+            "id": container_id,
+            "image_repo_digest": image_repo_digest,
+            "image_platform_digest": image_platform_digest,
+            "image_config_id": image_config_id,
+            "model_mount": {
+                "source": f"volume:{model_volume}/{MODEL_VOLUME_SUBPATH}",
+                "destination": CHECKPOINT_ROOT,
+                "read_only": True,
+            },
+            "gpu_device_indices": list(PHYSICAL_GPU_INDICES),
+            "ipc_mode": "host",
+            "shm_size_bytes": 32 * 1024**3,
+            "cap_add": ["SYS_NICE", "SYS_PTRACE"],
+        },
+        "source": source_value,
+        "checkpoint": checkpoint_capture_value["checkpoint"]["value"],
+        "checkpoint_capture_start": checkpoint_capture_start,
+        "checkpoint_volume": checkpoint_volume,
+        "gpus": [
+            {
+                "visible_index": visible_index,
+                "physical_index": host["physical_index"],
+                "uuid": host["uuid"],
+                "pci_bus_id": host["pci_bus_id"],
+                "name": host["name"],
+                "total_memory_bytes": host["total_memory_bytes"],
+            }
+            for visible_index, host in enumerate(host_gpus)
+        ],
+        "environment": {
+            "host_id": socket.gethostname(),
+            "driver_version": host_gpus[0]["driver_version"],
+            **versions,
+            "engine_name": arm,
+            "gpu_jobs_exclusive": True,
+        },
+        "runtime": runtime,
+        "runtime_witness": runtime_witness,
+    }
+    if not _provenance_value_valid(
+        value,
+        arm=arm,
+        candidate=candidate,
+        moe_a2a_backend=DEFAULT_SGLANG_MOE_A2A_BACKEND,
+    ):
+        raise GateEvidenceError("captured runtime does not satisfy the provenance schema")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(output, value, indent=2, sort_keys=True, ensure_ascii=False)
+    load_provenance(
+        output,
+        arm=arm,
+        candidate=candidate,
+        moe_a2a_backend=DEFAULT_SGLANG_MOE_A2A_BACKEND,
+    )
+    return value
+
+
+def _live_observation_value_valid(
+    value: object,
+    *,
+    provenance: Mapping[str, object],
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "type",
+        "capture_started_ns",
+        "capture_completed_ns",
+        "container",
+        "source",
+        "checkpoint_volume",
+        "gpus",
+        "environment",
+        "runtime_witness",
+    }:
+        return False
+    provenance_container = provenance.get("container")
+    runtime = provenance.get("runtime")
+    if not isinstance(provenance_container, dict) or not isinstance(runtime, dict):
+        return False
+    expected_container = {
+        "id": provenance_container.get("id"),
+        "image_repo_digest": provenance_container.get("image_repo_digest"),
+        "image_platform_digest": provenance_container.get("image_platform_digest"),
+        "image_config_id": provenance_container.get("image_config_id"),
+        "model_mount": provenance_container.get("model_mount"),
+        "resolved_argv": runtime.get("resolved_argv"),
+    }
+    return (
+        value["schema_version"] == LIVE_OBSERVATION_SCHEMA_VERSION
+        and value["type"] == "live_observation_end"
+        and type(value["capture_started_ns"]) is int
+        and type(value["capture_completed_ns"]) is int
+        and 0 < value["capture_started_ns"] < value["capture_completed_ns"]
+        and value["container"] == expected_container
+        and value["source"] == provenance.get("source")
+        and value["checkpoint_volume"] == provenance.get("checkpoint_volume")
+        and _checkpoint_volume_valid(value["checkpoint_volume"])
+        and value["gpus"] == provenance.get("gpus")
+        and value["environment"] == provenance.get("environment")
+        and isinstance(provenance.get("arm"), str)
+        and _runtime_witness_valid(
+            value["runtime_witness"],
+            arm=str(provenance["arm"]),
+            runtime=runtime,
+        )
+    )
+
+
+def capture_live_observation(provenance: Mapping[str, object]) -> dict[str, object]:
+    """Re-observe the measured container and machine after all shard traffic."""
+
+    arm = provenance.get("arm")
+    recorded_container = provenance.get("container")
+    recorded_runtime = provenance.get("runtime")
+    recorded_volume = provenance.get("checkpoint_volume")
+    if (
+        arm not in ARMS
+        or not isinstance(recorded_container, dict)
+        or not isinstance(recorded_runtime, dict)
+        or not isinstance(recorded_volume, dict)
+    ):
+        raise GateEvidenceError("end observation requires valid start provenance")
+    container_id = recorded_container.get("id")
+    model_volume = recorded_volume.get("name")
+    if not isinstance(container_id, str) or not isinstance(model_volume, str):
+        raise GateEvidenceError("end observation has no container/volume identity")
+
+    capture_started_ns = time.perf_counter_ns()
+    container = _capture_single_object(
+        ("docker", "inspect", container_id),
+        label="end container inspect",
+    )
+    config = container.get("Config")
+    host_config = container.get("HostConfig")
+    state = container.get("State")
+    mounts = container.get("Mounts")
+    if not all(isinstance(item, dict) for item in (config, host_config, state)) or not isinstance(
+        mounts, list
+    ):
+        raise GateEvidenceError("end container inspect is incomplete")
+    assert isinstance(config, dict) and isinstance(host_config, dict) and isinstance(state, dict)
+    resolved_argv = recorded_runtime.get("resolved_argv")
+    if not isinstance(resolved_argv, list) or not resolved_argv:
+        raise GateEvidenceError("start provenance has no resolved argv")
+    if not (
+        container.get("Id") == container_id
+        and state.get("Running") is True
+        and container.get("Image") == recorded_container.get("image_config_id")
+        and config.get("Image") == recorded_container.get("image_repo_digest")
+        and [container.get("Path"), *(container.get("Args") or ())] == resolved_argv
+    ):
+        raise GateEvidenceError("measured container identity/image/argv changed or stopped")
+    image = _capture_single_object(
+        ("docker", "image", "inspect", str(recorded_container["image_repo_digest"])),
+        label="end image inspect",
+    )
+    if not (
+        image.get("Id") == recorded_container.get("image_config_id")
+        and image.get("Os") == "linux"
+        and image.get("Architecture") == "amd64"
+        and recorded_container.get("image_repo_digest") in (image.get("RepoDigests") or ())
+    ):
+        raise GateEvidenceError("measured image record changed after traffic")
+
+    expected_mount = recorded_container.get("model_mount")
+    if not isinstance(expected_mount, dict):
+        raise GateEvidenceError("start provenance has no model mount")
+    live_model_mounts = [
+        mount
+        for mount in mounts
+        if isinstance(mount, dict) and mount.get("Destination") == CHECKPOINT_ROOT
+    ]
+    configured_model_mounts = [
+        mount
+        for mount in host_config.get("Mounts") or ()
+        if isinstance(mount, dict) and mount.get("Target") == CHECKPOINT_ROOT
+    ]
+    if len(live_model_mounts) != 1 or len(configured_model_mounts) != 1:
+        raise GateEvidenceError("measured model mount disappeared after traffic")
+    live_model = live_model_mounts[0]
+    configured_model = configured_model_mounts[0]
+    volume_options = configured_model.get("VolumeOptions")
+    if not (
+        live_model.get("Type") == "volume"
+        and live_model.get("Name") == model_volume
+        and live_model.get("RW") is False
+        and live_model.get("Subpath") in (None, MODEL_VOLUME_SUBPATH)
+        and configured_model.get("Type") == "volume"
+        and configured_model.get("Source") == model_volume
+        and configured_model.get("ReadOnly") is True
+        and isinstance(volume_options, dict)
+        and volume_options.get("Subpath") == MODEL_VOLUME_SUBPATH
+        and expected_mount.get("source")
+        == f"volume:{model_volume}/{MODEL_VOLUME_SUBPATH}"
+    ):
+        raise GateEvidenceError("measured model volume/subpath/read-only state changed")
+    if (
+        host_config.get("IpcMode") != recorded_container.get("ipc_mode")
+        or host_config.get("ShmSize") != recorded_container.get("shm_size_bytes")
+        or set(host_config.get("CapAdd") or ()) != set(recorded_container.get("cap_add") or ())
+    ):
+        raise GateEvidenceError("measured container resource contract changed")
+    device_requests = host_config.get("DeviceRequests")
+    gpu_requests = [
+        request
+        for request in device_requests or ()
+        if isinstance(request, dict)
+        and (
+            request.get("Driver") == "nvidia"
+            or any("gpu" in group for group in request.get("Capabilities") or ())
+        )
+    ]
+    if len(gpu_requests) != 1 or gpu_requests[0].get("DeviceIDs") != ["4", "5", "6", "7"]:
+        raise GateEvidenceError("measured container GPU request changed")
+    port_bindings = host_config.get("PortBindings")
+    published = port_bindings.get("30000/tcp") if isinstance(port_bindings, dict) else None
+    if published != [{"HostIp": "127.0.0.1", "HostPort": "30000"}]:
+        raise GateEvidenceError("measured container loopback port binding changed")
+    environment = _capture_env(config.get("Env"))
+    if environment.get("CUDA_VISIBLE_DEVICES") != "0,1,2,3":
+        raise GateEvidenceError("measured container GPU visibility changed")
+
+    labels = image.get("Config")
+    labels = labels.get("Labels") if isinstance(labels, dict) else None
+    if arm == "kairyu":
+        source_mounts = [
+            mount
+            for mount in mounts
+            if isinstance(mount, dict) and mount.get("Destination") == CAPTURE_SOURCE_ROOT
+        ]
+        if len(source_mounts) != 1:
+            raise GateEvidenceError("measured Kairyu source mount disappeared")
+        source_mount = source_mounts[0]
+        source_path = source_mount.get("Source")
+        if not (
+            source_mount.get("Type") == "bind"
+            and isinstance(source_path, str)
+            and source_mount.get("RW") is False
+            and config.get("WorkingDir") == CAPTURE_SOURCE_ROOT
+        ):
+            raise GateEvidenceError("measured Kairyu source mount changed")
+        commit = _capture_command(("git", "-C", source_path, "rev-parse", "HEAD")).strip()
+        status = _capture_command(
+            (
+                "git",
+                "-C",
+                source_path,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            )
+        )
+        _capture_command(
+            (
+                "git",
+                "-C",
+                source_path,
+                "ls-files",
+                "--error-unmatch",
+                "bench/g4_ma3_kairyu_server.py",
+            )
+        )
+        source_value: dict[str, object] = {
+            "repository": "https://github.com/ytworks/kairyu",
+            "commit": commit,
+            "clean": not bool(status),
+        }
+        if (
+            source_value != provenance.get("source")
+            or not isinstance(labels, dict)
+            or labels.get("org.opencontainers.image.revision") != commit
+        ):
+            raise GateEvidenceError("measured Kairyu source/image revision changed")
+    else:
+        source_value = {
+            "repository": SGLANG_SOURCE_REPOSITORY,
+            "version": SGLANG_VERSION,
+            "tag": SGLANG_TAG,
+            "tag_object": SGLANG_TAG_OBJECT,
+            "commit": SGLANG_SOURCE_COMMIT,
+            "clean": True,
+        }
+        if source_value != provenance.get("source"):
+            raise GateEvidenceError("measured SGLang source identity changed")
+
+    host_gpus = _capture_host_gpus()
+    _capture_container_gpus(container_id, host_gpus)
+    _capture_gpu_exclusivity(container_id, host_gpus)
+    checkpoint_volume = _capture_checkpoint_volume(
+        container_id=container_id,
+        model_volume=model_volume,
+    )
+    versions = _capture_runtime_versions(container_id, str(arm))
+    runtime_witness = _capture_runtime_witness(str(arm))
+    gpu_rows = [
+        {
+            "visible_index": visible_index,
+            "physical_index": host["physical_index"],
+            "uuid": host["uuid"],
+            "pci_bus_id": host["pci_bus_id"],
+            "name": host["name"],
+            "total_memory_bytes": host["total_memory_bytes"],
+        }
+        for visible_index, host in enumerate(host_gpus)
+    ]
+    environment_value = {
+        "host_id": socket.gethostname(),
+        "driver_version": host_gpus[0]["driver_version"],
+        **versions,
+        "engine_name": arm,
+        "gpu_jobs_exclusive": True,
+    }
+    capture_completed_ns = time.perf_counter_ns()
+    value: dict[str, object] = {
+        "schema_version": LIVE_OBSERVATION_SCHEMA_VERSION,
+        "type": "live_observation_end",
+        "capture_started_ns": capture_started_ns,
+        "capture_completed_ns": capture_completed_ns,
+        "container": {
+            "id": container_id,
+            "image_repo_digest": recorded_container["image_repo_digest"],
+            "image_platform_digest": recorded_container["image_platform_digest"],
+            "image_config_id": recorded_container["image_config_id"],
+            "model_mount": expected_mount,
+            "resolved_argv": resolved_argv,
+        },
+        "source": source_value,
+        "checkpoint_volume": checkpoint_volume,
+        "gpus": gpu_rows,
+        "environment": environment_value,
+        "runtime_witness": runtime_witness,
+    }
+    if not _live_observation_value_valid(value, provenance=provenance):
+        raise GateEvidenceError("end live observation differs from start provenance")
+    return value
 
 
 def _trace_rows(trace: Mapping[str, object], key: str) -> list[Mapping[str, object]]:
@@ -1780,7 +3243,6 @@ def _selection_valid(value: object) -> bool:
         "preflight_completed_ns",
         "selected",
         "candidate_metrics",
-        "open_loop_rates_millirps",
     }:
         return False
     selected = value["selected"]
@@ -1808,11 +3270,6 @@ def _selection_valid(value: object) -> bool:
         and selected["sglang"] in SGLANG_PREFLIGHT_CANDIDATES
         and isinstance(metrics, dict)
         and set(metrics) == set(ARMS)
-        and isinstance(value["open_loop_rates_millirps"], list)
-        and len(value["open_loop_rates_millirps"]) == OPEN_LOOP_POINTS
-        and len(set(value["open_loop_rates_millirps"])) == OPEN_LOOP_POINTS
-        and all(type(rate) is int and rate > 0 for rate in value["open_loop_rates_millirps"])
-        and value["open_loop_rates_millirps"] == sorted(value["open_loop_rates_millirps"])
     ):
         return False
     for arm in ARMS:
@@ -1835,25 +3292,7 @@ def _selection_valid(value: object) -> bool:
         )
         if selected[arm] != expected_selected:
             return False
-    sglang_rate = _fraction_from_record(metrics["sglang"][selected["sglang"]])
-    requests_per_second = sglang_rate * GPU_COUNT / PREFLIGHT_OUTPUT_TOKENS
-    expected_rates = [
-        max(1, _round_fraction_millirps(requests_per_second * multiplier))
-        for multiplier in (
-            Fraction(1, 4),
-            Fraction(1, 2),
-            Fraction(3, 4),
-            Fraction(1),
-            Fraction(5, 4),
-        )
-    ]
-    return value["open_loop_rates_millirps"] == expected_rates
-
-
-def _round_fraction_millirps(value: Fraction) -> int:
-    scaled = value * 1000
-    quotient, remainder = divmod(scaled.numerator, scaled.denominator)
-    return quotient + int(2 * remainder >= scaled.denominator)
+    return True
 
 
 def load_selection(path: Path) -> dict[str, object]:
@@ -1907,7 +3346,7 @@ async def measure_shard(
     api_key: str | None = None,
     request_timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> list[dict[str, object]]:
-    if arm not in ARMS or phase not in {"preflight", "formal", "open-loop"}:
+    if arm not in ARMS or phase not in {"preflight", "formal"}:
         raise GateEvidenceError("invalid run arm/phase")
     if request_timeout_s <= 0:
         raise GateEvidenceError("request timeout must be positive")
@@ -1929,7 +3368,7 @@ async def measure_shard(
             )
     else:
         if candidate is not None or selection_path is None:
-            raise GateEvidenceError("formal/open-loop requires a frozen selection and no candidate")
+            raise GateEvidenceError("formal requires a frozen selection and no candidate")
         selection = load_selection(selection_path)
         selection_raw = selection["value"]
         assert isinstance(selection_raw, dict)
@@ -1939,11 +3378,13 @@ async def measure_shard(
         ):
             raise GateEvidenceError("selection does not belong to this trace bundle")
         candidate = _selected_candidate(selection, arm)
-        if phase == "open-loop" and repeat is not None:
-            raise GateEvidenceError("open-loop does not accept a repeat")
     assert candidate is not None
     scenario_id = _scenario_id(phase=phase, arm=arm, candidate=candidate, repeat=repeat)
     endpoint = _normalize_endpoint(endpoint)
+    if endpoint != FORMAL_ENDPOINT:
+        raise GateEvidenceError(
+            f"run endpoint must be the captured loopback server {FORMAL_ENDPOINT}"
+        )
     provenance_start = load_provenance(
         provenance_path,
         arm=arm,
@@ -1957,7 +3398,7 @@ async def measure_shard(
         assert isinstance(selection_raw, dict)
         if provenance_raw["server_started_ns"] <= selection_raw["preflight_completed_ns"]:
             raise GateEvidenceError(
-                "formal/report-only server predates the frozen preflight selection"
+                "formal server predates the frozen preflight selection"
             )
     capture_start_ns = time.perf_counter_ns()
     rows: list[dict[str, object]] = [
@@ -2031,7 +3472,7 @@ async def measure_shard(
                         "end": max(int(item["end"]) for item in timings),
                     }
                 )
-        elif phase == "formal":
+        else:
             group = await _execute_synchronized(
                 client,
                 endpoint=endpoint,
@@ -2048,30 +3489,6 @@ async def measure_shard(
                     "end": max(int(item["end"]) for item in timings),
                 }
             )
-        else:
-            assert selection is not None
-            selection_raw = selection["value"]
-            assert isinstance(selection_raw, dict)
-            rates = selection_raw["open_loop_rates_millirps"]
-            assert isinstance(rates, list)
-            for point, plan in enumerate(_open_loop_plans(bundle["trace"], rates)):
-                group = await _execute_open_loop(
-                    client,
-                    endpoint=endpoint,
-                    planned=plan,
-                    rate_millirps=int(rates[point]),
-                )
-                measured.extend(group)
-                timings = [
-                    row["timing_ns"] for row in group if isinstance(row.get("timing_ns"), dict)
-                ]
-                measurement_groups.append(
-                    {
-                        "group": point,
-                        "start": min(int(item["start"]) for item in timings),
-                        "end": max(int(item["end"]) for item in timings),
-                    }
-                )
         if arm == "kairyu":
             graph_witness_end = await _fetch_kairyu_graph_witness(client, endpoint)
             if not _kairyu_graph_witness_pair_valid(graph_witness_start, graph_witness_end):
@@ -2089,12 +3506,15 @@ async def measure_shard(
                 "repeat": repeat,
             }
         )
-    provenance_end = load_provenance(
+    provenance_reloaded = load_provenance(
         provenance_path,
         arm=arm,
         candidate=candidate,
         moe_a2a_backend=moe_a2a_backend,
     )
+    if provenance_reloaded != provenance_start:
+        raise GateEvidenceError("start provenance changed during shard traffic")
+    provenance_end = hashed_descriptor(capture_live_observation(provenance_raw))
     capture_end_ns = time.perf_counter_ns()
     rows.append(
         {
@@ -2122,7 +3542,13 @@ def write_shard(path: Path, rows: Sequence[Mapping[str, object]]) -> dict[str, o
     stored = _read_jsonl(path)
     start, requests, end = _parse_shard(stored)
     successful = sum(row.get("status") == "success" for row in requests)
-    provenance_stable = start["provenance_start"] == end["provenance_end"]
+    provenance_start = start["provenance_start"]
+    provenance_end = end["provenance_end"]
+    assert isinstance(provenance_start, dict) and isinstance(provenance_start["value"], dict)
+    assert isinstance(provenance_end, dict)
+    provenance_stable = _live_observation_value_valid(
+        provenance_end["value"], provenance=provenance_start["value"]
+    )
     graph_witness_valid = _dynamic_graph_witness_valid(
         start["arm"],
         start["kairyu_graph_witness_start"],
@@ -2240,6 +3666,8 @@ def _parse_shard(
         raise GateEvidenceError("shard end has unknown or missing fields")
     if start.get("schema_version") != SCHEMA_VERSION or start.get("gate") != GATE:
         raise GateEvidenceError("shard schema/gate mismatch")
+    if start.get("endpoint") != FORMAL_ENDPOINT:
+        raise GateEvidenceError("shard endpoint is not the captured loopback server")
     phase = start.get("phase")
     arm = start.get("arm")
     candidate = start.get("candidate")
@@ -2264,7 +3692,7 @@ def _parse_shard(
     else:
         selection = start.get("selection")
         if not _descriptor_valid(selection):
-            raise GateEvidenceError("formal/report-only shard lacks a hashed selection")
+            raise GateEvidenceError("formal shard lacks a hashed selection")
         assert isinstance(selection, dict)
         if (
             not _selection_valid(selection["value"])
@@ -2276,18 +3704,23 @@ def _parse_shard(
     moe_a2a_backend = sglang.get("moe_a2a_backend") if isinstance(sglang, dict) else None
     if not isinstance(moe_a2a_backend, str):
         raise GateEvidenceError("shard benchmark has no SGLang A2A backend")
-    for key in ("provenance_start", "provenance_end"):
-        descriptor = start[key] if key == "provenance_start" else end[key]
-        if not _descriptor_valid(descriptor):
-            raise GateEvidenceError(f"{key} is not a hashed descriptor")
-        assert isinstance(descriptor, dict)
-        if not _provenance_value_valid(
-            descriptor["value"],
-            arm=arm,
-            candidate=candidate,
-            moe_a2a_backend=moe_a2a_backend,
-        ):
-            raise GateEvidenceError(f"{key} violates the provenance contract")
+    provenance_start = start["provenance_start"]
+    provenance_end = end["provenance_end"]
+    if not _descriptor_valid(provenance_start) or not isinstance(provenance_start, dict):
+        raise GateEvidenceError("provenance_start is not a hashed descriptor")
+    if not _provenance_value_valid(
+        provenance_start["value"],
+        arm=arm,
+        candidate=candidate,
+        moe_a2a_backend=moe_a2a_backend,
+    ):
+        raise GateEvidenceError("provenance_start violates the provenance contract")
+    if not _descriptor_valid(provenance_end) or not isinstance(provenance_end, dict):
+        raise GateEvidenceError("provenance_end is not a hashed descriptor")
+    start_value = provenance_start["value"]
+    assert isinstance(start_value, dict)
+    if not _live_observation_value_valid(provenance_end["value"], provenance=start_value):
+        raise GateEvidenceError("provenance_end violates the live observation contract")
     requests = list(rows[1:-1])
     for request in requests:
         if request.get("type") != "request":
@@ -2317,14 +3750,19 @@ def _parse_shard(
         raise GateEvidenceError("shard request counts do not match the declared phase")
     capture_start = start.get("capture_start_ns")
     capture_end = end.get("capture_end_ns")
-    provenance = start["provenance_start"]
-    assert isinstance(provenance, dict) and isinstance(provenance["value"], dict)
-    server_started = provenance["value"]["server_started_ns"]
+    server_started = start_value["server_started_ns"]
+    end_value = provenance_end["value"]
+    assert isinstance(end_value, dict)
+    end_observation_started = end_value["capture_started_ns"]
+    end_observation_completed = end_value["capture_completed_ns"]
     if not (
         type(capture_start) is int
         and type(capture_end) is int
         and type(server_started) is int
-        and server_started <= capture_start < capture_end
+        and type(end_observation_started) is int
+        and type(end_observation_completed) is int
+        and server_started <= capture_start < end_observation_started
+        < end_observation_completed <= capture_end
     ):
         raise GateEvidenceError("shard capture/server times are inconsistent")
     assert isinstance(capture_start, int) and isinstance(capture_end, int)
@@ -2339,7 +3777,7 @@ def _parse_shard(
                 <= timing["start"]
                 <= timing["first_token"]
                 <= timing["end"]
-                <= capture_end
+                <= end_observation_started
             )
         ):
             raise GateEvidenceError("request timing is outside the shard capture interval")
@@ -2358,7 +3796,10 @@ def _parse_shard(
         or type(group["group"]) is not int
         or type(group["start"]) is not int
         or type(group["end"]) is not int
-        or not capture_start <= group["start"] <= group["end"] <= capture_end
+        or not capture_start
+        <= group["start"]
+        <= group["end"]
+        <= end_observation_started
         for group in measurement_groups
     ):
         raise GateEvidenceError("measurement group is outside the shard capture interval")
@@ -2529,17 +3970,39 @@ def _common_provenance_valid(
 ) -> bool:
     if not shards:
         return False
-    if any(start["provenance_start"] != end["provenance_end"] for start, _rows, end in shards):
-        return False
+    for start, _rows, end in shards:
+        provenance_start = start.get("provenance_start")
+        provenance_end = end.get("provenance_end")
+        if (
+            not isinstance(provenance_start, dict)
+            or not isinstance(provenance_start.get("value"), dict)
+            or not isinstance(provenance_end, dict)
+            or not _live_observation_value_valid(
+                provenance_end.get("value"), provenance=provenance_start["value"]
+            )
+        ):
+            return False
     provenance = [_provenance_raw(start) for start, _rows, _end in shards]
     first = provenance[0]
     gpu_identity = first["gpus"]
     checkpoint = first["checkpoint"]
+    checkpoint_capture_start = first["checkpoint_capture_start"]
+    checkpoint_volume_identity = {
+        key: first["checkpoint_volume"][key]
+        for key in ("name", "driver", "scope", "mountpoint", "subpath")
+    }
     host_id = first["environment"]["host_id"]
     driver_version = first["environment"]["driver_version"]
     if any(
         item["gpus"] != gpu_identity
         or item["checkpoint"] != checkpoint
+        or item["checkpoint_capture_start"] != checkpoint_capture_start
+        or {
+            key: item["checkpoint_volume"][key]
+            for key in ("name", "driver", "scope", "mountpoint", "subpath")
+        }
+        != checkpoint_volume_identity
+        or item["checkpoint_volume"]["rw_consumer_count"] != 0
         or item["environment"]["host_id"] != host_id
         or item["environment"]["driver_version"] != driver_version
         for item in provenance
@@ -2580,11 +4043,84 @@ def _common_provenance_valid(
         if not previous_end < current_server_start <= current_start:
             return False
     if require_phase_order:
-        phase_rank = {"preflight": 0, "formal": 1, "open-loop": 2}
+        phase_rank = {"preflight": 0, "formal": 1}
         ranks = [phase_rank[str(start["phase"])] for start, _rows, _end in chronological]
         if ranks != sorted(ranks):
             return False
     return True
+
+
+def _checkpoint_matrix_binding_valid(
+    shards: Sequence[tuple[dict[str, object], list[dict[str, object]], dict[str, object]]],
+    *,
+    checkpoint_start: object,
+    checkpoint_end: object,
+) -> bool:
+    if (
+        not shards
+        or not _descriptor_valid(checkpoint_start)
+        or not _descriptor_valid(checkpoint_end)
+        or not isinstance(checkpoint_start, dict)
+        or not isinstance(checkpoint_end, dict)
+        or not _checkpoint_capture_value_valid(checkpoint_start.get("value"), phase="start")
+        or not _checkpoint_capture_value_valid(checkpoint_end.get("value"), phase="end")
+        or not isinstance(checkpoint_start.get("value"), dict)
+        or not isinstance(checkpoint_end.get("value"), dict)
+    ):
+        return False
+    start_value = checkpoint_start["value"]
+    end_value = checkpoint_end["value"]
+    start_container = start_value["capture_container"]
+    end_container = end_value["capture_container"]
+    assert isinstance(start_container, dict) and isinstance(end_container, dict)
+    if (
+        start_value["checkpoint"] != end_value["checkpoint"]
+        or start_value["source"] != end_value["source"]
+        or start_value["checkpoint_volume"] != end_value["checkpoint_volume"]
+        or {
+            key: start_container[key]
+            for key in (
+                "image_repo_digest",
+                "image_config_id",
+                "source_mount",
+                "model_mount",
+                "network_mode",
+                "gpu_device_requests",
+                "resolved_argv",
+            )
+        }
+        != {
+            key: end_container[key]
+            for key in (
+                "image_repo_digest",
+                "image_config_id",
+                "source_mount",
+                "model_mount",
+                "network_mode",
+                "gpu_device_requests",
+                "resolved_argv",
+            )
+        }
+    ):
+        return False
+    start_mount = start_container["model_mount"]
+    provenance = [_provenance_raw(start) for start, _requests, _end in shards]
+    if any(
+        item.get("checkpoint_capture_start") != checkpoint_start
+        or item.get("checkpoint") != start_value["checkpoint"]["value"]
+        or item.get("container", {}).get("model_mount") != start_mount
+        or item.get("checkpoint_volume") != start_value["checkpoint_volume"]
+        or (item.get("arm") == "kairyu" and item.get("source") != start_value["source"])
+        or item.get("checkpoint_volume", {}).get("rw_consumer_count") != 0
+        for item in provenance
+    ):
+        return False
+    return (
+        start_value["capture_completed_ns"]
+        < min(int(item["server_started_ns"]) for item in provenance)
+        and max(int(end["capture_end_ns"]) for _start, _requests, end in shards)
+        < end_value["capture_started_ns"]
+    )
 
 
 def _selection_from_metrics(
@@ -2609,19 +4145,6 @@ def _selection_from_metrics(
         records[arm] = {
             candidate: _fraction_record(fractions[candidate]) for candidate in candidates
         }
-    baseline = (
-        candidate_fractions["sglang"][selected["sglang"]] * GPU_COUNT / PREFLIGHT_OUTPUT_TOKENS
-    )
-    rates = [
-        max(1, _round_fraction_millirps(baseline * multiplier))
-        for multiplier in (
-            Fraction(1, 4),
-            Fraction(1, 2),
-            Fraction(3, 4),
-            Fraction(1),
-            Fraction(5, 4),
-        )
-    ]
     value = {
         "schema_version": SELECTION_SCHEMA_VERSION,
         "trace_bundle_sha256": trace_bundle_sha256,
@@ -2630,7 +4153,6 @@ def _selection_from_metrics(
         "preflight_completed_ns": preflight_completed_ns,
         "selected": selected,
         "candidate_metrics": records,
-        "open_loop_rates_millirps": rates,
     }
     if not _selection_valid(value):
         raise GateEvidenceError("derived preflight selection is internally inconsistent")
@@ -2662,7 +4184,7 @@ def derive_preflight_selection(paths: Sequence[Path]) -> dict[str, object]:
         shards[identity] = (start, requests, end, sha256_file(path))
     if set(shards) != expected:
         raise GateEvidenceError(
-            "preflight requires the exact six-candidate matrix; "
+            "preflight requires exactly one fixed candidate shard per arm; "
             f"missing={sorted(expected - set(shards))}"
         )
     parsed = [(start, requests, end) for start, requests, end, _digest in shards.values()]
@@ -2782,30 +4304,36 @@ def assemble_rows(
     *,
     preflight_paths: Sequence[Path],
     formal_paths: Sequence[Path],
-    sweep_paths: Sequence[Path],
     selection_path: Path,
+    checkpoint_start_path: Path,
+    checkpoint_end_path: Path,
 ) -> list[dict[str, object]]:
+    checkpoint_start = load_checkpoint_capture(checkpoint_start_path, phase="start")
+    checkpoint_end = load_checkpoint_capture(checkpoint_end_path, phase="end")
     expected_selection = derive_preflight_selection(preflight_paths)
     selection = load_selection(selection_path)
     if selection["value"] != expected_selection:
         raise GateEvidenceError("selection differs from an independent preflight raw replay")
     preflight = _load_unique_phase_shards(preflight_paths, phase="preflight")
     formal = _load_unique_phase_shards(formal_paths, phase="formal")
-    sweep = _load_unique_phase_shards(sweep_paths, phase="open-loop")
     if set(formal) != set(FORMAL_SEQUENCE):
         raise GateEvidenceError(
             "formal shards require the exact eight-cell matrix; "
             f"missing={sorted(set(FORMAL_SEQUENCE) - set(formal))}"
         )
-    if set(sweep) != set(ARMS):
-        raise GateEvidenceError(
-            f"open-loop shards require both arms; missing={sorted(set(ARMS) - set(sweep))}"
-        )
-    all_values = [*preflight.values(), *formal.values(), *sweep.values()]
+    all_values = [*preflight.values(), *formal.values()]
     parsed = [(start, requests, end) for start, requests, end, _digest in all_values]
     if not _common_provenance_valid(parsed, require_phase_order=True):
         raise GateEvidenceError(
             "all servers must be fresh, sequential, and use the same host/GPU/checkpoint"
+        )
+    if not _checkpoint_matrix_binding_valid(
+        parsed,
+        checkpoint_start=checkpoint_start,
+        checkpoint_end=checkpoint_end,
+    ):
+        raise GateEvidenceError(
+            "checkpoint bytes, matrix time window, volume, or per-generation binding changed"
         )
     chronological_formal = sorted(
         formal.values(), key=lambda value: int(value[0]["capture_start_ns"])
@@ -2817,19 +4345,18 @@ def assemble_rows(
         raise GateEvidenceError(
             f"formal server order must be {FORMAL_SEQUENCE}, got {observed_order}"
         )
-    for start, _requests, _end, _digest in [*formal.values(), *sweep.values()]:
+    for start, _requests, _end, _digest in formal.values():
         if start["selection"] != selection:
-            raise GateEvidenceError("formal/report-only shard changed the frozen selection")
+            raise GateEvidenceError("formal shard changed the frozen selection")
         provenance = _provenance_raw(start)
         if provenance["server_started_ns"] <= expected_selection["preflight_completed_ns"]:
-            raise GateEvidenceError("formal/report-only server started before preflight froze")
+            raise GateEvidenceError("formal server started before preflight froze")
     for arm in ARMS:
         candidate = expected_selection["selected"][arm]
         selected_preflight = preflight[(arm, candidate)][0]
         selected_runtime = _provenance_raw(selected_preflight)["runtime"]
         for start, _requests, _end, _digest in [
             *[value for key, value in formal.items() if key[1] == arm],
-            sweep[arm],
         ]:
             if _provenance_raw(start)["runtime"] != selected_runtime:
                 raise GateEvidenceError(
@@ -2854,6 +4381,7 @@ def assemble_rows(
             "graph_warmup": first["graph_warmup"],
             "trace_bundle_sha256": first["trace_bundle_sha256"],
             "selection": selection,
+            "checkpoint_start": checkpoint_start,
         }
     ]
     chronological = sorted(all_values, key=lambda value: int(value[0]["capture_start_ns"]))
@@ -2880,9 +4408,9 @@ def assemble_rows(
             "type": "run_end",
             "preflight_scenario_count": len(preflight),
             "formal_scenario_count": len(formal),
-            "open_loop_scenario_count": len(sweep),
             "scenario_count": len(all_values),
             "request_count": sum(len(requests) for _start, requests, _end, _digest in all_values),
+            "checkpoint_end": checkpoint_end,
         }
     )
     return combined
@@ -2909,6 +4437,7 @@ def _parse_artifact_rows(
         "graph_warmup",
         "trace_bundle_sha256",
         "selection",
+        "checkpoint_start",
         "row_index",
     }:
         raise GateEvidenceError("artifact run row has unknown or missing fields")
@@ -2952,6 +4481,16 @@ def _parse_artifact_rows(
             raise GateEvidenceError(f"unknown artifact row type {row_type!r}")
     if current_start is not None:
         raise GateEvidenceError("unterminated artifact scenario")
+    if set(run_end) != {
+        "type",
+        "preflight_scenario_count",
+        "formal_scenario_count",
+        "scenario_count",
+        "request_count",
+        "checkpoint_end",
+        "row_index",
+    }:
+        raise GateEvidenceError("artifact run_end row has unknown or missing fields")
     return run, scenarios, run_end
 
 
@@ -3192,8 +4731,7 @@ def evaluate_rows(
         f"preflight-{arm}-{candidate}" for arm in ARMS for candidate in PREFLIGHT_CANDIDATES[arm]
     }
     expected_formal = {f"formal-r{repeat}-{arm}" for repeat, arm in FORMAL_SEQUENCE}
-    expected_sweep = {f"open-loop-{arm}" for arm in ARMS}
-    expected_scenarios = expected_preflight | expected_formal | expected_sweep
+    expected_scenarios = expected_preflight | expected_formal
     if set(scenarios) != expected_scenarios:
         raise GateEvidenceError(
             "artifact scenario matrix differs; "
@@ -3217,6 +4755,11 @@ def evaluate_rows(
     )
     parsed = list(scenarios.values())
     common_provenance = _common_provenance_valid(parsed, require_phase_order=True)
+    checkpoint_window_exact = _checkpoint_matrix_binding_valid(
+        parsed,
+        checkpoint_start=run["checkpoint_start"],
+        checkpoint_end=run_end["checkpoint_end"],
+    )
     chronological_formal = sorted(
         (scenarios[scenario_id] for scenario_id in expected_formal),
         key=lambda value: int(value[0]["capture_start_ns"]),
@@ -3274,7 +4817,6 @@ def evaluate_rows(
             ]
             for scenario_id in [
                 *(f"formal-r{repeat}-{arm}" for repeat in range(REPEATS)),
-                f"open-loop-{arm}",
             ]:
                 runtime_selected_exact &= (
                     _provenance_raw(scenarios[scenario_id][0])["runtime"] == preflight_runtime
@@ -3330,20 +4872,14 @@ def evaluate_rows(
         * (SERIAL_WARMUP_REQUESTS + GRAPH_WARMUP_REQUESTS + PREFLIGHT_REPEATS * PREFLIGHT_REQUESTS)
         + len(expected_formal)
         * (SERIAL_WARMUP_REQUESTS + GRAPH_WARMUP_REQUESTS + SHAREGPT_REQUESTS)
-        + len(expected_sweep)
-        * (
-            SERIAL_WARMUP_REQUESTS
-            + GRAPH_WARMUP_REQUESTS
-            + OPEN_LOOP_POINTS * OPEN_LOOP_REQUESTS_PER_POINT
-        )
     )
     counts_exact = run_end == {
         "type": "run_end",
         "preflight_scenario_count": len(expected_preflight),
         "formal_scenario_count": len(expected_formal),
-        "open_loop_scenario_count": len(expected_sweep),
         "scenario_count": len(expected_scenarios),
         "request_count": expected_request_count,
+        "checkpoint_end": run_end["checkpoint_end"],
         "row_index": len(rows) - 1,
     }
     binding_ids = expected_preflight | expected_formal
@@ -3353,6 +4889,9 @@ def evaluate_rows(
         "exact_scenario_and_request_counts": counts_exact,
         "scenario_trace_and_benchmark_identity_exact": scenario_envelopes_exact,
         "same_four_gpus_fresh_sequential_servers_and_checkpoint_exact": common_provenance,
+        "checkpoint_bytes_hashed_before_and_after_full_matrix_exact": (
+            checkpoint_window_exact
+        ),
         "formal_server_start_order_k_s_s_k_s_k_k_s_exact": formal_order_exact,
         "preflight_selection_replayed_from_raw_and_frozen_before_formal": selection_exact,
         "preflight_candidates_change_only_declared_overlap_control": (preflight_controls_isolated),
@@ -3375,20 +4914,7 @@ def evaluate_rows(
             benchmark.get("m_a1_status") == "formal_fail_independent"
         ),
     }
-    report_checks = {
-        "open_loop_request_identity_retained_exactly_once": all(
-            identity_checks[scenario_id] for scenario_id in expected_sweep
-        ),
-        "open_loop_strict_streaming_successful_no_retry": all(
-            evidence_checks[scenario_id] for scenario_id in expected_sweep
-        ),
-        "open_loop_fixed_rate_schedule_and_drain_exact": all(
-            shape_checks[scenario_id] for scenario_id in expected_sweep
-        ),
-        "open_loop_graph_direct_nccl_witness_exact": all(
-            graph_witness_checks[scenario_id] for scenario_id in expected_sweep
-        ),
-    }
+    report_checks: dict[str, bool] = {}
     comparisons = {
         "paired_rounds": paired_rounds,
         "paired_median": {
@@ -3402,19 +4928,6 @@ def evaluate_rows(
                 _fraction_record(ttft_median) if ttft_median is not None else None
             ),
         },
-        "open_loop": {
-            arm: [
-                _measurement_metric(
-                    [
-                        row
-                        for row in scenarios[f"open-loop-{arm}"][1]
-                        if row["phase"] == "open_loop" and row["open_loop_point"] == point
-                    ]
-                )
-                for point in range(OPEN_LOOP_POINTS)
-            ]
-            for arm in ARMS
-        },
     }
     diagnostics = {
         "scenario_metrics": scenario_metrics,
@@ -3426,7 +4939,6 @@ def evaluate_rows(
             "warmups_excluded_from_metrics": True,
             "outlier_removal": False,
             "round_before_gate": False,
-            "open_loop_is_binding": False,
             "m_a1_status": "formal_fail_independent",
         },
         "sglang_limitations": [
@@ -3537,14 +5049,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prepare.add_argument("--output", type=Path, required=True)
 
+    checkpoint = subparsers.add_parser(
+        "capture-checkpoint",
+        help="hash the complete mounted checkpoint at one matrix boundary",
+    )
+    checkpoint.add_argument("--phase", choices=("start", "end"), required=True)
+    checkpoint.add_argument("--container", required=True)
+    checkpoint.add_argument("--source-root", type=Path, required=True)
+    checkpoint.add_argument("--output", type=Path, required=True)
+
+    capture = subparsers.add_parser(
+        "capture-provenance",
+        help="observe one already-running formal container and write strict provenance",
+    )
+    capture.add_argument("--arm", choices=ARMS, required=True)
+    capture.add_argument(
+        "--candidate",
+        choices=(*KAIRYU_PREFLIGHT_CANDIDATES, *SGLANG_PREFLIGHT_CANDIDATES),
+        required=True,
+    )
+    capture.add_argument("--container", required=True)
+    capture.add_argument("--server-generation-id", required=True)
+    capture.add_argument("--server-started-ns", type=int, required=True)
+    capture.add_argument("--model-volume", required=True)
+    capture.add_argument("--checkpoint-start", type=Path, required=True)
+    capture.add_argument("--source-root", type=Path)
+    capture.add_argument("--output", type=Path, required=True)
+
     run = subparsers.add_parser("run", help="measure one already-started fresh server")
-    run.add_argument("--phase", choices=("preflight", "formal", "open-loop"), required=True)
+    run.add_argument("--phase", choices=("preflight", "formal"), required=True)
     run.add_argument("--arm", choices=ARMS, required=True)
     run.add_argument(
         "--candidate", choices=(*KAIRYU_PREFLIGHT_CANDIDATES, *SGLANG_PREFLIGHT_CANDIDATES)
     )
     run.add_argument("--repeat", type=int, choices=range(REPEATS))
-    run.add_argument("--endpoint", required=True)
+    run.add_argument("--endpoint", choices=(FORMAL_ENDPOINT,), required=True)
     run.add_argument("--trace-bundle", type=Path, required=True)
     run.add_argument("--selection", type=Path)
     run.add_argument("--provenance", type=Path, required=True)
@@ -3562,7 +5101,8 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--selection-output", type=Path)
     assemble.add_argument("--selection", type=Path)
     assemble.add_argument("--raw", type=Path, action="append")
-    assemble.add_argument("--sweep-raw", type=Path, action="append")
+    assemble.add_argument("--checkpoint-start", type=Path)
+    assemble.add_argument("--checkpoint-end", type=Path)
     assemble.add_argument("--output-dir", type=Path)
     assemble.add_argument("--assert-gate", action="store_true")
 
@@ -3577,8 +5117,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv == [_CHECKPOINT_HELPER_COMMAND]:
+        checkpoint = ma1_capture._checkpoint_snapshot(Path(CHECKPOINT_ROOT))  # noqa: SLF001
+        print(canonical_json(checkpoint))
+        return 0
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     if args.command == "prepare":
         result = write_trace_bundle(
             args.output,
@@ -3591,6 +5136,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             "output": str(args.output),
             "sha256": sha256_file(args.output),
             "trace_sha256": result["trace"]["sha256"],
+        }
+    elif args.command == "capture-checkpoint":
+        result = capture_checkpoint(
+            args.output,
+            phase=args.phase,
+            container_name=args.container,
+            source_root=args.source_root,
+        )
+        output = {
+            "output": str(args.output),
+            "sha256": sha256_file(args.output),
+            "phase": result["phase"],
+            "checkpoint_sha256": result["checkpoint"]["sha256"],
+            "passed": True,
+        }
+    elif args.command == "capture-provenance":
+        result = capture_provenance(
+            args.output,
+            arm=args.arm,
+            candidate=args.candidate,
+            container_name=args.container,
+            server_generation_id=args.server_generation_id,
+            server_started_ns=args.server_started_ns,
+            model_volume=args.model_volume,
+            checkpoint_start_path=args.checkpoint_start,
+            source_root=args.source_root,
+        )
+        output = {
+            "output": str(args.output),
+            "sha256": sha256_file(args.output),
+            "arm": result["arm"],
+            "server_generation_id": result["server_generation_id"],
+            "passed": True,
         }
     elif args.command == "run":
         rows = asyncio.run(
@@ -3615,7 +5193,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.selection_output is None
                 or args.selection is not None
                 or args.raw
-                or args.sweep_raw
+                or args.checkpoint_start is not None
+                or args.checkpoint_end is not None
                 or args.output_dir is not None
                 or args.assert_gate
             ):
@@ -3627,18 +5206,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             if (
                 args.selection is None
                 or not args.raw
-                or not args.sweep_raw
+                or args.checkpoint_start is None
+                or args.checkpoint_end is None
                 or args.output_dir is None
                 or args.selection_output is not None
             ):
                 parser.error(
-                    "formal assemble requires --selection, --raw, --sweep-raw, and --output-dir"
+                    "formal assemble requires --selection, --raw, "
+                    "--checkpoint-start, --checkpoint-end, and --output-dir"
                 )
             rows = assemble_rows(
                 preflight_paths=args.preflight_raw,
                 formal_paths=args.raw,
-                sweep_paths=args.sweep_raw,
                 selection_path=args.selection,
+                checkpoint_start_path=args.checkpoint_start,
+                checkpoint_end_path=args.checkpoint_end,
             )
             output = write_artifact(args.output_dir, rows)
     elif args.command == "verify":

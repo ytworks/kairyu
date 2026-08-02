@@ -101,15 +101,6 @@ def _runtime(arm: str, candidate: str) -> dict[str, object]:
             if arm == "kairyu"
             else gate.SGLANG_MOE_RUNNER_BACKEND
         ),
-        "fp4_gemm_backend": (
-            gate.KAIRYU_FP4_GEMM_BACKEND
-            if arm == "kairyu"
-            else gate.SGLANG_FP4_GEMM_BACKEND
-        ),
-        "enable_alltoall": False,
-        "moe_block_count": gate.NUM_LAYERS,
-        "fallback_count": 0,
-        "post_moe_allreduce": False,
         "pipeline_depth": depth,
         "overlap_mode": candidate if arm == "sglang" else None,
         "prefill_cuda_graph": "disabled",
@@ -208,6 +199,138 @@ class _BackendsClient:
         return self.response
 
 
+def _checkpoint_capture(
+    phase: str,
+    *,
+    started_ns: int = 1,
+    completed_ns: int = 2,
+) -> dict[str, object]:
+    return gate.hashed_descriptor(
+        {
+            "schema_version": gate.CHECKPOINT_CAPTURE_SCHEMA_VERSION,
+            "type": "checkpoint_capture",
+            "phase": phase,
+            "capture_started_ns": started_ns,
+            "capture_completed_ns": completed_ns,
+            "capture_container": {
+                "id": ("a" if phase == "start" else "b") * 64,
+                "image_repo_digest": f"ghcr.io/ytworks/kairyu@sha256:{'c' * 64}",
+                "image_config_id": f"sha256:{'d' * 64}",
+                "source_mount": {
+                    "source": "/tmp/g4-ma3-source",
+                    "destination": gate.CAPTURE_SOURCE_ROOT,
+                    "read_only": True,
+                },
+                "model_mount": {
+                    "source": (
+                        "volume:kairyu-qwen3-235b-nvfp4/"
+                        f"{gate.MODEL_VOLUME_SUBPATH}"
+                    ),
+                    "destination": gate.CHECKPOINT_ROOT,
+                    "read_only": True,
+                },
+                "network_mode": "none",
+                "gpu_device_requests": [],
+                "resolved_argv": ["sleep", "infinity"],
+            },
+            "source": {
+                "repository": "https://github.com/ytworks/kairyu",
+                "commit": "e" * 40,
+                "clean": True,
+            },
+            "checkpoint_volume": {
+                "name": "kairyu-qwen3-235b-nvfp4",
+                "driver": "local",
+                "scope": "local",
+                "mountpoint": "/var/lib/docker/volumes/kairyu-qwen3-235b-nvfp4/_data",
+                "subpath": gate.MODEL_VOLUME_SUBPATH,
+                "rw_consumer_count": 0,
+            },
+            "checkpoint": gate.hashed_descriptor(gate.expected_checkpoint()),
+        }
+    )
+
+
+def _runtime_witness(arm: str, runtime: dict[str, object]) -> dict[str, object]:
+    if arm == "kairyu":
+        return {
+            "endpoint": "/backends",
+            "response": {
+                "role": "engine-host",
+                "engines": [
+                    {
+                        "model": gate.SERVED_MODEL_NAME,
+                        "engine_backend": "kairyu",
+                        "parallelism": "expert_parallel",
+                        "expert_parallel_size": gate.GPU_COUNT,
+                        "attention_data_parallel_size": gate.GPU_COUNT,
+                        "attention_tensor_parallel_size": 1,
+                        "attention_placement": "request_owned_data_parallel",
+                        "attention_output_placement": "replicated",
+                        "execution_mode": "request-owned-attention-dp",
+                        "pipeline_depth": runtime["pipeline_depth"],
+                        "decode_mode": "cuda_graph",
+                        "kv_cache_dtype": gate.KV_CACHE_DTYPE,
+                        "moe_dispatcher": gate.KAIRYU_MOE_RUNNER_BACKEND,
+                        "sampling_ownership": "request_owner",
+                        "kv_cache_ownership": "request_owner",
+                        "cuda_graph_decode": True,
+                        "cuda_graph_buckets": list(gate.KAIRYU_CUDA_GRAPH_BUCKETS),
+                        "cuda_graph_captures": 0,
+                        "cuda_graph_replays": 0,
+                        "cuda_graph_eager_fallbacks": 0,
+                        "moe_collective_transport": {
+                            "selected_backend": gate.KAIRYU_MOE_A2A_BACKEND,
+                            "direct_nccl_active": True,
+                        },
+                    }
+                ],
+            },
+        }
+    resolved = {
+        "served_model_name": gate.SERVED_MODEL_NAME,
+        "tp_size": gate.GPU_COUNT,
+        "dp_size": gate.GPU_COUNT,
+        "ep_size": gate.GPU_COUNT,
+        "enable_dp_attention": True,
+        "load_balance_method": "round_robin",
+        "dtype": "bfloat16",
+        "kv_cache_dtype": gate.KV_CACHE_DTYPE,
+        "fp4_gemm_runner_backend": gate.SGLANG_FP4_GEMM_BACKEND,
+        "moe_a2a_backend": gate.DEFAULT_SGLANG_MOE_A2A_BACKEND,
+        "moe_runner_backend": gate.SGLANG_MOE_RUNNER_BACKEND,
+        "page_size": gate.PAGE_SIZE,
+        "max_running_requests": gate.MAX_RUNNING_REQUESTS,
+        "max_total_tokens": gate.MAX_TOTAL_TOKENS_PER_OWNER,
+        "chunked_prefill_size": gate.RESOLVED_PREFILL_TOKENS_PER_OWNER,
+        "max_prefill_tokens": gate.SGLANG_MAX_PREFILL_TOKENS_PER_OWNER,
+        "schedule_policy": "fcfs",
+        "disable_radix_cache": False,
+        "speculative_algorithm": None,
+        "log_requests": False,
+        "log_level_http": "warning",
+        "enable_single_batch_overlap": False,
+        "enable_two_batch_overlap": False,
+    }
+    return {
+        "endpoint": "/server_info",
+        "response": {
+            "version": gate.SGLANG_VERSION,
+            "model_path": gate.SERVED_MODEL_NAME,
+            **resolved,
+            "max_total_num_tokens": gate.MAX_TOTAL_TOKENS_PER_OWNER,
+            "cuda_graph_config": {
+                "decode": {
+                    "backend": "full",
+                    "max_bs": gate.KAIRYU_CUDA_GRAPH_MAX_BATCH,
+                },
+                "prefill": {"backend": "disabled"},
+            },
+            "internal_states": [dict(resolved) for _ in range(gate.GPU_COUNT)],
+        },
+    }
+
+
 def _provenance(
     *, arm: str, candidate: str, ordinal: int, server_started_ns: int
 ) -> dict[str, object]:
@@ -249,7 +372,10 @@ def _provenance(
         ),
         "image_config_id": f"sha256:{'d' * 64 if sglang else 'c' * 64}",
         "model_mount": {
-            "source": gate.CHECKPOINT_ROOT,
+            "source": (
+                "volume:kairyu-qwen3-235b-nvfp4/"
+                f"{gate.MODEL_VOLUME_SUBPATH}"
+            ),
             "destination": gate.CHECKPOINT_ROOT,
             "read_only": True,
         },
@@ -258,6 +384,7 @@ def _provenance(
         "shm_size_bytes": 32 * 1024**3,
         "cap_add": ["SYS_NICE", "SYS_PTRACE"],
     }
+    runtime = _runtime(arm, candidate)
     return {
         "schema_version": gate.SCHEMA_VERSION,
         "arm": arm,
@@ -266,6 +393,15 @@ def _provenance(
         "container": container,
         "source": source,
         "checkpoint": gate.expected_checkpoint(),
+        "checkpoint_capture_start": _checkpoint_capture("start"),
+        "checkpoint_volume": {
+            "name": "kairyu-qwen3-235b-nvfp4",
+            "driver": "local",
+            "scope": "local",
+            "mountpoint": "/var/lib/docker/volumes/kairyu-qwen3-235b-nvfp4/_data",
+            "subpath": gate.MODEL_VOLUME_SUBPATH,
+            "rw_consumer_count": 0,
+        },
         "gpus": [
             {
                 "visible_index": visible,
@@ -278,8 +414,41 @@ def _provenance(
             for visible, physical in enumerate(gate.PHYSICAL_GPU_INDICES)
         ],
         "environment": environment,
-        "runtime": _runtime(arm, candidate),
+        "runtime": runtime,
+        "runtime_witness": _runtime_witness(arm, runtime),
     }
+
+
+def _live_observation(
+    provenance: dict[str, object],
+    *,
+    started_ns: int,
+    completed_ns: int,
+) -> dict[str, object]:
+    container = provenance["container"]
+    runtime = provenance["runtime"]
+    assert isinstance(container, dict) and isinstance(runtime, dict)
+    return gate.hashed_descriptor(
+        {
+            "schema_version": gate.LIVE_OBSERVATION_SCHEMA_VERSION,
+            "type": "live_observation_end",
+            "capture_started_ns": started_ns,
+            "capture_completed_ns": completed_ns,
+            "container": {
+                "id": container["id"],
+                "image_repo_digest": container["image_repo_digest"],
+                "image_platform_digest": container["image_platform_digest"],
+                "image_config_id": container["image_config_id"],
+                "model_mount": container["model_mount"],
+                "resolved_argv": runtime["resolved_argv"],
+            },
+            "source": provenance["source"],
+            "checkpoint_volume": provenance["checkpoint_volume"],
+            "gpus": provenance["gpus"],
+            "environment": provenance["environment"],
+            "runtime_witness": _runtime_witness(str(provenance["arm"]), runtime),
+        }
+    )
 
 
 def _success_row(
@@ -366,14 +535,13 @@ def _scenario_rows(
     )
     server_started_ns = base_ns + 100
     capture_start_ns = base_ns + 200
-    provenance = gate.hashed_descriptor(
-        _provenance(
-            arm=arm,
-            candidate=candidate,
-            ordinal=ordinal,
-            server_started_ns=server_started_ns,
-        )
+    provenance_value = _provenance(
+        arm=arm,
+        candidate=candidate,
+        ordinal=ordinal,
+        server_started_ns=server_started_ns,
     )
+    provenance = gate.hashed_descriptor(provenance_value)
     graph_replays_start = 100 + ordinal * 10
     start = {
         "type": "shard_start",
@@ -503,6 +671,8 @@ def _scenario_rows(
         ends = [int(row["timing_ns"]["end"]) for row in group_rows]
         measurement_groups.append({"group": group_number, "start": min(starts), "end": max(ends)})
         cursor = max(ends) + 100
+    live_observation_started_ns = cursor + 10
+    live_observation_completed_ns = cursor + 20
     capture_end_ns = cursor + 100
     rows.append(
         {
@@ -516,7 +686,11 @@ def _scenario_rows(
             "graph_warmup_request_count": gate.GRAPH_WARMUP_REQUESTS,
             "measurement_request_count": sum(len(group) for group in groups),
             "measurement_groups": measurement_groups,
-            "provenance_end": provenance,
+            "provenance_end": _live_observation(
+                provenance_value,
+                started_ns=live_observation_started_ns,
+                completed_ns=live_observation_completed_ns,
+            ),
             "kairyu_graph_witness_end": (
                 _graph_witness(replays=graph_replays_start + 1) if arm == "kairyu" else None
             ),
@@ -529,6 +703,12 @@ def _scenario_rows(
 @pytest.fixture(scope="module")
 def formal_artifact(tmp_path_factory: pytest.TempPathFactory) -> dict[str, object]:
     root = tmp_path_factory.mktemp("g4-ma3")
+    checkpoint_start_path = root / "checkpoint-start.json"
+    checkpoint_start = _checkpoint_capture("start")
+    checkpoint_start_path.write_text(
+        gate.canonical_json(checkpoint_start["value"]) + "\n",
+        encoding="utf-8",
+    )
     trace_path = root / "trace.json"
     bundle, trace_sha256 = _trace_bundle(trace_path)
     preflight_paths: list[Path] = []
@@ -587,32 +767,22 @@ def formal_artifact(tmp_path_factory: pytest.TempPathFactory) -> dict[str, objec
         formal_paths.append(path)
         base_ns = end_ns + 1_000
         ordinal += 1
-    sweep_paths: list[Path] = []
-    for arm in gate.ARMS:
-        candidate = selection_value["selected"][arm]
-        rows, end_ns = _scenario_rows(
-            bundle=bundle,
-            trace_bundle_sha256=trace_sha256,
-            phase="open-loop",
-            arm=arm,
-            candidate=candidate,
-            repeat=None,
-            selection=selection,
-            ordinal=ordinal,
-            base_ns=base_ns,
-            measurement_duration_ns=100_000,
-            measurement_ttft_ns=10_000,
-        )
-        path = root / f"open-loop-{arm}.jsonl"
-        gate.write_shard(path, rows)
-        sweep_paths.append(path)
-        base_ns = end_ns + 1_000
-        ordinal += 1
+    checkpoint_end_path = root / "checkpoint-end.json"
+    checkpoint_end = _checkpoint_capture(
+        "end",
+        started_ns=base_ns,
+        completed_ns=base_ns + 1,
+    )
+    checkpoint_end_path.write_text(
+        gate.canonical_json(checkpoint_end["value"]) + "\n",
+        encoding="utf-8",
+    )
     rows = gate.assemble_rows(
         preflight_paths=preflight_paths,
         formal_paths=formal_paths,
-        sweep_paths=sweep_paths,
         selection_path=selection_path,
+        checkpoint_start_path=checkpoint_start_path,
+        checkpoint_end_path=checkpoint_end_path,
     )
     output_dir = root / "artifact"
     manifest = gate.write_artifact(output_dir, rows)
@@ -637,7 +807,8 @@ def test_exact_sglang_v0516_identity_and_working_argv() -> None:
         "--moe-runner-backend flashinfer_cutlass --page-size 16 "
         "--max-running-requests 256 --max-total-tokens 16384 "
         "--chunked-prefill-size 8192 --max-prefill-tokens 2048 "
-        "--schedule-policy fcfs --cuda-graph-backend-prefill disabled"
+        "--schedule-policy fcfs --log-level-http warning "
+        "--cuda-graph-max-bs-decode 32 --cuda-graph-backend-prefill disabled"
     ).split()
     assert gate.expected_sglang_argv(overlap_mode="default") == expected
     with pytest.raises(ValueError, match="pinned to 'none'"):
@@ -712,9 +883,7 @@ def test_runtime_pins_kairyu_graph_and_matched_cache_capacity() -> None:
     for field, invalid in (
         ("moe_a2a_backend", "torch.distributed:nccl"),
         ("moe_runner_backend", gate.SGLANG_MOE_RUNNER_BACKEND),
-        ("fp4_gemm_backend", "torch"),
-        ("enable_alltoall", True),
-        ("post_moe_allreduce", True),
+        ("scheduler_policy", "priority"),
     ):
         changed = copy.deepcopy(kairyu)
         changed[field] = invalid
@@ -723,6 +892,171 @@ def test_runtime_pins_kairyu_graph_and_matched_cache_capacity() -> None:
             arm="kairyu",
             candidate="depth-5",
             moe_a2a_backend="none",
+        )
+
+
+@pytest.mark.parametrize(
+    ("arm", "candidate", "changed_field"),
+    (
+        ("kairyu", "depth-5", "pipeline_depth"),
+        ("sglang", "default", "chunked_prefill_size"),
+    ),
+)
+def test_live_runtime_witness_must_match_static_runtime(
+    arm: str,
+    candidate: str,
+    changed_field: str,
+) -> None:
+    runtime = _runtime(arm, candidate)
+    witness = _runtime_witness(arm, runtime)
+    assert gate._runtime_witness_valid(witness, arm=arm, runtime=runtime)
+
+    changed = copy.deepcopy(witness)
+    response = changed["response"]
+    assert isinstance(response, dict)
+    if arm == "kairyu":
+        engines = response["engines"]
+        assert isinstance(engines, list) and isinstance(engines[0], dict)
+        engines[0][changed_field] = 4
+    else:
+        response[changed_field] = gate.RESOLVED_PREFILL_TOKENS_PER_OWNER + 1
+    assert not gate._runtime_witness_valid(changed, arm=arm, runtime=runtime)
+
+
+def test_capture_checkpoint_binds_running_container_volume_source_and_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    output = tmp_path / "checkpoint-start.json"
+    expected = gate.expected_checkpoint()
+    container_id = "1" * 64
+    image_config_id = f"sha256:{'2' * 64}"
+    image_repo_digest = f"ghcr.io/ytworks/kairyu@sha256:{'3' * 64}"
+    model_volume = "kairyu-qwen3-235b-nvfp4"
+    container = {
+        "Id": container_id,
+        "Image": image_config_id,
+        "Path": "sleep",
+        "Args": ["infinity"],
+        "State": {"Running": True},
+        "Config": {"Image": image_repo_digest, "WorkingDir": gate.CAPTURE_SOURCE_ROOT},
+        "HostConfig": {
+            "NetworkMode": "none",
+            "DeviceRequests": None,
+            "PortBindings": None,
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": str(source_root.resolve()),
+                    "Target": gate.CAPTURE_SOURCE_ROOT,
+                    "ReadOnly": True,
+                },
+                {
+                    "Type": "volume",
+                    "Source": model_volume,
+                    "Target": gate.CHECKPOINT_ROOT,
+                    "ReadOnly": True,
+                    "VolumeOptions": {"Subpath": gate.MODEL_VOLUME_SUBPATH},
+                },
+            ]
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": str(source_root.resolve()),
+                "Destination": gate.CAPTURE_SOURCE_ROOT,
+                "RW": False,
+            },
+            {
+                "Type": "volume",
+                "Name": model_volume,
+                "Destination": gate.CHECKPOINT_ROOT,
+                "RW": False,
+            },
+        ],
+    }
+    helper_checkpoint: object = expected
+
+    def fake_capture(command: object) -> str:
+        nonlocal helper_checkpoint
+        observed = tuple(command)
+        if observed == ("docker", "inspect", "checkpoint-capture"):
+            return json.dumps([container])
+        if observed == ("docker", "image", "inspect", image_repo_digest):
+            return json.dumps(
+                [{"Id": image_config_id, "RepoDigests": [image_repo_digest]}]
+            )
+        if observed == ("git", "-C", str(source_root.resolve()), "rev-parse", "HEAD"):
+            return "e" * 40 + "\n"
+        if observed[:4] == ("git", "-C", str(source_root.resolve()), "status"):
+            return ""
+        if observed[:4] == ("git", "-C", str(source_root.resolve()), "ls-files"):
+            return (
+                "bench/g4_ma1_qwen3_235b_nvfp4_capture.py\n"
+                "bench/g4_ma3_sglang_bench.py\n"
+            )
+        if observed == ("docker", "volume", "inspect", model_volume):
+            return json.dumps(
+                [
+                    {
+                        "Name": model_volume,
+                        "Driver": "local",
+                        "Scope": "local",
+                        "Mountpoint": f"/var/lib/docker/volumes/{model_volume}/_data",
+                    }
+                ]
+            )
+        if observed == (
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            f"volume={model_volume}",
+        ):
+            return container_id + "\n"
+        if observed == ("docker", "inspect", container_id):
+            return json.dumps([container])
+        if observed == (
+            "docker",
+            "exec",
+            container_id,
+            gate.CAPTURE_PYTHON,
+            gate.CAPTURE_HELPER,
+            gate._CHECKPOINT_HELPER_COMMAND,
+        ):
+            return gate.canonical_json(helper_checkpoint) + "\n"
+        raise AssertionError(f"unexpected checkpoint observation: {observed!r}")
+
+    timestamps = iter((10, 20))
+    monkeypatch.setattr(gate.time, "perf_counter_ns", lambda: next(timestamps))
+    monkeypatch.setattr(gate, "_capture_command", fake_capture)
+
+    captured = gate.capture_checkpoint(
+        output,
+        phase="start",
+        container_name="checkpoint-capture",
+        source_root=source_root,
+    )
+    assert captured["checkpoint"] == gate.hashed_descriptor(expected)
+    assert captured["capture_container"]["model_mount"]["source"] == (
+        f"volume:{model_volume}/{gate.MODEL_VOLUME_SUBPATH}"
+    )
+    assert gate.load_checkpoint_capture(output, phase="start")["value"] == captured
+
+    changed = copy.deepcopy(expected)
+    changed["config_sha256"] = "0" * 64
+    helper_checkpoint = changed
+    timestamps = iter((30, 40))
+    with pytest.raises(gate.GateEvidenceError, match="differs from the pinned"):
+        gate.capture_checkpoint(
+            tmp_path / "checkpoint-end.json",
+            phase="end",
+            container_name="checkpoint-capture",
+            source_root=source_root,
         )
 
 
@@ -782,12 +1116,41 @@ def test_full_raw_replay_passes_exact_boundary(formal_artifact: dict[str, object
     assert gate._fraction_from_record(medians["ttft_p99_kairyu_over_sglang"]) == 1
 
 
-def test_preflight_winner_and_report_rates_are_raw_derived(
+@pytest.mark.parametrize("tamper", ("endpoint", "end-container", "end-gpu-exclusive"))
+def test_raw_replay_rejects_endpoint_or_end_live_observation_tamper(
+    formal_artifact: dict[str, object],
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    output_dir = formal_artifact["output_dir"]
+    assert isinstance(output_dir, Path)
+    rows = copy.deepcopy(gate._read_jsonl(output_dir / gate.RAW_NAME))
+    start = next(row for row in rows if row.get("type") == "scenario_start")
+    end = next(
+        row
+        for row in rows
+        if row.get("type") == "scenario_end" and row.get("scenario_id") == start["scenario_id"]
+    )
+    if tamper == "endpoint":
+        start["endpoint"] = "http://127.0.0.1:30001"
+    else:
+        descriptor = end["provenance_end"]
+        assert isinstance(descriptor, dict) and isinstance(descriptor["value"], dict)
+        changed = copy.deepcopy(descriptor["value"])
+        if tamper == "end-container":
+            changed["container"]["id"] = "f" * 64
+        else:
+            changed["environment"]["gpu_jobs_exclusive"] = False
+        end["provenance_end"] = gate.hashed_descriptor(changed)
+    with pytest.raises(gate.GateEvidenceError):
+        gate.write_artifact(tmp_path / tamper, rows)
+
+
+def test_preflight_winner_is_raw_derived(
     formal_artifact: dict[str, object],
 ) -> None:
     selection = formal_artifact["selection"]
     assert selection["selected"] == {"kairyu": "depth-5", "sglang": "default"}
-    assert selection["open_loop_rates_millirps"] == sorted(selection["open_loop_rates_millirps"])
     assert len(selection["preflight_raw_sha256"]) == 2
 
 
@@ -822,6 +1185,80 @@ def test_binding_retry_is_not_excluded(formal_artifact: dict[str, object], tmp_p
     assert (
         manifest["checks"]["binding"][
             "strict_streaming_binding_requests_all_successful_exactly_once_no_retry"
+        ]
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "end-checkpoint",
+        "end-source",
+        "end-volume",
+        "generation-start",
+        "end-timeline",
+    ),
+)
+def test_checkpoint_matrix_tamper_fails_raw_replay_binding(
+    formal_artifact: dict[str, object],
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    output_dir = formal_artifact["output_dir"]
+    assert isinstance(output_dir, Path)
+    rows = copy.deepcopy(gate._read_jsonl(output_dir / gate.RAW_NAME))
+    if tamper == "end-checkpoint":
+        checkpoint_end = rows[-1]["checkpoint_end"]
+        assert isinstance(checkpoint_end, dict)
+        checkpoint = checkpoint_end["value"]["checkpoint"]
+        assert isinstance(checkpoint, dict) and isinstance(checkpoint["value"], dict)
+        checkpoint["value"]["config_sha256"] = "0" * 64
+    elif tamper in {"end-source", "end-volume"}:
+        checkpoint_end = rows[-1]["checkpoint_end"]
+        assert isinstance(checkpoint_end, dict) and isinstance(checkpoint_end["value"], dict)
+        changed = copy.deepcopy(checkpoint_end["value"])
+        if tamper == "end-source":
+            changed["source"]["commit"] = "f" * 40
+        else:
+            changed["checkpoint_volume"]["name"] = "different-model-volume"
+            changed["capture_container"]["model_mount"]["source"] = (
+                f"volume:different-model-volume/{gate.MODEL_VOLUME_SUBPATH}"
+            )
+        rows[-1]["checkpoint_end"] = gate.hashed_descriptor(changed)
+    elif tamper == "generation-start":
+        start = next(
+            row
+            for row in rows
+            if row.get("type") == "scenario_start"
+            and row.get("phase") == "formal"
+            and row.get("arm") == "kairyu"
+        )
+        provenance = start["provenance_start"]
+        assert isinstance(provenance, dict) and isinstance(provenance["value"], dict)
+        changed = copy.deepcopy(provenance["value"])
+        changed["checkpoint_capture_start"] = _checkpoint_capture(
+            "start", started_ns=1, completed_ns=3
+        )
+        descriptor = gate.hashed_descriptor(changed)
+        start["provenance_start"] = descriptor
+    else:
+        latest_capture_end = max(
+            int(row["capture_end_ns"])
+            for row in rows
+            if row.get("type") == "scenario_end"
+        )
+        checkpoint_end = rows[-1]["checkpoint_end"]
+        assert isinstance(checkpoint_end, dict) and isinstance(checkpoint_end["value"], dict)
+        changed = copy.deepcopy(checkpoint_end["value"])
+        changed["capture_started_ns"] = latest_capture_end
+        rows[-1]["checkpoint_end"] = gate.hashed_descriptor(changed)
+
+    manifest = gate.write_artifact(tmp_path / tamper, rows)
+    assert manifest["passed"] is False
+    assert (
+        manifest["checks"]["binding"][
+            "checkpoint_bytes_hashed_before_and_after_full_matrix_exact"
         ]
         is False
     )
@@ -905,7 +1342,6 @@ def test_unknown_raw_request_field_fails_closed(
         "request-timing",
         "burst-release",
         "graph-release",
-        "scheduled-start",
         "measurement-group",
     ),
 )
@@ -917,12 +1353,11 @@ def test_scenario_timestamps_must_belong_to_the_capture_interval(
     output_dir = formal_artifact["output_dir"]
     assert isinstance(output_dir, Path)
     rows = copy.deepcopy(gate._read_jsonl(output_dir / gate.RAW_NAME))
-    phase = "open-loop" if tamper == "scheduled-start" else "formal"
     start = next(
         row
         for row in rows
         if row.get("type") == "scenario_start"
-        and row.get("phase") == phase
+        and row.get("phase") == "formal"
         and row.get("arm") == "kairyu"
     )
     capture_start = start["capture_start_ns"]
@@ -947,7 +1382,6 @@ def test_scenario_timestamps_must_belong_to_the_capture_interval(
         field = {
             "burst-release": "burst_release_ns",
             "graph-release": "graph_release_ns",
-            "scheduled-start": "scheduled_start_ns",
         }[tamper]
         request = next(row for row in scenario_rows if field in row)
         request[field] = capture_start - 1
@@ -955,26 +1389,343 @@ def test_scenario_timestamps_must_belong_to_the_capture_interval(
         gate.write_artifact(tmp_path / tamper, rows)
 
 
-def test_open_loop_failure_remains_report_only(
-    formal_artifact: dict[str, object], tmp_path: Path
+def _mock_capture_observations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    arm: str,
+    foreign_pid: bool = False,
+    dirty_source: bool = False,
+    rw_volume_consumer: bool = False,
+    model_subpath: str = gate.MODEL_VOLUME_SUBPATH,
+) -> tuple[Path | None, Path, Path]:
+    container_name = f"formal-{arm}"
+    model_volume = "kairyu-qwen3-235b-nvfp4"
+    checkpoint_start_path = tmp_path / "checkpoint-start.json"
+    checkpoint_start_path.write_text(
+        gate.canonical_json(_checkpoint_capture("start")["value"]) + "\n",
+        encoding="utf-8",
+    )
+    source_root = tmp_path / "source" if arm == "kairyu" else None
+    if source_root is not None:
+        source_root.mkdir()
+    commit = "e" * 40
+    config_id = f"sha256:{'b' * 64 if arm == 'kairyu' else 'c' * 64}"
+    repo_digest = (
+        f"127.0.0.1:5168/kairyu-g4-ma3@sha256:{'a' * 64}"
+        if arm == "kairyu"
+        else gate.SGLANG_IMAGE_REPO_DIGEST
+    )
+    env = ["CUDA_VISIBLE_DEVICES=0,1,2,3"]
+    mounts: list[dict[str, object]] = [
+        {
+            "Type": "volume",
+            "Name": model_volume,
+            "Source": f"/var/lib/docker/volumes/{model_volume}/_data",
+            "Destination": gate.CHECKPOINT_ROOT,
+            "RW": False,
+        }
+    ]
+    if source_root is not None:
+        env.extend(
+            [
+                "PYTHONPATH=/workspace",
+                "GIT_CONFIG_COUNT=1",
+                "GIT_CONFIG_KEY_0=safe.directory",
+                "GIT_CONFIG_VALUE_0=/workspace",
+            ]
+        )
+        mounts.append(
+            {
+                "Type": "bind",
+                "Source": str(source_root.resolve()),
+                "Destination": "/workspace",
+                "RW": False,
+            }
+        )
+    resolved = (
+        [
+            "/app/.venv/bin/python",
+            "/workspace/bench/g4_ma3_kairyu_server.py",
+            "--pipeline-depth",
+            "5",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "30000",
+        ]
+        if arm == "kairyu"
+        else gate.expected_sglang_argv(overlap_mode="default")
+    )
+    container = {
+        "Id": "1" * 64,
+        "Image": config_id,
+        "Path": resolved[0],
+        "Args": resolved[1:],
+        "State": {"Running": True},
+        "Config": {
+            "Image": repo_digest,
+            "Env": env,
+            "WorkingDir": "/workspace" if arm == "kairyu" else "/sgl-workspace",
+        },
+        "HostConfig": {
+            "IpcMode": "host",
+            "ShmSize": 32 * 1024**3,
+            "CapAdd": ["SYS_NICE", "SYS_PTRACE"],
+            "DeviceRequests": [
+                {
+                    "Driver": "nvidia",
+                    "DeviceIDs": ["4", "5", "6", "7"],
+                    "Capabilities": [["gpu"]],
+                }
+            ],
+            "PortBindings": {
+                "30000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "30000"}]
+            },
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Source": model_volume,
+                    "Target": gate.CHECKPOINT_ROOT,
+                    "ReadOnly": True,
+                    "VolumeOptions": {"Subpath": model_subpath},
+                }
+            ],
+        },
+        "Mounts": mounts,
+    }
+    image = {
+        "Id": config_id,
+        "Os": "linux",
+        "Architecture": "amd64",
+        "RepoDigests": [repo_digest],
+        "Config": {
+            "Labels": (
+                {"org.opencontainers.image.revision": commit}
+                if arm == "kairyu"
+                else {}
+            )
+        },
+    }
+    rw_consumer = copy.deepcopy(container)
+    rw_consumer["Id"] = "2" * 64
+    rw_consumer["Mounts"][0]["RW"] = True
+    rw_consumer["HostConfig"]["Mounts"][0]["ReadOnly"] = False
+    host_rows = [
+        f"{physical}, GPU-formal-{physical}, 00000000:{physical:02X}:00.0, "
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84, 97887"
+        for physical in gate.PHYSICAL_GPU_INDICES
+    ]
+    container_rows = [
+        f"{visible}, GPU-formal-{physical}, 00000000:{physical:02X}:00.0, "
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887"
+        for visible, physical in enumerate(gate.PHYSICAL_GPU_INDICES)
+    ]
+    pids = [100, 101, 102, 103]
+    app_rows = [
+        f"GPU-formal-{physical}, {999 if foreign_pid and visible == 0 else pids[visible]}"
+        for visible, physical in enumerate(gate.PHYSICAL_GPU_INDICES)
+    ]
+    versions = {
+        "cuda": gate.SGLANG_CUDA_VERSION,
+        "nccl": [2, 29, 7] if arm == "kairyu" else [2, 28, 9],
+        "torch": "2.12.1+cu130" if arm == "kairyu" else gate.SGLANG_TORCH_VERSION,
+        "flashinfer": gate.SGLANG_FLASHINFER_VERSION,
+        "engine": "0.1.0" if arm == "kairyu" else gate.SGLANG_VERSION,
+    }
+
+    def fake_capture(command: object) -> str:
+        observed = tuple(command)
+        if observed == ("docker", "inspect", container_name):
+            return json.dumps([container])
+        if observed == ("docker", "image", "inspect", repo_digest):
+            return json.dumps([image])
+        if observed == ("docker", "volume", "inspect", model_volume):
+            return json.dumps(
+                [
+                    {
+                        "Name": model_volume,
+                        "Driver": "local",
+                        "Scope": "local",
+                        "Mountpoint": f"/var/lib/docker/volumes/{model_volume}/_data",
+                    }
+                ]
+            )
+        if observed == (
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            f"volume={model_volume}",
+        ):
+            ids = [str(container["Id"])]
+            if rw_volume_consumer:
+                ids.append(str(rw_consumer["Id"]))
+            return "\n".join(ids) + "\n"
+        expected_consumer_ids = [str(container["Id"])]
+        expected_consumers = [container]
+        if rw_volume_consumer:
+            expected_consumer_ids.append(str(rw_consumer["Id"]))
+            expected_consumers.append(rw_consumer)
+        if observed == ("docker", "inspect", *expected_consumer_ids):
+            return json.dumps(expected_consumers)
+        if observed[:2] == ("docker", "exec") and observed[2] in {
+            container_name,
+            str(container["Id"]),
+        }:
+            if "nvidia-smi" in observed:
+                return "\n".join(container_rows) + "\n"
+            return json.dumps(versions) + "\n"
+        if observed in {
+            ("docker", "top", container_name, "-eo", "pid"),
+            ("docker", "top", str(container["Id"]), "-eo", "pid"),
+        }:
+            return "PID\n" + "\n".join(str(pid) for pid in pids) + "\n"
+        if observed[:2] == (
+            "nvidia-smi",
+            "--query-gpu=index,uuid,pci.bus_id,name,driver_version,memory.total",
+        ):
+            return "\n".join(host_rows) + "\n"
+        if observed[:2] == ("nvidia-smi", "--query-compute-apps=gpu_uuid,pid"):
+            return "\n".join(app_rows) + "\n"
+        if observed[:3] == ("git", "-C", str(source_root.resolve())):
+            if observed[3:5] == ("rev-parse", "HEAD"):
+                return commit + "\n"
+            if observed[3] == "status":
+                return " M kairyu/models/moe_parallel.py\n" if dirty_source else ""
+            if observed[3] == "ls-files":
+                return "bench/g4_ma3_kairyu_server.py\n"
+        raise AssertionError(f"unexpected provenance observation: {observed!r}")
+
+    monkeypatch.setattr(gate, "_capture_command", fake_capture)
+    candidate = "depth-5" if arm == "kairyu" else "default"
+    monkeypatch.setattr(
+        gate,
+        "_capture_runtime_witness",
+        lambda observed_arm: _runtime_witness(observed_arm, _runtime(arm, candidate)),
+    )
+    monkeypatch.setattr(gate.socket, "gethostname", lambda: "formal-host")
+    return source_root, checkpoint_start_path, tmp_path / f"{arm}-provenance.json"
+
+
+@pytest.mark.parametrize(("arm", "candidate"), (("kairyu", "depth-5"), ("sglang", "default")))
+def test_capture_provenance_uses_live_container_gpu_and_version_observations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    arm: str,
+    candidate: str,
 ) -> None:
-    output_dir = formal_artifact["output_dir"]
-    assert isinstance(output_dir, Path)
-    rows = copy.deepcopy(gate._read_jsonl(output_dir / gate.RAW_NAME))
-    request = next(
-        row for row in rows if row.get("type") == "request" and row.get("phase") == "open_loop"
+    source_root, checkpoint_start, output = _mock_capture_observations(
+        monkeypatch,
+        tmp_path,
+        arm=arm,
     )
-    request["attempts"] = 2
-    manifest = gate.write_artifact(tmp_path / "report-only", rows)
-    assert manifest["passed"] is True
-    assert (
-        manifest["checks"]["report_only"]["open_loop_strict_streaming_successful_no_retry"] is False
+    captured = gate.capture_provenance(
+        output,
+        arm=arm,
+        candidate=candidate,
+        container_name=f"formal-{arm}",
+        server_generation_id=f"generation-{arm}",
+        server_started_ns=123_456,
+        model_volume="kairyu-qwen3-235b-nvfp4",
+        checkpoint_start_path=checkpoint_start,
+        source_root=source_root,
     )
+    assert captured["environment"]["host_id"] == "formal-host"
+    assert captured["container"]["model_mount"]["source"].endswith(
+        f"/{gate.MODEL_VOLUME_SUBPATH}"
+    )
+    assert [row["physical_index"] for row in captured["gpus"]] == [4, 5, 6, 7]
+    assert gate.load_provenance(
+        output,
+        arm=arm,
+        candidate=candidate,
+        moe_a2a_backend=gate.DEFAULT_SGLANG_MOE_A2A_BACKEND,
+    )["value"] == captured
+    live_end = gate.capture_live_observation(captured)
+    assert live_end["container"]["id"] == captured["container"]["id"]
+    assert live_end["checkpoint_volume"] == captured["checkpoint_volume"]
+    assert gate._live_observation_value_valid(live_end, provenance=captured)
+
+
+@pytest.mark.parametrize(
+    ("capture_change", "message"),
+    (
+        ({"foreign_pid": True}, "foreign compute process"),
+        ({"dirty_source": True}, "clean tracked commit"),
+        ({"rw_volume_consumer": True}, "read-write consumer"),
+        ({"model_subpath": "wrong"}, "volume-subpath"),
+    ),
+)
+def test_capture_provenance_rejects_unowned_gpu_dirty_source_or_wrong_subpath(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capture_change: dict[str, object],
+    message: str,
+) -> None:
+    source_root, checkpoint_start, output = _mock_capture_observations(
+        monkeypatch,
+        tmp_path,
+        arm="kairyu",
+        **capture_change,
+    )
+    with pytest.raises(gate.GateEvidenceError, match=message):
+        gate.capture_provenance(
+            output,
+            arm="kairyu",
+            candidate="depth-5",
+            container_name="formal-kairyu",
+            server_generation_id="generation-kairyu",
+                server_started_ns=123_456,
+                model_volume="kairyu-qwen3-235b-nvfp4",
+                checkpoint_start_path=checkpoint_start,
+                source_root=source_root,
+        )
 
 
 def test_cli_surface_is_fail_closed_and_complete() -> None:
     parser = gate.build_parser()
     choices = parser._subparsers._group_actions[0].choices
-    assert set(choices) == {"prepare", "run", "assemble", "verify", "replay"}
+    assert set(choices) == {
+        "prepare",
+        "capture-checkpoint",
+        "capture-provenance",
+        "run",
+        "assemble",
+        "verify",
+        "replay",
+    }
+    run_phase = next(action for action in choices["run"]._actions if action.dest == "phase")
+    assert run_phase.choices == ("preflight", "formal")
+    run_endpoint = next(action for action in choices["run"]._actions if action.dest == "endpoint")
+    assert run_endpoint.choices == (gate.FORMAL_ENDPOINT,)
+    checkpoint_destinations = {action.dest for action in choices["capture-checkpoint"]._actions}
+    assert {"container", "source_root", "phase", "output"} <= checkpoint_destinations
+    assert "model_path" not in checkpoint_destinations
+    assert "model_volume" not in checkpoint_destinations
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--phase", "formal"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "run",
+                "--phase",
+                "formal",
+                "--endpoint",
+                "http://127.0.0.1:30001",
+            ]
+        )
+
+
+def test_formal_artifact_contains_only_ten_required_generations(
+    formal_artifact: dict[str, object],
+) -> None:
+    output_dir = formal_artifact["output_dir"]
+    assert isinstance(output_dir, Path)
+    rows = gate._read_jsonl(output_dir / gate.RAW_NAME)
+    starts = [row for row in rows if row.get("type") == "scenario_start"]
+    assert len(starts) == 10
+    assert {row["phase"] for row in starts} == {"preflight", "formal"}
+    assert not any(row.get("phase") in {"open-loop", "open_loop"} for row in rows)

@@ -319,7 +319,8 @@ cache tokens, packed-QKV/native-NVFP4 execution, direct NCCL, and CUDA-graph
 limits are fixed, while its sole performance choice is the already-selected
 pipeline depth 5. SGLang is pinned by source commit and immutable image digest
 with TP4/DP4/EP4, `--enable-dp-attention`, FlashInfer CUTLASS FP4/MoE, no MoE
-A2A, BF16 KV, and 16,384 cache tokens per owner.
+A2A, BF16 KV, 16,384 cache tokens per owner, HTTP logging fixed at `warning`,
+decode CUDA-graph batch size capped at 32, and prefill CUDA graph disabled.
 
 `prepare` hashes the exact seed-0 ShareGPT dataset, Qwen tokenizer, 128-request
 trace, and a disjoint 348-request graph-warmup trace. Every scenario first
@@ -331,23 +332,34 @@ Kairyu shard, `/backends` must show direct NCCL active, all seven buckets
 captured, zero eager fallback, no capture/fallback change across traffic, and
 a strictly increased replay count.
 
-The retained preflight contains one fixed candidate per arm and freezes its
-raw hashes before formal traffic. The eight binding formal shards use fresh,
-strictly sequential servers in K/S, S/K, S/K, K/S order. Each releases the
-same 128 prompts at concurrency 128 and requires exactly 128 streamed output
-tokens per request. Throughput is successful completion tokens divided by the
+The complete matrix is exactly ten fresh, strictly sequential server
+generations: one fixed-candidate preflight per arm, then eight binding formal
+shards in K/S, S/K, S/K, K/S order. The preflights freeze their raw hashes
+before formal traffic. Each formal shard releases the same 128 prompts at
+concurrency 128 and requires exactly 128 streamed output tokens per request.
+Throughput is successful completion tokens divided by the
 first-start-to-last-terminal span and four GPUs; TTFT p99 is nearest-rank over
 all 128 requests. The verdict is the exact median of four paired K/S ratios,
 requiring throughput at least 1 and TTFT at most 1, with no retry/failure
-exclusion, outlier removal, or round-before-gate. Two additional shards retain
-a five-point, 32-request-per-point open-loop sweep derived from SGLang's
-preflight capacity; it is report-only and cannot alter either performance
-verdict.
+exclusion, outlier removal, or round-before-gate. No additional measurement
+generation is part of the artifact.
 
-Each shard binds the exact checkpoint, trace/selection, clean source, image
-RepoDigest/platform/config identities, fresh container generation, read-only
-model mount, physical GPUs 4–7, runtime argv and package versions, and stable
-start/end provenance. Assembly writes authoritative
+The operator hashes the complete checkpoint once before the ten-generation
+matrix and once after it; assembly requires identical start/end descriptors
+and binds every shard to the start capture. Each shard also binds the
+trace/selection, clean source, image RepoDigest/platform/config identities,
+fresh container generation, read-only model mount with no read-write volume
+consumer, physical GPUs 4–7, runtime argv and package versions, and a live
+`/backends` or `/server_info` response. After traffic it re-observes those
+container, source, runtime, GPU-process, and volume-consumer facts while the
+same server is still running and retains that end witness. The
+`capture-provenance --checkpoint-start` command derives that record from the
+running container, Docker image/mount/resource state, clean source,
+host/container GPU inventories and process ownership, and the live runtime
+endpoint; handwritten declarations are not accepted as formal procedure. All
+operator commands use the detached, clean `SOURCE_ROOT`, never the mutable
+working-checkout script. Formal assembly requires both `--checkpoint-start`
+and `--checkpoint-end`. Assembly writes authoritative
 `g4-ma3-sglang-raw.jsonl` plus derived
 `g4-ma3-sglang-manifest.json`. `verify` checks the stored manifest against a
 fresh raw replay; `replay` ignores the manifest entirely. The report always

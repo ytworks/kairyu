@@ -62,6 +62,7 @@ def test_retained_cross_wrapper_imports_are_an_exact_allowlist() -> None:
         "bench.g4_ma3_sglang_bench": (
             "bench.g2_a6_vllm_bench",
             "bench.g4_ma1_qwen3_235b_nvfp4_bench",
+            "bench.g4_ma1_qwen3_235b_nvfp4_capture",
         ),
         "bench.gate_a1": ("bench.parity_tp",),
         "bench.gate_a2": ("bench.parity_hf", "bench.parity_tp"),

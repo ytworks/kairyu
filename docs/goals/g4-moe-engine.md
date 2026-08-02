@@ -67,18 +67,24 @@ and matches four request owners, EP4, BF16 KV, FCFS, aggregate 65,536-token
 cache capacity, and the fixed 128-request ShareGPT workload. Kairyu's internal
 TP1 replicated-attention projection layout and SGLang's recorded
 TP4/DP4/EP4 layout remain explicitly visible rather than being relabelled as
-identical.
+identical. SGLang additionally fixes `--log-level-http warning`,
+`--cuda-graph-max-bs-decode 32`, and disabled prefill CUDA graph.
 
-The binding operator uses four fresh-server pairs in K/S, S/K, S/K, K/S order
-and gates the exact median of the four ratios: Kairyu completion tok/s/GPU over
+The binding operator uses exactly ten fresh sequential generations: one fixed
+preflight per arm followed by four formal pairs in K/S, S/K, S/K, K/S order.
+It gates the exact median of the four ratios: Kairyu completion tok/s/GPU over
 SGLang must be at least 1, while Kairyu/SGLang TTFT p99 must be at most 1.
 Failures and retries are retained; there is no outlier removal, rounding before
-the gate, or exclusion. A separately retained five-point open-loop sweep is
-report-only. The Kairyu hardware load/graph smoke does not satisfy M-A3 by
-itself. The formal metrics, artifact path, and PASS/FAIL verdict are explicitly
-pending until the complete clean-commit raw JSONL passes both manifest
-verification and raw-only replay. The exact procedure and provenance contract
-are in `docs/gpu-runbook.md` §9.13.
+the gate, or exclusion. The complete checkpoint is hashed before and after the
+matrix, and every generation binds the start capture, a read-only model volume
+with no read-write consumer, and live runtime evidence. All operator commands
+execute the detached clean `SOURCE_ROOT`; provenance receives
+`--checkpoint-start`, while assembly requires both checkpoint boundaries. The
+Kairyu hardware load/graph smoke does not satisfy M-A3 by itself. The formal
+metrics, artifact path, and PASS/FAIL verdict are explicitly pending until the
+complete clean-commit raw JSONL passes both manifest verification and raw-only
+replay. The exact procedure and provenance contract are in
+`docs/gpu-runbook.md` §9.13.
 
 Recorded 2026-07-31: **FAIL** on the pinned Qwen3-32B revision and one RTX PRO
 6000 Blackwell. All K/V write audits passed across 7,522,091,008 values with

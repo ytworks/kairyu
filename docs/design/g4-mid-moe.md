@@ -425,34 +425,44 @@ batched-prefill limit. SGLang configures an 8,192-token chunked-prefill limit
 that v0.5.16 divides across DP4 and an explicit 2,048-token per-owner
 `max-prefill-tokens`; both therefore resolve to 2,048 tokens per request owner.
 This is a matched request-owner/EP comparison, not a claim that the two
-runtimes use identical internal projection sharding.
+runtimes use identical internal projection sharding. SGLang also fixes
+`--log-level-http warning`, caps decode CUDA-graph batch size with
+`--cuda-graph-max-bs-decode 32`, and disables prefill CUDA graph.
 
 `bench/g4_ma3_kairyu_server.py` is the dedicated production-server launcher,
-and `bench/g4_ma3_sglang_bench.py` prepares one immutable seed-0 ShareGPT trace,
-runs one retained preflight for each already-fixed production arm, and freezes
-that selection before formal traffic. Four fresh-server pairs execute in
-K/S, S/K, S/K, K/S order. Each formal cell synchronously releases 128 requests
-at concurrency 128 and requires exactly 128 streamed completion tokens per
+and `bench/g4_ma3_sglang_bench.py` prepares one immutable seed-0 ShareGPT trace.
+The complete matrix contains exactly ten fresh, sequential generations: one
+retained preflight for each already-fixed production arm, then four formal
+pairs in K/S, S/K, S/K, K/S order. The preflights freeze their selection before
+formal traffic. Each formal cell synchronously releases 128 requests at
+concurrency 128 and requires exactly 128 streamed completion tokens per
 request. Completion throughput is successful completion tokens divided by the
 first-start-to-last-terminal span and four GPUs; TTFT p99 is nearest-rank over
 all 128 requests. The gate uses the exact median of the four per-pair K/S
 ratios: throughput must be at least 1 and TTFT p99 at most 1. It performs no
-round-before-gate, outlier removal, retry, or failure exclusion. A five-point
-open-loop sweep derived from the selected SGLang preflight is retained as a
-separate report and cannot change those two binding verdicts.
+round-before-gate, outlier removal, retry, or failure exclusion. No additional
+measurement generation belongs to the formal artifact.
 
-Every shard binds one fresh sequential server generation to the source commit,
-image RepoDigest/platform/config identities, container and read-only model
-mount, exact 27-shard checkpoint and tokenizer rollups, physical GPU inventory,
-driver/CUDA/NCCL/Torch/FlashInfer versions, resolved runtime argv, and start/end
-runtime state. Assembly rejects a reused/overlapping server, changed
-provenance, changed trace/selection, incomplete SSE/usage, retry, fallback,
-or unknown raw field. Raw JSONL is authoritative; `verify` compares the
-derived manifest with an independent replay, and `replay` ignores the stored
-manifest. SGLang's SM120 limitations are always disclosed beside the result
-but never modify the gate: it uses FlashInfer CUTLASS rather than the
-SM100-only TRTLLM-gen MoE path, prefill CUDA graph is disabled while decode
-graph remains enabled, and MTP/speculative decoding is deferred to M-A4.
+The operator hashes every byte of the exact 27-shard checkpoint once before
+the matrix and once after it. Assembly requires identical boundary captures
+and binds every shard to the start descriptor. Every shard also binds one
+fresh sequential server generation to the clean source commit, image
+RepoDigest/platform/config identities, container and read-only model volume
+with no read-write consumer, physical GPU inventory,
+driver/CUDA/NCCL/Torch/FlashInfer versions, resolved runtime argv, and the live
+`/backends` or `/server_info` response. The shard end independently
+re-observes the same running container, source, runtime, GPU-process ownership,
+and volume consumers. All operator commands execute the detached clean
+`SOURCE_ROOT`; `capture-provenance` requires
+`--checkpoint-start`, and assembly requires both boundary captures. Assembly
+rejects a reused/overlapping server, changed provenance, changed
+trace/selection, incomplete SSE/usage, retry, fallback, or unknown raw field.
+Raw JSONL is authoritative; `verify` compares the derived manifest with an
+independent replay, and `replay` ignores the stored manifest. SGLang's SM120
+limitations are always disclosed beside the result but never modify the gate:
+it uses FlashInfer CUTLASS rather than the SM100-only TRTLLM-gen MoE path,
+prefill CUDA graph is disabled while decode graph remains enabled, and
+MTP/speculative decoding is deferred to M-A4.
 
 As of this amendment, the implementation, production launcher, hardware load
 smoke, and evidence operator are ready, but the complete clean-commit paired
@@ -477,10 +487,11 @@ pass the complete matrix.
   cache-rate gate, all four rank receipts are invariant, raw radix events are
   exact, and both manifest verification and raw-only replay pass.
 - M-A3 formal: the fixed production arms complete one preflight each, the
-  frozen selection precedes eight fresh sequential paired cells, all Kairyu
-  cells prove direct-NCCL plus graph replay without capture/fallback drift,
-  and the exact paired medians satisfy both throughput and TTFT thresholds.
-  The report-only open-loop sweep and all declared SGLang limitations remain
-  visible without affecting the binding verdict.
+  frozen selection precedes eight fresh sequential paired cells, the full
+  ten-generation window is enclosed by identical checkpoint hashes, all
+  Kairyu cells prove direct-NCCL plus graph replay without capture/fallback
+  drift, and the exact paired medians satisfy both throughput and TTFT
+  thresholds. All declared SGLang limitations remain visible without
+  affecting the binding verdict.
 - Repository: targeted tests, full applicable CPU/dist/GPU suites, ruff, and
   all required GitHub checks are green before merge.
