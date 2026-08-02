@@ -1369,7 +1369,13 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
 
     from kairyu.engine.kairyu_backend import KairyuBackend
 
-    names = tuple(inspect.signature(KairyuBackend).parameters)
+    parameters = inspect.signature(KairyuBackend).parameters
+    names = tuple(
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    )
     legacy_tail = names.index("cuda_graph_warmup_iters")
     assert names[legacy_tail + 1 : legacy_tail + 5] == (
         "pd_prefill_device",
@@ -1383,6 +1389,13 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
         "dram_kv_tier_profile",
     )
     assert names[legacy_tail + 8 :] == ("expert_parallel_size",)
+    keyword_only = tuple(
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert keyword_only == ("expert_parallel_attention_dp",)
+    assert parameters["expert_parallel_attention_dp"].default is False
 
 
 def test_pd_rejects_a_mixed_cpu_cuda_role_pair(model_dir):

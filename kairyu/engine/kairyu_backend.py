@@ -955,6 +955,7 @@ class KairyuBackend:
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | Path | None = None,
         expert_parallel_size: int = 1,
+        *,
         expert_parallel_attention_dp: bool = False,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size

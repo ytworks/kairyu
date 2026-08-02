@@ -1072,11 +1072,16 @@ def test_expert_parallel_size_and_topology_metadata_are_recorded(monkeypatch):
         fake_build_engine_loop,
     )
 
-    backend = KairyuBackend(expert_parallel_size=4)
+    backend = KairyuBackend(
+        expert_parallel_size=4,
+        expert_parallel_attention_dp=True,
+    )
 
     assert captured is not None
     assert captured["expert_parallel_size"] == 4
+    assert captured["expert_parallel_attention_dp"] is True
     assert backend.expert_parallel_size == 4
+    assert backend.expert_parallel_attention_dp is True
     assert backend.parallelism_metadata == loop.parallelism_metadata
     loop.close()
 
