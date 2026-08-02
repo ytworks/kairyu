@@ -26,7 +26,7 @@ from torch import nn
 from kairyu.engine.core.quant_config import (
     QuantConfig,
     QuantMethod,
-    detect_quantization,
+    load_checkpoint_quantization,
     validate_tensor_parallel_quantization,
 )
 from kairyu.models.config import ModelConfig, validate_tensor_parallel_config
@@ -365,7 +365,45 @@ class _RowParallelBinding:
         bias = getattr(module, "bias", None)
         if bias is not None:
             reduced = reduced + bias
+        if hasattr(module, "_kairyu_row_parallel_executed"):
+            object.__setattr__(
+                module,
+                "_kairyu_row_parallel_partial_dtype",
+                partial.dtype,
+            )
+            object.__setattr__(module, "_kairyu_row_parallel_executed", True)
         return reduced
+
+
+class _ReplicatedInputShardBinding:
+    """Select one contiguous K shard from an otherwise replicated activation."""
+
+    def __init__(self, *, rank: int, world_size: int, local_features: int) -> None:
+        self.rank = rank
+        self.world_size = world_size
+        self.local_features = local_features
+
+    def __call__(
+        self,
+        _module: nn.Module,
+        inputs: tuple[object, ...],
+    ) -> tuple[object, ...]:
+        if not inputs or not isinstance(inputs[0], torch.Tensor):
+            raise TypeError("replicated-input row parallelism expects a tensor input")
+        hidden = inputs[0]
+        expected = self.local_features * self.world_size
+        if hidden.shape[-1] != expected:
+            raise ValueError(
+                "replicated-input row parallelism expected global K="
+                f"{expected}, got {hidden.shape[-1]}"
+            )
+        start = self.rank * self.local_features
+        end = start + self.local_features
+        # K is the innermost physical axis for every supported linear kernel.
+        # Materialize one contiguous shard so packed NVFP4 activation blocks and
+        # the corresponding checkpoint weight slice have the same block order.
+        local = hidden[..., start:end].contiguous()
+        return (local, *inputs[1:])
 
 
 def _dense_row_parallel_forward(
@@ -418,6 +456,60 @@ def RowParallelLinear(
 
     if isinstance(local, Fp8Linear) and local.activation_dynamic:
         object.__setattr__(local, "_row_parallel_comm", comm)
+    return local
+
+
+def ReplicatedInputRowParallelLinear(
+    local: nn.Module,
+    comm,
+) -> nn.Module:
+    """Row-shard a projection whose upstream attention remains replicated.
+
+    Unlike normal tensor parallelism, every rank receives the complete
+    attention context.  The pre-hook selects the rank's contiguous hidden-K
+    shard; :func:`RowParallelLinear` then computes one dtype-materialized local
+    partial and all-reduces it.  The projection itself remains at its canonical
+    checkpoint path and owns only its rank-local weight slice.
+    """
+
+    if getattr(local, "_kairyu_replicated_input_shard", None) is not None:
+        raise ValueError(
+            f"{type(local).__name__} already has replicated-input shard behavior"
+        )
+    context = getattr(local, "linear_context", None)
+    if context is None:
+        raise TypeError("replicated-input row parallelism requires linear context")
+    placement = context.tensor_parallel
+    from kairyu.quant.linear import TensorParallelMode
+
+    if placement.mode is not TensorParallelMode.ROW:
+        raise ValueError("replicated-input projection must have row-parallel placement")
+    if placement.rank != comm.rank or placement.world_size != comm.world_size:
+        raise ValueError(
+            "replicated-input projection placement differs from communicator: "
+            f"projection={placement.rank}/{placement.world_size}, "
+            f"comm={comm.rank}/{comm.world_size}"
+        )
+    local_features = getattr(local, "in_features", None)
+    if (
+        type(local_features) is not int
+        or local_features != placement.local_in_features
+        or placement.global_in_features != local_features * placement.world_size
+    ):
+        raise ValueError(
+            "replicated-input projection has inconsistent local/global K geometry"
+        )
+
+    RowParallelLinear(local, comm)
+    object.__setattr__(local, "_kairyu_row_parallel_executed", False)
+    object.__setattr__(local, "_kairyu_row_parallel_partial_dtype", None)
+    binding = _ReplicatedInputShardBinding(
+        rank=placement.rank,
+        world_size=placement.world_size,
+        local_features=local_features,
+    )
+    local.register_forward_pre_hook(binding)
+    object.__setattr__(local, "_kairyu_replicated_input_shard", binding)
     return local
 
 
@@ -507,7 +599,7 @@ def build_tp_model(
     from kairyu.models.llama import DenseDecoder
 
     raw = json.loads((Path(model_dir) / "config.json").read_text())
-    quant = detect_quantization(raw)
+    quant = load_checkpoint_quantization(model_dir, raw).weights
     validate_tensor_parallel_quantization(quant)
     full_config = parse_model_config(raw)
     local_config = tp_view(full_config, tp, rank)

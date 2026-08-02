@@ -828,6 +828,33 @@ def test_mtp_loader_rejects_caller_checkpoint_semantic_mismatch(tmp_path):
         load_mtp_head(tmp_path, config)
 
 
+def test_mtp_loader_does_not_ignore_external_target_quantization(tmp_path):
+    config = parse_model_config(_DSV3_RAW)
+    head = MtpDraftHead(config).eval()
+    checkpoint = _mtp_checkpoint_state(config, dict(head.state_dict()))
+    (tmp_path / "config.json").write_text(
+        json.dumps(_DSV3_RAW),
+        encoding="utf-8",
+    )
+    (tmp_path / "hf_quant_config.json").write_text(
+        json.dumps(
+            {
+                "producer": {"name": "modelopt", "version": "0.33.0"},
+                "quantization": {
+                    "quant_algo": "NVFP4",
+                    "group_size": 8,
+                    "exclude_modules": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_file(checkpoint, tmp_path / "model.safetensors")
+
+    with pytest.raises(ValueError, match="group_size"):
+        load_mtp_head(tmp_path, config)
+
+
 def test_draft_factory_rejects_cross_scope_construction():
     metadata = _metadata(ModelScope.EAGLE_DRAFT)
     factory = draft_linear_factory(metadata)

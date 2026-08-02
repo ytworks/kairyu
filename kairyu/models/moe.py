@@ -17,6 +17,7 @@ from kairyu.quant.linear import (
     ExpertScope,
     LinearRole,
     ModelScope,
+    NvFp4Linear,
     bind_checkpoint_member_layout,
     make_linear,
 )
@@ -85,13 +86,94 @@ def _mix_experts(
     topk_indices: torch.Tensor,
     topk_weights: torch.Tensor,
 ) -> torch.Tensor:
-    """Reference combine: for each selected expert, run its tokens and add."""
-    out = torch.zeros_like(hidden)
+    """Reference combine with one final cast after router-weight accumulation."""
+    combine_dtype = torch.promote_types(hidden.dtype, topk_weights.dtype)
+    out = torch.zeros_like(hidden, dtype=combine_dtype)
     for expert_id in topk_indices.unique():
         token_mask, slot = (topk_indices == expert_id).nonzero(as_tuple=True)
-        expert_out = experts[int(expert_id)](hidden[token_mask])
-        out.index_add_(0, token_mask, expert_out * topk_weights[token_mask, slot][:, None])
-    return out
+        expert_out = experts[int(expert_id)](hidden[token_mask]).to(combine_dtype)
+        weights = topk_weights[token_mask, slot].to(combine_dtype)
+        out.index_add_(0, token_mask, expert_out * weights[:, None])
+    return out.to(hidden.dtype)
+
+
+def apply_nvfp4_moe_global_input_scales(
+    experts: nn.ModuleList,
+    *,
+    w13_input_scale: torch.Tensor | None = None,
+    w2_input_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Apply the fused-NVFP4 MoE activation-scale contract to local experts.
+
+    ModelOpt checkpoints retain one calibrated input scale per expert. Fused
+    NVFP4 MoE kernels quantize the shared FC1 and FC2 activations once, so each
+    sparse layer must use the maximum scale across all experts (and across the
+    gate/up pair for FC1). EP callers pass maxima read from the complete
+    checkpoint; non-sharded callers may derive them from their full expert set.
+    """
+
+    local_experts = tuple(expert for expert in experts if expert is not None)
+    if not local_experts:
+        raise ValueError("NVFP4 MoE scale normalization requires a local expert")
+
+    w13_projections: list[NvFp4Linear] = []
+    w2_projections: list[NvFp4Linear] = []
+    for expert in local_experts:
+        candidate = [
+            getattr(expert, "gate_proj", None),
+            getattr(expert, "up_proj", None),
+            getattr(expert, "down_proj", None),
+        ]
+        if any(module is None for module in candidate):
+            raise TypeError("MoE experts require gate/up/down projection modules")
+        w13_projections.extend(
+            module for module in candidate[:2] if isinstance(module, NvFp4Linear)
+        )
+        if isinstance(candidate[2], NvFp4Linear):
+            w2_projections.append(candidate[2])
+
+    def validated_scale(scale: torch.Tensor, label: str) -> torch.Tensor:
+        value = scale.detach().to(dtype=torch.float32).reshape(-1)
+        if (
+            value.numel() != 1
+            or not bool(torch.isfinite(value).all())
+            or not bool((value > 0).all())
+        ):
+            raise ValueError(f"{label} must be one finite positive FP32 value")
+        return value.reshape(())
+
+    if w13_input_scale is None:
+        w13_values = [
+            validated_scale(module.input_scale, "NVFP4 FC1 input scale")
+            for module in w13_projections
+        ]
+        w13_input_scale = torch.stack(w13_values).max() if w13_values else None
+    else:
+        w13_input_scale = validated_scale(
+            w13_input_scale, "NVFP4 FC1 global input scale"
+        )
+    if w2_input_scale is None:
+        w2_values = [
+            validated_scale(module.input_scale, "NVFP4 FC2 input scale")
+            for module in w2_projections
+        ]
+        w2_input_scale = torch.stack(w2_values).max() if w2_values else None
+    else:
+        w2_input_scale = validated_scale(
+            w2_input_scale, "NVFP4 FC2 global input scale"
+        )
+
+    if w13_input_scale is not None:
+        for module in w13_projections:
+            module.input_scale.copy_(
+                w13_input_scale.to(device=module.input_scale.device)
+            )
+    if w2_input_scale is not None:
+        for module in w2_projections:
+            module.input_scale.copy_(
+                w2_input_scale.to(device=module.input_scale.device)
+            )
+    return w13_input_scale, w2_input_scale
 
 
 def route_experts(
@@ -135,15 +217,28 @@ def route_experts(
         return topk_indices, topk_weights.to(hidden.dtype)
 
     logits = block.gate(hidden)
-    probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-    topk_weights, topk_indices = probs.topk(block.top_k, dim=-1)
+    # The pinned Qwen3 reference selects on the BF16 router logits, resolves
+    # ties by smaller expert id, then normalizes only the selected logits in
+    # FP32. Stable descending argsort preserves the original ascending expert
+    # order within an equal-logit run.
+    topk_indices = torch.argsort(
+        logits,
+        dim=-1,
+        descending=True,
+        stable=True,
+    )[:, : block.top_k]
     if block.norm_topk_prob:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    return topk_indices, topk_weights.to(hidden.dtype)
+        selected_logits = logits.gather(1, topk_indices).to(torch.float32)
+        topk_weights = torch.softmax(selected_logits, dim=-1)
+    else:
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        topk_weights = probs.gather(1, topk_indices)
+    # Fused reference backends retain router scales through FP32 finalization.
+    return topk_indices, topk_weights
 
 
 class Qwen3MoeSparseBlock(nn.Module):
-    """Softmax top-k routing (A8: fp32 softmax BEFORE top-k; renorm no eps)."""
+    """Stable BF16 top-k followed by selected-only FP32 normalization."""
 
     def __init__(
         self,

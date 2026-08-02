@@ -1466,3 +1466,240 @@ image, and drill are unchanged.
   The retained clean-commit run on 2026-07-31 passed all phases on
   8× RTX PRO 6000. See
   `bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.
+
+- 9.11 G4 M-A1 Qwen3-235B-A22B NVFP4 EP2/EP4 correctness (#166): run only
+  from the clean commit that contains the capture producer. The four engine
+  sessions are strictly sequential in this order: reference-EP2, Kairyu-EP2,
+  reference-EP4, Kairyu-EP4. Do not run paired arms concurrently. Every arm
+  uses a created, running container so `docker container inspect` can bind the
+  process hostname, immutable RepoDigest, config image ID, and (for Kairyu)
+  source-revision label to the retained session.
+
+  For each GPU count, the reference constructs the binding continuation as
+  16 autoregressive one-token fresh-full-prefix waves. Kairyu scores those
+  exact frozen prefixes. Both stacks also run an ordinary 16-token retained-KV
+  continuation, but it is diagnostic only and never supplies the teacher
+  prefix or a cross-stack decode-parity claim.
+
+  Build the Kairyu image from that commit, resolve both image identities, and
+  take the full pre-session snapshot inside a checkpoint-mounted control
+  container:
+
+  ```bash
+  set -euo pipefail
+  CHECKOUT=$(pwd -P)
+  COMMIT=$(git rev-parse HEAD)
+  test -z "$(git status --porcelain --untracked-files=all)"
+  while IFS= read -r bound_source; do
+    git ls-files --error-unmatch -- "$bound_source" >/dev/null
+  done < <(.venv/bin/python - <<'PY'
+from bench.g4_ma1_qwen3_235b_nvfp4_bench import BOUND_SOURCE_FILES
+
+print(*BOUND_SOURCE_FILES, sep="\n")
+PY
+  )
+  RESULT_ROOT=$(mktemp -d /tmp/kairyu-g4-ma1.XXXXXX)
+  MODEL_VOLUME=kairyu-qwen3-235b-nvfp4
+  MODEL_PATH=/models/qwen3-235b-nvfp4
+  REF_IMAGE=nvcr.io/nvidia/tensorrt-llm/release@sha256:cb4d8af81c586a90235ae3739b6d4ddc5d8336f2174c8a1c6b573d2e13faf5d7
+  REF_CONFIG_ID=sha256:cb4d8af81c586a90235ae3739b6d4ddc5d8336f2174c8a1c6b573d2e13faf5d7
+  LOCAL_REGISTRY=127.0.0.1:5166
+  REGISTRY_CONTAINER=kairyu-g4-ma1-registry
+  KAIRYU_TAG="$LOCAL_REGISTRY/kairyu-g4-ma1:$COMMIT"
+  PREPARE_CONTAINER=
+  REF2=
+  KAIRYU2=
+  REF4=
+  KAIRYU4=
+  FINALIZE_CONTAINER=
+
+  cleanup_g4_ma1() {
+    for container in \
+      "$FINALIZE_CONTAINER" "$KAIRYU4" "$REF4" \
+      "$KAIRYU2" "$REF2" "$PREPARE_CONTAINER"; do
+      if test -n "$container"; then
+        docker rm -f "$container" >/dev/null 2>&1 || true
+      fi
+    done
+    docker rm -fv "$REGISTRY_CONTAINER" >/dev/null 2>&1 || true
+  }
+  trap cleanup_g4_ma1 EXIT
+
+  # A local docker build has a config image ID but no RepoDigest. Push it
+  # through an ephemeral loopback registry so the formal runtime can bind both
+  # identities independently. The registry is only a content-addressing
+  # transport and is removed before any engine session starts.
+  docker run -d --name "$REGISTRY_CONTAINER" \
+    -p 127.0.0.1:5166:5000 registry:2
+  docker build -f Dockerfile.cuda \
+    --build-arg "KAIRYU_VCS_REF=$COMMIT" \
+    -t "$KAIRYU_TAG" .
+  docker push "$KAIRYU_TAG"
+  KAIRYU_CONFIG_ID=$(docker image inspect --format '{{.Id}}' "$KAIRYU_TAG")
+  KAIRYU_REPO_DIGEST=$(docker image inspect --format '{{index .RepoDigests 0}}' "$KAIRYU_TAG")
+  test "${KAIRYU_REPO_DIGEST#"$LOCAL_REGISTRY/kairyu-g4-ma1@sha256:"}" != "$KAIRYU_REPO_DIGEST"
+  test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$KAIRYU_TAG")" = "$COMMIT"
+  docker stop "$REGISTRY_CONTAINER"
+  docker rm -v "$REGISTRY_CONTAINER"
+
+  PREPARE_CONTAINER=$(docker create \
+    --entrypoint sleep \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/workspace \
+    -v "$CHECKOUT:/workspace:ro" \
+    -v "$MODEL_VOLUME:/models:ro" \
+    -v "$RESULT_ROOT:/results" \
+    -w /workspace \
+    "$KAIRYU_REPO_DIGEST" infinity)
+  docker start "$PREPARE_CONTAINER"
+  docker exec "$PREPARE_CONTAINER" /app/.venv/bin/python \
+    bench/g4_ma1_qwen3_235b_nvfp4_capture.py prepare \
+    --model-path "$MODEL_PATH" \
+    --image-repo-digest "$KAIRYU_REPO_DIGEST" \
+    --image-config-id "$KAIRYU_CONFIG_ID" \
+    --output /results/host-start.json
+  docker stop "$PREPARE_CONTAINER"
+  docker rm "$PREPARE_CONTAINER"
+  ```
+
+  Run reference-EP2, then Kairyu-EP2. The inspect file must be taken after
+  `docker start` and before `docker exec`; supplying an image-inspect document
+  or a stopped/different container fails closed.
+
+  ```bash
+  REF2=$(docker create \
+    --gpus '"device=0,1"' \
+    --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+    -e CUDA_VISIBLE_DEVICES=0,1 \
+    -v "$CHECKOUT:/workspace:ro" \
+    -v "$MODEL_VOLUME:/models:ro" \
+    -v "$RESULT_ROOT:/results" \
+    -w /workspace "$REF_IMAGE" sleep infinity)
+  docker start "$REF2"
+  docker container inspect "$REF2" > "$RESULT_ROOT/reference-ep2-inspect.json"
+  docker exec "$REF2" bash -lc 'exec python "$@"' bash \
+    /workspace/bench/g4_ma1_qwen3_235b_nvfp4_capture.py reference-arm \
+    --model-path "$MODEL_PATH" --world-size 2 \
+    --host-snapshot /results/host-start.json \
+    --image-repo-digest "$REF_IMAGE" --image-config-id "$REF_CONFIG_ID" \
+    --container-inspect /results/reference-ep2-inspect.json \
+    --output /results/reference-ep2.json
+  docker stop "$REF2"
+  docker rm "$REF2"
+
+  KAIRYU2=$(docker create \
+    --gpus '"device=0,1"' --entrypoint sleep \
+    --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+    -e CUDA_VISIBLE_DEVICES=0,1 \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/workspace \
+    -v "$CHECKOUT:/workspace:ro" \
+    -v "$MODEL_VOLUME:/models:ro" \
+    -v "$RESULT_ROOT:/results" \
+    -w /workspace "$KAIRYU_REPO_DIGEST" infinity)
+  docker start "$KAIRYU2"
+  docker container inspect "$KAIRYU2" > "$RESULT_ROOT/kairyu-ep2-inspect.json"
+  docker exec "$KAIRYU2" /app/.venv/bin/python \
+    bench/g4_ma1_qwen3_235b_nvfp4_capture.py kairyu-arm \
+    --model-path "$MODEL_PATH" --world-size 2 \
+    --host-snapshot /results/host-start.json \
+    --reference-fragment /results/reference-ep2.json \
+    --container-inspect /results/kairyu-ep2-inspect.json \
+    --output /results/kairyu-ep2.json
+  docker stop "$KAIRYU2"
+  docker rm "$KAIRYU2"
+  ```
+
+  Repeat on GPUs 0-3 for EP4, preserving the same reference-before-Kairyu
+  ordering:
+
+  ```bash
+  REF4=$(docker create \
+    --gpus '"device=0,1,2,3"' \
+    --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+    -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    -v "$CHECKOUT:/workspace:ro" \
+    -v "$MODEL_VOLUME:/models:ro" \
+    -v "$RESULT_ROOT:/results" \
+    -w /workspace "$REF_IMAGE" sleep infinity)
+  docker start "$REF4"
+  docker container inspect "$REF4" > "$RESULT_ROOT/reference-ep4-inspect.json"
+  docker exec "$REF4" bash -lc 'exec python "$@"' bash \
+    /workspace/bench/g4_ma1_qwen3_235b_nvfp4_capture.py reference-arm \
+    --model-path "$MODEL_PATH" --world-size 4 \
+    --host-snapshot /results/host-start.json \
+    --image-repo-digest "$REF_IMAGE" --image-config-id "$REF_CONFIG_ID" \
+    --container-inspect /results/reference-ep4-inspect.json \
+    --output /results/reference-ep4.json
+  docker stop "$REF4"
+  docker rm "$REF4"
+
+  KAIRYU4=$(docker create \
+    --gpus '"device=0,1,2,3"' --entrypoint sleep \
+    --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+    -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/workspace \
+    -v "$CHECKOUT:/workspace:ro" \
+    -v "$MODEL_VOLUME:/models:ro" \
+    -v "$RESULT_ROOT:/results" \
+    -w /workspace "$KAIRYU_REPO_DIGEST" infinity)
+  docker start "$KAIRYU4"
+  docker container inspect "$KAIRYU4" > "$RESULT_ROOT/kairyu-ep4-inspect.json"
+  docker exec "$KAIRYU4" /app/.venv/bin/python \
+    bench/g4_ma1_qwen3_235b_nvfp4_capture.py kairyu-arm \
+    --model-path "$MODEL_PATH" --world-size 4 \
+    --host-snapshot /results/host-start.json \
+    --reference-fragment /results/reference-ep4.json \
+    --container-inspect /results/kairyu-ep4-inspect.json \
+    --output /results/kairyu-ep4.json
+  docker stop "$KAIRYU4"
+  docker rm "$KAIRYU4"
+  ```
+
+  Finally, take the independent full end snapshot in a fresh control
+  container, assemble the 4,428-row capture, and independently replay it:
+
+  ```bash
+  FINALIZE_CONTAINER=$(docker create \
+    --entrypoint sleep \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/workspace \
+    -v "$CHECKOUT:/workspace:ro" \
+    -v "$MODEL_VOLUME:/models:ro" \
+    -v "$RESULT_ROOT:/results" \
+    -w /workspace "$KAIRYU_REPO_DIGEST" infinity)
+  docker start "$FINALIZE_CONTAINER"
+  docker exec "$FINALIZE_CONTAINER" /app/.venv/bin/python \
+    bench/g4_ma1_qwen3_235b_nvfp4_capture.py assemble \
+    --model-path "$MODEL_PATH" --host-snapshot /results/host-start.json \
+    --reference-ep2 /results/reference-ep2.json \
+    --kairyu-ep2 /results/kairyu-ep2.json \
+    --reference-ep4 /results/reference-ep4.json \
+    --kairyu-ep4 /results/kairyu-ep4.json \
+    --output /results/engine-capture.jsonl \
+    --manifest /results/capture-manifest.json --assert-gate
+  docker stop "$FINALIZE_CONTAINER"
+  docker rm "$FINALIZE_CONTAINER"
+
+  .venv/bin/python bench/g4_ma1_qwen3_235b_nvfp4_bench.py run \
+    --capture "$RESULT_ROOT/engine-capture.jsonl" \
+    --output-dir "$RESULT_ROOT/artifact" --assert-gate
+  .venv/bin/python bench/g4_ma1_qwen3_235b_nvfp4_bench.py verify \
+    --artifact "$RESULT_ROOT/artifact" --assert-gate
+  .venv/bin/python bench/g4_ma1_qwen3_235b_nvfp4_bench.py replay \
+    --artifact "$RESULT_ROOT/artifact" --assert-gate
+  ```
+
+  A non-zero arm command is a real formal failure: it atomically retains a
+  failure fragment and must never be presented or merged as M-A1 closure.
+  Implementation-only progress may merge while #166 remains open only when
+  every applicable repository/CI check is green and the PR reports the failed
+  formal result without relaxing or bypassing this gate. Missing GPUs,
+  image/inspect mismatch, checkpoint/source drift, fallback kernels,
+  incomplete ownership, missing top-64 token-ID logprobs, or an unavailable
+  runtime are never skips.

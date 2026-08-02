@@ -30,10 +30,13 @@ greedy == `hf.generate` — per architecture (the M12 harness extended).
 
 `Qwen3MoeSparseBlock`: `gate` (router linear, bias-free), `experts`
 (ModuleList of per-expert SwiGLU built via `linear_factory` — M14 quantized
-experts come free), routing = softmax over router logits → top-k →
-optional re-normalization (`norm_topk_prob`) → weighted sum of expert outputs.
-Token-loop reference implementation (gather tokens per expert) — the EP
-dispatch/combine (M16) replaces the loop, not the math. Config additions:
+experts come free). Qwen routing selects a stable descending top-k directly
+from the model-dtype router logits (equal logits prefer the lower expert ID).
+With `norm_topk_prob`, only those selected logits are converted to fp32 and
+softmax-normalized; the non-normalized variant gathers from the full fp32
+softmax. Expert outputs are mixed with fp32 router weights. Token-loop
+reference implementation (gather tokens per expert) — the EP dispatch/combine
+(M16) replaces the loop, not the math. Config additions:
 `num_experts`, `num_experts_per_tok`, `moe_intermediate_size`,
 `norm_topk_prob`, `decoder_sparse_step`/`mlp_only_layers` (which layers are
 sparse).
@@ -138,9 +141,11 @@ MLA fields from config). `validate_tp_degree`: MLA models report
   kv_cache_num_heads (1), kv_cache_head_dim (r + d_rope), rope_dim; PagedKVPool
   gains v_head_dim (0 for MLA — v tensor unused, bytes_per_token honest).
 - **A8 Qwen3-MoE**: sparse predicate ((idx+1) % decoder_sparse_step == 0 and
-  idx not in mlp_only_layers); routing softmax in fp32 BEFORE top-k; renorm
-  without eps; qk_norm extended to Qwen3MoeForCausalLM; attention identical
-  to M12 Qwen3.
+  idx not in mlp_only_layers); stable top-k on model-dtype logits BEFORE
+  selected-only fp32 softmax, with lower expert ID winning exact ties and no
+  renormalization epsilon; qk_norm extended to Qwen3MoeForCausalLM; attention
+  identical to M12 Qwen3. This corrects the earlier full-softmax-before-top-k
+  wording after direct TensorRT-LLM 1.2.1 routing-op comparison.
 - **A9 fixtures**: minimum kwargs pinned; DeepSeek needs consistent
   n_routed/n_group/topk_group/top_k, v_head_dim ≠ qk dims (catches
   transposes), q_lora both int and None, num_key_value_heads=heads.

@@ -716,23 +716,42 @@ def gptq_linear_forward(
 
 
 def _prepare_nvfp4_weight(module, device: torch.device):
+    source_key = (
+        id(module.weight),
+        module.weight._version,
+        id(module.weight_scale),
+        module.weight_scale._version,
+        device.type,
+        device.index,
+    )
+    cached_source_key = getattr(module, "_nvfp4_native_source_key", None)
     cached_weight = getattr(module, "_weight_native", None)
     cached_scale = getattr(module, "_weight_scale_swizzled", None)
-    if (
-        cached_weight is not None
-        and cached_scale is not None
-        and cached_weight.device == device
-    ):
-        return cached_weight, cached_scale
+    if cached_source_key == source_key and cached_scale is not None:
+        if cached_weight is None:
+            if module.weight.device == device and cached_scale.device == device:
+                return module.weight, cached_scale
+        elif cached_weight.device == device and cached_scale.device == device:
+            return cached_weight, cached_scale
 
     n_size, packed_k = module.weight.shape
     n_padded = _ceil_div(n_size, 32) * 32
     k_size = packed_k * 2
     k_padded = _ceil_div(k_size, 32) * 32
-    weight = torch.nn.functional.pad(
-        module.weight,
-        (0, k_padded // 2 - packed_k, 0, n_padded - n_size),
-    ).contiguous()
+    pad_k = k_padded // 2 - packed_k
+    pad_n = n_padded - n_size
+    if pad_k == 0 and pad_n == 0 and module.weight.is_contiguous():
+        # Real Qwen3 NVFP4 expert matrices already satisfy FlashInfer's N/K
+        # alignment.  ``F.pad(..., zeros)`` still allocates and copies the full
+        # packed weight; warming every expert in a 235B EP2 model would retain a
+        # second ~64 GiB weight set and eventually OOM.  Keep the checkpoint
+        # buffer itself as the native operand when no padding is required.
+        weight = module.weight
+    else:
+        weight = torch.nn.functional.pad(
+            module.weight,
+            (0, pad_k, 0, pad_n),
+        ).contiguous()
 
     scale = module.weight_scale
     scale_n_padded = _ceil_div(scale.shape[0], 128) * 128
@@ -744,8 +763,18 @@ def _prepare_nvfp4_weight(module, device: torch.device):
     scale = scale.reshape(1, scale_n_padded // 128, 4, 32, scale_k_padded // 4, 4)
     scale = scale.permute(0, 1, 4, 3, 2, 5).contiguous()
     scale = scale.reshape(scale_n_padded, scale_k_padded)
-    module.register_buffer("_weight_native", weight, persistent=False)
+    if weight is module.weight:
+        # Do not retain a plain tensor alias: unlike a registered buffer it is
+        # invisible to ``Module._apply`` and would keep the old GPU allocation
+        # alive after a device move. A source-key cache hit returns
+        # ``module.weight`` directly.
+        module._buffers.pop("_weight_native", None)
+        if "_weight_native" in module.__dict__:
+            object.__delattr__(module, "_weight_native")
+    else:
+        module.register_buffer("_weight_native", weight, persistent=False)
     module.register_buffer("_weight_scale_swizzled", scale, persistent=False)
+    object.__setattr__(module, "_nvfp4_native_source_key", source_key)
     return weight, scale
 
 

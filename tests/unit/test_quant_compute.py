@@ -111,6 +111,61 @@ class TestRoundTrips:
         restored = nvfp4.dequantize_nvfp4(packed, scale, global_scale)
         assert (restored - weight).abs().max().item() < 0.6  # 4-bit blockwise
 
+    def test_aligned_nvfp4_native_weight_reuses_checkpoint_storage(self):
+        from kairyu.kernels.quant_gemm_gpu import _prepare_nvfp4_weight
+        from kairyu.quant.linear import NvFp4Linear
+
+        module = NvFp4Linear(in_features=64, out_features=32, bias=False)
+        native, swizzled = _prepare_nvfp4_weight(module, module.weight.device)
+
+        assert native is module.weight
+        assert native.untyped_storage().data_ptr() == module.weight.untyped_storage().data_ptr()
+        assert not hasattr(module, "_weight_native")
+        assert "_weight_native" not in module._buffers
+        assert swizzled.shape == (128, 4)
+
+        cached_native, cached_swizzled = _prepare_nvfp4_weight(
+            module,
+            module.weight.device,
+        )
+        assert cached_native is module.weight
+        assert cached_swizzled is swizzled
+
+    def test_nvfp4_native_cache_invalidates_when_checkpoint_payload_changes(self):
+        from kairyu.kernels.quant_gemm_gpu import _prepare_nvfp4_weight
+        from kairyu.quant.linear import NvFp4Linear
+
+        module = NvFp4Linear(in_features=64, out_features=32, bias=False)
+        old_native, old_swizzled = _prepare_nvfp4_weight(
+            module,
+            module.weight.device,
+        )
+        replacement = torch.full_like(module.weight, 7)
+        module._buffers["weight"] = replacement
+
+        new_native, new_swizzled = _prepare_nvfp4_weight(
+            module,
+            module.weight.device,
+        )
+
+        assert old_native is not new_native
+        assert new_native is replacement
+        assert torch.equal(new_native, torch.full_like(new_native, 7))
+        assert new_swizzled is not old_swizzled
+        assert not hasattr(module, "_weight_native")
+
+    def test_nvfp4_native_cache_invalidates_after_in_place_scale_update(self):
+        from kairyu.kernels.quant_gemm_gpu import _prepare_nvfp4_weight
+        from kairyu.quant.linear import NvFp4Linear
+
+        module = NvFp4Linear(in_features=64, out_features=32, bias=False)
+        _, old_swizzled = _prepare_nvfp4_weight(module, module.weight.device)
+        module.weight_scale.fill_(2)
+
+        _, new_swizzled = _prepare_nvfp4_weight(module, module.weight.device)
+
+        assert new_swizzled is not old_swizzled
+
 
 # --- flagship D5: quantized checkpoint loads and RUNS through the engine ---
 

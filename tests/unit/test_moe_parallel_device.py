@@ -40,6 +40,7 @@ class _TinyMoeBlock(nn.Module):
 class _CopyCommunicator:
     def __init__(self) -> None:
         self.pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.reductions: list[torch.Tensor] = []
 
     def tensor_all_to_all_single(
         self,
@@ -51,6 +52,10 @@ class _CopyCommunicator:
         del output_split_sizes, input_split_sizes
         self.pairs.append((output, input_))
         output.copy_(input_)
+
+    def tensor_all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
+        self.reductions.append(tensor)
+        return tensor
 
 
 def test_ep_forward_allocates_every_collective_buffer_on_payload_device(
@@ -80,6 +85,8 @@ def test_ep_forward_allocates_every_collective_buffer_on_payload_device(
         output.device == input_.device == hidden.device
         for output, input_ in communicator.pairs
     )
+    assert len(communicator.reductions) == 1
+    assert communicator.reductions[0].device == hidden.device
     torch.testing.assert_close(actual, reference)
 
 

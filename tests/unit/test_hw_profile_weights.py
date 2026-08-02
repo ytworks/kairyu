@@ -162,6 +162,51 @@ class TestCheckpointReader:
         loaded = dict(CheckpointReader(path).items())
         assert set(loaded) == set(tensors)
 
+    def test_selected_items_opens_each_referenced_shard_once(
+        self,
+        sharded_checkpoint,
+    ):
+        path, tensors = sharded_checkpoint
+        reader = CheckpointReader(path)
+        real_safe_open = reader._safe_open
+        opened = []
+
+        def recording_safe_open(shard, **kwargs):
+            opened.append(shard.name)
+            return real_safe_open(shard, **kwargs)
+
+        reader._safe_open = recording_safe_open
+        names = (
+            "model.embed.weight",
+            "model.layers.0.w",
+            "lm_head.weight",
+        )
+        loaded = dict(reader.selected_items(names))
+
+        assert set(loaded) == set(names)
+        for name in names:
+            assert torch.equal(loaded[name], tensors[name])
+        assert opened == [
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+        ]
+
+    def test_specs_reads_shape_and_dtype_without_materializing(
+        self,
+        sharded_checkpoint,
+    ):
+        path, _ = sharded_checkpoint
+        reader = CheckpointReader(path)
+
+        specs = reader.specs(
+            ("model.embed.weight", "model.layers.1.w"),
+        )
+
+        assert specs == {
+            "model.embed.weight": ((8, 4), "F32"),
+            "model.layers.1.w": ((6, 6), "F32"),
+        }
+
     def test_get_slice_matches_full_tensor(self, sharded_checkpoint):
         path, tensors = sharded_checkpoint
         reader = CheckpointReader(path)
@@ -186,3 +231,59 @@ class TestCheckpointReader:
             CheckpointReader(path).tensor("ghost")
         with pytest.raises(ValueError, match="checkpoint"):
             CheckpointReader(tmp_path / "nope")
+
+    def test_duplicate_index_key_fails_loudly(self, tmp_path):
+        (tmp_path / "model.safetensors.index.json").write_text(
+            '{"weight_map":{"w":"a.safetensors","w":"b.safetensors"}}'
+        )
+
+        with pytest.raises(ValueError, match="invalid safetensors index"):
+            CheckpointReader(tmp_path)
+
+    @pytest.mark.parametrize(
+        ("weight_map", "expected"),
+        [
+            ({"present": "model.safetensors"}, "unexpected=.*extra"),
+            (
+                {
+                    "present": "model.safetensors",
+                    "missing": "model.safetensors",
+                },
+                "missing=.*missing",
+            ),
+        ],
+    )
+    def test_index_and_shard_header_must_match_exactly(
+        self,
+        tmp_path,
+        weight_map,
+        expected,
+    ):
+        import json
+
+        from safetensors.torch import save_file
+
+        tensors = {"present": torch.ones(1)}
+        if "missing" not in weight_map:
+            tensors["extra"] = torch.ones(1)
+        save_file(tensors, tmp_path / "model.safetensors")
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": weight_map})
+        )
+
+        with pytest.raises(ValueError, match=expected):
+            CheckpointReader(tmp_path)
+
+    @pytest.mark.parametrize(
+        "shard_name",
+        ("../outside.safetensors", "/tmp/outside.safetensors", "nested/model.safetensors"),
+    )
+    def test_index_rejects_non_basename_shard_paths(self, tmp_path, shard_name):
+        import json
+
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"w": shard_name}})
+        )
+
+        with pytest.raises(ValueError, match="unsafe safetensors shard path"):
+            CheckpointReader(tmp_path)

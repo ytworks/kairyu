@@ -144,7 +144,7 @@ def load_mtp_head(
     import json
     from pathlib import Path
 
-    from kairyu.engine.core.quant_config import detect_quantization
+    from kairyu.engine.core.quant_config import load_checkpoint_quantization
     from kairyu.engine.core.weights import CheckpointReader
     from kairyu.models.draft_quant import (
         coerce_draft_state_for_load,
@@ -171,7 +171,10 @@ def load_mtp_head(
             "MTP caller config does not match checkpoint semantics: " + "; ".join(mismatches)
         )
     if target_quantization is None:
-        target_quantization = detect_quantization(raw_config)
+        target_quantization = load_checkpoint_quantization(
+            checkpoint,
+            raw_config,
+        ).weights
     metadata = load_draft_quantization(
         checkpoint,
         expected_scope=ModelScope.MTP_DRAFT,

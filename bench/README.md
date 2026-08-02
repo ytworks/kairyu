@@ -61,7 +61,7 @@ Formal G2/G4/G5/G6 artifacts bind source paths, hashes, commands, and result
 locations. A refactor may delegate a stable wrapper to package-owned code, but
 must not silently rename the wrapper, invocation form, or recorded evidence
 path. Existing wrapper-to-wrapper imports are compatibility dependencies; new
-shared behavior belongs in the installed package. The exact fifteen retained
+shared behavior belongs in the installed package. The exact seventeen retained
 composition edges are allowlisted in the manifest's
 `[compatibility_imports]` table; checkout validation fails on any undeclared,
 removed, or redirected edge.
@@ -124,6 +124,8 @@ bench/frontier_compare.py
 bench/future_token_bench.py
 bench/g2_a6_vllm_bench.py
 bench/g2_a9_dp_tp_crossover_bench.py
+bench/g4_ma1_qwen3_235b_nvfp4_bench.py
+bench/g4_ma1_qwen3_235b_nvfp4_capture.py
 bench/gate_a1.py
 bench/gate_a2.py
 bench/global_kv_pool_decision.py

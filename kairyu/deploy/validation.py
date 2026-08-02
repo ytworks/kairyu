@@ -29,7 +29,7 @@ from kairyu.dsl.spec import OrchestratorSpec
 from kairyu.engine.config_validation import validate_backend_options
 from kairyu.engine.core.quant_config import (
     QuantMethod,
-    detect_quantization,
+    load_checkpoint_quantization,
     validate_model_quantization,
     validate_tensor_parallel_quantization,
 )
@@ -603,7 +603,7 @@ def _validate_model(
     if config is not None:
         try:
             model_config = parse_model_config(config)
-            quant_config = detect_quantization(config)
+            quant_config = load_checkpoint_quantization(model_dir, config).weights
             validate_model_quantization(
                 quant_config,
                 is_mla=model_config.is_mla,

@@ -3,24 +3,164 @@
 Routing runs REPLICATED (fp32, deterministic on CPU/gloo; a deploy-day debug
 guard hashes topk_indices across ranks — m16 A8). Tokens permute to
 expert-owning ranks via ``tensor_all_to_all_single`` (counts exchange first,
-then payload), local experts compute, reverse all_to_all, weighted combine
-locally. Contiguous expert blocks per rank; the math is the m15 token-loop's,
-algebraically identical (accumulation order differs — parity gates use token
-equality, m16 A7). gloo and NCCL share this code path; DeepEP/UCCL is the
+then payload), local experts compute, and reverse all_to_all returns the
+expert rows. Each rank finalizes only its owned-expert contribution in fp32,
+casts that partial to the model dtype, then all-reduces the rank partials.
+This preserves the standalone fused-MoE finalize boundary. Contiguous expert
+blocks per rank; gloo and NCCL share this code path. DeepEP/UCCL is the
 deploy-day fast path behind the same block interface.
 """
 
 from __future__ import annotations
 
+import gc
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
 import torch
 from torch import nn
 
-from kairyu.models.moe import route_experts
-from kairyu.models.parallel import ParallelShardInfo
+from kairyu.models.moe import (
+    apply_nvfp4_moe_global_input_scales,
+    route_experts,
+)
+from kairyu.models.parallel import (
+    ParallelShardInfo,
+    ReplicatedInputRowParallelLinear,
+    checkpoint_member_specs,
+)
+from kairyu.quant.linear import (
+    ExpertScope,
+    LinearKernel,
+    LinearRole,
+    ModelScope,
+    NvFp4Linear,
+    TensorParallelMode,
+)
 
 
 class RemoteExpertOwnershipError(LookupError):
     """A canonical expert exists, but its tensors belong to another rank."""
+
+
+class _RemoteExpertProjection(nn.Module):
+    """Allocation-free construction placeholder removed before execution."""
+
+    def __init__(self, qualified_name: str, owner_rank: int) -> None:
+        super().__init__()
+        self.qualified_name = qualified_name
+        self.owner_rank = owner_rank
+
+    def forward(self, _hidden: torch.Tensor) -> torch.Tensor:
+        raise RemoteExpertOwnershipError(
+            f"projection {self.qualified_name!r} belongs to expert rank "
+            f"{self.owner_rank}"
+        )
+
+
+class _ExpertShardedLinearFactory:
+    """Construct rank-owned experts and an optional attention-output K shard."""
+
+    def __init__(
+        self,
+        base,
+        *,
+        num_experts: int,
+        ep_rank: int,
+        ep_size: int,
+        attention_output_factory=None,
+    ) -> None:
+        if num_experts % ep_size:
+            raise ValueError(
+                f"{num_experts} experts do not divide across {ep_size} ranks"
+            )
+        self._base = base
+        self._num_experts = num_experts
+        self._ep_rank = ep_rank
+        self._ep_size = ep_size
+        self._experts_per_rank = num_experts // ep_size
+        self._attention_output_factory = attention_output_factory
+
+    def __call__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool,
+        *,
+        qualified_name: str | None = None,
+        model_scope: ModelScope = ModelScope.TARGET,
+        role: LinearRole | None = None,
+        layer_index: int | None = None,
+        expert_index: int | None = None,
+        expert_scope: ExpertScope = ExpertScope.NONE,
+        shard_dim: int | None = None,
+        allow_quantization: bool = True,
+    ) -> nn.Module:
+        if (
+            self._attention_output_factory is not None
+            and model_scope is ModelScope.TARGET
+            and role is LinearRole.ATTENTION_OUTPUT
+            and expert_scope is ExpertScope.NONE
+        ):
+            if shard_dim != 1:
+                raise ValueError("EP attention output must shard checkpoint K on dim 1")
+            if in_features % self._ep_size:
+                raise ValueError(
+                    f"attention output K={in_features} does not divide across "
+                    f"EP{self._ep_size}"
+                )
+            return self._attention_output_factory(
+                in_features // self._ep_size,
+                out_features,
+                bias,
+                qualified_name=qualified_name,
+                model_scope=model_scope,
+                role=role,
+                layer_index=layer_index,
+                expert_index=expert_index,
+                expert_scope=expert_scope,
+                shard_dim=shard_dim,
+                allow_quantization=allow_quantization,
+            )
+        if expert_scope is ExpertScope.ROUTED:
+            if expert_index is None or not 0 <= expert_index < self._num_experts:
+                raise ValueError("routed expert construction requires a valid global index")
+            owner = expert_index // self._experts_per_rank
+            if owner != self._ep_rank:
+                if qualified_name is None:
+                    raise ValueError("remote expert projection requires a checkpoint name")
+                return _RemoteExpertProjection(qualified_name, owner)
+        return self._base(
+            in_features,
+            out_features,
+            bias,
+            qualified_name=qualified_name,
+            model_scope=model_scope,
+            role=role,
+            layer_index=layer_index,
+            expert_index=expert_index,
+            expert_scope=expert_scope,
+            shard_dim=shard_dim,
+            allow_quantization=allow_quantization,
+        )
+
+
+@dataclass(frozen=True)
+class ExpertParallelLoadInfo:
+    """Fail-closed provenance from one rank-local expert load."""
+
+    ep_rank: int
+    ep_size: int
+    owned_expert_indices: tuple[int, ...]
+    quantization_source: str
+    quantization_method: str
+    kv_cache_quant_algo: str | None
+    producer_name: str | None
+    producer_version: str | None
+    checkpoint_tensor_count: int
+    rank_loaded_tensor_count: int
+    auxiliary_kv_scale_count: int
 
 
 def _assert_collective_device(
@@ -34,6 +174,251 @@ def _assert_collective_device(
         raise ValueError(
             f"expert-parallel collective device mismatch: expected {expected}; {details}"
         )
+
+
+def _ep_rank_partial(
+    expert_outputs: torch.Tensor,
+    topk_indices: torch.Tensor,
+    topk_weights: torch.Tensor,
+    *,
+    ep_rank: int,
+    experts_per_rank: int,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Finalize one EP rank in slot order, then cross the output dtype boundary."""
+
+    if expert_outputs.ndim != 3:
+        raise ValueError("EP expert outputs must have [tokens, top_k, hidden] shape")
+    if (
+        topk_indices.shape != expert_outputs.shape[:2]
+        or topk_weights.shape != expert_outputs.shape[:2]
+    ):
+        raise ValueError("EP routing tensors must match expert output token/slot axes")
+    if ep_rank < 0 or experts_per_rank < 1:
+        raise ValueError("EP rank and experts-per-rank must be valid")
+
+    combine_dtype = torch.promote_types(expert_outputs.dtype, topk_weights.dtype)
+    owners = topk_indices // experts_per_rank
+    partial = torch.zeros(
+        expert_outputs.shape[0],
+        expert_outputs.shape[2],
+        dtype=combine_dtype,
+        device=expert_outputs.device,
+    )
+    # TensorRT-LLM's standalone finalize walks routing slots in order and
+    # accumulates only experts owned by this rank in fp32. Keep that order
+    # explicit instead of asking a reduction kernel to choose an order.
+    for slot in range(expert_outputs.shape[1]):
+        selected = owners[:, slot] == ep_rank
+        contribution = expert_outputs[:, slot].to(combine_dtype)
+        contribution = contribution * topk_weights[:, slot].to(combine_dtype)[:, None]
+        partial = partial + torch.where(
+            selected[:, None],
+            contribution,
+            torch.zeros((), dtype=combine_dtype, device=expert_outputs.device),
+        )
+    return partial.to(output_dtype)
+
+
+def _swizzle_nvfp4_moe_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Convert ``[experts, out, in/16]`` scales to FlashInfer's 128x4 layout."""
+
+    if scale.ndim != 3:
+        raise ValueError("NVFP4 MoE block scales must have [experts, out, in/16] shape")
+    experts, rows, columns = scale.shape
+    rows_padded = (rows + 127) // 128 * 128
+    columns_padded = (columns + 3) // 4 * 4
+    padded = torch.nn.functional.pad(
+        scale,
+        (0, columns_padded - columns, 0, rows_padded - rows),
+    )
+    return (
+        padded.reshape(
+            experts,
+            rows_padded // 128,
+            4,
+            32,
+            columns_padded // 4,
+            4,
+        )
+        .permute(0, 1, 4, 3, 2, 5)
+        .contiguous()
+        .reshape(experts, rows_padded, columns_padded)
+    )
+
+
+def _clear_nvfp4_linear_runtime_cache(module: NvFp4Linear) -> None:
+    for name in ("_weight_native", "_weight_scale_swizzled"):
+        module._buffers.pop(name, None)
+        module.__dict__.pop(name, None)
+    module.__dict__.pop("_nvfp4_native_source_key", None)
+
+
+@torch.no_grad()
+def _pack_nvfp4_moe_block(
+    block,
+    *,
+    require_flashinfer_selection: bool,
+):
+    """Pack one rank's Qwen experts without retaining a duplicate weight set."""
+
+    from kairyu.kernels.nvfp4_moe_gpu import PreparedNvFp4Moe
+
+    local_experts = tuple(block.local_experts)
+    if not local_experts:
+        raise RuntimeError("fused NVFP4 MoE requires at least one local expert")
+
+    projections: list[tuple[NvFp4Linear, NvFp4Linear, NvFp4Linear]] = []
+    for expert in local_experts:
+        candidate = (
+            getattr(expert, "gate_proj", None),
+            getattr(expert, "up_proj", None),
+            getattr(expert, "down_proj", None),
+        )
+        if not all(isinstance(module, NvFp4Linear) for module in candidate):
+            raise RuntimeError(
+                "fused NVFP4 MoE requires homogeneous gate/up/down NvFp4Linear experts"
+            )
+        gate, up, down = candidate
+        if any(module.bias is not None for module in candidate):
+            raise RuntimeError("fused Qwen NVFP4 MoE does not support expert bias")
+        if require_flashinfer_selection:
+            for module in candidate:
+                selection = getattr(module, "linear_selection", None)
+                if getattr(selection, "kernel", None) is not LinearKernel.FLASHINFER_NVFP4:
+                    raise RuntimeError(
+                        "fused NVFP4 MoE requires every expert projection to "
+                        "resolve to FlashInfer NVFP4"
+                    )
+        projections.append((gate, up, down))
+
+    template_gate, template_up, template_down = projections[0]
+    if (
+        template_gate.weight.shape != template_up.weight.shape
+        or template_gate.weight_scale.shape != template_up.weight_scale.shape
+        or template_gate.in_features != template_up.in_features
+        or template_gate.out_features != template_up.out_features
+        or template_down.in_features != template_up.out_features
+        or template_down.out_features != template_up.in_features
+    ):
+        raise RuntimeError("fused NVFP4 MoE expert projection geometry is incompatible")
+
+    device = template_gate.weight.device
+    if require_flashinfer_selection and device.type != "cuda":
+        raise RuntimeError("fused NVFP4 MoE requires CUDA-resident checkpoint tensors")
+    expected = (
+        template_gate.weight.shape,
+        template_gate.weight_scale.shape,
+        template_down.weight.shape,
+        template_down.weight_scale.shape,
+    )
+    for gate, up, down in projections:
+        if any(module.weight.device != device for module in (gate, up, down)):
+            raise RuntimeError("fused NVFP4 MoE expert weights span multiple devices")
+        actual = (
+            gate.weight.shape,
+            gate.weight_scale.shape,
+            down.weight.shape,
+            down.weight_scale.shape,
+        )
+        if (
+            actual != expected
+            or up.weight.shape != gate.weight.shape
+            or up.weight_scale.shape != gate.weight_scale.shape
+        ):
+            raise RuntimeError("fused NVFP4 MoE local experts have unequal geometry")
+        if not torch.equal(gate.input_scale, up.input_scale):
+            raise RuntimeError("fused NVFP4 FC1 gate/up activation scales differ")
+        if not torch.equal(gate.weight_scale_2, up.weight_scale_2):
+            raise RuntimeError("fused NVFP4 FC1 gate/up dequant scales differ")
+
+    fc1_input_scale = template_up.input_scale.float().reshape(())
+    fc2_input_scale = template_down.input_scale.float().reshape(())
+    if (
+        not bool(torch.isfinite(fc1_input_scale))
+        or not bool(fc1_input_scale > 0)
+        or not bool(torch.isfinite(fc2_input_scale))
+        or not bool(fc2_input_scale > 0)
+    ):
+        raise RuntimeError("fused NVFP4 MoE activation scales must be finite and positive")
+    for _gate, up, down in projections[1:]:
+        if (
+            not torch.equal(up.input_scale, template_up.input_scale)
+            or not torch.equal(down.input_scale, template_down.input_scale)
+        ):
+            raise RuntimeError("fused NVFP4 MoE requires layer-global activation scales")
+
+    local_count = len(projections)
+    intermediate, packed_hidden = template_up.weight.shape
+    hidden, packed_intermediate = template_down.weight.shape
+    fc1_weight_u8 = torch.empty(
+        local_count,
+        intermediate * 2,
+        packed_hidden,
+        dtype=torch.uint8,
+        device=device,
+    )
+    fc2_weight_u8 = torch.empty(
+        local_count,
+        hidden,
+        packed_intermediate,
+        dtype=torch.uint8,
+        device=device,
+    )
+    fc1_scale_linear = torch.empty(
+        local_count,
+        intermediate * 2,
+        template_up.weight_scale.shape[1],
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+    fc2_scale_linear = torch.empty(
+        local_count,
+        hidden,
+        template_down.weight_scale.shape[1],
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+    fc1_dequant = torch.empty(local_count, dtype=torch.float32, device=device)
+    fc2_dequant = torch.empty(local_count, dtype=torch.float32, device=device)
+
+    # FlashInfer CUTLASS consumes the gated FC1 pair as [up, gate].
+    for local_index, (gate, up, down) in enumerate(projections):
+        fc1_weight_u8[local_index, :intermediate].copy_(up.weight)
+        fc1_weight_u8[local_index, intermediate:].copy_(gate.weight)
+        fc2_weight_u8[local_index].copy_(down.weight)
+        fc1_scale_linear[local_index, :intermediate].copy_(up.weight_scale)
+        fc1_scale_linear[local_index, intermediate:].copy_(gate.weight_scale)
+        fc2_scale_linear[local_index].copy_(down.weight_scale)
+        fc1_dequant[local_index] = up.weight_scale_2.float() * fc1_input_scale
+        fc2_dequant[local_index] = down.weight_scale_2.float() * fc2_input_scale
+
+    fc1_scale = _swizzle_nvfp4_moe_scale(fc1_scale_linear)
+    fc2_scale = _swizzle_nvfp4_moe_scale(fc2_scale_linear)
+    del fc1_scale_linear, fc2_scale_linear
+
+    # Rebind canonical checkpoint buffers to slices of the central packed
+    # storage. The dataclass and module buffers now share one allocation, so
+    # the 235B model never retains a second model-wide weight copy.
+    for local_index, (gate, up, down) in enumerate(projections):
+        up._buffers["weight"] = fc1_weight_u8[local_index, :intermediate]
+        gate._buffers["weight"] = fc1_weight_u8[local_index, intermediate:]
+        down._buffers["weight"] = fc2_weight_u8[local_index]
+        for module in (gate, up, down):
+            _clear_nvfp4_linear_runtime_cache(module)
+
+    return PreparedNvFp4Moe(
+        fc1_weight=fc1_weight_u8.view(torch.long),
+        fc2_weight=fc2_weight_u8.view(torch.long),
+        fc1_act_scale=fc1_input_scale.reciprocal(),
+        fc1_weight_scale=fc1_scale.view(torch.int32),
+        fc1_dequant_scale=fc1_dequant,
+        fc2_act_scale=fc2_input_scale.reciprocal(),
+        fc2_weight_scale=fc2_scale.view(torch.int32),
+        fc2_dequant_scale=fc2_dequant,
+        num_global_experts=len(block.experts),
+        local_expert_start=block.owned_expert_indices[0],
+    )
 
 
 class EpMoeBlock(nn.Module):
@@ -102,6 +487,48 @@ class EpMoeBlock(nn.Module):
             "_kairyu_parallel_shard",
             ParallelShardInfo("expert", ep_rank, ep_size),
         )
+        object.__setattr__(self, "_prepared_nvfp4_moe", None)
+        object.__setattr__(self, "_fused_nvfp4_executed", False)
+
+    def _invalidate_prepared_nvfp4(self) -> None:
+        """Drop derived fused operands before registered tensors can change."""
+
+        object.__setattr__(self, "_prepared_nvfp4_moe", None)
+        object.__setattr__(self, "_fused_nvfp4_executed", False)
+
+    def _apply(self, fn, recurse: bool = True):
+        # ``PreparedNvFp4Moe`` contains unregistered views and derived scale
+        # tensors.  Module._apply replaces registered buffers independently,
+        # so retaining the prepared object across to()/cuda()/dtype changes
+        # would leave it pointing at the previous device/storage generation.
+        # Invalidate first so even a failed conversion cannot re-enable stale
+        # operands; the normal build path prepares only after model.to(device).
+        self._invalidate_prepared_nvfp4()
+        return super()._apply(fn, recurse=recurse)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ) -> None:
+        # The packed activation/dequant scales are values derived from child
+        # buffers, not aliases.  A parent model's load_state_dict reaches this
+        # hook before it copies or assigns those child buffers.
+        self._invalidate_prepared_nvfp4()
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     @property
     def local_experts(self) -> tuple[nn.Module, ...]:
@@ -129,9 +556,63 @@ class EpMoeBlock(nn.Module):
             )
         return expert
 
+    def prepare_fused_nvfp4(self) -> None:
+        """Prepare the rank-local FlashInfer CUTLASS fused-MoE operands."""
+
+        # A failed repack must not leave a previous storage generation active.
+        self._invalidate_prepared_nvfp4()
+        prepared = _pack_nvfp4_moe_block(
+            self,
+            require_flashinfer_selection=True,
+        )
+        object.__setattr__(self, "_prepared_nvfp4_moe", prepared)
+
+    def fused_nvfp4_metadata(self) -> dict[str, object] | None:
+        """Return measured preparation/execution metadata without tensor values."""
+
+        prepared = self._prepared_nvfp4_moe
+        if prepared is None:
+            return None
+        return {
+            "backend": "flashinfer.cutlass_fused_moe",
+            "global_expert_count": prepared.num_global_experts,
+            "local_expert_count": prepared.fc2_weight.shape[0],
+            "local_expert_start": prepared.local_expert_start,
+            "weight_order": "up_gate",
+            "scale_layout": "128x4",
+            "output_dtype": "bfloat16",
+            "ep_partial": True,
+            "enable_alltoall": False,
+            "successful_forward": self._fused_nvfp4_executed,
+        }
+
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         device = hidden.device
         topk_indices, topk_weights = self._route(hidden)
+        if self._prepared_nvfp4_moe is not None:
+            from kairyu.kernels.nvfp4_moe_gpu import fused_moe_forward
+
+            object.__setattr__(self, "_fused_nvfp4_executed", False)
+            fused_hidden = hidden.contiguous()
+            selected_experts = topk_indices.to(torch.int32).contiguous()
+            routing_weights = topk_weights.to(torch.float32).contiguous()
+            local_partial = torch.empty_like(fused_hidden)
+            fused_moe_forward(
+                fused_hidden,
+                selected_experts,
+                routing_weights,
+                self._prepared_nvfp4_moe,
+                output=local_partial,
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+            )
+            _assert_collective_device(device, local_partial=local_partial)
+            out = self._comm.tensor_all_reduce(local_partial.contiguous())
+            if self.shared_experts is not None:
+                out = out + self.shared_experts(hidden)
+            object.__setattr__(self, "_fused_nvfp4_executed", True)
+            return out
+
         tokens, k = topk_indices.shape
         flat_expert = topk_indices.reshape(-1)  # [tokens*k]
         owner = flat_expert // self.experts_per_rank
@@ -187,11 +668,23 @@ class EpMoeBlock(nn.Module):
             send_counts.tolist(),
             recv_counts.tolist(),
         )
-        # undo the permutation, weight, and combine per token
+        # Undo the permutation. Each source rank now has the same complete set
+        # of returned expert rows, but contributes only the experts owned by
+        # its rank. The BF16 boundary before the all-reduce matches standalone
+        # fused-MoE finalization and is observably different from one global
+        # FP32 sum followed by a single cast.
         unsorted = torch.empty_like(returned)
         unsorted[order] = returned
-        weighted = unsorted.reshape(tokens, k, -1) * topk_weights[:, :, None]
-        out = weighted.sum(dim=1)
+        local_partial = _ep_rank_partial(
+            unsorted.reshape(tokens, k, -1),
+            topk_indices,
+            topk_weights,
+            ep_rank=self.ep_rank,
+            experts_per_rank=self.experts_per_rank,
+            output_dtype=hidden.dtype,
+        )
+        _assert_collective_device(device, local_partial=local_partial)
+        out = self._comm.tensor_all_reduce(local_partial.contiguous())
         if self.shared_experts is not None:
             out = out + self.shared_experts(hidden)
         return out
@@ -200,3 +693,609 @@ class EpMoeBlock(nn.Module):
         if self._route_override is not None:
             return self._route_override(hidden)
         return route_experts(self, hidden)
+
+
+def _checkpoint_shard_coordinates(
+    model: nn.Module,
+    state_name: str,
+    shard_dim: int | None,
+) -> tuple[int, int]:
+    """Return typed rank/world ownership for one physical checkpoint member."""
+
+    if shard_dim is None:
+        return 0, 1
+    module_name, separator, _member = state_name.rpartition(".")
+    if not separator:
+        raise RuntimeError(f"sharded checkpoint member {state_name!r} has no module path")
+    module = model.get_submodule(module_name)
+    context = getattr(module, "linear_context", None)
+    if context is None:
+        raise RuntimeError(
+            f"sharded checkpoint member {state_name!r} has no linear context"
+        )
+    placement = context.tensor_parallel
+    if placement.mode is TensorParallelMode.REPLICATED:
+        raise RuntimeError(
+            f"replicated projection {module_name!r} requested a checkpoint shard"
+        )
+    return placement.rank, placement.world_size
+
+
+def _ep_checkpoint_shapes(
+    model: nn.Module,
+    *,
+    tie_word_embeddings: bool,
+) -> tuple[
+    dict[str, tuple[int, ...]],
+    dict[str, tuple[int, ...]],
+    tuple[tuple[str, EpMoeBlock], ...],
+]:
+    """Return rank-local and reconstructed full-checkpoint shape contracts."""
+
+    local = {
+        name: tuple(tensor.shape)
+        for name, tensor in model.state_dict().items()
+    }
+    if tie_word_embeddings:
+        local.pop("lm_head.weight", None)
+    member_specs = checkpoint_member_specs(model)
+    expected: dict[str, tuple[int, ...]] = {}
+    for name, shape in local.items():
+        member = member_specs[name]
+        rank, world_size = _checkpoint_shard_coordinates(
+            model,
+            name,
+            member.shard_dim,
+        )
+        if not 0 <= rank < world_size:
+            raise RuntimeError(
+                f"checkpoint member {name!r} has invalid shard {rank}/{world_size}"
+            )
+        full_shape = list(shape)
+        if member.shard_dim is not None:
+            if not 0 <= member.shard_dim < len(full_shape):
+                raise RuntimeError(
+                    f"checkpoint member {name!r} has invalid shard dim "
+                    f"{member.shard_dim} for shape {shape}"
+                )
+            full_shape[member.shard_dim] *= world_size
+        if member.source_name in expected:
+            raise RuntimeError(
+                f"duplicate checkpoint source {member.source_name!r} in EP model"
+            )
+        expected[member.source_name] = tuple(full_shape)
+    blocks = tuple(
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, EpMoeBlock)
+    )
+    for block_name, block in blocks:
+        template_index = block.owned_expert_indices[0]
+        template_prefix = f"{block_name}.experts.{template_index}."
+        template = {
+            name.removeprefix(template_prefix): shape
+            for name, shape in local.items()
+            if name.startswith(template_prefix)
+        }
+        if not template:
+            raise RuntimeError(
+                f"owned expert {template_index} at {block_name!r} has no checkpoint state"
+            )
+        for expert_index in range(len(block.experts)):
+            for suffix, shape in template.items():
+                expected[
+                    f"{block_name}.experts.{expert_index}.{suffix}"
+                ] = shape
+    return local, expected, blocks
+
+
+def _kv_scale_names(model: nn.Module) -> tuple[str, ...]:
+    names = []
+    for layer_index, _layer in enumerate(model.model.layers):
+        names.extend(
+            (
+                f"model.layers.{layer_index}.self_attn.k_proj.k_scale",
+                f"model.layers.{layer_index}.self_attn.v_proj.v_scale",
+            )
+        )
+    return tuple(names)
+
+
+_NVFP4_SAFETENSORS_DTYPES = {
+    torch.uint8: "U8",
+    torch.float8_e4m3fn: "F8_E4M3",
+    torch.float32: "F32",
+}
+
+
+def _global_nvfp4_dtype_contract(
+    model: nn.Module,
+    blocks: tuple[tuple[str, EpMoeBlock], ...],
+) -> dict[str, str]:
+    """Reconstruct the packed ABI for owned and remote expert projections."""
+
+    local = {
+        (f"{module_name}.{buffer_name}" if module_name else buffer_name): (
+            _NVFP4_SAFETENSORS_DTYPES[buffer.dtype]
+        )
+        for module_name, module in model.named_modules()
+        if isinstance(module, NvFp4Linear)
+        for buffer_name, buffer in module.named_buffers(recurse=False)
+    }
+    expected = dict(local)
+    for block_name, block in blocks:
+        template_index = block.owned_expert_indices[0]
+        template_prefix = f"{block_name}.experts.{template_index}."
+        template = {
+            name.removeprefix(template_prefix): dtype
+            for name, dtype in local.items()
+            if name.startswith(template_prefix)
+        }
+        if not template:
+            raise RuntimeError(
+                f"owned NVFP4 expert {template_index} at {block_name!r} "
+                "has no packed checkpoint members"
+            )
+        for expert_index in range(len(block.experts)):
+            for suffix, dtype in template.items():
+                expected[f"{block_name}.experts.{expert_index}.{suffix}"] = dtype
+    return expected
+
+
+def _checkpoint_nvfp4_moe_global_input_scales(
+    reader,
+    blocks: tuple[tuple[str, EpMoeBlock], ...],
+) -> dict[str, tuple[torch.Tensor | None, torch.Tensor | None]]:
+    """Read layer-global FC1/FC2 activation scales, including remote experts."""
+
+    requested: dict[str, tuple[str, str]] = {}
+    expected_counts: dict[tuple[str, str], int] = {}
+    for block_name, block in blocks:
+        template = block.local_expert(block.owned_expert_indices[0])
+        w13_projections = tuple(
+            projection
+            for projection in ("gate_proj", "up_proj")
+            if isinstance(getattr(template, projection, None), NvFp4Linear)
+        )
+        w2_projections = (
+            ("down_proj",)
+            if isinstance(getattr(template, "down_proj", None), NvFp4Linear)
+            else ()
+        )
+        expected_counts[(block_name, "w13")] = (
+            len(block.experts) * len(w13_projections)
+        )
+        expected_counts[(block_name, "w2")] = (
+            len(block.experts) * len(w2_projections)
+        )
+        for expert_index in range(len(block.experts)):
+            prefix = f"{block_name}.experts.{expert_index}"
+            for projection in w13_projections:
+                requested[f"{prefix}.{projection}.input_scale"] = (
+                    block_name,
+                    "w13",
+                )
+            for projection in w2_projections:
+                requested[f"{prefix}.{projection}.input_scale"] = (
+                    block_name,
+                    "w2",
+                )
+
+    grouped: dict[tuple[str, str], list[torch.Tensor]] = {}
+    for name, scale in reader.selected_items(requested):
+        value = scale.detach().to(dtype=torch.float32).reshape(-1)
+        if (
+            value.numel() != 1
+            or not bool(torch.isfinite(value).all())
+            or not bool((value > 0).all())
+        ):
+            raise ValueError(
+                f"checkpoint NVFP4 MoE input scale {name!r} must be one "
+                "finite positive FP32 value"
+            )
+        grouped.setdefault(requested[name], []).append(value.reshape(()))
+
+    result: dict[str, tuple[torch.Tensor | None, torch.Tensor | None]] = {}
+    for block_name, _block in blocks:
+        w13 = grouped.get((block_name, "w13"), [])
+        w2 = grouped.get((block_name, "w2"), [])
+        if (
+            len(w13) != expected_counts[(block_name, "w13")]
+            or len(w2) != expected_counts[(block_name, "w2")]
+        ):
+            raise RuntimeError(
+                f"checkpoint NVFP4 MoE scales for {block_name!r} are incomplete"
+            )
+        result[block_name] = (
+            torch.stack(w13).max() if w13 else None,
+            torch.stack(w2).max() if w2 else None,
+        )
+    return result
+
+
+def _validate_ep_checkpoint_contract(
+    reader,
+    model: nn.Module,
+    *,
+    tie_word_embeddings: bool,
+    kv_cache_quant_algo: str | None,
+) -> tuple[
+    dict[str, tuple[int, ...]],
+    tuple[tuple[str, EpMoeBlock], ...],
+    tuple[str, ...],
+]:
+    local, expected, blocks = _ep_checkpoint_shapes(
+        model,
+        tie_word_embeddings=tie_word_embeddings,
+    )
+    kv_scale_names = (
+        _kv_scale_names(model)
+        if kv_cache_quant_algo == "FP8"
+        else ()
+    )
+    required = set(expected) | set(kv_scale_names)
+    actual = set(reader.names())
+    missing = sorted(required - actual)
+    unexpected = sorted(actual - required)
+    if missing or unexpected:
+        raise ValueError(
+            "expert-parallel checkpoint tensor layout mismatch: "
+            f"missing={missing[:8]} ({len(missing)} total), "
+            f"unexpected={unexpected[:8]} ({len(unexpected)} total)"
+        )
+
+    actual_specs = reader.specs(expected)
+    mismatches = [
+        (name, expected[name], actual_specs[name][0])
+        for name in expected
+        if actual_specs[name][0] != expected[name]
+    ]
+    if mismatches:
+        name, wanted, found = mismatches[0]
+        raise ValueError(
+            f"checkpoint tensor {name!r} shape {found} != expected {wanted}; "
+            f"{len(mismatches)} shape mismatch(es)"
+        )
+    expected_dtypes = _global_nvfp4_dtype_contract(model, blocks)
+    dtype_mismatches = [
+        (name, expected_dtype, actual_specs[name][1])
+        for name, expected_dtype in expected_dtypes.items()
+        if actual_specs[name][1] != expected_dtype
+    ]
+    if dtype_mismatches:
+        name, wanted, found = dtype_mismatches[0]
+        raise ValueError(
+            f"NVFP4 checkpoint tensor {name!r} dtype {found} != "
+            f"required ABI dtype {wanted}; "
+            f"{len(dtype_mismatches)} dtype mismatch(es)"
+        )
+    for name, scale in reader.selected_items(kv_scale_names):
+        if (
+            scale.numel() != 1
+            or not scale.is_floating_point()
+            or not torch.isfinite(scale).all()
+            or not bool((scale > 0).all())
+        ):
+            raise ValueError(
+                f"checkpoint FP8-KV calibration tensor {name!r} must be one "
+                "finite positive floating-point value"
+            )
+    return local, blocks, kv_scale_names
+
+
+def _assign_checkpoint_tensor(
+    model: nn.Module,
+    name: str,
+    tensor: torch.Tensor,
+) -> None:
+    module_name, separator, member = name.rpartition(".")
+    module = model.get_submodule(module_name) if separator else model
+    if member in module._parameters:
+        current = module._parameters[member]
+        if current is None:
+            raise RuntimeError(f"checkpoint parameter {name!r} is disabled")
+        module._parameters[member] = nn.Parameter(
+            tensor,
+            requires_grad=current.requires_grad,
+        )
+        return
+    if member in module._buffers:
+        module._buffers[member] = tensor
+        return
+    raise KeyError(f"checkpoint member {name!r} is not registered on the model")
+
+
+def build_ep_model(
+    model_dir: str | Path,
+    ep_size: int,
+    ep_rank: int,
+    comm,
+    dtype: torch.dtype = torch.float32,
+    device: str | torch.device = "cpu",
+    attention_backend=None,
+    linear_capabilities=None,
+    linear_selection_policy=None,
+) -> tuple[nn.Module, object, ExpertParallelLoadInfo]:
+    """Build one real Qwen3-MoE rank without materializing remote experts.
+
+    QKV projection, attention/KV state, router, embeddings, and the output head
+    are replicated. For NVFP4, attention ``o_proj`` alone uses a contiguous
+    hidden-K shard, one BF16 rank-local partial, and an EP-communicator
+    all-reduce. Routed expert modules retain their global HF names, but only
+    this rank's contiguous block is constructed and loaded. The complete
+    checkpoint name/shape contract is validated on every rank before any
+    request can execute.
+    """
+
+    from kairyu.engine.core.quant_config import (
+        QuantMethod,
+        load_checkpoint_quantization,
+        validate_model_quantization,
+    )
+    from kairyu.engine.core.weights import CheckpointReader
+    from kairyu.models.config import parse_model_config
+    from kairyu.models.layers import RotaryEmbedding
+    from kairyu.models.llama import DenseDecoder
+    from kairyu.quant.linear import (
+        QuantizedLinearBase,
+        linear_factory,
+    )
+
+    directory = Path(model_dir)
+    raw = json.loads((directory / "config.json").read_text())
+    config = parse_model_config(raw)
+    if config.architecture != "Qwen3MoeForCausalLM":
+        raise ValueError(
+            "expert-parallel real-checkpoint loading currently supports "
+            f"Qwen3MoeForCausalLM, got {config.architecture!r}"
+        )
+    if config.moe is None:
+        raise ValueError("expert-parallel loading requires a MoE model config")
+    if ep_size < 1:
+        raise ValueError("expert-parallel size must be positive")
+    if not 0 <= ep_rank < ep_size:
+        raise ValueError(
+            f"expert-parallel rank {ep_rank} is outside size {ep_size}"
+        )
+    if config.moe.num_experts % ep_size:
+        raise ValueError(
+            f"{config.moe.num_experts} experts do not divide across {ep_size} ranks"
+        )
+
+    resolved = load_checkpoint_quantization(directory, raw)
+    quant = resolved.weights
+    validate_model_quantization(
+        quant,
+        is_mla=config.is_mla,
+        architecture=config.architecture,
+    )
+    base_factory = linear_factory(
+        quant,
+        device=device,
+        dtype=dtype,
+        capabilities=linear_capabilities,
+        selection_policy=linear_selection_policy,
+    )
+    attention_output_factory = (
+        linear_factory(
+            quant,
+            device=device,
+            dtype=dtype,
+            tensor_parallel_size=ep_size,
+            tensor_parallel_rank=ep_rank,
+            capabilities=linear_capabilities,
+            selection_policy=linear_selection_policy,
+        )
+        if quant.method is QuantMethod.NVFP4
+        else None
+    )
+    factory = _ExpertShardedLinearFactory(
+        base_factory,
+        num_experts=config.moe.num_experts,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+        attention_output_factory=attention_output_factory,
+    )
+    # The official checkpoint is 134 GB. Even rank-local EP2 dummy buffers
+    # would allocate ~70 GB on the host before loading useful values. Construct
+    # shape-only modules, drop remote experts, and assign only selected tensors.
+    with torch.device("meta"):
+        model = DenseDecoder(
+            config,
+            attention_backend=attention_backend,
+            linear_factory=factory,
+            dtype=dtype,
+        )
+    for layer_index, layer in enumerate(model.model.layers):
+        if quant.method is QuantMethod.NVFP4:
+            output = layer.self_attn.o_proj
+            if not isinstance(output, NvFp4Linear):
+                raise RuntimeError(
+                    "NVFP4 EP attention-output row parallelism requires "
+                    f"NvFp4Linear at layer {layer_index}, got {type(output).__name__}"
+                )
+            ReplicatedInputRowParallelLinear(output, comm)
+        if hasattr(layer.mlp, "experts"):
+            layer.mlp = EpMoeBlock(
+                layer.mlp,
+                comm,
+                ep_rank=ep_rank,
+                ep_size=ep_size,
+            )
+    reader = CheckpointReader(directory)
+    local_shapes, blocks, kv_scale_names = _validate_ep_checkpoint_contract(
+        reader,
+        model,
+        tie_word_embeddings=config.tie_word_embeddings,
+        kv_cache_quant_algo=resolved.kv_cache_quant_algo,
+    )
+    if not blocks:
+        raise ValueError("Qwen3-MoE checkpoint has no sparse expert layers")
+    nvfp4_moe_input_scales = (
+        _checkpoint_nvfp4_moe_global_input_scales(reader, blocks)
+        if quant.method is QuantMethod.NVFP4
+        else {}
+    )
+
+    quantized_dtypes = {
+        (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
+        for module_name, module in model.named_modules()
+        if isinstance(module, QuantizedLinearBase)
+        for buffer_name, buffer in module.named_buffers(recurse=False)
+    }
+    strict_nvfp4_dtypes = {
+        (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
+        for module_name, module in model.named_modules()
+        if isinstance(module, NvFp4Linear)
+        for buffer_name, buffer in module.named_buffers(recurse=False)
+    }
+    member_specs = checkpoint_member_specs(model)
+    replicated_sources: dict[str, str] = {}
+    sharded_members: list[tuple[str, str, int, int, int]] = []
+    for name in local_shapes:
+        member = member_specs[name]
+        rank, world_size = _checkpoint_shard_coordinates(
+            model,
+            name,
+            member.shard_dim,
+        )
+        if member.shard_dim is None or world_size == 1:
+            if member.source_name in replicated_sources:
+                raise RuntimeError(
+                    f"duplicate EP checkpoint source {member.source_name!r}"
+                )
+            replicated_sources[member.source_name] = name
+        else:
+            sharded_members.append(
+                (name, member.source_name, member.shard_dim, rank, world_size)
+            )
+
+    loaded: set[str] = set()
+
+    def assign_checkpoint(
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        expected_shape: tuple[int, ...],
+    ) -> None:
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(
+                f"rank-local checkpoint tensor {name!r} shape "
+                f"{tuple(tensor.shape)} != expected {expected_shape}"
+            )
+        quantized_dtype = quantized_dtypes.get(name)
+        if name in strict_nvfp4_dtypes and tensor.dtype != strict_nvfp4_dtypes[name]:
+            raise ValueError(
+                f"NVFP4 checkpoint tensor {name!r} dtype {tensor.dtype} != "
+                f"required ABI dtype {strict_nvfp4_dtypes[name]}"
+            )
+        if quantized_dtype is not None and tensor.dtype != quantized_dtype:
+            tensor = tensor.to(quantized_dtype)
+        elif (
+            quantized_dtype is None
+            and tensor.is_floating_point()
+            and tensor.dtype != dtype
+        ):
+            tensor = tensor.to(dtype)
+        _assign_checkpoint_tensor(model, name, tensor)
+        loaded.add(name)
+
+    source_destinations = dict(replicated_sources)
+    slice_specs: dict[str, tuple[int, int, int, int]] = {}
+    for name, source, shard_dim, rank, world_size in sorted(sharded_members):
+        local_span = local_shapes[name][shard_dim]
+        start = rank * local_span
+        end = start + local_span
+        if end != (rank + 1) * local_span or end > local_span * world_size:
+            raise RuntimeError(f"invalid EP checkpoint slice for {name!r}")
+        if source in source_destinations:
+            raise RuntimeError(f"duplicate EP checkpoint source {source!r}")
+        source_destinations[source] = name
+        slice_specs[source] = (shard_dim, start, end, world_size)
+    for source, tensor in reader.selected_items(source_destinations):
+        name = source_destinations[source]
+        if source in slice_specs:
+            shard_dim, _start, _end, world_size = slice_specs[source]
+            expected_shape = list(local_shapes[name])
+            expected_shape[shard_dim] *= world_size
+            assign_checkpoint(
+                name,
+                tensor,
+                expected_shape=tuple(expected_shape),
+            )
+        else:
+            assign_checkpoint(
+                name,
+                tensor,
+                expected_shape=local_shapes[name],
+            )
+    if loaded != set(local_shapes):
+        absent = sorted(set(local_shapes) - loaded)
+        raise RuntimeError(
+            f"rank-local expert load omitted {absent[:8]} ({len(absent)} total)"
+        )
+    for block_name, block in blocks:
+        if block_name in nvfp4_moe_input_scales:
+            w13_input_scale, w2_input_scale = nvfp4_moe_input_scales[block_name]
+            apply_nvfp4_moe_global_input_scales(
+                block.experts,
+                w13_input_scale=w13_input_scale,
+                w2_input_scale=w2_input_scale,
+            )
+    if config.tie_word_embeddings:
+        model.lm_head.weight = model.model.embed_tokens.weight
+
+    fresh_rope = RotaryEmbedding(config)
+    model.model.rotary_emb._buffers["inv_freq"] = fresh_rope.inv_freq
+    model.model.rotary_emb.attention_scaling = fresh_rope.attention_scaling
+    remaining_meta = [
+        name
+        for name, tensor in (
+            *model.named_parameters(),
+            *model.named_buffers(),
+        )
+        if tensor.device.type == "meta"
+    ]
+    if remaining_meta:
+        raise RuntimeError(
+            "expert-parallel load left meta tensors unresolved: "
+            f"{remaining_meta[:8]} ({len(remaining_meta)} total)"
+        )
+    model.eval()
+    model.refresh_dense_packs()
+    gc.collect()
+    model = model.to(device)
+    for source, (shard_dim, start, end, _world_size) in sorted(
+        slice_specs.items()
+    ):
+        name = source_destinations[source]
+        full = model.get_buffer(name)
+        local = full.narrow(shard_dim, start, end - start).contiguous()
+        if tuple(local.shape) != local_shapes[name]:
+            raise RuntimeError(
+                f"resident checkpoint slice {name!r} shape {tuple(local.shape)} "
+                f"!= expected {local_shapes[name]}"
+            )
+        _assign_checkpoint_tensor(model, name, local)
+        del full, local
+    if quant.method is QuantMethod.NVFP4 and torch.device(device).type == "cuda":
+        for _block_name, block in blocks:
+            block.prepare_fused_nvfp4()
+    owned = blocks[0][1].owned_expert_indices
+    if any(block.owned_expert_indices != owned for _name, block in blocks):
+        raise RuntimeError("expert ownership differs across sparse layers")
+    info = ExpertParallelLoadInfo(
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+        owned_expert_indices=owned,
+        quantization_source=resolved.source,
+        quantization_method=quant.method.value,
+        kv_cache_quant_algo=resolved.kv_cache_quant_algo,
+        producer_name=resolved.producer_name,
+        producer_version=resolved.producer_version,
+        checkpoint_tensor_count=len(reader.names()),
+        rank_loaded_tensor_count=len(loaded),
+        auxiliary_kv_scale_count=len(kv_scale_names),
+    )
+    object.__setattr__(model, "_kairyu_ep_load_info", info)
+    return model, config, info
