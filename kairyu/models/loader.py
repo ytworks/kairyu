@@ -15,6 +15,7 @@ from pathlib import Path
 import torch
 
 from kairyu.engine.core.quant_config import (
+    QuantMethod,
     load_checkpoint_quantization,
     validate_model_quantization,
 )
@@ -131,6 +132,16 @@ def load_model(
             tensor = tensor.to(dtype)
         state[name] = tensor
     model.load_state_dict(state, strict=False, assign=True)
+    if (
+        quant.method is QuantMethod.NVFP4
+        and config.architecture == "Qwen3MoeForCausalLM"
+    ):
+        from kairyu.models.moe import apply_nvfp4_moe_global_input_scales
+
+        for layer in model.model.layers:
+            block = layer.mlp
+            if hasattr(block, "experts"):
+                apply_nvfp4_moe_global_input_scales(block.experts)
     if config.tie_word_embeddings:
         # assign=True replaces the embedding tensor; restore the tie
         model.lm_head.weight = model.model.embed_tokens.weight

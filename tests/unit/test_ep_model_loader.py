@@ -12,6 +12,7 @@ from kairyu.engine.core.quant_config import QuantConfig, QuantMethod
 from kairyu.engine.core.weights import CheckpointReader
 from kairyu.models.config import parse_model_config
 from kairyu.models.llama import DenseDecoder
+from kairyu.models.loader import load_model
 from kairyu.models.moe_parallel import EpMoeBlock, build_ep_model
 from kairyu.quant.linear import linear_factory
 
@@ -46,6 +47,7 @@ def _write_checkpoint(
     omit: str | None = None,
     bad_dtype: str | None = None,
     bad_kv_scale: float | None = None,
+    expert_input_scales: dict[tuple[int, str], float] | None = None,
     unexpected: bool = False,
 ) -> dict[str, torch.Tensor]:
     path.mkdir()
@@ -82,6 +84,11 @@ def _write_checkpoint(
         if ".experts." in name and name.endswith(".weight"):
             expert_index = int(name.split(".experts.", 1)[1].split(".", 1)[0])
             tensor.fill_(expert_index + 1)
+        if ".experts." in name and name.endswith(".input_scale"):
+            expert_index = int(name.split(".experts.", 1)[1].split(".", 1)[0])
+            projection = name.rsplit(".", 2)[-2]
+            if expert_input_scales is not None:
+                tensor.fill_(expert_input_scales[(expert_index, projection)])
     state["model.layers.0.self_attn.k_proj.k_scale"] = torch.tensor(
         0.5 if bad_kv_scale is None else bad_kv_scale
     )
@@ -137,8 +144,13 @@ def test_build_ep_model_loads_only_owned_global_experts(
     assert not any(".experts.0." in name for name in rank_names)
     assert not any(".experts.1." in name for name in rank_names)
     loaded_names = set().union(*(set(call) for call in selected_calls))
-    assert not any(".experts.0." in name for name in loaded_names)
-    assert not any(".experts.1." in name for name in loaded_names)
+    remote_names = {
+        name
+        for name in loaded_names
+        if ".experts.0." in name or ".experts.1." in name
+    }
+    assert remote_names
+    assert all(name.endswith(".input_scale") for name in remote_names)
     owned_weight = model.get_buffer(
         "model.layers.0.mlp.experts.2.gate_proj.weight"
     )
@@ -147,6 +159,64 @@ def test_build_ep_model_loads_only_owned_global_experts(
         tensor.device.type == "meta"
         for tensor in (*model.parameters(), *model.buffers())
     )
+
+
+def test_ep_nvfp4_uses_global_scales_from_owned_and_remote_experts(tmp_path):
+    checkpoint = tmp_path / "global-scales"
+    scales = {
+        (expert, projection): value
+        for expert, values in enumerate(
+            (
+                (0.5, 0.5, 4.0),
+                (3.0, 3.0, 2.0),
+                (1.5, 1.5, 8.0),
+                (2.0, 2.0, 6.0),
+            )
+        )
+        for projection, value in zip(
+            ("gate_proj", "up_proj", "down_proj"), values, strict=True
+        )
+    }
+    _write_checkpoint(checkpoint, expert_input_scales=scales)
+
+    model, _config, _info = build_ep_model(
+        checkpoint,
+        ep_size=2,
+        ep_rank=1,
+        comm=_UnusedEpComm(),
+    )
+
+    block = model.model.layers[0].mlp
+    for expert_index in block.owned_expert_indices:
+        expert = block.local_expert(expert_index)
+        assert expert.gate_proj.input_scale.item() == 3.0
+        assert expert.up_proj.input_scale.item() == 3.0
+        assert expert.down_proj.input_scale.item() == 8.0
+
+    full_model, _config, _generation = load_model(checkpoint)
+    for expert in full_model.model.layers[0].mlp.experts:
+        assert expert.gate_proj.input_scale.item() == 3.0
+        assert expert.up_proj.input_scale.item() == 3.0
+        assert expert.down_proj.input_scale.item() == 8.0
+
+
+def test_ep_nvfp4_rejects_invalid_remote_input_scale(tmp_path):
+    checkpoint = tmp_path / "bad-input-scale"
+    scales = {
+        (expert, projection): 1.0
+        for expert in range(4)
+        for projection in ("gate_proj", "up_proj", "down_proj")
+    }
+    scales[(0, "down_proj")] = 0.0
+    _write_checkpoint(checkpoint, expert_input_scales=scales)
+
+    with pytest.raises(ValueError, match="finite positive FP32"):
+        build_ep_model(
+            checkpoint,
+            ep_size=2,
+            ep_rank=1,
+            comm=_UnusedEpComm(),
+        )
 
 
 def test_ep_contract_requires_remote_expert_tensors(tmp_path):

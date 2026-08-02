@@ -20,7 +20,10 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from kairyu.models.moe import route_experts
+from kairyu.models.moe import (
+    apply_nvfp4_moe_global_input_scales,
+    route_experts,
+)
 from kairyu.models.parallel import ParallelShardInfo
 from kairyu.quant.linear import (
     ExpertScope,
@@ -291,8 +294,10 @@ class EpMoeBlock(nn.Module):
         # undo the permutation, weight, and combine per token
         unsorted = torch.empty_like(returned)
         unsorted[order] = returned
-        weighted = unsorted.reshape(tokens, k, -1) * topk_weights[:, :, None]
-        out = weighted.sum(dim=1)
+        combine_dtype = torch.promote_types(unsorted.dtype, topk_weights.dtype)
+        weighted = unsorted.reshape(tokens, k, -1).to(combine_dtype)
+        weighted = weighted * topk_weights.to(combine_dtype)[:, :, None]
+        out = weighted.sum(dim=1).to(hidden.dtype)
         if self.shared_experts is not None:
             out = out + self.shared_experts(hidden)
         return out
@@ -397,6 +402,50 @@ def _global_nvfp4_dtype_contract(
             for suffix, dtype in template.items():
                 expected[f"{block_name}.experts.{expert_index}.{suffix}"] = dtype
     return expected
+
+
+def _checkpoint_nvfp4_moe_global_input_scales(
+    reader,
+    blocks: tuple[tuple[str, EpMoeBlock], ...],
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Read layer-global FC1/FC2 activation scales, including remote experts."""
+
+    requested: dict[str, tuple[str, str]] = {}
+    for block_name, block in blocks:
+        for expert_index in range(len(block.experts)):
+            prefix = f"{block_name}.experts.{expert_index}"
+            for projection in ("gate_proj", "up_proj"):
+                requested[f"{prefix}.{projection}.input_scale"] = (
+                    block_name,
+                    "w13",
+                )
+            requested[f"{prefix}.down_proj.input_scale"] = (block_name, "w2")
+
+    grouped: dict[tuple[str, str], list[torch.Tensor]] = {}
+    for name, scale in reader.selected_items(requested):
+        value = scale.detach().to(dtype=torch.float32).reshape(-1)
+        if (
+            value.numel() != 1
+            or not bool(torch.isfinite(value).all())
+            or not bool((value > 0).all())
+        ):
+            raise ValueError(
+                f"checkpoint NVFP4 MoE input scale {name!r} must be one "
+                "finite positive FP32 value"
+            )
+        grouped.setdefault(requested[name], []).append(value.reshape(()))
+
+    result: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    for block_name, block in blocks:
+        expected_experts = len(block.experts)
+        w13 = grouped.get((block_name, "w13"), [])
+        w2 = grouped.get((block_name, "w2"), [])
+        if len(w13) != expected_experts * 2 or len(w2) != expected_experts:
+            raise RuntimeError(
+                f"checkpoint NVFP4 MoE scales for {block_name!r} are incomplete"
+            )
+        result[block_name] = (torch.stack(w13).max(), torch.stack(w2).max())
+    return result
 
 
 def _validate_ep_checkpoint_contract(
@@ -511,6 +560,7 @@ def build_ep_model(
     """
 
     from kairyu.engine.core.quant_config import (
+        QuantMethod,
         load_checkpoint_quantization,
         validate_model_quantization,
     )
@@ -591,6 +641,11 @@ def build_ep_model(
     )
     if not blocks:
         raise ValueError("Qwen3-MoE checkpoint has no sparse expert layers")
+    nvfp4_moe_input_scales = (
+        _checkpoint_nvfp4_moe_global_input_scales(reader, blocks)
+        if quant.method is QuantMethod.NVFP4
+        else {}
+    )
 
     quantized_dtypes = {
         (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
@@ -633,6 +688,14 @@ def build_ep_model(
         raise RuntimeError(
             f"rank-local expert load omitted {absent[:8]} ({len(absent)} total)"
         )
+    for block_name, block in blocks:
+        if block_name in nvfp4_moe_input_scales:
+            w13_input_scale, w2_input_scale = nvfp4_moe_input_scales[block_name]
+            apply_nvfp4_moe_global_input_scales(
+                block.experts,
+                w13_input_scale=w13_input_scale,
+                w2_input_scale=w2_input_scale,
+            )
     if config.tie_word_embeddings:
         model.lm_head.weight = model.model.embed_tokens.weight
 
