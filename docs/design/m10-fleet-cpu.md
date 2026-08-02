@@ -3,7 +3,8 @@
 Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
 2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
 2026-07-28; D7/A31 amended 2026-07-28; D6/A32 amended 2026-07-29;
-D8/A33 amended 2026-07-29; D4/A34 amended 2026-07-31).
+D8/A33 amended 2026-07-29; D4/A34 amended 2026-07-31; D5/A35 amended
+2026-08-03).
 Reviewed (1-reviewer panel with repo-line evidence; §6 binding; covers
 M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
@@ -1081,3 +1082,23 @@ online learning or the M4 request-family bandit.
   parent IDs, checks distinct service identities and the final response, and
   rejects prompt/output canaries in every exported span. Log order, timing,
   and randomly generated IDs are not acceptance inputs.
+
+- **A35 (2026-08-03)**: F1a separates gateway membership convergence from
+  benchmark EndpointSlice evidence cadence. The gateway polls EndpointSlices
+  every 500 ms, so both smoke and formal replay allow two configured discovery
+  intervals: one for worst-case polling phase and one for the bounded API read,
+  reconciliation, and scheduling. Every old UID must leave gateway eligibility
+  within one second of the independent observer's first disjoint EndpointSlice
+  snapshot.
+  The deadline is also capped at five seconds from the Pod DELETE start, so
+  evidence-observer delay cannot extend the graceful-withdrawal contract.
+
+  This leaves the binding formal one-second deadline unchanged. It corrects
+  only smoke, whose 500 ms evidence capture cadence had accidentally become a
+  one-poll gateway deadline after A24 changed discovery from 250 to 500 ms.
+  A one-poll deadline provides no time for the Kubernetes read, reconciliation,
+  or event-loop scheduling and therefore depends on polling phase rather than
+  product behavior. Retry-free traffic, zero failure, placement-to-membership
+  joins, no old-UID placement after the deadline, no eligibility reappearance,
+  the five-second absolute bound, and all fail-closed replay checks remain
+  mandatory.
