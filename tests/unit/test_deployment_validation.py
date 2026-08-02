@@ -524,7 +524,7 @@ engines:
     } <= codes
 
 
-def test_validation_ignores_unconsumed_index_entries(tmp_path):
+def test_validation_rejects_missing_shard_for_unconsumed_index_entry(tmp_path):
     model = tmp_path / "model"
     _write_tiny_model_checkpoint(model, extra_missing_shard=True)
     deployment = tmp_path / "deploy.yaml"
@@ -539,7 +539,13 @@ engines:
         encoding="utf-8",
     )
 
-    assert validate_deployment(deployment).valid
+    report = validate_deployment(deployment)
+
+    assert not report.valid
+    assert any(
+        finding.code == "schema.invalid_checkpoint"
+        for finding in report.findings
+    )
 
 
 @pytest.mark.parametrize(

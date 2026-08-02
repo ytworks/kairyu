@@ -26,7 +26,7 @@ from torch import nn
 from kairyu.engine.core.quant_config import (
     QuantConfig,
     QuantMethod,
-    detect_quantization,
+    load_checkpoint_quantization,
     validate_tensor_parallel_quantization,
 )
 from kairyu.models.config import ModelConfig, validate_tensor_parallel_config
@@ -507,7 +507,7 @@ def build_tp_model(
     from kairyu.models.llama import DenseDecoder
 
     raw = json.loads((Path(model_dir) / "config.json").read_text())
-    quant = detect_quantization(raw)
+    quant = load_checkpoint_quantization(model_dir, raw).weights
     validate_tensor_parallel_quantization(quant)
     full_config = parse_model_config(raw)
     local_config = tp_view(full_config, tp, rank)

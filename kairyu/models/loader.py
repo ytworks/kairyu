@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 
 from kairyu.engine.core.quant_config import (
-    detect_quantization,
+    load_checkpoint_quantization,
     validate_model_quantization,
 )
 from kairyu.engine.core.weights import CheckpointReader
@@ -77,7 +77,7 @@ def load_model(
     if not config_file.is_file():
         raise ValueError(f"no config.json at {path}")
     raw_config = json.loads(config_file.read_text())
-    quant = detect_quantization(raw_config)
+    quant = load_checkpoint_quantization(directory, raw_config).weights
     config = parse_model_config(raw_config)
     validate_model_quantization(
         quant,

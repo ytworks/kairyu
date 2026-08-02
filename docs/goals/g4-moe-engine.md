@@ -1,9 +1,9 @@
 # Goal G4: MoE Engine — Fused Experts, EP, MTP, NVFP4 (Roadmap Track E4–E5)
 
-Status: Goal defined (2026-07-03). Lifts the G2 §6 "MoE / expert parallelism"
-non-goal (amendment recorded in PROGRESS.md). A design doc (`docs/design/m8-*.md`
-or successor numbering) must pass design review before implementation begins —
-same flow as M1–M7.
+Status: G4.1 M-A1 implementation and evidence in progress (2026-07-31).
+Lifts the G2 §6 "MoE / expert parallelism" non-goal (amendment recorded in
+PROGRESS.md). The reviewed mid-MoE design is `docs/design/g4-mid-moe.md`;
+M-A2 and M-A3 remain pending and retain their own acceptance gates.
 Depends on: Roadmap Track E1–E3 (`docs/roadmap.md` §4): real single-GPU engine,
 scheduler multi-token commit (E2), NcclCommunicator (E3). Frontier-class gates
 additionally depend on the E3 hardware decision record (PCIe-switch chassis,
@@ -47,7 +47,7 @@ All numbers from committed `bench/` scripts (G2 §8 evidence rules carry forward
 
 | Gate | Target | Regime |
 |---|---|---|
-| M-A1 (correctness anchor) | Qwen3-235B NVFP4 on 2 and 4 GPUs: greedy output-match ≥99% on the 64 fixed prompts vs a reference serving stack of the same checkpoint, + logprob tolerance (m2 §2.5 style) | — |
+| M-A1 (correctness anchor) | Qwen3-235B NVFP4 on 2 and 4 GPUs: per-GPU-count TensorRT-LLM reference and Kairyu score the same reference prefix at 16 positions × 64 fixed prompts; require ≥1,014/1,024 token agreement, no substantive disagreement, and the fixed 0.125 near-tie / 0.25 reciprocal selected-logprob bounds. Retain ordinary 16-token free-running continuations as diagnostics, not as the post-divergence verdict. | — |
 | M-A2 (EP does not break KV) | Radix hit >80% @50% shared prefix with EP on (A7 lineage; attention-DP must keep per-replica KV accounting rank-invariant) | — |
 | M-A3 (baseline comparison) | tok/s/GPU and TTFT p99 ≥ SGLang, same box, same checkpoint, same config — SGLang is the credible MoE-on-SM120 baseline; disclose its known SM120 limitations in the results file | saturation |
 | M-A4 (MTP value) | MTP acceptance ≥2 tokens/step measured; decode throughput ≥1.5× MTP-off at equal quality (spec ≡ non-spec greedy invariant pinned by test, E2 lineage) | latency-bound |

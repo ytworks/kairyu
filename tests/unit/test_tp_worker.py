@@ -1077,11 +1077,45 @@ def test_sampling_ownership_metadata_reports_missing_rank():
     [
         (
             lambda row: (row, {**row, "rank": 0}),
-            "duplicate rank 0",
+            "gather slot 1 has invalid rank=0",
         ),
         (
-            lambda row: (row, {key: value for key, value in row.items() if key != "device"}),
+            lambda row: (
+                row,
+                {
+                    **{
+                        key: value
+                        for key, value in row.items()
+                        if key != "device"
+                    },
+                    "rank": 1,
+                },
+            ),
             r"gather slot 1 has malformed fields: missing=\['device'\]",
+        ),
+        (
+            lambda row: (
+                row,
+                {
+                    **row,
+                    "rank": 1,
+                    "sampling_owner": True,
+                    "sampler_present": False,
+                },
+            ),
+            "rank 1 violates the rank-0-only sampler contract",
+        ),
+        (
+            lambda row: (
+                row,
+                {
+                    **row,
+                    "rank": 1,
+                    "sampling_owner": False,
+                    "sampler_present": True,
+                },
+            ),
+            "rank 1 violates the rank-0-only sampler contract",
         ),
     ],
 )
@@ -1090,10 +1124,57 @@ def test_sampling_ownership_metadata_rejects_bad_replies(monkeypatch, corrupt, m
     model = FakeCommunicator.create_group(2)
     local = _DiagnosticRunner((), sampling_owner=True, sampler_present=True, device="cpu")
     driver = DistTPModelRunner(control[0], local, model[0])
-    monkeypatch.setattr(control[0], "all_gather", lambda row: corrupt(row))
+
+    def corrupt_gather(reply):
+        rows = corrupt(reply.row)
+        return tuple(
+            worker_module._SamplingOwnershipReply(
+                rank=row.get("rank", slot),
+                row=row,
+            )
+            for slot, row in enumerate(rows)
+        )
+
+    monkeypatch.setattr(control[0], "all_gather", corrupt_gather)
 
     with pytest.raises(RuntimeError, match=message):
         driver.sampling_ownership_metadata()
+
+    assert isinstance(driver.fatal_error, RuntimeError)
+
+
+def test_sampling_ownership_rank_local_failure_is_gathered_without_hang():
+    control = FakeCommunicator.create_group(2)
+    model = FakeCommunicator.create_group(2)
+    local = (
+        _DiagnosticRunner(
+            (),
+            sampling_owner=True,
+            sampler_present=True,
+            device="cpu",
+        ),
+        _DiagnosticRunner(
+            (),
+            sampling_owner=False,
+            sampler_present=False,
+            device="cpu",
+        ),
+    )
+    local[1].sampling_owner = "malformed"
+    driver = DistTPModelRunner(control[0], local[0], model[0])
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = pool.submit(worker_step_loop, control[1], local[1], model[1])
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "sampling ownership rank failures: rank 1: RuntimeError: "
+                "rank 1 runner has malformed sampling_owner"
+            ),
+        ):
+            driver.sampling_ownership_metadata()
+        control[0].broadcast(None, src=0)
+        assert worker.result(timeout=2) == 0
 
     assert isinstance(driver.fatal_error, RuntimeError)
 

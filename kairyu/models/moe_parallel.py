@@ -12,15 +12,116 @@ deploy-day fast path behind the same block interface.
 
 from __future__ import annotations
 
+import gc
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
 import torch
 from torch import nn
 
 from kairyu.models.moe import route_experts
 from kairyu.models.parallel import ParallelShardInfo
+from kairyu.quant.linear import (
+    ExpertScope,
+    LinearRole,
+    ModelScope,
+    NvFp4Linear,
+)
 
 
 class RemoteExpertOwnershipError(LookupError):
     """A canonical expert exists, but its tensors belong to another rank."""
+
+
+class _RemoteExpertProjection(nn.Module):
+    """Allocation-free construction placeholder removed before execution."""
+
+    def __init__(self, qualified_name: str, owner_rank: int) -> None:
+        super().__init__()
+        self.qualified_name = qualified_name
+        self.owner_rank = owner_rank
+
+    def forward(self, _hidden: torch.Tensor) -> torch.Tensor:
+        raise RemoteExpertOwnershipError(
+            f"projection {self.qualified_name!r} belongs to expert rank "
+            f"{self.owner_rank}"
+        )
+
+
+class _ExpertShardedLinearFactory:
+    """Construct checkpoint modules only for the current rank's experts."""
+
+    def __init__(
+        self,
+        base,
+        *,
+        num_experts: int,
+        ep_rank: int,
+        ep_size: int,
+    ) -> None:
+        if num_experts % ep_size:
+            raise ValueError(
+                f"{num_experts} experts do not divide across {ep_size} ranks"
+            )
+        self._base = base
+        self._num_experts = num_experts
+        self._ep_rank = ep_rank
+        self._experts_per_rank = num_experts // ep_size
+
+    def __call__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool,
+        *,
+        qualified_name: str | None = None,
+        model_scope: ModelScope = ModelScope.TARGET,
+        role: LinearRole | None = None,
+        layer_index: int | None = None,
+        expert_index: int | None = None,
+        expert_scope: ExpertScope = ExpertScope.NONE,
+        shard_dim: int | None = None,
+        allow_quantization: bool = True,
+    ) -> nn.Module:
+        if expert_scope is ExpertScope.ROUTED:
+            if expert_index is None or not 0 <= expert_index < self._num_experts:
+                raise ValueError("routed expert construction requires a valid global index")
+            owner = expert_index // self._experts_per_rank
+            if owner != self._ep_rank:
+                if qualified_name is None:
+                    raise ValueError("remote expert projection requires a checkpoint name")
+                return _RemoteExpertProjection(qualified_name, owner)
+        return self._base(
+            in_features,
+            out_features,
+            bias,
+            qualified_name=qualified_name,
+            model_scope=model_scope,
+            role=role,
+            layer_index=layer_index,
+            expert_index=expert_index,
+            expert_scope=expert_scope,
+            shard_dim=shard_dim,
+            allow_quantization=allow_quantization,
+        )
+
+
+@dataclass(frozen=True)
+class ExpertParallelLoadInfo:
+    """Fail-closed provenance from one rank-local expert load."""
+
+    ep_rank: int
+    ep_size: int
+    owned_expert_indices: tuple[int, ...]
+    quantization_source: str
+    quantization_method: str
+    kv_cache_quant_algo: str | None
+    producer_name: str | None
+    producer_version: str | None
+    checkpoint_tensor_count: int
+    rank_loaded_tensor_count: int
+    auxiliary_kv_scale_count: int
 
 
 def _assert_collective_device(
@@ -200,3 +301,376 @@ class EpMoeBlock(nn.Module):
         if self._route_override is not None:
             return self._route_override(hidden)
         return route_experts(self, hidden)
+
+
+def _ep_checkpoint_shapes(
+    model: nn.Module,
+    *,
+    tie_word_embeddings: bool,
+) -> tuple[
+    dict[str, tuple[int, ...]],
+    dict[str, tuple[int, ...]],
+    tuple[tuple[str, EpMoeBlock], ...],
+]:
+    """Return rank-local and reconstructed full-checkpoint shape contracts."""
+
+    local = {
+        name: tuple(tensor.shape)
+        for name, tensor in model.state_dict().items()
+    }
+    if tie_word_embeddings:
+        local.pop("lm_head.weight", None)
+    expected = dict(local)
+    blocks = tuple(
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, EpMoeBlock)
+    )
+    for block_name, block in blocks:
+        template_index = block.owned_expert_indices[0]
+        template_prefix = f"{block_name}.experts.{template_index}."
+        template = {
+            name.removeprefix(template_prefix): shape
+            for name, shape in local.items()
+            if name.startswith(template_prefix)
+        }
+        if not template:
+            raise RuntimeError(
+                f"owned expert {template_index} at {block_name!r} has no checkpoint state"
+            )
+        for expert_index in range(len(block.experts)):
+            for suffix, shape in template.items():
+                expected[
+                    f"{block_name}.experts.{expert_index}.{suffix}"
+                ] = shape
+    return local, expected, blocks
+
+
+def _kv_scale_names(model: nn.Module) -> tuple[str, ...]:
+    names = []
+    for layer_index, _layer in enumerate(model.model.layers):
+        names.extend(
+            (
+                f"model.layers.{layer_index}.self_attn.k_proj.k_scale",
+                f"model.layers.{layer_index}.self_attn.v_proj.v_scale",
+            )
+        )
+    return tuple(names)
+
+
+_NVFP4_SAFETENSORS_DTYPES = {
+    torch.uint8: "U8",
+    torch.float8_e4m3fn: "F8_E4M3",
+    torch.float32: "F32",
+}
+
+
+def _global_nvfp4_dtype_contract(
+    model: nn.Module,
+    blocks: tuple[tuple[str, EpMoeBlock], ...],
+) -> dict[str, str]:
+    """Reconstruct the packed ABI for owned and remote expert projections."""
+
+    local = {
+        (f"{module_name}.{buffer_name}" if module_name else buffer_name): (
+            _NVFP4_SAFETENSORS_DTYPES[buffer.dtype]
+        )
+        for module_name, module in model.named_modules()
+        if isinstance(module, NvFp4Linear)
+        for buffer_name, buffer in module.named_buffers(recurse=False)
+    }
+    expected = dict(local)
+    for block_name, block in blocks:
+        template_index = block.owned_expert_indices[0]
+        template_prefix = f"{block_name}.experts.{template_index}."
+        template = {
+            name.removeprefix(template_prefix): dtype
+            for name, dtype in local.items()
+            if name.startswith(template_prefix)
+        }
+        if not template:
+            raise RuntimeError(
+                f"owned NVFP4 expert {template_index} at {block_name!r} "
+                "has no packed checkpoint members"
+            )
+        for expert_index in range(len(block.experts)):
+            for suffix, dtype in template.items():
+                expected[f"{block_name}.experts.{expert_index}.{suffix}"] = dtype
+    return expected
+
+
+def _validate_ep_checkpoint_contract(
+    reader,
+    model: nn.Module,
+    *,
+    tie_word_embeddings: bool,
+    kv_cache_quant_algo: str | None,
+) -> tuple[
+    dict[str, tuple[int, ...]],
+    tuple[tuple[str, EpMoeBlock], ...],
+    tuple[str, ...],
+]:
+    local, expected, blocks = _ep_checkpoint_shapes(
+        model,
+        tie_word_embeddings=tie_word_embeddings,
+    )
+    kv_scale_names = (
+        _kv_scale_names(model)
+        if kv_cache_quant_algo == "FP8"
+        else ()
+    )
+    required = set(expected) | set(kv_scale_names)
+    actual = set(reader.names())
+    missing = sorted(required - actual)
+    unexpected = sorted(actual - required)
+    if missing or unexpected:
+        raise ValueError(
+            "expert-parallel checkpoint tensor layout mismatch: "
+            f"missing={missing[:8]} ({len(missing)} total), "
+            f"unexpected={unexpected[:8]} ({len(unexpected)} total)"
+        )
+
+    actual_specs = reader.specs(expected)
+    mismatches = [
+        (name, expected[name], actual_specs[name][0])
+        for name in expected
+        if actual_specs[name][0] != expected[name]
+    ]
+    if mismatches:
+        name, wanted, found = mismatches[0]
+        raise ValueError(
+            f"checkpoint tensor {name!r} shape {found} != expected {wanted}; "
+            f"{len(mismatches)} shape mismatch(es)"
+        )
+    expected_dtypes = _global_nvfp4_dtype_contract(model, blocks)
+    dtype_mismatches = [
+        (name, expected_dtype, actual_specs[name][1])
+        for name, expected_dtype in expected_dtypes.items()
+        if actual_specs[name][1] != expected_dtype
+    ]
+    if dtype_mismatches:
+        name, wanted, found = dtype_mismatches[0]
+        raise ValueError(
+            f"NVFP4 checkpoint tensor {name!r} dtype {found} != "
+            f"required ABI dtype {wanted}; "
+            f"{len(dtype_mismatches)} dtype mismatch(es)"
+        )
+    for name, scale in reader.selected_items(kv_scale_names):
+        if (
+            scale.numel() != 1
+            or not scale.is_floating_point()
+            or not torch.isfinite(scale).all()
+            or not bool((scale > 0).all())
+        ):
+            raise ValueError(
+                f"checkpoint FP8-KV calibration tensor {name!r} must be one "
+                "finite positive floating-point value"
+            )
+    return local, blocks, kv_scale_names
+
+
+def _assign_checkpoint_tensor(
+    model: nn.Module,
+    name: str,
+    tensor: torch.Tensor,
+) -> None:
+    module_name, separator, member = name.rpartition(".")
+    module = model.get_submodule(module_name) if separator else model
+    if member in module._parameters:
+        current = module._parameters[member]
+        if current is None:
+            raise RuntimeError(f"checkpoint parameter {name!r} is disabled")
+        module._parameters[member] = nn.Parameter(
+            tensor,
+            requires_grad=current.requires_grad,
+        )
+        return
+    if member in module._buffers:
+        module._buffers[member] = tensor
+        return
+    raise KeyError(f"checkpoint member {name!r} is not registered on the model")
+
+
+def build_ep_model(
+    model_dir: str | Path,
+    ep_size: int,
+    ep_rank: int,
+    comm,
+    dtype: torch.dtype = torch.float32,
+    device: str | torch.device = "cpu",
+    attention_backend=None,
+    linear_capabilities=None,
+    linear_selection_policy=None,
+) -> tuple[nn.Module, object, ExpertParallelLoadInfo]:
+    """Build one real Qwen3-MoE rank without materializing remote experts.
+
+    Attention, router, embeddings, and the output head are replicated. Routed
+    expert modules retain their global HF names, but only this rank's contiguous
+    block is constructed and loaded. The complete checkpoint name/shape
+    contract is validated on every rank before any request can execute.
+    """
+
+    from kairyu.engine.core.quant_config import (
+        load_checkpoint_quantization,
+        validate_model_quantization,
+    )
+    from kairyu.engine.core.weights import CheckpointReader
+    from kairyu.models.config import parse_model_config
+    from kairyu.models.layers import RotaryEmbedding
+    from kairyu.models.llama import DenseDecoder
+    from kairyu.quant.linear import (
+        QuantizedLinearBase,
+        linear_factory,
+    )
+
+    directory = Path(model_dir)
+    raw = json.loads((directory / "config.json").read_text())
+    config = parse_model_config(raw)
+    if config.architecture != "Qwen3MoeForCausalLM":
+        raise ValueError(
+            "expert-parallel real-checkpoint loading currently supports "
+            f"Qwen3MoeForCausalLM, got {config.architecture!r}"
+        )
+    if config.moe is None:
+        raise ValueError("expert-parallel loading requires a MoE model config")
+    if ep_size < 1:
+        raise ValueError("expert-parallel size must be positive")
+    if not 0 <= ep_rank < ep_size:
+        raise ValueError(
+            f"expert-parallel rank {ep_rank} is outside size {ep_size}"
+        )
+    if config.moe.num_experts % ep_size:
+        raise ValueError(
+            f"{config.moe.num_experts} experts do not divide across {ep_size} ranks"
+        )
+
+    resolved = load_checkpoint_quantization(directory, raw)
+    quant = resolved.weights
+    validate_model_quantization(
+        quant,
+        is_mla=config.is_mla,
+        architecture=config.architecture,
+    )
+    base_factory = linear_factory(
+        quant,
+        device=device,
+        dtype=dtype,
+        capabilities=linear_capabilities,
+        selection_policy=linear_selection_policy,
+    )
+    factory = _ExpertShardedLinearFactory(
+        base_factory,
+        num_experts=config.moe.num_experts,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+    )
+    # The official checkpoint is 134 GB. Even rank-local EP2 dummy buffers
+    # would allocate ~70 GB on the host before loading useful values. Construct
+    # shape-only modules, drop remote experts, and assign only selected tensors.
+    with torch.device("meta"):
+        model = DenseDecoder(
+            config,
+            attention_backend=attention_backend,
+            linear_factory=factory,
+            dtype=dtype,
+        )
+    for layer in model.model.layers:
+        if hasattr(layer.mlp, "experts"):
+            layer.mlp = EpMoeBlock(
+                layer.mlp,
+                comm,
+                ep_rank=ep_rank,
+                ep_size=ep_size,
+            )
+    reader = CheckpointReader(directory)
+    local_shapes, blocks, kv_scale_names = _validate_ep_checkpoint_contract(
+        reader,
+        model,
+        tie_word_embeddings=config.tie_word_embeddings,
+        kv_cache_quant_algo=resolved.kv_cache_quant_algo,
+    )
+    if not blocks:
+        raise ValueError("Qwen3-MoE checkpoint has no sparse expert layers")
+
+    quantized_dtypes = {
+        (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
+        for module_name, module in model.named_modules()
+        if isinstance(module, QuantizedLinearBase)
+        for buffer_name, buffer in module.named_buffers(recurse=False)
+    }
+    strict_nvfp4_dtypes = {
+        (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
+        for module_name, module in model.named_modules()
+        if isinstance(module, NvFp4Linear)
+        for buffer_name, buffer in module.named_buffers(recurse=False)
+    }
+    loaded: set[str] = set()
+    for name, tensor in reader.selected_items(local_shapes):
+        expected_shape = local_shapes[name]
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(
+                f"rank-local checkpoint tensor {name!r} shape "
+                f"{tuple(tensor.shape)} != expected {expected_shape}"
+            )
+        quantized_dtype = quantized_dtypes.get(name)
+        if name in strict_nvfp4_dtypes and tensor.dtype != strict_nvfp4_dtypes[name]:
+            raise ValueError(
+                f"NVFP4 checkpoint tensor {name!r} dtype {tensor.dtype} != "
+                f"required ABI dtype {strict_nvfp4_dtypes[name]}"
+            )
+        if quantized_dtype is not None and tensor.dtype != quantized_dtype:
+            tensor = tensor.to(quantized_dtype)
+        elif (
+            quantized_dtype is None
+            and tensor.is_floating_point()
+            and tensor.dtype != dtype
+        ):
+            tensor = tensor.to(dtype)
+        _assign_checkpoint_tensor(model, name, tensor)
+        loaded.add(name)
+    if loaded != set(local_shapes):
+        absent = sorted(set(local_shapes) - loaded)
+        raise RuntimeError(
+            f"rank-local expert load omitted {absent[:8]} ({len(absent)} total)"
+        )
+    if config.tie_word_embeddings:
+        model.lm_head.weight = model.model.embed_tokens.weight
+
+    fresh_rope = RotaryEmbedding(config)
+    model.model.rotary_emb._buffers["inv_freq"] = fresh_rope.inv_freq
+    model.model.rotary_emb.attention_scaling = fresh_rope.attention_scaling
+    remaining_meta = [
+        name
+        for name, tensor in (
+            *model.named_parameters(),
+            *model.named_buffers(),
+        )
+        if tensor.device.type == "meta"
+    ]
+    if remaining_meta:
+        raise RuntimeError(
+            "expert-parallel load left meta tensors unresolved: "
+            f"{remaining_meta[:8]} ({len(remaining_meta)} total)"
+        )
+    model.eval()
+    model.refresh_dense_packs()
+    gc.collect()
+    model = model.to(device)
+    owned = blocks[0][1].owned_expert_indices
+    if any(block.owned_expert_indices != owned for _name, block in blocks):
+        raise RuntimeError("expert ownership differs across sparse layers")
+    info = ExpertParallelLoadInfo(
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+        owned_expert_indices=owned,
+        quantization_source=resolved.source,
+        quantization_method=quant.method.value,
+        kv_cache_quant_algo=resolved.kv_cache_quant_algo,
+        producer_name=resolved.producer_name,
+        producer_version=resolved.producer_version,
+        checkpoint_tensor_count=len(reader.names()),
+        rank_loaded_tensor_count=len(loaded),
+        auxiliary_kv_scale_count=len(kv_scale_names),
+    )
+    object.__setattr__(model, "_kairyu_ep_load_info", info)
+    return model, config, info

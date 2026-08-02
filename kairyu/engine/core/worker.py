@@ -55,6 +55,29 @@ class _SamplingOwnershipProbe:
 
 
 @dataclass(frozen=True)
+class _SamplingOwnershipReply:
+    """Pickle-safe sampling probe reply that keeps every rank in the gather."""
+
+    rank: int
+    row: dict[str, object] | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _EPKernelInventoryProbe:
+    """Out-of-band request for rank-local EP NVFP4 kernel metadata."""
+
+
+@dataclass(frozen=True)
+class _EPKernelInventoryReply:
+    """Pickle-safe EP probe reply that keeps every rank in the gather."""
+
+    rank: int
+    row: dict[str, object] | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class _BatchedPrefillMode:
     """Out-of-band, all-rank optimization toggle for rollback/matched A-B."""
 
@@ -252,6 +275,434 @@ def _sampling_ownership_row(control_comm, model_comm, local_runner) -> dict[str,
         "sampler_present": local_runner._sampler is not None,
         "device": device,
     }
+
+
+def _sampling_ownership_reply(
+    control_comm,
+    model_comm,
+    local_runner,
+) -> _SamplingOwnershipReply:
+    """Encode rank-local failures so every peer still enters the gather."""
+
+    rank = control_comm.rank
+    try:
+        return _SamplingOwnershipReply(
+            rank=rank,
+            row=_sampling_ownership_row(control_comm, model_comm, local_runner),
+        )
+    except BaseException as error:
+        return _SamplingOwnershipReply(
+            rank=rank,
+            error=(f"{type(error).__name__}: {error}")[:1024],
+        )
+
+
+_EP_KERNEL_INVENTORY_FIELDS = frozenset(
+    {
+        "rank",
+        "projection_count",
+        "projection_inventory_sha256",
+        "kernel_counts",
+        "meta_count",
+        "load_info",
+    }
+)
+_EP_KERNEL_LOAD_INFO_FIELDS = frozenset(
+    {
+        "ep_rank",
+        "ep_size",
+        "owned_expert_count",
+        "owned_expert_indices_sha256",
+        "first_owned_expert",
+        "last_owned_expert",
+        "quantization_source",
+        "quantization_method",
+        "kv_cache_quant_algo",
+        "producer_name",
+        "producer_version",
+        "checkpoint_tensor_count",
+        "rank_loaded_tensor_count",
+        "auxiliary_kv_scale_count",
+    }
+)
+_LOWER_HEX = frozenset("0123456789abcdef")
+
+
+def _json_sha256(value: object) -> str:
+    """Hash the same canonical JSON representation used by formal gates."""
+
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _ep_load_info_summary(
+    local_runner,
+    *,
+    rank: int,
+    world_size: int,
+) -> dict[str, object]:
+    """Reduce rank-local loader evidence without sending the expert list."""
+
+    load_info = getattr(local_runner, "expert_parallel_load_info", None)
+    if load_info is None:
+        raise RuntimeError(f"rank {rank} runner has no expert_parallel_load_info")
+    ep_rank = getattr(load_info, "ep_rank", None)
+    ep_size = getattr(load_info, "ep_size", None)
+    owned = getattr(load_info, "owned_expert_indices", None)
+    if type(ep_rank) is not int or ep_rank != rank:
+        raise RuntimeError(
+            f"rank {rank} load info has malformed ep_rank={ep_rank!r}"
+        )
+    if type(ep_size) is not int or ep_size != world_size:
+        raise RuntimeError(
+            f"rank {rank} load info has malformed ep_size={ep_size!r}; "
+            f"expected {world_size}"
+        )
+    if (
+        not isinstance(owned, tuple)
+        or not owned
+        or any(type(index) is not int or index < 0 for index in owned)
+        or tuple(sorted(set(owned))) != owned
+        or owned[-1] - owned[0] + 1 != len(owned)
+    ):
+        raise RuntimeError(
+            f"rank {rank} load info has malformed contiguous expert ownership"
+        )
+
+    string_fields = (
+        "quantization_source",
+        "quantization_method",
+    )
+    for name in string_fields:
+        value = getattr(load_info, name, None)
+        if not isinstance(value, str) or not value:
+            raise RuntimeError(
+                f"rank {rank} load info has malformed {name}={value!r}"
+            )
+    optional_string_fields = (
+        "kv_cache_quant_algo",
+        "producer_name",
+        "producer_version",
+    )
+    for name in optional_string_fields:
+        value = getattr(load_info, name, None)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise RuntimeError(
+                f"rank {rank} load info has malformed {name}={value!r}"
+            )
+    count_fields = (
+        "checkpoint_tensor_count",
+        "rank_loaded_tensor_count",
+        "auxiliary_kv_scale_count",
+    )
+    for name in count_fields:
+        value = getattr(load_info, name, None)
+        if type(value) is not int or value < 0:
+            raise RuntimeError(
+                f"rank {rank} load info has malformed {name}={value!r}"
+            )
+
+    return {
+        "ep_rank": ep_rank,
+        "ep_size": ep_size,
+        "owned_expert_count": len(owned),
+        "owned_expert_indices_sha256": _json_sha256(list(owned)),
+        "first_owned_expert": owned[0],
+        "last_owned_expert": owned[-1],
+        "quantization_source": load_info.quantization_source,
+        "quantization_method": load_info.quantization_method,
+        "kv_cache_quant_algo": load_info.kv_cache_quant_algo,
+        "producer_name": load_info.producer_name,
+        "producer_version": load_info.producer_version,
+        "checkpoint_tensor_count": load_info.checkpoint_tensor_count,
+        "rank_loaded_tensor_count": load_info.rank_loaded_tensor_count,
+        "auxiliary_kv_scale_count": load_info.auxiliary_kv_scale_count,
+    }
+
+
+def _ep_kernel_inventory_row(
+    control_comm,
+    local_runner,
+) -> dict[str, object]:
+    """Measure one local model while retaining only a names digest."""
+
+    from kairyu.quant.linear import NvFp4Linear
+
+    rank = control_comm.rank
+    world_size = control_comm.world_size
+    if type(rank) is not int or type(world_size) is not int or world_size < 1:
+        raise RuntimeError(
+            "EP kernel inventory communicator metadata must be positive integers"
+        )
+    model = getattr(local_runner, "_model", None)
+    if model is None or not callable(getattr(model, "named_modules", None)):
+        raise RuntimeError(f"rank {rank} runner does not expose its local model")
+
+    names: list[str] = []
+    kernel_counts: dict[str, int] = {}
+    for name, module in model.named_modules():
+        if not isinstance(module, NvFp4Linear):
+            continue
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(f"rank {rank} has an unnamed NVFP4 projection")
+        selection = getattr(module, "linear_selection", None)
+        quantization = getattr(selection, "quantization", None)
+        method = getattr(getattr(quantization, "method", None), "value", None)
+        kernel = getattr(getattr(selection, "kernel", None), "value", None)
+        if not isinstance(method, str) or not method:
+            raise RuntimeError(
+                f"rank {rank} NVFP4 projection {name!r} has no quant method"
+            )
+        if not isinstance(kernel, str) or not kernel:
+            raise RuntimeError(
+                f"rank {rank} NVFP4 projection {name!r} has no kernel"
+            )
+        names.append(name)
+        key = f"{method}:{kernel}"
+        kernel_counts[key] = kernel_counts.get(key, 0) + 1
+    names.sort()
+    if not names:
+        raise RuntimeError(f"rank {rank} local model has no NVFP4 projections")
+    if len(set(names)) != len(names):
+        raise RuntimeError(f"rank {rank} local model has duplicate module names")
+
+    named_parameters = getattr(model, "named_parameters", None)
+    named_buffers = getattr(model, "named_buffers", None)
+    if not callable(named_parameters) or not callable(named_buffers):
+        raise RuntimeError(
+            f"rank {rank} local model cannot enumerate parameters and buffers"
+        )
+    meta_parameters = sum(
+        tensor.device.type == "meta" for _name, tensor in named_parameters()
+    )
+    meta_buffers = sum(
+        tensor.device.type == "meta" for _name, tensor in named_buffers()
+    )
+    return {
+        "rank": rank,
+        "projection_count": len(names),
+        "projection_inventory_sha256": _json_sha256(names),
+        "kernel_counts": dict(sorted(kernel_counts.items())),
+        "meta_count": {
+            "parameters": meta_parameters,
+            "buffers": meta_buffers,
+            "total": meta_parameters + meta_buffers,
+        },
+        "load_info": _ep_load_info_summary(
+            local_runner,
+            rank=rank,
+            world_size=world_size,
+        ),
+    }
+
+
+def _ep_kernel_inventory_reply(control_comm, local_runner) -> _EPKernelInventoryReply:
+    """Encode rank-local failures so all peers still enter the gloo gather."""
+
+    rank = control_comm.rank
+    try:
+        return _EPKernelInventoryReply(
+            rank=rank,
+            row=_ep_kernel_inventory_row(control_comm, local_runner),
+        )
+    except BaseException as error:
+        return _EPKernelInventoryReply(
+            rank=rank,
+            error=(f"{type(error).__name__}: {error}")[:1024],
+        )
+
+
+def _is_lower_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in _LOWER_HEX for character in value)
+    )
+
+
+def _validate_ep_kernel_inventory_rows(
+    rows: object,
+    *,
+    world_size: int,
+) -> tuple[dict[str, object], ...]:
+    """Reject missing ranks and every untyped or internally inconsistent row."""
+
+    if not isinstance(rows, (tuple, list)) or len(rows) != world_size:
+        actual = len(rows) if isinstance(rows, (tuple, list)) else type(rows).__name__
+        raise RuntimeError(
+            "EP kernel inventory reply count mismatch: "
+            f"expected {world_size}, got {actual}"
+        )
+    by_rank: dict[int, dict[str, object]] = {}
+    for slot, row in enumerate(rows):
+        if not isinstance(row, dict) or set(row) != _EP_KERNEL_INVENTORY_FIELDS:
+            raise RuntimeError(
+                f"EP kernel inventory reply in gather slot {slot} is malformed"
+            )
+        rank = row["rank"]
+        if type(rank) is not int or not 0 <= rank < world_size or rank in by_rank:
+            raise RuntimeError(
+                f"EP kernel inventory reply in gather slot {slot} has invalid "
+                f"rank={rank!r}"
+            )
+        projection_count = row["projection_count"]
+        kernel_counts = row["kernel_counts"]
+        if type(projection_count) is not int or projection_count < 1:
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has malformed projection_count"
+            )
+        if not _is_lower_sha256(row["projection_inventory_sha256"]):
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has malformed inventory SHA-256"
+            )
+        if (
+            not isinstance(kernel_counts, dict)
+            or not kernel_counts
+            or any(
+                not isinstance(key, str)
+                or key.count(":") != 1
+                or any(not part for part in key.split(":"))
+                or type(count) is not int
+                or count < 1
+                for key, count in kernel_counts.items()
+            )
+            or sum(kernel_counts.values()) != projection_count
+        ):
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has malformed kernel_counts"
+            )
+        meta_count = row["meta_count"]
+        if (
+            not isinstance(meta_count, dict)
+            or set(meta_count) != {"parameters", "buffers", "total"}
+            or any(type(value) is not int or value < 0 for value in meta_count.values())
+            or meta_count["total"]
+            != meta_count["parameters"] + meta_count["buffers"]
+        ):
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has malformed meta_count"
+            )
+        load_info = row["load_info"]
+        if not isinstance(load_info, dict) or set(load_info) != _EP_KERNEL_LOAD_INFO_FIELDS:
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has malformed load_info fields"
+            )
+        integer_fields = {
+            "ep_rank",
+            "ep_size",
+            "owned_expert_count",
+            "first_owned_expert",
+            "last_owned_expert",
+            "checkpoint_tensor_count",
+            "rank_loaded_tensor_count",
+            "auxiliary_kv_scale_count",
+        }
+        if any(type(load_info[name]) is not int for name in integer_fields):
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has untyped load_info counts"
+            )
+        if (
+            load_info["ep_rank"] != rank
+            or load_info["ep_size"] != world_size
+            or load_info["owned_expert_count"] < 1
+            or load_info["first_owned_expert"] < 0
+            or load_info["last_owned_expert"] - load_info["first_owned_expert"] + 1
+            != load_info["owned_expert_count"]
+            or load_info["checkpoint_tensor_count"] < 1
+            or load_info["rank_loaded_tensor_count"] < 1
+            or load_info["auxiliary_kv_scale_count"] < 0
+            or not _is_lower_sha256(load_info["owned_expert_indices_sha256"])
+        ):
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has inconsistent load_info"
+            )
+        for name in ("quantization_source", "quantization_method"):
+            value = load_info[name]
+            if not isinstance(value, str) or not value:
+                raise RuntimeError(
+                    f"EP kernel inventory rank {rank} has malformed load_info {name}"
+                )
+        for name in ("kv_cache_quant_algo", "producer_name", "producer_version"):
+            value = load_info[name]
+            if value is not None and (not isinstance(value, str) or not value):
+                raise RuntimeError(
+                    f"EP kernel inventory rank {rank} has malformed load_info {name}"
+                )
+        by_rank[rank] = row
+    expected = set(range(world_size))
+    if set(by_rank) != expected:
+        raise RuntimeError(
+            "EP kernel inventory ranks are incomplete: "
+            f"expected={sorted(expected)}, got={sorted(by_rank)}"
+        )
+    return tuple(by_rank[rank] for rank in range(world_size))
+
+
+def _validate_ep_kernel_inventory_replies(
+    gathered: object,
+    *,
+    world_size: int,
+) -> tuple[dict[str, object], ...]:
+    """Validate transport envelopes before exposing their measured rows."""
+
+    if not isinstance(gathered, (tuple, list)) or len(gathered) != world_size:
+        actual = (
+            len(gathered)
+            if isinstance(gathered, (tuple, list))
+            else type(gathered).__name__
+        )
+        raise RuntimeError(
+            "EP kernel inventory gathered malformed rank count: "
+            f"expected {world_size}, got {actual}"
+        )
+    replies: dict[int, _EPKernelInventoryReply] = {}
+    for slot, reply in enumerate(gathered):
+        if not isinstance(reply, _EPKernelInventoryReply):
+            raise RuntimeError(
+                f"EP kernel inventory gather slot {slot} returned malformed "
+                f"{type(reply).__name__}"
+            )
+        if (
+            type(reply.rank) is not int
+            or not 0 <= reply.rank < world_size
+            or reply.rank in replies
+        ):
+            raise RuntimeError(
+                f"EP kernel inventory gather slot {slot} has invalid rank="
+                f"{reply.rank!r}"
+            )
+        if (reply.row is None) == (reply.error is None):
+            raise RuntimeError(
+                f"EP kernel inventory rank {reply.rank} reply must contain exactly "
+                "one of row or error"
+            )
+        if reply.error is not None and (
+            not isinstance(reply.error, str) or not reply.error
+        ):
+            raise RuntimeError(
+                f"EP kernel inventory rank {reply.rank} has malformed error"
+            )
+        replies[reply.rank] = reply
+    missing = sorted(set(range(world_size)) - set(replies))
+    if missing:
+        raise RuntimeError(f"EP kernel inventory ranks are incomplete: missing={missing}")
+    failures = tuple(
+        f"rank {rank}: {replies[rank].error}"
+        for rank in range(world_size)
+        if replies[rank].error is not None
+    )
+    if failures:
+        raise RuntimeError("EP kernel inventory rank failures: " + "; ".join(failures))
+    return _validate_ep_kernel_inventory_rows(
+        tuple(replies[rank].row for rank in range(world_size)),
+        world_size=world_size,
+    )
 
 
 def _prefill_stats_row(control_comm, local_runner, *, reset: bool) -> dict[str, object]:
@@ -752,6 +1203,18 @@ def _validate_sampling_ownership_rows(
                 f"sampling ownership reply for rank {rank} disagrees with rank 0 "
                 f"topology (reported, expected)={mismatches}"
             )
+        expected_owner = rank == 0
+        if (
+            row["sampling_owner"] is not expected_owner
+            or row["sampler_present"] is not expected_owner
+        ):
+            raise RuntimeError(
+                f"sampling ownership reply for rank {rank} violates the "
+                "rank-0-only sampler contract: "
+                f"sampling_owner={row['sampling_owner']!r}, "
+                f"sampler_present={row['sampler_present']!r}, "
+                f"expected={expected_owner!r}"
+            )
         if not row["device"]:
             raise RuntimeError(f"sampling ownership reply for rank {rank} has an empty device")
         by_rank[rank] = row
@@ -760,6 +1223,73 @@ def _validate_sampling_ownership_rows(
     if missing:
         raise RuntimeError(f"sampling ownership replies are missing ranks={missing}")
     return tuple(by_rank[rank] for rank in sorted(by_rank))
+
+
+def _validate_sampling_ownership_replies(
+    gathered: object,
+    *,
+    control_world_size: int,
+    model_world_size: int,
+    control_backend: str,
+    model_backend: str,
+) -> tuple[dict[str, object], ...]:
+    """Validate all-rank envelopes before exposing sampling topology rows."""
+
+    if not isinstance(gathered, (tuple, list)) or len(gathered) != control_world_size:
+        actual = (
+            len(gathered)
+            if isinstance(gathered, (tuple, list))
+            else type(gathered).__name__
+        )
+        raise RuntimeError(
+            "sampling ownership gathered malformed rank count: "
+            f"expected {control_world_size}, got {actual}"
+        )
+    replies: dict[int, _SamplingOwnershipReply] = {}
+    for slot, reply in enumerate(gathered):
+        if not isinstance(reply, _SamplingOwnershipReply):
+            raise RuntimeError(
+                f"sampling ownership gather slot {slot} returned malformed "
+                f"{type(reply).__name__}"
+            )
+        if (
+            type(reply.rank) is not int
+            or not 0 <= reply.rank < control_world_size
+            or reply.rank in replies
+        ):
+            raise RuntimeError(
+                f"sampling ownership gather slot {slot} has invalid rank="
+                f"{reply.rank!r}"
+            )
+        if (reply.row is None) == (reply.error is None):
+            raise RuntimeError(
+                f"sampling ownership rank {reply.rank} reply must contain "
+                "exactly one of row or error"
+            )
+        if reply.error is not None and (
+            not isinstance(reply.error, str) or not reply.error
+        ):
+            raise RuntimeError(
+                f"sampling ownership rank {reply.rank} has malformed error"
+            )
+        replies[reply.rank] = reply
+    missing = sorted(set(range(control_world_size)) - set(replies))
+    if missing:
+        raise RuntimeError(f"sampling ownership ranks are incomplete: missing={missing}")
+    failures = tuple(
+        f"rank {rank}: {replies[rank].error}"
+        for rank in range(control_world_size)
+        if replies[rank].error is not None
+    )
+    if failures:
+        raise RuntimeError("sampling ownership rank failures: " + "; ".join(failures))
+    return _validate_sampling_ownership_rows(
+        tuple(replies[rank].row for rank in range(control_world_size)),
+        control_world_size=control_world_size,
+        model_world_size=model_world_size,
+        control_backend=control_backend,
+        model_backend=model_backend,
+    )
 
 
 def _config_fingerprint(model_dir: str) -> str:
@@ -817,6 +1347,208 @@ def validate_handshake(
             f"TP worker mismatch: driver={handshake} worker={expected} — "
             "pool sizing/config, backend identity, KV dtype identity, and "
             "DRAM tier identity must be identical on every rank"
+        )
+
+
+_EP_CORRECTNESS_MODE = "replicated-attention-correctness"
+_EP_SUPPORTED_SIZES = frozenset({2, 4})
+_EP_METADATA_FILES = (
+    "config.json",
+    "hf_quant_config.json",
+    "model.safetensors.index.json",
+)
+_EP_OFFICIAL_SHARD_COUNT = 27
+
+
+def _validate_ep_correctness_mode(
+    *,
+    expert_parallel_size: object,
+    pipeline_depth: object = 1,
+    decode_mode: object = "eager",
+    kv_cache_dtype: object = "bfloat16",
+    pd_separation: object = False,
+    graph_scratch_page: object = None,
+    dram_kv_tier_capacity_pages: object = 0,
+    dram_kv_tier_profile: object = None,
+    speculative: object = None,
+) -> None:
+    """Fail closed outside the first production EP correctness envelope.
+
+    This path intentionally replicates attention/KV state on every rank and
+    shards only routed experts. It establishes correctness for EP2/EP4; it is
+    not the attention-DP or grouped-expert throughput path.
+    """
+
+    if (
+        type(expert_parallel_size) is not int
+        or expert_parallel_size not in _EP_SUPPORTED_SIZES
+    ):
+        supported = ", ".join(str(size) for size in sorted(_EP_SUPPORTED_SIZES))
+        raise ValueError(
+            "replicated-attention EP correctness mode supports only "
+            f"expert_parallel_size in {{{supported}}}; got {expert_parallel_size!r}"
+        )
+    if type(pipeline_depth) is not int or pipeline_depth != 1:
+        raise ValueError(
+            "replicated-attention EP correctness mode requires pipeline_depth=1"
+        )
+    if decode_mode != "eager":
+        raise ValueError(
+            "replicated-attention EP correctness mode requires decode_mode='eager'; "
+            "CUDA graph decode is not supported"
+        )
+    if kv_cache_dtype != "bfloat16":
+        raise ValueError(
+            "replicated-attention EP correctness mode requires "
+            "kv_cache_dtype='bfloat16'"
+        )
+    if type(pd_separation) is not bool:
+        raise TypeError("pd_separation must be a boolean")
+    if pd_separation:
+        raise ValueError(
+            "replicated-attention EP correctness mode does not support P-D separation"
+        )
+    if graph_scratch_page is not None:
+        raise ValueError(
+            "replicated-attention EP correctness mode does not support CUDA graphs"
+        )
+    if (
+        type(dram_kv_tier_capacity_pages) is not int
+        or dram_kv_tier_capacity_pages != 0
+        or dram_kv_tier_profile is not None
+    ):
+        raise ValueError(
+            "replicated-attention EP correctness mode does not support a DRAM KV tier"
+        )
+    if speculative is not None:
+        raise ValueError(
+            "replicated-attention EP correctness mode does not support speculative decoding"
+        )
+
+
+def _ep_checkpoint_identity(model_dir: str) -> dict[str, object]:
+    """Hash lightweight metadata and stat, but never read, indexed shards."""
+
+    directory = Path(model_dir).resolve(strict=True)
+    if not directory.is_dir():
+        raise ValueError(f"EP model path is not a directory: {directory}")
+    payloads: dict[str, bytes] = {}
+    metadata_sha256: list[tuple[str, str]] = []
+    for name in _EP_METADATA_FILES:
+        path = directory / name
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"EP checkpoint is missing required metadata file {name!r}"
+            )
+        payload = path.read_bytes()
+        payloads[name] = payload
+        metadata_sha256.append((name, hashlib.sha256(payload).hexdigest()))
+
+    try:
+        index = json.loads(payloads["model.safetensors.index.json"])
+    except (TypeError, ValueError) as error:
+        raise ValueError("EP checkpoint safetensors index is not valid JSON") from error
+    if not isinstance(index, dict) or not isinstance(index.get("weight_map"), dict):
+        raise ValueError("EP checkpoint safetensors index must contain a weight_map object")
+    weight_map = index["weight_map"]
+    if not weight_map or any(
+        not isinstance(tensor_name, str)
+        or not tensor_name
+        or not isinstance(shard_name, str)
+        or not shard_name
+        for tensor_name, shard_name in weight_map.items()
+    ):
+        raise ValueError("EP checkpoint safetensors weight_map is malformed")
+    shard_names = sorted(set(weight_map.values()))
+    if len(shard_names) != _EP_OFFICIAL_SHARD_COUNT:
+        raise ValueError(
+            "official Qwen3-235B NVFP4 checkpoint must reference exactly "
+            f"{_EP_OFFICIAL_SHARD_COUNT} shards; found {len(shard_names)}"
+        )
+
+    shards: list[tuple[str, int]] = []
+    for name in shard_names:
+        relative = Path(name)
+        if (
+            relative.is_absolute()
+            or len(relative.parts) != 1
+            or relative.suffix != ".safetensors"
+        ):
+            raise ValueError(f"EP checkpoint index has an unsafe shard name {name!r}")
+        path = directory / relative
+        if not path.is_file():
+            raise FileNotFoundError(f"EP checkpoint shard {name!r} is missing")
+        resolved = path.resolve(strict=True)
+        if resolved.parent != directory:
+            raise ValueError(
+                f"EP checkpoint shard {name!r} resolves outside the shared model path"
+            )
+        size = resolved.stat().st_size
+        if size < 1:
+            raise ValueError(f"EP checkpoint shard {name!r} is empty")
+        shards.append((name, size))
+    return {
+        "resolved_model_path": str(directory),
+        "metadata_sha256": tuple(metadata_sha256),
+        "indexed_shards": tuple(shards),
+    }
+
+
+def _make_ep_handshake(
+    model_dir: str,
+    expert_parallel_size: int,
+    num_pages: int,
+    page_size: int,
+    attention_backend_identity: str,
+    kv_cache_dtype_resolved: str,
+) -> dict[str, object]:
+    """Exact all-rank identity for replicated-attention EP correctness mode."""
+
+    _validate_ep_correctness_mode(expert_parallel_size=expert_parallel_size)
+    handshake = make_handshake(
+        model_dir,
+        num_pages,
+        page_size,
+        attention_backend_identity=attention_backend_identity,
+        kv_cache_dtype_requested="bfloat16",
+        kv_cache_dtype_resolved=kv_cache_dtype_resolved,
+    )
+    handshake.update(
+        {
+            "parallelism": "expert_parallel",
+            "expert_parallel_size": expert_parallel_size,
+            "attention_placement": "replicated",
+            "execution_mode": _EP_CORRECTNESS_MODE,
+            "decode_mode": "eager",
+            "pipeline_depth": 1,
+            "checkpoint_identity": _ep_checkpoint_identity(model_dir),
+        }
+    )
+    return handshake
+
+
+def _validate_ep_handshake(
+    handshake: dict[str, object],
+    model_dir: str,
+    expert_parallel_size: int,
+    num_pages: int,
+    page_size: int,
+    attention_backend_identity: str,
+    kv_cache_dtype_resolved: str,
+) -> None:
+    expected = _make_ep_handshake(
+        model_dir,
+        expert_parallel_size,
+        num_pages,
+        page_size,
+        attention_backend_identity,
+        kv_cache_dtype_resolved,
+    )
+    if handshake != expected:
+        raise RuntimeError(
+            f"EP worker mismatch: driver={handshake} worker={expected} — "
+            "expert topology, replicated attention, eager execution, BF16 KV, "
+            "pool sizing/config, and backend identity must match on every rank"
         )
 
 
@@ -998,10 +1730,20 @@ class DistTPModelRunner:
     model/KV path, then all ranks adopt rank 0's device token packet.
     """
 
-    def __init__(self, control_comm, local_runner, model_comm=None) -> None:
+    def __init__(
+        self,
+        control_comm,
+        local_runner,
+        model_comm=None,
+        *,
+        parallelism_display: str = "tensor-parallel",
+        parallelism_prefix: str = "TP",
+    ) -> None:
         self._control_comm = control_comm
         self._model_comm = model_comm if model_comm is not None else control_comm
         self._local = local_runner
+        self._parallelism_display = parallelism_display
+        self._parallelism_prefix = parallelism_prefix
         self._fatal_error: Exception | None = None
         # delta-broadcast state (F4): only new/finished requests + committed
         # tokens cross the wire each step, not a full pickled snapshot of every
@@ -1024,7 +1766,7 @@ class DistTPModelRunner:
     def _snapshot_pending_releases(self) -> tuple[tuple[str, int], ...]:
         with self._pending_release_lock:
             if self._shutdown_started:
-                raise RuntimeError("tensor-parallel runner is shutting down")
+                raise RuntimeError(f"{self._parallelism_display} runner is shutting down")
             return tuple(self._pending_releases.items())
 
     def _ack_pending_releases(
@@ -1046,7 +1788,8 @@ class DistTPModelRunner:
         with self._protocol_lock:
             if self._fatal_error is not None:
                 raise RuntimeError(
-                    "tensor-parallel runner is unavailable after a fatal step failure"
+                    f"{self._parallelism_display} runner is unavailable after a fatal "
+                    "step failure"
                 ) from self._fatal_error
             chunks = tuple(scheduled)
             pending_releases = self._snapshot_pending_releases()
@@ -1087,7 +1830,8 @@ class DistTPModelRunner:
         """Run one already-serialized all-rank tier transaction."""
         if self._fatal_error is not None:
             raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
             ) from self._fatal_error
         operation = _dram_kv_operation(payload)
         try:
@@ -1107,7 +1851,9 @@ class DistTPModelRunner:
             # A transport/shape failure can leave ranks on different collective
             # rounds. Local tier failures are encoded in ACKs and never enter
             # this branch, so only protocol failures poison the TP runner.
-            failure = RuntimeError(f"TP DRAM KV {operation} protocol failed: {error}")
+            failure = RuntimeError(
+                f"{self._parallelism_prefix} DRAM KV {operation} protocol failed: {error}"
+            )
             self._fatal_error = failure
             raise failure from error
 
@@ -1117,7 +1863,8 @@ class DistTPModelRunner:
         failed = tuple(row for row in rows if not row.ok or row.value is not True)
         if failed:
             raise DramKVTierTransactionError(
-                "TP DRAM KV discard could not converge every rank: "
+                f"{self._parallelism_prefix} DRAM KV discard could not converge "
+                "every rank: "
                 f"{_dram_kv_failure_summary(failed)}"
             )
 
@@ -1162,7 +1909,8 @@ class DistTPModelRunner:
         )
         if unsafe:
             raise DramKVTierTransactionError(
-                "TP DRAM KV offload left source ownership unknown: "
+                f"{self._parallelism_prefix} DRAM KV offload left source ownership "
+                "unknown: "
                 f"{_dram_kv_failure_summary(unsafe)}",
                 source_reusable=False,
             )
@@ -1192,7 +1940,8 @@ class DistTPModelRunner:
         )
         if unsafe:
             raise DramKVTierTransactionError(
-                "TP DRAM KV restore left destination ownership unknown: "
+                f"{self._parallelism_prefix} DRAM KV restore left destination "
+                "ownership unknown: "
                 f"{_dram_kv_failure_summary(unsafe)}",
                 destination_reusable=False,
                 destination_publishable=False,
@@ -1218,26 +1967,38 @@ class DistTPModelRunner:
         """
         if self._fatal_error is not None:
             raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
             ) from self._fatal_error
         try:
+            control_world_size = self._control_comm.world_size
+            model_world_size = self._model_comm.world_size
+            control_backend = _communicator_backend(self._control_comm)
+            model_backend = _communicator_backend(self._model_comm)
             delivered = self._control_comm.broadcast(_SamplingOwnershipProbe(), src=0)
             if not isinstance(delivered, _SamplingOwnershipProbe):
                 raise RuntimeError(
                     "sampling ownership probe broadcast returned a malformed "
                     f"payload: {type(delivered).__name__}"
                 )
-            local = _sampling_ownership_row(self._control_comm, self._model_comm, self._local)
+            local = _sampling_ownership_reply(
+                self._control_comm,
+                self._model_comm,
+                self._local,
+            )
             rows = self._control_comm.all_gather(local)
-            return _validate_sampling_ownership_rows(
+            return _validate_sampling_ownership_replies(
                 rows,
-                control_world_size=local["control_world_size"],
-                model_world_size=local["model_world_size"],
-                control_backend=local["control_backend"],
-                model_backend=local["model_backend"],
+                control_world_size=control_world_size,
+                model_world_size=model_world_size,
+                control_backend=control_backend,
+                model_backend=model_backend,
             )
         except Exception as error:
-            failure = RuntimeError(f"TP sampling ownership metadata probe failed: {error}")
+            failure = RuntimeError(
+                f"{self._parallelism_prefix} sampling ownership metadata probe "
+                f"failed: {error}"
+            )
             self._fatal_error = failure
             raise failure from error
 
@@ -1248,7 +2009,8 @@ class DistTPModelRunner:
             raise TypeError("batched prefill enabled flag must be bool")
         if self._fatal_error is not None:
             raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
             ) from self._fatal_error
         try:
             payload = _BatchedPrefillMode(enabled)
@@ -1267,7 +2029,8 @@ class DistTPModelRunner:
             raise TypeError("prefill stats reset flag must be bool")
         if self._fatal_error is not None:
             raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
             ) from self._fatal_error
         try:
             probe = _PrefillStatsProbe(reset)
@@ -1286,7 +2049,9 @@ class DistTPModelRunner:
                 world_size=self._control_comm.world_size,
             )
         except Exception as error:
-            failure = RuntimeError(f"TP prefill stats probe failed: {error}")
+            failure = RuntimeError(
+                f"{self._parallelism_prefix} prefill stats probe failed: {error}"
+            )
             self._fatal_error = failure
             raise failure from error
 
@@ -1297,7 +2062,8 @@ class DistTPModelRunner:
             raise TypeError("batched verification enabled flag must be bool")
         if self._fatal_error is not None:
             raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
             ) from self._fatal_error
         try:
             payload = _BatchedVerificationMode(enabled)
@@ -1322,7 +2088,8 @@ class DistTPModelRunner:
             raise TypeError("verification stats reset flag must be bool")
         if self._fatal_error is not None:
             raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
             ) from self._fatal_error
         try:
             probe = _VerificationStatsProbe(reset)
@@ -1343,7 +2110,9 @@ class DistTPModelRunner:
                 world_size=self._control_comm.world_size,
             )
         except Exception as error:
-            failure = RuntimeError(f"TP verification stats probe failed: {error}")
+            failure = RuntimeError(
+                f"{self._parallelism_prefix} verification stats probe failed: {error}"
+            )
             self._fatal_error = failure
             raise failure from error
 
@@ -1354,7 +2123,8 @@ class DistTPModelRunner:
             raise TypeError("decode page-table cache enabled flag must be bool")
         if self._fatal_error is not None:
             raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
             ) from self._fatal_error
         try:
             payload = _DecodePageTableCacheMode(enabled)
@@ -1379,7 +2149,8 @@ class DistTPModelRunner:
             raise TypeError("decode page-table cache stats reset flag must be bool")
         if self._fatal_error is not None:
             raise RuntimeError(
-                "tensor-parallel runner is unavailable after a fatal step failure"
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
             ) from self._fatal_error
         try:
             probe = _DecodePageTableCacheStatsProbe(reset)
@@ -1400,7 +2171,9 @@ class DistTPModelRunner:
                 world_size=self._control_comm.world_size,
             )
         except Exception as error:
-            failure = RuntimeError(f"TP decode page-table stats probe failed: {error}")
+            failure = RuntimeError(
+                f"{self._parallelism_prefix} decode page-table stats probe failed: {error}"
+            )
             self._fatal_error = failure
             raise failure from error
 
@@ -1408,7 +2181,7 @@ class DistTPModelRunner:
         """Queue cleanup for the next all-rank transaction without blocking it."""
         with self._pending_release_lock:
             if self._shutdown_started:
-                raise RuntimeError("tensor-parallel runner is shutting down")
+                raise RuntimeError(f"{self._parallelism_display} runner is shutting down")
             self._release_generation += 1
             # Reinsert duplicates at their newest position. The generation
             # prevents an execute transaction from acknowledging a same-id
@@ -1441,7 +2214,137 @@ class DistTPModelRunner:
             invalidate()
 
 
-def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
+class DistEPModelRunner:
+    """Driver facade for replicated-attention expert-parallel correctness.
+
+    The rank protocol is intentionally the same SPMD/single-sampling-owner
+    protocol as TP, but the public topology is not: attention and KV are full
+    replicas and only routed experts are sharded.
+    """
+
+    def __init__(
+        self,
+        control_comm,
+        local_runner,
+        model_comm=None,
+        *,
+        expert_parallel_size: int,
+    ) -> None:
+        _validate_ep_correctness_mode(
+            expert_parallel_size=expert_parallel_size,
+        )
+        if control_comm.world_size != expert_parallel_size:
+            raise ValueError(
+                "EP control communicator world size does not match "
+                f"expert_parallel_size={expert_parallel_size}"
+            )
+        if model_comm is not None and model_comm.world_size != expert_parallel_size:
+            raise ValueError(
+                "EP model communicator world size does not match "
+                f"expert_parallel_size={expert_parallel_size}"
+            )
+        self._delegate = DistTPModelRunner(
+            control_comm,
+            local_runner,
+            model_comm,
+            parallelism_display="expert-parallel correctness-mode",
+            parallelism_prefix="EP",
+        )
+        self.expert_parallel_size = expert_parallel_size
+        self.parallelism = "expert_parallel"
+        self.execution_mode = _EP_CORRECTNESS_MODE
+        self.attention_placement = "replicated"
+        self.pipeline_depth = 1
+        self.decode_mode = "eager"
+
+    def __getattr__(self, name: str):
+        """Delegate the proven SPMD control protocol without becoming a TP type."""
+
+        return getattr(object.__getattribute__(self, "_delegate"), name)
+
+    def parallelism_metadata(self) -> dict[str, object]:
+        """Unambiguous topology metadata for gates and serving surfaces."""
+
+        return {
+            "parallelism": self.parallelism,
+            "expert_parallel_size": self.expert_parallel_size,
+            "attention_placement": self.attention_placement,
+            "execution_mode": self.execution_mode,
+            "pipeline_depth": self.pipeline_depth,
+            "decode_mode": self.decode_mode,
+            "kv_cache_dtype": "bfloat16",
+        }
+
+    @_serialized_protocol
+    def ep_kernel_inventory_metadata(self) -> tuple[dict[str, object], ...]:
+        """Gather bounded all-rank NVFP4 runtime evidence over gloo.
+
+        Projection names never leave their owning rank. Each rank sends only a
+        count, canonical names SHA-256, quant/kernel counts, unresolved-meta
+        counts, and a reduced loader summary. The returned tuple is rank ordered.
+        """
+
+        delegate = object.__getattribute__(self, "_delegate")
+        if delegate._fatal_error is not None:
+            raise RuntimeError(
+                "expert-parallel correctness-mode runner is unavailable after "
+                "a fatal step failure"
+            ) from delegate._fatal_error
+        try:
+            backend = _communicator_backend(delegate._control_comm)
+            if backend not in {"gloo", "fake"}:
+                raise RuntimeError(
+                    "EP kernel inventory requires the bounded control communicator "
+                    f"(gloo), got {backend!r}"
+                )
+            delivered = delegate._control_comm.broadcast(
+                _EPKernelInventoryProbe(),
+                src=0,
+            )
+            if not isinstance(delivered, _EPKernelInventoryProbe):
+                raise RuntimeError(
+                    "EP kernel inventory probe broadcast returned a malformed payload"
+                )
+            local = _ep_kernel_inventory_reply(
+                delegate._control_comm,
+                delegate._local,
+            )
+            gathered = delegate._control_comm.all_gather(local)
+            return _validate_ep_kernel_inventory_replies(
+                gathered,
+                world_size=self.expert_parallel_size,
+            )
+        except Exception as error:
+            failure = RuntimeError(f"EP kernel inventory metadata probe failed: {error}")
+            delegate._fatal_error = failure
+            raise failure from error
+
+    @staticmethod
+    def _reject_dram_kv() -> None:
+        raise RuntimeError(
+            "replicated-attention EP correctness mode does not support a DRAM KV tier"
+        )
+
+    def available_prefix(self, keys: tuple[str, ...], *, min_pages: int = 1) -> int:
+        self._reject_dram_kv()
+
+    def offload(self, keys: tuple[str, ...], page_ids: tuple[int, ...]) -> bool:
+        self._reject_dram_kv()
+
+    def restore(self, keys: tuple[str, ...], page_ids: tuple[int, ...]) -> bool:
+        self._reject_dram_kv()
+
+    def discard(self, keys: tuple[str, ...]) -> bool:
+        self._reject_dram_kv()
+
+
+def worker_step_loop(
+    control_comm,
+    local_runner,
+    model_comm=None,
+    *,
+    parallelism_prefix: str = "TP",
+) -> int:
     """Non-zero-rank main loop: execute passive steps until shutdown.
 
     Returns the number of steps executed (spawn tests assert on it).
@@ -1460,7 +2363,15 @@ def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
                 sync.discard(payload.released_ids)
                 return steps
             if isinstance(payload, _SamplingOwnershipProbe):
-                local = _sampling_ownership_row(control_comm, model_comm, local_runner)
+                local = _sampling_ownership_reply(
+                    control_comm,
+                    model_comm,
+                    local_runner,
+                )
+                control_comm.all_gather(local)
+                continue
+            if isinstance(payload, _EPKernelInventoryProbe):
+                local = _ep_kernel_inventory_reply(control_comm, local_runner)
                 control_comm.all_gather(local)
                 continue
             if isinstance(payload, _BatchedPrefillMode):
@@ -1507,7 +2418,8 @@ def worker_step_loop(control_comm, local_runner, model_comm=None) -> int:
                 control_comm.all_gather(local)
                 continue
             raise RuntimeError(
-                f"TP worker received an unsupported control payload: {type(payload).__name__}"
+                f"{parallelism_prefix} worker received an unsupported control payload: "
+                f"{type(payload).__name__}"
             )
         _release_runner_requests(local_runner, payload.released_ids)
         view = sync.apply(payload)  # same delta -> same reconstructed states
@@ -1532,6 +2444,15 @@ class TPPlacement:
     device: str
     dtype: object  # torch.dtype; annotated loosely to keep this import-light
     backend: str  # torch.distributed backend matching the device
+
+
+@dataclass(frozen=True)
+class _EPPlacement:
+    """One rank per device for replicated-attention expert parallelism."""
+
+    device: str
+    dtype: object
+    backend: str
 
 
 def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
@@ -1562,6 +2483,37 @@ def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
         )
     # gloo would move every RowParallelLinear all_reduce through host memory
     return TPPlacement(f"cuda:{rank}", torch.bfloat16, "nccl")
+
+
+def _ep_placement(
+    expert_parallel_size: int,
+    rank: int,
+) -> _EPPlacement:
+    """Rank-local placement for the EP2/EP4 correctness path."""
+
+    import torch
+
+    from kairyu.engine.core.hw_profile import probe
+
+    _validate_ep_correctness_mode(
+        expert_parallel_size=expert_parallel_size,
+    )
+    if not 0 <= rank < expert_parallel_size:
+        raise ValueError(
+            f"expert-parallel rank {rank} is outside size {expert_parallel_size}"
+        )
+    profile = probe()
+    if profile.arch != "cuda":
+        raise RuntimeError(
+            "replicated-attention EP correctness mode requires CUDA; "
+            f"probed architecture {profile.arch!r}"
+        )
+    if profile.device_count < expert_parallel_size:
+        raise RuntimeError(
+            f"expert_parallel_size={expert_parallel_size} needs "
+            f"{expert_parallel_size} CUDA devices; found {profile.device_count}"
+        )
+    return _EPPlacement(f"cuda:{rank}", torch.bfloat16, "nccl")
 
 
 class _DeferredComm:
@@ -1773,6 +2725,135 @@ def build_tp_runner(
     return runner, full_config
 
 
+def build_ep_runner(
+    model_dir: str,
+    expert_parallel_size: int,
+    rank: int,
+    comm,
+    num_pages: int,
+    page_size: int,
+    vocab: list[str] | GrammarVocabulary,
+    placement: _EPPlacement | None = None,
+    *,
+    pipeline_depth: int = 1,
+    decode_mode: str = "eager",
+    kv_cache_dtype: str = "bfloat16",
+    pd_separation: bool = False,
+    graph_scratch_page: int | None = None,
+    dram_kv_tier_capacity_pages: int = 0,
+    dram_kv_tier_profile: str | Path | None = None,
+    speculative: str | None = None,
+):
+    """Build one rank of the replicated-attention EP2/EP4 correctness path."""
+
+    import torch
+
+    from kairyu.engine.core.attention import select_backend
+    from kairyu.engine.core.attention_selector import attention_backend_identity
+    from kairyu.engine.core.hw_profile import probe
+    from kairyu.engine.core.kv_cache_dtype import (
+        kv_cache_dtype_name,
+        resolve_kv_cache_dtype,
+    )
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.models.moe_parallel import build_ep_model
+
+    _validate_ep_correctness_mode(
+        expert_parallel_size=expert_parallel_size,
+        pipeline_depth=pipeline_depth,
+        decode_mode=decode_mode,
+        kv_cache_dtype=kv_cache_dtype,
+        pd_separation=pd_separation,
+        graph_scratch_page=graph_scratch_page,
+        dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
+        dram_kv_tier_profile=dram_kv_tier_profile,
+        speculative=speculative,
+    )
+    if not 0 <= rank < expert_parallel_size:
+        raise ValueError(
+            f"expert-parallel rank {rank} is outside size {expert_parallel_size}"
+        )
+    if placement is None:
+        placement = _ep_placement(expert_parallel_size, rank)
+    if (
+        placement.backend != "nccl"
+        or not str(placement.device).startswith("cuda:")
+        or placement.dtype is not torch.bfloat16
+    ):
+        raise ValueError(
+            "replicated-attention EP correctness mode requires a CUDA/NCCL "
+            "BF16 placement"
+        )
+    profile = probe(placement.device)
+    attention_backend = select_backend(profile, device=placement.device)
+    selected_attention_backend_identity = attention_backend_identity(
+        attention_backend.selection_decision
+    )
+    model, full_config, load_info = build_ep_model(
+        model_dir,
+        expert_parallel_size,
+        rank,
+        comm,
+        dtype=placement.dtype,
+        device=placement.device,
+        attention_backend=attention_backend,
+    )
+    resolved_kv_cache_dtype = resolve_kv_cache_dtype(
+        kv_cache_dtype,
+        placement.dtype,
+        profile,
+        attention_backend,
+        full_config,
+    )
+    if resolved_kv_cache_dtype is not torch.bfloat16:
+        raise RuntimeError(
+            "replicated-attention EP correctness mode resolved a non-BF16 KV cache"
+        )
+    pool = PagedKVPool(
+        num_layers=full_config.num_hidden_layers,
+        num_pages=num_pages,
+        page_size=page_size,
+        num_kv_heads=full_config.kv_cache_num_heads,
+        head_dim=full_config.kv_cache_head_dim,
+        dtype=resolved_kv_cache_dtype,
+        device=placement.device,
+    )
+    grammar_vocab = (
+        vocab if isinstance(vocab, GrammarVocabulary) else GrammarVocabulary(list(vocab))
+    )
+    runner = PagedModelRunner(
+        model,
+        pool,
+        sampler=(
+            Sampler(vocab_provider=lambda: grammar_vocab)
+            if rank == 0
+            else None
+        ),
+        sampling_owner=rank == 0,
+    )
+    runner.attention_backend_decision = attention_backend.selection_decision
+    runner.attention_backend_identity = selected_attention_backend_identity
+    runner.kv_cache_dtype_requested = "bfloat16"
+    runner.kv_cache_dtype_resolved = kv_cache_dtype_name(
+        resolved_kv_cache_dtype
+    )
+    runner.dram_kv_binding = None
+    runner.dram_kv_tier = None
+    runner.dram_kv_policy = None
+    runner.dram_kv_tier_identity = None
+    runner.parallelism = "expert_parallel"
+    runner.expert_parallel_size = expert_parallel_size
+    runner.expert_parallel_rank = rank
+    runner.attention_placement = "replicated"
+    runner.execution_mode = _EP_CORRECTNESS_MODE
+    runner.pipeline_depth = 1
+    runner.decode_mode = "eager"
+    runner.expert_parallel_load_info = load_info
+    return runner, full_config, load_info
+
+
 def _tp_worker_entry(
     spawn_index: int,
     world_size: int,
@@ -1864,6 +2945,86 @@ def _tp_worker_entry(
             # Drain it, then rendezvous on the model communicator so no rank
             # destroys that communicator while a peer is still releasing its
             # captured work.
+            torch.cuda.synchronize()
+            comm.barrier()
+        dist.destroy_process_group(comm.group)
+        dist.destroy_process_group(control_comm.group)
+        dist.destroy_process_group()
+
+
+def _ep_worker_entry(
+    spawn_index: int,
+    expert_parallel_size: int,
+    init_file: str,
+    model_dir: str,
+    num_pages: int,
+    page_size: int,
+    vocab: list[str] | GrammarVocabulary,
+) -> None:
+    """Spawned EP correctness worker; rank 0 remains in the driver process."""
+
+    import torch
+
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+
+    _validate_ep_correctness_mode(
+        expert_parallel_size=expert_parallel_size,
+    )
+    rank = spawn_index + 1
+    torch.set_num_threads(1)
+    placement = _ep_placement(expert_parallel_size, rank)
+    if placement.backend == "nccl":
+        torch.cuda.set_device(rank)
+    init_distributed(
+        rank,
+        expert_parallel_size,
+        f"file://{init_file}",
+        backend=placement.backend,
+        timeout_s=_STARTUP_TIMEOUT_S,
+    )
+    startup_comm = TorchDistCommunicator(device=placement.device)
+    comm = _DeferredComm(startup_comm)
+    runner, _, _ = build_ep_runner(
+        model_dir,
+        expert_parallel_size,
+        rank,
+        comm,
+        num_pages,
+        page_size,
+        vocab,
+        placement,
+    )
+    if (
+        runner.expert_parallel_size != expert_parallel_size
+        or runner.expert_parallel_rank != rank
+    ):
+        raise RuntimeError(
+            "EP rank-local runner ownership does not match its process identity"
+        )
+    handshake = startup_comm.broadcast(None, src=0)
+    _validate_ep_handshake(
+        handshake,
+        model_dir,
+        expert_parallel_size,
+        num_pages,
+        page_size,
+        runner.attention_backend_identity,
+        runner.kv_cache_dtype_resolved,
+    )
+    groups = serving_groups(placement.backend)
+    comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
+    control_comm = TorchDistCommunicator(group=groups.control)
+    try:
+        worker_step_loop(
+            control_comm,
+            runner,
+            comm,
+            parallelism_prefix="EP",
+        )
+    finally:
+        import torch.distributed as dist
+
+        if placement.backend == "nccl":
             torch.cuda.synchronize()
             comm.barrier()
         dist.destroy_process_group(comm.group)
@@ -2119,7 +3280,7 @@ class DistTPLauncher:
         )
 
     def failure_type(self) -> str | None:
-        """Fatal TP step failure, sanitized for the unauthenticated health API."""
+        """Fatal distributed step failure, sanitized for health reporting."""
         error = self.runner.fatal_error
         return type(error).__name__ if error is not None else None
 
@@ -2157,3 +3318,153 @@ class DistTPLauncher:
         self._ctx.join()
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self._init_file)
+
+
+class _DistLauncherLifecycle:
+    """Share proven process-group cleanup without making EP a TP subtype."""
+
+    _abandon_start = DistTPLauncher._abandon_start
+    _abort_communicator = DistTPLauncher._abort_communicator
+    dead_ranks = DistTPLauncher.dead_ranks
+    failure_type = DistTPLauncher.failure_type
+    shutdown = DistTPLauncher.shutdown
+
+
+class DistEPLauncher(_DistLauncherLifecycle):
+    """Own one EP2/EP4 replicated-attention correctness-mode process group.
+
+    This is a distinct public topology from :class:`DistTPLauncher`. Every rank
+    holds complete attention/KV state, while ``build_ep_model`` loads only that
+    rank's routed experts. The constructor validates the deliberately narrow
+    execution envelope before spawning any process.
+    """
+
+    def __init__(
+        self,
+        model_dir: str,
+        expert_parallel_size: int,
+        num_pages: int,
+        page_size: int,
+        vocab: list[str] | GrammarVocabulary,
+        *,
+        pipeline_depth: int = 1,
+        decode_mode: str = "eager",
+        kv_cache_dtype: str = "bfloat16",
+        pd_separation: bool = False,
+        graph_scratch_page: int | None = None,
+        dram_kv_tier_capacity_pages: int = 0,
+        dram_kv_tier_profile: str | Path | None = None,
+        speculative: str | None = None,
+    ) -> None:
+        import tempfile
+
+        import torch
+        import torch.multiprocessing as mp
+
+        from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+
+        _validate_ep_correctness_mode(
+            expert_parallel_size=expert_parallel_size,
+            pipeline_depth=pipeline_depth,
+            decode_mode=decode_mode,
+            kv_cache_dtype=kv_cache_dtype,
+            pd_separation=pd_separation,
+            graph_scratch_page=graph_scratch_page,
+            dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
+            dram_kv_tier_profile=dram_kv_tier_profile,
+            speculative=speculative,
+        )
+        self.expert_parallel_size = expert_parallel_size
+        self.parallelism = "expert_parallel"
+        self.execution_mode = _EP_CORRECTNESS_MODE
+        self.attention_placement = "replicated"
+        self.pipeline_depth = 1
+        self.decode_mode = "eager"
+        self._init_file = tempfile.mktemp(prefix="kairyu-ep-")  # noqa: S306
+        placement = _ep_placement(expert_parallel_size, 0)
+        self._placement_backend = placement.backend
+        self._ctx = mp.spawn(
+            _ep_worker_entry,
+            args=(
+                expert_parallel_size,
+                self._init_file,
+                model_dir,
+                num_pages,
+                page_size,
+                vocab,
+            ),
+            nprocs=expert_parallel_size - 1,
+            join=False,
+        )
+        try:
+            if placement.backend == "nccl":
+                torch.cuda.set_device(0)
+            init_distributed(
+                0,
+                expert_parallel_size,
+                f"file://{self._init_file}",
+                backend=placement.backend,
+                timeout_s=_STARTUP_TIMEOUT_S,
+            )
+            startup_comm = TorchDistCommunicator(device=placement.device)
+            self._comm = _DeferredComm(startup_comm)
+            runner, self.full_config, self.expert_parallel_load_info = build_ep_runner(
+                model_dir,
+                expert_parallel_size,
+                0,
+                self._comm,
+                num_pages,
+                page_size,
+                vocab,
+                placement,
+                pipeline_depth=pipeline_depth,
+                decode_mode=decode_mode,
+                kv_cache_dtype=kv_cache_dtype,
+                pd_separation=pd_separation,
+                graph_scratch_page=graph_scratch_page,
+                dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
+                dram_kv_tier_profile=dram_kv_tier_profile,
+                speculative=speculative,
+            )
+            self.attention_backend_decision = runner.attention_backend_decision
+            self.attention_backend_identity = runner.attention_backend_identity
+            self.kv_cache_dtype_requested = runner.kv_cache_dtype_requested
+            self.kv_cache_dtype_resolved = runner.kv_cache_dtype_resolved
+            self.dram_kv_binding = None
+            self.dram_kv_tier_identity = None
+            startup_comm.broadcast(
+                _make_ep_handshake(
+                    model_dir,
+                    expert_parallel_size,
+                    num_pages,
+                    page_size,
+                    self.attention_backend_identity,
+                    self.kv_cache_dtype_resolved,
+                ),
+                src=0,
+            )
+            groups = serving_groups(placement.backend)
+            self._comm.bind(
+                TorchDistCommunicator(
+                    group=groups.model,
+                    device=placement.device,
+                )
+            )
+            self._control_comm = TorchDistCommunicator(group=groups.control)
+            self.runner = DistEPModelRunner(
+                self._control_comm,
+                runner,
+                self._comm,
+                expert_parallel_size=expert_parallel_size,
+            )
+        except BaseException:
+            self._abandon_start()
+            raise
+
+    def parallelism_metadata(self) -> dict[str, object]:
+        return self.runner.parallelism_metadata()
+
+    def ep_kernel_inventory_metadata(self) -> tuple[dict[str, object], ...]:
+        """Return the rank-complete runtime inventory from the EP runner."""
+
+        return self.runner.ep_kernel_inventory_metadata()
