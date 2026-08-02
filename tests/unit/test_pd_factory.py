@@ -1377,11 +1377,12 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
         "pd_defer_handoff",
         "max_model_len",
     )
-    assert names[legacy_tail + 5 :] == (
+    assert names[legacy_tail + 5 : legacy_tail + 8] == (
         "kv_cache_dtype",
         "dram_kv_tier_capacity_pages",
         "dram_kv_tier_profile",
     )
+    assert names[legacy_tail + 8 :] == ("expert_parallel_size",)
 
 
 def test_pd_rejects_a_mixed_cpu_cuda_role_pair(model_dir):

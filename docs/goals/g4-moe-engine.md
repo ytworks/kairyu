@@ -1,9 +1,10 @@
 # Goal G4: MoE Engine — Fused Experts, EP, MTP, NVFP4 (Roadmap Track E4–E5)
 
-Status: G4.1 M-A1 implementation and evidence in progress (2026-07-31).
+Status: G4.1 M-A1 retains its formal FAIL; M-A2 production integration and
+formal evidence are complete (2026-08-02).
 Lifts the G2 §6 "MoE / expert parallelism" non-goal (amendment recorded in
 PROGRESS.md). The reviewed mid-MoE design is `docs/design/g4-mid-moe.md`;
-M-A2 and M-A3 remain pending and retain their own acceptance gates.
+M-A2 passed its independent cache gate; M-A3 remains pending.
 Depends on: Roadmap Track E1–E3 (`docs/roadmap.md` §4): real single-GPU engine,
 scheduler multi-token commit (E2), NcclCommunicator (E3). Frontier-class gates
 additionally depend on the E3 hardware decision record (PCIe-switch chassis,
@@ -48,7 +49,7 @@ All numbers from committed `bench/` scripts (G2 §8 evidence rules carry forward
 | Gate | Target | Regime |
 |---|---|---|
 | M-A1 (correctness anchor) | Qwen3-235B NVFP4 on 2 and 4 GPUs: per-GPU-count TensorRT-LLM reference and Kairyu score the same autoregressive fresh-prefill reference rollout at 16 positions × 64 fixed prompts; require ≥1,014/1,024 token agreement, no substantive disagreement, and the fixed 0.125 near-tie / 0.25 reciprocal selected-logprob bounds. Retain ordinary 16-token retained-KV continuations as diagnostics only; M-A1 does not turn them into a cross-stack decode-parity claim. | — |
-| M-A2 (EP does not break KV) | Radix hit >80% @50% shared prefix with EP on (A7 lineage; attention-DP must keep per-replica KV accounting rank-invariant) | — |
+| M-A2 (EP does not break KV) | Qwen3-235B NVFP4 EP4, BF16 KV: serialize the fixed A7-lineage 64-session × 8-turn trace (512-token shared prefix, 128 appended tokens/turn) through one persistent production radix/scheduler/engine path. Require 512/512 terminal usages, logical `sum(engine cached_tokens) / sum(engine prompt_tokens) > 80%`, exact raw radix store events, and identical first-prefill allocation/page receipts on all four ranks. Rank rows are witnesses and are never multiplied into the rate. Retain source/checkpoint/container/GPU/topology/kernel evidence and pass manifest verification plus raw-only replay. Timing, OS jitter, and cross-engine output equality are non-binding. | — |
 | M-A3 (baseline comparison) | tok/s/GPU and TTFT p99 ≥ SGLang, same box, same checkpoint, same config — SGLang is the credible MoE-on-SM120 baseline; disclose its known SM120 limitations in the results file | saturation |
 | M-A4 (MTP value) | MTP acceptance ≥2 tokens/step measured; decode throughput ≥1.5× MTP-off at equal quality (spec ≡ non-spec greedy invariant pinned by test, E2 lineage) | latency-bound |
 | E-KV (FP8 KV bake) | `bench/fp8_kv_g4_ekv_bench.py` runs the pinned Qwen3-32B checkpoint on one SM120 with exact 8K/16K/32K prompts, 2,048-token native ragged-prefill chunks, and 16 greedy decode tokens in BF16-KV and explicit unit-scale E4M3-KV arms. PASS requires exact output token IDs/stopping, finite common-prefix selected logprobs with max absolute delta ≤0.25, complete finite/in-range SATFINITE write audits with bit-exact stored E4M3 bytes and the declared quantization-error bound, and fixed cross-cache samples with NRMSE ≤0.05 and cosine ≥0.99. BF16 remains the default; the operator alone may construct the candidate arm, and any runtime or quality failure is retained as FAIL and keeps public FP8 KV disabled. | — |
@@ -84,8 +85,11 @@ per-layer K/V scales require a separate bake before enablement.
 
 ## 5. Seams (informative, non-binding)
 
-- EP lives inside the `ModelRunner` (G2 §7 seam philosophy): scheduler, radix KV, and
-  step loop keep their contracts; attention-DP means each rank owns its requests' KV.
+- EP lives inside the `ModelRunner` (G2 §7 seam philosophy): scheduler, radix KV,
+  and step loop keep their contracts. M-A2 proves rank-invariant logical
+  accounting for the current replicated-attention/KV EP path; M-A3 must retain
+  that contract when attention-DP makes each attention replica own its
+  requests' KV.
 - MTP rides the E2 multi-token commit extension of `Scheduler.update()` — an MTP head
   is a different draft source behind `spec_decode.py`'s verify, not a new scheduler.
 - Expert-sharded loading extends the E1 safetensors loader + `quant_config.py`

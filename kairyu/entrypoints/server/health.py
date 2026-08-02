@@ -32,6 +32,51 @@ _ENGINE_LABELS = {
 # Engine backends that run attention locally in-process (so the resolved
 # attention backend applies to them); remote/echo engines report null.
 _LOCAL_ATTENTION_BACKENDS = frozenset({"kairyu", "kairyu-proc"})
+_EP_STRING_METADATA_FIELDS = (
+    "attention_placement",
+    "attention_output_placement",
+    "attention_output_partial_dtype",
+    "execution_mode",
+    "decode_mode",
+    "kv_cache_dtype",
+)
+_EP_INT_METADATA_FIELDS = (
+    "expert_parallel_size",
+    "attention_output_parallel_size",
+    "pipeline_depth",
+)
+
+
+def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
+    """Return a complete, JSON-safe EP topology or fail closed."""
+
+    if not isinstance(value, Mapping) or value.get("parallelism") != "expert_parallel":
+        return None
+    metadata: dict[str, object] = {"parallelism": "expert_parallel"}
+    for field in _EP_STRING_METADATA_FIELDS:
+        field_value = value.get(field)
+        if not isinstance(field_value, str) or not field_value:
+            return None
+        metadata[field] = field_value
+    for field in _EP_INT_METADATA_FIELDS:
+        field_value = value.get(field)
+        if type(field_value) is not int or field_value < 1:
+            return None
+        metadata[field] = field_value
+    if (
+        metadata["expert_parallel_size"] not in {2, 4}
+        or metadata["attention_output_parallel_size"]
+        != metadata["expert_parallel_size"]
+        or metadata["attention_placement"] != "replicated"
+        or metadata["attention_output_placement"] != "row_parallel"
+        or metadata["attention_output_partial_dtype"] != "bfloat16"
+        or metadata["execution_mode"] != "replicated-attention-correctness"
+        or metadata["pipeline_depth"] != 1
+        or metadata["decode_mode"] != "eager"
+        or metadata["kv_cache_dtype"] != "bfloat16"
+    ):
+        return None
+    return metadata
 
 
 def add_health_routes(
@@ -341,13 +386,38 @@ def add_health_routes(
                         "versions": _versions_for(engine_decision.components),
                     }
                 )
-            tensor_parallel_size = getattr(
-                engine,
-                "tensor_parallel_size",
-                None,
+            ep_metadata = _expert_parallel_metadata(
+                getattr(engine, "parallelism_metadata", None)
             )
-            if type(tensor_parallel_size) is int and tensor_parallel_size >= 1:
-                entry["tensor_parallel_size"] = tensor_parallel_size
+            if ep_metadata is not None:
+                entry.update(ep_metadata)
+            else:
+                declared_ep_size = getattr(
+                    engine,
+                    "expert_parallel_size",
+                    None,
+                )
+                if type(declared_ep_size) is int and declared_ep_size > 1:
+                    # Never relabel a known EP engine as TP1 when its detailed
+                    # runtime topology is missing or malformed.
+                    entry.update(
+                        {
+                            "parallelism": "expert_parallel",
+                            "expert_parallel_size": declared_ep_size,
+                            "parallelism_metadata_status": "invalid",
+                        }
+                    )
+                else:
+                    tensor_parallel_size = getattr(
+                        engine,
+                        "tensor_parallel_size",
+                        None,
+                    )
+                    if (
+                        type(tensor_parallel_size) is int
+                        and tensor_parallel_size >= 1
+                    ):
+                        entry["tensor_parallel_size"] = tensor_parallel_size
             requested_kv_dtype = getattr(
                 engine,
                 "kv_cache_dtype_requested",
@@ -401,7 +471,11 @@ def add_health_routes(
                     replica_sizes = {
                         item.get("tensor_parallel_size")
                         for item in replica.get("engines", ())
-                        if isinstance(item, dict) and type(item.get("tensor_parallel_size")) is int
+                        if (
+                            isinstance(item, dict)
+                            and item.get("parallelism") != "expert_parallel"
+                            and type(item.get("tensor_parallel_size")) is int
+                        )
                     }
                     if len(replica_sizes) == 1:
                         replica_size = replica_sizes.pop()
@@ -412,6 +486,22 @@ def add_health_routes(
                         for item in replica.get("engines", ())
                         if isinstance(item, dict)
                     ]
+                    replica_ep_metadata = [
+                        _expert_parallel_metadata(item)
+                        for item in replica_engines
+                    ]
+                    if (
+                        replica_ep_metadata
+                        and replica_ep_metadata[0] is not None
+                        and all(
+                            metadata == replica_ep_metadata[0]
+                            for metadata in replica_ep_metadata
+                        )
+                    ):
+                        entry.pop("tensor_parallel_size", None)
+                        entry["via_replica"].pop("tensor_parallel_size", None)
+                        entry.update(replica_ep_metadata[0])
+                        entry["via_replica"].update(replica_ep_metadata[0])
                     for field in (
                         "requested_kv_cache_dtype",
                         "kv_cache_dtype",

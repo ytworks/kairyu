@@ -1,7 +1,8 @@
 # G4.1 Design: Mid-tier MoE — Real NVFP4 Loading and Correctness
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-01; implementation and
-formal hardware evidence in progress).
+Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-02; the M-A1 best
+implementation is retained with its formal FAIL, while M-A2 production
+integration and formal hardware evidence are complete).
 Milestone: G4.1 M-A1, with explicit seams for M-A2 and M-A3.
 Depends on: M12 (Qwen model), M13 (paged attention), M14 (native NVFP4
 projection kernels), M15 (Qwen3-MoE math), M16 (NCCL communicator and EP
@@ -152,13 +153,15 @@ The M-A1 runner accepts only:
 - no public tensor/pipeline parallel composition (the internal `o_proj`
   row-parallel reduction is part of this EP correctness operator);
 - no CUDA graph, P-D handoff, DRAM KV tier, FP8 KV, or attention-DP.
-- no radix/block reuse between formal requests.
+- the M-A1 correctness capture alone disables radix/block reuse between formal
+  requests; M-A2 deliberately enables one persistent production radix cache.
 
 Unsupported combinations fail during construction. Backend/status reporting
 uses `expert_parallel_size`; it must not label EP as tensor parallelism.
-This first runner is an L1 formal correctness operator. Wiring EP into the L3
-production serving/status surface is a later product integration and is not
-claimed by M-A1.
+M-A1 used this runner as an L1 formal correctness operator. M-A2 wires the
+same bounded EP2/EP4 execution envelope into the L3 production
+serving/status surface; this later integration does not change or retroactively
+pass the M-A1 correctness verdict.
 
 ### D4 — Immutable reference
 
@@ -284,9 +287,61 @@ is committed.
 
 ## 4. M-A2/M-A3 seams and explicit non-claims
 
-M-A2 will reuse the same model loader and native kernels but must give each
-attention replica rank-invariant radix accounting and prove the fixed
-shared-prefix hit gate.
+### D7 — Rank-invariant radix truth for M-A2
+
+M-A2 reuses the same model loader, native kernels, and replicated-attention
+EP runner. The L2 `Scheduler` and `RadixKVCache` remain single logical owners
+on rank 0. Each inference step already broadcasts the immutable `StepDelta`
+containing the logical allocation, page table, and `num_cached_tokens`; every
+replicated KV rank applies that same snapshot before executing. Therefore the
+cache rate is counted once from terminal `StreamUpdate` engine usage, never
+once per rank. Four rank receipts are equality witnesses for the control-plane
+allocation and page-table view; they are not four rate samples and do not
+claim a bytewise readback of physical KV contents.
+
+The formal operator,
+`bench/g4_ma2_qwen3_235b_ep_kv_bench.py`, arms one opt-in, bounded recorder on
+all EP ranks before the trace and gathers it once afterward over the existing
+gloo control group. It records only the first prefill view of each request:
+prompt/cache token counts, the actual prefill start (including the scheduler's
+full-hit final-token recompute rule), prompt digest, and logical page-table
+digest. Capture is limited to 4,096 observations and 256-byte request IDs.
+Overflow and rank-local capture errors are retained as explicit failure
+evidence; a diagnostic error never interrupts the inference collective order.
+Outside an armed EP capture the recorder retains no request history, and TP
+does not construct it.
+
+The fixed real-model cell is Qwen3-235B NVFP4 EP4 with BF16 KV, eager decode,
+pipeline depth 1, page size 16, and one persistent cache/scheduler/engine loop.
+It serializes the A7-lineage 64-session × 8-turn trace: a 512-token shared
+prefix and 128 appended tokens per turn, for 512 one-token requests. The
+derived cache capacity is 4,129 pages: 4,128 retained pages plus one
+active-request guard. Binding success requires all 512 terminal engine usages,
+the strict logical `sum(cached) / sum(prompt) > 0.80`, exact raw
+`BlockStored` events, four complete rank receipts with no accounting/page
+drift, and complete source/checkpoint/container/GPU/topology/kernel evidence.
+`verify` must reproduce the manifest and raw-only `replay` must derive the
+same verdict. Timing, OS jitter, output equality against another engine, and
+rank-multiplied token counts are non-binding.
+
+Production configuration exposes `expert_parallel_size` 2 or 4 through
+`KairyuBackend`; TP and EP are mutually exclusive and the existing EP
+correctness envelope remains fail-closed. Readiness/shutdown use one
+topology-neutral launcher handle, while `/backends` reports complete EP
+metadata locally and through a `ReplicaPool` without relabelling EP as TP.
+The formal GPU operator drives the same production L1 `DistEPLauncher`
+directly so it can arm the all-rank recorder and attach the raw radix event
+sink; CPU/server regression tests separately bind the L3 construction and
+reporting path.
+
+The clean-commit real run at `d2d33e0472fb3101b680f4085d22e80a4ac7ceca`
+passed all 12 binding checks on 4× RTX PRO 6000. All 512 requests completed;
+the one logical engine rate was 491,008 / 557,056 = 0.8814338235, all four
+ranks reported those exact totals and identical page identities, and the raw
+trace retained 512 `BlockStored` events and 4,128 unique blocks. Manifest
+verification and raw-only replay both pass. The complete evidence is retained
+under
+`bench/results/g4-ma2-ep-kv-qwen3-235b-rtxpro6000-2026-08-02/`.
 
 M-A3 must replace correctness-mode attention duplication with request-owned
 attention-DP and add an overlap strategy chosen from measured throughput. It
@@ -308,5 +363,8 @@ reused as M-A3 evidence.
   parity, then official-checkpoint load smoke on both degrees.
 - Formal: both 1,024-position cells pass raw replay and manifest verification;
   all 64 free-running outputs, provenance, and topology are retained.
+- M-A2 formal: the fixed 512-request EP4 trace passes the strict logical
+  cache-rate gate, all four rank receipts are invariant, raw radix events are
+  exact, and both manifest verification and raw-only replay pass.
 - Repository: targeted tests, full applicable CPU/dist/GPU suites, ruff, and
   all required GitHub checks are green before merge.

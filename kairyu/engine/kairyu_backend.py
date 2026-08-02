@@ -58,6 +58,7 @@ from kairyu.outputs import CompletionOutput
 
 _VOCAB_SIZE = 50_000
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
+_EXPERT_PARALLEL_SIZES = frozenset({1, 2, 4})
 logger = logging.getLogger(__name__)
 
 
@@ -228,6 +229,7 @@ def build_engine_loop(
     priority_age_s: float | None = 60.0,
     runner: object | None = None,
     tensor_parallel_size: int = 1,
+    expert_parallel_size: int = 1,
     tokenizer: str | Tokenizer | None = None,
     speculative: str | None = None,
     speculative_tokens: int = 4,
@@ -250,12 +252,32 @@ def build_engine_loop(
     ``model_path`` loads a real checkpoint (m12 D5): DenseDecoder +
     PagedKVPool + PagedModelRunner + Sampler, tokenizer from the same dir
     unless overridden. Mutually exclusive with ``runner``. Real-model TP > 1
-    spawns the ``DistTPLauncher`` group (rank 0 here, ranks 1.. as workers) and
-    drives it via ``DistTPModelRunner``; the loop's ``.tp_launcher`` handle must
-    be ``shutdown()`` on serve teardown. A caller-supplied ``runner`` is a
-    single rank-local object and therefore requires ``tensor_parallel_size=1``.
+    and EP > 1 spawn their respective distributed launcher; the loop's
+    ``.parallel_launcher`` handle must be ``shutdown()`` on serve teardown. A
+    caller-supplied ``runner`` is a single rank-local object and therefore
+    requires both distributed sizes to remain 1.
     """
     _validate_max_model_len(max_model_len)
+    if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
+        raise ValueError(
+            "tensor_parallel_size must be a positive integer; "
+            f"got {tensor_parallel_size!r}"
+        )
+    if (
+        type(expert_parallel_size) is not int
+        or expert_parallel_size not in _EXPERT_PARALLEL_SIZES
+    ):
+        supported = ", ".join(str(size) for size in sorted(_EXPERT_PARALLEL_SIZES))
+        raise ValueError(
+            f"expert_parallel_size must be one of {supported}; "
+            f"got {expert_parallel_size!r}"
+        )
+    expert_parallel = expert_parallel_size > 1
+    if expert_parallel and tensor_parallel_size > 1:
+        raise ValueError(
+            "tensor_parallel_size > 1 and expert_parallel_size > 1 are "
+            "mutually exclusive"
+        )
     if pipeline_depth < 1:
         raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
     if speculative is not None and speculative != "ngram":
@@ -329,6 +351,39 @@ def build_engine_loop(
         raise ValueError(
             "pd_prefill_device, pd_decode_device, and a non-default "
             "pd_defer_handoff require pd_separation=True"
+        )
+    if expert_parallel:
+        if model_path is None:
+            raise ValueError("expert parallelism requires a real model_path")
+        if pipeline_depth != 1:
+            raise ValueError("expert parallelism requires pipeline_depth=1")
+        if decode_mode != "eager":
+            raise ValueError("expert parallelism requires decode_mode='eager'")
+        if kv_cache_dtype != "bfloat16":
+            raise ValueError(
+                "expert parallelism requires kv_cache_dtype='bfloat16'"
+            )
+        if pd_separation:
+            raise ValueError("expert parallelism does not support P-D separation")
+        if speculative is not None:
+            raise ValueError(
+                "expert parallelism does not support speculative decoding"
+            )
+        if dram_kv_tier_capacity_pages:
+            raise ValueError("expert parallelism does not support a DRAM KV tier")
+        return _build_dist_ep_loop(
+            model_path=model_path,
+            expert_parallel_size=expert_parallel_size,
+            num_pages=num_pages,
+            page_size=page_size,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            max_model_len=max_model_len,
+            priority_age_s=priority_age_s,
+            tokenizer=tokenizer,
+            pipeline_depth=pipeline_depth,
+            decode_mode=decode_mode,
+            kv_cache_dtype=kv_cache_dtype,
         )
     if pd_separation:
         if model_path is None:
@@ -537,7 +592,8 @@ def build_engine_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
     )
-    loop.tp_launcher = None  # single-process: nothing to tear down
+    loop.parallel_launcher = None  # single-process: nothing to tear down
+    loop.tp_launcher = None  # compatibility alias for TP-specific callers
     loop.attention_backend_decision = attention_backend_decision
     loop.kv_cache_dtype_requested = kv_cache_dtype
     loop.kv_cache_dtype_resolved = (
@@ -626,6 +682,7 @@ def _build_pd_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
     )
+    loop.parallel_launcher = None
     loop.tp_launcher = None
     loop.pd_coordinator = coordinator
     loop.attention_backend_decision = getattr(
@@ -640,6 +697,85 @@ def _build_pd_loop(
     loop.dram_kv_tier_profile_sha256 = None
     loop.dram_kv_tier_min_restore_tokens = None
     return loop, adapter.kv_cache, adapter
+
+
+def _build_dist_ep_loop(
+    *,
+    model_path: str,
+    expert_parallel_size: int,
+    num_pages: int,
+    page_size: int,
+    max_num_batched_tokens: int,
+    max_num_seqs: int,
+    max_model_len: int | None,
+    priority_age_s: float | None,
+    tokenizer: str | Tokenizer | None,
+    pipeline_depth: int = 1,
+    decode_mode: str = "eager",
+    kv_cache_dtype: str = "bfloat16",
+) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
+    """Build the production replicated-attention EP2/EP4 serving loop."""
+
+    from kairyu.engine.core.worker import DistEPLauncher
+    from kairyu.models.loader import load_generation_defaults
+
+    resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
+    raw_config = json.loads((Path(model_path) / "config.json").read_text())
+    model_vocab_size = int(raw_config["vocab_size"])
+    grammar_vocab = grammar_vocabulary(
+        resolved,
+        model_vocab_size=model_vocab_size,
+    )
+    generation = load_generation_defaults(model_path)
+    cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        page_size=page_size,
+        speculative_tokens=0,
+        priority_age_s=priority_age_s,
+    )
+    launcher = DistEPLauncher(
+        model_path,
+        expert_parallel_size,
+        num_pages,
+        page_size,
+        vocab=grammar_vocab,
+        pipeline_depth=pipeline_depth,
+        decode_mode=decode_mode,
+        kv_cache_dtype=kv_cache_dtype,
+        pd_separation=False,
+        graph_scratch_page=None,
+        dram_kv_tier_capacity_pages=0,
+        dram_kv_tier_profile=None,
+        speculative=None,
+    )
+    try:
+        loop = EngineLoop(
+            resolved,
+            scheduler,
+            launcher.runner,
+            default_eos_token_id=generation.eos_token_id,
+            default_stop_token_ids=generation.stop_token_ids,
+            pipeline_depth=pipeline_depth,
+            max_model_len=max_model_len,
+        )
+    except BaseException:
+        launcher.shutdown()
+        raise
+    loop.parallel_launcher = launcher
+    loop.ep_launcher = launcher
+    loop.tp_launcher = None
+    loop.parallelism_metadata = dict(launcher.parallelism_metadata())
+    loop.attention_backend_decision = launcher.attention_backend_decision
+    loop.kv_cache_dtype_requested = launcher.kv_cache_dtype_requested
+    loop.kv_cache_dtype_resolved = launcher.kv_cache_dtype_resolved
+    loop.dram_kv_tier_enabled = False
+    loop.dram_kv_tier_capacity_pages = 0
+    loop.dram_kv_tier_profile_sha256 = None
+    loop.dram_kv_tier_min_restore_tokens = None
+    return loop, cache, scheduler
 
 
 def _build_dist_tp_loop(
@@ -730,7 +866,8 @@ def _build_dist_tp_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
     )
-    loop.tp_launcher = launcher  # serve teardown must call launcher.shutdown()
+    loop.parallel_launcher = launcher
+    loop.tp_launcher = launcher  # compatibility alias for TP-specific callers
     loop.attention_backend_decision = launcher.attention_backend_decision
     loop.kv_cache_dtype_requested = launcher.kv_cache_dtype_requested
     loop.kv_cache_dtype_resolved = launcher.kv_cache_dtype_resolved
@@ -780,8 +917,10 @@ class KairyuBackend:
         kv_cache_dtype: str = "auto",
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | Path | None = None,
+        expert_parallel_size: int = 1,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
+        self.expert_parallel_size = expert_parallel_size
         self._loop, self._cache, self._scheduler = build_engine_loop(
             num_pages=num_pages,
             page_size=page_size,
@@ -791,6 +930,7 @@ class KairyuBackend:
             priority_age_s=priority_age_s,
             runner=runner,
             tensor_parallel_size=tensor_parallel_size,
+            expert_parallel_size=expert_parallel_size,
             tokenizer=tokenizer,
             speculative=speculative,
             speculative_tokens=speculative_tokens,
@@ -810,6 +950,16 @@ class KairyuBackend:
         )
         self.attention_backend_decision = getattr(
             self._loop, "attention_backend_decision", None
+        )
+        loop_parallelism_metadata = getattr(
+            self._loop,
+            "parallelism_metadata",
+            None,
+        )
+        self.parallelism_metadata = (
+            dict(loop_parallelism_metadata)
+            if isinstance(loop_parallelism_metadata, Mapping)
+            else None
         )
         self.kv_cache_dtype_requested = self._loop.kv_cache_dtype_requested
         self.kv_cache_dtype_resolved = self._loop.kv_cache_dtype_resolved
@@ -1070,7 +1220,7 @@ class KairyuBackend:
             # A producer can append an op after the worker's final has_work()
             # snapshot. Re-check on the event loop after clearing the old task.
             # Explicit cancellation waits for a later submit/abort to restart;
-            # fatal TP state and shutdown never hot-loop.
+            # fatal distributed state and shutdown never hot-loop.
             if (
                 cancelled is None
                 and not self._shutdown_started
@@ -1084,10 +1234,10 @@ class KairyuBackend:
     def readiness(self) -> EngineReadiness:
         """Cheap liveness for `/readyz`: KNOWN-FATAL state only, no probe.
 
-        A dead TP rank or a failed TP step is fatal. The group cannot complete a
-        trustworthy next collective after either condition and nothing
-        in-process can repair its sequence, so the node needs replacing —
-        `fatal` says so, and `/health` turns that into a restart signal.
+        A dead distributed rank or failed transport is fatal. The group cannot
+        complete a trustworthy next collective after either condition and
+        nothing in-process can repair its sequence, so the node needs replacing
+        — `fatal` says so, and `/health` turns that into a restart signal.
 
         A step exception deliberately does NOT flip readiness. It is reported for
         diagnosis but cannot be told apart from one bad request, and marking the
@@ -1095,20 +1245,31 @@ class KairyuBackend:
         the successful step that would clear the flag never arrives and the node
         stays out of rotation until someone notices (review [P1] on #126).
         """
-        launcher = getattr(self._loop, "tp_launcher", None)
+        launcher = getattr(self._loop, "parallel_launcher", None)
+        if launcher is None:
+            # Compatibility for loops/tests created before the topology-neutral
+            # launcher handle was introduced.
+            launcher = getattr(self._loop, "tp_launcher", None)
         if launcher is not None:
+            parallelism = getattr(self._loop, "parallelism_metadata", None)
+            topology = (
+                "expert-parallel"
+                if isinstance(parallelism, Mapping)
+                and parallelism.get("parallelism") == "expert_parallel"
+                else "tensor-parallel"
+            )
             failure_type = getattr(launcher, "failure_type", lambda: None)()
             if failure_type is not None:
                 return EngineReadiness(
                     False,
-                    f"tensor-parallel transport failed: {failure_type}",
+                    f"{topology} transport failed: {failure_type}",
                     fatal=True,
                 )
             dead = launcher.dead_ranks()
             if dead:
                 return EngineReadiness(
                     False,
-                    f"tensor-parallel ranks not running: {sorted(dead)}",
+                    f"{topology} ranks not running: {sorted(dead)}",
                     fatal=True,
                 )
         return EngineReadiness(True, self._last_error_detail())
@@ -1457,8 +1618,10 @@ class KairyuBackend:
         finally:
             with self._prepared_requests_lock:
                 self._prepared_requests.clear()
-            # Stop spawned TP ranks even if settling the pump or loop fails.
-            launcher = getattr(self._loop, "tp_launcher", None)
+            # Stop spawned distributed ranks even if settling the pump or loop fails.
+            launcher = getattr(self._loop, "parallel_launcher", None)
+            if launcher is None:
+                launcher = getattr(self._loop, "tp_launcher", None)
             if launcher is not None:
                 await asyncio.to_thread(launcher.shutdown)
 

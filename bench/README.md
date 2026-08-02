@@ -284,6 +284,28 @@ first noninferior at 8 req/s. TP8 retains lower terminal-stream TPOT at
 Evidence is retained under
 `bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/`.
 
+### G4 M-A2 EP radix-KV evidence
+
+`bench/g4_ma2_qwen3_235b_ep_kv_bench.py` runs the fixed 512-request
+50%-shared-prefix lineage on the real Qwen3-235B NVFP4 EP4 path. One
+persistent radix cache, scheduler, and engine loop serve the requests
+serially. The logical hit rate comes only from terminal engine usage and must
+be strictly above 80%; the four rank rows prove identical first-prefill
+allocation/page views and are not additional rate samples. Raw
+`BlockStored` events, workload/topology, native kernel inventory, and
+source/checkpoint/container/GPU provenance are retained. Completed semantic
+failures still write an artifact. GitHub CI runs deterministic tamper tests,
+manifest verification, and raw-only replay rather than pretending to have the
+four-GPU 235B environment. The exact hardware procedure is in
+`docs/gpu-runbook.md` §9.12.
+
+The clean-commit real EP4 run passed all 12 checks: 512/512 requests,
+491,008 cached / 557,056 prompt tokens (88.143382%), identical totals and page
+identities on all four ranks, 512 raw cache events, and 4,128 retained blocks.
+Both retained-copy verification and raw-only replay pass. Evidence, including
+the running-container inspect record, is retained under
+`bench/results/g4-ma2-ep-kv-qwen3-235b-rtxpro6000-2026-08-02/`.
+
 ### G4 E-KV FP8 KV evidence
 
 `bench/fp8_kv_g4_ekv_bench.py` is the formal G4 E-KV correctness operator.

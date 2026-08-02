@@ -134,6 +134,95 @@ async def test_backends_reports_the_local_engine_actual_auto_fallback(monkeypatc
     assert body["engines"][0]["kv_cache_dtype"] == "bfloat16"
 
 
+async def test_backends_reports_ep_topology_locally_and_through_gateway(
+    monkeypatch,
+):
+    monkeypatch.delenv("KAIRYU_ATTENTION_BACKEND", raising=False)
+    monkeypatch.setattr(health_module, "probe", lambda: HardwareProfile(arch="cpu"))
+    expected = {
+        "parallelism": "expert_parallel",
+        "expert_parallel_size": 4,
+        "attention_placement": "replicated",
+        "attention_output_placement": "row_parallel",
+        "attention_output_parallel_size": 4,
+        "attention_output_partial_dtype": "bfloat16",
+        "execution_mode": "replicated-attention-correctness",
+        "pipeline_depth": 1,
+        "decode_mode": "eager",
+    }
+
+    class KairyuBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.parallelism_metadata = {
+                **expected,
+                "kv_cache_dtype": "bfloat16",
+            }
+            self.kv_cache_dtype_requested = "bfloat16"
+            self.kv_cache_dtype_resolved = "bfloat16"
+
+    replica_app = create_app(
+        engines={
+            "default": KairyuBackend(),
+            # The gateway backend targets only "default"; topology from this
+            # unrelated co-hosted model must not enter the pool aggregate.
+            "unrelated": MockBackend(tensor_parallel_size=8),
+        }
+    )
+    async with _client(replica_app) as client:
+        replica_response = await client.get("/backends")
+
+    assert replica_response.status_code == 200
+    replica_entry = replica_response.json()["engines"][0]
+    assert {field: replica_entry[field] for field in expected} == expected
+    assert "tensor_parallel_size" not in replica_entry
+
+    replica_backend = OpenAICompatBackend(
+        base_url="http://replica/v1",
+        model="default",
+        api_key_env=None,
+        transport=httpx.ASGITransport(app=replica_app),
+    )
+    gateway_app = create_app(
+        engines={"qwen3-235b": ReplicaPool([replica_backend])},
+    )
+    async with _client(gateway_app) as client:
+        gateway_response = await client.get("/backends")
+
+    assert gateway_response.status_code == 200
+    pool_entry = gateway_response.json()["engines"][0]
+    assert {field: pool_entry[field] for field in expected} == expected
+    assert {
+        field: pool_entry["via_replica"][field] for field in expected
+    } == expected
+    assert "tensor_parallel_size" not in pool_entry
+    assert "tensor_parallel_size" not in pool_entry["via_replica"]
+
+
+async def test_backends_never_relabels_malformed_ep_metadata_as_tp():
+    class KairyuBackend(MockBackend):
+        def __init__(self):
+            super().__init__(tensor_parallel_size=1)
+            self.expert_parallel_size = 4
+            self.parallelism_metadata = {
+                "parallelism": "expert_parallel",
+                "expert_parallel_size": 4,
+                "attention_placement": "replicated",
+                # Missing the remaining required runtime topology.
+            }
+
+    app = create_app(engines={"qwen3-235b": KairyuBackend()})
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    assert response.status_code == 200
+    entry = response.json()["engines"][0]
+    assert entry["parallelism"] == "expert_parallel"
+    assert entry["expert_parallel_size"] == 4
+    assert entry["parallelism_metadata_status"] == "invalid"
+    assert "tensor_parallel_size" not in entry
+
+
 async def test_backends_does_not_invent_torch_after_invalid_selection(monkeypatch):
     monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "invalid")
     monkeypatch.setattr(

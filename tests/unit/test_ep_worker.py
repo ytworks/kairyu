@@ -10,6 +10,9 @@ import torch
 
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.comm import FakeCommunicator
+from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
+from kairyu.engine.core.step_input import RequestSnapshot
 
 
 def _write_ep_checkpoint(directory: Path) -> tuple[str, ...]:
@@ -115,6 +118,38 @@ def _kernel_probe_runner(
     return SimpleNamespace(
         _model=model,
         expert_parallel_load_info=load_info,
+    )
+
+
+class _AccountingRunner:
+    def execute(self, scheduled, states):
+        return {}
+
+    def execute_passive(self, scheduled, states):
+        return {}
+
+    def make_sampling_token_packet(self, scheduled, states, sampled=None):
+        return torch.full((len(scheduled),), -1, dtype=torch.int64)
+
+    def adopt_sampling_token_packet(self, scheduled, states, packet) -> None:
+        pass
+
+    def release(self, request_id: str) -> None:
+        pass
+
+
+def _accounting_snapshot(request_id: str) -> RequestSnapshot:
+    return RequestSnapshot(
+        request_id=request_id,
+        prompt_token_ids=tuple(range(20)),
+        computed_prompt=20,
+        outputs=(),
+        in_flight=0,
+        page_ids=(7, 11),
+        decode_page_ids=(),
+        eos_token_id=None,
+        max_new_tokens=1,
+        num_cached_tokens=16,
     )
 
 
@@ -371,6 +406,204 @@ def test_ep_runner_rejects_a_communicator_with_the_wrong_world_size():
             object(),
             expert_parallel_size=4,
         )
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_ep_kv_accounting_gathers_identical_first_request_views_and_disarms(
+    world_size,
+):
+    control = FakeCommunicator.create_group(world_size)
+    model = FakeCommunicator.create_group(world_size)
+    local = tuple(_AccountingRunner() for _ in range(world_size))
+    driver = worker_module.DistEPModelRunner(
+        control[0],
+        local[0],
+        model[0],
+        expert_parallel_size=world_size,
+    )
+    snapshot = _accounting_snapshot("request-0")
+
+    with ThreadPoolExecutor(max_workers=world_size - 1) as pool:
+        workers = tuple(
+            pool.submit(
+                worker_module.worker_step_loop,
+                control[rank],
+                local[rank],
+                model[rank],
+                parallelism_prefix="EP",
+            )
+            for rank in range(1, world_size)
+        )
+        started = driver.start_ep_kv_accounting()
+        driver.execute(
+            (ScheduledChunk("request-0", 4, True, 16),),
+            {"request-0": snapshot},
+        )
+        rows = driver.finish_ep_kv_accounting()
+        driver.shutdown()
+        assert [worker.result(timeout=2) for worker in workers] == [
+            1
+        ] * (world_size - 1)
+
+    assert [row["rank"] for row in started] == list(range(world_size))
+    assert all(row["capture_action"] == "start" for row in started)
+    assert all(row["request_count"] == 0 for row in started)
+    assert all(row["capture_error"] is None for row in started)
+    assert [row["rank"] for row in rows] == list(range(world_size))
+    assert all(row["capture_action"] == "finish" for row in rows)
+    assert all(row["overflow"] is False for row in rows)
+    assert all(row["capture_error"] is None for row in rows)
+    assert all(row["request_count"] == 1 for row in rows)
+    assert all(row["prompt_tokens"] == 20 for row in rows)
+    assert all(row["cached_tokens"] == 16 for row in rows)
+    invariant = {
+        key: value
+        for key, value in rows[0].items()
+        if key not in {"rank"}
+    }
+    assert all(
+        {
+            key: value
+            for key, value in row.items()
+            if key not in {"rank"}
+        }
+        == invariant
+        for row in rows[1:]
+    )
+    observation = rows[0]["observations"][0]
+    assert observation == {
+        "sequence": 0,
+        "request_id": "request-0",
+        "prompt_tokens": 20,
+        "cached_tokens": 16,
+        "prefill_start": 16,
+        "first_num_tokens": 4,
+        "first_is_prefill": True,
+        "prompt_token_ids_sha256": worker_module._json_sha256(list(range(20))),
+        "page_count": 2,
+        "page_ids_sha256": worker_module._json_sha256([7, 11]),
+    }
+
+
+def test_ep_kv_accounting_uses_scheduler_cache_truth_for_prefill_start():
+    cache = RadixKVCache(num_pages=32, page_size=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=64,
+        max_num_seqs=1,
+    )
+    shared = tuple(range(8))
+    scheduler.add_request(
+        EngineRequest(
+            "seed",
+            prompt_token_ids=shared + tuple(range(100, 104)),
+            max_new_tokens=1,
+        )
+    )
+    assert scheduler.schedule().scheduled[0].num_tokens == 12
+    assert scheduler.update({"seed": 42}) == ("seed",)
+
+    scheduler.add_request(
+        EngineRequest(
+            "reuse",
+            prompt_token_ids=shared + tuple(range(200, 204)),
+            max_new_tokens=1,
+        )
+    )
+    scheduled = scheduler.schedule().scheduled
+    recorder = worker_module._EPKVAccountingRecorder()
+    recorder.start()
+    recorder.observe(scheduled, scheduler.states)
+    row = recorder.snapshot(rank=0, world_size=4, action="finish")
+
+    assert row["capture_error"] is None
+    assert row["request_count"] == 1
+    assert row["cached_tokens"] == 8
+    assert row["observations"][0]["prefill_start"] == 8
+    assert row["observations"][0]["first_num_tokens"] == 4
+    assert scheduled[0].position == 0
+
+
+def test_ep_kv_accounting_recomputes_last_token_on_a_full_prompt_hit():
+    cache = RadixKVCache(num_pages=32, page_size=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=64,
+        max_num_seqs=1,
+    )
+    prompt = tuple(range(12))
+    scheduler.add_request(
+        EngineRequest("seed", prompt_token_ids=prompt, max_new_tokens=1)
+    )
+    scheduler.schedule()
+    assert scheduler.update({"seed": 42}) == ("seed",)
+
+    scheduler.add_request(
+        EngineRequest("exact", prompt_token_ids=prompt, max_new_tokens=1)
+    )
+    scheduled = scheduler.schedule().scheduled
+    recorder = worker_module._EPKVAccountingRecorder()
+    recorder.start()
+    recorder.observe(scheduled, scheduler.states)
+    row = recorder.snapshot(rank=0, world_size=4, action="finish")
+
+    assert row["capture_error"] is None
+    assert row["cached_tokens"] == len(prompt)
+    assert row["observations"][0]["prefill_start"] == len(prompt) - 1
+    assert row["observations"][0]["first_num_tokens"] == 1
+
+
+def test_ep_kv_accounting_observation_failure_is_reported_after_collective():
+    control = FakeCommunicator.create_group(2)
+    model = FakeCommunicator.create_group(2)
+    local = (_AccountingRunner(), _AccountingRunner())
+    driver = worker_module.DistEPModelRunner(
+        control[0],
+        local[0],
+        model[0],
+        expert_parallel_size=2,
+    )
+    malformed = _accounting_snapshot("request-0")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = pool.submit(
+            worker_module.worker_step_loop,
+            control[1],
+            local[1],
+            model[1],
+            parallelism_prefix="EP",
+        )
+        driver.start_ep_kv_accounting()
+        driver.execute(
+            (ScheduledChunk("request-0", 4, False),),
+            {"request-0": malformed},
+        )
+        rows = driver.finish_ep_kv_accounting()
+        driver.shutdown()
+        assert worker.result(timeout=2) == 1
+
+    assert [row["request_count"] for row in rows] == [0, 0]
+    assert all(
+        isinstance(row["capture_error"], str)
+        and "malformed first-prefill allocation" in row["capture_error"]
+        for row in rows
+    )
+
+
+def test_ep_kv_accounting_finish_disarms_and_bounds_seen_state():
+    recorder = worker_module._EPKVAccountingRecorder()
+    recorder.start()
+    recorder.snapshot(rank=0, world_size=4, action="finish")
+    recorder.observe(
+        (ScheduledChunk("missing", 1, True),),
+        {},
+    )
+    recorder.start()
+    row = recorder.snapshot(rank=0, world_size=4, action="finish")
+
+    assert row["request_count"] == 0
+    assert row["capture_error"] is None
+    assert row["overflow"] is False
 
 
 def test_ep_kernel_inventory_gathers_rank_local_runtime_evidence_without_names():

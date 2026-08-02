@@ -1703,3 +1703,120 @@ PY
   image/inspect mismatch, checkpoint/source drift, fallback kernels,
   incomplete ownership, missing top-64 token-ID logprobs, or an unavailable
   runtime are never skips.
+
+- 9.12 G4 M-A2 Qwen3-235B-A22B NVFP4 EP4 radix reuse (#167): run from the
+  clean tracked commit containing the M-A2 operator. This is one EP4 cell on
+  GPUs 0–3, not an EP2/EP4 matrix and not a reference-engine comparison. It
+  serializes all 512 requests through one persistent radix cache, scheduler,
+  and engine loop. The binding rate counts terminal engine usage once;
+  all-rank rows are invariance witnesses and must never be multiplied into
+  the numerator or denominator. Timing and OS jitter are non-binding.
+
+  The 4,129-page BF16 KV capacity is derived from 4,128 retained pages plus
+  one active-request guard. Do not substitute the unrelated 8,192-page A7
+  simulator default. Build and content-address the exact source image, then
+  run the checkpoint and source mounts read-only:
+
+  ```bash
+  set -euo pipefail
+  CHECKOUT=$(pwd -P)
+  COMMIT=$(git rev-parse HEAD)
+  SESSION_ROOT=$(mktemp -d /tmp/kairyu-g4-ma2.XXXXXX)
+  SOURCE_ROOT="$SESSION_ROOT/source"
+  RESULT_ROOT="$SESSION_ROOT/results"
+
+  git clone --no-hardlinks "$CHECKOUT" "$SOURCE_ROOT"
+  git -C "$SOURCE_ROOT" switch --detach "$COMMIT"
+  test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$COMMIT"
+  test -z "$(git -C "$SOURCE_ROOT" status \
+    --porcelain=v1 --untracked-files=all)"
+  while IFS= read -r bound_source; do
+    git -C "$SOURCE_ROOT" ls-files --error-unmatch \
+      -- "$bound_source" >/dev/null
+  done < <(
+    cd "$SOURCE_ROOT"
+    "$CHECKOUT/.venv/bin/python" - <<'PY'
+from bench.g4_ma2_qwen3_235b_ep_kv_bench import BOUND_SOURCE_FILES
+
+print(*BOUND_SOURCE_FILES, sep="\n")
+PY
+  )
+  mkdir -p "$RESULT_ROOT"
+  MODEL_VOLUME=kairyu-qwen3-235b-nvfp4
+  MODEL_PATH=/models/qwen3-235b-nvfp4
+  LOCAL_REGISTRY=127.0.0.1:5167
+  REGISTRY_CONTAINER=kairyu-g4-ma2-registry
+  KAIRYU_TAG="$LOCAL_REGISTRY/kairyu-g4-ma2:$COMMIT"
+  RUN_CONTAINER=
+
+  cleanup_g4_ma2() {
+    if test -n "$RUN_CONTAINER"; then
+      docker rm -f "$RUN_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    docker rm -fv "$REGISTRY_CONTAINER" >/dev/null 2>&1 || true
+  }
+  trap cleanup_g4_ma2 EXIT
+
+  docker run -d --name "$REGISTRY_CONTAINER" \
+    -p 127.0.0.1:5167:5000 registry:2
+  docker build -f "$SOURCE_ROOT/Dockerfile.cuda" \
+    --build-arg "KAIRYU_VCS_REF=$COMMIT" \
+    -t "$KAIRYU_TAG" "$SOURCE_ROOT"
+  docker push "$KAIRYU_TAG"
+  KAIRYU_CONFIG_ID=$(docker image inspect --format '{{.Id}}' "$KAIRYU_TAG")
+  KAIRYU_REPO_DIGEST=$(docker image inspect \
+    --format '{{index .RepoDigests 0}}' "$KAIRYU_TAG")
+  test "${KAIRYU_REPO_DIGEST#"$LOCAL_REGISTRY/kairyu-g4-ma2@sha256:"}" \
+    != "$KAIRYU_REPO_DIGEST"
+  test "$(docker image inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$KAIRYU_TAG")" = "$COMMIT"
+  docker stop "$REGISTRY_CONTAINER"
+  docker rm -v "$REGISTRY_CONTAINER"
+
+  RUN_CONTAINER=$(docker create \
+    --gpus '"device=0,1,2,3"' --entrypoint sleep \
+    --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+    -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/workspace \
+    -v "$SOURCE_ROOT:/workspace:ro" \
+    -v "$MODEL_VOLUME:/models:ro" \
+    -v "$RESULT_ROOT:/results" \
+    -w /workspace "$KAIRYU_REPO_DIGEST" infinity)
+  docker start "$RUN_CONTAINER"
+  docker container inspect "$RUN_CONTAINER" \
+    > "$RESULT_ROOT/kairyu-ep4-inspect.json"
+  docker exec "$RUN_CONTAINER" /app/.venv/bin/python \
+    bench/g4_ma2_qwen3_235b_ep_kv_bench.py run \
+    --model-path "$MODEL_PATH" \
+    --container-inspect /results/kairyu-ep4-inspect.json \
+    --image-repo-digest "$KAIRYU_REPO_DIGEST" \
+    --image-config-id "$KAIRYU_CONFIG_ID" \
+    --output-dir /results/artifact --assert-gate
+  docker exec "$RUN_CONTAINER" /app/.venv/bin/python \
+    bench/g4_ma2_qwen3_235b_ep_kv_bench.py verify \
+    --artifact /results/artifact --assert-gate
+  docker exec "$RUN_CONTAINER" /app/.venv/bin/python \
+    bench/g4_ma2_qwen3_235b_ep_kv_bench.py replay \
+    --artifact /results/artifact --assert-gate
+  docker stop "$RUN_CONTAINER"
+  docker rm "$RUN_CONTAINER"
+  RUN_CONTAINER=
+
+  nvidia-smi \
+    --query-compute-apps=gpu_uuid,pid,used_memory \
+    --format=csv,noheader
+  ```
+
+  A completed semantic FAIL still writes raw JSONL and its derived manifest;
+  retain both and do not close M-A2. Runtime failure before a complete
+  end-snapshot is also a real failure, not a skip. PASS requires all 512
+  terminal usages, strict logical hit rate `>0.80`, exact raw
+  `BlockStored` events, four complete and identical rank allocation/page
+  receipts, native EP topology/kernel evidence, start/end provenance, manifest
+  verification, and raw-only replay. The retained M-A1 FAIL is independent and
+  is neither rerun nor reclassified by this cache gate. GitHub-hosted CI runs
+  only deterministic replay/tamper/entrypoint tests; it does not pretend to
+  rerun this four-GPU 235B cell.

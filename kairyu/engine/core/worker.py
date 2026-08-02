@@ -40,6 +40,8 @@ _CONTROL_IDLE_TIMEOUT_S = 365 * 24 * 60 * 60.0
 _PREFILL_STATS_PACKET_BYTES = 4096
 _VERIFICATION_STATS_PACKET_BYTES = 4096
 _PAGE_TABLE_STATS_PACKET_BYTES = 4096
+_EP_KV_ACCOUNTING_MAX_OBSERVATIONS = 4096
+_EP_KV_ACCOUNTING_MAX_REQUEST_ID_BYTES = 256
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,22 @@ class _EPKernelInventoryProbe:
 @dataclass(frozen=True)
 class _EPKernelInventoryReply:
     """Pickle-safe EP probe reply that keeps every rank in the gather."""
+
+    rank: int
+    row: dict[str, object] | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _EPKVAccountingControl:
+    """Start or finish one opt-in all-rank EP KV-accounting capture."""
+
+    action: str
+
+
+@dataclass(frozen=True)
+class _EPKVAccountingReply:
+    """Pickle-safe EP KV-accounting reply with a bounded error envelope."""
 
     rank: int
     row: dict[str, object] | None = None
@@ -357,6 +375,373 @@ def _json_sha256(value: object) -> str:
         allow_nan=False,
     ).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+_EP_KV_ACCOUNTING_OBSERVATION_FIELDS = frozenset(
+    {
+        "sequence",
+        "request_id",
+        "prompt_tokens",
+        "cached_tokens",
+        "prefill_start",
+        "first_num_tokens",
+        "first_is_prefill",
+        "prompt_token_ids_sha256",
+        "page_count",
+        "page_ids_sha256",
+    }
+)
+_EP_KV_ACCOUNTING_ROW_FIELDS = frozenset(
+    {
+        "rank",
+        "world_size",
+        "capture_action",
+        "observation_limit",
+        "overflow",
+        "capture_error",
+        "request_count",
+        "prompt_tokens",
+        "cached_tokens",
+        "observations_sha256",
+        "observations",
+    }
+)
+
+
+class _EPKVAccountingRecorder:
+    """Record first rank-local views only while a formal probe is armed.
+
+    The steady serving path pays one boolean branch and retains no request
+    history. M-A2 explicitly arms the recorder before its fixed trace, then
+    gathers the rank-local observations once after all requests complete.
+    """
+
+    def __init__(self) -> None:
+        self._active = False
+        self._overflow = False
+        self._error: str | None = None
+        self._seen: set[str] = set()
+        self._observations: list[dict[str, object]] = []
+
+    def start(self) -> None:
+        if self._active:
+            raise RuntimeError("EP KV accounting capture is already active")
+        self._active = True
+        self._overflow = False
+        self._error = None
+        self._seen.clear()
+        self._observations.clear()
+
+    def observe(self, chunks, states) -> None:
+        if not self._active or self._overflow or self._error is not None:
+            return
+        try:
+            for chunk in chunks:
+                request_id = getattr(chunk, "request_id", None)
+                if (
+                    not isinstance(request_id, str)
+                    or not request_id
+                    or len(request_id.encode("utf-8")) > _EP_KV_ACCOUNTING_MAX_REQUEST_ID_BYTES
+                ):
+                    raise RuntimeError(
+                        "EP KV accounting observed a malformed request ID"
+                    )
+                if request_id in self._seen:
+                    continue
+                state = states.get(request_id)
+                if state is None:
+                    raise RuntimeError(
+                        f"EP KV accounting cannot resolve request {request_id!r}"
+                    )
+                prompt_token_ids = tuple(state.request.prompt_token_ids)
+                allocation = state.allocation
+                if allocation is None:
+                    raise RuntimeError(
+                        f"EP KV accounting observed no allocation for {request_id!r}"
+                    )
+                page_ids = tuple(allocation.pages)
+                cached_tokens = allocation.num_cached_tokens
+                prefill_start = state.computed_prompt - chunk.num_tokens
+                expected_prefill_start = min(
+                    cached_tokens,
+                    len(prompt_token_ids) - 1,
+                )
+                if (
+                    not prompt_token_ids
+                    or any(type(token_id) is not int for token_id in prompt_token_ids)
+                    or not page_ids
+                    or any(
+                        type(page_id) is not int or page_id < 0
+                        for page_id in page_ids
+                    )
+                    or type(cached_tokens) is not int
+                    or not 0 <= cached_tokens <= len(prompt_token_ids)
+                    or chunk.is_prefill is not True
+                    or type(chunk.num_tokens) is not int
+                    or chunk.num_tokens < 1
+                    or type(prefill_start) is not int
+                    or prefill_start != expected_prefill_start
+                ):
+                    raise RuntimeError(
+                        "EP KV accounting observed malformed first-prefill "
+                        f"allocation for {request_id!r}"
+                    )
+                if len(self._observations) >= _EP_KV_ACCOUNTING_MAX_OBSERVATIONS:
+                    self._overflow = True
+                    return
+                self._seen.add(request_id)
+                self._observations.append(
+                    {
+                        "sequence": len(self._observations),
+                        "request_id": request_id,
+                        "prompt_tokens": len(prompt_token_ids),
+                        "cached_tokens": cached_tokens,
+                        "prefill_start": prefill_start,
+                        "first_num_tokens": chunk.num_tokens,
+                        "first_is_prefill": True,
+                        "prompt_token_ids_sha256": _json_sha256(
+                            list(prompt_token_ids)
+                        ),
+                        "page_count": len(page_ids),
+                        "page_ids_sha256": _json_sha256(list(page_ids)),
+                    }
+                )
+        except BaseException as error:
+            # This diagnostic must never break the inference collective order.
+            # Retain the bounded failure and let every rank complete the step;
+            # finish() reports it through the normal all-gather boundary.
+            self._error = (f"{type(error).__name__}: {error}")[:1024]
+
+    def snapshot(self, *, rank: int, world_size: int, action: str) -> dict[str, object]:
+        if not self._active:
+            raise RuntimeError("EP KV accounting capture is not active")
+        observations = tuple(dict(row) for row in self._observations)
+        row = {
+            "rank": rank,
+            "world_size": world_size,
+            "capture_action": action,
+            "observation_limit": _EP_KV_ACCOUNTING_MAX_OBSERVATIONS,
+            "overflow": self._overflow,
+            "capture_error": self._error,
+            "request_count": len(observations),
+            "prompt_tokens": sum(
+                int(observation["prompt_tokens"]) for observation in observations
+            ),
+            "cached_tokens": sum(
+                int(observation["cached_tokens"]) for observation in observations
+            ),
+            "observations_sha256": _json_sha256(list(observations)),
+            "observations": observations,
+        }
+        if action == "finish":
+            self._active = False
+            self._overflow = False
+            self._error = None
+            self._seen.clear()
+            self._observations.clear()
+        return row
+
+
+def _ep_kv_accounting_reply(
+    control_comm,
+    recorder: _EPKVAccountingRecorder,
+    *,
+    action: str,
+) -> _EPKVAccountingReply:
+    """Apply one capture boundary and keep every rank in the gather."""
+
+    rank = control_comm.rank
+    try:
+        if action == "start":
+            recorder.start()
+        elif action != "finish":
+            raise RuntimeError(f"unknown EP KV accounting action {action!r}")
+        return _EPKVAccountingReply(
+            rank=rank,
+            row=recorder.snapshot(
+                rank=rank,
+                world_size=control_comm.world_size,
+                action=action,
+            ),
+        )
+    except BaseException as error:
+        return _EPKVAccountingReply(
+            rank=rank,
+            error=(f"{type(error).__name__}: {error}")[:1024],
+        )
+
+
+def _validate_ep_kv_accounting_rows(
+    rows: object,
+    *,
+    world_size: int,
+    action: str,
+) -> tuple[dict[str, object], ...]:
+    """Validate each rank envelope without hiding a substantive rank drift."""
+
+    if not isinstance(rows, (tuple, list)) or len(rows) != world_size:
+        actual = len(rows) if isinstance(rows, (tuple, list)) else type(rows).__name__
+        raise RuntimeError(
+            "EP KV accounting reply count mismatch: "
+            f"expected {world_size}, got {actual}"
+        )
+    by_rank: dict[int, dict[str, object]] = {}
+    for slot, row in enumerate(rows):
+        if not isinstance(row, dict) or set(row) != _EP_KV_ACCOUNTING_ROW_FIELDS:
+            raise RuntimeError(
+                f"EP KV accounting reply in gather slot {slot} is malformed"
+            )
+        rank = row["rank"]
+        observations = row["observations"]
+        if (
+            type(rank) is not int
+            or not 0 <= rank < world_size
+            or rank in by_rank
+            or row["world_size"] != world_size
+            or row["capture_action"] != action
+            or row["observation_limit"] != _EP_KV_ACCOUNTING_MAX_OBSERVATIONS
+            or type(row["overflow"]) is not bool
+            or (
+                row["capture_error"] is not None
+                and (
+                    not isinstance(row["capture_error"], str)
+                    or not row["capture_error"]
+                    or len(row["capture_error"]) > 1024
+                )
+            )
+            or not isinstance(observations, (tuple, list))
+            or type(row["request_count"]) is not int
+            or row["request_count"] != len(observations)
+            or row["request_count"] > _EP_KV_ACCOUNTING_MAX_OBSERVATIONS
+            or (
+                row["overflow"]
+                and row["request_count"] != _EP_KV_ACCOUNTING_MAX_OBSERVATIONS
+            )
+            or type(row["prompt_tokens"]) is not int
+            or type(row["cached_tokens"]) is not int
+            or not _is_lower_sha256(row["observations_sha256"])
+            or row["observations_sha256"] != _json_sha256(list(observations))
+        ):
+            raise RuntimeError(
+                f"EP KV accounting reply in gather slot {slot} has malformed summary"
+            )
+        request_ids: set[str] = set()
+        prompt_tokens = 0
+        cached_tokens = 0
+        for sequence, observation in enumerate(observations):
+            if (
+                not isinstance(observation, dict)
+                or set(observation) != _EP_KV_ACCOUNTING_OBSERVATION_FIELDS
+                or type(observation["sequence"]) is not int
+                or observation["sequence"] != sequence
+                or not isinstance(observation["request_id"], str)
+                or not observation["request_id"]
+                or len(observation["request_id"].encode("utf-8"))
+                > _EP_KV_ACCOUNTING_MAX_REQUEST_ID_BYTES
+                or observation["request_id"] in request_ids
+                or type(observation["prompt_tokens"]) is not int
+                or observation["prompt_tokens"] < 1
+                or type(observation["cached_tokens"]) is not int
+                or not 0
+                <= observation["cached_tokens"]
+                <= observation["prompt_tokens"]
+                or type(observation["prefill_start"]) is not int
+                or observation["prefill_start"]
+                != min(
+                    observation["cached_tokens"],
+                    observation["prompt_tokens"] - 1,
+                )
+                or type(observation["first_num_tokens"]) is not int
+                or observation["first_num_tokens"] < 1
+                or observation["first_is_prefill"] is not True
+                or not _is_lower_sha256(
+                    observation["prompt_token_ids_sha256"]
+                )
+                or type(observation["page_count"]) is not int
+                or observation["page_count"] < 1
+                or not _is_lower_sha256(observation["page_ids_sha256"])
+            ):
+                raise RuntimeError(
+                    f"EP KV accounting rank {rank} observation {sequence} is malformed"
+                )
+            request_ids.add(observation["request_id"])
+            prompt_tokens += observation["prompt_tokens"]
+            cached_tokens += observation["cached_tokens"]
+        if (
+            row["prompt_tokens"] != prompt_tokens
+            or row["cached_tokens"] != cached_tokens
+            or (
+                action == "start"
+                and (
+                    observations
+                    or row["overflow"]
+                    or row["capture_error"] is not None
+                )
+            )
+        ):
+            raise RuntimeError(
+                f"EP KV accounting rank {rank} summary disagrees with observations"
+            )
+        by_rank[rank] = row
+    if set(by_rank) != set(range(world_size)):
+        raise RuntimeError("EP KV accounting ranks are incomplete")
+    return tuple(by_rank[rank] for rank in range(world_size))
+
+
+def _validate_ep_kv_accounting_replies(
+    gathered: object,
+    *,
+    world_size: int,
+    action: str,
+) -> tuple[dict[str, object], ...]:
+    """Validate bounded transport envelopes before exposing rank observations."""
+
+    if not isinstance(gathered, (tuple, list)) or len(gathered) != world_size:
+        actual = (
+            len(gathered)
+            if isinstance(gathered, (tuple, list))
+            else type(gathered).__name__
+        )
+        raise RuntimeError(
+            "EP KV accounting gathered malformed rank count: "
+            f"expected {world_size}, got {actual}"
+        )
+    replies: dict[int, _EPKVAccountingReply] = {}
+    for slot, reply in enumerate(gathered):
+        if not isinstance(reply, _EPKVAccountingReply):
+            raise RuntimeError(
+                f"EP KV accounting gather slot {slot} returned malformed "
+                f"{type(reply).__name__}"
+            )
+        if (
+            type(reply.rank) is not int
+            or not 0 <= reply.rank < world_size
+            or reply.rank in replies
+            or (reply.row is None) == (reply.error is None)
+            or (
+                reply.error is not None
+                and (not isinstance(reply.error, str) or not reply.error)
+            )
+        ):
+            raise RuntimeError(
+                f"EP KV accounting gather slot {slot} has malformed envelope"
+            )
+        replies[reply.rank] = reply
+    missing = sorted(set(range(world_size)) - set(replies))
+    if missing:
+        raise RuntimeError(f"EP KV accounting ranks are incomplete: missing={missing}")
+    failures = tuple(
+        f"rank {rank}: {replies[rank].error}"
+        for rank in range(world_size)
+        if replies[rank].error is not None
+    )
+    if failures:
+        raise RuntimeError("EP KV accounting rank failures: " + "; ".join(failures))
+    return _validate_ep_kv_accounting_rows(
+        tuple(replies[rank].row for rank in range(world_size)),
+        world_size=world_size,
+        action=action,
+    )
 
 
 def _ep_load_info_summary(
@@ -2082,6 +2467,11 @@ class DistTPModelRunner:
         self._pending_releases: dict[str, int] = {}
         self._release_generation = 0
         self._shutdown_started = False
+        self._ep_kv_accounting = (
+            _EPKVAccountingRecorder()
+            if parallelism_prefix == "EP"
+            else None
+        )
 
     def _snapshot_pending_releases(self) -> tuple[tuple[str, int], ...]:
         with self._pending_release_lock:
@@ -2130,6 +2520,8 @@ class DistTPModelRunner:
                 # cleanup. Acknowledge only after both rank protocols have
                 # accepted the batch and rank 0 has applied it.
                 self._ack_pending_releases(pending_releases)
+                if self._ep_kv_accounting is not None:
+                    self._ep_kv_accounting.observe(chunks, view)
                 sampled = self._local.execute(chunks, view)
                 packet = self._local.make_sampling_token_packet(chunks, view, sampled=sampled)
                 packet = self._model_comm.tensor_broadcast(packet, src=0)
@@ -2602,6 +2994,57 @@ class DistEPModelRunner:
         }
 
     @_serialized_protocol
+    def _ep_kv_accounting_collect(
+        self,
+        action: str,
+    ) -> tuple[dict[str, object], ...]:
+        delegate = object.__getattribute__(self, "_delegate")
+        if action not in {"start", "finish"}:
+            raise ValueError("EP KV accounting action must be start or finish")
+        if delegate._fatal_error is not None:
+            raise RuntimeError(
+                "expert-parallel correctness-mode runner is unavailable after "
+                "a fatal step failure"
+            ) from delegate._fatal_error
+        try:
+            payload = _EPKVAccountingControl(action)
+            delivered = delegate._control_comm.broadcast(payload, src=0)
+            if not isinstance(delivered, _EPKVAccountingControl):
+                raise RuntimeError(
+                    "EP KV accounting control returned a malformed payload"
+                )
+            recorder = delegate._ep_kv_accounting
+            if recorder is None:
+                raise RuntimeError("EP KV accounting recorder is unavailable")
+            local = _ep_kv_accounting_reply(
+                delegate._control_comm,
+                recorder,
+                action=delivered.action,
+            )
+            gathered = delegate._control_comm.all_gather(local)
+            return _validate_ep_kv_accounting_replies(
+                gathered,
+                world_size=self.expert_parallel_size,
+                action=action,
+            )
+        except Exception as error:
+            failure = RuntimeError(
+                f"EP KV accounting {action} probe failed: {error}"
+            )
+            delegate._fatal_error = failure
+            raise failure from error
+
+    def start_ep_kv_accounting(self) -> tuple[dict[str, object], ...]:
+        """Arm a bounded rank-local capture and prove every EP rank started."""
+
+        return self._ep_kv_accounting_collect("start")
+
+    def finish_ep_kv_accounting(self) -> tuple[dict[str, object], ...]:
+        """Gather and disarm the rank-local observations after a fixed trace."""
+
+        return self._ep_kv_accounting_collect("finish")
+
+    @_serialized_protocol
     def ep_kernel_inventory_metadata(self) -> tuple[dict[str, object], ...]:
         """Gather bounded all-rank NVFP4 runtime evidence over gloo.
 
@@ -2680,6 +3123,11 @@ def worker_step_loop(
         model_comm = control_comm
     steps = 0
     sync = StateSync()
+    ep_kv_accounting = (
+        _EPKVAccountingRecorder()
+        if parallelism_prefix == "EP"
+        else None
+    )
     while True:
         payload = control_comm.broadcast(_SHUTDOWN, src=0)
         if not isinstance(payload, StepDelta):
@@ -2699,6 +3147,18 @@ def worker_step_loop(
                 continue
             if isinstance(payload, _EPKernelInventoryProbe):
                 local = _ep_kernel_inventory_reply(control_comm, local_runner)
+                control_comm.all_gather(local)
+                continue
+            if isinstance(payload, _EPKVAccountingControl):
+                if ep_kv_accounting is None:
+                    raise RuntimeError(
+                        "EP KV accounting control reached a non-EP worker"
+                    )
+                local = _ep_kv_accounting_reply(
+                    control_comm,
+                    ep_kv_accounting,
+                    action=payload.action,
+                )
                 control_comm.all_gather(local)
                 continue
             if isinstance(payload, _BatchedPrefillMode):
@@ -2750,6 +3210,8 @@ def worker_step_loop(
             )
         _release_runner_requests(local_runner, payload.released_ids)
         view = sync.apply(payload)  # same delta -> same reconstructed states
+        if ep_kv_accounting is not None:
+            ep_kv_accounting.observe(payload.chunks, view)
         local_runner.execute_passive(payload.chunks, view)
         packet = local_runner.make_sampling_token_packet(payload.chunks, view, sampled=None)
         packet = model_comm.tensor_broadcast(packet, src=0)

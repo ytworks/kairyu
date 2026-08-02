@@ -1,0 +1,104 @@
+{
+  "checks": {
+    "all_512_requests_successful": true,
+    "ep4_rank_accounting_complete": true,
+    "ep4_topology_sampling_and_kernel_evidence_exact": true,
+    "every_rank_observation_matches_logical_engine_truth": true,
+    "every_request_present_exactly_once": true,
+    "fixed_a7_512_request_trace_exact": true,
+    "formal_run_metadata_exact": true,
+    "logical_engine_cache_rate_strictly_above_0_80": true,
+    "rank_page_identity_has_no_drift": true,
+    "raw_radix_blockstored_events_complete_and_exact": true,
+    "source_checkpoint_container_and_gpu_start_end_exact": true,
+    "terminal_streamupdate_usage_complete": true
+  },
+  "config": {
+    "binding": {
+      "cache_rate": {
+        "definition": "sum(terminal StreamUpdate.num_cached_tokens) / sum(terminal StreamUpdate.num_prompt_tokens)",
+        "operator": ">",
+        "value": 0.8
+      },
+      "rank_rows_are_not_rate_samples": true,
+      "required_rank_observations_per_request": 4
+    },
+    "gate": "G4-M-A2",
+    "kv_policy": {
+      "active_request_guard_pages": 1,
+      "bytes_per_page_per_rank": 3080192,
+      "capacity_bytes_per_rank": 12718112768,
+      "max_retained_pages": 4128,
+      "num_pages": 4129,
+      "page_size": 16,
+      "pages_per_session_turn": 8,
+      "shared_prefix_pages": 32
+    },
+    "model": "nvidia/Qwen3-235B-A22B-NVFP4",
+    "model_revision": "21cfa2c9e152032eb60647ee7b46a2bbcd8d76d2",
+    "sampling": {
+      "ignore_eos": true,
+      "max_tokens": 1,
+      "seed": 42,
+      "temperature": 0.0,
+      "top_k": -1,
+      "top_p": 1.0
+    },
+    "topology": {
+      "attention_output_placement": "row_parallel",
+      "attention_placement": "replicated",
+      "decode_mode": "eager",
+      "expert_parallel_size": 4,
+      "kv_cache_dtype": "bfloat16",
+      "pipeline_depth": 1,
+      "tensor_parallel_size": 1
+    },
+    "workload": {
+      "construction": "stable-single-token-repeat-v1",
+      "request_count": 512,
+      "seed": 42,
+      "serialized": true,
+      "sessions": 64,
+      "shared_prefix_tokens": 512,
+      "source": "G2-A7-fixed-geometry",
+      "theoretical_cached_tokens": 491008,
+      "theoretical_prompt_tokens": 557056,
+      "turn_tokens": 128,
+      "turns_per_session": 8
+    }
+  },
+  "gate": "G4-M-A2",
+  "metrics": {
+    "cache_event_count": 512,
+    "cache_rate_definition": "sum(terminal StreamUpdate.num_cached_tokens) / sum(terminal StreamUpdate.num_prompt_tokens)",
+    "kernel_rank_count": 4,
+    "logical_cached_tokens": 491008,
+    "logical_engine_cache_rate": 0.8814338235294118,
+    "logical_prompt_tokens": 557056,
+    "rank_cached_tokens": {
+      "0": 491008,
+      "1": 491008,
+      "2": 491008,
+      "3": 491008
+    },
+    "rank_count": 4,
+    "rank_prompt_tokens": {
+      "0": 557056,
+      "1": 557056,
+      "2": 557056,
+      "3": 557056
+    },
+    "rank_rows_are_not_aggregated_into_rate": true,
+    "request_count": 512,
+    "retained_block_hash_count": 4128,
+    "success_count": 512
+  },
+  "passed": true,
+  "raw": {
+    "name": "g4-ma2-qwen3-235b-ep-kv-raw.jsonl",
+    "row_count": 1034,
+    "sha256": "3920cf30dd7633905594f144d05f34727c641a06b0edc54bde8d2ff3fc5cb532"
+  },
+  "schema_version": "kairyu.g4.ma2.qwen3-235b-ep-kv.v1",
+  "verdict": "PASS"
+}
