@@ -61,6 +61,9 @@ _SHARED_EXPERT = re.compile(r"^model\.layers\.\d+\.mlp\.shared_experts\.")
 _AUXILIARY_KV_SCALE = re.compile(
     r"^model\.layers\.\d+\.self_attn\.[kv]_proj\.[kv]_scale$"
 )
+_ATTENTION_OUTPUT_SHARD = re.compile(
+    r"^model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|weight_scale)$"
+)
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -566,6 +569,81 @@ def _geometry_digest(names: Sequence[str], sizes: Mapping[str, int]) -> str:
     return gate.sha256_json([[name, sizes[name]] for name in sorted(names)])
 
 
+def _attention_output_sharded_names(names: Sequence[str]) -> list[str]:
+    matched: dict[tuple[int, str], str] = {}
+    for name in names:
+        match = _ATTENTION_OUTPUT_SHARD.fullmatch(name)
+        if match is None:
+            continue
+        key = (int(match.group(1)), match.group(2))
+        if key in matched:
+            raise ValueError(f"duplicate attention-output checkpoint member {key!r}")
+        matched[key] = name
+    expected = {
+        (layer, member)
+        for layer in range(gate.NUM_LAYERS)
+        for member in ("weight", "weight_scale")
+    }
+    if set(matched) != expected:
+        missing = sorted(expected - set(matched))
+        extra = sorted(set(matched) - expected)
+        raise ValueError(
+            "checkpoint attention-output shard inventory differs from exactly "
+            f"94 x (weight, weight_scale): missing={missing[:4]!r}, "
+            f"extra={extra[:4]!r}"
+        )
+    return sorted(matched.values())
+
+
+def _attention_output_shard_contracts(
+    names: Sequence[str],
+    sizes: Mapping[str, int],
+    *,
+    world_size: int,
+) -> list[dict[str, object]]:
+    if len(names) != gate.ATTENTION_OUTPUT_SHARDED_TENSOR_COUNT:
+        raise ValueError("attention-output shard tensor count is not exact")
+    ordered = sorted(names)
+    if any(sizes[name] <= 0 or sizes[name] % world_size for name in ordered):
+        raise ValueError(
+            "attention-output checkpoint members must split evenly across EP ranks"
+        )
+    full_bytes = sum(sizes[name] for name in ordered)
+    rank_slice_bytes = sum(sizes[name] // world_size for name in ordered)
+    common = {
+        "placement": "row_parallel",
+        "checkpoint_axis": 1,
+        "world_size": world_size,
+        "tensor_count": len(ordered),
+        "tensor_names_sha256": gate.sha256_json(ordered),
+        "full_geometry_sha256": _geometry_digest(ordered, sizes),
+        "full_bytes": full_bytes,
+        "slice_denominator": world_size,
+        "rank_slice_bytes": rank_slice_bytes,
+    }
+    rows = [
+        {
+            **common,
+            "rank": rank,
+            "slice_start_numerator": rank,
+            "slice_end_numerator": rank + 1,
+        }
+        for rank in range(world_size)
+    ]
+    rank_slice_digests = [
+        gate._attention_output_rank_slice_sha256(row) for row in rows
+    ]
+    partition_sha256 = gate.sha256_json(rank_slice_digests)
+    return [
+        {
+            **row,
+            "rank_slice_sha256": rank_slice_digests[rank],
+            "partition_sha256": partition_sha256,
+        }
+        for rank, row in enumerate(rows)
+    ]
+
+
 def _ownership_rows(
     *,
     model_path: Path,
@@ -585,6 +663,10 @@ def _ownership_rows(
     replicated_checkpoint = all_names - {
         name for names in routed.values() for name in names
     }
+    attention_output = _attention_output_sharded_names(
+        sorted(replicated_checkpoint)
+    )
+    attention_output_set = set(attention_output)
     auxiliary_kv_scales = {
         name for name in replicated_checkpoint if _AUXILIARY_KV_SCALE.match(name)
     }
@@ -594,13 +676,23 @@ def _ownership_rows(
         )
     # These calibration scalars remain authoritative checkpoint provenance but
     # BF16 KV runtime deliberately does not load them into rank-local modules.
-    replicated = replicated_checkpoint - auxiliary_kv_scales
+    replicated = (
+        replicated_checkpoint - auxiliary_kv_scales - attention_output_set
+    )
+    if len(replicated) != gate.FULLY_REPLICATED_TENSOR_COUNT:
+        raise ValueError("fully replicated checkpoint tensor count is not exact")
     router = sorted(name for name in replicated if _ROUTER.match(name))
     shared = sorted(name for name in replicated if _SHARED_EXPERT.match(name))
     dense = sorted(replicated - set(router) - set(shared))
     experts_per_rank = gate.NUM_EXPERTS // world_size
     rows: list[dict[str, object]] = []
     projection_names: list[list[str]] = []
+    attention_output_contracts = _attention_output_shard_contracts(
+        attention_output,
+        sizes,
+        world_size=world_size,
+    )
+    fully_replicated_bytes = sum(sizes[name] for name in replicated)
     for rank in range(world_size):
         owned_indices = list(
             range(rank * experts_per_rank, (rank + 1) * experts_per_rank)
@@ -608,13 +700,15 @@ def _ownership_rows(
         owned_names = sorted(
             name for expert in owned_indices for name in routed[expert]
         )
-        loaded_names = sorted((*replicated, *owned_names))
+        loaded_names = sorted((*replicated, *attention_output, *owned_names))
         projections = sorted(
             name[: -len(".weight_scale_2")]
             for name in loaded_names
             if name.endswith(".weight_scale_2")
         )
         projection_names.append(projections)
+        owned_expert_bytes = sum(sizes[name] for name in owned_names)
+        attention_output_contract = attention_output_contracts[rank]
         row = {
             "schema_version": gate.SCHEMA_VERSION,
             "type": "ownership",
@@ -626,8 +720,17 @@ def _ownership_rows(
             "owned_expert_indices": owned_indices,
             "owned_expert_tensor_count": len(owned_names),
             "owned_expert_tensor_names_sha256": gate.sha256_json(owned_names),
+            "owned_expert_bytes": owned_expert_bytes,
+            "fully_replicated_tensor_count": len(replicated),
+            "fully_replicated_bytes": fully_replicated_bytes,
+            "fully_replicated_sha256": _geometry_digest(replicated, sizes),
+            "attention_output_shard": attention_output_contract,
             "rank_loaded_tensor_count": len(loaded_names),
-            "rank_loaded_bytes": sum(sizes[name] for name in loaded_names),
+            "rank_loaded_bytes": (
+                fully_replicated_bytes
+                + owned_expert_bytes
+                + attention_output_contract["rank_slice_bytes"]
+            ),
             "loaded_tensor_names_sha256": gate.sha256_json(loaded_names),
             "dense_replication_sha256": _geometry_digest(dense, sizes),
             "router_replication_sha256": _geometry_digest(router, sizes),
@@ -702,7 +805,7 @@ def _kernel_rows(
             "resolved": (
                 "tensorrt_llm.pytorch.MoeConfig.CUTLASS"
                 if reference
-                else "flashinfer.mm_fp4"
+                else "flashinfer.cutlass_fused_moe+flashinfer.mm_fp4"
             ),
             "provider": "cutlass" if reference else "flashinfer",
             "provider_version": provider_version,
@@ -1386,12 +1489,68 @@ def _validate_ep_kernel_probe(
             "projection_count",
             "projection_inventory_sha256",
             "kernel_counts",
+            "fused_moe",
+            "attention_output",
             "meta_count",
             "load_info",
         }:
             raise RuntimeError(f"EP kernel probe row {rank} has an invalid schema")
         expected_count = len(names)
         owned_indices = list(owned["owned_expert_indices"])
+        routed_matches = [
+            _ROUTED_EXPERT.match(f"{name}.")
+            for name in names
+        ]
+        routed_projection_count = sum(
+            match is not None for match in routed_matches
+        )
+        dense_projection_count = expected_count - routed_projection_count
+        fused_block_count = len(
+            {
+                int(match.group(1))
+                for match in routed_matches
+                if match is not None
+            }
+        )
+        expected_fused_moe = (
+            {
+                "backend": "flashinfer.cutlass_fused_moe",
+                "global_expert_count": gate.NUM_EXPERTS,
+                "local_expert_count": len(owned_indices),
+                "local_expert_start": owned_indices[0],
+                "weight_order": "up_gate",
+                "scale_layout": "128x4",
+                "output_dtype": "bfloat16",
+                "ep_partial": True,
+                "enable_alltoall": False,
+                "block_count": fused_block_count,
+                "successful_forward_block_count": fused_block_count,
+            }
+            if routed_projection_count
+            else None
+        )
+        world_size = len(projection_names)
+        expected_attention_output = {
+            "backend": "flashinfer.mm_fp4",
+            "placement": "row_parallel",
+            "parallel_size": world_size,
+            "rank": rank,
+            "shard_axis": 1,
+            "global_in_features": 8_192,
+            "local_in_features": 8_192 // world_size,
+            "out_features": 4_096,
+            "partial_dtype": "bfloat16",
+            "block_count": gate.NUM_LAYERS,
+            "successful_forward_block_count": gate.NUM_LAYERS,
+        }
+        expected_kernel_counts = {
+            "nvfp4:flashinfer_nvfp4": dense_projection_count,
+        }
+        if routed_projection_count:
+            expected_kernel_counts[
+                "nvfp4:flashinfer_cutlass_fused_moe"
+            ] = routed_projection_count
+        expected_kernel_counts = dict(sorted(expected_kernel_counts.items()))
         expected_load = {
             "ep_rank": rank,
             "ep_size": len(projection_names),
@@ -1414,7 +1573,9 @@ def _validate_ep_kernel_probe(
             or row["projection_inventory_sha256"]
             != gate.sha256_json(list(names))
             or row["kernel_counts"]
-            != {"nvfp4:flashinfer_nvfp4": expected_count}
+            != expected_kernel_counts
+            or row["fused_moe"] != expected_fused_moe
+            or row["attention_output"] != expected_attention_output
             or row["meta_count"]
             != {"parameters": 0, "buffers": 0, "total": 0}
             or row["load_info"] != expected_load
@@ -1508,6 +1669,9 @@ def capture_kairyu_arm(
             "parallelism": "expert_parallel",
             "expert_parallel_size": world_size,
             "attention_placement": "replicated",
+            "attention_output_placement": "row_parallel",
+            "attention_output_parallel_size": world_size,
+            "attention_output_partial_dtype": "bfloat16",
             "execution_mode": "replicated-attention-correctness",
             "pipeline_depth": 1,
             "decode_mode": "eager",

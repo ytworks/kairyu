@@ -326,13 +326,25 @@ class _DivergentReferenceLLM(_ReferenceLLM):
 
 def _projection_names(arm: str) -> list[list[str]]:
     world_size = gate._arm_world_size(arm)
-    count = 4 * gate.NUM_LAYERS + (
-        3 * gate.NUM_LAYERS * gate.NUM_EXPERTS // world_size
-    )
-    return [
-        [f"rank-{rank}.projection-{index}" for index in range(count)]
-        for rank in range(world_size)
-    ]
+    experts_per_rank = gate.NUM_EXPERTS // world_size
+    names_by_rank = []
+    for rank in range(world_size):
+        names = [
+            f"model.layers.{layer}.self_attn.{projection}"
+            for layer in range(gate.NUM_LAYERS)
+            for projection in ("q_proj", "k_proj", "v_proj", "o_proj")
+        ]
+        names.extend(
+            f"model.layers.{layer}.mlp.experts.{expert}.{projection}"
+            for layer in range(gate.NUM_LAYERS)
+            for expert in range(
+                rank * experts_per_rank,
+                (rank + 1) * experts_per_rank,
+            )
+            for projection in ("gate_proj", "up_proj", "down_proj")
+        )
+        names_by_rank.append(names)
+    return names_by_rank
 
 
 def _patch_common(monkeypatch, host_snapshot) -> dict[str, int]:
@@ -530,11 +542,41 @@ def test_kairyu_batch_submits_all_64_before_first_step() -> None:
 def _ownership_fixture(arm: str) -> list[dict[str, object]]:
     world_size = gate._arm_world_size(arm)
     experts_per_rank = gate.NUM_EXPERTS // world_size
+    fully_replicated_bytes = 4_000
+    total_expert_bytes = 8_000
+    attention_output_full_bytes = 4_000
+    attention_output_shards = []
+    for rank in range(world_size):
+        shard = {
+            "placement": "row_parallel",
+            "checkpoint_axis": 1,
+            "rank": rank,
+            "world_size": world_size,
+            "tensor_count": gate.ATTENTION_OUTPUT_SHARDED_TENSOR_COUNT,
+            "tensor_names_sha256": "6" * 64,
+            "full_geometry_sha256": "7" * 64,
+            "full_bytes": attention_output_full_bytes,
+            "slice_start_numerator": rank,
+            "slice_end_numerator": rank + 1,
+            "slice_denominator": world_size,
+            "rank_slice_bytes": attention_output_full_bytes // world_size,
+        }
+        shard["rank_slice_sha256"] = gate._attention_output_rank_slice_sha256(
+            shard
+        )
+        attention_output_shards.append(shard)
+    partition_sha256 = gate.sha256_json(
+        [row["rank_slice_sha256"] for row in attention_output_shards]
+    )
+    for shard in attention_output_shards:
+        shard["partition_sha256"] = partition_sha256
     rows = []
     for rank in range(world_size):
         owned = list(
             range(rank * experts_per_rank, (rank + 1) * experts_per_rank)
         )
+        owned_expert_bytes = total_expert_bytes // world_size
+        attention_output_slice_bytes = attention_output_full_bytes // world_size
         rows.append(
             {
                 "schema_version": gate.SCHEMA_VERSION,
@@ -551,10 +593,22 @@ def _ownership_fixture(arm: str) -> list[dict[str, object]]:
                 "owned_expert_tensor_names_sha256": gate.sha256_json(
                     [arm, rank, "owned"]
                 ),
-                "rank_loaded_tensor_count": (
-                    1977 + 12 * gate.NUM_LAYERS * experts_per_rank
+                "owned_expert_bytes": owned_expert_bytes,
+                "fully_replicated_tensor_count": (
+                    gate.FULLY_REPLICATED_TENSOR_COUNT
                 ),
-                "rank_loaded_bytes": 10_000,
+                "fully_replicated_bytes": fully_replicated_bytes,
+                "fully_replicated_sha256": "2" * 64,
+                "attention_output_shard": attention_output_shards[rank],
+                "rank_loaded_tensor_count": (
+                    gate.LOADED_NON_EXPERT_TENSOR_COUNT
+                    + 12 * gate.NUM_LAYERS * experts_per_rank
+                ),
+                "rank_loaded_bytes": (
+                    fully_replicated_bytes
+                    + owned_expert_bytes
+                    + attention_output_slice_bytes
+                ),
                 "loaded_tensor_names_sha256": gate.sha256_json(
                     [arm, rank, "loaded"]
                 ),
@@ -611,6 +665,9 @@ class _Launcher:
             "parallelism": "expert_parallel",
             "expert_parallel_size": gate._arm_world_size(self.arm),
             "attention_placement": "replicated",
+            "attention_output_placement": "row_parallel",
+            "attention_output_parallel_size": gate._arm_world_size(self.arm),
+            "attention_output_partial_dtype": "bfloat16",
             "execution_mode": "replicated-attention-correctness",
             "pipeline_depth": 1,
             "decode_mode": "eager",
@@ -720,12 +777,61 @@ def _kernel_probe_fixture(
         zip(projections, ownership, strict=True)
     ):
         owned_indices = list(owned["owned_expert_indices"])
+        routed_matches = [
+            capture._ROUTED_EXPERT.match(f"{name}.") for name in names
+        ]
+        routed_projection_count = sum(
+            match is not None for match in routed_matches
+        )
+        dense_projection_count = len(names) - routed_projection_count
+        fused_block_count = len(
+            {
+                int(match.group(1))
+                for match in routed_matches
+                if match is not None
+            }
+        )
+        kernel_counts = {
+            "nvfp4:flashinfer_nvfp4": dense_projection_count,
+        }
+        fused_moe = None
+        if routed_projection_count:
+            kernel_counts[
+                "nvfp4:flashinfer_cutlass_fused_moe"
+            ] = routed_projection_count
+            fused_moe = {
+                "backend": "flashinfer.cutlass_fused_moe",
+                "global_expert_count": gate.NUM_EXPERTS,
+                "local_expert_count": len(owned_indices),
+                "local_expert_start": owned_indices[0],
+                "weight_order": "up_gate",
+                "scale_layout": "128x4",
+                "output_dtype": "bfloat16",
+                "ep_partial": True,
+                "enable_alltoall": False,
+                "block_count": fused_block_count,
+                "successful_forward_block_count": fused_block_count,
+            }
         rows.append(
             {
                 "rank": rank,
                 "projection_count": len(names),
                 "projection_inventory_sha256": gate.sha256_json(names),
-                "kernel_counts": {"nvfp4:flashinfer_nvfp4": len(names)},
+                "kernel_counts": dict(sorted(kernel_counts.items())),
+                "fused_moe": fused_moe,
+                "attention_output": {
+                    "backend": "flashinfer.mm_fp4",
+                    "placement": "row_parallel",
+                    "parallel_size": len(projections),
+                    "rank": rank,
+                    "shard_axis": 1,
+                    "global_in_features": 8_192,
+                    "local_in_features": 8_192 // len(projections),
+                    "out_features": 4_096,
+                    "partial_dtype": "bfloat16",
+                    "block_count": gate.NUM_LAYERS,
+                    "successful_forward_block_count": gate.NUM_LAYERS,
+                },
                 "meta_count": {"parameters": 0, "buffers": 0, "total": 0},
                 "load_info": {
                     "ep_rank": rank,
@@ -752,10 +858,15 @@ def _kernel_probe_fixture(
     return rows
 
 
-@pytest.mark.parametrize("field", ["digest", "kernel", "meta", "load"])
+@pytest.mark.parametrize(
+    "field", ["digest", "kernel", "fused_moe", "attention", "meta", "load"]
+)
 def test_all_rank_kernel_probe_mismatch_fails_closed(field: str) -> None:
     ownership = _ownership_fixture("kairyu_ep2")
-    projections = [["a", "b"], ["c"]]
+    projections = [
+        ["model.layers.0.mlp.experts.0.gate_proj", "a"],
+        ["model.layers.0.mlp.experts.64.gate_proj", "c"],
+    ]
     rows = _kernel_probe_fixture(projections, ownership)
     capture._validate_ep_kernel_probe(
         rows, projection_names=projections, ownership=ownership
@@ -765,6 +876,10 @@ def test_all_rank_kernel_probe_mismatch_fails_closed(field: str) -> None:
         broken[1]["projection_inventory_sha256"] = "0" * 64
     elif field == "kernel":
         broken[1]["kernel_counts"] = {"nvfp4:cpu_reference": 1}
+    elif field == "fused_moe":
+        broken[1]["fused_moe"]["successful_forward_block_count"] -= 1
+    elif field == "attention":
+        broken[1]["attention_output"]["placement"] = "replicated"
     elif field == "meta":
         broken[1]["meta_count"]["total"] = 1
     else:
@@ -772,6 +887,41 @@ def test_all_rank_kernel_probe_mismatch_fails_closed(field: str) -> None:
     with pytest.raises(RuntimeError, match="runtime kernel/load probe"):
         capture._validate_ep_kernel_probe(
             broken, projection_names=projections, ownership=ownership
+        )
+
+
+def test_attention_output_shard_contract_is_exact_and_complete() -> None:
+    candidates = [
+        f"model.layers.{layer}.self_attn.o_proj.{member}"
+        for layer in range(gate.NUM_LAYERS)
+        for member in ("weight", "weight_scale", "weight_scale_2", "input_scale")
+    ]
+    names = capture._attention_output_sharded_names(candidates)
+    assert len(names) == gate.ATTENTION_OUTPUT_SHARDED_TENSOR_COUNT
+    assert all(name.endswith((".weight", ".weight_scale")) for name in names)
+    assert not any(name.endswith((".weight_scale_2", ".input_scale")) for name in names)
+
+    sizes = {name: 16 for name in names}
+    contracts = capture._attention_output_shard_contracts(
+        names, sizes, world_size=4
+    )
+    rank_digests = [row["rank_slice_sha256"] for row in contracts]
+    assert [row["slice_start_numerator"] for row in contracts] == [0, 1, 2, 3]
+    assert [row["slice_end_numerator"] for row in contracts] == [1, 2, 3, 4]
+    assert len(set(rank_digests)) == 4
+    assert all(
+        row["partition_sha256"] == gate.sha256_json(rank_digests)
+        for row in contracts
+    )
+    assert all(row["full_bytes"] == row["rank_slice_bytes"] * 4 for row in contracts)
+
+    with pytest.raises(ValueError, match="exactly 94"):
+        capture._attention_output_sharded_names(candidates[1:])
+    broken_sizes = dict(sizes)
+    broken_sizes[names[0]] = 15
+    with pytest.raises(ValueError, match="split evenly"):
+        capture._attention_output_shard_contracts(
+            names, broken_sizes, world_size=4
         )
 
 

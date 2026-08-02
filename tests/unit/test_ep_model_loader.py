@@ -14,7 +14,7 @@ from kairyu.models.config import parse_model_config
 from kairyu.models.llama import DenseDecoder
 from kairyu.models.loader import load_model
 from kairyu.models.moe_parallel import EpMoeBlock, build_ep_model
-from kairyu.quant.linear import linear_factory
+from kairyu.quant.linear import NvFp4Linear, linear_factory
 
 _RAW = {
     "architectures": ["Qwen3MoeForCausalLM"],
@@ -22,7 +22,7 @@ _RAW = {
     "num_hidden_layers": 1,
     "num_attention_heads": 4,
     "num_key_value_heads": 2,
-    "head_dim": 8,
+    "head_dim": 16,
     "intermediate_size": 64,
     "vocab_size": 64,
     "max_position_embeddings": 128,
@@ -37,8 +37,9 @@ _RAW = {
 
 
 class _UnusedEpComm:
-    rank = 1
-    world_size = 2
+    def __init__(self, rank: int = 1, world_size: int = 2) -> None:
+        self.rank = rank
+        self.world_size = world_size
 
 
 def _write_checkpoint(
@@ -82,6 +83,16 @@ def _write_checkpoint(
         for name, tensor in model.state_dict().items()
     }
     for name, tensor in state.items():
+        if name == "model.layers.0.self_attn.o_proj.weight":
+            values = torch.arange(tensor.numel(), dtype=torch.int64).reshape(tensor.shape)
+            tensor.copy_((values % 251).to(tensor.dtype))
+        if name == "model.layers.0.self_attn.o_proj.weight_scale":
+            values = torch.arange(1, tensor.numel() + 1).reshape(tensor.shape)
+            tensor.copy_(values.to(tensor.dtype))
+        if name == "model.layers.0.self_attn.o_proj.weight_scale_2":
+            tensor.fill_(0.03125)
+        if name == "model.layers.0.self_attn.o_proj.input_scale":
+            tensor.fill_(0.125)
         if ".experts." in name and name.endswith(".weight"):
             expert_index = int(name.split(".experts.", 1)[1].split(".", 1)[0])
             tensor.fill_(expert_index + 1)
@@ -156,10 +167,58 @@ def test_build_ep_model_loads_only_owned_global_experts(
         "model.layers.0.mlp.experts.2.gate_proj.weight"
     )
     assert torch.equal(owned_weight, torch.full_like(owned_weight, 3))
+    output_name = "model.layers.0.self_attn.o_proj"
+    output = model.get_submodule(output_name)
+    assert isinstance(output, NvFp4Linear)
+    assert output.in_features == 32
+    assert output.linear_context.tensor_parallel.rank == 1
+    assert output.linear_context.tensor_parallel.world_size == 2
+    assert torch.equal(output.weight, full_state[f"{output_name}.weight"][:, 16:])
+    assert torch.equal(
+        output.weight_scale,
+        full_state[f"{output_name}.weight_scale"][:, 2:],
+    )
+    assert torch.equal(
+        output.weight_scale_2,
+        full_state[f"{output_name}.weight_scale_2"],
+    )
+    assert torch.equal(output.input_scale, full_state[f"{output_name}.input_scale"])
+    assert f"{output_name}.weight" in loaded_names
+    assert f"{output_name}.weight_scale" in loaded_names
     assert not any(
         tensor.device.type == "meta"
         for tensor in (*model.parameters(), *model.buffers())
     )
+
+
+def test_ep4_attention_output_loads_only_rank_contiguous_nvfp4_k_shard(tmp_path):
+    checkpoint = tmp_path / "ep4-attention-output"
+    full_state = _write_checkpoint(checkpoint)
+
+    model, _config, info = build_ep_model(
+        checkpoint,
+        ep_size=4,
+        ep_rank=3,
+        comm=_UnusedEpComm(rank=3, world_size=4),
+    )
+
+    assert info.owned_expert_indices == (3,)
+    output_name = "model.layers.0.self_attn.o_proj"
+    output = model.get_submodule(output_name)
+    assert isinstance(output, NvFp4Linear)
+    assert output.in_features == 16
+    assert output.linear_context.tensor_parallel.rank == 3
+    assert output.linear_context.tensor_parallel.world_size == 4
+    assert torch.equal(output.weight, full_state[f"{output_name}.weight"][:, 24:32])
+    assert torch.equal(
+        output.weight_scale,
+        full_state[f"{output_name}.weight_scale"][:, 3:4],
+    )
+    assert torch.equal(
+        output.weight_scale_2,
+        full_state[f"{output_name}.weight_scale_2"],
+    )
+    assert torch.equal(output.input_scale, full_state[f"{output_name}.input_scale"])
 
 
 def test_ep_nvfp4_uses_global_scales_from_owned_and_remote_experts(tmp_path):

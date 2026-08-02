@@ -1695,7 +1695,11 @@ PY
     --artifact "$RESULT_ROOT/artifact" --assert-gate
   ```
 
-  A non-zero arm command is a real failure: it atomically retains a formal
-  failure fragment, and the PR must not be merged. Missing GPUs, image/inspect
-  mismatch, checkpoint/source drift, fallback kernels, incomplete ownership,
-  missing top-64 token-ID logprobs, or an unavailable runtime are never skips.
+  A non-zero arm command is a real formal failure: it atomically retains a
+  failure fragment and must never be presented or merged as M-A1 closure.
+  Implementation-only progress may merge while #166 remains open only when
+  every applicable repository/CI check is green and the PR reports the failed
+  formal result without relaxing or bypassing this gate. Missing GPUs,
+  image/inspect mismatch, checkpoint/source drift, fallback kernels,
+  incomplete ownership, missing top-64 token-ID logprobs, or an unavailable
+  runtime are never skips.

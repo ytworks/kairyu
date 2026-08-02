@@ -160,6 +160,12 @@ def _kernels(arm: str) -> list[dict[str, object]]:
         if not reference:
             first_owned = rank * experts_per_rank
             last_owned = first_owned + experts_per_rank - 1
+            routed_projection_count = (
+                3 * gate.NUM_LAYERS * experts_per_rank
+            )
+            dense_projection_count = (
+                projection_count - routed_projection_count
+            )
             execution_evidence = {
                 "kind": "all-rank-runtime-module-probe",
                 "projection_inventory_source": (
@@ -172,7 +178,36 @@ def _kernels(arm: str) -> list[dict[str, object]]:
                     "projection_count": projection_count,
                     "projection_inventory_sha256": projection_sha,
                     "kernel_counts": {
-                        "nvfp4:flashinfer_nvfp4": projection_count
+                        "nvfp4:flashinfer_cutlass_fused_moe": (
+                            routed_projection_count
+                        ),
+                        "nvfp4:flashinfer_nvfp4": dense_projection_count,
+                    },
+                    "fused_moe": {
+                        "backend": "flashinfer.cutlass_fused_moe",
+                        "global_expert_count": gate.NUM_EXPERTS,
+                        "local_expert_count": experts_per_rank,
+                        "local_expert_start": first_owned,
+                        "weight_order": "up_gate",
+                        "scale_layout": "128x4",
+                        "output_dtype": "bfloat16",
+                        "ep_partial": True,
+                        "enable_alltoall": False,
+                        "block_count": gate.NUM_LAYERS,
+                        "successful_forward_block_count": gate.NUM_LAYERS,
+                    },
+                    "attention_output": {
+                        "backend": "flashinfer.mm_fp4",
+                        "placement": "row_parallel",
+                        "parallel_size": world_size,
+                        "rank": rank,
+                        "shard_axis": 1,
+                        "global_in_features": 8_192,
+                        "local_in_features": 8_192 // world_size,
+                        "out_features": 4_096,
+                        "partial_dtype": "bfloat16",
+                        "block_count": gate.NUM_LAYERS,
+                        "successful_forward_block_count": gate.NUM_LAYERS,
                     },
                     "meta_count": {
                         "parameters": 0,
@@ -197,7 +232,7 @@ def _kernels(arm: str) -> list[dict[str, object]]:
                             gate.EXPECTED_TENSOR_COUNT
                         ),
                         "rank_loaded_tensor_count": (
-                            1977
+                            gate.LOADED_NON_EXPERT_TENSOR_COUNT
                             + 12 * gate.NUM_LAYERS * experts_per_rank
                         ),
                         "auxiliary_kv_scale_count": 188,
@@ -211,7 +246,7 @@ def _kernels(arm: str) -> list[dict[str, object]]:
             "resolved": (
                 "tensorrt_llm.pytorch.MoeConfig.CUTLASS"
                 if reference
-                else "flashinfer.mm_fp4"
+                else "flashinfer.cutlass_fused_moe+flashinfer.mm_fp4"
             ),
             "provider": "cutlass" if reference else "flashinfer",
             "provider_version": "3.8" if reference else "0.6.14",
@@ -407,7 +442,43 @@ def valid_rows() -> list[dict[str, object]]:
     for world_size in gate.WORLD_SIZES:
         arm = gate.KAIRYU_ARM[world_size]
         experts_per_rank = gate.NUM_EXPERTS // world_size
+        fully_replicated_bytes = 40_000_000_000
+        total_expert_bytes = 80_000_000_000
+        attention_output_full_bytes = 4_000_000_000
+        attention_output_shards = []
         for rank in range(world_size):
+            shard = {
+                "placement": "row_parallel",
+                "checkpoint_axis": 1,
+                "rank": rank,
+                "world_size": world_size,
+                "tensor_count": gate.ATTENTION_OUTPUT_SHARDED_TENSOR_COUNT,
+                "tensor_names_sha256": gate.sha256_json(
+                    ["attention-output-names"]
+                ),
+                "full_geometry_sha256": gate.sha256_json(
+                    ["attention-output-full-geometry"]
+                ),
+                "full_bytes": attention_output_full_bytes,
+                "slice_start_numerator": rank,
+                "slice_end_numerator": rank + 1,
+                "slice_denominator": world_size,
+                "rank_slice_bytes": attention_output_full_bytes // world_size,
+            }
+            shard["rank_slice_sha256"] = (
+                gate._attention_output_rank_slice_sha256(shard)
+            )
+            attention_output_shards.append(shard)
+        partition_sha256 = gate.sha256_json(
+            [row["rank_slice_sha256"] for row in attention_output_shards]
+        )
+        for shard in attention_output_shards:
+            shard["partition_sha256"] = partition_sha256
+        for rank in range(world_size):
+            owned_expert_bytes = total_expert_bytes // world_size
+            attention_output_slice_bytes = (
+                attention_output_full_bytes // world_size
+            )
             rows.append(
                 {
                     "schema_version": gate.SCHEMA_VERSION,
@@ -429,10 +500,24 @@ def valid_rows() -> list[dict[str, object]]:
                     "owned_expert_tensor_names_sha256": gate.sha256_json(
                         [world_size, rank, "experts"]
                     ),
-                    "rank_loaded_tensor_count": (
-                        1977 + 12 * gate.NUM_LAYERS * experts_per_rank
+                    "owned_expert_bytes": owned_expert_bytes,
+                    "fully_replicated_tensor_count": (
+                        gate.FULLY_REPLICATED_TENSOR_COUNT
                     ),
-                    "rank_loaded_bytes": 140_000_000_000 // world_size,
+                    "fully_replicated_bytes": fully_replicated_bytes,
+                    "fully_replicated_sha256": gate.sha256_json(
+                        ["fully-replicated"]
+                    ),
+                    "attention_output_shard": attention_output_shards[rank],
+                    "rank_loaded_tensor_count": (
+                        gate.LOADED_NON_EXPERT_TENSOR_COUNT
+                        + 12 * gate.NUM_LAYERS * experts_per_rank
+                    ),
+                    "rank_loaded_bytes": (
+                        fully_replicated_bytes
+                        + owned_expert_bytes
+                        + attention_output_slice_bytes
+                    ),
                     "loaded_tensor_names_sha256": gate.sha256_json(
                         [world_size, rank, "loaded"]
                     ),
@@ -759,6 +844,31 @@ def test_config_provenance_checkpoint_kernel_and_ownership_tamper_fail(
     result = _manifest(rows)
     assert result["passed"] is False
     assert result["checks"][check] is False
+
+
+@pytest.mark.parametrize(
+    "tamper", ["slice_overlap", "partition_digest", "full_geometry", "loaded_bytes"]
+)
+def test_attention_output_partition_and_byte_accounting_fail_closed(
+    valid_rows, tamper
+):
+    rows = copy.deepcopy(valid_rows)
+    ownership = _row(rows, "ownership", arm="kairyu_ep4", rank=1)
+    shard = ownership["attention_output_shard"]
+    if tamper == "slice_overlap":
+        shard["slice_start_numerator"] = 0
+    elif tamper == "partition_digest":
+        shard["partition_sha256"] = "0" * 64
+    elif tamper == "full_geometry":
+        shard["full_geometry_sha256"] = "1" * 64
+    else:
+        ownership["rank_loaded_bytes"] += 1
+
+    result = _manifest(rows)
+    assert result["passed"] is False
+    assert result["checks"][
+        "attention_output_shards_nonoverlapping_complete"
+    ] is False
 
 
 def test_reference_teacher_rollout_must_be_canonical(valid_rows):

@@ -15,12 +15,15 @@ expert parallel degree 2 and 4 on one node, then produce replayable
 correctness evidence against an immutable reference runtime using the same
 checkpoint and the same GPU count.
 
-M-A1 is a correctness anchor. It deliberately uses replicated attention and
-KV state on every EP rank so the existing single-owner SPMD protocol can be
-reused without changing request ownership. This is not the attention-DP,
-grouped-expert, overlap-capable implementation required to make a throughput
-claim in M-A3. The M-A1 formal verdict therefore reports correctness only;
-timing and memory fields are diagnostic and cannot close M-A3.
+M-A1 is a correctness anchor. It deliberately replicates QKV projection,
+attention score/value computation, and KV state on every EP rank so the
+existing single-owner SPMD protocol can be reused without changing request
+ownership. The attention output projection alone is row-parallel on the EP
+communicator to preserve the reference's BF16 rank-partial reduction boundary.
+This is not the attention-DP or overlap-capable implementation required to
+make a throughput claim in M-A3. The M-A1 formal verdict therefore reports
+correctness only; timing and memory fields are diagnostic and cannot close
+M-A3.
 
 ## 2. Pinned production contract
 
@@ -68,14 +71,29 @@ For a contiguous expert assignment, rank `r` owns:
 Remote routed projections are allocation-free construction placeholders.
 After each sparse block is bound to `EpMoeBlock`, remote slots become `None`
 holes in the global-length `ModuleList`, preserving the M16 canonical-name
-contract. Attention, embeddings, norms, routers, and the output head are
+contract. QKV projections, attention/KV state, embeddings, norms, routers,
+and the output head are replicated. Each NVFP4 attention `o_proj` retains its
+canonical checkpoint path but owns only the rank's contiguous packed K-axis
+weight and block-scale shard; its global activation and weight scales remain
 replicated.
 
-Each rank reconstructs and validates the full global checkpoint contract,
-but opens and loads only its local state. Selected tensor names are grouped
-by safetensors shard so each shard is opened at most once per loading pass.
-Dense floating tensors are converted to the requested compute dtype.
-NVFP4 packed tensors retain their exact ABI:
+Each rank reconstructs and validates the full global checkpoint contract and
+loads only rank-owned routed experts. Selected tensor names are grouped by
+safetensors shard so each shard is opened at most once per loading pass.
+The validated `o_proj` path currently materializes its 188 small dense members
+through the normal sequential mmap loader, transfers them with the rest of the
+rank, then replaces each GPU buffer one layer at a time with its contiguous K
+shard and immediately releases the full buffer. Earlier full-run CPU-slice
+attempts ended before model startup, but a later isolated probe constructed all
+188 EP2 slices in 4.105 seconds; that evidence does not isolate inner-axis
+slicing as the cause, so no unsupported stall claim is made. The retained path
+is the one that completed the real EP2 diagnostic and EP4 smoke. Its maximum
+temporary `o_proj` allocation above final residency is 854 MiB at EP2 and
+1,273 MiB at EP4. Source-at-a-time GPU staging can reduce that follow-up P2 to
+one full member (at most 16 MiB) without changing the numerical path. The
+complete 134 GB model is never materialized on one rank, and the steady-state
+module owns only the local `o_proj` shard. Dense floating tensors are converted
+to the requested compute dtype. NVFP4 packed tensors retain their exact ABI:
 
 - `weight`: `uint8`
 - `weight_scale`: `float8_e4m3fn`
@@ -93,11 +111,36 @@ NCCL model groups, following M16 D4. Rank 0 owns scheduling, sampling,
 logprobs, and public output. Followers execute passive forwards and adopt the
 rank-0 token packet before the next step.
 
-Every rank receives the same scheduled tokens and owns the same attention/KV
-state. `EpMoeBlock` routes those replicated activations to the rank that owns
-each expert, computes with native NVFP4 projection kernels, reverses the
-all-to-all, and combines locally. This duplicates expert rows across source
-ranks and is intentionally not a performance topology.
+Every rank receives the same scheduled tokens and owns the same QKV,
+attention-core, and KV state. The complete attention context is split on its
+innermost K axis; each rank's NVFP4 `o_proj` produces a BF16 partial and NCCL
+all-reduce reconstructs the replicated hidden output.
+
+For the pinned homogeneous NVFP4 experts, `EpMoeBlock` packs each rank's
+`[up, gate]` FC1 and FC2 weights into FlashInfer's public CUTLASS fused-MoE
+ABI. Routing stays replicated. Each rank evaluates only its contiguous local
+expert range, finalizes that rank's weighted partial in BF16, and NCCL
+all-reduces the partials. `enable_alltoall=False`; no token or expert row is
+duplicated through an all-to-all. The generic mixed/non-NVFP4 compatibility
+path retains the M16 all-to-all contract.
+
+Packed weights share storage with their canonical per-expert buffers.
+FlashInfer's 128x4 scale order cannot be represented as an inverse 2-D strided
+view, so M-A1 retains both canonical checkpoint scales and one derived
+swizzled scale set. The exact additional steady CUDA allocation is
+6.609375 GiB per EP2 rank and 3.3046875 GiB per EP4 rank; both completed real
+diagnostics include this allocation. Removing it requires a separate
+block-owned lowering plus inverse serialization/load hooks and remains a P2,
+not a correctness shortcut in this implementation.
+
+The fused operand object is derived runtime state rather than checkpoint
+state. Any module `_apply` operation (`to`/`cuda` included) or
+`load_state_dict` invalidates it before registered buffers can change. A stale
+device or scale generation can therefore never execute; the fused runtime
+probe disappears until the caller explicitly repacks. The normal construction
+path moves the model first and packs afterward. A forward is marked successful
+only after the fused kernel, rank all-reduce, and shared-expert contribution
+all complete.
 
 The M-A1 runner accepts only:
 
@@ -106,7 +149,8 @@ The M-A1 runner accepts only:
 - BF16 compute and BF16 KV;
 - eager execution;
 - pipeline depth 1;
-- no tensor/pipeline parallel composition;
+- no public tensor/pipeline parallel composition (the internal `o_proj`
+  row-parallel reduction is part of this EP correctness operator);
 - no CUDA graph, P-D handoff, DRAM KV tier, FP8 KV, or attention-DP.
 - no radix/block reuse between formal requests.
 
@@ -222,7 +266,9 @@ kernel use, or incomplete run termination all fail closed.
 
 Kairyu retains an all-rank runtime probe for the actual gloo control group,
 NCCL model group, rank-0-only sampler, device placement, loaded expert
-partition, native NVFP4 projection inventory, and unresolved meta counts.
+partition, fused local-expert execution, attention-output K-shard geometry
+and successful BF16 partial forwards, native NVFP4 projection inventory, and
+unresolved meta counts.
 Rank-local probe failures are transported as bounded error envelopes so every
 rank enters the same gloo gather before the driver fails; a diagnostic error
 cannot strand another rank in the long-lived control collective.
@@ -239,17 +285,20 @@ M-A2 will reuse the same model loader and native kernels but must give each
 attention replica rank-invariant radix accounting and prove the fixed
 shared-prefix hit gate.
 
-M-A3 must replace correctness-mode duplication with request-owned
-attention-DP, grouped/fused expert execution, and an overlap strategy chosen
-from measured throughput. It must compare Kairyu and SGLang sequentially at
-equal checkpoint/config and publish steady-state token throughput and TTFT
-statistics. M-A1 timing cannot be reused as M-A3 evidence.
+M-A3 must replace correctness-mode attention duplication with request-owned
+attention-DP and add an overlap strategy chosen from measured throughput. It
+may reuse the grouped/fused local-expert ABI introduced here. It must compare
+Kairyu and SGLang sequentially at equal checkpoint/config and publish
+steady-state token throughput and TTFT statistics. M-A1 timing cannot be
+reused as M-A3 evidence.
 
 ## 5. Verification
 
 - Unit: external metadata success/conflict/malformed cases, exact NVFP4 ABI,
   global checkpoint names/shapes, remote expert omission, selected shard-open
-  count, packed-weight storage alias, and every construction refusal.
+  count, packed-weight storage alias, prepared-operand invalidation after
+  device/state changes, complete-forward success markers, and every
+  construction refusal.
 - Distributed CPU: EP2 parity, rank ownership, single-sampler packet
   adoption, failure propagation, and teardown.
 - GPU: native FlashInfer NVFP4 projection oracle, NCCL EP2/EP4 tiny-model

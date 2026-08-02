@@ -1,4 +1,4 @@
-"""Production wiring for replicated-attention EP correctness mode (#166)."""
+"""Production wiring for replicated-QKV/KV EP correctness mode (#166)."""
 
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -42,25 +42,59 @@ def _kernel_probe_runner(
 ):
     from kairyu.engine.core.quant_config import QuantConfig, QuantMethod
     from kairyu.models.moe_parallel import ExpertParallelLoadInfo
+    from kairyu.models.parallel import ReplicatedInputRowParallelLinear
     from kairyu.quant.linear import (
         LinearKernel,
+        LinearRole,
         LinearSelection,
-        NvFp4Linear,
+        linear_factory,
+        make_linear,
     )
 
     model = torch.nn.Module()
-    projections = torch.nn.ModuleDict()
-    for suffix in ("gate", "up"):
-        module = NvFp4Linear(16, 4, bias=False)
+    model.model = torch.nn.Module()
+    model.model.layers = torch.nn.ModuleList()
+
+    class _RowComm:
+        def __init__(self) -> None:
+            self.rank = rank
+            self.world_size = world_size
+
+        @staticmethod
+        def tensor_all_reduce(partial):
+            return partial
+
+    comm = _RowComm()
+    factory = linear_factory(
+        QuantConfig(QuantMethod.NVFP4, weight_bits=4, group_size=16),
+        dtype=torch.bfloat16,
+        tensor_parallel_size=world_size,
+        tensor_parallel_rank=rank,
+    )
+    for layer_index in range(94):
+        layer = torch.nn.Module()
+        layer.self_attn = torch.nn.Module()
+        name = f"model.layers.{layer_index}.self_attn.o_proj"
+        module = make_linear(
+            factory,
+            16,
+            4,
+            False,
+            qualified_name=name,
+            role=LinearRole.ATTENTION_OUTPUT,
+            layer_index=layer_index,
+            shard_dim=1,
+        )
         module.linear_selection = LinearSelection(
             QuantConfig(QuantMethod.NVFP4, weight_bits=4, group_size=16),
             LinearKernel.FLASHINFER_NVFP4,
             "unit-test",
         )
-        projections[f"rank_{rank}_{suffix}"] = module
+        ReplicatedInputRowParallelLinear(module, comm)
+        layer.self_attn.o_proj = module
+        model.model.layers.append(layer)
     if malformed_selection:
-        del projections[f"rank_{rank}_gate"].linear_selection
-    model.projections = projections
+        del model.model.layers[0].self_attn.o_proj.linear_selection
     experts_per_rank = 128 // world_size
     owned = tuple(
         range(rank * experts_per_rank, (rank + 1) * experts_per_rank)
@@ -168,6 +202,9 @@ def test_ep_handshake_names_the_topology_and_fails_on_size_mismatch(tmp_path):
     assert handshake["parallelism"] == "expert_parallel"
     assert handshake["expert_parallel_size"] == 4
     assert handshake["attention_placement"] == "replicated"
+    assert handshake["attention_output_placement"] == "row_parallel"
+    assert handshake["attention_output_parallel_size"] == 4
+    assert handshake["attention_output_partial_dtype"] == "bfloat16"
     assert handshake["execution_mode"] == "replicated-attention-correctness"
     assert handshake["kv_cache_dtype_requested"] == "bfloat16"
     assert "tensor_parallel_size" not in handshake
@@ -311,6 +348,9 @@ def test_ep_runner_metadata_never_reports_expert_parallelism_as_tp():
         "parallelism": "expert_parallel",
         "expert_parallel_size": 2,
         "attention_placement": "replicated",
+        "attention_output_placement": "row_parallel",
+        "attention_output_parallel_size": 2,
+        "attention_output_partial_dtype": "bfloat16",
         "execution_mode": "replicated-attention-correctness",
         "pipeline_depth": 1,
         "decode_mode": "eager",
@@ -358,20 +398,34 @@ def test_ep_kernel_inventory_gathers_rank_local_runtime_evidence_without_names()
 
     assert [row["rank"] for row in rows] == [0, 1]
     assert all(set(row) == worker_module._EP_KERNEL_INVENTORY_FIELDS for row in rows)
-    assert all(row["projection_count"] == 2 for row in rows)
+    assert all(row["projection_count"] == 94 for row in rows)
     assert all(
-        row["kernel_counts"] == {"nvfp4:flashinfer_nvfp4": 2}
+        row["kernel_counts"] == {"nvfp4:flashinfer_nvfp4": 94}
         for row in rows
     )
+    for rank, row in enumerate(rows):
+        assert row["attention_output"] == {
+            "backend": "flashinfer.mm_fp4",
+            "placement": "row_parallel",
+            "parallel_size": 2,
+            "rank": rank,
+            "shard_axis": 1,
+            "global_in_features": 32,
+            "local_in_features": 16,
+            "out_features": 4,
+            "partial_dtype": "bfloat16",
+            "block_count": 94,
+            "successful_forward_block_count": 0,
+        }
+    assert all(row["fused_moe"] is None for row in rows)
     assert all(
         row["meta_count"] == {"parameters": 0, "buffers": 0, "total": 0}
         for row in rows
     )
     for rank, row in enumerate(rows):
-        names = [
-            f"projections.rank_{rank}_gate",
-            f"projections.rank_{rank}_up",
-        ]
+        names = sorted(
+            f"model.layers.{layer}.self_attn.o_proj" for layer in range(94)
+        )
         assert row["projection_inventory_sha256"] == worker_module._json_sha256(names)
         assert "projection_names" not in row
         assert row["load_info"] == {
@@ -394,17 +448,9 @@ def test_ep_kernel_inventory_gathers_rank_local_runtime_evidence_without_names()
         }
 
 
-def test_ep_kernel_inventory_measures_kernel_selection_and_unresolved_meta_state():
-    from kairyu.engine.core.quant_config import QuantConfig, QuantMethod
-    from kairyu.quant.linear import LinearKernel, LinearSelection
-
+def test_ep_kernel_inventory_measures_unresolved_meta_state():
     (control, _peer) = FakeCommunicator.create_group(2)
     local = _kernel_probe_runner(0, 2)
-    local._model.projections.rank_0_gate.linear_selection = LinearSelection(
-        QuantConfig(QuantMethod.NVFP4, weight_bits=4, group_size=16),
-        LinearKernel.CPU_REFERENCE,
-        "unit-test-fallback",
-    )
     local._model.register_parameter(
         "unresolved_parameter",
         torch.nn.Parameter(torch.empty(1, device="meta")),
@@ -416,11 +462,40 @@ def test_ep_kernel_inventory_measures_kernel_selection_and_unresolved_meta_state
 
     row = worker_module._ep_kernel_inventory_row(control, local)
 
-    assert row["kernel_counts"] == {
-        "nvfp4:cpu_reference": 1,
-        "nvfp4:flashinfer_nvfp4": 1,
-    }
+    assert row["kernel_counts"] == {"nvfp4:flashinfer_nvfp4": 94}
     assert row["meta_count"] == {"parameters": 1, "buffers": 1, "total": 2}
+
+
+def test_ep_kernel_inventory_rejects_attention_output_kernel_fallback():
+    from kairyu.engine.core.quant_config import QuantConfig, QuantMethod
+    from kairyu.quant.linear import LinearKernel, LinearSelection
+
+    (control, _peer) = FakeCommunicator.create_group(2)
+    local = _kernel_probe_runner(0, 2)
+    local._model.model.layers[0].self_attn.o_proj.linear_selection = LinearSelection(
+        QuantConfig(QuantMethod.NVFP4, weight_bits=4, group_size=16),
+        LinearKernel.CPU_REFERENCE,
+        "unit-test-fallback",
+    )
+
+    with pytest.raises(RuntimeError, match="does not select FlashInfer NVFP4"):
+        worker_module._ep_kernel_inventory_row(control, local)
+
+
+def test_ep_kernel_inventory_counts_only_successful_row_reductions():
+    (control, _peer) = FakeCommunicator.create_group(2)
+    local = _kernel_probe_runner(0, 2)
+    output = local._model.model.layers[0].self_attn.o_proj
+
+    before = worker_module._ep_kernel_inventory_row(control, local)
+    assert before["attention_output"]["successful_forward_block_count"] == 0
+
+    hidden = torch.zeros(2, 32, dtype=torch.bfloat16)
+    result = output(hidden)
+
+    assert result.shape == (2, 4)
+    after = worker_module._ep_kernel_inventory_row(control, local)
+    assert after["attention_output"]["successful_forward_block_count"] == 1
 
 
 def test_ep_kernel_inventory_rank_failure_is_gathered_without_hanging():
@@ -471,6 +546,24 @@ def test_ep_kernel_inventory_rank_failure_is_gathered_without_hanging():
                 ),
             ),
             "malformed projection_count",
+        ),
+        (
+            lambda reply: (
+                reply,
+                worker_module._EPKernelInventoryReply(
+                    rank=1,
+                    row={
+                        **reply.row,
+                        "rank": 1,
+                        "attention_output": {
+                            **reply.row["attention_output"],
+                            "rank": 1,
+                            "local_in_features": 17,
+                        },
+                    },
+                ),
+            ),
+            "malformed attention_output",
         ),
     ],
 )
@@ -648,6 +741,9 @@ def test_build_ep_runner_replicates_attention_and_binds_rank_local_experts(
     assert runner.expert_parallel_size == 4
     assert runner.expert_parallel_rank == rank
     assert runner.attention_placement == "replicated"
+    assert runner.attention_output_placement == "row_parallel"
+    assert runner.attention_output_parallel_size == 4
+    assert runner.attention_output_partial_dtype == "bfloat16"
     assert runner.kv_cache_dtype_requested == "bfloat16"
     assert runner.kv_cache_dtype_resolved == "bfloat16"
     assert runner.dram_kv_tier is None

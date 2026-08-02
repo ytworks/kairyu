@@ -217,16 +217,28 @@ def route_experts(
         return topk_indices, topk_weights.to(hidden.dtype)
 
     logits = block.gate(hidden)
-    probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-    topk_weights, topk_indices = probs.topk(block.top_k, dim=-1)
+    # The pinned Qwen3 reference selects on the BF16 router logits, resolves
+    # ties by smaller expert id, then normalizes only the selected logits in
+    # FP32. Stable descending argsort preserves the original ascending expert
+    # order within an equal-logit run.
+    topk_indices = torch.argsort(
+        logits,
+        dim=-1,
+        descending=True,
+        stable=True,
+    )[:, : block.top_k]
     if block.norm_topk_prob:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        selected_logits = logits.gather(1, topk_indices).to(torch.float32)
+        topk_weights = torch.softmax(selected_logits, dim=-1)
+    else:
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        topk_weights = probs.gather(1, topk_indices)
     # Fused reference backends retain router scales through FP32 finalization.
     return topk_indices, topk_weights
 
 
 class Qwen3MoeSparseBlock(nn.Module):
-    """Softmax top-k routing (A8: fp32 softmax BEFORE top-k; renorm no eps)."""
+    """Stable BF16 top-k followed by selected-only FP32 normalization."""
 
     def __init__(
         self,

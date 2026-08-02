@@ -273,6 +273,11 @@ LOGPROB_ABS_DELTA_MAX = 0.25
 VOCAB_SIZE = 151_936
 NUM_LAYERS = 94
 NUM_EXPERTS = 128
+ATTENTION_OUTPUT_SHARDED_TENSOR_COUNT = NUM_LAYERS * 2
+FULLY_REPLICATED_TENSOR_COUNT = 1_789
+LOADED_NON_EXPERT_TENSOR_COUNT = (
+    FULLY_REPLICATED_TENSOR_COUNT + ATTENTION_OUTPUT_SHARDED_TENSOR_COUNT
+)
 KV_CACHE_CAPACITY_TOKENS = 4_096
 KAIRYU_KV_PAGE_SIZE = 16
 KAIRYU_KV_NUM_PAGES = KV_CACHE_CAPACITY_TOKENS // KAIRYU_KV_PAGE_SIZE
@@ -322,8 +327,10 @@ BOUND_SOURCE_FILES = (
     "kairyu/engine/core/quant_config.py",
     "kairyu/engine/core/weights.py",
     "kairyu/engine/core/worker.py",
+    "kairyu/kernels/nvfp4_moe_gpu.py",
     "kairyu/kernels/quant_gemm_gpu.py",
     "kairyu/models/loader.py",
+    "kairyu/models/moe.py",
     "kairyu/models/moe_parallel.py",
     "kairyu/models/parallel.py",
     "pyproject.toml",
@@ -421,6 +428,9 @@ def _session_config(arm: str) -> dict[str, object]:
         "expert_parallel_size": world_size,
         "attention_mode": "tensor_parallel" if reference else "replicated",
         "attention_data_parallel": False,
+        "attention_output_placement": "row_parallel",
+        "attention_output_parallel_size": world_size,
+        "attention_output_partial_dtype": "bfloat16",
         "overlap": False,
         "cuda_graph": False,
         "radix_prefix_cache": False,
@@ -443,7 +453,11 @@ def _session_config(arm: str) -> dict[str, object]:
                 "num_pages": KAIRYU_KV_NUM_PAGES,
             }
         ),
-        "moe_backend": "CUTLASS" if reference else "kairyu_ep_all_to_all",
+        "moe_backend": (
+            "CUTLASS"
+            if reference
+            else "flashinfer_cutlass_fused_moe_local_partial_all_reduce"
+        ),
         "sampling_arguments": {
             "seed": SEED,
             "temperature": 0.0,
@@ -889,9 +903,38 @@ def _kernel_rank_valid(value: object, *, arm: str, rank: int) -> bool:
             "producer_version": "0.33.0",
             "checkpoint_tensor_count": EXPECTED_TENSOR_COUNT,
             "rank_loaded_tensor_count": (
-                1977 + NUM_LAYERS * owned_count * 12
+                LOADED_NON_EXPERT_TENSOR_COUNT
+                + NUM_LAYERS * owned_count * 12
             ),
             "auxiliary_kv_scale_count": 188,
+        }
+        routed_projection_count = 3 * NUM_LAYERS * owned_count
+        dense_projection_count = expected_projection_count - routed_projection_count
+        expected_fused_moe = {
+            "backend": "flashinfer.cutlass_fused_moe",
+            "global_expert_count": NUM_EXPERTS,
+            "local_expert_count": owned_count,
+            "local_expert_start": first_owned,
+            "weight_order": "up_gate",
+            "scale_layout": "128x4",
+            "output_dtype": "bfloat16",
+            "ep_partial": True,
+            "enable_alltoall": False,
+            "block_count": NUM_LAYERS,
+            "successful_forward_block_count": NUM_LAYERS,
+        }
+        expected_attention_output = {
+            "backend": "flashinfer.mm_fp4",
+            "placement": "row_parallel",
+            "parallel_size": _arm_world_size(arm),
+            "rank": rank,
+            "shard_axis": 1,
+            "global_in_features": 8_192,
+            "local_in_features": 8_192 // _arm_world_size(arm),
+            "out_features": 4_096,
+            "partial_dtype": "bfloat16",
+            "block_count": NUM_LAYERS,
+            "successful_forward_block_count": NUM_LAYERS,
         }
         observed = evidence.get("observed") if isinstance(evidence, dict) else None
         evidence_valid = (
@@ -904,8 +947,11 @@ def _kernel_rank_valid(value: object, *, arm: str, rank: int) -> bool:
                     "projection_inventory_sha256"
                 ],
                 "kernel_counts": {
-                    "nvfp4:flashinfer_nvfp4": expected_projection_count
+                    "nvfp4:flashinfer_cutlass_fused_moe": routed_projection_count,
+                    "nvfp4:flashinfer_nvfp4": dense_projection_count,
                 },
+                "fused_moe": expected_fused_moe,
+                "attention_output": expected_attention_output,
                 "meta_count": {
                     "parameters": 0,
                     "buffers": 0,
@@ -930,7 +976,7 @@ def _kernel_rank_valid(value: object, *, arm: str, rank: int) -> bool:
         == (
             "tensorrt_llm.pytorch.MoeConfig.CUTLASS"
             if reference
-            else "flashinfer.mm_fp4"
+            else "flashinfer.cutlass_fused_moe+flashinfer.mm_fp4"
         )
         and value["provider"] == ("cutlass" if reference else "flashinfer")
         and isinstance(value["provider_version"], str)
@@ -1347,6 +1393,86 @@ def _teacher_valid(value: object) -> bool:
     )
 
 
+def _attention_output_rank_slice_sha256(value: Mapping[str, object]) -> str:
+    return sha256_json(
+        [
+            value["tensor_count"],
+            value["tensor_names_sha256"],
+            value["full_geometry_sha256"],
+            value["full_bytes"],
+            value["checkpoint_axis"],
+            value["rank"],
+            value["world_size"],
+            value["slice_start_numerator"],
+            value["slice_end_numerator"],
+            value["slice_denominator"],
+            value["rank_slice_bytes"],
+        ]
+    )
+
+
+def _attention_output_shard_valid(
+    value: object,
+    *,
+    rank: int,
+    world_size: int,
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "placement",
+        "checkpoint_axis",
+        "rank",
+        "world_size",
+        "tensor_count",
+        "tensor_names_sha256",
+        "full_geometry_sha256",
+        "full_bytes",
+        "slice_start_numerator",
+        "slice_end_numerator",
+        "slice_denominator",
+        "rank_slice_bytes",
+        "rank_slice_sha256",
+        "partition_sha256",
+    }:
+        return False
+    integer_fields = (
+        "checkpoint_axis",
+        "rank",
+        "world_size",
+        "tensor_count",
+        "full_bytes",
+        "slice_start_numerator",
+        "slice_end_numerator",
+        "slice_denominator",
+        "rank_slice_bytes",
+    )
+    return (
+        all(type(value[name]) is int for name in integer_fields)
+        and value["placement"] == "row_parallel"
+        and value["checkpoint_axis"] == 1
+        and value["rank"] == rank
+        and value["world_size"] == world_size
+        and value["tensor_count"] == ATTENTION_OUTPUT_SHARDED_TENSOR_COUNT
+        and value["full_bytes"] > 0
+        and value["rank_slice_bytes"] > 0
+        and value["full_bytes"] == value["rank_slice_bytes"] * world_size
+        and value["slice_start_numerator"] == rank
+        and value["slice_end_numerator"] == rank + 1
+        and value["slice_denominator"] == world_size
+        and value["rank_slice_sha256"]
+        == _attention_output_rank_slice_sha256(value)
+        and all(
+            isinstance(value[name], str)
+            and _HEX64.fullmatch(value[name]) is not None
+            for name in (
+                "tensor_names_sha256",
+                "full_geometry_sha256",
+                "rank_slice_sha256",
+                "partition_sha256",
+            )
+        )
+    )
+
+
 def _ownership_valid(value: object) -> bool:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
@@ -1359,6 +1485,11 @@ def _ownership_valid(value: object) -> bool:
         "owned_expert_indices",
         "owned_expert_tensor_count",
         "owned_expert_tensor_names_sha256",
+        "owned_expert_bytes",
+        "fully_replicated_tensor_count",
+        "fully_replicated_bytes",
+        "fully_replicated_sha256",
+        "attention_output_shard",
         "rank_loaded_tensor_count",
         "rank_loaded_bytes",
         "loaded_tensor_names_sha256",
@@ -1383,7 +1514,10 @@ def _ownership_valid(value: object) -> bool:
         range(rank * experts_per_rank, (rank + 1) * experts_per_rank)
     )
     expected_owned_tensor_count = NUM_LAYERS * experts_per_rank * 12
-    expected_rank_loaded_tensor_count = 1977 + expected_owned_tensor_count
+    expected_rank_loaded_tensor_count = (
+        LOADED_NON_EXPERT_TENSOR_COUNT + expected_owned_tensor_count
+    )
+    attention_output = value["attention_output_shard"]
     load_contract = value["load_contract"]
     return (
         value["schema_version"] == SCHEMA_VERSION
@@ -1393,14 +1527,29 @@ def _ownership_valid(value: object) -> bool:
         and value["num_experts"] == NUM_EXPERTS
         and value["owned_expert_indices"] == expected
         and value["owned_expert_tensor_count"] == expected_owned_tensor_count
+        and type(value["owned_expert_bytes"]) is int
+        and value["owned_expert_bytes"] > 0
+        and value["fully_replicated_tensor_count"]
+        == FULLY_REPLICATED_TENSOR_COUNT
+        and type(value["fully_replicated_bytes"]) is int
+        and value["fully_replicated_bytes"] > 0
+        and _attention_output_shard_valid(
+            attention_output,
+            rank=rank,
+            world_size=world_size,
+        )
         and value["rank_loaded_tensor_count"]
         == expected_rank_loaded_tensor_count
         and type(value["rank_loaded_bytes"]) is int
-        and value["rank_loaded_bytes"] > 0
+        and value["rank_loaded_bytes"]
+        == value["fully_replicated_bytes"]
+        + value["owned_expert_bytes"]
+        + attention_output["rank_slice_bytes"]
         and all(
             isinstance(value[name], str) and _HEX64.fullmatch(value[name]) is not None
             for name in (
                 "owned_expert_tensor_names_sha256",
+                "fully_replicated_sha256",
                 "loaded_tensor_names_sha256",
                 "dense_replication_sha256",
                 "router_replication_sha256",
@@ -1799,6 +1948,7 @@ def recompute_manifest(
     )
     checks["no_remote_tensor_reads_or_unresolved_meta"] = no_remote_or_meta
     replicated_dense = ownership_complete
+    attention_partition = ownership_complete
     if ownership_complete:
         for world_size in WORLD_SIZES:
             rows_for_world = [
@@ -1809,6 +1959,9 @@ def recompute_manifest(
                 "dense_replication_sha256",
                 "router_replication_sha256",
                 "shared_expert_replication_sha256",
+                "fully_replicated_sha256",
+                "fully_replicated_tensor_count",
+                "fully_replicated_bytes",
             ):
                 replicated_dense &= len({row[field] for row in rows_for_world}) == 1
             replicated_dense &= len(
@@ -1817,15 +1970,53 @@ def recompute_manifest(
             replicated_dense &= len(
                 {row["rank_loaded_bytes"] for row in rows_for_world}
             ) == 1
+            attention_rows = [row["attention_output_shard"] for row in rows_for_world]
+            for field in (
+                "tensor_count",
+                "tensor_names_sha256",
+                "full_geometry_sha256",
+                "full_bytes",
+                "rank_slice_bytes",
+                "partition_sha256",
+            ):
+                attention_partition &= len(
+                    {row[field] for row in attention_rows}
+                ) == 1
+            rank_slice_digests = [
+                row["rank_slice_sha256"] for row in attention_rows
+            ]
+            attention_partition &= len(set(rank_slice_digests)) == world_size
+            attention_partition &= all(
+                row["partition_sha256"] == sha256_json(rank_slice_digests)
+                for row in attention_rows
+            )
         for field in (
             "dense_replication_sha256",
             "router_replication_sha256",
             "shared_expert_replication_sha256",
+            "fully_replicated_sha256",
+            "fully_replicated_tensor_count",
+            "fully_replicated_bytes",
         ):
             replicated_dense &= len(
                 {row[field] for row in by_type["ownership"]}
             ) == 1
+        for field in (
+            "tensor_count",
+            "tensor_names_sha256",
+            "full_geometry_sha256",
+            "full_bytes",
+        ):
+            attention_partition &= len(
+                {
+                    row["attention_output_shard"][field]
+                    for row in by_type["ownership"]
+                }
+            ) == 1
     checks["rank_invariant_replicated_and_load_geometry"] = bool(replicated_dense)
+    checks["attention_output_shards_nonoverlapping_complete"] = bool(
+        attention_partition
+    )
 
     free_by_key, duplicate_free = _keyed_rows(
         by_type["free_run"], keys=("arm", "prompt_id")

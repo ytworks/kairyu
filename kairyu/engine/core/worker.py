@@ -303,10 +303,28 @@ _EP_KERNEL_INVENTORY_FIELDS = frozenset(
         "projection_count",
         "projection_inventory_sha256",
         "kernel_counts",
+        "attention_output",
+        "fused_moe",
         "meta_count",
         "load_info",
     }
 )
+_EP_ATTENTION_OUTPUT_FIELDS = frozenset(
+    {
+        "backend",
+        "placement",
+        "parallel_size",
+        "rank",
+        "shard_axis",
+        "global_in_features",
+        "local_in_features",
+        "out_features",
+        "partial_dtype",
+        "block_count",
+        "successful_forward_block_count",
+    }
+)
+_EP_ATTENTION_OUTPUT_BLOCK_COUNT = 94
 _EP_KERNEL_LOAD_INFO_FIELDS = frozenset(
     {
         "ep_rank",
@@ -426,12 +444,152 @@ def _ep_load_info_summary(
     }
 
 
+def _ep_attention_output_summary(
+    modules: tuple[tuple[str, object], ...],
+    *,
+    rank: int,
+    world_size: int,
+) -> dict[str, object]:
+    """Validate every canonical NVFP4 ``o_proj`` and reduce its live geometry."""
+
+    import torch
+
+    from kairyu.quant.linear import (
+        LinearKernel,
+        LinearRole,
+        NvFp4Linear,
+        TensorParallelMode,
+    )
+
+    expected_names = tuple(
+        f"model.layers.{layer}.self_attn.o_proj"
+        for layer in range(_EP_ATTENTION_OUTPUT_BLOCK_COUNT)
+    )
+    by_name = dict(modules)
+    actual_names = tuple(
+        sorted(name for name, _module in modules if name.endswith(".self_attn.o_proj"))
+    )
+    if set(actual_names) != set(expected_names) or len(actual_names) != len(
+        expected_names
+    ):
+        missing = sorted(set(expected_names) - set(actual_names))
+        unexpected = sorted(set(actual_names) - set(expected_names))
+        raise RuntimeError(
+            f"rank {rank} attention output inventory mismatch: "
+            f"missing={missing[:4]} ({len(missing)} total), "
+            f"unexpected={unexpected[:4]} ({len(unexpected)} total)"
+        )
+
+    geometry: tuple[int, int, int] | None = None
+    successful = 0
+    for layer, name in enumerate(expected_names):
+        module = by_name.get(name)
+        if not isinstance(module, NvFp4Linear):
+            raise RuntimeError(
+                f"rank {rank} attention output {name!r} is not NvFp4Linear"
+            )
+        context = getattr(module, "linear_context", None)
+        placement = getattr(context, "tensor_parallel", None)
+        if (
+            context is None
+            or context.qualified_name != name
+            or context.role is not LinearRole.ATTENTION_OUTPUT
+            or context.layer_index != layer
+            or context.dtype is not torch.bfloat16
+            or placement is None
+            or placement.mode is not TensorParallelMode.ROW
+            or placement.rank != rank
+            or placement.world_size != world_size
+            or placement.shard_dim != 1
+            or placement.global_in_features
+            != placement.local_in_features * world_size
+            or placement.global_out_features != placement.local_out_features
+            or module.in_features != placement.local_in_features
+            or module.out_features != placement.local_out_features
+        ):
+            raise RuntimeError(
+                f"rank {rank} attention output {name!r} has malformed row placement"
+            )
+        if (
+            tuple(module.weight.shape)
+            != (placement.local_out_features, placement.local_in_features // 2)
+            or tuple(module.weight_scale.shape)
+            != (placement.local_out_features, placement.local_in_features // 16)
+        ):
+            raise RuntimeError(
+                f"rank {rank} attention output {name!r} has malformed NVFP4 shard"
+            )
+        selection = getattr(module, "linear_selection", None)
+        if getattr(selection, "kernel", None) is not LinearKernel.FLASHINFER_NVFP4:
+            raise RuntimeError(
+                f"rank {rank} attention output {name!r} does not select "
+                "FlashInfer NVFP4"
+            )
+        input_binding = getattr(module, "_kairyu_replicated_input_shard", None)
+        reduce_binding = getattr(module, "_kairyu_row_parallel", None)
+        reduce_comm = getattr(reduce_binding, "comm", None)
+        if (
+            input_binding is None
+            or input_binding.rank != rank
+            or input_binding.world_size != world_size
+            or input_binding.local_features != placement.local_in_features
+            or reduce_binding is None
+            or reduce_binding.context is not None
+            or getattr(reduce_comm, "rank", None) != rank
+            or getattr(reduce_comm, "world_size", None) != world_size
+        ):
+            raise RuntimeError(
+                f"rank {rank} attention output {name!r} lacks its EP row bindings"
+            )
+        executed = getattr(module, "_kairyu_row_parallel_executed", None)
+        partial_dtype = getattr(module, "_kairyu_row_parallel_partial_dtype", None)
+        if (
+            type(executed) is not bool
+            or (executed and partial_dtype is not torch.bfloat16)
+            or (not executed and partial_dtype is not None)
+        ):
+            raise RuntimeError(
+                f"rank {rank} attention output {name!r} has malformed "
+                "execution/dtype markers"
+            )
+        successful += int(executed)
+        current = (
+            placement.global_in_features,
+            placement.local_in_features,
+            placement.global_out_features,
+        )
+        if geometry is None:
+            geometry = current
+        elif current != geometry:
+            raise RuntimeError(
+                f"rank {rank} attention output geometry differs across layers"
+            )
+
+    if geometry is None:  # guarded by the exact inventory check above
+        raise RuntimeError(f"rank {rank} has no attention output projections")
+    global_in_features, local_in_features, out_features = geometry
+    return {
+        "backend": "flashinfer.mm_fp4",
+        "placement": "row_parallel",
+        "parallel_size": world_size,
+        "rank": rank,
+        "shard_axis": 1,
+        "global_in_features": global_in_features,
+        "local_in_features": local_in_features,
+        "out_features": out_features,
+        "partial_dtype": "bfloat16",
+        "block_count": _EP_ATTENTION_OUTPUT_BLOCK_COUNT,
+        "successful_forward_block_count": successful,
+    }
+
+
 def _ep_kernel_inventory_row(
     control_comm,
     local_runner,
 ) -> dict[str, object]:
     """Measure one local model while retaining only a names digest."""
 
+    from kairyu.models.moe_parallel import EpMoeBlock
     from kairyu.quant.linear import NvFp4Linear
 
     rank = control_comm.rank
@@ -444,9 +602,17 @@ def _ep_kernel_inventory_row(
     if model is None or not callable(getattr(model, "named_modules", None)):
         raise RuntimeError(f"rank {rank} runner does not expose its local model")
 
+    modules = tuple(model.named_modules())
+    fused_blocks = tuple(
+        (name, module.fused_nvfp4_metadata())
+        for name, module in modules
+        if isinstance(module, EpMoeBlock)
+        and module.fused_nvfp4_metadata() is not None
+    )
+    fused_prefixes = tuple(f"{name}.experts." for name, _metadata in fused_blocks)
     names: list[str] = []
     kernel_counts: dict[str, int] = {}
-    for name, module in model.named_modules():
+    for name, module in modules:
         if not isinstance(module, NvFp4Linear):
             continue
         if not isinstance(name, str) or not name:
@@ -464,7 +630,12 @@ def _ep_kernel_inventory_row(
                 f"rank {rank} NVFP4 projection {name!r} has no kernel"
             )
         names.append(name)
-        key = f"{method}:{kernel}"
+        fused_expert = any(name.startswith(prefix) for prefix in fused_prefixes)
+        key = (
+            f"{method}:flashinfer_cutlass_fused_moe"
+            if fused_expert
+            else f"{method}:{kernel}"
+        )
         kernel_counts[key] = kernel_counts.get(key, 0) + 1
     names.sort()
     if not names:
@@ -484,11 +655,62 @@ def _ep_kernel_inventory_row(
     meta_buffers = sum(
         tensor.device.type == "meta" for _name, tensor in named_buffers()
     )
+    fused_moe = None
+    if fused_blocks:
+        expected_fields = {
+            "backend",
+            "global_expert_count",
+            "local_expert_count",
+            "local_expert_start",
+            "weight_order",
+            "scale_layout",
+            "output_dtype",
+            "ep_partial",
+            "enable_alltoall",
+            "successful_forward",
+        }
+        metadata_rows = [metadata for _name, metadata in fused_blocks]
+        if any(
+            not isinstance(metadata, dict) or set(metadata) != expected_fields
+            for metadata in metadata_rows
+        ):
+            raise RuntimeError(f"rank {rank} has malformed fused-MoE metadata")
+        invariant_fields = (
+            "backend",
+            "global_expert_count",
+            "local_expert_count",
+            "local_expert_start",
+            "weight_order",
+            "scale_layout",
+            "output_dtype",
+            "ep_partial",
+            "enable_alltoall",
+        )
+        first = metadata_rows[0]
+        if any(
+            any(metadata[field] != first[field] for field in invariant_fields)
+            for metadata in metadata_rows[1:]
+        ):
+            raise RuntimeError(f"rank {rank} fused-MoE block metadata disagrees")
+        fused_moe = {
+            **{field: first[field] for field in invariant_fields},
+            "block_count": len(fused_blocks),
+            "successful_forward_block_count": sum(
+                metadata["successful_forward"] is True
+                for metadata in metadata_rows
+            ),
+        }
     return {
         "rank": rank,
         "projection_count": len(names),
         "projection_inventory_sha256": _json_sha256(names),
         "kernel_counts": dict(sorted(kernel_counts.items())),
+        "attention_output": _ep_attention_output_summary(
+            modules,
+            rank=rank,
+            world_size=world_size,
+        ),
+        "fused_moe": fused_moe,
         "meta_count": {
             "parameters": meta_parameters,
             "buffers": meta_buffers,
@@ -577,6 +799,78 @@ def _validate_ep_kernel_inventory_rows(
             raise RuntimeError(
                 f"EP kernel inventory rank {rank} has malformed kernel_counts"
             )
+        attention_output = row["attention_output"]
+        if (
+            not isinstance(attention_output, dict)
+            or set(attention_output) != _EP_ATTENTION_OUTPUT_FIELDS
+            or attention_output["backend"] != "flashinfer.mm_fp4"
+            or attention_output["placement"] != "row_parallel"
+            or type(attention_output["parallel_size"]) is not int
+            or attention_output["parallel_size"] != world_size
+            or type(attention_output["rank"]) is not int
+            or attention_output["rank"] != rank
+            or type(attention_output["shard_axis"]) is not int
+            or attention_output["shard_axis"] != 1
+            or type(attention_output["global_in_features"]) is not int
+            or type(attention_output["local_in_features"]) is not int
+            or type(attention_output["out_features"]) is not int
+            or attention_output["global_in_features"] < 1
+            or attention_output["local_in_features"] < 1
+            or attention_output["out_features"] < 1
+            or attention_output["global_in_features"]
+            != attention_output["local_in_features"] * world_size
+            or attention_output["partial_dtype"] != "bfloat16"
+            or type(attention_output["block_count"]) is not int
+            or attention_output["block_count"]
+            != _EP_ATTENTION_OUTPUT_BLOCK_COUNT
+            or type(attention_output["successful_forward_block_count"]) is not int
+            or not 0
+            <= attention_output["successful_forward_block_count"]
+            <= _EP_ATTENTION_OUTPUT_BLOCK_COUNT
+        ):
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} has malformed attention_output"
+            )
+        fused_moe = row["fused_moe"]
+        if fused_moe is not None:
+            if (
+                not isinstance(fused_moe, dict)
+                or set(fused_moe)
+                != {
+                    "backend",
+                    "global_expert_count",
+                    "local_expert_count",
+                    "local_expert_start",
+                    "weight_order",
+                    "scale_layout",
+                    "output_dtype",
+                    "ep_partial",
+                    "enable_alltoall",
+                    "block_count",
+                    "successful_forward_block_count",
+                }
+                or fused_moe["backend"] != "flashinfer.cutlass_fused_moe"
+                or type(fused_moe["global_expert_count"]) is not int
+                or fused_moe["global_expert_count"] < 1
+                or type(fused_moe["local_expert_count"]) is not int
+                or fused_moe["local_expert_count"] < 1
+                or type(fused_moe["local_expert_start"]) is not int
+                or fused_moe["local_expert_start"] < 0
+                or fused_moe["weight_order"] != "up_gate"
+                or fused_moe["scale_layout"] != "128x4"
+                or fused_moe["output_dtype"] != "bfloat16"
+                or fused_moe["ep_partial"] is not True
+                or fused_moe["enable_alltoall"] is not False
+                or type(fused_moe["block_count"]) is not int
+                or fused_moe["block_count"] < 1
+                or type(fused_moe["successful_forward_block_count"]) is not int
+                or not 0
+                <= fused_moe["successful_forward_block_count"]
+                <= fused_moe["block_count"]
+            ):
+                raise RuntimeError(
+                    f"EP kernel inventory rank {rank} has malformed fused_moe"
+                )
         meta_count = row["meta_count"]
         if (
             not isinstance(meta_count, dict)
@@ -634,12 +928,33 @@ def _validate_ep_kernel_inventory_rows(
                 raise RuntimeError(
                     f"EP kernel inventory rank {rank} has malformed load_info {name}"
                 )
+        if fused_moe is not None and (
+            fused_moe["global_expert_count"]
+            != fused_moe["local_expert_count"] * world_size
+            or fused_moe["local_expert_count"] != load_info["owned_expert_count"]
+            or fused_moe["local_expert_start"] != load_info["first_owned_expert"]
+        ):
+            raise RuntimeError(
+                f"EP kernel inventory rank {rank} fused_moe disagrees with load_info"
+            )
         by_rank[rank] = row
     expected = set(range(world_size))
     if set(by_rank) != expected:
         raise RuntimeError(
             "EP kernel inventory ranks are incomplete: "
             f"expected={sorted(expected)}, got={sorted(by_rank)}"
+        )
+    invariant_attention_fields = _EP_ATTENTION_OUTPUT_FIELDS - {"rank"}
+    first_attention = by_rank[0]["attention_output"]
+    if any(
+        any(
+            row["attention_output"][field] != first_attention[field]
+            for field in invariant_attention_fields
+        )
+        for row in by_rank.values()
+    ):
+        raise RuntimeError(
+            "EP kernel inventory attention_output geometry differs across ranks"
         )
     return tuple(by_rank[rank] for rank in range(world_size))
 
@@ -1374,9 +1689,10 @@ def _validate_ep_correctness_mode(
 ) -> None:
     """Fail closed outside the first production EP correctness envelope.
 
-    This path intentionally replicates attention/KV state on every rank and
-    shards only routed experts. It establishes correctness for EP2/EP4; it is
-    not the attention-DP or grouped-expert throughput path.
+    This path intentionally replicates QKV projection, attention core, and KV
+    state on every rank. NVFP4 attention output is row-parallel over the EP
+    communicator, and routed experts retain contiguous rank ownership. It
+    establishes correctness for EP2/EP4; it is not the attention-DP path.
     """
 
     if (
@@ -1385,32 +1701,32 @@ def _validate_ep_correctness_mode(
     ):
         supported = ", ".join(str(size) for size in sorted(_EP_SUPPORTED_SIZES))
         raise ValueError(
-            "replicated-attention EP correctness mode supports only "
+            "replicated-QKV/KV EP correctness mode supports only "
             f"expert_parallel_size in {{{supported}}}; got {expert_parallel_size!r}"
         )
     if type(pipeline_depth) is not int or pipeline_depth != 1:
         raise ValueError(
-            "replicated-attention EP correctness mode requires pipeline_depth=1"
+            "replicated-QKV/KV EP correctness mode requires pipeline_depth=1"
         )
     if decode_mode != "eager":
         raise ValueError(
-            "replicated-attention EP correctness mode requires decode_mode='eager'; "
+            "replicated-QKV/KV EP correctness mode requires decode_mode='eager'; "
             "CUDA graph decode is not supported"
         )
     if kv_cache_dtype != "bfloat16":
         raise ValueError(
-            "replicated-attention EP correctness mode requires "
+            "replicated-QKV/KV EP correctness mode requires "
             "kv_cache_dtype='bfloat16'"
         )
     if type(pd_separation) is not bool:
         raise TypeError("pd_separation must be a boolean")
     if pd_separation:
         raise ValueError(
-            "replicated-attention EP correctness mode does not support P-D separation"
+            "replicated-QKV/KV EP correctness mode does not support P-D separation"
         )
     if graph_scratch_page is not None:
         raise ValueError(
-            "replicated-attention EP correctness mode does not support CUDA graphs"
+            "replicated-QKV/KV EP correctness mode does not support CUDA graphs"
         )
     if (
         type(dram_kv_tier_capacity_pages) is not int
@@ -1418,11 +1734,11 @@ def _validate_ep_correctness_mode(
         or dram_kv_tier_profile is not None
     ):
         raise ValueError(
-            "replicated-attention EP correctness mode does not support a DRAM KV tier"
+            "replicated-QKV/KV EP correctness mode does not support a DRAM KV tier"
         )
     if speculative is not None:
         raise ValueError(
-            "replicated-attention EP correctness mode does not support speculative decoding"
+            "replicated-QKV/KV EP correctness mode does not support speculative decoding"
         )
 
 
@@ -1502,7 +1818,7 @@ def _make_ep_handshake(
     attention_backend_identity: str,
     kv_cache_dtype_resolved: str,
 ) -> dict[str, object]:
-    """Exact all-rank identity for replicated-attention EP correctness mode."""
+    """Exact all-rank identity for replicated-QKV/KV EP correctness mode."""
 
     _validate_ep_correctness_mode(expert_parallel_size=expert_parallel_size)
     handshake = make_handshake(
@@ -1518,6 +1834,9 @@ def _make_ep_handshake(
             "parallelism": "expert_parallel",
             "expert_parallel_size": expert_parallel_size,
             "attention_placement": "replicated",
+            "attention_output_placement": "row_parallel",
+            "attention_output_parallel_size": expert_parallel_size,
+            "attention_output_partial_dtype": "bfloat16",
             "execution_mode": _EP_CORRECTNESS_MODE,
             "decode_mode": "eager",
             "pipeline_depth": 1,
@@ -1547,8 +1866,9 @@ def _validate_ep_handshake(
     if handshake != expected:
         raise RuntimeError(
             f"EP worker mismatch: driver={handshake} worker={expected} — "
-            "expert topology, replicated attention, eager execution, BF16 KV, "
-            "pool sizing/config, and backend identity must match on every rank"
+            "expert topology, replicated QKV/KV, row-parallel attention output, "
+            "eager execution, BF16 KV, pool sizing/config, and backend identity "
+            "must match on every rank"
         )
 
 
@@ -2215,11 +2535,11 @@ class DistTPModelRunner:
 
 
 class DistEPModelRunner:
-    """Driver facade for replicated-attention expert-parallel correctness.
+    """Driver facade for replicated-QKV/KV expert-parallel correctness.
 
     The rank protocol is intentionally the same SPMD/single-sampling-owner
-    protocol as TP, but the public topology is not: attention and KV are full
-    replicas and only routed experts are sharded.
+    protocol as TP, but the public topology is not: QKV, attention core, and KV
+    are replicated while NVFP4 attention output and routed experts are sharded.
     """
 
     def __init__(
@@ -2254,6 +2574,9 @@ class DistEPModelRunner:
         self.parallelism = "expert_parallel"
         self.execution_mode = _EP_CORRECTNESS_MODE
         self.attention_placement = "replicated"
+        self.attention_output_placement = "row_parallel"
+        self.attention_output_parallel_size = expert_parallel_size
+        self.attention_output_partial_dtype = "bfloat16"
         self.pipeline_depth = 1
         self.decode_mode = "eager"
 
@@ -2269,6 +2592,9 @@ class DistEPModelRunner:
             "parallelism": self.parallelism,
             "expert_parallel_size": self.expert_parallel_size,
             "attention_placement": self.attention_placement,
+            "attention_output_placement": self.attention_output_placement,
+            "attention_output_parallel_size": self.attention_output_parallel_size,
+            "attention_output_partial_dtype": self.attention_output_partial_dtype,
             "execution_mode": self.execution_mode,
             "pipeline_depth": self.pipeline_depth,
             "decode_mode": self.decode_mode,
@@ -2280,8 +2606,9 @@ class DistEPModelRunner:
         """Gather bounded all-rank NVFP4 runtime evidence over gloo.
 
         Projection names never leave their owning rank. Each rank sends only a
-        count, canonical names SHA-256, quant/kernel counts, unresolved-meta
-        counts, and a reduced loader summary. The returned tuple is rank ordered.
+        count, canonical names SHA-256, quant/kernel counts, live attention
+        output geometry, unresolved-meta counts, and a reduced loader summary.
+        The returned tuple is rank ordered.
         """
 
         delegate = object.__getattribute__(self, "_delegate")
@@ -2322,7 +2649,7 @@ class DistEPModelRunner:
     @staticmethod
     def _reject_dram_kv() -> None:
         raise RuntimeError(
-            "replicated-attention EP correctness mode does not support a DRAM KV tier"
+            "replicated-QKV/KV EP correctness mode does not support a DRAM KV tier"
         )
 
     def available_prefix(self, keys: tuple[str, ...], *, min_pages: int = 1) -> int:
@@ -2448,7 +2775,7 @@ class TPPlacement:
 
 @dataclass(frozen=True)
 class _EPPlacement:
-    """One rank per device for replicated-attention expert parallelism."""
+    """One rank per device for replicated-QKV/KV expert parallelism."""
 
     device: str
     dtype: object
@@ -2505,7 +2832,7 @@ def _ep_placement(
     profile = probe()
     if profile.arch != "cuda":
         raise RuntimeError(
-            "replicated-attention EP correctness mode requires CUDA; "
+            "replicated-QKV/KV EP correctness mode requires CUDA; "
             f"probed architecture {profile.arch!r}"
         )
     if profile.device_count < expert_parallel_size:
@@ -2744,7 +3071,7 @@ def build_ep_runner(
     dram_kv_tier_profile: str | Path | None = None,
     speculative: str | None = None,
 ):
-    """Build one rank of the replicated-attention EP2/EP4 correctness path."""
+    """Build one replicated-QKV/KV, row-output-parallel EP2/EP4 rank."""
 
     import torch
 
@@ -2783,7 +3110,7 @@ def build_ep_runner(
         or placement.dtype is not torch.bfloat16
     ):
         raise ValueError(
-            "replicated-attention EP correctness mode requires a CUDA/NCCL "
+            "replicated-QKV/KV EP correctness mode requires a CUDA/NCCL "
             "BF16 placement"
         )
     profile = probe(placement.device)
@@ -2809,7 +3136,7 @@ def build_ep_runner(
     )
     if resolved_kv_cache_dtype is not torch.bfloat16:
         raise RuntimeError(
-            "replicated-attention EP correctness mode resolved a non-BF16 KV cache"
+            "replicated-QKV/KV EP correctness mode resolved a non-BF16 KV cache"
         )
     pool = PagedKVPool(
         num_layers=full_config.num_hidden_layers,
@@ -2847,6 +3174,9 @@ def build_ep_runner(
     runner.expert_parallel_size = expert_parallel_size
     runner.expert_parallel_rank = rank
     runner.attention_placement = "replicated"
+    runner.attention_output_placement = "row_parallel"
+    runner.attention_output_parallel_size = expert_parallel_size
+    runner.attention_output_partial_dtype = "bfloat16"
     runner.execution_mode = _EP_CORRECTNESS_MODE
     runner.pipeline_depth = 1
     runner.decode_mode = "eager"
@@ -3331,12 +3661,12 @@ class _DistLauncherLifecycle:
 
 
 class DistEPLauncher(_DistLauncherLifecycle):
-    """Own one EP2/EP4 replicated-attention correctness-mode process group.
+    """Own one EP2/EP4 replicated-QKV/KV correctness-mode process group.
 
     This is a distinct public topology from :class:`DistTPLauncher`. Every rank
-    holds complete attention/KV state, while ``build_ep_model`` loads only that
-    rank's routed experts. The constructor validates the deliberately narrow
-    execution envelope before spawning any process.
+    holds complete QKV, attention-core, and KV state. ``build_ep_model`` loads
+    its rank's attention-output K shard and routed experts. The constructor
+    validates the deliberately narrow execution envelope before spawning.
     """
 
     def __init__(
@@ -3378,6 +3708,9 @@ class DistEPLauncher(_DistLauncherLifecycle):
         self.parallelism = "expert_parallel"
         self.execution_mode = _EP_CORRECTNESS_MODE
         self.attention_placement = "replicated"
+        self.attention_output_placement = "row_parallel"
+        self.attention_output_parallel_size = expert_parallel_size
+        self.attention_output_partial_dtype = "bfloat16"
         self.pipeline_depth = 1
         self.decode_mode = "eager"
         self._init_file = tempfile.mktemp(prefix="kairyu-ep-")  # noqa: S306
