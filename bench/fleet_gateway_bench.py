@@ -30,6 +30,7 @@ import time
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -2119,29 +2120,32 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         for index, event in enumerate(claim_event_names)
         if event == "reclaimed"
     ]
-    reclaim_index = reclaim_indexes[0] if len(reclaim_indexes) == 1 else -1
     claim_event_shape = (
         len(claim_events) >= 3
         and claim_event_names[0] == "claimed"
         and claim_event_names[-1] == "terminal_committed"
-        and 0 < reclaim_index < len(claim_events) - 1
-        and all(event == "renewed" for event in claim_event_names[1:reclaim_index])
+        and bool(reclaim_indexes)
         and all(
-            event == "renewed"
-            for event in claim_event_names[reclaim_index + 1 : -1]
+            event in {"renewed", "reclaimed"}
+            for event in claim_event_names[1:-1]
         )
     )
-    old_audit = claim_events[0] if claim_event_shape else {}
-    new_audit = claim_events[reclaim_index] if claim_event_shape else {}
+    segment_starts = [0, *reclaim_indexes] if claim_event_shape else []
+    segment_ends = (
+        [*reclaim_indexes, len(claim_events) - 1]
+        if claim_event_shape
+        else []
+    )
+    lease_segments = [
+        claim_events[start:end]
+        for start, end in zip(segment_starts, segment_ends, strict=True)
+    ]
+    old_audit = lease_segments[0][0] if lease_segments else {}
+    new_audit = lease_segments[1][0] if len(lease_segments) >= 2 else {}
     terminal_audit = claim_events[-1] if claim_event_shape else {}
-    owner_lease_events = (
-        claim_events[:reclaim_index] if claim_event_shape else []
-    )
-    new_lease_events = (
-        claim_events[reclaim_index:-1] if claim_event_shape else []
-    )
+    owner_lease_events = lease_segments[0] if lease_segments else []
+    final_lease_events = lease_segments[-1] if lease_segments else []
     last_owner_lease = owner_lease_events[-1] if owner_lease_events else {}
-    previous_lease_ns = new_audit.get("previous_lease_until_unix_ns")
 
     def audit_matches_lifecycle(
         audit: Mapping[str, Any],
@@ -2165,17 +2169,43 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         type(row.get("at_unix_ns")) is int
         and type(row.get("lease_until_unix_ns")) is int
         and row["at_unix_ns"] < row["lease_until_unix_ns"]
-        for row in (*owner_lease_events, *new_lease_events)
+        for segment in lease_segments
+        for row in segment
     )
-    old_fence_exact = bool(owner_lease_events) and all(
-        row.get("worker_id") == old_claim.get("worker_id")
-        and row.get("fencing_token") == old_claim.get("fencing_token")
-        for row in owner_lease_events
+    valid_gateway_worker_ids = {
+        gateway.get("uid")
+        for gateway in (*initial_gateways.values(), *final_gateways.values())
+        if isinstance(gateway.get("uid"), str)
+    }
+    fence_segments_exact = bool(lease_segments) and all(
+        segment
+        and isinstance(segment[0].get("worker_id"), str)
+        and segment[0].get("worker_id") in valid_gateway_worker_ids
+        and type(segment[0].get("fencing_token")) is int
+        and all(
+            row.get("worker_id") == segment[0].get("worker_id")
+            and row.get("fencing_token") == segment[0].get("fencing_token")
+            for row in segment
+        )
+        for segment in lease_segments
     )
-    new_fence_exact = bool(new_lease_events) and all(
-        row.get("worker_id") == new_claim.get("worker_id")
-        and row.get("fencing_token") == new_claim.get("fencing_token")
-        for row in new_lease_events
+    reclaim_chain_valid = len(lease_segments) >= 2 and all(
+        next_segment[0].get("event") == "reclaimed"
+        and type(previous_segment[0].get("fencing_token")) is int
+        and type(next_segment[0].get("fencing_token")) is int
+        and next_segment[0]["fencing_token"]
+        == previous_segment[0]["fencing_token"] + 1
+        and type(previous_segment[-1].get("lease_until_unix_ns")) is int
+        and type(
+            next_segment[0].get("previous_lease_until_unix_ns")
+        )
+        is int
+        and next_segment[0]["previous_lease_until_unix_ns"]
+        == previous_segment[-1]["lease_until_unix_ns"]
+        and type(next_segment[0].get("at_unix_ns")) is int
+        and previous_segment[-1]["lease_until_unix_ns"]
+        <= next_segment[0]["at_unix_ns"]
+        for previous_segment, next_segment in pairwise(lease_segments)
     )
     kill_requested_ns = kill_requested.get("at_unix_ns")
     kill_covered_by_old_lease = type(kill_requested_ns) is int and any(
@@ -2184,7 +2214,8 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         if type(row.get("at_unix_ns")) is int
         and type(row.get("lease_until_unix_ns")) is int
     )
-    last_new_lease = new_lease_events[-1] if new_lease_events else {}
+    final_claim_audit = final_lease_events[0] if final_lease_events else {}
+    last_final_lease = final_lease_events[-1] if final_lease_events else {}
     durable_claim_audit = (
         lifecycle_exact
         and claims_match_batch
@@ -2194,29 +2225,27 @@ def verify_evidence(results_dir: str | Path) -> dict[str, Any]:
         and audit_matches_lifecycle(old_audit, old_claim)
         and audit_matches_lifecycle(new_audit, new_claim)
         and active_leases_valid
-        and old_fence_exact
-        and new_fence_exact
-        and type(previous_lease_ns) is int
-        and previous_lease_ns == last_owner_lease.get("lease_until_unix_ns")
+        and fence_segments_exact
+        and reclaim_chain_valid
         and kill_covered_by_old_lease
         and type(last_owner_lease.get("at_unix_ns")) is int
         and type(killed.get("at_unix_ns")) is int
         and last_owner_lease["at_unix_ns"] < killed["at_unix_ns"]
         and type(new_audit.get("at_unix_ns")) is int
-        and previous_lease_ns <= new_audit["at_unix_ns"]
         # owner_killed is the time a polling observer noticed Pod absence, not
         # the actual stop time; scheduler/API jitter may place that observation
         # after a valid post-expiry reclaim.
         and kill_requested_ns < new_audit["at_unix_ns"]
-        and terminal_audit.get("worker_id") == new_claim.get("worker_id")
-        and terminal_audit.get("fencing_token") == new_claim.get("fencing_token")
+        and terminal_audit.get("worker_id") == final_claim_audit.get("worker_id")
+        and terminal_audit.get("fencing_token")
+        == final_claim_audit.get("fencing_token")
         and type(terminal_audit.get("at_unix_ns")) is int
-        and terminal_audit["at_unix_ns"] >= new_audit["at_unix_ns"]
-        and type(last_new_lease.get("at_unix_ns")) is int
-        and type(last_new_lease.get("lease_until_unix_ns")) is int
-        and last_new_lease["at_unix_ns"]
+        and terminal_audit["at_unix_ns"] >= final_claim_audit["at_unix_ns"]
+        and type(last_final_lease.get("at_unix_ns")) is int
+        and type(last_final_lease.get("lease_until_unix_ns")) is int
+        and last_final_lease["at_unix_ns"]
         <= terminal_audit["at_unix_ns"]
-        < last_new_lease["lease_until_unix_ns"]
+        < last_final_lease["lease_until_unix_ns"]
         and type(completed.get("at_unix_ns")) is int
         and completed.get("clock") == "postgres_clock_timestamp"
         and completed["at_unix_ns"] >= terminal_audit["at_unix_ns"]
