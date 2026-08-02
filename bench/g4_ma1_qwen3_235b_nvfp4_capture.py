@@ -955,6 +955,38 @@ def _teacher_rows_from_outputs(
     return rows
 
 
+def _reference_teacher_canonical(
+    *,
+    reference_fragment: Mapping[str, object],
+    prompt_tokens: Sequence[Sequence[int]],
+) -> list[list[int]]:
+    arm = str(reference_fragment["arm"])
+    rows = {
+        (row["prompt_id"], row["position"]): row
+        for row in reference_fragment["teacher"]
+    }
+    canonical: list[list[int]] = [[] for _ in prompt_tokens]
+    for position in range(gate.POSITIONS):
+        for index, prompt in enumerate(prompt_tokens):
+            prompt_id = f"p{index}"
+            row = rows[(prompt_id, position)]
+            expected_prefix = [*prompt, *canonical[index]]
+            token = row["selected_token_id"]
+            if (
+                row["arm"] != arm
+                or row["canonical_token_id"] != token
+                or row["prefix_token_count"] != len(expected_prefix)
+                or row["prefix_token_ids_sha256"]
+                != gate.sha256_json(expected_prefix)
+            ):
+                raise ValueError(
+                    f"{arm} teacher rollout is not canonical at "
+                    f"{prompt_id} position {position}"
+                )
+            canonical[index].append(token)
+    return canonical
+
+
 def _verify_output_prompts(
     outputs: Sequence[object], expected: Sequence[Sequence[int]]
 ) -> None:
@@ -1125,9 +1157,10 @@ def capture_reference_arm(
                 expected=gate.PROMPT_COUNT,
             )
             _verify_output_prompts(free_outputs, prompt_tokens)
-            free_rows, canonical = _free_rows_from_outputs(
+            free_rows, _free_diagnostic = _free_rows_from_outputs(
                 arm=arm, outputs=free_outputs
             )
+            canonical: list[list[int]] = [[] for _ in prompt_tokens]
             teacher_params = sampling_type(
                 max_tokens=1,
                 temperature=0.0,
@@ -1151,6 +1184,11 @@ def capture_reference_arm(
                     expected=gate.PROMPT_COUNT,
                 )
                 _verify_output_prompts(outputs, prefixes)
+                for index, output in enumerate(outputs):
+                    _completion_value, selected_ids, _selected_lps, _top = (
+                        _completion(output, expected_tokens=1)
+                    )
+                    canonical[index].append(selected_ids[0])
                 wave = _teacher_rows_from_outputs(
                     arm=arm,
                     position=position,
@@ -1158,14 +1196,6 @@ def capture_reference_arm(
                     prompt_tokens=prompt_tokens,
                     canonical=canonical,
                 )
-                if any(
-                    row["selected_token_id"] != row["canonical_token_id"]
-                    for row in wave
-                ):
-                    raise RuntimeError(
-                        f"{arm} failed to reproduce its own canonical token at "
-                        f"teacher position {position}"
-                    )
                 teacher_rows.extend(wave)
         finally:
             if llm is not None:
@@ -1441,13 +1471,10 @@ def capture_kairyu_arm(
         launcher_type = DistEPLauncher
     prompt_rows = host_snapshot["prompts"]
     prompt_tokens = [list(row["token_ids"]) for row in prompt_rows]
-    reference_free = {
-        row["prompt_id"]: row for row in reference_fragment["free_run"]
-    }
-    canonical = [
-        list(reference_free[f"p{index}"]["output_token_ids"])
-        for index in range(gate.PROMPT_COUNT)
-    ]
+    canonical = _reference_teacher_canonical(
+        reference_fragment=reference_fragment,
+        prompt_tokens=prompt_tokens,
+    )
     started_at = _now()
     checkpoint_start = _checkpoint_snapshot(model_path)
     if checkpoint_start != host_snapshot["checkpoint"]:

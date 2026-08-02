@@ -163,22 +163,34 @@ The input set is the exact 64-text `_TEXT_PROMPTS` tuple from
 canonical hashes. Generation is 16 greedy tokens with seed `20260702`,
 temperature 0, top-p 1, no top-k truncation, and EOS ignored until token 16.
 
-Each GPU count has its own reference continuation. At position `i`,
-reference-W and Kairyu-EPW are both evaluated on:
+Each GPU count has its own reference teacher rollout. At position `i`, the
+reference first evaluates a fresh full-prefix request on:
 
 ```
-prompt_ids + reference_W_tokens[:i]
+prompt_ids + reference_W_teacher_tokens[:i]
 ```
 
-This teacher-forced position wave provides 1,024 same-prefix comparisons per
-GPU count. It prevents a numerically valid near-tie at one position from
-turning every later different-prefix token into a false disagreement.
-Ordinary free-running continuations are also retained, but after the first
-prefix divergence they are diagnostic only.
+The selected token becomes position `i` of that immutable teacher rollout.
+Kairyu-EPW is then evaluated on the exact same frozen prefix. Repeating this
+for 16 positions provides 1,024 same-prefix comparisons per GPU count and
+prevents a numerically valid near-tie at one position from turning every later
+different-prefix token into a false disagreement.
 
-The reference must reproduce its own canonical token at all 1,024
-teacher-forced positions. Each Kairyu cell passes only if all evidence is
-present and finite and all of the following hold:
+The ordinary 16-token retained-KV continuations from both stacks are retained
+as diagnostics but never supply the binding prefix. A pre-formal EP2
+diagnostic demonstrated why: TensorRT-LLM's retained-KV decode and fresh
+full-prefix path agreed on only 933/1,024 positions even though every returned
+prompt token sequence was exact. The largest fresh-path deficit for the
+retained-decode token was 6.125 natural-log units, so those 91 differences
+cannot be relabelled as near-tie noise. The binding claim is therefore
+fresh-prefill next-token parity on identical prefixes; M-A1 does not claim
+retained-KV decode parity between the stacks.
+
+Replay requires the complete reference rollout chain: every reference
+teacher row's selected and canonical token must be identical, and every
+prefix count/hash must equal the prompt plus all earlier reference teacher
+tokens. Each Kairyu cell passes only if all evidence is present and finite and
+all of the following hold:
 
 - token agreement is at least `ceil(0.99 * 1024) = 1014`;
 - substantive disagreement count is zero;

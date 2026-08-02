@@ -578,6 +578,21 @@ def test_valid_raw_passes_and_reports_fixed_threshold(valid_rows):
 
 def test_prompt_specific_canonical_association_swap_fails(valid_rows) -> None:
     rows = copy.deepcopy(valid_rows)
+    for row in rows:
+        if row["type"] != "teacher" or row["arm"] != "reference_ep2":
+            continue
+        if row["prompt_id"] == "p2":
+            row["prompt_id"] = "p10"
+        elif row["prompt_id"] == "p10":
+            row["prompt_id"] = "p2"
+
+    result = _manifest(rows)
+    assert result["passed"] is False
+    assert result["checks"]["world_matched_teacher_prefixes_exact"] is False
+
+
+def test_free_run_association_is_diagnostic_only(valid_rows) -> None:
+    rows = copy.deepcopy(valid_rows)
     left = _row(rows, "free_run", arm="reference_ep2", prompt_id="p2")
     right = _row(rows, "free_run", arm="reference_ep2", prompt_id="p10")
     left_tokens = left["output_token_ids"]
@@ -588,8 +603,8 @@ def test_prompt_specific_canonical_association_swap_fails(valid_rows) -> None:
     right["output_token_ids_sha256"] = gate.sha256_json(left_tokens)
 
     result = _manifest(rows)
-    assert result["passed"] is False
-    assert result["checks"]["world_matched_teacher_prefixes_exact"] is False
+    assert result["passed"] is True
+    assert result["checks"]["world_matched_teacher_prefixes_exact"] is True
 
 
 @pytest.mark.parametrize(
@@ -746,7 +761,7 @@ def test_config_provenance_checkpoint_kernel_and_ownership_tamper_fail(
     assert result["checks"][check] is False
 
 
-def test_reference_teacher_must_reproduce_every_canonical_token(valid_rows):
+def test_reference_teacher_rollout_must_be_canonical(valid_rows):
     rows = copy.deepcopy(valid_rows)
     teacher = _row(rows, "teacher", arm="reference_ep4", prompt_id="p0", position=0)
     wrong = 30_000
@@ -756,7 +771,7 @@ def test_reference_teacher_must_reproduce_every_canonical_token(valid_rows):
 
     result = _manifest(rows)
     assert result["passed"] is False
-    assert result["checks"]["reference_teacher_reproduces_all_canonical_tokens"] is False
+    assert result["checks"]["reference_teacher_rollout_chain_exact"] is False
 
 
 def test_ten_reciprocal_ties_meet_exact_99_percent_floor(valid_rows):

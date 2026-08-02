@@ -294,6 +294,36 @@ class _ReferenceLLM:
     def shutdown(self) -> None:
         self.shutdown_called = True
 
+
+class _DivergentReferenceLLM(_ReferenceLLM):
+    def generate(self, prompts, params, *, use_tqdm):
+        assert use_tqdm is False
+        self.calls.append(params.max_tokens)
+        outputs = []
+        for prompt in prompts:
+            if isinstance(prompt, str):
+                prompt_index = gate.PROMPTS.index(prompt)
+                prompt_ids = [100 + prompt_index]
+                tokens = _canonical_tokens(prompt_index)
+                tokens[1] += 50_000
+            else:
+                prompt_ids = list(prompt)
+                prompt_index = prompt_ids[0] - 100
+                tokens = [_canonical_tokens(prompt_index)[len(prompt_ids) - 1]]
+            completion = SimpleNamespace(
+                token_ids=tokens,
+                logprobs=[_logprobs(token) for token in tokens],
+                finish_reason="length",
+            )
+            outputs.append(
+                SimpleNamespace(
+                    outputs=(completion,),
+                    prompt_token_ids=tuple(prompt_ids),
+                )
+            )
+        return outputs
+
+
 def _projection_names(arm: str) -> list[list[str]]:
     world_size = gate._arm_world_size(arm)
     count = 4 * gate.NUM_LAYERS + (
@@ -384,6 +414,44 @@ def test_reference_arm_produces_64_plus_16_waves(
     assert len(fragment["free_run"]) == gate.PROMPT_COUNT
     assert len(fragment["teacher"]) == gate.EXPECTED_POSITIONS
     assert calls["checkpoint"] == 2
+    assert capture._fragment_valid(
+        fragment, arm="reference_ep2", host_snapshot=host_snapshot
+    )
+
+
+def test_reference_teacher_rollout_is_independent_of_free_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    host_snapshot: dict[str, object],
+) -> None:
+    _DivergentReferenceLLM.calls = []
+    _patch_common(monkeypatch, host_snapshot)
+    fragment = capture.capture_reference_arm(
+        model_path=Path("/models/source"),
+        world_size=2,
+        host_snapshot=host_snapshot,
+        bindings={
+            "LLM": _DivergentReferenceLLM,
+            "SamplingParams": _ReferenceParams,
+            "KvCacheConfig": _Config,
+            "MoeConfig": _Config,
+            "Nvfp4GemmConfig": _Config,
+            "version": "1.2.1",
+        },
+        container_observation=_observation(
+            gate.REFERENCE_RUNTIME["image_repo_digest"],
+            gate.REFERENCE_RUNTIME["image_config_id"],
+        ),
+    )
+
+    assert fragment["free_run"][0]["output_token_ids"][1] == 51_001
+    canonical = capture._reference_teacher_canonical(
+        reference_fragment=fragment,
+        prompt_tokens=[row["token_ids"] for row in host_snapshot["prompts"]],
+    )
+    assert canonical == [
+        _canonical_tokens(index) for index in range(gate.PROMPT_COUNT)
+    ]
+    assert len(fragment["teacher"]) == gate.EXPECTED_POSITIONS
     assert capture._fragment_valid(
         fragment, arm="reference_ep2", host_snapshot=host_snapshot
     )
@@ -570,7 +638,7 @@ def test_kairyu_arm_uses_reference_prefix_and_fresh_wave_caches(
         world_size=world_size,
         host_snapshot=host_snapshot,
         bindings={
-            "LLM": _ReferenceLLM,
+            "LLM": _DivergentReferenceLLM,
             "SamplingParams": _ReferenceParams,
             "KvCacheConfig": _Config,
             "MoeConfig": _Config,
@@ -619,6 +687,13 @@ def test_kairyu_arm_uses_reference_prefix_and_fresh_wave_caches(
         row["output_token_ids"] for row in fragment["free_run"]
     ] == [
         _canonical_tokens(index) for index in range(gate.PROMPT_COUNT)
+    ]
+    assert [
+        row["canonical_token_id"] for row in fragment["teacher"]
+    ] == [
+        _canonical_tokens(prompt)[position]
+        for position in range(gate.POSITIONS)
+        for prompt in range(gate.PROMPT_COUNT)
     ]
     assert capture._fragment_valid(
         fragment, arm=arm, host_snapshot=host_snapshot

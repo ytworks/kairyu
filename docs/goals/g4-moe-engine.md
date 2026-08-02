@@ -47,7 +47,7 @@ All numbers from committed `bench/` scripts (G2 §8 evidence rules carry forward
 
 | Gate | Target | Regime |
 |---|---|---|
-| M-A1 (correctness anchor) | Qwen3-235B NVFP4 on 2 and 4 GPUs: per-GPU-count TensorRT-LLM reference and Kairyu score the same reference prefix at 16 positions × 64 fixed prompts; require ≥1,014/1,024 token agreement, no substantive disagreement, and the fixed 0.125 near-tie / 0.25 reciprocal selected-logprob bounds. Retain ordinary 16-token free-running continuations as diagnostics, not as the post-divergence verdict. | — |
+| M-A1 (correctness anchor) | Qwen3-235B NVFP4 on 2 and 4 GPUs: per-GPU-count TensorRT-LLM reference and Kairyu score the same autoregressive fresh-prefill reference rollout at 16 positions × 64 fixed prompts; require ≥1,014/1,024 token agreement, no substantive disagreement, and the fixed 0.125 near-tie / 0.25 reciprocal selected-logprob bounds. Retain ordinary 16-token retained-KV continuations as diagnostics only; M-A1 does not turn them into a cross-stack decode-parity claim. | — |
 | M-A2 (EP does not break KV) | Radix hit >80% @50% shared prefix with EP on (A7 lineage; attention-DP must keep per-replica KV accounting rank-invariant) | — |
 | M-A3 (baseline comparison) | tok/s/GPU and TTFT p99 ≥ SGLang, same box, same checkpoint, same config — SGLang is the credible MoE-on-SM120 baseline; disclose its known SM120 limitations in the results file | saturation |
 | M-A4 (MTP value) | MTP acceptance ≥2 tokens/step measured; decode throughput ≥1.5× MTP-off at equal quality (spec ≡ non-spec greedy invariant pinned by test, E2 lineage) | latency-bound |

@@ -15,9 +15,10 @@ The capture adapter contract is strict:
   teacher-forced positions, and one final ``run_end`` row;
 * sixteen greedy tokens per prompt, seed 20260702, temperature 0, top-p 1,
   top-k -1, EOS ignored, and token-ID top-64 logprobs;
-* reference-w2 and Kairyu-EP2 score the exact reference-w2 free-running prefix;
-  reference-w4 and Kairyu-EP4 independently score the exact reference-w4
-  prefix.  Free-running equality and cross-world equality are diagnostic only;
+* reference-w2 and Kairyu-EP2 score the exact reference-w2 autoregressive
+  fresh-prefill teacher rollout; reference-w4 and Kairyu-EP4 independently
+  score the corresponding reference-w4 rollout.  Ordinary retained-KV
+  free-running equality and cross-world equality are diagnostic only;
 * reference rows come from the pinned TensorRT-LLM Python ``LLM`` API image.
   Kairyu rows come directly from ``SampledToken``.  HTTP/text top-k adapters are
   not valid evidence;
@@ -450,7 +451,9 @@ def _session_config(arm: str) -> dict[str, object]:
             "top_k": 0 if reference else -1,
             "top_k_normalized": "disabled",
             "ignore_eos": True,
-            "max_tokens": POSITIONS,
+            "free_run_max_tokens": POSITIONS,
+            "teacher_rollout_waves": POSITIONS,
+            "teacher_max_tokens_per_wave": 1,
             "logprobs": TOP_LOGPROBS,
         },
     }
@@ -483,12 +486,12 @@ def formal_config() -> dict[str, object]:
         "session_order": list(ARMS),
         "sessions": {arm: _session_config(arm) for arm in ARMS},
         "teacher_prefix": {
-            "ep2": "reference_ep2_free_run",
-            "ep4": "reference_ep4_free_run",
+            "ep2": "reference_ep2_teacher_rollout",
+            "ep4": "reference_ep4_teacher_rollout",
         },
         "binding": {
             "positions_per_cell": EXPECTED_POSITIONS,
-            "reference_canonical_reproduction": EXPECTED_POSITIONS,
+            "reference_teacher_rollout_positions": EXPECTED_POSITIONS,
             "agreement_rate_min": AGREEMENT_RATE_MIN,
             "agreement_count_min": AGREEMENT_COUNT_MIN,
             "tie_gap_nats": TIE_GAP_NATS,
@@ -1855,17 +1858,22 @@ def recompute_manifest(
     )
     checks["complete_finite_token_id_top64_teacher_rows"] = complete_teacher
 
-    prefixes_exact = complete_teacher and complete_free and checks[
+    prefixes_exact = complete_teacher and checks[
         "exact_fixed_tokenized_prompts"
     ]
-    reference_canonical_exact = prefixes_exact
+    reference_teacher_rollout_exact = prefixes_exact
     if prefixes_exact:
         for world_size in WORLD_SIZES:
             ref_arm = REFERENCE_ARM[world_size]
             for prompt in range(PROMPT_COUNT):
                 prompt_id = f"p{prompt}"
                 prompt_tokens = prompt_by_key[(prompt_id,)]["token_ids"]
-                canonical = free_by_key[(ref_arm, prompt_id)]["output_token_ids"]
+                canonical = [
+                    teacher_by_key[(ref_arm, prompt_id, position)][
+                        "canonical_token_id"
+                    ]
+                    for position in range(POSITIONS)
+                ]
                 for position in range(POSITIONS):
                     expected_prefix = prompt_tokens + canonical[:position]
                     expected_digest = sha256_json(expected_prefix)
@@ -1877,15 +1885,15 @@ def recompute_manifest(
                             and row["prefix_token_ids_sha256"] == expected_digest
                             and row["canonical_token_id"] == expected_token
                         )
-                    reference_canonical_exact &= (
+                    reference_teacher_rollout_exact &= (
                         teacher_by_key[(ref_arm, prompt_id, position)][
                             "selected_token_id"
                         ]
                         == expected_token
                     )
     checks["world_matched_teacher_prefixes_exact"] = bool(prefixes_exact)
-    checks["reference_teacher_reproduces_all_canonical_tokens"] = bool(
-        reference_canonical_exact
+    checks["reference_teacher_rollout_chain_exact"] = bool(
+        reference_teacher_rollout_exact
     )
 
     binding: dict[str, dict[str, object]] = {}

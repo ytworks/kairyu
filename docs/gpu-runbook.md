@@ -1475,6 +1475,12 @@ image, and drill are unchanged.
   process hostname, immutable RepoDigest, config image ID, and (for Kairyu)
   source-revision label to the retained session.
 
+  For each GPU count, the reference constructs the binding continuation as
+  16 autoregressive one-token fresh-full-prefix waves. Kairyu scores those
+  exact frozen prefixes. Both stacks also run an ordinary 16-token retained-KV
+  continuation, but it is diagnostic only and never supplies the teacher
+  prefix or a cross-stack decode-parity claim.
+
   Build the Kairyu image from that commit, resolve both image identities, and
   take the full pre-session snapshot inside a checkpoint-mounted control
   container:
@@ -1563,7 +1569,7 @@ PY
 
   ```bash
   REF2=$(docker create \
-    --gpus 'device=0,1' \
+    --gpus '"device=0,1"' \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -e CUDA_VISIBLE_DEVICES=0,1 \
     -v "$CHECKOUT:/workspace:ro" \
@@ -1583,7 +1589,7 @@ PY
   docker rm "$REF2"
 
   KAIRYU2=$(docker create \
-    --gpus 'device=0,1' --entrypoint sleep \
+    --gpus '"device=0,1"' --entrypoint sleep \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -e CUDA_VISIBLE_DEVICES=0,1 \
     -e GIT_CONFIG_COUNT=1 \
@@ -1611,7 +1617,7 @@ PY
 
   ```bash
   REF4=$(docker create \
-    --gpus 'device=0,1,2,3' \
+    --gpus '"device=0,1,2,3"' \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
     -v "$CHECKOUT:/workspace:ro" \
@@ -1631,7 +1637,7 @@ PY
   docker rm "$REF4"
 
   KAIRYU4=$(docker create \
-    --gpus 'device=0,1,2,3' --entrypoint sleep \
+    --gpus '"device=0,1,2,3"' --entrypoint sleep \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
     -e GIT_CONFIG_COUNT=1 \
