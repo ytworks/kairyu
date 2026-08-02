@@ -764,6 +764,69 @@ def _passing_evidence(tmp_path: Path) -> Path:
     return manifest_path
 
 
+def _multi_reclaim_evidence(tmp_path: Path) -> Path:
+    manifest_path = _passing_evidence(tmp_path)
+    claims = gateway_bench._read_jsonl(tmp_path / "batch-claims.jsonl")
+    terminal = claims.pop()
+    previous_lease_until = claims[-1]["lease_until_unix_ns"]
+    intermediate_worker = "gateway-c-stable"
+    intermediate_token = claims[-1]["fencing_token"] + 1
+    final_worker = "gateway-b-stable"
+    final_token = intermediate_token + 1
+    claims.extend(
+        [
+            {
+                "schema_version": gateway_bench.SCHEMA_VERSION,
+                "sequence": terminal["sequence"],
+                "batch_id": terminal["batch_id"],
+                "event": "reclaimed",
+                "worker_id": intermediate_worker,
+                "fencing_token": intermediate_token,
+                "at_unix_ns": 30,
+                "lease_until_unix_ns": 40,
+                "previous_lease_until_unix_ns": previous_lease_until,
+            },
+            {
+                "schema_version": gateway_bench.SCHEMA_VERSION,
+                "sequence": terminal["sequence"] + 1,
+                "batch_id": terminal["batch_id"],
+                "event": "reclaimed",
+                "worker_id": final_worker,
+                "fencing_token": final_token,
+                "at_unix_ns": 40,
+                "lease_until_unix_ns": 50,
+                "previous_lease_until_unix_ns": 40,
+            },
+            {
+                "schema_version": gateway_bench.SCHEMA_VERSION,
+                "sequence": terminal["sequence"] + 2,
+                "batch_id": terminal["batch_id"],
+                "event": "renewed",
+                "worker_id": final_worker,
+                "fencing_token": final_token,
+                "at_unix_ns": 41,
+                "lease_until_unix_ns": 51,
+                "previous_lease_until_unix_ns": None,
+            },
+        ]
+    )
+    terminal.update(
+        sequence=terminal["sequence"] + 3,
+        worker_id=final_worker,
+        fencing_token=final_token,
+        at_unix_ns=45,
+    )
+    claims.append(terminal)
+    _write_jsonl(tmp_path / "batch-claims.jsonl", claims)
+    _refresh_artifact(manifest_path, "batch-claims.jsonl")
+
+    lifecycle = gateway_bench._read_jsonl(tmp_path / "batch-lifecycle.jsonl")
+    lifecycle[-1]["at_unix_ns"] = 46
+    _write_jsonl(tmp_path / "batch-lifecycle.jsonl", lifecycle)
+    _refresh_artifact(manifest_path, "batch-lifecycle.jsonl")
+    return manifest_path
+
+
 def test_rendezvous_order_is_stable_and_sessions_cover_every_gateway() -> None:
     candidates = gateway_bench.GATEWAY_IDS
     sessions = {
@@ -1030,6 +1093,61 @@ def test_verifier_requires_reclaim_after_the_last_owner_lease(
     ]
 
 
+def test_verifier_accepts_ordered_multiple_reclaims(tmp_path: Path) -> None:
+    _multi_reclaim_evidence(tmp_path)
+    result = gateway_bench.verify_evidence(tmp_path)
+    assert result["passed"]
+    assert result["checks"][
+        "durable_claim_audit_has_one_new-fence_terminal_commit"
+    ]
+
+
+def test_verifier_rejects_fencing_token_gap_between_reclaims(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _multi_reclaim_evidence(tmp_path)
+    claims = gateway_bench._read_jsonl(tmp_path / "batch-claims.jsonl")
+    for row in claims[5:]:
+        row["fencing_token"] = 5
+    _write_jsonl(tmp_path / "batch-claims.jsonl", claims)
+    _refresh_artifact(manifest_path, "batch-claims.jsonl")
+    result = gateway_bench.verify_evidence(tmp_path)
+    assert not result["passed"]
+    assert not result["checks"][
+        "durable_claim_audit_has_one_new-fence_terminal_commit"
+    ]
+
+
+def test_verifier_rejects_later_reclaim_before_previous_lease_expiry(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _multi_reclaim_evidence(tmp_path)
+    claims = gateway_bench._read_jsonl(tmp_path / "batch-claims.jsonl")
+    claims[5]["at_unix_ns"] = 39
+    _write_jsonl(tmp_path / "batch-claims.jsonl", claims)
+    _refresh_artifact(manifest_path, "batch-claims.jsonl")
+    result = gateway_bench.verify_evidence(tmp_path)
+    assert not result["passed"]
+    assert not result["checks"][
+        "durable_claim_audit_has_one_new-fence_terminal_commit"
+    ]
+
+
+def test_verifier_rejects_wrong_previous_lease_between_reclaims(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _multi_reclaim_evidence(tmp_path)
+    claims = gateway_bench._read_jsonl(tmp_path / "batch-claims.jsonl")
+    claims[5]["previous_lease_until_unix_ns"] = 39
+    _write_jsonl(tmp_path / "batch-claims.jsonl", claims)
+    _refresh_artifact(manifest_path, "batch-claims.jsonl")
+    result = gateway_bench.verify_evidence(tmp_path)
+    assert not result["passed"]
+    assert not result["checks"][
+        "durable_claim_audit_has_one_new-fence_terminal_commit"
+    ]
+
+
 def test_verifier_rejects_a_stale_owner_renewal_after_reclaim(
     tmp_path: Path,
 ) -> None:
@@ -1080,6 +1198,38 @@ def test_verifier_rejects_terminal_publication_by_the_stale_fence(
     claims = gateway_bench._read_jsonl(tmp_path / "batch-claims.jsonl")
     claims[-1]["worker_id"] = "gateway-a-old"
     claims[-1]["fencing_token"] = 1
+    _write_jsonl(tmp_path / "batch-claims.jsonl", claims)
+    _refresh_artifact(manifest_path, "batch-claims.jsonl")
+    result = gateway_bench.verify_evidence(tmp_path)
+    assert not result["passed"]
+    assert not result["checks"][
+        "durable_claim_audit_has_one_new-fence_terminal_commit"
+    ]
+
+
+def test_verifier_rejects_terminal_publication_before_latest_fence(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _multi_reclaim_evidence(tmp_path)
+    claims = gateway_bench._read_jsonl(tmp_path / "batch-claims.jsonl")
+    claims[-1]["worker_id"] = claims[4]["worker_id"]
+    claims[-1]["fencing_token"] = claims[4]["fencing_token"]
+    _write_jsonl(tmp_path / "batch-claims.jsonl", claims)
+    _refresh_artifact(manifest_path, "batch-claims.jsonl")
+    result = gateway_bench.verify_evidence(tmp_path)
+    assert not result["passed"]
+    assert not result["checks"][
+        "durable_claim_audit_has_one_new-fence_terminal_commit"
+    ]
+
+
+def test_verifier_rejects_multiple_terminal_publications(tmp_path: Path) -> None:
+    manifest_path = _multi_reclaim_evidence(tmp_path)
+    claims = gateway_bench._read_jsonl(tmp_path / "batch-claims.jsonl")
+    extra_terminal = dict(claims[-1])
+    extra_terminal["sequence"] += 1
+    extra_terminal["at_unix_ns"] = 46
+    claims.append(extra_terminal)
     _write_jsonl(tmp_path / "batch-claims.jsonl", claims)
     _refresh_artifact(manifest_path, "batch-claims.jsonl")
     result = gateway_bench.verify_evidence(tmp_path)
