@@ -673,7 +673,7 @@ async def test_shutdown_is_shared_and_cancellation_safe_through_all_cleanup():
 
     launcher = _BlockingLauncher()
     backend._loop.close = blocking_close
-    backend._loop.tp_launcher = launcher
+    backend._loop.parallel_launcher = launcher
 
     first = asyncio.create_task(backend.shutdown())
     try:
@@ -1045,6 +1045,42 @@ def test_tensor_parallel_size_recorded():
     assert backend.tensor_parallel_size == 2
 
 
+def test_expert_parallel_size_and_topology_metadata_are_recorded(monkeypatch):
+    loop, cache, scheduler = build_engine_loop(num_pages=64)
+    loop.parallelism_metadata = {
+        "parallelism": "expert_parallel",
+        "expert_parallel_size": 4,
+        "attention_placement": "replicated",
+        "attention_output_placement": "row_parallel",
+        "attention_output_parallel_size": 4,
+        "attention_output_partial_dtype": "bfloat16",
+        "execution_mode": "replicated-attention-correctness",
+        "pipeline_depth": 1,
+        "decode_mode": "eager",
+        "kv_cache_dtype": "bfloat16",
+    }
+    captured = None
+
+    def fake_build_engine_loop(**kwargs):
+        nonlocal captured
+        captured = kwargs
+        return loop, cache, scheduler
+
+    monkeypatch.setattr(
+        kairyu_backend_module,
+        "build_engine_loop",
+        fake_build_engine_loop,
+    )
+
+    backend = KairyuBackend(expert_parallel_size=4)
+
+    assert captured is not None
+    assert captured["expert_parallel_size"] == 4
+    assert backend.expert_parallel_size == 4
+    assert backend.parallelism_metadata == loop.parallelism_metadata
+    loop.close()
+
+
 def test_custom_runner_requires_one_distinct_runner_per_tp_rank():
     with pytest.raises(
         ValueError,
@@ -1060,6 +1096,79 @@ def test_custom_runner_remains_supported_at_tp1():
     custom = object()
     loop, _cache, _scheduler = build_engine_loop(runner=custom)
     assert loop._runner is custom
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"expert_parallel_size": 3}, "expert_parallel_size"),
+        (
+            {
+                "model_path": "/unused",
+                "tensor_parallel_size": 0,
+                "expert_parallel_size": 2,
+                "kv_cache_dtype": "bfloat16",
+            },
+            "tensor_parallel_size",
+        ),
+        (
+            {
+                "model_path": "/unused",
+                "tensor_parallel_size": True,
+                "expert_parallel_size": 2,
+                "kv_cache_dtype": "bfloat16",
+            },
+            "tensor_parallel_size",
+        ),
+        (
+            {
+                "model_path": "/unused",
+                "tensor_parallel_size": 2,
+                "expert_parallel_size": 2,
+                "kv_cache_dtype": "bfloat16",
+            },
+            "mutually exclusive",
+        ),
+        ({"expert_parallel_size": 2}, "real model_path"),
+        (
+            {"model_path": "/unused", "expert_parallel_size": 2},
+            "kv_cache_dtype='bfloat16'",
+        ),
+        (
+            {
+                "model_path": "/unused",
+                "expert_parallel_size": 2,
+                "kv_cache_dtype": "bfloat16",
+                "pipeline_depth": 2,
+            },
+            "pipeline_depth=1",
+        ),
+        (
+            {
+                "model_path": "/unused",
+                "expert_parallel_size": 2,
+                "kv_cache_dtype": "bfloat16",
+                "speculative": "ngram",
+            },
+            "speculative decoding",
+        ),
+        (
+            {
+                "model_path": "/unused",
+                "expert_parallel_size": 2,
+                "kv_cache_dtype": "bfloat16",
+                "decode_mode": "cuda_graph",
+            },
+            "decode_mode='eager'",
+        ),
+    ],
+)
+def test_build_engine_loop_rejects_unsupported_expert_parallel_options(
+    options,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        build_engine_loop(**options)
 
 
 @pytest.mark.parametrize("degree", [0, 3])
@@ -1103,10 +1212,18 @@ def test_registry_forwards_server_max_model_len_option():
     ("builder_name", "options"),
     [
         ("_build_dist_tp_loop", {"model_path": "/unused", "tensor_parallel_size": 2}),
+        (
+            "_build_dist_ep_loop",
+            {
+                "model_path": "/unused",
+                "expert_parallel_size": 4,
+                "kv_cache_dtype": "bfloat16",
+            },
+        ),
         ("_build_pd_loop", {"model_path": "/unused", "pd_separation": True}),
     ],
 )
-def test_context_limit_crosses_tp_and_pd_builders(
+def test_context_limit_crosses_distributed_and_pd_builders(
     monkeypatch,
     builder_name,
     options,
@@ -1126,6 +1243,88 @@ def test_context_limit_crosses_tp_and_pd_builders(
     assert result is sentinel
     assert captured is not None
     assert captured["max_model_len"] == 8192
+
+
+def test_dist_ep_builder_assembles_topology_neutral_serving_loop(
+    monkeypatch,
+    tmp_path,
+):
+    (tmp_path / "config.json").write_text(
+        '{"vocab_size": 50000}',
+        encoding="utf-8",
+    )
+    created = []
+
+    class _FakeEPLauncher:
+        def __init__(
+            self,
+            model_path,
+            expert_parallel_size,
+            num_pages,
+            page_size,
+            **kwargs,
+        ):
+            self.model_path = model_path
+            self.expert_parallel_size = expert_parallel_size
+            self.num_pages = num_pages
+            self.page_size = page_size
+            self.kwargs = kwargs
+            self.runner = object()
+            self.attention_backend_decision = None
+            self.kv_cache_dtype_requested = "bfloat16"
+            self.kv_cache_dtype_resolved = "bfloat16"
+            self.shutdown_calls = 0
+            created.append(self)
+
+        def parallelism_metadata(self):
+            return {
+                "parallelism": "expert_parallel",
+                "expert_parallel_size": self.expert_parallel_size,
+                "attention_placement": "replicated",
+                "attention_output_placement": "row_parallel",
+                "attention_output_parallel_size": self.expert_parallel_size,
+                "attention_output_partial_dtype": "bfloat16",
+                "execution_mode": "replicated-attention-correctness",
+                "pipeline_depth": 1,
+                "decode_mode": "eager",
+                "kv_cache_dtype": "bfloat16",
+            }
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+    monkeypatch.setattr(
+        "kairyu.engine.core.worker.DistEPLauncher",
+        _FakeEPLauncher,
+    )
+
+    loop, _cache, _scheduler = kairyu_backend_module._build_dist_ep_loop(
+        model_path=str(tmp_path),
+        expert_parallel_size=4,
+        num_pages=64,
+        page_size=16,
+        max_num_batched_tokens=32,
+        max_num_seqs=4,
+        max_model_len=8192,
+        priority_age_s=60.0,
+        tokenizer=ToyTokenizer(),
+        pipeline_depth=1,
+        decode_mode="eager",
+        kv_cache_dtype="bfloat16",
+    )
+
+    try:
+        launcher = created[0]
+        assert loop._runner is launcher.runner
+        assert loop.parallel_launcher is launcher
+        assert loop.ep_launcher is launcher
+        assert loop.tp_launcher is None
+        assert loop.parallelism_metadata == launcher.parallelism_metadata()
+        assert launcher.kwargs["pipeline_depth"] == 1
+        assert launcher.kwargs["decode_mode"] == "eager"
+        assert launcher.kwargs["kv_cache_dtype"] == "bfloat16"
+    finally:
+        loop.close()
 
 
 async def test_full_stack_openai_server_over_engine_core():
@@ -1237,23 +1436,41 @@ async def test_readiness_reports_dead_tensor_parallel_ranks_as_fatal():
     # nothing in-process can bring a dead rank back, so this is the one condition
     # that both stops traffic AND asks for a restart
     backend = KairyuBackend(runner=_SlowRunner())
-    backend._loop.tp_launcher = _DeadRankLauncher((2, 5))
+    backend._loop.parallel_launcher = _DeadRankLauncher((2, 5))
     status = backend.readiness()
     assert status.ready is False
     assert status.fatal is True
+    assert status.detail.startswith("tensor-parallel ranks not running:")
     assert "[2, 5]" in status.detail
 
 
 async def test_live_tensor_parallel_ranks_stay_ready():
     backend = KairyuBackend(runner=_SlowRunner())
-    backend._loop.tp_launcher = _DeadRankLauncher(())
+    backend._loop.parallel_launcher = _DeadRankLauncher(())
     assert backend.readiness().ready is True
 
 
 async def test_failed_tensor_parallel_transport_is_fatal_even_with_live_ranks():
     backend = KairyuBackend(runner=_SlowRunner())
-    backend._loop.tp_launcher = _DeadRankLauncher((), failure="DistBackendError")
+    backend._loop.parallel_launcher = _DeadRankLauncher(
+        (),
+        failure="DistBackendError",
+    )
     status = backend.readiness()
     assert status.ready is False
     assert status.fatal is True
     assert status.detail == "tensor-parallel transport failed: DistBackendError"
+
+
+async def test_readiness_names_expert_parallel_failures_without_calling_them_tp():
+    backend = KairyuBackend(runner=_SlowRunner())
+    backend._loop.parallel_launcher = _DeadRankLauncher((3,))
+    backend._loop.parallelism_metadata = {
+        "parallelism": "expert_parallel",
+    }
+
+    status = backend.readiness()
+
+    assert status.ready is False
+    assert status.fatal is True
+    assert status.detail == "expert-parallel ranks not running: [3]"

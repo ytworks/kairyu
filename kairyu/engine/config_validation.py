@@ -50,6 +50,7 @@ _KAIRYU_OPTIONS = frozenset(
         "priority_age_s",
         "runner",
         "tensor_parallel_size",
+        "expert_parallel_size",
         "tokenizer",
         "speculative",
         "speculative_tokens",
@@ -385,6 +386,22 @@ def _validate_kairyu(options: Mapping[str, object]) -> None:
         options.get("tensor_parallel_size", 1),
         1,
     )
+    expert_parallel_size = _require_int_at_least(
+        "kairyu",
+        "expert_parallel_size",
+        options.get("expert_parallel_size", 1),
+        1,
+    )
+    if expert_parallel_size not in {1, 2, 4}:
+        raise ValueError(
+            "kairyu backend expert_parallel_size must be one of 1, 2, or 4"
+        )
+    expert_parallel = expert_parallel_size > 1
+    if expert_parallel and tensor_parallel_size > 1:
+        raise ValueError(
+            "kairyu backend tensor parallelism and expert parallelism are "
+            "mutually exclusive"
+        )
     pd_separation = options.get("pd_separation", False)
     if not isinstance(pd_separation, bool):
         raise ValueError("kairyu backend pd_separation must be a boolean")
@@ -423,6 +440,36 @@ def _validate_kairyu(options: Mapping[str, object]) -> None:
         runner=options.get("runner"),
         pd_separation=pd_separation,
     )
+    if expert_parallel:
+        if options.get("model_path") is None:
+            raise ValueError(
+                "kairyu backend expert parallelism requires a real model_path"
+            )
+        if options.get("pipeline_depth", 1) != 1:
+            raise ValueError(
+                "kairyu backend expert parallelism requires pipeline_depth=1"
+            )
+        if options.get("decode_mode", "eager") != "eager":
+            raise ValueError(
+                "kairyu backend expert parallelism requires decode_mode='eager'"
+            )
+        if options.get("kv_cache_dtype", "auto") != "bfloat16":
+            raise ValueError(
+                "kairyu backend expert parallelism requires "
+                "kv_cache_dtype='bfloat16'"
+            )
+        if pd_separation:
+            raise ValueError(
+                "kairyu backend expert parallelism does not support P-D separation"
+            )
+        if options.get("speculative") is not None:
+            raise ValueError(
+                "kairyu backend expert parallelism does not support speculative decoding"
+            )
+        if options.get("dram_kv_tier_capacity_pages", 0) != 0:
+            raise ValueError(
+                "kairyu backend expert parallelism does not support a DRAM KV tier"
+            )
     if options.get("model_path") is None:
         try:
             from kairyu.engine.core.tp_runner import validate_tp_degree

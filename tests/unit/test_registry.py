@@ -52,6 +52,77 @@ def test_native_cuda_graph_without_model_is_rejected_before_import():
         validate_backend_options("kairyu", {"decode_mode": "cuda_graph"})
 
 
+@pytest.mark.parametrize("expert_parallel_size", [2, 4])
+def test_expert_parallel_options_pass_preflight_without_runtime_import(
+    expert_parallel_size,
+):
+    validate_backend_options(
+        "kairyu",
+        {
+            "model_path": "/models/qwen3-235b",
+            "expert_parallel_size": expert_parallel_size,
+            "kv_cache_dtype": "bfloat16",
+        },
+    )
+
+
+@pytest.mark.parametrize("expert_parallel_size", [0, 3, 8, True])
+def test_invalid_expert_parallel_size_fails_static_preflight(
+    expert_parallel_size,
+):
+    with pytest.raises(ValueError, match="expert_parallel_size"):
+        validate_backend_options(
+            "kairyu",
+            {"expert_parallel_size": expert_parallel_size},
+        )
+
+
+def test_expert_parallelism_is_mutually_exclusive_with_tensor_parallelism():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_backend_options(
+            "kairyu",
+            {
+                "model_path": "/models/qwen3-235b",
+                "tensor_parallel_size": 2,
+                "expert_parallel_size": 2,
+                "kv_cache_dtype": "bfloat16",
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"expert_parallel_size": 2},
+        {
+            "model_path": "/models/qwen3-235b",
+            "expert_parallel_size": 2,
+        },
+        {
+            "model_path": "/models/qwen3-235b",
+            "expert_parallel_size": 2,
+            "kv_cache_dtype": "bfloat16",
+            "pipeline_depth": 2,
+        },
+        {
+            "model_path": "/models/qwen3-235b",
+            "expert_parallel_size": 2,
+            "kv_cache_dtype": "bfloat16",
+            "speculative": "ngram",
+        },
+        {
+            "model_path": "/models/qwen3-235b",
+            "expert_parallel_size": 2,
+            "kv_cache_dtype": "bfloat16",
+            "decode_mode": "cuda_graph",
+        },
+    ],
+)
+def test_unsupported_expert_parallel_modes_fail_static_preflight(options):
+    with pytest.raises(ValueError, match="expert parallelism"):
+        validate_backend_options("kairyu", options)
+
+
 def test_cross_device_pd_options_pass_preflight_without_runtime_import():
     validate_backend_options(
         "kairyu",

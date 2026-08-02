@@ -506,9 +506,23 @@ class OpenAICompatBackend:
         if response.status_code != 200:
             return None
         try:
-            return response.json()
+            payload = response.json()
         except ValueError:
             return None
+        if not isinstance(payload, dict):
+            return None
+        engines = payload.get("engines")
+        if isinstance(engines, list):
+            # One replica process may serve several models. This backend routes
+            # only to ``self._model``; forwarding topology from another row
+            # would make the gateway report an unrelated TP/EP configuration.
+            payload = dict(payload)
+            payload["engines"] = [
+                item
+                for item in engines
+                if isinstance(item, dict) and item.get("model") == self._model
+            ]
+        return payload
 
     def _api_key(self) -> str:
         assert self._api_key_env is not None
