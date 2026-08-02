@@ -648,6 +648,11 @@ class PagedModelRunner:
                 scratch_page=self._graph_scratch_page,
                 device=self._device,
                 plan_fn=self._plan_graph_decode,
+                replay_plan_fn=(
+                    self._plan_graph_decode_replay
+                    if getattr(model, "supports_fast_replay_plan", False)
+                    else None
+                ),
             )
 
     def _plan_graph_decode(self, batch) -> None:
@@ -661,6 +666,16 @@ class PagedModelRunner:
         when the graph was recorded.
         """
         self._model.plan_decode_tensors(self._pool, batch.page_tables, batch.seq_lens)
+
+    def _plan_graph_decode_replay(self, batch) -> None:
+        """Use replay-only planning after stock capture initialized wrappers."""
+        self._model.plan_decode_tensors(
+            self._pool,
+            batch.page_tables,
+            batch.seq_lens,
+            replay=True,
+            host_seq_lens=batch.host_seq_lens,
+        )
 
     def _graph_decode(self, batch) -> torch.Tensor:
         """The captured region: embed -> layers -> norm -> logits, tensors only."""

@@ -34,6 +34,8 @@ class TorchAttentionBackend:
         *,
         num_qo_heads: int,
         q_dtype: torch.dtype,
+        replay: bool = False,
+        host_seq_lens: tuple[int, ...] | None = None,
     ) -> None:
         """No host phase: nothing to plan (``GraphDecodeBackend``).
 

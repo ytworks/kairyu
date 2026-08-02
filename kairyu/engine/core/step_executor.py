@@ -81,6 +81,12 @@ class DecodeBatch:
     page_tables: torch.Tensor  # [B, max_pages] int32, padded with the scratch page
     seq_lens: torch.Tensor  # [B] int32
     write_from: torch.Tensor  # [B] int64; positions below this retain cached KV
+    # Authoritative host lengths from the scheduler.  CUDA-graph replay needs
+    # these to build FlashInfer's CPU schedule without reading ``seq_lens``
+    # back from the device.  They are immutable alongside the batch: padded
+    # graph metadata is represented by a fresh view, never by mutating a stale
+    # frozen tuple captured with the static buffers.
+    host_seq_lens: tuple[int, ...] = ()
     # Optional host metadata.  It never participates in model execution; a
     # reusable builder and graph bucket use it to prove which page-table ranges
     # are unchanged without reading a CUDA tensor back to the host.
@@ -445,12 +451,14 @@ def build_decode_batch(
         page_tables=page_tables,
         seq_lens=torch.as_tensor(seq_lens, dtype=torch.int32, device=device),
         write_from=torch.as_tensor(write_from, dtype=torch.int64, device=device),
+        host_seq_lens=tuple(int(seq_len) for seq_len in seq_lens),
         page_table_rows=page_table_rows,
     )
 
 
 DecodeFn = Callable[[DecodeBatch], torch.Tensor]  # -> logits/hidden [B, ...]
 PlanFn = Callable[[DecodeBatch], None]  # host phase, OUTSIDE the captured region
+ReplayPlanFn = Callable[[DecodeBatch], None]  # optimized host phase for replay only
 
 
 class EagerStepExecutor:
@@ -546,6 +554,7 @@ class GraphStepExecutor:
         max_pages: int = 1,
         device: str | torch.device = "cpu",
         plan_fn: PlanFn | None = None,
+        replay_plan_fn: ReplayPlanFn | None = None,
     ) -> None:
         """``scratch_page`` is REQUIRED (m17 A5, review [P1]).
 
@@ -567,6 +576,11 @@ class GraphStepExecutor:
         # Optional, so a decode_fn whose backends have no host phase (every
         # FakeGraphBackend test) constructs exactly as before.
         self._plan_fn = plan_fn
+        # Kept separate from ``plan_fn`` deliberately.  Capture and eager
+        # fallback must retain the backend's stock planning path; only a graph
+        # whose wrapper was initialized by that stock plan may use a replay
+        # specialization such as FlashInfer's ``fast_decode_plan``.
+        self._replay_plan_fn = replay_plan_fn
         self._backend = graph_backend
         self._buckets = decode_buckets(max_batch)
         self._max_pages = max_pages
@@ -809,7 +823,7 @@ class GraphStepExecutor:
         # lengths the kernels are about to read, and _copy_in just rewrote both
         # (including the padding rows). Planning before the copy would schedule
         # the PREVIOUS step. This ordering is the whole point of the hook.
-        self._plan(static)
+        self._plan_replay(static, batch)
         out = replayable.replay()
         self._graph_executions += 1
         self._page_table_graph_executions += 1
@@ -846,6 +860,33 @@ class GraphStepExecutor:
         if self._plan_fn is not None:
             self._plan_fn(batch)
 
+    def _plan_replay(self, static: DecodeBatch, batch: DecodeBatch) -> None:
+        """Plan an initialized graph replay without stale host metadata.
+
+        ``static`` owns the fixed device addresses captured by the graph, but
+        its frozen host fields describe the all-padding capture seed.  Build a
+        short-lived immutable view that shares those device tensors and pads
+        the current scheduler lengths with one exactly as ``_copy_in`` did.
+        Batches constructed outside :func:`build_decode_batch` have no
+        authoritative host lengths; correctness then falls back to stock
+        planning instead of guessing or synchronizing a CUDA tensor.
+        """
+        if self._replay_plan_fn is None or len(batch.host_seq_lens) != batch.batch_size:
+            self._plan(static)
+            return
+        host_seq_lens = batch.host_seq_lens + (1,) * (
+            static.batch_size - batch.batch_size
+        )
+        replay_batch = DecodeBatch(
+            token_ids=static.token_ids,
+            positions=static.positions,
+            page_tables=static.page_tables,
+            seq_lens=static.seq_lens,
+            write_from=static.write_from,
+            host_seq_lens=host_seq_lens,
+        )
+        self._replay_plan_fn(replay_batch)
+
     def _capture(self, bucket: int) -> None:
         static = DecodeBatch(
             token_ids=torch.zeros(bucket, dtype=torch.int64, device=self._device),
@@ -858,6 +899,7 @@ class GraphStepExecutor:
             ),
             seq_lens=torch.ones(bucket, dtype=torch.int32, device=self._device),
             write_from=torch.zeros(bucket, dtype=torch.int64, device=self._device),
+            host_seq_lens=(1,) * bucket,
         )
         # Plan BEFORE the backend captures: the warmup passes and the capture
         # itself run decode_fn, which reaches attend_decode, which under capture

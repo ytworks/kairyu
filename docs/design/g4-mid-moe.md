@@ -3,7 +3,8 @@
 Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-03; the M-A1 best
 implementation is retained with its formal FAIL, M-A2 production integration
 and formal hardware evidence are complete, and M-A3 retains its first formal
-performance FAIL while an optimized production candidate awaits remeasurement).
+performance FAIL while an optimized production candidate has passed a
+same-trace live diagnostic and awaits a clean formal matrix).
 Milestone: G4.1 M-A1/M-A2/M-A3.
 Depends on: M12 (Qwen model), M13 (paged attention), M14 (native NVFP4
 projection kernels), M15 (Qwen3-MoE math), M16 (NCCL communicator and EP
@@ -424,18 +425,31 @@ Adapters that cannot prove a read-only prefill state fail safe at depth 2.
 
 Pure-greedy attention-DP sampling also has one fewer host-control transaction.
 The fixed NCCL token packet begins with one status slot per gathered rank,
-followed by the existing owner-token slots. Every rank validates the same
-status matrix; one execution or packet-encoding failure aborts the step on all
-ranks. Status columns are copied asynchronously to pinned host memory on the
-same copy stream/event as deferred public tokens rather than being converted
-on the current CUDA stream. Driver and passive ranks retain the preceding
-sidecar and, after the next common control broadcast, all resolve exactly one
-FIFO entry without branching on rank-local event readiness; shutdown drains
-the remaining tail. The driver and passive ranks therefore skip the final
-Gloo reply gather only on this fast path without introducing either an eager
-CUDA-to-host synchronization or divergent failure participation. Logprobs,
-grammar, and every other non-fast sampling path retain the former all-rank
-Gloo reply and validation.
+followed by the existing owner-token slots, and every rank enqueues that fixed
+collective even after local execution or packet-encoding failure. Immediately
+after enqueue, every rank unconditionally participates in one fixed-size CPU
+Gloo reduction of its host-known failure bit while the CUDA graph and NCCL
+packet remain in flight. A zero reduction returns without resolving a CUDA
+event or reading packet status. A nonzero reduction sends every rank through
+the existing bounded object gather so the same rank-local diagnostic is raised
+symmetrically; malformed reductions fail closed. Public owner tokens retain
+their deferred D2H path. The driver and passive ranks therefore skip the final
+Gloo reply gather on success without either a CUDA-to-host synchronization or
+divergent failure participation. Logprobs, grammar, and every other non-fast
+sampling path retain the former all-rank Gloo reply and validation.
+
+Steady CUDA-graph replay also avoids FlashInfer's stock planning drain.
+Capture and eager fallback initialize each graph-shape wrapper with the public
+stock `plan()`. Replay receives authoritative scheduler-owned sequence lengths
+on the CPU, uses one Triton kernel to pack the current rectangular device page
+table into the wrapper's persistent indptr/index/last-page buffers, and calls
+FlashInfer 0.6.14 `fast_decode_plan` with CPU-only schedule inputs. This removes
+the stock boolean-index `nonzero` and device-to-host schedule copies without
+moving planning into the captured region. Missing APIs, compiler errors,
+signature drift, or incompatible wrapper buffers are optimization misses:
+stock `plan()` rewrites every persistent buffer and remains the correctness
+fallback. Models that do not explicitly declare the replay-plan extension
+retain the original stock planning contract.
 
 The comparison uses the same four physical GPUs, immutable checkpoint,
 BF16 KV, four request owners, EP4 ownership, FCFS policy, prompt/completion
@@ -494,10 +508,14 @@ generations, 4,630 raw rows, and every non-performance binding check. Its four
 throughput ratios were 0.741839/0.798127/0.829296/0.769510 and its exact median
 was 0.783818; the exact median TTFT-p99 ratio was 1.352633. Both performance
 checks therefore failed and retained verification/raw replay correctly reject
-`--assert-gate`. The optimized horizon/status-packet candidate described above
-is CPU-validated but not yet GPU-measured. The failed verdict remains
-authoritative until a new complete clean-commit matrix independently passes;
-no diagnostic or mixed-commit result can close M-A3.
+`--assert-gate`. A pre-commit live diagnostic of the optimized replay path then
+completed the same 128-request × 128-token trace with 128/128 successes at
+571.542867 completion tok/s/GPU and 1.025656-second TTFT p99. Its seven graph
+captures stayed fixed, replay count increased 144 to 272, and eager fallback
+stayed zero. This exceeds the retained SGLang generations' 449.965–481.865
+tok/s/GPU, but it is diagnostic evidence only. The failed formal verdict
+remains authoritative until a new complete clean-commit matrix independently
+passes; no diagnostic or mixed-commit result can close M-A3.
 
 ## 5. Verification
 

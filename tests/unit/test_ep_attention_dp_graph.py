@@ -1,9 +1,12 @@
 """Coordinated attention-DP CUDA graph protocol coverage (#168)."""
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 import torch
 
 from kairyu.engine.core import worker as worker_module
+from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.step_executor import (
@@ -199,6 +202,123 @@ def test_global_page_overflow_decision_keeps_every_rank_eager() -> None:
             world_size=4,
         )
         assert runner.seen == [(7, 3)]
+
+
+@pytest.mark.parametrize(
+    (
+        "decision",
+        "cuda_graph_decode",
+        "expected_gathers",
+        "expected_reductions",
+    ),
+    [
+        (GraphDecodeDecision("capture", 8, 4), True, 1, 0),
+        (GraphDecodeDecision("eager_fallback", 7, 1), False, 1, 0),
+        (GraphDecodeDecision("replay", 8, 0), True, 0, 1),
+    ],
+    ids=["capture", "eager", "certified-replay"],
+)
+def test_graph_preflight_skips_only_certified_replay(
+    decision: GraphDecodeDecision,
+    cuda_graph_decode: bool,
+    expected_gathers: int,
+    expected_reductions: int,
+) -> None:
+    world_size = 4
+    control = FakeCommunicator.create_group(world_size)
+    payload, states = _payload(
+        decision,
+        cuda_graph_decode=cuda_graph_decode,
+    )
+    runners = tuple(_DecisionRunner(decision) for _ in range(world_size))
+
+    with ThreadPoolExecutor(max_workers=world_size) as pool:
+        futures = tuple(
+            pool.submit(
+                worker_module._ep_attention_dp_graph_preflight,
+                control[rank],
+                runners[rank],
+                payload,
+                states,
+            )
+            for rank in range(world_size)
+        )
+        assert [future.result(timeout=2) for future in futures] == [None] * world_size
+
+    assert [communicator._gather_round for communicator in control] == [
+        expected_gathers
+    ] * world_size
+    assert [communicator._reduce_round for communicator in control] == [
+        expected_reductions
+    ] * world_size
+    assert [runner.seen for runner in runners] == [[(7, 3)]] * world_size
+
+
+def test_capture_preflight_still_reports_one_rank_graph_state_skew_to_all() -> None:
+    world_size = 4
+    control = FakeCommunicator.create_group(world_size, timeout_s=1)
+    capture = GraphDecodeDecision("capture", 8, 4)
+    payload, states = _payload(capture)
+    runners = tuple(
+        _DecisionRunner(
+            GraphDecodeDecision("replay", 8, 0) if rank == 2 else capture
+        )
+        for rank in range(world_size)
+    )
+
+    with ThreadPoolExecutor(max_workers=world_size) as pool:
+        futures = tuple(
+            pool.submit(
+                worker_module._ep_attention_dp_graph_preflight,
+                control[rank],
+                runners[rank],
+                payload,
+                states,
+            )
+            for rank in range(world_size)
+        )
+        for future in futures:
+            with pytest.raises(
+                RuntimeError,
+                match="rank 2: RuntimeError: attention-DP graph decision differs",
+            ):
+                future.result(timeout=2)
+
+    assert [communicator._gather_round for communicator in control] == [1] * world_size
+
+
+def test_replay_rank_skew_reduces_status_before_all_rank_diagnostics() -> None:
+    world_size = 4
+    control = FakeCommunicator.create_group(world_size, timeout_s=1)
+    replay = GraphDecodeDecision("replay", 8, 0)
+    payload, states = _payload(replay)
+    runners = tuple(
+        _DecisionRunner(
+            GraphDecodeDecision("capture", 8, 4) if rank == 2 else replay
+        )
+        for rank in range(world_size)
+    )
+
+    with ThreadPoolExecutor(max_workers=world_size) as pool:
+        futures = tuple(
+            pool.submit(
+                worker_module._ep_attention_dp_graph_preflight,
+                control[rank],
+                runners[rank],
+                payload,
+                states,
+            )
+            for rank in range(world_size)
+        )
+        for future in futures:
+            with pytest.raises(
+                RuntimeError,
+                match="rank 2: RuntimeError: attention-DP graph decision differs",
+            ):
+                future.result(timeout=2)
+
+    assert [communicator._reduce_round for communicator in control] == [1] * world_size
+    assert [communicator._gather_round for communicator in control] == [1] * world_size
 
 
 def _batch(size: int = 2) -> DecodeBatch:

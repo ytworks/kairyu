@@ -1870,11 +1870,16 @@ PY
   operation arrives, and returns to depth 5 only for pure decode. Its
   pure-greedy attention-DP token packet also carries one explicit status slot
   per rank and therefore replaces the final Gloo reply gather; non-fast
-  sampling retains that gather. Status columns transfer asynchronously on the
-  deferred-output copy stream and every rank resolves the preceding sidecar
-  after the next common control broadcast; rank-local event readiness must
-  never decide participation. These are binding implementation properties of
-  the candidate under test, not benchmark-side delays or subtracted overhead.
+  sampling retains that gather. After every rank enqueues the fixed packet,
+  every rank unconditionally reduces one host-known failure scalar on the CPU
+  Gloo group while CUDA work remains in flight. Success must not resolve a CUDA
+  event or read packet status; failure alone enters an all-rank bounded object
+  diagnostic gather. FlashInfer graph replay receives scheduler-owned CPU
+  lengths, packs persistent device page metadata with one Triton kernel, and
+  uses `fast_decode_plan`; missing or incompatible fast support must fall back
+  to stock planning after rewriting all persistent buffers. These are binding
+  implementation properties of the candidate under test, not benchmark-side
+  delays or subtracted overhead.
 
   First materialize one detached clean Kairyu source. Derive a metadata-only
   image from the retained M-A2 GPU runtime payload, set the exact source

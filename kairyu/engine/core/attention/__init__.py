@@ -119,6 +119,8 @@ class GraphDecodeBackend(Protocol):
         *,
         num_qo_heads: int,
         q_dtype: torch.dtype,
+        replay: bool = False,
+        host_seq_lens: tuple[int, ...] | None = None,
     ) -> None:
         """Host phase for ONE decode step, over the buffers about to be read."""
         ...

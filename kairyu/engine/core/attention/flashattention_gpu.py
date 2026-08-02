@@ -527,11 +527,29 @@ class FlashAttentionBackend:
         }
         self._decode_backend = decode_backend
         self.supports_graph_capture = bool(getattr(decode_backend, "supports_graph_capture", False))
+        self.supports_fast_replay_plan = bool(
+            getattr(decode_backend, "supports_fast_replay_plan", False)
+        )
 
     @property
     def device(self) -> torch.device:
         """The explicit device selected for both prefill and decode."""
         return self._device
+
+    def decode_execution_stats(self, *, reset: bool = False) -> dict[str, object]:
+        """Expose delegated FlashInfer fast/fallback replay state."""
+
+        getter = getattr(self._decode_backend, "decode_execution_stats", None)
+        if not callable(getter):
+            return {
+                "type": type(self._decode_backend).__name__,
+                "plans": 0,
+                "runs": 0,
+                "fast_replay_plans": 0,
+                "stock_replay_fallbacks": 0,
+                "replay_fallback_reason": "decode backend exposes no execution stats",
+            }
+        return getter(reset=reset)
 
     def _supports_head_dim(self, head_dim: int) -> bool:
         if head_dim < 8 or head_dim % 8:
@@ -909,13 +927,17 @@ class FlashAttentionBackend:
         *,
         num_qo_heads: int,
         q_dtype: torch.dtype,
+        replay: bool = False,
+        host_seq_lens: tuple[int, ...] | None = None,
     ) -> None:
+        kwargs = {
+            "num_qo_heads": num_qo_heads,
+            "q_dtype": q_dtype,
+        }
+        if replay and self.supports_fast_replay_plan:
+            kwargs.update(replay=True, host_seq_lens=host_seq_lens)
         return self._decode_backend.plan_decode(
-            kv_pool,
-            page_tables,
-            seq_lens,
-            num_qo_heads=num_qo_heads,
-            q_dtype=q_dtype,
+            kv_pool, page_tables, seq_lens, **kwargs
         )
 
     def attend_decode(

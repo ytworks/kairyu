@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import wraps
@@ -2957,22 +2956,11 @@ class DistTPModelRunner:
             if parallelism_prefix == "EP"
             else None
         )
-        self._post_control_boundary = None
 
     def _broadcast_control(self, payload: object) -> object:
-        """Broadcast one payload, then settle any rank-symmetric sidecar.
+        """Broadcast one rank-0 control payload."""
 
-        Request-owned attention-DP installs a callback that resolves the prior
-        step's asynchronously copied status only after every passive rank has
-        crossed this same broadcast boundary. Other parallel modes leave the
-        hook unset and retain their exact former protocol.
-        """
-
-        delivered = self._control_comm.broadcast(payload, src=0)
-        callback = self._post_control_boundary
-        if callable(callback):
-            callback(delivered)
-        return delivered
+        return self._control_comm.broadcast(payload, src=0)
 
     def _snapshot_pending_releases(self) -> tuple[tuple[str, int], ...]:
         with self._pending_release_lock:
@@ -3699,6 +3687,71 @@ def _ep_attention_dp_validate_graph_replies(
         )
 
 
+def _ep_attention_dp_graph_preflight(
+    control_comm,
+    local_runner,
+    payload: _EPAttentionDPStep,
+    states: Mapping[str, RequestSnapshot],
+) -> None:
+    """Agree stateful graph transitions; trust an already-certified replay.
+
+    Capture remains an all-rank object preflight because it mutates the local
+    graph cache.  A successful capture is then certified by the existing
+    all-rank execution status before any later payload is processed.  Captured
+    buckets are grow-only while serving, and request-owned attention-DP rejects
+    live invalidation.  Steady replay therefore needs only a fixed-size CPU
+    status reduction; the diagnostic object gather runs only after every rank
+    has learned that at least one validation failed.  This preserves symmetric
+    failure without adding a CUDA-to-host synchronization.
+    """
+
+    rank = control_comm.rank
+    try:
+        _ep_attention_dp_validate_graph_plan(
+            local_runner,
+            payload,
+            states,
+            world_size=control_comm.world_size,
+        )
+        validation = _EPAttentionDPGraphValidationReply(rank=rank)
+    except BaseException as error:
+        validation = _EPAttentionDPGraphValidationReply(
+            rank=rank,
+            error=(f"{type(error).__name__}: {error}")[:2048],
+        )
+
+    plan = payload.graph_plan
+    certified_replay = (
+        isinstance(plan, _EPAttentionDPGraphPlan)
+        and plan.cuda_graph_decode is True
+        and isinstance(plan.decision, GraphDecodeDecision)
+        and plan.decision.kind == "replay"
+    )
+    if certified_replay:
+        failure_counts = control_comm.all_reduce(
+            (float(validation.error is not None),)
+        )
+        valid_counts = tuple(
+            float(count) for count in range(control_comm.world_size + 1)
+        )
+        if (
+            not isinstance(failure_counts, tuple)
+            or len(failure_counts) != 1
+            or failure_counts[0] not in valid_counts
+        ):
+            raise RuntimeError(
+                "attention-DP certified graph replay status reduction is malformed"
+            )
+        if failure_counts[0] == 0.0:
+            return
+
+    validation_replies = control_comm.all_gather(validation)
+    _ep_attention_dp_validate_graph_replies(
+        validation_replies,
+        world_size=control_comm.world_size,
+    )
+
+
 def _ep_attention_dp_plan(
     payload: _EPAttentionDPStep,
     states: dict[str, RequestSnapshot],
@@ -3843,23 +3896,11 @@ def _ep_attention_dp_local_reply(
     failure: BaseException | None = None
     sampled = None
     try:
-        try:
-            _ep_attention_dp_validate_graph_plan(
-                local_runner,
-                payload,
-                states,
-                world_size=control_comm.world_size,
-            )
-            validation = _EPAttentionDPGraphValidationReply(rank=rank)
-        except BaseException as error:
-            validation = _EPAttentionDPGraphValidationReply(
-                rank=rank,
-                error=(f"{type(error).__name__}: {error}")[:2048],
-            )
-        validation_replies = control_comm.all_gather(validation)
-        _ep_attention_dp_validate_graph_replies(
-            validation_replies,
-            world_size=control_comm.world_size,
+        _ep_attention_dp_graph_preflight(
+            control_comm,
+            local_runner,
+            payload,
+            states,
         )
 
         prefill_scratch_pages = getattr(
@@ -3983,14 +4024,10 @@ def _ep_attention_dp_local_reply(
             except BaseException as error:
                 if failure is None:
                     failure = error
-                packet = _ep_attention_dp_local_token_packet(
+                packet = _ep_attention_dp_failed_token_packet(
                     model_comm,
                     local_runner,
-                    payload,
-                    states,
-                    None,
-                    dummy_ids=dummy_ids,
-                    failed=True,
+                    chunk_count=len(payload.delta.chunks),
                 )
             gathered = model_comm.tensor_all_gather(packet)
             reply = _EPAttentionDPReply(
@@ -3999,7 +4036,10 @@ def _ep_attention_dp_local_reply(
                 error=(
                     None
                     if failure is None
-                    else (f"{type(failure).__name__}: {failure}")[:2048]
+                    else (
+                        "local execution or token-packet encoding failed: "
+                        f"{type(failure).__name__}: {failure}"
+                    )[:2048]
                 ),
             )
             return _EPAttentionDPLocalResult(reply, gathered)
@@ -4075,6 +4115,33 @@ def _ep_attention_dp_raw_records(sampled):
     return raw_records() if callable(raw_records) else sampled
 
 
+def _ep_attention_dp_failed_token_packet(
+    model_comm,
+    local_runner,
+    *,
+    chunk_count: int,
+):
+    """Build the minimal fixed packet after model or encoder failure."""
+
+    import torch
+
+    from kairyu.engine.core.comm import FakeCommunicator
+
+    packet_device = (
+        torch.device("cpu")
+        if isinstance(model_comm, FakeCommunicator)
+        else torch.device(local_runner._device)
+    )
+    packet = torch.full(
+        (chunk_count + 1,),
+        -1,
+        dtype=torch.int64,
+        device=packet_device,
+    )
+    packet[0].fill_(_EP_ATTENTION_DP_PACKET_FAILED)
+    return packet
+
+
 def _ep_attention_dp_local_token_packet(
     model_comm,
     local_runner,
@@ -4087,25 +4154,23 @@ def _ep_attention_dp_local_token_packet(
 ):
     """Encode rank status plus owner-local greedy ids in one device packet."""
 
+    chunks = payload.delta.chunks
+    if failed:
+        return _ep_attention_dp_failed_token_packet(
+            model_comm,
+            local_runner,
+            chunk_count=len(chunks),
+        )
+
     import torch
 
     from kairyu.engine.core.comm import FakeCommunicator
 
-    chunks = payload.delta.chunks
     packet_device = (
         torch.device("cpu")
         if isinstance(model_comm, FakeCommunicator)
         else torch.device(local_runner._device)
     )
-    if failed:
-        packet = torch.full(
-            (len(chunks) + 1,),
-            -1,
-            dtype=torch.int64,
-            device=packet_device,
-        )
-        packet[0] = _EP_ATTENTION_DP_PACKET_FAILED
-        return packet
     owner_map = _ep_attention_dp_owner_map(
         payload.owners,
         chunks,
@@ -4150,7 +4215,7 @@ def _ep_attention_dp_local_token_packet(
         dtype=torch.int64,
         device=packet_device,
     )
-    packet[0] = _EP_ATTENTION_DP_PACKET_OK
+    packet[0].fill_(_EP_ATTENTION_DP_PACKET_OK)
     for index, chunk in enumerate(chunks):
         if (
             owner_map[chunk.request_id] != model_comm.rank
@@ -4193,7 +4258,7 @@ def _ep_attention_dp_packet_views(
     chunk_count: int,
     world_size: int,
 ):
-    """Return device-resident rank-major token and status packet views."""
+    """Return the device-resident rank-major token packet view."""
 
     import torch
 
@@ -4207,48 +4272,89 @@ def _ep_attention_dp_packet_views(
             "attention-DP gathered token packet has malformed shape or dtype"
         )
     matrix = gathered.reshape(world_size, packet_width)
-    return matrix[:, 1:], matrix[:, 0].contiguous()
+    return matrix[:, 1:]
 
 
-def _ep_attention_dp_validate_statuses(statuses, *, world_size: int) -> None:
-    """Validate one asynchronously copied all-rank status vector on the host."""
+def _ep_attention_dp_validate_fast_status_replies(
+    replies: object,
+    *,
+    world_size: int,
+) -> None:
+    """Raise one deterministic all-rank diagnostic for a fast-step failure."""
 
-    import torch
+    if not isinstance(replies, (tuple, list)) or len(replies) != world_size:
+        raise RuntimeError(
+            "attention-DP fast status gathered malformed rank count: "
+            f"expected {world_size}, got "
+            f"{len(replies) if isinstance(replies, (tuple, list)) else type(replies).__name__}"
+        )
+    by_rank: dict[int, _EPAttentionDPReply] = {}
+    failures: list[str] = []
+    for reply in replies:
+        if (
+            not isinstance(reply, _EPAttentionDPReply)
+            or type(reply.rank) is not int
+            or not 0 <= reply.rank < world_size
+            or reply.rank in by_rank
+        ):
+            failures.append(f"malformed reply: {reply!r}")
+            continue
+        by_rank[reply.rank] = reply
+        if reply.error is not None:
+            failures.append(f"rank {reply.rank}: {reply.error}")
+        elif reply.sampled != {}:
+            failures.append(
+                f"rank {reply.rank}: fast status sampled payload is malformed"
+            )
+    missing_ranks = sorted(set(range(world_size)) - set(by_rank))
+    if missing_ranks:
+        failures.append(f"missing ranks={missing_ranks}")
+    if not failures:
+        failures.append(
+            "fixed failure reduction disagrees with all-rank diagnostics"
+        )
+    raise RuntimeError("attention-DP fast rank failures: " + "; ".join(failures))
 
+
+def _ep_attention_dp_fast_status(
+    control_comm,
+    reply: _EPAttentionDPReply,
+) -> None:
+    """Agree fast-step host failures without waiting for the CUDA packet.
+
+    The caller invokes this only after every rank has enqueued the fixed token
+    packet all-gather.  The one-scalar gloo reduction is unconditional and can
+    overlap the already-enqueued CUDA work.  Python objects cross the control
+    group only on failure, when they retain the bounded rank-local diagnostic.
+    """
+
+    local_failed = (
+        not isinstance(reply, _EPAttentionDPReply)
+        or type(reply.rank) is not int
+        or reply.rank != control_comm.rank
+        or (reply.error is None and reply.sampled != {})
+        or (reply.error is not None and not isinstance(reply.error, str))
+    )
+    if isinstance(reply, _EPAttentionDPReply) and reply.error is not None:
+        local_failed = True
+    failure_counts = control_comm.all_reduce((float(local_failed),))
+    valid_counts = tuple(float(count) for count in range(control_comm.world_size + 1))
     if (
-        not isinstance(statuses, torch.Tensor)
-        or statuses.device.type != "cpu"
-        or statuses.dtype is not torch.int64
-        or tuple(statuses.shape) != (world_size,)
+        not isinstance(failure_counts, tuple)
+        or len(failure_counts) != 1
+        or type(failure_counts[0]) is not float
+        or failure_counts[0] not in valid_counts
     ):
         raise RuntimeError(
-            "attention-DP copied status sidecar has malformed shape or dtype"
+            "attention-DP fast status reduction is malformed"
         )
-    values = tuple(int(status) for status in statuses.tolist())
-    failures: list[str] = []
-    for rank, status in enumerate(values):
-        if status == _EP_ATTENTION_DP_PACKET_OK:
-            continue
-        if status == _EP_ATTENTION_DP_PACKET_FAILED:
-            failures.append(
-                f"rank {rank}: local execution or token-packet encoding failed"
-            )
-        else:
-            failures.append(f"rank {rank}: malformed status {status}")
-    if failures:
-        raise RuntimeError(
-            "attention-DP device-packet rank failures: " + "; ".join(failures)
-        )
-
-
-def _ep_attention_dp_status_sidecars(statuses, *, world_size: int):
-    def validate(host_statuses) -> None:
-        _ep_attention_dp_validate_statuses(
-            host_statuses,
-            world_size=world_size,
-        )
-
-    return ((statuses, validate),)
+    if failure_counts[0] == 0.0:
+        return
+    replies = control_comm.all_gather(reply)
+    _ep_attention_dp_validate_fast_status_replies(
+        replies,
+        world_size=control_comm.world_size,
+    )
 
 
 def _ep_attention_dp_deferred_packet_output(
@@ -4268,7 +4374,7 @@ def _ep_attention_dp_deferred_packet_output(
     )
     from kairyu.engine.core.sampler import DeviceSample
 
-    matrix, statuses = _ep_attention_dp_packet_views(
+    matrix = _ep_attention_dp_packet_views(
         gathered,
         chunk_count=len(chunks),
         world_size=world_size,
@@ -4311,50 +4417,7 @@ def _ep_attention_dp_deferred_packet_output(
     return _DeferredStepOutput(
         records,
         getattr(local_runner, "_output_copy_stream", None),
-        device_sidecars=_ep_attention_dp_status_sidecars(
-            statuses,
-            world_size=world_size,
-        ),
     )
-
-
-def _ep_attention_dp_deferred_status_output(
-    gathered,
-    *,
-    chunk_count: int,
-    world_size: int,
-    local_runner,
-):
-    """Retain a passive rank's status sidecar until the next control boundary."""
-
-    from kairyu.engine.core.model_runner import _DeferredStepOutput
-
-    _tokens, statuses = _ep_attention_dp_packet_views(
-        gathered,
-        chunk_count=chunk_count,
-        world_size=world_size,
-    )
-    return _DeferredStepOutput(
-        {},
-        getattr(local_runner, "_output_copy_stream", None),
-        device_sidecars=_ep_attention_dp_status_sidecars(
-            statuses,
-            world_size=world_size,
-        ),
-    )
-
-
-def _resolve_attention_dp_status_boundary(pending, *, drain_all: bool) -> None:
-    """Resolve the same FIFO status prefix on every rank after a broadcast.
-
-    Readiness must never choose whether a rank participates: CUDA copy events
-    can become ready at different host-observation times. Normal boundaries
-    settle exactly the preceding step; shutdown settles the entire tail.
-    """
-
-    count = len(pending) if drain_all else min(1, len(pending))
-    for _ in range(count):
-        pending.popleft().resolve_sidecars()
 
 
 def _validate_ep_attention_dp_replies(
@@ -4495,11 +4558,6 @@ class DistEPModelRunner:
         self._owner_assignment_sequence = 0
         self._owner_assignment_log: list[dict[str, object]] = []
         self._owner_assignment_dropped = 0
-        self._pending_attention_dp_status = deque()
-        if attention_dp:
-            self._delegate._post_control_boundary = (
-                self._resolve_pending_attention_dp_status
-            )
         self.expert_parallel_size = expert_parallel_size
         self.parallelism = "expert_parallel"
         self.execution_mode = (
@@ -4520,14 +4578,6 @@ class DistEPModelRunner:
         self.pipeline_depth = pipeline_depth
         self.decode_mode = decode_mode
 
-    def _resolve_pending_attention_dp_status(self, payload: object) -> None:
-        """Resolve the rank-symmetric prior step; shutdown drains the tail."""
-
-        _resolve_attention_dp_status_boundary(
-            self._pending_attention_dp_status,
-            drain_all=isinstance(payload, _ShutdownRequest),
-        )
-
     def __getattr__(self, name: str):
         """Delegate the proven SPMD control protocol without becoming a TP type."""
 
@@ -4543,6 +4593,18 @@ class DistEPModelRunner:
                 "request-owned attention-DP cannot disable batched prefill"
             )
         self._delegate.set_batched_prefill_enabled(enabled)
+
+    def invalidate_graphs(self) -> None:
+        """Prevent one rank from dropping a graph while peers keep replaying."""
+
+        delegate = object.__getattribute__(self, "_delegate")
+        with delegate._protocol_lock:
+            if self._attention_dp and not delegate._shutdown_started:
+                raise RuntimeError(
+                    "request-owned attention-DP cannot invalidate CUDA graphs "
+                    "while serving; shut down every rank first"
+                )
+            delegate.invalidate_graphs()
 
     def parallelism_metadata(self) -> dict[str, object]:
         """Unambiguous topology metadata for gates and serving surfaces."""
@@ -4836,6 +4898,10 @@ class DistEPModelRunner:
                     view,
                 )
                 if fast_path:
+                    _ep_attention_dp_fast_status(
+                        delegate._control_comm,
+                        local.reply,
+                    )
                     sampled = _ep_attention_dp_deferred_packet_output(
                         local.gathered_token_packet,
                         chunks=chunks,
@@ -4844,7 +4910,6 @@ class DistEPModelRunner:
                         world_size=self.expert_parallel_size,
                         local_runner=delegate._local,
                     )
-                    self._pending_attention_dp_status.append(sampled)
                 else:
                     gathered = delegate._control_comm.all_gather(local.reply)
                     sampled = _validate_ep_attention_dp_replies(
@@ -5085,16 +5150,8 @@ def worker_step_loop(
         if parallelism_prefix == "EP"
         else None
     )
-    pending_attention_dp_status = deque()
     while True:
         payload = control_comm.broadcast(_SHUTDOWN, src=0)
-        drain_statuses = isinstance(payload, _ShutdownRequest) or (
-            payload is _SHUTDOWN or payload is None
-        )
-        _resolve_attention_dp_status_boundary(
-            pending_attention_dp_status,
-            drain_all=drain_statuses,
-        )
         if isinstance(payload, _EPAttentionDPStep):
             _release_runner_requests(
                 local_runner,
@@ -5113,13 +5170,9 @@ def worker_step_loop(
                 view,
             )
             if fast_path:
-                pending_attention_dp_status.append(
-                    _ep_attention_dp_deferred_status_output(
-                        local.gathered_token_packet,
-                        chunk_count=len(payload.delta.chunks),
-                        world_size=control_comm.world_size,
-                        local_runner=local_runner,
-                    )
+                _ep_attention_dp_fast_status(
+                    control_comm,
+                    local.reply,
                 )
             else:
                 gathered = control_comm.all_gather(local.reply)

@@ -1,6 +1,5 @@
 """Request-owned attention-DP worker protocol coverage for G4 M-A3 (#168)."""
 
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from types import MethodType, SimpleNamespace
 
@@ -23,6 +22,7 @@ class _AttentionDPRunner:
         self.attention_dp_scratch_pages = (64, 65)
         self.executions: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.released: list[str] = []
+        self.graph_invalidations = 0
 
     def execute(self, chunks, states):
         self.executions.append(
@@ -50,6 +50,9 @@ class _AttentionDPRunner:
     def release(self, request_id: str) -> None:
         self.released.append(request_id)
 
+    def invalidate_graphs(self) -> None:
+        self.graph_invalidations += 1
+
 
 class _MalformedPacketRunner(_AttentionDPRunner):
     def execute(self, chunks, states):
@@ -60,18 +63,10 @@ class _MalformedPacketRunner(_AttentionDPRunner):
         return sampled
 
 
-class _DeferredStatusProbe:
-    def __init__(self, ready: bool) -> None:
-        self._ready = ready
-        self.ready_calls = 0
-        self.resolve_calls = 0
-
-    def ready(self) -> bool:
-        self.ready_calls += 1
-        return self._ready
-
-    def resolve_sidecars(self) -> None:
-        self.resolve_calls += 1
+class _ExecutionFailureRunner(_AttentionDPRunner):
+    def execute(self, chunks, states):
+        super().execute(chunks, states)
+        raise RuntimeError("injected owner-local execution failure")
 
 
 def _snapshot(
@@ -98,54 +93,32 @@ def _snapshot(
     )
 
 
-def test_status_boundary_never_branches_on_rank_local_event_readiness() -> None:
-    probes = tuple(
-        _DeferredStatusProbe(ready)
-        for ready in (True, False, True, False)
+@pytest.mark.parametrize(
+    "reduced",
+    (
+        [0.0],
+        (0,),
+        (float("nan"),),
+        (-1.0,),
+        (2.0,),
+        (0.0, 0.0),
+    ),
+)
+def test_fast_status_reduction_fails_closed_on_malformed_result(reduced) -> None:
+    communicator = SimpleNamespace(
+        rank=0,
+        world_size=1,
+        all_reduce=lambda _values: reduced,
     )
-    queues = tuple(deque((probe,)) for probe in probes)
 
-    for pending in queues:
-        worker_module._resolve_attention_dp_status_boundary(
-            pending,
-            drain_all=False,
+    with pytest.raises(
+        RuntimeError,
+        match="fast status reduction is malformed",
+    ):
+        worker_module._ep_attention_dp_fast_status(
+            communicator,
+            worker_module._EPAttentionDPReply(rank=0, sampled={}),
         )
-
-    assert all(not pending for pending in queues)
-    assert [probe.resolve_calls for probe in probes] == [1, 1, 1, 1]
-    assert [probe.ready_calls for probe in probes] == [0, 0, 0, 0]
-
-    shutdown_tail = deque(
-        (_DeferredStatusProbe(False), _DeferredStatusProbe(True))
-    )
-    worker_module._resolve_attention_dp_status_boundary(
-        shutdown_tail,
-        drain_all=True,
-    )
-    assert not shutdown_tail
-
-
-def test_public_resolution_then_control_boundary_is_idempotent() -> None:
-    import torch
-
-    from kairyu.engine.core.model_runner import _DeferredStepOutput
-
-    output = _DeferredStepOutput(
-        {"request": (SampledToken(7),)},
-        device_sidecars=worker_module._ep_attention_dp_status_sidecars(
-            torch.zeros(4, dtype=torch.int64),
-            world_size=4,
-        ),
-    )
-
-    assert output["request"] == (SampledToken(7),)
-    pending = deque((output,))
-    worker_module._resolve_attention_dp_status_boundary(
-        pending,
-        drain_all=False,
-    )
-
-    assert not pending
 
 
 def test_attention_dp_fast_worker_omits_final_gather_and_preserves_affinity(
@@ -264,6 +237,7 @@ def test_attention_dp_fast_worker_omits_final_gather_and_preserves_affinity(
         (control_comm._gather_round, model_comm._gather_round)
         for control_comm, model_comm in zip(control, model, strict=True)
     ) == ((3, 3),) * world_size
+    assert [communicator._reduce_round for communicator in control] == [3] * 4
     assert tuple(
         (row["request_id"], row["owner_rank"], row["cache_affine"])
         for row in evidence["assignments"]
@@ -310,8 +284,13 @@ def test_attention_dp_fast_worker_omits_final_gather_and_preserves_affinity(
         ]
 
 
-def test_one_rank_fast_packet_status_failure_rejects_on_every_rank(
+@pytest.mark.parametrize(
+    "failing_runner",
+    (_ExecutionFailureRunner, _MalformedPacketRunner),
+)
+def test_one_rank_fast_failure_rejects_on_every_rank_without_collective_skew(
     monkeypatch,
+    failing_runner,
 ) -> None:
     from kairyu.models import moe_parallel
 
@@ -329,9 +308,24 @@ def test_one_rank_fast_packet_status_failure_rejects_on_every_rank(
     world_size = 4
     control = FakeCommunicator.create_group(world_size, timeout_s=1)
     model = FakeCommunicator.create_group(world_size, timeout_s=1)
+    protocol_events: list[list[str]] = [[] for _ in range(world_size)]
+    for rank in range(world_size):
+        original_packet_gather = model[rank].tensor_all_gather
+        original_status_reduce = control[rank].all_reduce
+
+        def packet_gather(self, tensor, *, _rank=rank, _call=original_packet_gather):
+            protocol_events[_rank].append("packet")
+            return _call(tensor)
+
+        def status_reduce(self, values, *, _rank=rank, _call=original_status_reduce):
+            protocol_events[_rank].append("status")
+            return _call(values)
+
+        model[rank].tensor_all_gather = MethodType(packet_gather, model[rank])
+        control[rank].all_reduce = MethodType(status_reduce, control[rank])
     local = tuple(
         (
-            _MalformedPacketRunner(rank)
+            failing_runner(rank)
             if rank == 2
             else _AttentionDPRunner(rank)
         )
@@ -389,7 +383,10 @@ def test_one_rank_fast_packet_status_failure_rejects_on_every_rank(
                 worker.result(timeout=2)
 
     assert [communicator._gather_round for communicator in model] == [1] * 4
-    assert [communicator._gather_round for communicator in control] == [1] * 4
+    # Graph preflight plus the failure-only bounded diagnostic gather.
+    assert [communicator._gather_round for communicator in control] == [2] * 4
+    assert [communicator._reduce_round for communicator in control] == [1] * 4
+    assert protocol_events == [["packet", "status"]] * world_size
 
 
 def test_non_fast_sampling_retains_final_control_gather_with_rank_symmetry(
@@ -525,6 +522,47 @@ def test_attention_dp_rejects_prefill_disable_before_control_broadcast() -> None
     with pytest.raises(ValueError, match="cannot disable batched prefill"):
         driver.set_batched_prefill_enabled(False)
     assert control[0]._group.broadcasts == {}
+
+
+def test_attention_dp_rejects_live_graph_invalidation_until_shutdown() -> None:
+    world_size = 4
+    control = FakeCommunicator.create_group(world_size)
+    model = FakeCommunicator.create_group(world_size)
+    local = tuple(_AttentionDPRunner(rank) for rank in range(world_size))
+    driver = worker_module.DistEPModelRunner(
+        control[0],
+        local[0],
+        model[0],
+        expert_parallel_size=world_size,
+        attention_dp=True,
+        pipeline_depth=5,
+        page_size=16,
+    )
+
+    with ThreadPoolExecutor(max_workers=world_size - 1) as pool:
+        workers = tuple(
+            pool.submit(
+                worker_module.worker_step_loop,
+                control[rank],
+                local[rank],
+                model[rank],
+                parallelism_prefix="EP",
+            )
+            for rank in range(1, world_size)
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="cannot invalidate CUDA graphs while serving",
+        ):
+            driver.invalidate_graphs()
+        assert local[0].graph_invalidations == 0
+        assert not control[0]._group.broadcasts.get(0)
+
+        driver.shutdown()
+        assert [worker.result(timeout=2) for worker in workers] == [0, 0, 0]
+
+    driver.invalidate_graphs()
+    assert local[0].graph_invalidations == 1
 
 
 def test_attention_dp_launcher_rejects_wrong_graph_scratch_before_spawn(

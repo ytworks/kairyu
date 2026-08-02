@@ -28,9 +28,14 @@ via the injected fake module.
 
 from __future__ import annotations
 
+import importlib
+
 import torch
 
 from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.kernels.flashinfer_decode_plan_gpu import (
+    pack_flashinfer_decode_metadata,
+)
 
 # FlashInfer calls 128 MiB "recommended", but that is not a capacity guarantee:
 # Qwen3-32B's 1,024-token chunked prefill required 190,840,832 bytes once its
@@ -63,6 +68,7 @@ class FlashInferBackend:
     #: about ``attend_decode``, not about this class in general: ``plan()``
     #: still cannot be captured and the eager list paths still sync to the host.
     supports_graph_capture = True
+    supports_fast_replay_plan = True
 
     def __init__(self, device: object = "cuda") -> None:
         try:
@@ -75,6 +81,13 @@ class FlashInferBackend:
             ) from error
 
         self._flashinfer = flashinfer
+        try:
+            decode_module = importlib.import_module("flashinfer.decode")
+        except (ImportError, AttributeError):
+            self._fast_decode_plan = None
+        else:
+            candidate = getattr(decode_module, "fast_decode_plan", None)
+            self._fast_decode_plan = candidate if callable(candidate) else None
         selected = torch.device(device)
         if selected.type == "cuda" and selected.index is None:
             selected = torch.device("cuda", torch.cuda.current_device())
@@ -92,6 +105,7 @@ class FlashInferBackend:
         # into ITS buffers, so swapping the wrapper would silently make every
         # later replay read a dead plan.
         self._graph_decode: dict[tuple[int, int], object] = {}
+        self._graph_decode_initialized: dict[tuple[int, int], tuple] = {}
         self._decode_tensor_wrapper: object | None = None
         self._decode_tensor_key: tuple | None = None
         self._decode_tensor_layers: set[int] = set()
@@ -99,6 +113,9 @@ class FlashInferBackend:
         self._prefill_run_calls = 0
         self._decode_plan_calls = 0
         self._decode_run_calls = 0
+        self._decode_fast_replay_plan_calls = 0
+        self._decode_stock_replay_fallback_calls = 0
+        self._decode_replay_fallback_reason: str | None = None
 
     @property
     def device(self) -> torch.device:
@@ -123,10 +140,16 @@ class FlashInferBackend:
             "type": type(self).__name__,
             "plans": self._decode_plan_calls,
             "runs": self._decode_run_calls,
+            "fast_replay_plans": self._decode_fast_replay_plan_calls,
+            "stock_replay_fallbacks": self._decode_stock_replay_fallback_calls,
+            "replay_fallback_reason": self._decode_replay_fallback_reason,
         }
         if reset:
             self._decode_plan_calls = 0
             self._decode_run_calls = 0
+            self._decode_fast_replay_plan_calls = 0
+            self._decode_stock_replay_fallback_calls = 0
+            self._decode_replay_fallback_reason = None
         return result
 
     @staticmethod
@@ -315,7 +338,195 @@ class FlashInferBackend:
             kv_pool.v.dtype,
         )
 
+    @staticmethod
+    def _wrapper_paged_buffers(
+        wrapper: object,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Resolve the persistent buffers owned by a cudagraph wrapper."""
+
+        names = (
+            ("_paged_kv_indptr_buf", "indptr_buffer"),
+            ("_paged_kv_indices_buf", "indices_buffer"),
+            ("_paged_kv_last_page_len_buf", "last_page_len_buffer"),
+        )
+        resolved: list[torch.Tensor] = []
+        for private, contract_fake in names:
+            value = getattr(wrapper, private, None)
+            if value is None:
+                value = getattr(wrapper, contract_fake, None)
+            if not torch.is_tensor(value):
+                raise AttributeError(
+                    "FlashInfer CUDA-graph wrapper does not expose its "
+                    f"persistent {private} buffer"
+                )
+            resolved.append(value)
+        return resolved[0], resolved[1], resolved[2]
+
+    @staticmethod
+    def _host_decode_arrays(
+        host_seq_lens: tuple[int, ...],
+        *,
+        page_size: int,
+        max_pages: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Build the CPU-only schedule inputs from scheduler-owned lengths."""
+
+        if not host_seq_lens:
+            raise ValueError("fast replay planning needs non-empty host_seq_lens")
+        if page_size < 1 or max_pages < 1:
+            raise ValueError("decode page geometry must be positive")
+        page_counts: list[int] = []
+        last_lengths: list[int] = []
+        for seq_len in host_seq_lens:
+            if type(seq_len) is not int or seq_len < 1:
+                raise ValueError("host_seq_lens must contain positive integers")
+            page_count = (seq_len + page_size - 1) // page_size
+            if page_count > max_pages:
+                raise ValueError(
+                    f"seq_len={seq_len} needs {page_count} pages, but the "
+                    f"captured table has width {max_pages}"
+                )
+            page_counts.append(page_count)
+            last_lengths.append((seq_len - 1) % page_size + 1)
+        offsets = [0]
+        for page_count in page_counts:
+            offsets.append(offsets[-1] + page_count)
+        return (
+            torch.tensor(offsets, dtype=torch.int32, device="cpu"),
+            torch.tensor(last_lengths, dtype=torch.int32, device="cpu"),
+            offsets[-1],
+        )
+
+    def _record_stock_replay_fallback(self, reason: object) -> None:
+        self._decode_stock_replay_fallback_calls += 1
+        self._decode_replay_fallback_reason = str(reason)
+
+    def _try_fast_replay_plan(
+        self,
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        num_qo_heads: int,
+        q_dtype: torch.dtype,
+        host_seq_lens: tuple[int, ...] | None,
+    ) -> bool:
+        """Refresh an initialized wrapper without any CUDA-to-host read."""
+
+        if self._fast_decode_plan is None:
+            self._record_stock_replay_fallback(
+                "flashinfer.decode.fast_decode_plan is unavailable"
+            )
+            return False
+        rows, max_pages = int(page_tables.shape[0]), int(page_tables.shape[1])
+        if host_seq_lens is None or len(host_seq_lens) != rows:
+            self._record_stock_replay_fallback(
+                "authoritative host_seq_lens do not match the replay batch"
+            )
+            return False
+        key = self._decode_shape_key(kv_pool, page_tables, num_qo_heads, q_dtype)
+        shape = (rows, max_pages)
+        wrapper = self._graph_decode.get(shape)
+        if (
+            wrapper is None
+            or self._graph_decode_initialized.get(shape) != key
+        ):
+            self._record_stock_replay_fallback(
+                "the CUDA-graph wrapper has not been initialized by stock plan()"
+            )
+            return False
+
+        try:
+            indptr_cpu, last_page_len_cpu, used_pages = self._host_decode_arrays(
+                host_seq_lens,
+                page_size=kv_pool.page_size,
+                max_pages=max_pages,
+            )
+            indptr_buf, indices_buf, last_page_len_buf = (
+                self._wrapper_paged_buffers(wrapper)
+            )
+            pack_flashinfer_decode_metadata(
+                page_tables,
+                seq_lens,
+                indptr_buf,
+                indices_buf,
+                last_page_len_buf,
+                page_size=kv_pool.page_size,
+            )
+            # 0.6.14's fast helper is an unbound function whose first argument
+            # is the wrapper.  In cudagraph mode it deliberately does not copy
+            # these inputs; the Triton launch above has already refreshed the
+            # persistent device buffers on this same current stream.  Both
+            # host tensors below are ordinary CPU tensors, so its `.cpu()`
+            # calls are no-ops rather than D2H transfers.
+            self._fast_decode_plan(
+                wrapper,
+                indptr_cpu,
+                indices_buf[:used_pages],
+                last_page_len_cpu,
+                num_qo_heads,
+                kv_pool.num_kv_heads,
+                kv_pool.head_dim,
+                kv_pool.page_size,
+                q_data_type=q_dtype,
+                kv_data_type=kv_pool.k.dtype,
+                global_override_indptr_cpu=indptr_cpu,
+            )
+        except Exception as error:
+            # Version/signature/layout incompatibility is an optimization miss,
+            # never a correctness mode. This intentionally includes Triton
+            # compiler exceptions whose concrete classes vary by release.
+            # Stock plan() rewrites every persistent buffer after this attempt
+            # and remains the truthful fallback.
+            self._record_stock_replay_fallback(
+                f"fast replay plan was incompatible: {type(error).__name__}: {error}"
+            )
+            return False
+
+        self._decode_plan_calls += 1
+        self._decode_fast_replay_plan_calls += 1
+        self._decode_replay_fallback_reason = None
+        self._decode_tensor_wrapper = wrapper
+        self._decode_tensor_key = key
+        self._decode_tensor_layers = set()
+        return True
+
     def plan_decode(
+        self,
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        num_qo_heads: int,
+        q_dtype: torch.dtype,
+        replay: bool = False,
+        host_seq_lens: tuple[int, ...] | None = None,
+    ) -> None:
+        """Plan stock capture/eager decode or an initialized graph replay."""
+
+        if _is_capturing():
+            raise RuntimeError(
+                "FlashInfer plan() cannot run inside a CUDA graph; call "
+                "plan_decode() once per decode step BEFORE capture/replay"
+            )
+        if replay and self._try_fast_replay_plan(
+            kv_pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=num_qo_heads,
+            q_dtype=q_dtype,
+            host_seq_lens=host_seq_lens,
+        ):
+            return
+        self._plan_decode_stock(
+            kv_pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=num_qo_heads,
+            q_dtype=q_dtype,
+        )
+
+    def _plan_decode_stock(
         self,
         kv_pool: PagedKVPool,
         page_tables: torch.Tensor,  # [B, P] int
@@ -337,13 +548,9 @@ class FlashInferBackend:
         so the graph attends over the CURRENT step's pages.
 
         The paged arrays themselves are derived on DEVICE from the page-table
-        and length tensors: no Python list and no D2H copy in this adapter.
+        and length tensors.  FlashInfer's stock plan then copies their schedule
+        inputs to the host; graph replay avoids that via the separate fast path.
         """
-        if _is_capturing():
-            raise RuntimeError(
-                "FlashInfer plan() cannot run inside a CUDA graph; call "
-                "plan_decode() once per decode step BEFORE capture/replay"
-            )
         page_size = kv_pool.page_size
         pages_per_row = torch.div(seq_lens + page_size - 1, page_size, rounding_mode="floor").to(
             torch.int32
@@ -375,6 +582,9 @@ class FlashInferBackend:
         self._decode_tensor_key = self._decode_shape_key(
             kv_pool, page_tables, num_qo_heads, q_dtype
         )
+        self._graph_decode_initialized[
+            (int(page_tables.shape[0]), int(page_tables.shape[1]))
+        ] = self._decode_tensor_key
         self._decode_tensor_layers = set()
 
     def attend_decode(

@@ -229,6 +229,8 @@ class Attention(nn.Module):
         seq_lens: torch.Tensor,  # [B]
         *,
         q_dtype: torch.dtype,
+        replay: bool = False,
+        host_seq_lens: tuple[int, ...] | None = None,
     ) -> None:
         """Run the backend's step-boundary host phase (``GraphDecodeBackend``).
 
@@ -246,13 +248,19 @@ class Attention(nn.Module):
         plan = getattr(self.backend, "plan_decode", None)
         if plan is None:  # a backend outside the graph contract; nothing to do
             return
-        plan(
-            kv_pool,
-            page_tables,
-            seq_lens,
-            num_qo_heads=self.num_heads,
-            q_dtype=q_dtype,
-        )
+        kwargs = {
+            "num_qo_heads": self.num_heads,
+            "q_dtype": q_dtype,
+        }
+        if replay and getattr(self.backend, "supports_fast_replay_plan", False):
+            # Replay metadata is an extension to the established backend
+            # contract.  Stock capture/eager calls retain the exact former
+            # signature so compatible third-party backends are unchanged.
+            kwargs.update(
+                replay=True,
+                host_seq_lens=host_seq_lens,
+            )
+        plan(kv_pool, page_tables, seq_lens, **kwargs)
 
     def forward_decode_tensors(
         self,

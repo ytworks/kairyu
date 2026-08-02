@@ -615,6 +615,193 @@ class TestFlashInferTensorDecode:
         assert wrapper.indices_buffer[:3].tolist() == [5, 2, 0]
         assert wrapper.last_page_len_buffer.tolist() == [4, 4]
 
+    def test_fast_replay_uses_host_schedule_and_refreshes_persistent_buffers(
+        self, fake_flashinfer, monkeypatch
+    ):
+        from kairyu.engine.core.attention import flashinfer_gpu
+
+        backend = self._backend()
+        pool = _pool()
+        query, page_tables, seq_lens = self._inputs()
+        backend.plan_decode(
+            pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=4,
+            q_dtype=query.dtype,
+        )
+        wrapper = backend._decode_tensor_wrapper
+        stock_plans = len(wrapper.plans)
+        fast_calls: list[tuple] = []
+
+        def cpu_pack(
+            tables, lengths, indptr, indices, last_page_len, *, page_size
+        ):
+            counts = [
+                (int(length) + page_size - 1) // page_size
+                for length in lengths.tolist()
+            ]
+            offsets = [0]
+            packed = []
+            for row, count in enumerate(counts):
+                offsets.append(offsets[-1] + count)
+                packed.extend(tables[row, :count].tolist())
+            indptr.copy_(torch.tensor(offsets, dtype=torch.int32))
+            indices[: len(packed)].copy_(torch.tensor(packed, dtype=torch.int32))
+            last_page_len.copy_(
+                torch.tensor(
+                    [(int(length) - 1) % page_size + 1 for length in lengths],
+                    dtype=torch.int32,
+                )
+            )
+
+        def fast_plan(wrapper_arg, indptr, indices, last_page_len, *args, **kwargs):
+            fast_calls.append(
+                (wrapper_arg, indptr.clone(), indices.clone(), last_page_len.clone(), args, kwargs)
+            )
+
+        monkeypatch.setattr(flashinfer_gpu, "pack_flashinfer_decode_metadata", cpu_pack)
+        backend._fast_decode_plan = fast_plan
+        page_tables.copy_(torch.tensor([[5, 4], [2, 0]], dtype=torch.int32))
+        seq_lens.copy_(torch.tensor([4, 8], dtype=torch.int32))
+
+        backend.plan_decode(
+            pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=4,
+            q_dtype=query.dtype,
+            replay=True,
+            host_seq_lens=(4, 8),
+        )
+
+        assert len(wrapper.plans) == stock_plans
+        assert wrapper.indptr_buffer.tolist() == [0, 1, 3]
+        assert wrapper.indices_buffer[:3].tolist() == [5, 2, 0]
+        assert wrapper.last_page_len_buffer.tolist() == [4, 4]
+        assert len(fast_calls) == 1
+        _, cpu_indptr, _, cpu_last, _, kwargs = fast_calls[0]
+        assert cpu_indptr.device.type == cpu_last.device.type == "cpu"
+        assert cpu_indptr.tolist() == [0, 1, 3]
+        assert cpu_last.tolist() == [4, 4]
+        assert kwargs["global_override_indptr_cpu"].tolist() == [0, 1, 3]
+        stats = backend.decode_execution_stats()
+        assert stats["fast_replay_plans"] == 1
+        assert stats["stock_replay_fallbacks"] == 0
+        assert stats["replay_fallback_reason"] is None
+
+    def test_missing_fast_api_truthfully_falls_back_to_stock_plan(
+        self, fake_flashinfer
+    ):
+        backend = self._backend()
+        pool = _pool()
+        query, page_tables, seq_lens = self._inputs()
+        backend.plan_decode(
+            pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=4,
+            q_dtype=query.dtype,
+        )
+        wrapper = backend._decode_tensor_wrapper
+        page_tables.copy_(torch.tensor([[5, 4], [2, 0]], dtype=torch.int32))
+        seq_lens.copy_(torch.tensor([4, 8], dtype=torch.int32))
+
+        backend.plan_decode(
+            pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=4,
+            q_dtype=query.dtype,
+            replay=True,
+            host_seq_lens=(4, 8),
+        )
+
+        assert len(wrapper.plans) == 2
+        assert wrapper.indptr_buffer.tolist() == [0, 1, 3]
+        assert wrapper.indices_buffer[:3].tolist() == [5, 2, 0]
+        stats = backend.decode_execution_stats()
+        assert stats["fast_replay_plans"] == 0
+        assert stats["stock_replay_fallbacks"] == 1
+        assert "unavailable" in stats["replay_fallback_reason"]
+
+    @pytest.mark.parametrize(
+        ("error_type", "message"),
+        (
+            (TypeError, "simulated 0.6.x signature drift"),
+            (Exception, "simulated Triton compilation failure"),
+        ),
+        ids=("signature-drift", "triton-compiler"),
+    )
+    def test_incompatible_fast_api_rewrites_a_partially_packed_buffer_with_stock(
+        self, fake_flashinfer, monkeypatch, error_type, message
+    ):
+        from kairyu.engine.core.attention import flashinfer_gpu
+
+        backend = self._backend()
+        pool = _pool()
+        query, page_tables, seq_lens = self._inputs()
+        backend.plan_decode(
+            pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=4,
+            q_dtype=query.dtype,
+        )
+        wrapper = backend._decode_tensor_wrapper
+
+        def partial_pack(
+            _tables, _lengths, indptr, indices, last_page_len, *, page_size
+        ):
+            assert page_size == PAGE
+            indptr.fill_(-91)
+            indices.fill_(-92)
+            last_page_len.fill_(-93)
+
+        def incompatible_fast(*args, **kwargs):
+            raise error_type(message)
+
+        monkeypatch.setattr(
+            flashinfer_gpu, "pack_flashinfer_decode_metadata", partial_pack
+        )
+        backend._fast_decode_plan = incompatible_fast
+        page_tables.copy_(torch.tensor([[5, 4], [2, 0]], dtype=torch.int32))
+        seq_lens.copy_(torch.tensor([4, 8], dtype=torch.int32))
+
+        backend.plan_decode(
+            pool,
+            page_tables,
+            seq_lens,
+            num_qo_heads=4,
+            q_dtype=query.dtype,
+            replay=True,
+            host_seq_lens=(4, 8),
+        )
+
+        assert len(wrapper.plans) == 2
+        assert wrapper.indptr_buffer.tolist() == [0, 1, 3]
+        assert wrapper.indices_buffer[:3].tolist() == [5, 2, 0]
+        assert wrapper.last_page_len_buffer.tolist() == [4, 4]
+        stats = backend.decode_execution_stats()
+        assert stats["fast_replay_plans"] == 0
+        assert stats["stock_replay_fallbacks"] == 1
+        assert message in stats["replay_fallback_reason"]
+
+    def test_fast_api_is_resolved_from_the_flashinfer_decode_module(
+        self, fake_flashinfer, monkeypatch
+    ):
+        decode_module = types.ModuleType("flashinfer.decode")
+
+        def fast_decode_plan(*args, **kwargs):
+            return None
+
+        decode_module.fast_decode_plan = fast_decode_plan
+        monkeypatch.setitem(sys.modules, "flashinfer.decode", decode_module)
+
+        backend = self._backend()
+
+        assert backend._fast_decode_plan is fast_decode_plan
+
     def test_flashinfer_satisfies_the_graph_capture_contract(self, fake_flashinfer):
         """The declaration the runner's fail-fast gate reads (#138 review [P1]).
 
