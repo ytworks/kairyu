@@ -54,11 +54,12 @@ from bench import g4_ma1_qwen3_235b_nvfp4_capture as ma1_capture  # noqa: E402
 from kairyu.bench.reporting import atomic_write_json, atomic_write_text  # noqa: E402
 from kairyu.engine.tokenizer import HFTokenizer  # noqa: E402
 
-SCHEMA_VERSION = "kairyu.g4.ma3.sglang-comparison.v1"
-TRACE_SCHEMA_VERSION = "kairyu.g4.ma3.sharegpt-trace.v1"
+SCHEMA_VERSION = "kairyu.g4.ma3.sglang-comparison.v2"
+TRACE_SCHEMA_VERSION = "kairyu.g4.ma3.sharegpt-trace.v2"
 SELECTION_SCHEMA_VERSION = "kairyu.g4.ma3.preflight-selection.v1"
 CHECKPOINT_CAPTURE_SCHEMA_VERSION = "kairyu.g4.ma3.checkpoint-capture.v1"
 LIVE_OBSERVATION_SCHEMA_VERSION = "kairyu.g4.ma3.live-observation.v1"
+HTTP_CLIENT_LIFECYCLE_SCHEMA_VERSION = "kairyu.g4.ma3.http-client-lifecycle.v1"
 GATE = "G4-M-A3"
 RAW_NAME = "g4-ma3-sglang-raw.jsonl"
 MANIFEST_NAME = "g4-ma3-sglang-manifest.json"
@@ -233,6 +234,66 @@ class _Tokenizer(Protocol):
     def decode(self, token_ids: Sequence[int]) -> str: ...
 
     def vocab(self) -> list[str]: ...
+
+
+class _TrackedAsyncClient:
+    """Own one HTTP connection pool and retain its exact outbound request order."""
+
+    def __init__(self, *, role: str, **kwargs: object) -> None:
+        if role not in {"warmup", "measurement"}:
+            raise ValueError(f"invalid HTTP client role {role!r}")
+        self.role = role
+        self.created_ns = time.perf_counter_ns()
+        self.closed_ns: int | None = None
+        self._request_paths: list[str] = []
+        self._client = httpx.AsyncClient(**kwargs)
+
+    @property
+    def request_count(self) -> int:
+        return len(self._request_paths)
+
+    def _record(self, url: str) -> None:
+        if self.closed_ns is not None:
+            raise RuntimeError(f"{self.role} HTTP client is already closed")
+        self._request_paths.append(httpx.URL(url).path)
+
+    async def get(self, url: str, **kwargs: object) -> httpx.Response:
+        self._record(url)
+        return await self._client.get(url, **kwargs)
+
+    def stream(self, method: str, url: str, **kwargs: object) -> object:
+        self._record(url)
+        return self._client.stream(method, url, **kwargs)
+
+    async def __aenter__(self) -> _TrackedAsyncClient:
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> object:
+        try:
+            return await self._client.__aexit__(exc_type, exc_value, traceback)
+        finally:
+            self.closed_ns = time.perf_counter_ns()
+
+    def evidence(self) -> dict[str, object]:
+        if self.closed_ns is None:
+            raise GateEvidenceError(f"{self.role} HTTP client was not fully closed")
+        counts = {
+            path: self._request_paths.count(path) for path in sorted(set(self._request_paths))
+        }
+        return {
+            "role": self.role,
+            "created_ns": self.created_ns,
+            "closed_ns": self.closed_ns,
+            "request_count": self.request_count,
+            "request_path_counts": counts,
+            "request_path_sequence_sha256": sha256_json(self._request_paths),
+        }
 
 
 @dataclass(frozen=True)
@@ -959,6 +1020,24 @@ def benchmark_config(
             "graph_completion_tokens": GRAPH_WARMUP_OUTPUT_TOKENS,
             "retained": True,
             "excluded_from_metrics": True,
+        },
+        "http_client_lifecycle": {
+            "applies_to_arms": list(ARMS),
+            "applies_to_phases": ["preflight", "formal"],
+            "warmup_client_request_order": [
+                "model_probe",
+                "serial_warmup",
+                "graph_warmup",
+                "kairyu_graph_start_witness_if_kairyu",
+            ],
+            "warmup_client_fully_closed_before_measurement_client_created": True,
+            "measurement_client": "distinct fresh connection pool",
+            "measurement_client_requests_before_synchronized_group": 0,
+            "measurement_client_request_order": [
+                "one synchronized preflight_or_formal_group",
+                "kairyu_graph_end_witness_if_kairyu",
+            ],
+            "measurement_client_fully_closed_after_witness": True,
         },
         "matched": {
             "maximum_workload_tokens": a6.SHAREGPT_MAX_PROMPT_TOKENS + SHAREGPT_OUTPUT_TOKENS,
@@ -2779,7 +2858,7 @@ def _usage_from_payload(value: object) -> dict[str, int] | None:
 
 
 async def stream_completion_once(
-    client: httpx.AsyncClient,
+    client: _TrackedAsyncClient,
     *,
     endpoint: str,
     planned: PlannedRequest,
@@ -2791,6 +2870,7 @@ async def stream_completion_once(
         "prompt": planned.prompt_text,
         **request_config(planned.expected_completion_tokens),
     }
+    http_client_request_ordinal = client.request_count
     start_ns = time.perf_counter_ns()
     first_token_ns: int | None = None
     end_ns = start_ns
@@ -2927,6 +3007,8 @@ async def stream_completion_once(
     success = error_type is None
     return {
         "type": "request",
+        "http_client_role": client.role,
+        "http_client_request_ordinal": http_client_request_ordinal,
         "phase": planned.phase,
         "sequence": planned.sequence,
         "attempts": 1,
@@ -2963,7 +3045,7 @@ async def stream_completion_once(
 
 
 async def _execute_serial(
-    client: httpx.AsyncClient,
+    client: _TrackedAsyncClient,
     *,
     endpoint: str,
     planned: Sequence[PlannedRequest],
@@ -2975,7 +3057,7 @@ async def _execute_serial(
 
 
 async def _execute_synchronized(
-    client: httpx.AsyncClient,
+    client: _TrackedAsyncClient,
     *,
     endpoint: str,
     planned: Sequence[PlannedRequest],
@@ -2998,7 +3080,7 @@ async def _execute_synchronized(
 
 
 async def _execute_graph_warmups(
-    client: httpx.AsyncClient,
+    client: _TrackedAsyncClient,
     *,
     endpoint: str,
     planned: Sequence[PlannedRequest],
@@ -3027,7 +3109,7 @@ async def _execute_graph_warmups(
 
 
 async def _execute_open_loop(
-    client: httpx.AsyncClient,
+    client: _TrackedAsyncClient,
     *,
     endpoint: str,
     planned: Sequence[PlannedRequest],
@@ -3442,34 +3524,48 @@ async def measure_shard(
         max_keepalive_connections=SHAREGPT_CONCURRENCY,
     )
     measurement_groups: list[dict[str, int]] = []
-    async with httpx.AsyncClient(
-        timeout=request_timeout_s, headers=headers, limits=limits
-    ) as client:
-        await _assert_served_model(client, endpoint)
+    graph_witness_start: dict[str, object] | None = None
+    graph_witness_end: dict[str, object] | None = None
+    warmup_client = _TrackedAsyncClient(
+        role="warmup",
+        timeout=request_timeout_s,
+        headers=headers,
+        limits=limits,
+    )
+    async with warmup_client:
+        await _assert_served_model(warmup_client, endpoint)
         warmup_rows = await _execute_serial(
-            client,
+            warmup_client,
             endpoint=endpoint,
             planned=_serial_warmup_plan(bundle["trace"]),
         )
         graph_rows = await _execute_graph_warmups(
-            client,
+            warmup_client,
             endpoint=endpoint,
             planned=_graph_warmup_plan(bundle["graph_warmup"]),
         )
-        graph_witness_start: dict[str, object] | None = None
-        graph_witness_end: dict[str, object] | None = None
         if arm == "kairyu":
-            graph_witness_start = await _fetch_kairyu_graph_witness(client, endpoint)
+            graph_witness_start = await _fetch_kairyu_graph_witness(warmup_client, endpoint)
             if not _kairyu_graph_witness_start_valid(graph_witness_start):
                 raise GateEvidenceError(
                     "Kairyu graph warmup did not establish the pinned graph/direct-NCCL state"
                 )
             rows[0]["kairyu_graph_witness_start"] = graph_witness_start
+    warmup_client_evidence = warmup_client.evidence()
+
+    measurement_client = _TrackedAsyncClient(
+        role="measurement",
+        timeout=request_timeout_s,
+        headers=headers,
+        limits=limits,
+    )
+    measurement_requests_before_group = measurement_client.request_count
+    async with measurement_client:
         measured: list[dict[str, object]] = []
         if phase == "preflight":
             for preflight_repeat, plan in enumerate(_preflight_plans(bundle["trace"])):
                 group = await _execute_synchronized(
-                    client,
+                    measurement_client,
                     endpoint=endpoint,
                     planned=plan,
                     expected_size=PREFLIGHT_REQUESTS,
@@ -3488,7 +3584,7 @@ async def measure_shard(
                 )
         else:
             group = await _execute_synchronized(
-                client,
+                measurement_client,
                 endpoint=endpoint,
                 planned=_formal_plan(bundle["trace"]),
                 expected_size=SHAREGPT_REQUESTS,
@@ -3504,11 +3600,19 @@ async def measure_shard(
                 }
             )
         if arm == "kairyu":
-            graph_witness_end = await _fetch_kairyu_graph_witness(client, endpoint)
+            graph_witness_end = await _fetch_kairyu_graph_witness(measurement_client, endpoint)
             if not _kairyu_graph_witness_pair_valid(graph_witness_start, graph_witness_end):
                 raise GateEvidenceError(
                     "Kairyu measurement changed graph/direct-NCCL state or replayed no graph"
                 )
+    measurement_client_evidence = measurement_client.evidence()
+    client_lifecycle = {
+        "schema_version": HTTP_CLIENT_LIFECYCLE_SCHEMA_VERSION,
+        "distinct_client_instances": warmup_client is not measurement_client,
+        "measurement_requests_before_group": measurement_requests_before_group,
+        "warmup_client": warmup_client_evidence,
+        "measurement_client": measurement_client_evidence,
+    }
     for row in (*warmup_rows, *graph_rows, *measured):
         rows.append(
             {
@@ -3542,6 +3646,7 @@ async def measure_shard(
             "graph_warmup_request_count": len(graph_rows),
             "measurement_request_count": len(measured),
             "measurement_groups": measurement_groups,
+            "http_client_lifecycle": client_lifecycle,
             "provenance_end": provenance_end,
             "kairyu_graph_witness_end": graph_witness_end,
             "capture_end_ns": capture_end_ns,
@@ -3582,6 +3687,8 @@ def write_shard(path: Path, rows: Sequence[Mapping[str, object]]) -> dict[str, o
 
 _REQUEST_BASE_KEYS = {
     "type",
+    "http_client_role",
+    "http_client_request_ordinal",
     "phase",
     "sequence",
     "attempts",
@@ -3653,6 +3760,7 @@ _SHARD_END_KEYS = {
     "graph_warmup_request_count",
     "measurement_request_count",
     "measurement_groups",
+    "http_client_lifecycle",
     "provenance_end",
     "kairyu_graph_witness_end",
     "capture_end_ns",
@@ -3663,6 +3771,168 @@ _REQUEST_CAPTURE_TIMESTAMPS = (
     "graph_release_ns",
     "scheduled_start_ns",
 )
+
+
+def _http_client_snapshot_valid(
+    value: object,
+    *,
+    role: str,
+    expected_paths: Sequence[str],
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "role",
+        "created_ns",
+        "closed_ns",
+        "request_count",
+        "request_path_counts",
+        "request_path_sequence_sha256",
+    }:
+        return False
+    expected_counts = {path: expected_paths.count(path) for path in sorted(set(expected_paths))}
+    return (
+        value["role"] == role
+        and type(value["created_ns"]) is int
+        and type(value["closed_ns"]) is int
+        and 0 < value["created_ns"] <= value["closed_ns"]
+        and value["request_count"] == len(expected_paths)
+        and value["request_path_counts"] == expected_counts
+        and value["request_path_sequence_sha256"] == sha256_json(list(expected_paths))
+    )
+
+
+def _http_client_lifecycle_valid(
+    value: object,
+    *,
+    arm: str,
+    phase: str,
+    requests: Sequence[Mapping[str, object]],
+    capture_start_ns: int,
+    end_observation_started_ns: int,
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "distinct_client_instances",
+        "measurement_requests_before_group",
+        "warmup_client",
+        "measurement_client",
+    }:
+        return False
+    measured_phase = {
+        "preflight": "preflight",
+        "formal": "formal",
+        "open-loop": "open_loop",
+    }.get(phase)
+    if measured_phase is None:
+        return False
+    serial_rows = [row for row in requests if row.get("phase") == "serial_warmup"]
+    graph_rows = [row for row in requests if row.get("phase") == "graph_warmup"]
+    warmup_rows = [*serial_rows, *graph_rows]
+    measurement_rows = [row for row in requests if row.get("phase") == measured_phase]
+    if len(warmup_rows) != SERIAL_WARMUP_REQUESTS + GRAPH_WARMUP_REQUESTS:
+        return False
+    if len(warmup_rows) + len(measurement_rows) != len(requests):
+        return False
+    witness_paths = ["/backends"] if arm == "kairyu" else []
+    warmup_paths = [
+        "/v1/models",
+        *["/v1/completions"] * len(warmup_rows),
+        *witness_paths,
+    ]
+    measurement_paths = [
+        *["/v1/completions"] * len(measurement_rows),
+        *witness_paths,
+    ]
+    warmup_client = value["warmup_client"]
+    measurement_client = value["measurement_client"]
+    if not (
+        value["schema_version"] == HTTP_CLIENT_LIFECYCLE_SCHEMA_VERSION
+        and value["distinct_client_instances"] is True
+        and value["measurement_requests_before_group"] == 0
+        and _http_client_snapshot_valid(
+            warmup_client,
+            role="warmup",
+            expected_paths=warmup_paths,
+        )
+        and _http_client_snapshot_valid(
+            measurement_client,
+            role="measurement",
+            expected_paths=measurement_paths,
+        )
+    ):
+        return False
+    assert isinstance(warmup_client, dict) and isinstance(measurement_client, dict)
+    serial_ordinals = [
+        row.get("http_client_request_ordinal")
+        for row in sorted(
+            serial_rows,
+            key=lambda row: (
+                int(row["timing_ns"]["start"])
+                if isinstance(row.get("timing_ns"), dict)
+                and type(row["timing_ns"].get("start")) is int
+                else -1
+            ),
+        )
+    ]
+    graph_ordinals = [row.get("http_client_request_ordinal") for row in graph_rows]
+    measurement_ordinals = [
+        row.get("http_client_request_ordinal") for row in measurement_rows
+    ]
+    if any(
+        type(ordinal) is not int
+        for ordinal in (*serial_ordinals, *graph_ordinals, *measurement_ordinals)
+    ):
+        return False
+    if (
+        [row.get("http_client_role") for row in warmup_rows]
+        != ["warmup"] * len(warmup_rows)
+        or serial_ordinals != list(range(1, 1 + SERIAL_WARMUP_REQUESTS))
+    ):
+        return False
+    next_graph_ordinal = 1 + SERIAL_WARMUP_REQUESTS
+    for batch_size in GRAPH_WARMUP_BATCH_SIZES:
+        batch_ordinals = [
+            row.get("http_client_request_ordinal")
+            for row in graph_rows
+            if row.get("graph_batch_size") == batch_size
+        ]
+        expected_ordinals = list(
+            range(next_graph_ordinal, next_graph_ordinal + batch_size)
+        )
+        if sorted(batch_ordinals) != expected_ordinals:
+            return False
+        next_graph_ordinal += batch_size
+    if [row.get("http_client_role") for row in measurement_rows] != [
+        "measurement"
+    ] * len(measurement_rows) or sorted(measurement_ordinals) != list(
+        range(len(measurement_rows))
+    ):
+        return False
+    warmup_timings = [row.get("timing_ns") for row in warmup_rows]
+    measurement_timings = [row.get("timing_ns") for row in measurement_rows]
+    if not all(isinstance(item, dict) for item in (*warmup_timings, *measurement_timings)):
+        return False
+    warmup_created = int(warmup_client["created_ns"])
+    warmup_closed = int(warmup_client["closed_ns"])
+    measurement_created = int(measurement_client["created_ns"])
+    measurement_closed = int(measurement_client["closed_ns"])
+    return (
+        capture_start_ns <= warmup_created
+        and all(
+            warmup_created <= int(item["start"]) <= int(item["end"]) <= warmup_closed
+            for item in warmup_timings
+            if isinstance(item, dict)
+        )
+        and warmup_closed < measurement_created
+        and all(
+            measurement_created
+            <= int(item["start"])
+            <= int(item["end"])
+            <= measurement_closed
+            for item in measurement_timings
+            if isinstance(item, dict)
+        )
+        and measurement_closed <= end_observation_started_ns
+    )
 
 
 def _parse_shard(
@@ -3716,8 +3986,34 @@ def _parse_shard(
     benchmark = start.get("benchmark")
     sglang = benchmark.get("sglang") if isinstance(benchmark, dict) else None
     moe_a2a_backend = sglang.get("moe_a2a_backend") if isinstance(sglang, dict) else None
-    if not isinstance(moe_a2a_backend, str):
-        raise GateEvidenceError("shard benchmark has no SGLang A2A backend")
+    sharegpt = benchmark.get("sharegpt") if isinstance(benchmark, dict) else None
+    dataset_sha256 = sharegpt.get("sha256") if isinstance(sharegpt, dict) else None
+    trace = start.get("trace")
+    graph_warmup = start.get("graph_warmup")
+    if not isinstance(moe_a2a_backend, str) or not isinstance(dataset_sha256, str):
+        raise GateEvidenceError("shard benchmark has no pinned dataset/backend identity")
+    try:
+        expected_benchmark = benchmark_config(
+            dataset_sha256,
+            moe_a2a_backend=moe_a2a_backend,
+        )
+    except ValueError as error:
+        raise GateEvidenceError("shard benchmark identity is invalid") from error
+    trace_bundle = {
+        "schema_version": TRACE_SCHEMA_VERSION,
+        "benchmark": benchmark,
+        "trace": trace,
+        "graph_warmup": graph_warmup,
+    }
+    if not (
+        benchmark == expected_benchmark
+        and a6._trace_valid(trace, workload="sharegpt", dataset_sha256=dataset_sha256)
+        and _graph_warmup_trace_valid(graph_warmup)
+        and _graph_warmup_disjoint(graph_warmup, trace)
+        and start.get("trace_bundle_sha256")
+        == sha256_text(canonical_json(trace_bundle) + "\n")
+    ):
+        raise GateEvidenceError("shard benchmark/trace bundle violates the v2 contract")
     provenance_start = start["provenance_start"]
     provenance_end = end["provenance_end"]
     if not _descriptor_valid(provenance_start) or not isinstance(provenance_start, dict):
@@ -3817,6 +4113,15 @@ def _parse_shard(
         for group in measurement_groups
     ):
         raise GateEvidenceError("measurement group is outside the shard capture interval")
+    if not _http_client_lifecycle_valid(
+        end.get("http_client_lifecycle"),
+        arm=arm,
+        phase=phase,
+        requests=requests,
+        capture_start_ns=capture_start,
+        end_observation_started_ns=end_observation_started,
+    ):
+        raise GateEvidenceError("shard HTTP client lifecycle is missing or inconsistent")
     return start, requests, end
 
 
@@ -3857,8 +4162,14 @@ def _expected_requests_for_shard(
 def _request_contract_valid(row: Mapping[str, object], planned: PlannedRequest) -> bool:
     usage = row.get("usage")
     timing = row.get("timing_ns")
+    expected_client_role = (
+        "warmup" if planned.phase in {"serial_warmup", "graph_warmup"} else "measurement"
+    )
     identity = (
-        row.get("phase") == planned.phase
+        row.get("http_client_role") == expected_client_role
+        and type(row.get("http_client_request_ordinal")) is int
+        and int(row["http_client_request_ordinal"]) >= 0
+        and row.get("phase") == planned.phase
         and row.get("sequence") == planned.sequence
         and row.get("preflight_repeat") == planned.preflight_repeat
         and row.get("graph_batch_size") == planned.graph_batch_size
@@ -4795,12 +5106,23 @@ def evaluate_rows(
     identity_checks: dict[str, bool] = {}
     evidence_checks: dict[str, bool] = {}
     shape_checks: dict[str, bool] = {}
+    client_lifecycle_checks: dict[str, bool] = {}
     graph_witness_checks: dict[str, bool] = {}
     for scenario_id, (start, requests, end) in scenarios.items():
         identity_checks[scenario_id], evidence_checks[scenario_id] = _shard_request_checks(
             start, requests
         )
         shape_checks[scenario_id] = _scenario_execution_shape_valid(start, requests, end)
+        provenance_end = end["provenance_end"]
+        assert isinstance(provenance_end, dict) and isinstance(provenance_end["value"], dict)
+        client_lifecycle_checks[scenario_id] = _http_client_lifecycle_valid(
+            end["http_client_lifecycle"],
+            arm=str(start["arm"]),
+            phase=str(start["phase"]),
+            requests=requests,
+            capture_start_ns=int(start["capture_start_ns"]),
+            end_observation_started_ns=int(provenance_end["value"]["capture_started_ns"]),
+        )
         graph_witness_checks[scenario_id] = _dynamic_graph_witness_valid(
             start["arm"],
             start["kairyu_graph_witness_start"],
@@ -4918,6 +5240,9 @@ def evaluate_rows(
         ),
         "binding_warmup_burst_and_measurement_windows_exact": all(
             shape_checks[scenario_id] for scenario_id in binding_ids
+        ),
+        "warmup_pool_closed_before_zero-request_fresh_measurement_pool_exact": all(
+            client_lifecycle_checks[scenario_id] for scenario_id in binding_ids
         ),
         "kairyu_request_owned_ep4_direct_nccl_and_cuda_graph_replay_exact": all(
             graph_witness_checks[scenario_id] for scenario_id in binding_ids

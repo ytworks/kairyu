@@ -1,11 +1,12 @@
 # Goal G4: MoE Engine — Fused Experts, EP, MTP, NVFP4 (Roadmap Track E4–E5)
 
 Status: G4.1 M-A1 retains its formal FAIL; M-A2 production integration and
-formal evidence are complete; M-A3 has an implemented production candidate
-and formal operator, with the clean paired verdict still pending (2026-08-03).
+formal evidence are complete; M-A3 is scope-closed by an explicit product-owner
+deviation while its unchanged formal performance gate remains FAIL
+(2026-08-03).
 Lifts the G2 §6 "MoE / expert parallelism" non-goal (amendment recorded in
 PROGRESS.md). The reviewed mid-MoE design is `docs/design/g4-mid-moe.md`;
-M-A2 passed its independent cache gate; M-A3 measurement remains pending.
+M-A2 passed its independent cache gate; M-A3 did not pass its formal gate.
 Depends on: Roadmap Track E1–E3 (`docs/roadmap.md` §4): real single-GPU engine,
 scheduler multi-token commit (E2), NcclCommunicator (E3). Frontier-class gates
 additionally depend on the E3 hardware decision record (PCIe-switch chassis,
@@ -75,26 +76,33 @@ preflight per arm followed by four formal pairs in K/S, S/K, S/K, K/S order.
 It gates the exact median of the four ratios: Kairyu completion tok/s/GPU over
 SGLang must be at least 1, while Kairyu/SGLang TTFT p99 must be at most 1.
 Failures and retries are retained; there is no outlier removal, rounding before
-the gate, or exclusion. The complete checkpoint is hashed before and after the
-matrix, and every generation binds the start capture, a read-only model volume
-with no read-write consumer, and live runtime evidence. All operator commands
-execute the detached clean `SOURCE_ROOT`; provenance receives
-`--checkpoint-start`, while assembly requires both checkpoint boundaries. The
-Kairyu hardware load/graph smoke does not satisfy M-A3 by itself. The formal
-matrix at clean commit `55f3a8ca4513e158182d4b9b4a818c24f5ae7b34`
-completed all ten generations and every non-performance binding check, but
-retained a FAIL: exact median completion tok/s/GPU was 0.783818× SGLang and
-TTFT p99 was 1.352633× SGLang. All four throughput pairs were below one, so the
-result is not reclassified as jitter. The next candidate keeps configured
-depth 5 for pure decode, bounds unresolved admission/prefill work to two
-forwards, stops fill on producer arrivals, and removes the pure-greedy final
-Gloo reply by adding fail-closed rank status to the existing NCCL token packet.
-That status is copied asynchronously beside deferred public tokens and resolved
-by every rank after the next common control broadcast, so validation neither
-eagerly synchronizes the current CUDA stream nor branches on rank-local event
-readiness. Those changes require a new complete clean-commit matrix; the
-earlier FAIL remains authoritative until then. The exact procedure and
-provenance contract are in `docs/gpu-runbook.md` §9.13.
+the gate, or exclusion. Every shard now completes and closes its warmup
+connection pool before creating a distinct measurement pool with zero prior
+requests; assembly, verification, and raw replay reject any lifecycle or
+request-order violation. The complete checkpoint is hashed before and after
+the matrix, and every generation binds the start capture, a read-only model
+volume with no read-write consumer, and live runtime evidence. All operator
+commands execute the detached clean `SOURCE_ROOT`; provenance receives
+`--checkpoint-start`, while assembly requires both checkpoint boundaries.
+
+The formal matrix at clean commit
+`55f3a8ca4513e158182d4b9b4a818c24f5ae7b34` completed all ten generations and
+every non-performance binding check, but retained a FAIL: exact median
+completion tok/s/GPU was 0.783818× SGLang and TTFT p99 was 1.352633× SGLang.
+All four throughput pairs were below one, so the result is not reclassified as
+jitter. The optimized candidate keeps configured depth 5, removes replay-side
+host drains, and writes ordinary non-aliasing same-device int64 sampled tokens
+into persistent decode slots with one vectorized batched D2D copy. A corrected
+fresh-server/fresh-pool diagnostic measured Kairyu 536.690626 versus SGLang
+551.731445 completion
+tok/s/GPU (0.972739×), with a TTFT-p99 ratio of 0.868731. The previous
+571.542867-versus-449.965–481.865 comparison is withdrawn because its client
+lifecycles were incompatible. A full-server CUTLASS override was also rejected
+because its 530.616804 tok/s/GPU was 1.13% below the retained `auto` result.
+The product owner accepts the remaining 2.73% diagnostic throughput gap as an
+explicit closure deviation so later work can proceed. The formal 1.0/1.0
+thresholds and retained FAIL remain unchanged; this is not a formal PASS. The
+exact procedure and provenance contract are in `docs/gpu-runbook.md` §9.13.
 
 Recorded 2026-07-31: **FAIL** on the pinned Qwen3-32B revision and one RTX PRO
 6000 Blackwell. All K/V write audits passed across 7,522,091,008 values with

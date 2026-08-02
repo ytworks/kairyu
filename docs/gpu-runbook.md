@@ -1821,9 +1821,13 @@ PY
   only deterministic replay/tamper/entrypoint tests; it does not pretend to
   rerun this four-GPU 235B cell.
 
-- 9.13 G4 M-A3 Qwen3-235B-A22B NVFP4 versus SGLang (#168): run the complete
-  ten-generation matrix only from a clean tracked Kairyu commit after all
-  implementation and operator changes are final. It consists of two
+- 9.13 G4 M-A3 Qwen3-235B-A22B NVFP4 versus SGLang (#168): this section retains
+  the strict formal operator and exact reproduction procedure. The first
+  completed matrix remains FAIL against its unchanged thresholds; M-A3 issue
+  scope is closed separately by the explicit product-owner deviation recorded
+  below, not by a formal PASS. Any future strict revalidation must run the
+  complete ten-generation matrix only from a clean tracked Kairyu commit after
+  all implementation and operator changes are final. It consists of two
   one-candidate preflights followed by eight formal generations. M-A3 uses
   physical GPUs 4–7 for every arm on the same eight-GPU host. Every server is
   fresh and strictly sequential; stop it, prove the cohort is free, and only
@@ -1877,9 +1881,14 @@ PY
   diagnostic gather. FlashInfer graph replay receives scheduler-owned CPU
   lengths, packs persistent device page metadata with one Triton kernel, and
   uses `fast_decode_plan`; missing or incompatible fast support must fall back
-  to stock planning after rewriting all persistent buffers. These are binding
-  implementation properties of the candidate under test, not benchmark-side
-  delays or subtracted overhead.
+  to stock planning after rewriting all persistent buffers. For decode batches
+  larger than one, ordinary non-aliasing same-device scalar `int64` sampled
+  tokens update the persistent decode input slots through one vectorized
+  batched D2D operation rather than per-row scalar copies.
+  Destination-aliasing compatibility views are staged first; public
+  sampled-token D2H is unchanged. These are binding implementation properties
+  of the candidate under test, not benchmark-side delays or subtracted
+  overhead.
 
   First materialize one detached clean Kairyu source. Derive a metadata-only
   image from the retained M-A2 GPU runtime payload, set the exact source
@@ -2005,6 +2014,16 @@ PY
   four buckets. All warmup rows remain in raw evidence but are excluded from
   metrics.
 
+  Every `run` uses a dedicated tracked client/pool for the model probe and all
+  serial/graph warmups. It must await all warmup traffic and fully close that
+  pool before constructing a distinct measurement client/pool. The measurement
+  pool must have zero prior requests, its first synchronized measurement
+  request must have ordinal zero, and it must be fully closed after the final
+  runtime witness. The raw shard binds both clients' creation/close timestamps,
+  exact request-path counts and order hash, roles, and per-request ordinals.
+  `assemble`, `verify`, and raw-only `replay` fail closed on omission,
+  tampering, reuse, overlap, a nonzero measurement history, or invalid ordering.
+
   Launch each Kairyu generation with only the dedicated production launcher:
 
   ```bash
@@ -2124,11 +2143,12 @@ PY
   require `nvidia-smi` to show the selected cohort free before proceeding.
 
   Run the two one-candidate preflights sequentially. A `run` invocation performs
-  all serial/graph warmups itself, then one synchronized 32-request × 32-token
-  measurement. For Kairyu it also reads `/backends` after graph warmup and after
-  measurement: all seven buckets must already be captured, direct NCCL must be
-  active, fallback/capture counts must remain unchanged at zero/seven, and the
-  replay count must increase.
+  all serial/graph warmups itself, fully closes their client pool, creates the
+  zero-history measurement pool, then runs one synchronized 32-request ×
+  32-token measurement. For Kairyu it also reads `/backends` after graph warmup
+  and after measurement: all seven buckets must already be captured, direct
+  NCCL must be active, fallback/capture counts must remain unchanged at
+  zero/seven, and the replay count must increase.
 
   ```bash
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
@@ -2236,9 +2256,19 @@ PY
   Always publish these SGLang SM120 limitations next to the verdict without
   changing it: FlashInfer CUTLASS is used instead of the SM100-only TRTLLM-gen
   MoE path; prefill CUDA graph is disabled while decode graph remains enabled;
-  and MTP/speculative decoding is disabled because it belongs to M-A4. The
-  implementation and real checkpoint/graph smoke are complete, but the final
-  M-A3 metrics, artifact path, and PASS/FAIL verdict remain **pending** until
-  this complete clean-commit matrix passes both retained-copy verification and
-  raw-only replay. GitHub-hosted CI runs the deterministic operator/tamper
-  suite only and must not pretend to execute this four-GPU 235B measurement.
+  and MTP/speculative decoding is disabled because it belongs to M-A4.
+
+  The retained first clean-commit matrix is a formal FAIL; its verdict and the
+  1.0/1.0 throughput/TTFT thresholds above are unchanged. The former diagnostic
+  comparison of Kairyu 571.542867 with SGLang 449.965–481.865 completion
+  tok/s/GPU is withdrawn because the arms used incompatible HTTP client-pool
+  lifecycles. A corrected, non-binding fresh-server/fresh-measurement-pool
+  diagnostic measured Kairyu 536.690626 versus SGLang 551.731445 completion
+  tok/s/GPU (K/S 0.972739), with TTFT-p99 K/S 0.868731 (1,519.31 versus 1,748.88
+  ms). A full-server SM120 CUTLASS override reached 530.616804 tok/s/GPU, 1.13%
+  below FlashInfer `auto` at 536.690626, so throughput priority retains `auto`.
+  The product owner explicitly accepts the remaining 2.73% diagnostic
+  throughput gap as a closure deviation; M-A3 issue scope is closed without
+  changing either formal threshold or relabelling the retained formal FAIL as
+  PASS. GitHub-hosted CI runs the deterministic operator/tamper suite only and
+  must not pretend to execute this four-GPU 235B measurement.

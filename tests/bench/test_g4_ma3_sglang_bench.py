@@ -466,8 +466,13 @@ def _success_row(
     extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
     end_ns = start_ns + duration_ns
+    client_role = (
+        "warmup" if planned.phase in {"serial_warmup", "graph_warmup"} else "measurement"
+    )
     return {
         "type": "request",
+        "http_client_role": client_role,
+        "http_client_request_ordinal": ordinal,
         "phase": planned.phase,
         "sequence": planned.sequence,
         "attempts": 1,
@@ -510,6 +515,25 @@ def _success_row(
         "candidate": candidate,
         "repeat": repeat,
         **(extra or {}),
+    }
+
+
+def _client_snapshot(
+    *,
+    role: str,
+    created_ns: int,
+    closed_ns: int,
+    paths: list[str],
+) -> dict[str, object]:
+    return {
+        "role": role,
+        "created_ns": created_ns,
+        "closed_ns": closed_ns,
+        "request_count": len(paths),
+        "request_path_counts": {
+            path: paths.count(path) for path in sorted(set(paths))
+        },
+        "request_path_sequence_sha256": gate.sha256_json(paths),
     }
 
 
@@ -565,8 +589,9 @@ def _scenario_rows(
         "capture_start_ns": capture_start_ns,
     }
     rows: list[dict[str, object]] = [start]
+    warmup_client_created_ns = capture_start_ns + 500
     cursor = capture_start_ns + 1_000
-    request_ordinal = 0
+    request_ordinal = 1
     for planned in gate._serial_warmup_plan(bundle["trace"]):
         rows.append(
             _success_row(
@@ -607,6 +632,10 @@ def _scenario_rows(
             request_ordinal += 1
         offset += batch_size
         cursor = release + 210
+    warmup_client_closed_ns = cursor
+    measurement_client_created_ns = warmup_client_closed_ns + 1
+    cursor = measurement_client_created_ns + 100
+    request_ordinal = 0
     groups: list[list[gate.PlannedRequest]]
     if phase == "preflight":
         groups = gate._preflight_plans(bundle["trace"])
@@ -671,6 +700,7 @@ def _scenario_rows(
         ends = [int(row["timing_ns"]["end"]) for row in group_rows]
         measurement_groups.append({"group": group_number, "start": min(starts), "end": max(ends)})
         cursor = max(ends) + 100
+    measurement_client_closed_ns = cursor
     live_observation_started_ns = cursor + 10
     live_observation_completed_ns = cursor + 20
     capture_end_ns = cursor + 100
@@ -686,6 +716,31 @@ def _scenario_rows(
             "graph_warmup_request_count": gate.GRAPH_WARMUP_REQUESTS,
             "measurement_request_count": sum(len(group) for group in groups),
             "measurement_groups": measurement_groups,
+            "http_client_lifecycle": {
+                "schema_version": gate.HTTP_CLIENT_LIFECYCLE_SCHEMA_VERSION,
+                "distinct_client_instances": True,
+                "measurement_requests_before_group": 0,
+                "warmup_client": _client_snapshot(
+                    role="warmup",
+                    created_ns=warmup_client_created_ns,
+                    closed_ns=warmup_client_closed_ns,
+                    paths=[
+                        "/v1/models",
+                        *["/v1/completions"]
+                        * (gate.SERIAL_WARMUP_REQUESTS + gate.GRAPH_WARMUP_REQUESTS),
+                        *(["/backends"] if arm == "kairyu" else []),
+                    ],
+                ),
+                "measurement_client": _client_snapshot(
+                    role="measurement",
+                    created_ns=measurement_client_created_ns,
+                    closed_ns=measurement_client_closed_ns,
+                    paths=[
+                        *["/v1/completions"] * sum(len(group) for group in groups),
+                        *(["/backends"] if arm == "kairyu" else []),
+                    ],
+                ),
+            },
             "provenance_end": _live_observation(
                 provenance_value,
                 started_ns=live_observation_started_ns,
@@ -816,6 +871,74 @@ def test_exact_sglang_v0516_identity_and_working_argv() -> None:
             overlap_mode="default",
             moe_a2a_backend="flashinfer",
         )
+
+
+def test_benchmark_pins_fresh_measurement_http_client_contract() -> None:
+    lifecycle = gate.benchmark_config(a6.SHAREGPT_DATASET_SHA256)[
+        "http_client_lifecycle"
+    ]
+    assert lifecycle == {
+        "applies_to_arms": ["kairyu", "sglang"],
+        "applies_to_phases": ["preflight", "formal"],
+        "warmup_client_request_order": [
+            "model_probe",
+            "serial_warmup",
+            "graph_warmup",
+            "kairyu_graph_start_witness_if_kairyu",
+        ],
+        "warmup_client_fully_closed_before_measurement_client_created": True,
+        "measurement_client": "distinct fresh connection pool",
+        "measurement_client_requests_before_synchronized_group": 0,
+        "measurement_client_request_order": [
+            "one synchronized preflight_or_formal_group",
+            "kairyu_graph_end_witness_if_kairyu",
+        ],
+        "measurement_client_fully_closed_after_witness": True,
+    }
+
+
+def test_tracked_http_client_records_paths_and_only_emits_evidence_after_close() -> None:
+    transport = gate.httpx.MockTransport(
+        lambda _request: gate.httpx.Response(200, json={"ok": True})
+    )
+
+    async def exercise() -> dict[str, object]:
+        client = gate._TrackedAsyncClient(
+            role="measurement",
+            transport=transport,
+        )
+        with pytest.raises(gate.GateEvidenceError, match="not fully closed"):
+            client.evidence()
+        async with client:
+            await client.get("http://127.0.0.1:30000/v1/models")
+            async with client.stream(
+                "POST",
+                "http://127.0.0.1:30000/v1/completions",
+            ) as response:
+                await response.aread()
+        return client.evidence()
+
+    evidence = asyncio.run(exercise())
+    assert evidence["role"] == "measurement"
+    assert evidence["request_count"] == 2
+    assert evidence["request_path_counts"] == {
+        "/v1/completions": 1,
+        "/v1/models": 1,
+    }
+    assert evidence["request_path_sequence_sha256"] == gate.sha256_json(
+        ["/v1/models", "/v1/completions"]
+    )
+    assert int(evidence["created_ns"]) < int(evidence["closed_ns"])
+
+
+def test_trace_bundle_fails_closed_without_client_lifecycle_contract(tmp_path: Path) -> None:
+    path = tmp_path / "trace.json"
+    bundle, _digest = _trace_bundle(path)
+    changed = copy.deepcopy(bundle)
+    changed["benchmark"].pop("http_client_lifecycle")
+    path.write_text(gate.canonical_json(changed) + "\n", encoding="utf-8")
+    with pytest.raises(gate.GateEvidenceError, match="G4 M-A3 contract"):
+        gate.load_trace_bundle(path, dataset_sha256=a6.SHAREGPT_DATASET_SHA256)
 
 
 @pytest.mark.parametrize(
@@ -1141,6 +1264,89 @@ def test_full_raw_replay_passes_exact_boundary(formal_artifact: dict[str, object
     medians = verified["comparisons"]["paired_median"]
     assert gate._fraction_from_record(medians["completion_tok_s_per_gpu_kairyu_over_sglang"]) == 1
     assert gate._fraction_from_record(medians["ttft_p99_kairyu_over_sglang"]) == 1
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "prior-request",
+        "pool-overlap",
+        "request-role",
+        "request-ordinal",
+        "warmup-phase-ordinal-swap",
+        "request-sequence",
+    ),
+)
+def test_raw_replay_rejects_http_client_lifecycle_tamper(
+    formal_artifact: dict[str, object],
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    output_dir = formal_artifact["output_dir"]
+    assert isinstance(output_dir, Path)
+    rows = copy.deepcopy(gate._read_jsonl(output_dir / gate.RAW_NAME))
+    start = next(
+        row
+        for row in rows
+        if row.get("type") == "scenario_start"
+        and row.get("scenario_id") == "formal-r0-kairyu"
+    )
+    end = next(
+        row
+        for row in rows
+        if row.get("type") == "scenario_end"
+        and row.get("scenario_id") == start["scenario_id"]
+    )
+    lifecycle = end["http_client_lifecycle"]
+    assert isinstance(lifecycle, dict)
+    warmup = lifecycle["warmup_client"]
+    measurement = lifecycle["measurement_client"]
+    assert isinstance(warmup, dict) and isinstance(measurement, dict)
+    if tamper == "prior-request":
+        lifecycle["measurement_requests_before_group"] = 1
+    elif tamper == "pool-overlap":
+        warmup["closed_ns"] = measurement["created_ns"]
+    elif tamper == "request-role":
+        request = next(
+            row
+            for row in rows
+            if row.get("type") == "request"
+            and row.get("scenario_id") == start["scenario_id"]
+            and row.get("phase") == "formal"
+        )
+        request["http_client_role"] = "warmup"
+    elif tamper == "request-ordinal":
+        request = next(
+            row
+            for row in rows
+            if row.get("type") == "request"
+            and row.get("scenario_id") == start["scenario_id"]
+            and row.get("phase") == "formal"
+        )
+        request["http_client_request_ordinal"] = 1
+    elif tamper == "warmup-phase-ordinal-swap":
+        serial = next(
+            row
+            for row in rows
+            if row.get("type") == "request"
+            and row.get("scenario_id") == start["scenario_id"]
+            and row.get("phase") == "serial_warmup"
+        )
+        graph = next(
+            row
+            for row in rows
+            if row.get("type") == "request"
+            and row.get("scenario_id") == start["scenario_id"]
+            and row.get("phase") == "graph_warmup"
+        )
+        serial["http_client_request_ordinal"], graph["http_client_request_ordinal"] = (
+            graph["http_client_request_ordinal"],
+            serial["http_client_request_ordinal"],
+        )
+    else:
+        measurement["request_path_sequence_sha256"] = "0" * 64
+    with pytest.raises(gate.GateEvidenceError, match="HTTP client lifecycle"):
+        gate.write_artifact(tmp_path / tamper, rows)
 
 
 @pytest.mark.parametrize("tamper", ("endpoint", "end-container", "end-gpu-exclusive"))

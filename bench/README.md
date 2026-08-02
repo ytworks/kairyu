@@ -321,6 +321,11 @@ pipeline depth 5. SGLang is pinned by source commit and immutable image digest
 with TP4/DP4/EP4, `--enable-dp-attention`, FlashInfer CUTLASS FP4/MoE, no MoE
 A2A, BF16 KV, 16,384 cache tokens per owner, HTTP logging fixed at `warning`,
 decode CUDA-graph batch size capped at 32, and prefill CUDA graph disabled.
+For decode batches larger than one, ordinary non-aliasing same-device scalar
+`int64` sampled tokens update Kairyu's persistent input slots through one
+vectorized batched D2D operation rather than per-row scalar copies.
+Destination-aliasing compatibility views are staged first; public
+sampled-token D2H remains unchanged.
 
 `prepare` hashes the exact seed-0 ShareGPT dataset, Qwen tokenizer, 128-request
 trace, and a disjoint 348-request graph-warmup trace. Every scenario first
@@ -331,6 +336,15 @@ HTTP arrival wave reaches steady decode. Those bursts cover Kairyu's seven local
 Kairyu shard, `/backends` must show direct NCCL active, all seven buckets
 captured, zero eager fallback, no capture/fallback change across traffic, and
 a strictly increased replay count.
+
+The model probe and all warmups use one tracked warmup client/pool. Their
+traffic must complete and that pool must be fully closed before a distinct
+measurement pool is created. The measurement pool starts with zero prior
+requests, assigns ordinal zero to the first synchronized measurement request,
+and is fully closed after its final runtime witness. Raw shards retain the
+client roles, lifecycle timestamps, exact request paths and order, and request
+ordinals; `assemble`, `verify`, and raw-only `replay` reject missing, tampered,
+reused, overlapping, or out-of-order lifecycle evidence.
 
 The complete matrix is exactly ten fresh, strictly sequential server
 generations: one fixed-candidate preflight per arm, then eight binding formal
@@ -367,10 +381,19 @@ discloses that SM120 uses FlashInfer CUTLASS instead of the SM100-only
 TRTLLM-gen MoE path, disables prefill CUDA graph while retaining decode graph,
 and leaves MTP/speculation to M-A4. These limitations never change the gate.
 
-The production implementation and hardware load/graph smoke are complete, but
-the final paired metrics, artifact path, and PASS/FAIL verdict remain pending;
-do not substitute smoke or diagnostic samples for the complete artifact. The
-clean-server launch order, CLI sequence, and full provenance contract are in
+The first complete clean-commit matrix remains a formal FAIL against the
+unchanged 1.0 throughput and 1.0 TTFT thresholds; it is not reclassified. The
+earlier comparison of Kairyu 571.542867 with SGLang 449.965–481.865 completion
+tok/s/GPU is withdrawn because the two arms used incompatible client-pool
+lifecycles. A corrected, non-binding fresh-server/fresh-measurement-pool
+diagnostic measured Kairyu 536.690626 versus SGLang 551.731445 completion
+tok/s/GPU (K/S 0.972739), with TTFT-p99 K/S 0.868731 (1,519.31 versus 1,748.88
+ms). A full-server SM120 CUTLASS override reached 530.616804 tok/s/GPU, 1.13%
+below `auto` at 536.690626, so throughput priority retains FlashInfer `auto`.
+The product owner accepts the remaining 2.73% diagnostic throughput gap as an
+explicit closure deviation. M-A3 issue scope is therefore closed without a
+formal PASS or a threshold change. The retained formal procedure, clean-server
+launch order, CLI sequence, and provenance contract remain in
 `docs/gpu-runbook.md` §9.13.
 
 ### G4 E-KV FP8 KV evidence

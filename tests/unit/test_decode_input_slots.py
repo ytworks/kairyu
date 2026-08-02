@@ -100,6 +100,62 @@ def test_the_slots_are_allocated_once_across_batch_sizes(llama_dir):
     assert grown.tolist() == wide
 
 
+def test_device_scalar_rows_are_stacked_directly_into_persistent_slots(
+    llama_dir, monkeypatch
+):
+    """A device-token batch uses one stack into the existing slot storage."""
+    runner = _runner(llama_dir)
+    sources = [torch.tensor(value, dtype=torch.long) for value in range(16)]
+    stack_calls = []
+    original_stack = torch.stack
+
+    def record_stack(tensors, *args, **kwargs):
+        stack_calls.append((tuple(tensors), kwargs.get("out")))
+        return original_stack(tensors, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "stack", record_stack)
+    tokens, positions = runner._decode_input_slots(sources, list(range(16)))
+
+    assert tokens.tolist() == list(range(16))
+    assert positions.tolist() == list(range(16))
+    assert len(stack_calls) == 1
+    stacked_sources, destination = stack_calls[0]
+    assert stacked_sources == tuple(sources)
+    assert destination is not None
+    assert destination.data_ptr() == runner._decode_slots.data_ptr()
+
+
+def test_mixed_host_and_tensor_rows_keep_compatibility_path(llama_dir, monkeypatch):
+    runner = _runner(llama_dir)
+
+    def forbid_stack(*_args, **_kwargs):
+        pytest.fail("mixed decode inputs must not enter the all-device batch path")
+
+    monkeypatch.setattr(torch, "stack", forbid_stack)
+    tokens, positions = runner._decode_input_slots(
+        [torch.tensor(17, dtype=torch.long), 29],
+        [3, 4],
+    )
+
+    assert tokens.tolist() == [17, 29]
+    assert positions.tolist() == [3, 4]
+
+
+def test_decode_slot_aliases_are_staged_before_destination_update(llama_dir):
+    """Reordered views of the returned slots preserve their original values."""
+    runner = _runner(llama_dir)
+    slots, _ = runner._decode_input_slots([11, 22, 33], [0, 1, 2])
+    aliased_sources = [slots[2], slots[0], slots[1]]
+
+    tokens, positions = runner._decode_input_slots(
+        aliased_sources,
+        [7, 8, 9],
+    )
+
+    assert tokens.tolist() == [33, 11, 22]
+    assert positions.tolist() == [7, 8, 9]
+
+
 def _capture_decode_input(runner, method: str):
     """Record the tensor the model was handed, without disturbing the forward."""
     seen = {}

@@ -2,9 +2,9 @@
 
 Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-03; the M-A1 best
 implementation is retained with its formal FAIL, M-A2 production integration
-and formal hardware evidence are complete, and M-A3 retains its first formal
-performance FAIL while an optimized production candidate has passed a
-same-trace live diagnostic and awaits a clean formal matrix).
+and formal hardware evidence are complete, and M-A3 is scope-closed by an
+explicit product-owner deviation while its retained formal performance verdict
+remains FAIL against the unchanged thresholds).
 Milestone: G4.1 M-A1/M-A2/M-A3.
 Depends on: M12 (Qwen model), M13 (paged attention), M14 (native NVFP4
 projection kernels), M15 (Qwen3-MoE math), M16 (NCCL communicator and EP
@@ -438,6 +438,15 @@ Gloo reply gather on success without either a CUDA-to-host synchronization or
 divergent failure participation. Logprobs, grammar, and every other non-fast
 sampling path retain the former all-rank Gloo reply and validation.
 
+The persistent decode input slots also retain their device addresses across
+steps. When a batch larger than one supplies ordinary non-aliasing same-device
+scalar `int64` sampled tokens, one vectorized batched D2D operation updates all
+token rows in those slots instead of submitting one scalar copy per row.
+Destination-aliasing views are staged before update to preserve their original
+values; other unusual tensors and mixed host/device batches retain the
+compatibility path. This internal input update does not change the public
+sampled-token D2H/materialization contract.
+
 Steady CUDA-graph replay also avoids FlashInfer's stock planning drain.
 Capture and eager fallback initialize each graph-shape wrapper with the public
 stock `plan()`. Replay receives authoritative scheduler-owned sequence lengths
@@ -495,6 +504,15 @@ and volume consumers. All operator commands execute the detached clean
 `--checkpoint-start`, and assembly requires both boundary captures. Assembly
 rejects a reused/overlapping server, changed provenance, changed
 trace/selection, incomplete SSE/usage, retry, fallback, or unknown raw field.
+The model probe and all serial/graph warmups run through one tracked warmup
+client and connection pool. Only after that traffic completes and the pool is
+fully closed may the operator construct the distinct measurement pool, whose
+prior-request count must be zero and whose first synchronized measurement
+request ordinal is zero. The measurement pool is fully closed after its final
+runtime witness. This lifecycle, its timestamps, exact path counts, path-order
+hash, client roles, and request ordinals are retained in raw evidence;
+`assemble`, `verify`, and raw-only `replay` all fail closed on omission,
+tampering, pool reuse, or invalid ordering.
 Raw JSONL is authoritative; `verify` compares the derived manifest with an
 independent replay, and `replay` ignores the stored manifest. SGLang's SM120
 limitations are always disclosed beside the result but never modify the gate:
@@ -508,14 +526,21 @@ generations, 4,630 raw rows, and every non-performance binding check. Its four
 throughput ratios were 0.741839/0.798127/0.829296/0.769510 and its exact median
 was 0.783818; the exact median TTFT-p99 ratio was 1.352633. Both performance
 checks therefore failed and retained verification/raw replay correctly reject
-`--assert-gate`. A pre-commit live diagnostic of the optimized replay path then
-completed the same 128-request × 128-token trace with 128/128 successes at
-571.542867 completion tok/s/GPU and 1.025656-second TTFT p99. Its seven graph
-captures stayed fixed, replay count increased 144 to 272, and eager fallback
-stayed zero. This exceeds the retained SGLang generations' 449.965–481.865
-tok/s/GPU, but it is diagnostic evidence only. The failed formal verdict
-remains authoritative until a new complete clean-commit matrix independently
-passes; no diagnostic or mixed-commit result can close M-A3.
+`--assert-gate`. The later 571.542867 tok/s/GPU Kairyu sample was originally
+compared with retained SGLang generations at 449.965–481.865 tok/s/GPU. That
+comparison is withdrawn because the arms used incompatible HTTP client-pool
+lifecycles and therefore does not support a performance conclusion.
+
+A corrected, non-binding fresh-server/fresh-measurement-pool diagnostic
+measured Kairyu at 536.690626 and SGLang at 551.731445 completion tok/s/GPU,
+for a K/S throughput ratio of 0.972739. Its TTFT-p99 K/S ratio was 0.868731
+(Kairyu 1,519.31 ms; SGLang 1,748.88 ms). A full-server SM120 CUTLASS override
+measured 530.616804 tok/s/GPU, 1.13% below the retained FlashInfer `auto` result
+of 536.690626 tok/s/GPU, so throughput priority keeps `auto`. These diagnostics
+do not alter the formal throughput/TTFT thresholds of 1.0/1.0 or the retained
+formal FAIL. The product owner explicitly accepts the remaining 2.73%
+diagnostic throughput gap as a closure deviation, so M-A3 issue scope is
+closed without reclassifying any diagnostic or formal evidence as PASS.
 
 ## 5. Verification
 
@@ -535,10 +560,11 @@ passes; no diagnostic or mixed-commit result can close M-A3.
   exact, and both manifest verification and raw-only replay pass.
 - M-A3 formal: the fixed production arms complete one preflight each, the
   frozen selection precedes eight fresh sequential paired cells, the full
-  ten-generation window is enclosed by identical checkpoint hashes, all
+  ten-generation window is enclosed by identical checkpoint hashes, and all
   Kairyu cells prove direct-NCCL plus graph replay without capture/fallback
-  drift, and the exact paired medians satisfy both throughput and TTFT
-  thresholds. All declared SGLang limitations remain visible without
-  affecting the binding verdict.
+  drift. Formal PASS still requires both exact paired medians to satisfy the
+  unchanged throughput and TTFT thresholds; the retained matrix remains FAIL,
+  while issue scope is closed separately by the explicit owner deviation. All
+  declared SGLang limitations remain visible without affecting either verdict.
 - Repository: targeted tests, full applicable CPU/dist/GPU suites, ruff, and
   all required GitHub checks are green before merge.

@@ -1715,6 +1715,32 @@ class PagedModelRunner:
         if self._decode_slots is None or self._decode_slots.numel() < size:
             self._allocate_decode_slots(size)
         assert self._decode_slots is not None and self._decode_positions is not None
+        # Pure device sampling produces one scalar view per decode row.  The
+        # views normally share an argmax/token-packet allocation, but copying
+        # them one by one still submits B separate CUDA kernels from Python.
+        # ``stack(out=...)`` gathers ordinary scalar views directly into the
+        # persistent input slots with one kernel and no temporary output.
+        # Destination-aliasing views need a temporary stack to preserve their
+        # pre-update values; other unusual or mixed inputs retain the established
+        # compatibility path below.
+        same_device_scalar_tokens = bool(tokens) and all(
+            type(token) is torch.Tensor
+            and token.device == self._device
+            and token.dtype is torch.int64
+            and token.ndim == 0
+            and not token.requires_grad
+            for token in tokens
+        )
+        slot_start = self._decode_slots[:size].data_ptr()
+        slot_end = slot_start + size * self._decode_slots.element_size()
+        decode_slot_alias = same_device_scalar_tokens and any(
+            slot_start <= token.data_ptr() < slot_end
+            for token in tokens
+            if isinstance(token, torch.Tensor)
+        )
+        batched_device_tokens = (
+            size > 1 and same_device_scalar_tokens and not decode_slot_alias
+        )
         host_tokens = [
             0 if isinstance(token, torch.Tensor) else token for token in tokens
         ]
@@ -1732,17 +1758,23 @@ class PagedModelRunner:
                     staging[0, :size], non_blocking=True
                 )
         else:
-            self._decode_slots[:size].copy_(
-                torch.as_tensor(host_tokens, dtype=torch.long)
-            )
+            if not batched_device_tokens and not decode_slot_alias:
+                self._decode_slots[:size].copy_(
+                    torch.as_tensor(host_tokens, dtype=torch.long)
+                )
             self._decode_positions[:size].copy_(
                 torch.as_tensor(positions, dtype=torch.long)
             )
-        for index, token in enumerate(tokens):
-            if isinstance(token, torch.Tensor):
-                self._decode_slots[index].copy_(
-                    token.to(device=self._device, dtype=torch.long)
-                )
+        if batched_device_tokens:
+            torch.stack(tokens, out=self._decode_slots[:size])
+        elif decode_slot_alias:
+            self._decode_slots[:size].copy_(torch.stack(tokens))
+        else:
+            for index, token in enumerate(tokens):
+                if isinstance(token, torch.Tensor):
+                    self._decode_slots[index].copy_(
+                        token.to(device=self._device, dtype=torch.long)
+                    )
         if self._device.type == "cuda":
             copy_done.record()
         return self._decode_slots[:size], self._decode_positions[:size]
