@@ -904,6 +904,49 @@ def test_formal_gateway_manifest_freezes_guaranteed_qos() -> None:
     }
 
 
+def test_gateway_membership_deadline_covers_two_discovery_intervals() -> None:
+    manifest = (
+        Path(__file__).parents[2]
+        / "deploy"
+        / "kind"
+        / "f1a"
+        / "base"
+        / "gateway.yaml"
+    )
+    documents = [
+        document
+        for document in yaml.safe_load_all(
+            manifest.read_text(encoding="utf-8")
+        )
+        if document
+    ]
+    config_map = next(
+        document
+        for document in documents
+        if document.get("kind") == "ConfigMap"
+        and document["metadata"]["name"] == "f1a-gateway-config"
+    )
+    gateway = yaml.safe_load(config_map["data"]["config.yaml"])
+    discovery_poll_seconds = gateway["pools"]["f1a"]["discovery"][
+        "poll_interval_s"
+    ]
+
+    assert discovery_poll_seconds == 0.5
+    for config in (FORMAL_CONFIG, SMOKE_CONFIG):
+        assert (
+            config.gateway_membership_withdrawal_limit_seconds
+            == 2 * discovery_poll_seconds
+        )
+        assert (
+            config.gateway_membership_withdrawal_limit_seconds
+            < config.endpoint_withdrawal_limit_seconds
+        )
+    assert (
+        SMOKE_CONFIG.gateway_membership_withdrawal_limit_seconds
+        > SMOKE_CONFIG.evidence_interval_seconds
+    )
+
+
 def test_percentile_uses_raw_nearest_rank_samples() -> None:
     assert percentile([float(index) for index in range(1, 101)], 0.99) == 99.0
 
@@ -1690,7 +1733,10 @@ def test_gate_requires_gateway_withdrawal_by_endpoint_deadline() -> None:
     ]
     deadline_ns = (
         evidence["churn"][0]["old_withdrawn_ns"]
-        + int(SMOKE_CONFIG.evidence_interval_seconds * 1_000_000_000)
+        + int(
+            SMOKE_CONFIG.gateway_membership_withdrawal_limit_seconds
+            * 1_000_000_000
+        )
     )
     memberships[1]["observed_ns"] = deadline_ns + 100_000_000
     memberships[2]["observed_ns"] = deadline_ns + 200_000_000
@@ -1699,6 +1745,28 @@ def test_gate_requires_gateway_withdrawal_by_endpoint_deadline() -> None:
 
     assert not result["passed"]
     assert not result["checks"]["gateway_membership_withdrawal_causal"]
+
+
+def test_gateway_withdrawal_is_not_bounded_by_evidence_capture_cadence() -> None:
+    evidence = _passing_evidence()
+    memberships = [
+        row for row in evidence["placements"] if row.get("kind") == "membership"
+    ]
+    old_withdrawn_ns = evidence["churn"][0]["old_withdrawn_ns"]
+    evidence_deadline_ns = old_withdrawn_ns + int(
+        SMOKE_CONFIG.evidence_interval_seconds * 1_000_000_000
+    )
+    gateway_deadline_ns = old_withdrawn_ns + int(
+        SMOKE_CONFIG.gateway_membership_withdrawal_limit_seconds
+        * 1_000_000_000
+    )
+    assert evidence_deadline_ns < gateway_deadline_ns
+    memberships[1]["observed_ns"] = evidence_deadline_ns + 100_000_000
+    memberships[2]["observed_ns"] = evidence_deadline_ns + 200_000_000
+
+    result = evaluate_gate(**evidence)
+
+    assert result["checks"]["gateway_membership_withdrawal_causal"]
 
 
 def test_gate_rejects_membership_sequence_gap_or_duplicate() -> None:

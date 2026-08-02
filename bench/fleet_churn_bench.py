@@ -87,6 +87,7 @@ class GateConfig:
     schedule_lateness_limit_ms: float
     endpoint_withdrawal_limit_seconds: float
     pacing_success_fraction: float
+    gateway_membership_withdrawal_limit_seconds: float = 1.0
 
     @property
     def measurement_seconds(self) -> float:
@@ -136,6 +137,7 @@ class GateConfig:
             self.placement_p99_limit_ms,
             self.schedule_lateness_limit_ms,
             self.endpoint_withdrawal_limit_seconds,
+            self.gateway_membership_withdrawal_limit_seconds,
         )
         if any(value <= 0 for value in positive):
             raise ValueError("gate duration/rate/limit fields must be positive")
@@ -145,6 +147,14 @@ class GateConfig:
             raise ValueError("pacing_success_fraction must be in (0, 1]")
         if self.churn_window_seconds > self.epoch_seconds:
             raise ValueError("churn_window_seconds must not exceed epoch_seconds")
+        if (
+            self.gateway_membership_withdrawal_limit_seconds
+            > self.endpoint_withdrawal_limit_seconds
+        ):
+            raise ValueError(
+                "gateway membership withdrawal limit must not exceed the "
+                "endpoint withdrawal limit"
+            )
 
 
 FORMAL_CONFIG = GateConfig(
@@ -167,6 +177,7 @@ FORMAL_CONFIG = GateConfig(
     schedule_lateness_limit_ms=1_000.0,
     endpoint_withdrawal_limit_seconds=5.0,
     pacing_success_fraction=0.99,
+    gateway_membership_withdrawal_limit_seconds=1.0,
 )
 
 SMOKE_CONFIG = GateConfig(
@@ -189,6 +200,7 @@ SMOKE_CONFIG = GateConfig(
     schedule_lateness_limit_ms=1_000.0,
     endpoint_withdrawal_limit_seconds=5.0,
     pacing_success_fraction=0.95,
+    gateway_membership_withdrawal_limit_seconds=1.0,
 )
 
 
@@ -3077,6 +3089,10 @@ def evaluate_gate(
     endpoint_interval_ns = int(
         config.evidence_interval_seconds * 1_000_000_000
     )
+    gateway_withdrawal_limit_ns = int(
+        config.gateway_membership_withdrawal_limit_seconds
+        * 1_000_000_000
+    )
     endpoint_causal_bracket_ns = int(
         _ENDPOINT_WITHDRAWAL_CAUSAL_BRACKET_SECONDS * 1_000_000_000
     )
@@ -3487,8 +3503,20 @@ def evaluate_gate(
                 ),
                 None,
             )
-        if type(old_withdrawn_ns) is int:
-            withdrawal_deadline_ns = old_withdrawn_ns + endpoint_interval_ns
+        if type(old_withdrawn_ns) is int and type(api_started_ns) is int:
+            # Endpoint evidence and gateway discovery are independent polling
+            # loops.  The former's capture cadence is not a convergence SLO.
+            # Bound the gateway by its explicit two-interval budget and, even
+            # when the EndpointSlice observer is late, by the five-second
+            # graceful withdrawal contract measured from deletion.
+            withdrawal_deadline_ns = min(
+                old_withdrawn_ns + gateway_withdrawal_limit_ns,
+                api_started_ns
+                + int(
+                    config.endpoint_withdrawal_limit_seconds
+                    * 1_000_000_000
+                ),
+            )
             deadline_membership = next(
                 (
                     membership
