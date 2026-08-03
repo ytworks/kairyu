@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,8 @@ import kairyu.deploy.builder as builder_module
 from kairyu.deploy.registry import ReplicaConfig
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.orchestration.replica import ReplicaPool
 from kairyu.sampling_params import SamplingParams
 
 
@@ -69,7 +72,10 @@ def test_dynamic_http_clients_share_only_tls_and_bound_cross_origin_probe_pool(
     )
     monkeypatch.setattr(builder_module.httpx, "AsyncClient", construct)
 
-    factory = builder_module._DynamicPoolHTTPClientFactory()
+    factory = builder_module._DynamicPoolHTTPClientFactory(
+        max_concurrency=128,
+        replica_count=lambda: 2,
+    )
     first = factory.create_replica_client()
     second = factory.create_replica_client()
     probe = factory.create_probe_client()
@@ -85,13 +91,131 @@ def test_dynamic_http_clients_share_only_tls_and_bound_cross_origin_probe_pool(
     assert first_limits is not second_limits
     for limits in (first_limits, second_limits):
         assert limits.max_connections is None
-        assert limits.max_keepalive_connections == 1
+        assert limits.max_keepalive_connections == 64
         assert limits.keepalive_expiry == 30.0
 
     probe_limits = client_options[2]["limits"]
     assert probe_limits.max_connections == 16
     assert probe_limits.max_keepalive_connections == 16
     assert probe_limits.keepalive_expiry == 30.0
+
+
+@pytest.mark.parametrize(
+    ("max_concurrency", "replica_count", "expected"),
+    [
+        (128, 2, 64),
+        (128, 0, 64),
+        (256, 200, 2),
+        (4096, 2, 64),
+        (None, 200, 8),
+    ],
+)
+def test_dynamic_replica_keepalive_limit_tracks_gateway_capacity(
+    max_concurrency: int | None,
+    replica_count: int,
+    expected: int,
+) -> None:
+    assert (
+        builder_module._dynamic_replica_keepalive_limit(
+            max_concurrency,
+            replica_count,
+        )
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_dynamic_replica_client_keeps_a_concurrent_wave_warm_and_closes_on_removal(
+) -> None:
+    wave_size = 64
+    accepted_connections = 0
+    received_requests = 0
+    active_handlers = 0
+    wave_arrived = (asyncio.Event(), asyncio.Event())
+    handlers_done = asyncio.Event()
+
+    async def serve(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        nonlocal accepted_connections, active_handlers, received_requests
+        accepted_connections += 1
+        active_handlers += 1
+        try:
+            while True:
+                try:
+                    await reader.readuntil(b"\r\n\r\n")
+                except (
+                    asyncio.IncompleteReadError,
+                    asyncio.LimitOverrunError,
+                    OSError,
+                ):
+                    return
+                wave = received_requests // wave_size
+                received_requests += 1
+                if wave < len(wave_arrived):
+                    if received_requests == (wave + 1) * wave_size:
+                        wave_arrived[wave].set()
+                    await asyncio.wait_for(
+                        wave_arrived[wave].wait(),
+                        timeout=5.0,
+                    )
+                try:
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Content-Length: 2\r\n"
+                        b"Connection: keep-alive\r\n\r\n"
+                        b"ok"
+                    )
+                    await writer.drain()
+                except OSError:
+                    return
+        finally:
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+            active_handlers -= 1
+            if active_handlers == 0:
+                handlers_done.set()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    factory = builder_module._DynamicPoolHTTPClientFactory(
+        max_concurrency=128,
+        replica_count=lambda: 2,
+    )
+    backend = OpenAICompatBackend(
+        base_url=f"http://127.0.0.1:{port}/v1",
+        model="test-model",
+        api_key_env=None,
+        client_factory=factory.create_replica_client,
+    )
+    pool = ReplicaPool({"replica": backend})
+    client = backend._get_client()
+
+    try:
+        async with server:
+            first = await asyncio.gather(
+                *(client.get(f"http://127.0.0.1:{port}") for _ in range(wave_size))
+            )
+            assert [response.text for response in first] == ["ok"] * wave_size
+            assert accepted_connections == wave_size
+
+            second = await asyncio.gather(
+                *(client.get(f"http://127.0.0.1:{port}") for _ in range(wave_size))
+            )
+            assert [response.text for response in second] == ["ok"] * wave_size
+            assert accepted_connections == wave_size
+
+            await pool.remove_replica("replica")
+            assert client.is_closed is True
+            await asyncio.wait_for(handlers_done.wait(), timeout=5.0)
+    finally:
+        if pool.replica_ids:
+            await pool.remove_replica("replica")
+        if accepted_connections:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(handlers_done.wait(), timeout=5.0)
 
 
 @pytest.mark.asyncio
@@ -165,7 +289,14 @@ async def test_dynamic_pool_wires_discovery_prober_log_and_lifespan(
     class FakeHTTPClientFactory:
         instances: list[FakeHTTPClientFactory] = []
 
-        def __init__(self) -> None:
+        def __init__(
+            self,
+            *,
+            max_concurrency: int | None,
+            replica_count,
+        ) -> None:
+            self.max_concurrency = max_concurrency
+            self.replica_count = replica_count
             self.replica_clients: list[httpx.AsyncClient] = []
             self.probe_client: httpx.AsyncClient | None = None
             self.instances.append(self)
@@ -189,6 +320,8 @@ async def test_dynamic_pool_wires_discovery_prober_log_and_lifespan(
     )
     spec = load_deployment_spec(
         """
+server:
+  max_concurrency: 128
 pools:
   qwen:
     discovery:
@@ -221,6 +354,8 @@ pools:
         "address_family_preference": "ipv4",
     }
     client_factory = FakeHTTPClientFactory.instances[0]
+    assert client_factory.max_concurrency == 128
+    assert client_factory.replica_count() == 0
     assert app.state.dynamic_pool_http_client_factories == (client_factory,)
     assert prober._client is client_factory.probe_client
     assert prober._owns_client is True
@@ -231,6 +366,7 @@ pools:
                 break
             await asyncio.sleep(0.001)
         assert pool.replica_ids == ("pod-uid",)
+        assert client_factory.replica_count() == 1
         assert pool.healthy == (True,)
         assert pool.eligible_ids == ("pod-uid",)
         backend = pool._entries["pod-uid"].backend

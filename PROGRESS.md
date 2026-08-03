@@ -53,10 +53,10 @@ keeps the contiguous table stride runtime because it equals the live width.
 After the first ragged compile, previously unseen table widths fell from
 63.81–67.53 ms to 0.11–0.20 ms with exact K/V output; the batched gate now
 binds exact K/V output and one shared compile across changing row/width pairs.
-Portable CPU jobs retain both Python 3.11/3.12 and all 4,579 selected tests,
+Portable CPU jobs retain both Python 3.11/3.12 and all 4,585 selected tests,
 but run `tests/bench` with two file-isolated workers and reuse immutable formal
 inputs instead of regenerating them. The exact Python 3.12 two-phase command
-passed in 10m20s versus the prior 16m33s GitHub test step, with zero selected
+passed in 10m18s versus the prior 16m33s GitHub test step, with zero selected
 skips and 86.74% combined coverage.
 The full TP4/8 HTTP matrix remains an open hard performance gate while the
 verified depth-5 implementation proceeds independently.
@@ -777,6 +777,15 @@ CUDA boolean indexing, eliminating the per-layer scalar and `nonzero` stream
 drains from the single-chunk prefill path while the public arbitrary-position
 model contract retains its exact compatibility behavior.
 
+Dynamic replica data clients now snapshot live membership on lazy creation and
+retain `min(64, ceil(gateway concurrency / live replicas))` demand-created idle
+connections per origin. This preserves all 64 connections per replica for a
+128-client, DP=2 serving wave while retaining only two per origin in F1a's
+256-request/200-replica envelope; gateways without a concurrency bound use an
+explicit fallback of eight. Active connections remain transport-unqueued, idle
+sockets are expiry-checked by later same-origin activity, and replica removal or
+replacement closes the origin-local client immediately.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -784,6 +793,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [amendment] Dynamic replica clients retain one saturated serving wave
+- What: dynamic origin-local clients now snapshot the live replica count when first used and retain `min(64, max(1, ceil(gateway concurrency / live replicas)))` idle connections, with an explicit fallback of eight when gateway concurrency is unbounded. Active connections remain transport-unqueued, expiry remains 30 seconds and same-origin activity driven, and replica removal still closes its client immediately. A real HTTP/1.1 TCP regression gate holds two consecutive 64-request waves at a barrier, requires exact socket reuse, then removes the real backend from its pool and waits for every server handler to observe close.
+- Why: with the issue's 128 clients across DP=2, a one-socket idle cap closed 63 connections per replica after every saturated wave and forced the next wave to reconnect. A fixed 64 cap would instead permit 12,800 retained sockets across F1a's 200 replicas; capacity-proportional lazy sizing gives the cited DP case 64 while F1a retains two per origin.
+- Refs: issue #345; m10 A18; `kairyu/deploy/builder.py`; `tests/unit/test_k8s_builder.py`; `tests/unit/test_openai_backend.py`
 
 ### 2026-08-04 — [amendment] Batched paged-KV live bounds reuse one Triton kernel
 - What: made batched row count, page-table width, and contiguous table stride runtime non-specialized arguments while retaining layout, dtype, head geometry, and write mode as compile-time constants; a real-GPU gate now changes both live dimensions, checks exact K/V output, and requires one compilation.

@@ -359,17 +359,28 @@ online learning or the M4 request-family bandit.
   then each discovered OpenAI backend lazily creates and owns an origin-local
   `AsyncClient` from it. Removing or replacing a replica closes only that
   replica's client, cancellation-safely through the existing backend lifecycle.
-  Active data connections remain bounded by gateway admission rather than a
-  transport queue; each origin retains at most one idle connection for 30
-  seconds. Readiness uses a separately owned client capped at the prober's 16
-  concurrent connections. Both paths ignore proxy environment variables because
-  EndpointSlice addresses are cluster-internal. Sharing the TLS context removes
-  synchronous per-replica CA loading while separate transports avoid httpcore
-  1.0's fleet-wide flat connection scan. vLLM's shared aiohttp/reqwest clients
-  are not a counterexample: both index reusable connections by origin, whereas
-  httpcore 1.0 scans one cross-origin list and performs quadratic idle cleanup.
-  A18 therefore supersedes A17's shared-httpx-transport choice while retaining
-  its pool-scope TLS setup objective and per-operation timeout contract.
+  When configured, gateway admission bounds active data connections; the
+  transport does not impose a second queue. When an origin's client is lazily
+  created, a gateway with finite concurrency `C` and `R` live replicas retains
+  `min(64, max(1, ceil(C / R)))` demand-created idle connections for that
+  origin. Thus a 128-client, DP=2 serving wave retains 64 per origin, while
+  F1a's 256-request/200-replica envelope retains two. An unbounded gateway uses
+  an explicit conservative fallback of eight. The limit is a creation-time
+  membership snapshot: scale-out does not resize existing transports, and a
+  surviving origin after scale-in can retain its former lower limit until that
+  replica is replaced. This avoids closing an active transport during a
+  membership mutation. Idle connections become expiry-eligible after 30
+  seconds and are reclaimed by later activity on that same origin-local client;
+  removing or replacing a replica closes its client immediately. Readiness uses
+  a separately owned client capped at the prober's 16 concurrent connections.
+  Both paths ignore proxy environment variables because EndpointSlice addresses
+  are cluster-internal. Sharing the TLS context removes synchronous per-replica
+  CA loading while separate transports avoid httpcore 1.0's fleet-wide flat
+  connection scan. vLLM's shared aiohttp/reqwest clients are not a
+  counterexample: both index reusable connections by origin, whereas httpcore
+  1.0 scans one cross-origin list and performs quadratic idle cleanup. A18
+  therefore supersedes A17's shared-httpx-transport choice while retaining its
+  pool-scope TLS setup objective and per-operation timeout contract.
 - **A19**: request validation preserves the intersection of all eligible
   replica contracts without repeating an identical immutable contract for
   every replica. A backend may explicitly publish a hashable
