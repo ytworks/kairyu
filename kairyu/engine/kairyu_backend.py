@@ -230,6 +230,7 @@ def build_engine_loop(
     runner: object | None = None,
     tensor_parallel_size: int = 1,
     expert_parallel_size: int = 1,
+    expert_parallel_attention_dp: bool = False,
     tokenizer: str | Tokenizer | None = None,
     speculative: str | None = None,
     speculative_tokens: int = 4,
@@ -273,6 +274,12 @@ def build_engine_loop(
             f"got {expert_parallel_size!r}"
         )
     expert_parallel = expert_parallel_size > 1
+    if type(expert_parallel_attention_dp) is not bool:
+        raise TypeError("expert_parallel_attention_dp must be a boolean")
+    if expert_parallel_attention_dp and expert_parallel_size != 4:
+        raise ValueError(
+            "expert_parallel_attention_dp requires expert_parallel_size=4"
+        )
     if expert_parallel and tensor_parallel_size > 1:
         raise ValueError(
             "tensor_parallel_size > 1 and expert_parallel_size > 1 are "
@@ -355,10 +362,15 @@ def build_engine_loop(
     if expert_parallel:
         if model_path is None:
             raise ValueError("expert parallelism requires a real model_path")
-        if pipeline_depth != 1:
-            raise ValueError("expert parallelism requires pipeline_depth=1")
-        if decode_mode != "eager":
-            raise ValueError("expert parallelism requires decode_mode='eager'")
+        if not expert_parallel_attention_dp and pipeline_depth != 1:
+            raise ValueError(
+                "replicated-attention expert parallelism requires pipeline_depth=1"
+            )
+        if decode_mode != "eager" and not expert_parallel_attention_dp:
+            raise ValueError(
+                "replicated-attention expert parallelism requires "
+                "decode_mode='eager'"
+            )
         if kv_cache_dtype != "bfloat16":
             raise ValueError(
                 "expert parallelism requires kv_cache_dtype='bfloat16'"
@@ -374,6 +386,7 @@ def build_engine_loop(
         return _build_dist_ep_loop(
             model_path=model_path,
             expert_parallel_size=expert_parallel_size,
+            expert_parallel_attention_dp=expert_parallel_attention_dp,
             num_pages=num_pages,
             page_size=page_size,
             max_num_batched_tokens=max_num_batched_tokens,
@@ -383,6 +396,9 @@ def build_engine_loop(
             tokenizer=tokenizer,
             pipeline_depth=pipeline_depth,
             decode_mode=decode_mode,
+            cuda_graph_max_batch=cuda_graph_max_batch,
+            cuda_graph_max_pages=cuda_graph_max_pages,
+            cuda_graph_warmup_iters=cuda_graph_warmup_iters,
             kv_cache_dtype=kv_cache_dtype,
         )
     if pd_separation:
@@ -703,6 +719,7 @@ def _build_dist_ep_loop(
     *,
     model_path: str,
     expert_parallel_size: int,
+    expert_parallel_attention_dp: bool = False,
     num_pages: int,
     page_size: int,
     max_num_batched_tokens: int,
@@ -712,9 +729,12 @@ def _build_dist_ep_loop(
     tokenizer: str | Tokenizer | None,
     pipeline_depth: int = 1,
     decode_mode: str = "eager",
+    cuda_graph_max_batch: int = 8,
+    cuda_graph_max_pages: int = 512,
+    cuda_graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "bfloat16",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
-    """Build the production replicated-attention EP2/EP4 serving loop."""
+    """Build the production replicated-attention or attention-DP EP loop."""
 
     from kairyu.engine.core.worker import DistEPLauncher
     from kairyu.models.loader import load_generation_defaults
@@ -736,17 +756,34 @@ def _build_dist_ep_loop(
         speculative_tokens=0,
         priority_age_s=priority_age_s,
     )
+    graph_decode = decode_mode == "cuda_graph"
+    graph_row_capacity = _graph_row_capacity(
+        cuda_graph_max_batch,
+        max_num_batched_tokens,
+        speculative=False,
+        speculative_tokens=0,
+    )
+    # Attention-DP ranks own a physical pool larger than the scheduler-visible
+    # namespace: two prefill scratch pages, one unique decode scratch page per
+    # maximum graph row, then this distinct graph-capture scratch page.
+    graph_scratch_page = (
+        num_pages + 2 + graph_row_capacity if graph_decode else None
+    )
     launcher = DistEPLauncher(
         model_path,
         expert_parallel_size,
         num_pages,
         page_size,
         vocab=grammar_vocab,
+        attention_dp=expert_parallel_attention_dp,
         pipeline_depth=pipeline_depth,
         decode_mode=decode_mode,
         kv_cache_dtype=kv_cache_dtype,
         pd_separation=False,
-        graph_scratch_page=None,
+        graph_scratch_page=graph_scratch_page,
+        graph_max_batch=graph_row_capacity if graph_decode else 0,
+        graph_max_pages=cuda_graph_max_pages if graph_decode else 0,
+        graph_warmup_iters=cuda_graph_warmup_iters,
         dram_kv_tier_capacity_pages=0,
         dram_kv_tier_profile=None,
         speculative=None,
@@ -918,9 +955,12 @@ class KairyuBackend:
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | Path | None = None,
         expert_parallel_size: int = 1,
+        *,
+        expert_parallel_attention_dp: bool = False,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self.expert_parallel_size = expert_parallel_size
+        self.expert_parallel_attention_dp = expert_parallel_attention_dp
         self._loop, self._cache, self._scheduler = build_engine_loop(
             num_pages=num_pages,
             page_size=page_size,
@@ -931,6 +971,7 @@ class KairyuBackend:
             runner=runner,
             tensor_parallel_size=tensor_parallel_size,
             expert_parallel_size=expert_parallel_size,
+            expert_parallel_attention_dp=expert_parallel_attention_dp,
             tokenizer=tokenizer,
             speculative=speculative,
             speculative_tokens=speculative_tokens,
@@ -987,6 +1028,17 @@ class KairyuBackend:
             tuple[weakref.ReferenceType[GenerationRequest], PreparedPrompt],
         ] = {}
         self._prepared_requests_lock = threading.Lock()
+
+    def parallelism_metadata_snapshot(self) -> dict[str, object] | None:
+        """Refresh topology counters for diagnostics without a rank collective."""
+
+        launcher = getattr(self._loop, "parallel_launcher", None)
+        getter = getattr(launcher, "parallelism_metadata", None)
+        if callable(getter):
+            metadata = getter()
+            return dict(metadata) if isinstance(metadata, Mapping) else None
+        metadata = self.parallelism_metadata
+        return dict(metadata) if isinstance(metadata, Mapping) else None
 
     def _peek_prepared_request(
         self,

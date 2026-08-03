@@ -70,6 +70,7 @@ class _ExpertShardedLinearFactory:
         ep_rank: int,
         ep_size: int,
         attention_output_factory=None,
+        replicate_attention_output: bool = False,
     ) -> None:
         if num_experts % ep_size:
             raise ValueError(
@@ -81,6 +82,7 @@ class _ExpertShardedLinearFactory:
         self._ep_size = ep_size
         self._experts_per_rank = num_experts // ep_size
         self._attention_output_factory = attention_output_factory
+        self._replicate_attention_output = replicate_attention_output
 
     def __call__(
         self,
@@ -97,6 +99,29 @@ class _ExpertShardedLinearFactory:
         shard_dim: int | None = None,
         allow_quantization: bool = True,
     ) -> nn.Module:
+        if (
+            self._replicate_attention_output
+            and model_scope is ModelScope.TARGET
+            and role is LinearRole.ATTENTION_OUTPUT
+            and expert_scope is ExpertScope.NONE
+        ):
+            if shard_dim != 1:
+                raise ValueError(
+                    "attention-DP attention output must originate from checkpoint K dim 1"
+                )
+            return self._base(
+                in_features,
+                out_features,
+                bias,
+                qualified_name=qualified_name,
+                model_scope=model_scope,
+                role=role,
+                layer_index=layer_index,
+                expert_index=expert_index,
+                expert_scope=expert_scope,
+                shard_dim=None,
+                allow_quantization=allow_quantization,
+            )
         if (
             self._attention_output_factory is not None
             and model_scope is ModelScope.TARGET
@@ -161,6 +186,56 @@ class ExpertParallelLoadInfo:
     checkpoint_tensor_count: int
     rank_loaded_tensor_count: int
     auxiliary_kv_scale_count: int
+
+
+_ATTENTION_DP_DISPATCHER = "nvfp4_allgather_reduce_scatter"
+_ATTENTION_DP_EP_SIZE = 4
+_ATTENTION_DP_QWEN3_235B_GEOMETRY = {
+    "architecture": "Qwen3MoeForCausalLM",
+    "hidden_size": 4096,
+    "num_hidden_layers": 94,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 4,
+    "head_dim": 128,
+    "intermediate_size": 12_288,
+    "vocab_size": 151_936,
+    "dtype": "bfloat16",
+    "tie_word_embeddings": False,
+    "num_experts": 128,
+    "num_experts_per_tok": 8,
+    "moe_intermediate_size": 1536,
+    "decoder_sparse_step": 1,
+    "mlp_only_layers": (),
+    "n_shared_experts": 0,
+    "first_k_dense_replace": 0,
+}
+
+
+def _normalize_attention_dp_layouts(
+    layouts: object,
+    *,
+    ep_size: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Validate one step's rank-row layouts without coercing caller input."""
+
+    if type(layouts) is not tuple or not layouts:
+        raise ValueError(
+            "attention-DP layouts must be a non-empty tuple in forward-call order"
+        )
+    normalized: list[tuple[int, ...]] = []
+    for forward_index, row_counts in enumerate(layouts):
+        if type(row_counts) is not tuple or len(row_counts) != ep_size:
+            raise ValueError(
+                "attention-DP layout entry "
+                f"{forward_index} must be a rank-order tuple of length {ep_size}"
+            )
+        if any(type(count) is not int or count <= 0 for count in row_counts):
+            raise ValueError(
+                "attention-DP layout entry "
+                f"{forward_index} must contain positive exact integer row counts"
+            )
+        normalized.append(row_counts)
+    return tuple(normalized)
 
 
 def _assert_collective_device(
@@ -430,7 +505,15 @@ class EpMoeBlock(nn.Module):
     while retaining global expert indices.
     """
 
-    def __init__(self, block: nn.Module, comm, ep_rank: int, ep_size: int) -> None:
+    def __init__(
+        self,
+        block: nn.Module,
+        comm,
+        ep_rank: int,
+        ep_size: int,
+        *,
+        attention_dp: bool = False,
+    ) -> None:
         super().__init__()
         num_experts = len(block.experts)
         if ep_size < 1:
@@ -441,9 +524,32 @@ class EpMoeBlock(nn.Module):
             )
         if num_experts % ep_size != 0:
             raise ValueError(f"{num_experts} experts do not divide across {ep_size} ranks")
+        if type(attention_dp) is not bool:
+            raise TypeError("attention_dp must be a boolean")
+        if attention_dp:
+            if ep_size != _ATTENTION_DP_EP_SIZE:
+                raise ValueError(
+                    "Qwen3-235B NVFP4 attention-DP requires expert-parallel size 4"
+                )
+            if getattr(comm, "rank", None) != ep_rank:
+                raise ValueError(
+                    "attention-DP communicator rank must equal the expert rank: "
+                    f"{getattr(comm, 'rank', None)!r} != {ep_rank}"
+                )
+            if getattr(comm, "world_size", None) != ep_size:
+                raise ValueError(
+                    "attention-DP communicator world_size must equal EP size: "
+                    f"{getattr(comm, 'world_size', None)!r} != {ep_size}"
+                )
+            for primitive in ("tensor_all_gather", "tensor_reduce_scatter"):
+                if not callable(getattr(comm, primitive, None)):
+                    raise TypeError(
+                        f"attention-DP communicator must provide {primitive}()"
+                    )
         self._comm = comm
         self.ep_rank = ep_rank
         self.ep_size = ep_size
+        self.attention_dp = attention_dp
         self.experts_per_rank = num_experts // ep_size
         start = ep_rank * self.experts_per_rank
         end = (ep_rank + 1) * self.experts_per_rank
@@ -489,12 +595,108 @@ class EpMoeBlock(nn.Module):
         )
         object.__setattr__(self, "_prepared_nvfp4_moe", None)
         object.__setattr__(self, "_fused_nvfp4_executed", False)
+        object.__setattr__(self, "_attention_dp_layouts", None)
+        object.__setattr__(self, "_attention_dp_layout_cursor", 0)
+        object.__setattr__(self, "_attention_dp_completed_steps", 0)
+        object.__setattr__(self, "_attention_dp_last_layout", None)
+        object.__setattr__(self, "_attention_dp_last_local_rows", None)
+        object.__setattr__(self, "_attention_dp_last_padded_rows", None)
+        object.__setattr__(self, "_attention_dp_last_total_rows", None)
+        object.__setattr__(self, "_attention_dp_last_dispatcher", None)
+        object.__setattr__(self, "_attention_dp_last_row_layout", None)
+        object.__setattr__(self, "_attention_dp_last_activation_collective", None)
+        object.__setattr__(self, "_attention_dp_last_combine_collective", None)
+        object.__setattr__(self, "_attention_dp_local_partial_workspaces", {})
+        object.__setattr__(
+            self,
+            "_attention_dp_captured_local_partial_workspaces",
+            {},
+        )
+        object.__setattr__(
+            self,
+            "_attention_dp_capture_resolver",
+            None,
+        )
 
     def _invalidate_prepared_nvfp4(self) -> None:
         """Drop derived fused operands before registered tensors can change."""
 
         object.__setattr__(self, "_prepared_nvfp4_moe", None)
         object.__setattr__(self, "_fused_nvfp4_executed", False)
+        workspaces = getattr(self, "_attention_dp_local_partial_workspaces", None)
+        if workspaces is not None:
+            workspaces.clear()
+        captured = getattr(
+            self,
+            "_attention_dp_captured_local_partial_workspaces",
+            None,
+        )
+        if captured is not None:
+            captured.clear()
+
+    def _attention_dp_local_partial(
+        self,
+        *,
+        rows: int,
+        hidden_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Grow-only per-block output scratch for the direct-NCCL stream.
+
+        The fused local expert writes this tensor and reduce-scatter consumes it
+        immediately on the same current stream. Keeping the stream handle in the
+        key prevents another stream from overwriting a still-live operation.
+        Torch-distributed fallback retains the former allocate-per-call path.
+        """
+
+        if getattr(self._comm, "attention_dp_direct_nccl_active", False) is not True:
+            return torch.empty(rows, hidden_size, dtype=dtype, device=device)
+        stream = torch.cuda.current_stream(device)
+        stream_handle = getattr(stream, "cuda_stream", None)
+        if type(stream_handle) is not int or stream_handle < 0:
+            raise RuntimeError(
+                "attention-DP direct NCCL workspace needs a current CUDA stream"
+            )
+        key = (str(device), dtype, hidden_size, stream_handle)
+        capture_resolver = self._attention_dp_capture_resolver
+        capturing = (
+            capture_resolver()
+            if callable(capture_resolver)
+            else (
+                torch.cuda.is_current_stream_capturing()
+                if device.type == "cuda"
+                else False
+            )
+        )
+        if type(capturing) is not bool:
+            raise RuntimeError(
+                "attention-DP CUDA graph capture resolver must return a boolean"
+            )
+        if capturing:
+            captured_key = (*key, rows)
+            workspaces = self._attention_dp_captured_local_partial_workspaces
+            workspace = workspaces.get(captured_key)
+            if workspace is None:
+                workspace = torch.empty(
+                    rows,
+                    hidden_size,
+                    dtype=dtype,
+                    device=device,
+                )
+                workspaces[captured_key] = workspace
+            return workspace
+        workspaces = self._attention_dp_local_partial_workspaces
+        workspace = workspaces.get(key)
+        if workspace is None or workspace.shape[0] < rows:
+            workspace = torch.empty(
+                rows,
+                hidden_size,
+                dtype=dtype,
+                device=device,
+            )
+            workspaces[key] = workspace
+        return workspace if workspace.shape[0] == rows else workspace[:rows]
 
     def _apply(self, fn, recurse: bool = True):
         # ``PreparedNvFp4Moe`` contains unregistered views and derived scale
@@ -573,7 +775,7 @@ class EpMoeBlock(nn.Module):
         prepared = self._prepared_nvfp4_moe
         if prepared is None:
             return None
-        return {
+        metadata = {
             "backend": "flashinfer.cutlass_fused_moe",
             "global_expert_count": prepared.num_global_experts,
             "local_expert_count": prepared.fc2_weight.shape[0],
@@ -585,8 +787,128 @@ class EpMoeBlock(nn.Module):
             "enable_alltoall": False,
             "successful_forward": self._fused_nvfp4_executed,
         }
+        if self.attention_dp:
+            metadata.update(self.attention_dp_metadata())
+        return metadata
+
+    def attention_dp_metadata(self) -> dict[str, object]:
+        """Expose the live opt-in layout state without claiming worker support."""
+
+        layouts = self._attention_dp_layouts
+        return {
+            "attention_dp": self.attention_dp,
+            "attention_placement": (
+                "request_owned_data_parallel" if self.attention_dp else "replicated"
+            ),
+            "attention_output_placement": (
+                "replicated" if self.attention_dp else "row_parallel"
+            ),
+            "dispatcher": (
+                self._attention_dp_last_dispatcher
+                or _ATTENTION_DP_DISPATCHER
+                if self.attention_dp
+                else None
+            ),
+            "row_layout": (
+                self._attention_dp_last_row_layout
+                or "rank_major_zero_padded"
+                if self.attention_dp
+                else "replicated"
+            ),
+            "activation_collective": (
+                self._attention_dp_last_activation_collective
+                or "tensor_all_gather_many"
+                if self.attention_dp
+                else None
+            ),
+            "activation_collective_dtype": (
+                "nvfp4_packed_uint8" if self.attention_dp else None
+            ),
+            "scale_collective_dtype": "uint8" if self.attention_dp else None,
+            "combine_collective": (
+                self._attention_dp_last_combine_collective
+                or "tensor_reduce_scatter"
+                if self.attention_dp
+                else None
+            ),
+            "post_combine_all_reduce": False if self.attention_dp else None,
+            "layout_queue_depth": len(layouts) if layouts is not None else 0,
+            "layout_queue_consumed": self._attention_dp_layout_cursor,
+            "completed_layout_steps": self._attention_dp_completed_steps,
+            "last_rank_row_layout": self._attention_dp_last_layout,
+            "last_local_real_rows": self._attention_dp_last_local_rows,
+            "last_padded_rows_per_rank": self._attention_dp_last_padded_rows,
+            "total_collective_rows": self._attention_dp_last_total_rows,
+        }
+
+    def _check_attention_dp_layout_prepare(
+        self,
+        layouts: tuple[tuple[int, ...], ...],
+    ) -> None:
+        if not self.attention_dp:
+            raise RuntimeError("attention-DP layouts require an attention-DP EP block")
+        if self._attention_dp_layouts is not None:
+            raise RuntimeError(
+                "attention-DP layout queue is already active; assert complete "
+                "consumption before preparing the next step"
+            )
+
+    def _prepare_attention_dp_layouts(
+        self,
+        layouts: tuple[tuple[int, ...], ...],
+    ) -> None:
+        object.__setattr__(self, "_attention_dp_layouts", layouts)
+        object.__setattr__(self, "_attention_dp_layout_cursor", 0)
+
+    def _check_attention_dp_layouts_consumed(self) -> None:
+        layouts = self._attention_dp_layouts
+        if layouts is None:
+            raise RuntimeError("attention-DP layout queue was not prepared")
+        consumed = self._attention_dp_layout_cursor
+        if consumed != len(layouts):
+            raise RuntimeError(
+                "attention-DP layout queue was not fully consumed: "
+                f"{consumed}/{len(layouts)} forward layouts"
+            )
+
+    def _finish_attention_dp_layout_step(self) -> None:
+        object.__setattr__(self, "_attention_dp_layouts", None)
+        object.__setattr__(self, "_attention_dp_layout_cursor", 0)
+        object.__setattr__(
+            self,
+            "_attention_dp_completed_steps",
+            self._attention_dp_completed_steps + 1,
+        )
+
+    def _current_attention_dp_layout(self, hidden: torch.Tensor) -> tuple[int, ...]:
+        layouts = self._attention_dp_layouts
+        if layouts is None:
+            raise RuntimeError(
+                "attention-DP forward requires prepare_attention_dp_layouts()"
+            )
+        cursor = self._attention_dp_layout_cursor
+        if cursor >= len(layouts):
+            raise RuntimeError(
+                "attention-DP forward consumed more layouts than the prepared step"
+            )
+        if hidden.ndim != 2 or hidden.shape[1] <= 0:
+            raise ValueError(
+                "attention-DP hidden must have non-empty [local_rows, hidden] shape"
+            )
+        layout = layouts[cursor]
+        expected_rows = layout[self.ep_rank]
+        if hidden.shape[0] != expected_rows:
+            raise ValueError(
+                "attention-DP local row layout drift at forward "
+                f"{cursor}: rank {self.ep_rank} hidden rows {hidden.shape[0]} "
+                f"!= declared {expected_rows}"
+            )
+        return layout
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        if self.attention_dp:
+            return self._forward_attention_dp(hidden)
+
         device = hidden.device
         topk_indices, topk_weights = self._route(hidden)
         if self._prepared_nvfp4_moe is not None:
@@ -689,10 +1011,280 @@ class EpMoeBlock(nn.Module):
             out = out + self.shared_experts(hidden)
         return out
 
+    def _forward_attention_dp(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Dispatch request-owned rows through the opt-in NVFP4 EP4 path."""
+
+        from kairyu.kernels.nvfp4_moe_gpu import (
+            fused_moe_forward_quantized,
+            interleave_moe_input_scales,
+            quantize_moe_input,
+        )
+
+        prepared = self._prepared_nvfp4_moe
+        if prepared is None:
+            raise RuntimeError(
+                "attention-DP requires prepared fused NVFP4 local experts"
+            )
+        object.__setattr__(self, "_fused_nvfp4_executed", False)
+        layout = self._current_attention_dp_layout(hidden)
+        if hidden.dtype is not torch.bfloat16:
+            raise TypeError(
+                "Qwen3-235B NVFP4 attention-DP requires BF16 hidden rows"
+            )
+        local_rows, hidden_size = hidden.shape
+        padded_rows = max(layout)
+        ragged_direct = (
+            getattr(self._comm, "attention_dp_direct_nccl_active", False) is True
+            and len(set(layout)) > 1
+        )
+        padding = 0 if ragged_direct else padded_rows - local_rows
+        padded_hidden = (
+            torch.nn.functional.pad(hidden, (0, 0, 0, padding))
+            if padding
+            else hidden.contiguous()
+        )
+
+        # Routing stays rank-local. Dummy rows carry a zero routing weight so
+        # their fixed slots cannot contribute even if a packed-zero kernel
+        # implementation changes its exact zero-point behavior.
+        topk_indices, topk_weights = self._route(hidden)
+        selected_local = topk_indices.to(torch.int32).contiguous()
+        routing_local = topk_weights.to(torch.float32).contiguous()
+        if padding:
+            selected_local = torch.nn.functional.pad(
+                selected_local,
+                (0, 0, 0, padding),
+                value=0,
+            )
+            routing_local = torch.nn.functional.pad(
+                routing_local,
+                (0, 0, 0, padding),
+                value=0.0,
+            )
+
+        packed_local, scale_rows_local = quantize_moe_input(
+            padded_hidden.contiguous(),
+            prepared.fc1_act_scale,
+        )
+        gather_inputs = (
+            packed_local.contiguous(),
+            scale_rows_local.contiguous(),
+            selected_local.contiguous(),
+            routing_local.contiguous(),
+        )
+        gather_many = getattr(
+            self._comm,
+            (
+                "tensor_all_gatherv_many"
+                if ragged_direct
+                else "tensor_all_gather_many"
+            ),
+            None,
+        )
+        if ragged_direct and not callable(gather_many):
+            raise RuntimeError(
+                "active direct NCCL attention-DP transport lacks grouped gatherv"
+            )
+        if callable(gather_many):
+            gathered_tensors = (
+                gather_many(gather_inputs, layout)
+                if ragged_direct
+                else gather_many(gather_inputs)
+            )
+            if (
+                not isinstance(gathered_tensors, tuple)
+                or len(gathered_tensors) != len(gather_inputs)
+                or any(
+                    not isinstance(tensor, torch.Tensor)
+                    for tensor in gathered_tensors
+                )
+            ):
+                raise RuntimeError(
+                    "attention-DP grouped all-gather returned a malformed result"
+                )
+        else:
+            gathered_tensors = tuple(
+                self._comm.tensor_all_gather(tensor)
+                for tensor in gather_inputs
+            )
+        (
+            packed_global,
+            scale_rows_global,
+            selected_global,
+            routing_global,
+        ) = gathered_tensors
+        global_rows = sum(layout) if ragged_direct else padded_rows * self.ep_size
+        expected_shapes = {
+            "packed_global": (global_rows, hidden_size // 2),
+            "scale_rows_global": (global_rows, hidden_size // 16),
+            "selected_global": (global_rows, selected_local.shape[1]),
+            "routing_global": (global_rows, routing_local.shape[1]),
+        }
+        gathered = {
+            "packed_global": packed_global,
+            "scale_rows_global": scale_rows_global,
+            "selected_global": selected_global,
+            "routing_global": routing_global,
+        }
+        for name, tensor in gathered.items():
+            if tuple(tensor.shape) != expected_shapes[name]:
+                raise RuntimeError(
+                    f"attention-DP {name} shape {tuple(tensor.shape)} != "
+                    f"fixed rank-major layout {expected_shapes[name]}"
+                )
+        device = hidden.device
+        _assert_collective_device(device, **gathered)
+        input_sf = interleave_moe_input_scales(scale_rows_global.contiguous())
+
+        local_partial = self._attention_dp_local_partial(
+            rows=global_rows,
+            hidden_size=hidden_size,
+            dtype=hidden.dtype,
+            device=device,
+        )
+        fused_moe_forward_quantized(
+            packed_global.contiguous(),
+            input_sf,
+            selected_global.to(torch.int32).contiguous(),
+            routing_global.to(torch.float32).contiguous(),
+            prepared,
+            output=local_partial,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+        )
+        _assert_collective_device(device, local_partial=local_partial)
+        reduced_slot = (
+            self._comm.tensor_reduce_scatterv(local_partial.contiguous(), layout)
+            if ragged_direct
+            else self._comm.tensor_reduce_scatter(local_partial.contiguous())
+        )
+        expected_local_rows = local_rows if ragged_direct else padded_rows
+        if tuple(reduced_slot.shape) != (expected_local_rows, hidden_size):
+            raise RuntimeError(
+                "attention-DP reduce-scatter returned shape "
+                f"{tuple(reduced_slot.shape)} != "
+                f"{(expected_local_rows, hidden_size)}"
+            )
+        _assert_collective_device(device, reduced_slot=reduced_slot)
+        out = reduced_slot if ragged_direct else reduced_slot[:local_rows]
+        if self.shared_experts is not None:
+            out = out + self.shared_experts(hidden)
+
+        object.__setattr__(self, "_attention_dp_last_layout", layout)
+        object.__setattr__(self, "_attention_dp_last_local_rows", local_rows)
+        object.__setattr__(
+            self,
+            "_attention_dp_last_padded_rows",
+            None if ragged_direct else padded_rows,
+        )
+        object.__setattr__(self, "_attention_dp_last_total_rows", global_rows)
+        object.__setattr__(
+            self,
+            "_attention_dp_last_dispatcher",
+            (
+                "nvfp4_allgatherv_reduce_scatterv"
+                if ragged_direct
+                else _ATTENTION_DP_DISPATCHER
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_attention_dp_last_row_layout",
+            "rank_major_ragged" if ragged_direct else "rank_major_zero_padded",
+        )
+        object.__setattr__(
+            self,
+            "_attention_dp_last_activation_collective",
+            (
+                "tensor_all_gatherv_many"
+                if ragged_direct
+                else "tensor_all_gather_many"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_attention_dp_last_combine_collective",
+            (
+                "tensor_reduce_scatterv"
+                if ragged_direct
+                else "tensor_reduce_scatter"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_attention_dp_layout_cursor",
+            self._attention_dp_layout_cursor + 1,
+        )
+        object.__setattr__(self, "_fused_nvfp4_executed", True)
+        return out
+
     def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self._route_override is not None:
             return self._route_override(hidden)
         return route_experts(self, hidden)
+
+
+def _model_ep_blocks(model: nn.Module) -> tuple[EpMoeBlock, ...]:
+    cached = getattr(model, "_kairyu_attention_dp_blocks", None)
+    if type(cached) is tuple and cached and all(
+        isinstance(block, EpMoeBlock) for block in cached
+    ):
+        return cached
+    return tuple(
+        module for module in model.modules() if isinstance(module, EpMoeBlock)
+    )
+
+
+def prepare_attention_dp_layouts(
+    model: nn.Module,
+    layouts: object,
+) -> None:
+    """Arm every sparse layer with one immutable per-forward row-layout queue."""
+
+    blocks = _model_ep_blocks(model)
+    if not blocks:
+        raise ValueError("attention-DP model has no EpMoeBlock layers")
+    ep_size = blocks[0].ep_size
+    if any(not block.attention_dp or block.ep_size != ep_size for block in blocks):
+        raise RuntimeError("model has mixed or inconsistent attention-DP EP blocks")
+    normalized = _normalize_attention_dp_layouts(layouts, ep_size=ep_size)
+    for block in blocks:
+        block._check_attention_dp_layout_prepare(normalized)
+    for block in blocks:
+        block._prepare_attention_dp_layouts(normalized)
+
+
+def assert_attention_dp_layouts_consumed(model: nn.Module) -> None:
+    """Fail a step with missing model forwards, then release its layout queue."""
+
+    blocks = _model_ep_blocks(model)
+    if not blocks:
+        raise ValueError("attention-DP model has no EpMoeBlock layers")
+    for block in blocks:
+        block._check_attention_dp_layouts_consumed()
+    for block in blocks:
+        block._finish_attention_dp_layout_step()
+
+
+def assert_attention_dp_layouts_idle(model: nn.Module) -> None:
+    """Prove graph replay did not enter Python or arm a layout queue.
+
+    CUDA graph replay launches previously captured kernels and therefore must
+    consume zero Python-side MoE layouts.  This explicit check distinguishes a
+    clean replay from accidentally leaving a prior step's queue armed.
+    """
+
+    blocks = _model_ep_blocks(model)
+    if not blocks:
+        raise ValueError("attention-DP model has no EpMoeBlock layers")
+    for block in blocks:
+        if (
+            block._attention_dp_layouts is not None
+            or block._attention_dp_layout_cursor != 0
+        ):
+            raise RuntimeError(
+                "attention-DP graph replay requires an idle layout queue"
+            )
 
 
 def _checkpoint_shard_coordinates(
@@ -1005,6 +1597,66 @@ def _assign_checkpoint_tensor(
     raise KeyError(f"checkpoint member {name!r} is not registered on the model")
 
 
+def _validate_attention_dp_build_envelope(
+    config,
+    quant,
+    *,
+    ep_size: int,
+    ep_rank: int,
+    comm,
+    dtype: torch.dtype,
+    device: str | torch.device,
+) -> None:
+    """Pin the first attention-DP implementation to its measured formal cell."""
+
+    moe = config.moe
+    actual = {
+        "architecture": config.architecture,
+        "hidden_size": config.hidden_size,
+        "num_hidden_layers": config.num_hidden_layers,
+        "num_attention_heads": config.num_attention_heads,
+        "num_key_value_heads": config.num_key_value_heads,
+        "head_dim": config.head_dim,
+        "intermediate_size": config.intermediate_size,
+        "vocab_size": config.vocab_size,
+        "dtype": config.dtype,
+        "tie_word_embeddings": config.tie_word_embeddings,
+        "num_experts": getattr(moe, "num_experts", None),
+        "num_experts_per_tok": getattr(moe, "num_experts_per_tok", None),
+        "moe_intermediate_size": getattr(moe, "moe_intermediate_size", None),
+        "decoder_sparse_step": getattr(moe, "decoder_sparse_step", None),
+        "mlp_only_layers": getattr(moe, "mlp_only_layers", None),
+        "n_shared_experts": getattr(moe, "n_shared_experts", None),
+        "first_k_dense_replace": getattr(moe, "first_k_dense_replace", None),
+    }
+    mismatches = [
+        (name, expected, actual[name])
+        for name, expected in _ATTENTION_DP_QWEN3_235B_GEOMETRY.items()
+        if actual[name] != expected
+    ]
+    if mismatches:
+        name, expected, found = mismatches[0]
+        raise ValueError(
+            "attention-DP supports only the pinned Qwen3-235B geometry: "
+            f"{name}={found!r}, expected {expected!r} "
+            f"({len(mismatches)} mismatch(es))"
+        )
+    if ep_size != _ATTENTION_DP_EP_SIZE:
+        raise ValueError("Qwen3-235B attention-DP requires EP4")
+    if getattr(quant.method, "value", None) != "nvfp4" or quant.group_size != 16:
+        raise ValueError(
+            "Qwen3-235B attention-DP requires ModelOpt NVFP4 group_size=16"
+        )
+    if dtype is not torch.bfloat16:
+        raise ValueError("Qwen3-235B attention-DP requires runtime dtype bfloat16")
+    if torch.device(device).type != "cuda":
+        raise ValueError("Qwen3-235B attention-DP requires a CUDA device")
+    if getattr(comm, "rank", None) != ep_rank:
+        raise ValueError("attention-DP communicator rank must equal ep_rank")
+    if getattr(comm, "world_size", None) != ep_size:
+        raise ValueError("attention-DP communicator world_size must equal ep_size")
+
+
 def build_ep_model(
     model_dir: str | Path,
     ep_size: int,
@@ -1015,16 +1667,18 @@ def build_ep_model(
     attention_backend=None,
     linear_capabilities=None,
     linear_selection_policy=None,
+    attention_dp: bool = False,
 ) -> tuple[nn.Module, object, ExpertParallelLoadInfo]:
     """Build one real Qwen3-MoE rank without materializing remote experts.
 
     QKV projection, attention/KV state, router, embeddings, and the output head
-    are replicated. For NVFP4, attention ``o_proj`` alone uses a contiguous
-    hidden-K shard, one BF16 rank-local partial, and an EP-communicator
-    all-reduce. Routed expert modules retain their global HF names, but only
-    this rank's contiguous block is constructed and loaded. The complete
-    checkpoint name/shape contract is validated on every rank before any
-    request can execute.
+    are replicated. The default correctness mode keeps its NVFP4 attention
+    ``o_proj`` K shard and all-reduce unchanged. ``attention_dp=True`` is a
+    fail-closed Qwen3-235B EP4 opt-in: ``o_proj`` stays fully replicated and
+    sparse layers consume request-owned row-layout queues. Routed expert
+    modules retain their global HF names, but only this rank's contiguous block
+    is constructed and loaded. The complete checkpoint name/shape contract is
+    validated on every rank before any request can execute.
     """
 
     from kairyu.engine.core.quant_config import (
@@ -1061,6 +1715,8 @@ def build_ep_model(
         raise ValueError(
             f"{config.moe.num_experts} experts do not divide across {ep_size} ranks"
         )
+    if type(attention_dp) is not bool:
+        raise TypeError("attention_dp must be a boolean")
 
     resolved = load_checkpoint_quantization(directory, raw)
     quant = resolved.weights
@@ -1069,6 +1725,16 @@ def build_ep_model(
         is_mla=config.is_mla,
         architecture=config.architecture,
     )
+    if attention_dp:
+        _validate_attention_dp_build_envelope(
+            config,
+            quant,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            comm=comm,
+            dtype=dtype,
+            device=device,
+        )
     base_factory = linear_factory(
         quant,
         device=device,
@@ -1086,7 +1752,7 @@ def build_ep_model(
             capabilities=linear_capabilities,
             selection_policy=linear_selection_policy,
         )
-        if quant.method is QuantMethod.NVFP4
+        if quant.method is QuantMethod.NVFP4 and not attention_dp
         else None
     )
     factory = _ExpertShardedLinearFactory(
@@ -1095,6 +1761,7 @@ def build_ep_model(
         ep_rank=ep_rank,
         ep_size=ep_size,
         attention_output_factory=attention_output_factory,
+        replicate_attention_output=attention_dp,
     )
     # The official checkpoint is 134 GB. Even rank-local EP2 dummy buffers
     # would allocate ~70 GB on the host before loading useful values. Construct
@@ -1111,16 +1778,33 @@ def build_ep_model(
             output = layer.self_attn.o_proj
             if not isinstance(output, NvFp4Linear):
                 raise RuntimeError(
-                    "NVFP4 EP attention-output row parallelism requires "
+                    "NVFP4 EP attention output requires "
                     f"NvFp4Linear at layer {layer_index}, got {type(output).__name__}"
                 )
-            ReplicatedInputRowParallelLinear(output, comm)
+            if attention_dp:
+                placement = output.linear_context.tensor_parallel
+                attention_width = (
+                    config.num_attention_heads * config.head_dim
+                )
+                if (
+                    placement.mode is not TensorParallelMode.REPLICATED
+                    or placement.rank != 0
+                    or placement.world_size != 1
+                    or output.in_features != attention_width
+                    or output.out_features != config.hidden_size
+                ):
+                    raise RuntimeError(
+                        "attention-DP requires a full replicated attention o_proj"
+                    )
+            else:
+                ReplicatedInputRowParallelLinear(output, comm)
         if hasattr(layer.mlp, "experts"):
             layer.mlp = EpMoeBlock(
                 layer.mlp,
                 comm,
                 ep_rank=ep_rank,
                 ep_size=ep_size,
+                attention_dp=attention_dp,
             )
     reader = CheckpointReader(directory)
     local_shapes, blocks, kv_scale_names = _validate_ep_checkpoint_contract(
@@ -1298,4 +1982,26 @@ def build_ep_model(
         auxiliary_kv_scale_count=len(kv_scale_names),
     )
     object.__setattr__(model, "_kairyu_ep_load_info", info)
+    if attention_dp:
+        object.__setattr__(
+            model,
+            "_kairyu_attention_dp_blocks",
+            tuple(block for _name, block in blocks),
+        )
+        object.__setattr__(
+            model,
+            "_kairyu_attention_dp_metadata",
+            {
+                "enabled": True,
+                "dispatcher": _ATTENTION_DP_DISPATCHER,
+                "expert_parallel_size": ep_size,
+                "expert_parallel_rank": ep_rank,
+                "attention_placement": "request_owned_data_parallel",
+                "attention_output_placement": "replicated",
+                "row_layout": "rank_major_zero_padded",
+                "activation_collective_dtype": "nvfp4_packed_uint8",
+                "scale_collective_dtype": "uint8",
+                "combine_collective": "tensor_reduce_scatter",
+            },
+        )
     return model, config, info

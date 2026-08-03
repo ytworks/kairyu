@@ -13,8 +13,18 @@ from kairyu.engine.core.weights import CheckpointReader
 from kairyu.models.config import parse_model_config
 from kairyu.models.llama import DenseDecoder
 from kairyu.models.loader import load_model
-from kairyu.models.moe_parallel import EpMoeBlock, build_ep_model
-from kairyu.quant.linear import NvFp4Linear, linear_factory
+from kairyu.models.moe_parallel import (
+    EpMoeBlock,
+    _ExpertShardedLinearFactory,
+    _validate_attention_dp_build_envelope,
+    build_ep_model,
+)
+from kairyu.quant.linear import (
+    LinearRole,
+    NvFp4Linear,
+    TensorParallelMode,
+    linear_factory,
+)
 
 _RAW = {
     "architectures": ["Qwen3MoeForCausalLM"],
@@ -35,11 +45,103 @@ _RAW = {
     "mlp_only_layers": [],
 }
 
+_ATTENTION_DP_RAW = {
+    **_RAW,
+    "hidden_size": 4096,
+    "num_hidden_layers": 94,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 4,
+    "head_dim": 128,
+    "intermediate_size": 12_288,
+    "vocab_size": 151_936,
+    "torch_dtype": "bfloat16",
+    "tie_word_embeddings": False,
+    "num_experts": 128,
+    "num_experts_per_tok": 8,
+    "moe_intermediate_size": 1536,
+}
+
 
 class _UnusedEpComm:
     def __init__(self, rank: int = 1, world_size: int = 2) -> None:
         self.rank = rank
         self.world_size = world_size
+
+
+def test_attention_dp_build_envelope_pins_qwen3_235b_nvfp4_ep4() -> None:
+    config = parse_model_config(_ATTENTION_DP_RAW)
+    quant = QuantConfig(
+        QuantMethod.NVFP4,
+        weight_bits=4,
+        group_size=16,
+    )
+    comm = _UnusedEpComm(rank=3, world_size=4)
+
+    _validate_attention_dp_build_envelope(
+        config,
+        quant,
+        ep_size=4,
+        ep_rank=3,
+        comm=comm,
+        dtype=torch.bfloat16,
+        device="cuda:3",
+    )
+
+    with pytest.raises(ValueError, match="ModelOpt NVFP4"):
+        _validate_attention_dp_build_envelope(
+            config,
+            QuantConfig(QuantMethod.NONE),
+            ep_size=4,
+            ep_rank=3,
+            comm=comm,
+            dtype=torch.bfloat16,
+            device="cuda:3",
+        )
+    with pytest.raises(ValueError, match="runtime dtype bfloat16"):
+        _validate_attention_dp_build_envelope(
+            config,
+            quant,
+            ep_size=4,
+            ep_rank=3,
+            comm=comm,
+            dtype=torch.float16,
+            device="cuda:3",
+        )
+
+
+def test_attention_dp_factory_keeps_full_attention_output_replicated() -> None:
+    quant = QuantConfig(
+        QuantMethod.NVFP4,
+        weight_bits=4,
+        group_size=16,
+    )
+    factory = _ExpertShardedLinearFactory(
+        linear_factory(quant),
+        num_experts=4,
+        ep_rank=3,
+        ep_size=4,
+        replicate_attention_output=True,
+    )
+
+    output = factory(
+        8192,
+        4096,
+        False,
+        qualified_name="model.layers.0.self_attn.o_proj",
+        role=LinearRole.ATTENTION_OUTPUT,
+        shard_dim=1,
+    )
+
+    assert isinstance(output, NvFp4Linear)
+    # Qwen3-235B uses 64 query heads x 128 dimensions while hidden_size is
+    # 4096.  Attention-DP replicates this complete 8192 -> 4096 projection.
+    assert output.in_features == 8192
+    assert output.out_features == 4096
+    placement = output.linear_context.tensor_parallel
+    assert placement.mode is TensorParallelMode.REPLICATED
+    assert placement.rank == 0
+    assert placement.world_size == 1
+    assert placement.shard_dim is None
 
 
 def _write_checkpoint(
@@ -115,6 +217,22 @@ def _write_checkpoint(
         )
     save_file(state, path / "model.safetensors")
     return state
+
+
+def test_build_ep_model_attention_dp_rejects_non_formal_geometry(tmp_path) -> None:
+    checkpoint = tmp_path / "tiny-attention-dp"
+    _write_checkpoint(checkpoint)
+
+    with pytest.raises(ValueError, match="pinned Qwen3-235B geometry"):
+        build_ep_model(
+            checkpoint,
+            ep_size=4,
+            ep_rank=3,
+            comm=_UnusedEpComm(rank=3, world_size=4),
+            dtype=torch.bfloat16,
+            device="cuda:3",
+            attention_dp=True,
+        )
 
 
 def test_build_ep_model_loads_only_owned_global_experts(

@@ -52,6 +52,7 @@ from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.step_executor import (
     DecodePageTableCache,
     DecodeRowOwner,
+    GraphDecodeDecision,
     build_decode_batch,
 )
 from kairyu.models.llama import DenseDecoder
@@ -82,19 +83,53 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
             str, tuple[SampledToken | _PendingDeviceToken, ...]
         ],
         copy_stream: torch.cuda.Stream | None = None,
+        *,
+        device_sidecars: tuple[
+            tuple[torch.Tensor, Callable[[torch.Tensor], None]], ...
+        ] = (),
     ) -> None:
+        if type(device_sidecars) is not tuple or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], torch.Tensor)
+            or not callable(item[1])
+            for item in device_sidecars
+        ):
+            raise TypeError(
+                "deferred output device_sidecars must be "
+                "(tensor, validator) tuples"
+            )
         self._records = dict(records)
         self._resolved: dict[str, tuple[SampledToken, ...]] | None = None
         self._event: torch.cuda.Event | None = None
+        self._sidecars_resolved = False
+        self._sidecar_error: Exception | None = None
         pending = [
             record
             for values in self._records.values()
             for record in values
             if isinstance(record, _PendingDeviceToken)
         ]
-        has_cuda = bool(
-            pending and pending[0].sample.token_id.device.type == "cuda"
+        sidecar_sources = tuple(item[0] for item in device_sidecars)
+        cuda_sources = tuple(
+            source
+            for source in (
+                *(record.sample.token_id for record in pending),
+                *sidecar_sources,
+            )
+            if source.device.type == "cuda"
         )
+        has_cuda = bool(cuda_sources)
+        if has_cuda:
+            device = cuda_sources[0].device
+            all_sources = (
+                *(record.sample.token_id for record in pending),
+                *sidecar_sources,
+            )
+            if any(source.device != device for source in all_sources):
+                raise ValueError(
+                    "deferred output tokens and sidecars must share one CUDA device"
+                )
 
         # One token vector per step, not B scalar D2H operations.  The vector is
         # immutable and retained by this output, so a dedicated copy stream can
@@ -133,8 +168,28 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
         # storage and overwrite a public token with its ``-1`` sentinel.
         self._copy_sources = tuple(
             source
-            for source in (device_tokens, device_logprob_tensor)
+            for source in (
+                device_tokens,
+                device_logprob_tensor,
+                *sidecar_sources,
+            )
             if source is not None
+        )
+        host_sidecars = tuple(
+            torch.empty_like(
+                source,
+                device="cpu",
+                pin_memory=source.device.type == "cuda",
+            )
+            for source in sidecar_sources
+        )
+        self._sidecars = tuple(
+            (host, validator)
+            for host, (_source, validator) in zip(
+                host_sidecars,
+                device_sidecars,
+                strict=True,
+            )
         )
         host_logprobs = (
             torch.empty(
@@ -160,6 +215,12 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
                 host_logprobs.copy_(
                     device_logprob_tensor, non_blocking=has_cuda
                 )
+            for source, host in zip(
+                sidecar_sources,
+                host_sidecars,
+                strict=True,
+            ):
+                host.copy_(source, non_blocking=source.device.type == "cuda")
             for record in pending:
                 sample = record.sample
                 if sample.top_indices is not None:
@@ -185,7 +246,7 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
         if has_cuda:
             if copy_stream is None:
                 raise ValueError("CUDA deferred output requires a copy stream")
-            producer = torch.cuda.current_stream(device_tokens.device)
+            producer = torch.cuda.current_stream(cuda_sources[0].device)
             copy_stream.wait_stream(producer)
             with torch.cuda.stream(copy_stream):
                 enqueue_copies()
@@ -198,11 +259,39 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
     def ready(self) -> bool:
         return self._resolved is not None or self._event is None or self._event.query()
 
+    def resolve_sidecars(self) -> None:
+        """Resolve bounded auxiliary device evidence at a later host boundary.
+
+        Attention-DP attaches its all-rank status vector here so the same copy
+        stream and event as the public token vector carry failure evidence.
+        Calling this at the next control boundary preserves one-step overlap;
+        calling it again from the public commit path is idempotent.
+        """
+
+        if self._sidecar_error is not None:
+            raise self._sidecar_error
+        if self._sidecars_resolved:
+            return
+        if self._event is not None:
+            # Normal control-boundary callers first observed ``ready()``. Do
+            # not turn that non-blocking poll back into a host synchronization;
+            # only commit/shutdown callers that arrive early wait here.
+            if not self._event.query():
+                self._event.synchronize()
+            self._event = None
+        try:
+            for host, validator in self._sidecars:
+                validator(host)
+        except Exception as error:
+            self._sidecar_error = error
+            raise
+        self._sidecars_resolved = True
+        self._sidecars = ()
+
     def _resolve(self) -> dict[str, tuple[SampledToken, ...]]:
         if self._resolved is not None:
             return self._resolved
-        if self._event is not None:
-            self._event.synchronize()
+        self.resolve_sidecars()
         resolved: dict[str, tuple[SampledToken, ...]] = {}
         for request_id, values in self._records.items():
             host_values: list[SampledToken] = []
@@ -559,6 +648,11 @@ class PagedModelRunner:
                 scratch_page=self._graph_scratch_page,
                 device=self._device,
                 plan_fn=self._plan_graph_decode,
+                replay_plan_fn=(
+                    self._plan_graph_decode_replay
+                    if getattr(model, "supports_fast_replay_plan", False)
+                    else None
+                ),
             )
 
     def _plan_graph_decode(self, batch) -> None:
@@ -573,6 +667,16 @@ class PagedModelRunner:
         """
         self._model.plan_decode_tensors(self._pool, batch.page_tables, batch.seq_lens)
 
+    def _plan_graph_decode_replay(self, batch) -> None:
+        """Use replay-only planning after stock capture initialized wrappers."""
+        self._model.plan_decode_tensors(
+            self._pool,
+            batch.page_tables,
+            batch.seq_lens,
+            replay=True,
+            host_seq_lens=batch.host_seq_lens,
+        )
+
     def _graph_decode(self, batch) -> torch.Tensor:
         """The captured region: embed -> layers -> norm -> logits, tensors only."""
         hidden = self._model.forward_decode_tensors(
@@ -586,6 +690,132 @@ class PagedModelRunner:
         if self._graph is not None:
             self._graph.invalidate()
         self._decode_page_table_cache.invalidate()
+
+    def decode_graph_decision(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> GraphDecodeDecision | None:
+        """Preview graph dispatch for this step's single-token decode.
+
+        This is a strictly read-only shape query.  It intentionally does not
+        call ``_decode_inputs``: that execution helper trims retained future
+        tokens.  Only chunk kind/count and the already-owned page metadata are
+        inspected, so a distributed coordinator can stage capture-time side
+        inputs without advancing request, token, or graph state.
+        """
+
+        decodes = tuple(
+            chunk
+            for chunk in scheduled
+            if not chunk.is_prefill and chunk.num_tokens == 1
+        )
+        if not decodes:
+            return None
+        page_widths: list[int] = []
+        for chunk in decodes:
+            state = states[chunk.request_id]
+            allocation = state.allocation
+            if allocation is None:
+                raise RuntimeError(
+                    f"decode request {chunk.request_id!r} has no KV allocation"
+                )
+            page_widths.append(
+                len(allocation.pages) + len(state.decode_pages)
+            )
+        max_pages = max(page_widths)
+        if max_pages < 1:
+            raise RuntimeError("decode request has an empty KV page table")
+        return self.decode_graph_decision_for_shape(
+            batch_size=len(decodes),
+            max_pages=max_pages,
+        )
+
+    def decode_graph_decision_for_shape(
+        self,
+        *,
+        batch_size: int,
+        max_pages: int,
+    ) -> GraphDecodeDecision:
+        """Preview decode dispatch for coordinator-supplied global geometry."""
+
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("decode batch_size must be an integer >= 1")
+        if type(max_pages) is not int or max_pages < 1:
+            raise ValueError("decode max_pages must be an integer >= 1")
+        if self._graph is None:
+            return GraphDecodeDecision(
+                kind="eager_fallback",
+                bucket_size=batch_size,
+                capture_model_forward_count=1,
+            )
+        return self._graph.decode_decision(
+            batch_size=batch_size,
+            max_pages=max_pages,
+        )
+
+    def coordinate_decode_graph_decision(
+        self,
+        decision: GraphDecodeDecision,
+    ) -> None:
+        """Make one distributed decision authoritative for the next decode."""
+
+        if self._graph is None:
+            if decision != GraphDecodeDecision(
+                kind="eager_fallback",
+                bucket_size=decision.bucket_size,
+                capture_model_forward_count=1,
+            ):
+                raise RuntimeError(
+                    "an eager runner cannot arm a captured graph decision"
+                )
+            return
+        self._graph.coordinate_next_decode(decision)
+
+    def assert_coordinated_decode_graph_decision_consumed(self) -> None:
+        """Assert the armed distributed graph branch was entered once."""
+
+        if self._graph is not None:
+            self._graph.assert_coordinated_decode_consumed()
+
+    def cancel_coordinated_decode_graph_decision(self) -> None:
+        """Disarm an override while propagating an already-fatal step error."""
+
+        if self._graph is not None:
+            self._graph.cancel_coordinated_decode()
+
+    def decode_graph_metadata(self) -> dict[str, object]:
+        """Return actual configured buckets and live structural dispatch counts."""
+
+        if self._graph is None:
+            return {
+                "decode_mode": "eager",
+                "cuda_graph_decode": False,
+                "cuda_graph_buckets": (),
+                "cuda_graph_captures": 0,
+                "cuda_graph_replays": 0,
+                "cuda_graph_eager_fallbacks": 0,
+            }
+        stats = self._graph.execution_stats()
+        captured = stats["captured_buckets"]
+        return {
+            "decode_mode": "cuda_graph",
+            "cuda_graph_decode": True,
+            "cuda_graph_buckets": self._graph.configured_buckets,
+            "cuda_graph_captures": len(captured),
+            "cuda_graph_replays": stats["graph_executions"],
+            "cuda_graph_eager_fallbacks": stats["eager_fallbacks"],
+        }
+
+    def required_decode_model_forward_count(
+        self,
+        scheduled: tuple[ScheduledChunk, ...],
+        states: Mapping[str, object],
+    ) -> int:
+        """Return Python model-forward repetitions required by the preview."""
+
+        decision = self.decode_graph_decision(scheduled, states)
+        return 0 if decision is None else decision.capture_model_forward_count
 
     @property
     def sampler(self) -> Sampler | None:
@@ -1485,6 +1715,32 @@ class PagedModelRunner:
         if self._decode_slots is None or self._decode_slots.numel() < size:
             self._allocate_decode_slots(size)
         assert self._decode_slots is not None and self._decode_positions is not None
+        # Pure device sampling produces one scalar view per decode row.  The
+        # views normally share an argmax/token-packet allocation, but copying
+        # them one by one still submits B separate CUDA kernels from Python.
+        # ``stack(out=...)`` gathers ordinary scalar views directly into the
+        # persistent input slots with one kernel and no temporary output.
+        # Destination-aliasing views need a temporary stack to preserve their
+        # pre-update values; other unusual or mixed inputs retain the established
+        # compatibility path below.
+        same_device_scalar_tokens = bool(tokens) and all(
+            type(token) is torch.Tensor
+            and token.device == self._device
+            and token.dtype is torch.int64
+            and token.ndim == 0
+            and not token.requires_grad
+            for token in tokens
+        )
+        slot_start = self._decode_slots[:size].data_ptr()
+        slot_end = slot_start + size * self._decode_slots.element_size()
+        decode_slot_alias = same_device_scalar_tokens and any(
+            slot_start <= token.data_ptr() < slot_end
+            for token in tokens
+            if isinstance(token, torch.Tensor)
+        )
+        batched_device_tokens = (
+            size > 1 and same_device_scalar_tokens and not decode_slot_alias
+        )
         host_tokens = [
             0 if isinstance(token, torch.Tensor) else token for token in tokens
         ]
@@ -1502,17 +1758,23 @@ class PagedModelRunner:
                     staging[0, :size], non_blocking=True
                 )
         else:
-            self._decode_slots[:size].copy_(
-                torch.as_tensor(host_tokens, dtype=torch.long)
-            )
+            if not batched_device_tokens and not decode_slot_alias:
+                self._decode_slots[:size].copy_(
+                    torch.as_tensor(host_tokens, dtype=torch.long)
+                )
             self._decode_positions[:size].copy_(
                 torch.as_tensor(positions, dtype=torch.long)
             )
-        for index, token in enumerate(tokens):
-            if isinstance(token, torch.Tensor):
-                self._decode_slots[index].copy_(
-                    token.to(device=self._device, dtype=torch.long)
-                )
+        if batched_device_tokens:
+            torch.stack(tokens, out=self._decode_slots[:size])
+        elif decode_slot_alias:
+            self._decode_slots[:size].copy_(torch.stack(tokens))
+        else:
+            for index, token in enumerate(tokens):
+                if isinstance(token, torch.Tensor):
+                    self._decode_slots[index].copy_(
+                        token.to(device=self._device, dtype=torch.long)
+                    )
         if self._device.type == "cuda":
             copy_done.record()
         return self._decode_slots[:size], self._decode_positions[:size]

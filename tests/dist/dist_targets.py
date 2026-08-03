@@ -801,3 +801,106 @@ def sequence_parallel_nccl_parity(
         )
     finally:
         dist.destroy_process_group()
+
+
+def direct_nccl_graph_workspace_growth(
+    rank: int,
+    world_size: int,
+    init_file: str,
+    out_dir: str,
+) -> None:
+    """Small capture remains correct after a larger capture grows workspaces."""
+
+    import torch.distributed as dist
+
+    from kairyu.engine.core.direct_nccl import DirectNcclCommunicator
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+
+    torch.cuda.set_device(rank)
+    init_distributed(rank, world_size, f"file://{init_file}", backend="gloo")
+    direct = None
+    small_graph = None
+    large_graph = None
+    try:
+        control = TorchDistCommunicator()
+        direct, metadata = DirectNcclCommunicator.try_create(
+            control,
+            torch.device("cuda", rank),
+        )
+        if direct is None:
+            raise RuntimeError(f"direct NCCL unavailable: {metadata!r}")
+        pool = torch.cuda.graph_pool_handle()
+
+        def capture(rows: int, value: float):
+            static_input = torch.full(
+                (rows, 8),
+                value,
+                dtype=torch.bfloat16,
+                device=f"cuda:{rank}",
+            )
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                gathered = direct.all_gather_many((static_input,))[0]
+                reduced = direct.reduce_scatter(gathered)
+            torch.cuda.current_stream().wait_stream(side)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=pool):
+                gathered = direct.all_gather_many((static_input,))[0]
+                reduced = direct.reduce_scatter(gathered)
+            graph.replay()
+            torch.cuda.synchronize()
+            return graph, static_input, gathered, reduced
+
+        small_graph, small_input, small_gather, small_reduce = capture(
+            1,
+            float(rank + 1),
+        )
+        small_gather_ptr = small_gather.data_ptr()
+        small_reduce_ptr = small_reduce.data_ptr()
+        control.barrier()
+        large_graph, _large_input, _large_gather, _large_reduce = capture(
+            4,
+            float(rank + 101),
+        )
+        control.barrier()
+
+        small_input.fill_(float(rank + 11))
+        small_graph.replay()
+        torch.cuda.synchronize()
+        expected = torch.full_like(
+            small_reduce,
+            float(world_size * (rank + 11)),
+        )
+        max_error = float((small_reduce - expected).abs().max().item())
+        retained_gather_ptrs = {
+            tensor.data_ptr()
+            for tensor in direct._captured_gather_workspaces.values()
+        }
+        retained_reduce_ptrs = {
+            tensor.data_ptr()
+            for tensor in direct._captured_reduce_scatter_workspaces.values()
+        }
+        Path(out_dir, f"rank{rank}.json").write_text(
+            json.dumps(
+                {
+                    "max_error": max_error,
+                    "small_gather_retained": (
+                        small_gather_ptr in retained_gather_ptrs
+                    ),
+                    "small_reduce_retained": (
+                        small_reduce_ptr in retained_reduce_ptrs
+                    ),
+                    "direct_nccl_active": metadata["direct_nccl_active"],
+                }
+            )
+        )
+        control.barrier()
+    finally:
+        if small_graph is not None:
+            small_graph.reset()
+        if large_graph is not None:
+            large_graph.reset()
+        if direct is not None:
+            direct.close()
+        dist.destroy_process_group()

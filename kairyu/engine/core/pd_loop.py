@@ -109,6 +109,14 @@ class PDLoopAdapter:
             or self._coordinator.decode_scheduler.has_unfinished()
         )
 
+    def has_prefill_work(self) -> bool:
+        """Expose admission-sensitive work across both P-D scheduler halves."""
+
+        return (
+            self._coordinator.has_prefill_work()
+            or self._coordinator.decode_scheduler.has_prefill_work()
+        )
+
     @property
     def states(self) -> Mapping[str, object]:
         return self._states

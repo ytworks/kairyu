@@ -126,6 +126,90 @@ def test_lazy_flashinfer_dispatch_uses_global_ids_ep_and_preallocated_output(
     assert kwargs["input_sf"] is None
 
 
+def test_attention_dp_quantizes_before_communication_and_interleaves_after_gather(
+    monkeypatch,
+    cpu_contract,
+) -> None:
+    hidden = torch.randn(3, 128, dtype=torch.bfloat16)
+    global_scale = torch.tensor(1.0, dtype=torch.float32)
+    packed = torch.zeros(3, 64, dtype=torch.uint8)
+    scale_rows = torch.zeros(3, 8, dtype=torch.uint8)
+    swizzled = torch.zeros(128 * 8, dtype=torch.uint8)
+    calls: list[tuple[str, object]] = []
+
+    def fake_quantize(value, scale, *, is_sf_swizzled_layout):
+        calls.append(
+            (
+                "quantize",
+                (value, scale, is_sf_swizzled_layout),
+            )
+        )
+        return packed, scale_rows
+
+    def fake_interleave(value):
+        calls.append(("interleave", value))
+        return swizzled
+
+    fake = SimpleNamespace(
+        __version__="0.6.14",
+        fp4_quantize=fake_quantize,
+        nvfp4_block_scale_interleave=fake_interleave,
+    )
+    monkeypatch.setitem(sys.modules, "flashinfer", fake)
+
+    actual_packed, actual_rows = nvfp4_moe_gpu.quantize_moe_input(
+        hidden,
+        global_scale,
+    )
+    actual_swizzled = nvfp4_moe_gpu.interleave_moe_input_scales(actual_rows)
+
+    assert actual_packed is packed
+    assert actual_rows is scale_rows
+    assert actual_swizzled is swizzled
+    assert calls == [
+        ("quantize", (hidden, global_scale, False)),
+        ("interleave", scale_rows),
+    ]
+
+
+def test_attention_dp_prequantized_dispatch_passes_swizzled_input_scale(
+    monkeypatch,
+    cpu_contract,
+) -> None:
+    _hidden, selected, routing, prepared, output = _request()
+    packed = torch.zeros(3, 64, dtype=torch.uint8)
+    input_sf = torch.zeros(128 * 8, dtype=torch.uint8)
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_cutlass(*args, **kwargs):
+        calls.append((args, kwargs))
+        kwargs["output"].zero_()
+        return [kwargs["output"]]
+
+    fake = SimpleNamespace(
+        __version__="0.6.14",
+        cutlass_fused_moe=fake_cutlass,
+        ActivationType=SimpleNamespace(Swiglu=object()),
+    )
+    monkeypatch.setitem(sys.modules, "flashinfer", fake)
+
+    actual = nvfp4_moe_gpu.fused_moe_forward_quantized(
+        packed,
+        input_sf,
+        selected,
+        routing,
+        prepared,
+        output=output,
+        ep_size=2,
+        ep_rank=1,
+    )
+
+    assert actual is output
+    assert calls[0][0][0] is packed
+    assert calls[0][1]["input_sf"] is input_sf
+    assert calls[0][1]["enable_alltoall"] is False
+
+
 def test_module_import_does_not_import_flashinfer(monkeypatch) -> None:
     monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
 

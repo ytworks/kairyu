@@ -3,6 +3,7 @@
 import importlib.metadata
 
 import httpx
+import pytest
 
 from kairyu.engine.core.attention_selector import AttentionBackendDecision
 from kairyu.engine.core.hw_profile import HardwareProfile
@@ -199,6 +200,92 @@ async def test_backends_reports_ep_topology_locally_and_through_gateway(
     assert "tensor_parallel_size" not in pool_entry["via_replica"]
 
 
+@pytest.mark.parametrize(
+    ("active", "selected", "library", "version", "reason"),
+    [
+        (
+            True,
+            "direct_nccl_ctypes",
+            "libnccl.so.2",
+            "2.29.7",
+            "initialized on every rank",
+        ),
+        (
+            False,
+            "torch.distributed:nccl",
+            None,
+            None,
+            "rank 2: OSError: library absent",
+        ),
+        (
+            False,
+            "unavailable",
+            None,
+            None,
+            "runtime collective fallback is unsafe",
+        ),
+    ],
+)
+async def test_backends_reports_attention_dp_collective_transport_only_when_active(
+    active,
+    selected,
+    library,
+    version,
+    reason,
+):
+    transport = {
+        "selected_backend": selected,
+        "fallback_backend": "torch.distributed:nccl",
+        "direct_nccl_active": active,
+        "direct_nccl_library": library,
+        "direct_nccl_version": version,
+        "selection_reason": reason,
+    }
+
+    class KairyuBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.expert_parallel_size = 4
+            self.parallelism_metadata = {
+                "parallelism": "expert_parallel",
+                "expert_parallel_size": 4,
+                "attention_placement": "request_owned_data_parallel",
+                "attention_output_placement": "replicated",
+                "attention_output_parallel_size": 1,
+                "attention_output_partial_dtype": None,
+                "execution_mode": "request-owned-attention-dp",
+                "pipeline_depth": 5,
+                "decode_mode": "eager",
+                "kv_cache_dtype": "bfloat16",
+                "attention_data_parallel_size": 4,
+                "attention_tensor_parallel_size": 1,
+                "moe_dispatcher": "nvfp4_allgather_reduce_scatter",
+                "sampling_ownership": "request_owner",
+                    "kv_cache_ownership": "request_owner",
+                    "cuda_graph_decode": False,
+                    "cuda_graph_buckets": (),
+                    "cuda_graph_captures": 0,
+                    "cuda_graph_replays": 0,
+                    "cuda_graph_eager_fallbacks": 0,
+                    "attention_dp_prefill_scratch_pages": 2,
+                    "attention_dp_decode_scratch_pages": 1,
+                    "attention_dp_graph_scratch_pages": 0,
+                    "attention_dp_scratch_pages": 3,
+                "moe_collective_transport": transport,
+            }
+
+    app = create_app(engines={"qwen3-235b": KairyuBackend()})
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    assert response.status_code == 200
+    entry = response.json()["engines"][0]
+    assert entry["execution_mode"] == "request-owned-attention-dp"
+    assert entry["pipeline_depth"] == 5
+    assert entry["moe_collective_transport"] == transport
+    assert "parallelism_metadata_status" not in entry
+
+
 async def test_backends_never_relabels_malformed_ep_metadata_as_tp():
     class KairyuBackend(MockBackend):
         def __init__(self):
@@ -221,6 +308,63 @@ async def test_backends_never_relabels_malformed_ep_metadata_as_tp():
     assert entry["expert_parallel_size"] == 4
     assert entry["parallelism_metadata_status"] == "invalid"
     assert "tensor_parallel_size" not in entry
+
+
+async def test_backends_reports_live_attention_dp_cuda_graph_counters():
+    transport = {
+        "selected_backend": "direct_nccl_ctypes",
+        "fallback_backend": "torch.distributed:nccl",
+        "direct_nccl_active": True,
+        "direct_nccl_library": "libnccl.so.2",
+        "direct_nccl_version": "2.29.7",
+        "selection_reason": "initialized on every rank",
+    }
+
+    class KairyuBackend(MockBackend):
+        expert_parallel_size = 4
+        parallelism_metadata = None
+
+        @staticmethod
+        def parallelism_metadata_snapshot():
+            return {
+                "parallelism": "expert_parallel",
+                "expert_parallel_size": 4,
+                "attention_placement": "request_owned_data_parallel",
+                "attention_output_placement": "replicated",
+                "attention_output_parallel_size": 1,
+                "attention_output_partial_dtype": None,
+                "execution_mode": "request-owned-attention-dp",
+                "pipeline_depth": 1,
+                "decode_mode": "cuda_graph",
+                "kv_cache_dtype": "bfloat16",
+                "attention_data_parallel_size": 4,
+                "attention_tensor_parallel_size": 1,
+                "moe_dispatcher": "nvfp4_allgather_reduce_scatter",
+                "sampling_ownership": "request_owner",
+                "kv_cache_ownership": "request_owner",
+                "cuda_graph_decode": True,
+                "cuda_graph_buckets": (1, 2, 4, 8),
+                "cuda_graph_captures": 2,
+                "cuda_graph_replays": 17,
+                "cuda_graph_eager_fallbacks": 1,
+                "attention_dp_prefill_scratch_pages": 2,
+                "attention_dp_decode_scratch_pages": 8,
+                "attention_dp_graph_scratch_pages": 1,
+                "attention_dp_scratch_pages": 11,
+                "moe_collective_transport": transport,
+            }
+
+    app = create_app(engines={"qwen3-235b": KairyuBackend()})
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    entry = response.json()["engines"][0]
+    assert entry["decode_mode"] == "cuda_graph"
+    assert entry["cuda_graph_decode"] is True
+    assert entry["cuda_graph_buckets"] == [1, 2, 4, 8]
+    assert entry["cuda_graph_captures"] == 2
+    assert entry["cuda_graph_replays"] == 17
+    assert entry["cuda_graph_eager_fallbacks"] == 1
 
 
 async def test_backends_does_not_invent_torch_after_invalid_selection(monkeypatch):

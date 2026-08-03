@@ -908,6 +908,7 @@ def test_build_ep_runner_replicates_attention_and_binds_rank_local_experts(
         dtype,
         device,
         attention_backend,
+        attention_dp,
     ):
         seen["model"] = {
             "model_dir": model_dir,
@@ -917,6 +918,7 @@ def test_build_ep_runner_replicates_attention_and_binds_rank_local_experts(
             "dtype": dtype,
             "device": device,
             "attention_backend": attention_backend,
+            "attention_dp": attention_dp,
         }
         return "rank-local-model", full_config, load_info
 
@@ -957,6 +959,7 @@ def test_build_ep_runner_replicates_attention_and_binds_rank_local_experts(
         "dtype": torch.bfloat16,
         "device": f"cuda:{rank}",
         "attention_backend": backend,
+        "attention_dp": False,
     }
     assert seen["pool"] == {
         "num_layers": 94,

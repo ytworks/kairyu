@@ -97,14 +97,26 @@ def _validate_request(
     *,
     ep_size: int,
     ep_rank: int,
+    input_sf: torch.Tensor | None = None,
 ) -> None:
     _require_sm120(hidden)
     if hidden.ndim != 2:
         raise ValueError(f"hidden must be 2-D [tokens, hidden_size], got {tuple(hidden.shape)}")
-    if hidden.dtype != torch.bfloat16:
-        raise TypeError(f"hidden must have dtype torch.bfloat16, got {hidden.dtype}")
     if not hidden.is_contiguous():
         raise ValueError("hidden must be contiguous")
+    if hidden.dtype is torch.bfloat16:
+        if input_sf is not None:
+            raise ValueError("BF16 hidden must not provide a prequantized input_sf")
+        hidden_size = hidden.shape[1]
+    elif hidden.dtype is torch.uint8:
+        if input_sf is None:
+            raise ValueError("packed NVFP4 hidden requires a swizzled input_sf")
+        hidden_size = hidden.shape[1] * 2
+    else:
+        raise TypeError(
+            "hidden must have dtype torch.bfloat16 or torch.uint8 packed NVFP4, "
+            f"got {hidden.dtype}"
+        )
 
     if isinstance(ep_size, bool) or not isinstance(ep_size, int) or ep_size < 1:
         raise ValueError(f"ep_size must be a positive integer, got {ep_size!r}")
@@ -152,9 +164,20 @@ def _validate_request(
     if prepared.local_expert_start + local_experts > prepared.num_global_experts:
         raise ValueError("local expert range exceeds num_global_experts")
 
-    tokens, hidden_size = hidden.shape
+    tokens = hidden.shape[0]
     if tokens < 1 or hidden_size < 1:
         raise ValueError("hidden must contain at least one token and one hidden element")
+    if input_sf is not None:
+        expected_scale_elements = (
+            _ceil_div(tokens, 128) * 128 * _ceil_div(hidden_size, 16)
+        )
+        _require_tensor(
+            input_sf,
+            name="input_sf",
+            dtype=torch.uint8,
+            shape=(expected_scale_elements,),
+            device=hidden.device,
+        )
     if prepared.fc2_weight.shape[1] != hidden_size:
         raise ValueError(
             "fc2_weight hidden dimension must match hidden: "
@@ -281,6 +304,167 @@ def _load_flashinfer() -> tuple[object, object]:
     return function, swiglu
 
 
+def _load_flashinfer_fp4_quantization() -> tuple[object, object]:
+    """Load the two public activation helpers without importing at module load."""
+
+    try:
+        module = importlib.import_module("flashinfer")
+    except ImportError as error:
+        raise RuntimeError(
+            "SM120 NVFP4 attention-DP requires FlashInfer fp4_quantize and "
+            "nvfp4_block_scale_interleave"
+        ) from error
+    quantize = getattr(module, "fp4_quantize", None)
+    interleave = getattr(module, "nvfp4_block_scale_interleave", None)
+    if not callable(quantize) or not callable(interleave):
+        version = getattr(module, "__version__", "unknown")
+        raise RuntimeError(
+            "FlashInfer NVFP4 activation API mismatch "
+            f"(version={version}): expected fp4_quantize and "
+            "nvfp4_block_scale_interleave"
+        )
+    return quantize, interleave
+
+
+def quantize_moe_input(
+    hidden: torch.Tensor,
+    input_global_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize BF16 rows before EP communication.
+
+    The returned scale factors deliberately remain in FlashInfer's ordinary
+    ``[tokens, hidden/16]`` layout. Callers gather those compact rows first,
+    then invoke :func:`interleave_moe_input_scales` exactly once on the global
+    rank-major tensor. This is the same FP4-before-communication contract used
+    by SGLang's stable FlashInfer CUTLASS dispatcher.
+    """
+
+    _require_sm120(hidden)
+    if hidden.ndim != 2 or hidden.dtype is not torch.bfloat16:
+        raise TypeError(
+            "NVFP4 MoE input quantization requires 2-D torch.bfloat16 hidden"
+        )
+    if not hidden.is_contiguous():
+        raise ValueError("hidden must be contiguous")
+    tokens, hidden_size = hidden.shape
+    if tokens < 1 or hidden_size < 1 or hidden_size % 16:
+        raise ValueError(
+            "hidden must contain at least one row and a hidden size divisible by 16"
+        )
+    _require_tensor(
+        input_global_scale,
+        name="input_global_scale",
+        dtype=torch.float32,
+        shape=(),
+        device=hidden.device,
+    )
+    quantize, _ = _load_flashinfer_fp4_quantization()
+    with torch.cuda.device(hidden.device):
+        result = quantize(
+            hidden,
+            input_global_scale,
+            is_sf_swizzled_layout=False,
+        )
+    if not isinstance(result, (tuple, list)) or len(result) != 2:
+        raise RuntimeError("FlashInfer fp4_quantize returned a malformed result")
+    packed, scales = result
+    _require_tensor(
+        packed,
+        name="packed_hidden",
+        dtype=torch.uint8,
+        shape=(tokens, hidden_size // 2),
+        device=hidden.device,
+    )
+    _require_tensor(
+        scales,
+        name="input_scale_rows",
+        dtype=torch.uint8,
+        shape=(tokens, hidden_size // 16),
+        device=hidden.device,
+    )
+    return packed, scales
+
+
+def interleave_moe_input_scales(scale_rows: torch.Tensor) -> torch.Tensor:
+    """Convert gathered FP4 scale rows to CUTLASS's 128-row swizzled ABI."""
+
+    _require_sm120(scale_rows)
+    if scale_rows.ndim != 2 or scale_rows.dtype is not torch.uint8:
+        raise TypeError(
+            "NVFP4 MoE input scale rows must be a 2-D torch.uint8 tensor"
+        )
+    if not scale_rows.is_contiguous():
+        raise ValueError("input scale rows must be contiguous")
+    tokens, scale_columns = scale_rows.shape
+    if tokens < 1 or scale_columns < 1:
+        raise ValueError("input scale rows must be non-empty")
+    _, interleave = _load_flashinfer_fp4_quantization()
+    with torch.cuda.device(scale_rows.device):
+        swizzled = interleave(scale_rows)
+    expected = _ceil_div(tokens, 128) * 128 * scale_columns
+    _require_tensor(
+        swizzled,
+        name="swizzled_input_sf",
+        dtype=torch.uint8,
+        shape=(expected,),
+        device=scale_rows.device,
+    )
+    return swizzled
+
+
+def _call_fused_moe(
+    hidden: torch.Tensor,
+    selected_experts: torch.Tensor,
+    routing_weights: torch.Tensor,
+    prepared: PreparedNvFp4Moe,
+    *,
+    output: torch.Tensor,
+    input_sf: torch.Tensor | None,
+    ep_size: int,
+    ep_rank: int,
+) -> torch.Tensor:
+    cutlass_fused_moe, swiglu = _load_flashinfer()
+
+    # FlashInfer 0.6.14 resolves its AOT module from the current device rather
+    # than the input tensor, so bind the context explicitly on multi-GPU ranks.
+    with torch.cuda.device(hidden.device):
+        result = cutlass_fused_moe(
+            hidden,
+            selected_experts,
+            routing_weights,
+            prepared.fc1_weight,
+            prepared.fc2_weight,
+            torch.bfloat16,
+            quant_scales=prepared.quant_scales(),
+            fc1_expert_biases=None,
+            fc2_expert_biases=None,
+            input_sf=input_sf,
+            tp_size=1,
+            tp_rank=0,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            cluster_size=1,
+            cluster_rank=0,
+            output=output,
+            enable_alltoall=False,
+            use_deepseek_fp8_block_scale=False,
+            use_w4_group_scaling=False,
+            use_mxfp8_act_scaling=False,
+            min_latency_mode=False,
+            use_packed_weights=False,
+            activation_type=swiglu,
+            swizzled_input_sf=True,
+        )
+
+    # The 0.6.14 implementation returns a list even though its public
+    # annotation says Tensor. Accept both documented and observed forms, but
+    # require that the supplied output buffer is the one actually returned.
+    returned = result[0] if isinstance(result, (list, tuple)) and result else result
+    if not isinstance(returned, torch.Tensor) or returned.data_ptr() != output.data_ptr():
+        raise RuntimeError("FlashInfer did not return the preallocated fused-MoE output buffer")
+    return output
+
+
 def fused_moe_forward(
     hidden: torch.Tensor,
     selected_experts: torch.Tensor,
@@ -301,43 +485,48 @@ def fused_moe_forward(
         ep_size=ep_size,
         ep_rank=ep_rank,
     )
-    cutlass_fused_moe, swiglu = _load_flashinfer()
+    return _call_fused_moe(
+        hidden,
+        selected_experts,
+        routing_weights,
+        prepared,
+        output=output,
+        input_sf=None,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+    )
 
-    # FlashInfer 0.6.14 resolves its AOT module from the current device rather
-    # than the input tensor, so bind the context explicitly on multi-GPU ranks.
-    with torch.cuda.device(hidden.device):
-        result = cutlass_fused_moe(
-            hidden,
-            selected_experts,
-            routing_weights,
-            prepared.fc1_weight,
-            prepared.fc2_weight,
-            torch.bfloat16,
-            quant_scales=prepared.quant_scales(),
-            fc1_expert_biases=None,
-            fc2_expert_biases=None,
-            input_sf=None,
-            tp_size=1,
-            tp_rank=0,
-            ep_size=ep_size,
-            ep_rank=ep_rank,
-            cluster_size=1,
-            cluster_rank=0,
-            output=output,
-            enable_alltoall=False,
-            use_deepseek_fp8_block_scale=False,
-            use_w4_group_scaling=False,
-            use_mxfp8_act_scaling=False,
-            min_latency_mode=False,
-            use_packed_weights=False,
-            activation_type=swiglu,
-            swizzled_input_sf=True,
-        )
 
-    # The 0.6.14 implementation returns a list even though its public
-    # annotation says Tensor.  Accept both documented and observed forms, but
-    # require that the supplied output buffer is the one actually returned.
-    returned = result[0] if isinstance(result, (list, tuple)) and result else result
-    if not isinstance(returned, torch.Tensor) or returned.data_ptr() != output.data_ptr():
-        raise RuntimeError("FlashInfer did not return the preallocated fused-MoE output buffer")
-    return output
+def fused_moe_forward_quantized(
+    packed_hidden: torch.Tensor,
+    input_sf: torch.Tensor,
+    selected_experts: torch.Tensor,
+    routing_weights: torch.Tensor,
+    prepared: PreparedNvFp4Moe,
+    *,
+    output: torch.Tensor,
+    ep_size: int,
+    ep_rank: int,
+) -> torch.Tensor:
+    """Run local experts from a gathered packed-NVFP4 activation tensor."""
+
+    _validate_request(
+        packed_hidden,
+        selected_experts,
+        routing_weights,
+        prepared,
+        output,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+        input_sf=input_sf,
+    )
+    return _call_fused_moe(
+        packed_hidden,
+        selected_experts,
+        routing_weights,
+        prepared,
+        output=output,
+        input_sf=input_sf,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+    )

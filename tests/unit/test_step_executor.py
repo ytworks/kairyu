@@ -666,6 +666,77 @@ def test_the_plan_hook_runs_after_copy_in_before_every_replay():
     assert plan.plans[2] == ([[6, 9], [7, 9], [8, 9], [9, 9]], [5, 5, 5, 1])
 
 
+def test_replay_plan_is_distinct_and_receives_current_padded_host_lengths():
+    """Capture stays stock while replay gets immutable scheduler metadata."""
+
+    stock = _PlanRecorder()
+    replay_batches: list[DecodeBatch] = []
+
+    def replay(batch: DecodeBatch) -> None:
+        replay_batches.append(batch)
+
+    executor = GraphStepExecutor(
+        _decode_fn_pages,
+        SnapshotGraphBackend(),
+        max_batch=8,
+        max_pages=2,
+        scratch_page=9,
+        plan_fn=stock,
+        replay_plan_fn=replay,
+    )
+    batch = build_decode_batch(
+        token_ids=[1, 2, 3],
+        positions=[3, 4, 5],
+        page_lists=[(3,), (4,), (5,)],
+        seq_lens=[4, 5, 6],
+        max_pages=1,
+        scratch_page=9,
+    )
+
+    executor.execute_decode(batch)
+    _, static = executor._captured[4]
+
+    assert len(stock.plans) == 1  # initial wrapper/capture plan only
+    assert len(replay_batches) == 1
+    replay_batch = replay_batches[0]
+    assert replay_batch.host_seq_lens == (4, 5, 6, 1)
+    assert replay_batch.seq_lens.tolist() == [4, 5, 6, 1]
+    assert replay_batch.seq_lens.data_ptr() == static.seq_lens.data_ptr()
+    # The frozen capture seed remains honest; no stale metadata was mutated.
+    assert static.host_seq_lens == (1, 1, 1, 1)
+    assert batch.host_seq_lens == (4, 5, 6)
+
+
+def test_replay_without_host_lengths_falls_back_to_stock_plan():
+    stock = _PlanRecorder()
+    replay_calls = 0
+
+    def replay(_batch: DecodeBatch) -> None:
+        nonlocal replay_calls
+        replay_calls += 1
+
+    executor = GraphStepExecutor(
+        _decode_fn,
+        SnapshotGraphBackend(),
+        max_batch=2,
+        scratch_page=0,
+        plan_fn=stock,
+        replay_plan_fn=replay,
+    )
+    batch = DecodeBatch(
+        token_ids=torch.tensor([1]),
+        positions=torch.tensor([1]),
+        page_tables=torch.tensor([[0]], dtype=torch.int32),
+        seq_lens=torch.tensor([2], dtype=torch.int32),
+        write_from=torch.tensor([0]),
+    )
+
+    executor.execute_decode(batch)
+
+    assert replay_calls == 0
+    assert len(stock.plans) == 2  # capture initialization plus safe replay fallback
+
+
 def test_the_plan_hook_also_runs_on_the_eager_fallback():
     """An oversize batch skips capture but still reaches attend_decode, which on
     a planning backend needs a live plan for THOSE buffers."""

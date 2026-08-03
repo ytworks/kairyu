@@ -51,6 +51,7 @@ _KAIRYU_OPTIONS = frozenset(
         "runner",
         "tensor_parallel_size",
         "expert_parallel_size",
+        "expert_parallel_attention_dp",
         "tokenizer",
         "speculative",
         "speculative_tokens",
@@ -397,6 +398,19 @@ def _validate_kairyu(options: Mapping[str, object]) -> None:
             "kairyu backend expert_parallel_size must be one of 1, 2, or 4"
         )
     expert_parallel = expert_parallel_size > 1
+    expert_parallel_attention_dp = options.get(
+        "expert_parallel_attention_dp",
+        False,
+    )
+    if type(expert_parallel_attention_dp) is not bool:
+        raise ValueError(
+            "kairyu backend expert_parallel_attention_dp must be a boolean"
+        )
+    if expert_parallel_attention_dp and expert_parallel_size != 4:
+        raise ValueError(
+            "kairyu backend expert_parallel_attention_dp requires "
+            "expert_parallel_size=4"
+        )
     if expert_parallel and tensor_parallel_size > 1:
         raise ValueError(
             "kairyu backend tensor parallelism and expert parallelism are "
@@ -445,13 +459,21 @@ def _validate_kairyu(options: Mapping[str, object]) -> None:
             raise ValueError(
                 "kairyu backend expert parallelism requires a real model_path"
             )
-        if options.get("pipeline_depth", 1) != 1:
+        if (
+            not expert_parallel_attention_dp
+            and options.get("pipeline_depth", 1) != 1
+        ):
             raise ValueError(
-                "kairyu backend expert parallelism requires pipeline_depth=1"
+                "kairyu backend replicated-attention expert parallelism "
+                "requires pipeline_depth=1"
             )
-        if options.get("decode_mode", "eager") != "eager":
+        if (
+            options.get("decode_mode", "eager") != "eager"
+            and not expert_parallel_attention_dp
+        ):
             raise ValueError(
-                "kairyu backend expert parallelism requires decode_mode='eager'"
+                "kairyu backend replicated-attention expert parallelism "
+                "requires decode_mode='eager'"
             )
         if options.get("kv_cache_dtype", "auto") != "bfloat16":
             raise ValueError(

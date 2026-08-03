@@ -18,10 +18,35 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
 from kairyu.engine.core.graph_buckets import bucket_for, decode_buckets
+
+GraphDecodeKind = Literal["eager_fallback", "capture", "replay"]
+
+
+@dataclass(frozen=True)
+class GraphDecodeDecision:
+    """Read-only dispatch plan for one prospective decode batch.
+
+    ``bucket_size`` is the number of rows the selected execution runs.  Graph
+    decisions report their padded static bucket; eager fallback reports the
+    unpadded prospective batch size.  ``capture_model_forward_count`` is the
+    number of times the Python model-forward function must be entered before
+    this dispatch can complete.  A first capture enters it once per backend
+    warmup plus once for capture itself.  Replaying the resulting graph enters
+    no Python model code, while eager fallback enters it exactly once.
+
+    The slightly capture-specific field name is intentional: consumers need
+    this count to stage capture-time side inputs (for example one collective
+    layout per warmup/capture invocation), not to estimate GPU graph replays.
+    """
+
+    kind: GraphDecodeKind
+    bucket_size: int
+    capture_model_forward_count: int
 
 
 @dataclass(frozen=True)
@@ -56,6 +81,12 @@ class DecodeBatch:
     page_tables: torch.Tensor  # [B, max_pages] int32, padded with the scratch page
     seq_lens: torch.Tensor  # [B] int32
     write_from: torch.Tensor  # [B] int64; positions below this retain cached KV
+    # Authoritative host lengths from the scheduler.  CUDA-graph replay needs
+    # these to build FlashInfer's CPU schedule without reading ``seq_lens``
+    # back from the device.  They are immutable alongside the batch: padded
+    # graph metadata is represented by a fresh view, never by mutating a stale
+    # frozen tuple captured with the static buffers.
+    host_seq_lens: tuple[int, ...] = ()
     # Optional host metadata.  It never participates in model execution; a
     # reusable builder and graph bucket use it to prove which page-table ranges
     # are unchanged without reading a CUDA tensor back to the host.
@@ -420,12 +451,14 @@ def build_decode_batch(
         page_tables=page_tables,
         seq_lens=torch.as_tensor(seq_lens, dtype=torch.int32, device=device),
         write_from=torch.as_tensor(write_from, dtype=torch.int64, device=device),
+        host_seq_lens=tuple(int(seq_len) for seq_len in seq_lens),
         page_table_rows=page_table_rows,
     )
 
 
 DecodeFn = Callable[[DecodeBatch], torch.Tensor]  # -> logits/hidden [B, ...]
 PlanFn = Callable[[DecodeBatch], None]  # host phase, OUTSIDE the captured region
+ReplayPlanFn = Callable[[DecodeBatch], None]  # optimized host phase for replay only
 
 
 class EagerStepExecutor:
@@ -449,6 +482,18 @@ class FakeGraphBackend:
     def __init__(self) -> None:
         self.captures = 0
         self.replays = 0
+
+    @property
+    def capture_model_forward_count(self) -> int:
+        """Logical no-warmup capture count used by graph-policy tests.
+
+        This lightweight backend evaluates ``fn`` from ``replay`` so CPU tests
+        can observe current tensor contents.  The reported count models the
+        equivalent production capture boundary: one capture forward and no
+        warmups.
+        """
+
+        return 1
 
     def capture(self, fn: DecodeFn, static_batch: DecodeBatch):
         self.captures += 1
@@ -478,6 +523,12 @@ class SnapshotGraphBackend:
         self.captures = 0
         self.replays = 0
 
+    @property
+    def capture_model_forward_count(self) -> int:
+        """Logical no-warmup capture count; see ``FakeGraphBackend``."""
+
+        return 1
+
     def capture(self, fn: DecodeFn, static_batch: DecodeBatch):
         self.captures += 1
         backend = self
@@ -503,6 +554,7 @@ class GraphStepExecutor:
         max_pages: int = 1,
         device: str | torch.device = "cpu",
         plan_fn: PlanFn | None = None,
+        replay_plan_fn: ReplayPlanFn | None = None,
     ) -> None:
         """``scratch_page`` is REQUIRED (m17 A5, review [P1]).
 
@@ -524,6 +576,11 @@ class GraphStepExecutor:
         # Optional, so a decode_fn whose backends have no host phase (every
         # FakeGraphBackend test) constructs exactly as before.
         self._plan_fn = plan_fn
+        # Kept separate from ``plan_fn`` deliberately.  Capture and eager
+        # fallback must retain the backend's stock planning path; only a graph
+        # whose wrapper was initialized by that stock plan may use a replay
+        # specialization such as FlashInfer's ``fast_decode_plan``.
+        self._replay_plan_fn = replay_plan_fn
         self._backend = graph_backend
         self._buckets = decode_buckets(max_batch)
         self._max_pages = max_pages
@@ -552,6 +609,24 @@ class GraphStepExecutor:
         self._page_table_elements_copied = 0
         self._page_table_row_hits = 0
         self._page_table_released_rows = 0
+        # Distributed attention-DP chooses one graph/eager branch for every
+        # rank before any model collective.  The one-shot override below makes
+        # that global decision authoritative at the local executor boundary;
+        # without it a rank whose smaller local shape fits a graph could enter
+        # capture while a peer takes the globally-required eager fallback.
+        self._coordinated_decision: GraphDecodeDecision | None = None
+
+    @property
+    def configured_buckets(self) -> tuple[int, ...]:
+        """Static capture buckets in ascending execution order."""
+
+        return self._buckets
+
+    @property
+    def max_pages(self) -> int:
+        """Maximum page-table width accepted by captured decode."""
+
+        return self._max_pages
 
     def can_execute_graph(self, batch: DecodeBatch) -> bool:
         """Whether ``batch`` fits one configured static graph bucket."""
@@ -559,6 +634,101 @@ class GraphStepExecutor:
             bucket_for(batch.batch_size, self._buckets) is not None
             and batch.max_pages <= self._max_pages
         )
+
+    def decode_decision(
+        self,
+        *,
+        batch_size: int,
+        max_pages: int,
+    ) -> GraphDecodeDecision:
+        """Return the dispatch decision without capturing or mutating counters.
+
+        The caller supplies only prospective shape metadata.  In particular,
+        this method never builds/copies a ``DecodeBatch`` and never changes the
+        captured-bucket set, so distributed callers can coordinate any required
+        capture-time Python forwards before entering ``execute_decode``.
+        """
+
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("decode batch_size must be an integer >= 1")
+        if type(max_pages) is not int or max_pages < 1:
+            raise ValueError("decode max_pages must be an integer >= 1")
+        bucket = bucket_for(batch_size, self._buckets)
+        if bucket is None or max_pages > self._max_pages:
+            return GraphDecodeDecision(
+                kind="eager_fallback",
+                bucket_size=batch_size,
+                capture_model_forward_count=1,
+            )
+        if bucket in self._captured:
+            return GraphDecodeDecision(
+                kind="replay",
+                bucket_size=bucket,
+                capture_model_forward_count=0,
+            )
+        count = getattr(self._backend, "capture_model_forward_count", None)
+        if type(count) is not int or count < 1:
+            raise RuntimeError(
+                "graph backend must expose a positive integer "
+                "capture_model_forward_count for prospective dispatch"
+            )
+        return GraphDecodeDecision(
+            kind="capture",
+            bucket_size=bucket,
+            capture_model_forward_count=count,
+        )
+
+    def coordinate_next_decode(self, decision: GraphDecodeDecision) -> None:
+        """Arm exactly one authoritative distributed decode decision.
+
+        The coordinator has already compared this decision on every rank.  It
+        is deliberately consumed by the next :meth:`execute_decode` call only;
+        double arming or skipping that call is protocol drift and fails closed.
+        """
+
+        if not isinstance(decision, GraphDecodeDecision):
+            raise TypeError("coordinated graph decision must be GraphDecodeDecision")
+        if self._coordinated_decision is not None:
+            raise RuntimeError(
+                "coordinated graph decision is already armed for the next decode"
+            )
+        if decision.kind == "eager_fallback":
+            valid = (
+                decision.bucket_size >= 1
+                and decision.capture_model_forward_count == 1
+            )
+        elif decision.kind == "capture":
+            count = getattr(self._backend, "capture_model_forward_count", None)
+            valid = (
+                decision.bucket_size in self._buckets
+                and type(count) is int
+                and count >= 1
+                and decision.capture_model_forward_count == count
+            )
+        else:
+            valid = (
+                decision.kind == "replay"
+                and decision.bucket_size in self._buckets
+                and decision.capture_model_forward_count == 0
+            )
+        if not valid:
+            raise ValueError(
+                f"malformed coordinated graph decision: {decision!r}"
+            )
+        self._coordinated_decision = decision
+
+    def assert_coordinated_decode_consumed(self) -> None:
+        """Prove the one-step override reached exactly one decode dispatch."""
+
+        if self._coordinated_decision is not None:
+            raise RuntimeError(
+                "coordinated graph decision was not consumed by model decode"
+            )
+
+    def cancel_coordinated_decode(self) -> None:
+        """Clear an armed decision while tearing down an already-failed step."""
+
+        self._coordinated_decision = None
 
     def execution_stats(self, *, reset: bool = False) -> dict[str, object]:
         """Structural dispatch counts, independent of wall-clock jitter."""
@@ -614,6 +784,29 @@ class GraphStepExecutor:
         return result
 
     def execute_decode(self, batch: DecodeBatch) -> torch.Tensor:
+        coordinated = self._coordinated_decision
+        self._coordinated_decision = None
+        if coordinated is not None:
+            if coordinated.kind == "eager_fallback":
+                self._eager_fallbacks += 1
+                self._page_table_eager_fallbacks += 1
+                self._plan(batch)
+                return self._decode_fn(batch)
+            if batch.batch_size != coordinated.bucket_size:
+                raise RuntimeError(
+                    "coordinated graph bucket disagrees with the local padded "
+                    f"decode: decision={coordinated.bucket_size}, "
+                    f"batch={batch.batch_size}"
+                )
+            local = self.decode_decision(
+                batch_size=batch.batch_size,
+                max_pages=batch.max_pages,
+            )
+            if local != coordinated:
+                raise RuntimeError(
+                    "coordinated graph decision disagrees with local executor "
+                    f"state: coordinated={coordinated!r}, local={local!r}"
+                )
         bucket = bucket_for(batch.batch_size, self._buckets)
         # oversize batch OR a page table wider than the captured static buffer:
         # never crash, run eager (D2)
@@ -630,7 +823,7 @@ class GraphStepExecutor:
         # lengths the kernels are about to read, and _copy_in just rewrote both
         # (including the padding rows). Planning before the copy would schedule
         # the PREVIOUS step. This ordering is the whole point of the hook.
-        self._plan(static)
+        self._plan_replay(static, batch)
         out = replayable.replay()
         self._graph_executions += 1
         self._page_table_graph_executions += 1
@@ -667,6 +860,33 @@ class GraphStepExecutor:
         if self._plan_fn is not None:
             self._plan_fn(batch)
 
+    def _plan_replay(self, static: DecodeBatch, batch: DecodeBatch) -> None:
+        """Plan an initialized graph replay without stale host metadata.
+
+        ``static`` owns the fixed device addresses captured by the graph, but
+        its frozen host fields describe the all-padding capture seed.  Build a
+        short-lived immutable view that shares those device tensors and pads
+        the current scheduler lengths with one exactly as ``_copy_in`` did.
+        Batches constructed outside :func:`build_decode_batch` have no
+        authoritative host lengths; correctness then falls back to stock
+        planning instead of guessing or synchronizing a CUDA tensor.
+        """
+        if self._replay_plan_fn is None or len(batch.host_seq_lens) != batch.batch_size:
+            self._plan(static)
+            return
+        host_seq_lens = batch.host_seq_lens + (1,) * (
+            static.batch_size - batch.batch_size
+        )
+        replay_batch = DecodeBatch(
+            token_ids=static.token_ids,
+            positions=static.positions,
+            page_tables=static.page_tables,
+            seq_lens=static.seq_lens,
+            write_from=static.write_from,
+            host_seq_lens=host_seq_lens,
+        )
+        self._replay_plan_fn(replay_batch)
+
     def _capture(self, bucket: int) -> None:
         static = DecodeBatch(
             token_ids=torch.zeros(bucket, dtype=torch.int64, device=self._device),
@@ -679,6 +899,7 @@ class GraphStepExecutor:
             ),
             seq_lens=torch.ones(bucket, dtype=torch.int32, device=self._device),
             write_from=torch.zeros(bucket, dtype=torch.int64, device=self._device),
+            host_seq_lens=(1,) * bucket,
         )
         # Plan BEFORE the backend captures: the warmup passes and the capture
         # itself run decode_fn, which reaches attend_decode, which under capture

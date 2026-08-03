@@ -1,9 +1,11 @@
 # G4.1 Design: Mid-tier MoE — Real NVFP4 Loading and Correctness
 
-Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-02; the M-A1 best
-implementation is retained with its formal FAIL, while M-A2 production
-integration and formal hardware evidence are complete).
-Milestone: G4.1 M-A1, with explicit seams for M-A2 and M-A3.
+Status: **Reviewed — APPROVE-WITH-AMENDMENTS** (2026-08-03; the M-A1 best
+implementation is retained with its formal FAIL, M-A2 production integration
+and formal hardware evidence are complete, and M-A3 is scope-closed by an
+explicit product-owner deviation while its retained formal performance verdict
+remains FAIL against the unchanged thresholds).
+Milestone: G4.1 M-A1/M-A2/M-A3.
 Depends on: M12 (Qwen model), M13 (paged attention), M14 (native NVFP4
 projection kernels), M15 (Qwen3-MoE math), M16 (NCCL communicator and EP
 dispatch), M8/M9 (paged runner and scheduler).
@@ -343,12 +345,202 @@ verification and raw-only replay both pass. The complete evidence is retained
 under
 `bench/results/g4-ma2-ep-kv-qwen3-235b-rtxpro6000-2026-08-02/`.
 
-M-A3 must replace correctness-mode attention duplication with request-owned
-attention-DP and add an overlap strategy chosen from measured throughput. It
-may reuse the grouped/fused local-expert ABI introduced here. It must compare
-Kairyu and SGLang sequentially at equal checkpoint/config and publish
-steady-state token throughput and TTFT statistics. M-A1 timing cannot be
-reused as M-A3 evidence.
+M-A3 replaces correctness-mode attention duplication with request-owned
+attention-DP and reuses the grouped/fused local-expert ABI introduced here.
+The implementation diagnostic selected pipeline depth 5 over depth 1 for the
+production candidate; this choice is fixed before the formal run and the
+diagnostic timing is not M-A3 evidence. The binding comparison runs Kairyu and
+SGLang sequentially at equal checkpoint/config and publishes steady-state
+token throughput and TTFT statistics. M-A1 timing cannot be reused as M-A3
+evidence.
+
+### D8 — Request-owned attention-DP and the M-A3 comparison boundary
+
+The M-A3 Kairyu path is an opt-in, fail-closed production envelope for the
+pinned Qwen3-235B NVFP4 checkpoint: one node, four ranks, TP1, EP4, BF16
+compute/KV, FCFS scheduling, request-owned attention-DP, and either eager or
+CUDA-graph decode. A stable round-robin assignment owns each request's
+attention, KV pages, sampling state, and selected-token packet on one rank for
+its lifetime. Q/K/V, attention output, embeddings, norms, routers, and the
+output head are replicated; each rank retains only its contiguous expert
+partition. Unlike M-A1, `o_proj` is therefore a complete replicated
+projection, produces a complete local hidden row, and has no attention-output
+all-reduce. Every rank still participates in the ordered control and MoE
+collectives, including when it has no real row; bounded scratch requests/pages
+make that participation explicit rather than borrowing another request's KV.
+
+The MoE boundary communicates the smallest native operands. Each owner routes
+and NVFP4-quantizes its local BF16 hidden rows before communication. The four
+packed activation, input-scale, selected-expert, and routing-weight tensors
+are issued as one grouped direct-NCCL operation. Eager unequal owner layouts
+use rank-ragged grouped broadcasts and reductions without zero-row padding;
+equal layouts, including graph buckets, use fixed all-gather and
+reduce-scatter shapes. Every expert rank evaluates only its local fused
+experts into a grow-only stream-local BF16 partial workspace, and
+reduce-scatter returns only each attention owner's completed rows. There is no
+post-MoE all-reduce. The direct communicator is a deliberately small ctypes
+binding over `libnccl.so.2`; the existing Gloo/NCCL process groups retain
+control-plane and lifecycle ownership. An all-rank initialization failure may
+select the declared `torch.distributed:nccl` compatibility transport, but a
+runtime direct-NCCL failure aborts instead of changing algorithms in flight.
+M-A3 formal evidence requires direct NCCL to be active, so the compatibility
+transport cannot satisfy the performance gate.
+
+Compatible Q/K/V NVFP4 projections share one activation quantization and one
+concatenated FlashInfer W4A4 GEMM through `NvFp4LinearPack`. The three
+canonical checkpoint module names and state-dict keys remain intact, and their
+weights/scales become views of one packed owner so the optimization does not
+retain a second raw QKV copy. Any incompatible scale, layout, hook, placement,
+or lifecycle mutation declines or invalidates the pack and executes the
+existing separate projections. The pinned checkpoint's 94 attention layers
+were compatible in the real load smoke; that smoke and its CUDA-graph replay
+proof establish implementation readiness but are not M-A3 performance
+evidence.
+
+CUDA-graph policy is coordinated before any model collective. The driver
+gathers each rank's prospective owner-row and page-table width, chooses one
+global eager/capture/replay decision, and arms that decision exactly once on
+every rank. Captures use unique scratch pages and enough dummy rows to make
+the selected local bucket identical across ranks; mixed prefill/decode steps
+retain separate layouts. The production comparison pins local buckets
+`1,2,4,8,16,24,32`, maximum page-table width 128, and three backend warmup
+forwards. Before every measured scenario, arm-neutral, trace-disjoint global
+bursts of `4,8,16,32,64,96,128` requests, each retained for 16 completion
+tokens, populate all seven local buckets.
+The `/backends` witness taken after warmup must show all seven captures,
+direct-NCCL ownership, and zero eager fallback. A second witness after traffic
+must keep every structural field and counter fixed except for a strictly
+increased replay count. Lazy capture or fallback during measurement is a
+formal failure, not benchmark overhead to subtract.
+
+Configured pipeline depth remains 5, but admission-sensitive work has a
+smaller unresolved horizon. While the scheduler has a waiter or unfinished
+prompt, or an already-submitted snapshot contains prefill, at most the
+previous and current forwards may remain unresolved. A producer add/abort that
+arrives during fill stops further schedule-ahead at the next loop observation.
+Once all scheduler and pending work is pure decode, the configured depth 5 is
+restored. This matches the bounded previous/current structure used by pinned
+SGLang and vLLM async scheduling without reducing steady decode overlap.
+Adapters that cannot prove a read-only prefill state fail safe at depth 2.
+
+Pure-greedy attention-DP sampling also has one fewer host-control transaction.
+The fixed NCCL token packet begins with one status slot per gathered rank,
+followed by the existing owner-token slots, and every rank enqueues that fixed
+collective even after local execution or packet-encoding failure. Immediately
+after enqueue, every rank unconditionally participates in one fixed-size CPU
+Gloo reduction of its host-known failure bit while the CUDA graph and NCCL
+packet remain in flight. A zero reduction returns without resolving a CUDA
+event or reading packet status. A nonzero reduction sends every rank through
+the existing bounded object gather so the same rank-local diagnostic is raised
+symmetrically; malformed reductions fail closed. Public owner tokens retain
+their deferred D2H path. The driver and passive ranks therefore skip the final
+Gloo reply gather on success without either a CUDA-to-host synchronization or
+divergent failure participation. Logprobs, grammar, and every other non-fast
+sampling path retain the former all-rank Gloo reply and validation.
+
+The persistent decode input slots also retain their device addresses across
+steps. When a batch larger than one supplies ordinary non-aliasing same-device
+scalar `int64` sampled tokens, one vectorized batched D2D operation updates all
+token rows in those slots instead of submitting one scalar copy per row.
+Destination-aliasing views are staged before update to preserve their original
+values; other unusual tensors and mixed host/device batches retain the
+compatibility path. This internal input update does not change the public
+sampled-token D2H/materialization contract.
+
+Steady CUDA-graph replay also avoids FlashInfer's stock planning drain.
+Capture and eager fallback initialize each graph-shape wrapper with the public
+stock `plan()`. Replay receives authoritative scheduler-owned sequence lengths
+on the CPU, uses one Triton kernel to pack the current rectangular device page
+table into the wrapper's persistent indptr/index/last-page buffers, and calls
+FlashInfer 0.6.14 `fast_decode_plan` with CPU-only schedule inputs. This removes
+the stock boolean-index `nonzero` and device-to-host schedule copies without
+moving planning into the captured region. Missing APIs, compiler errors,
+signature drift, or incompatible wrapper buffers are optimization misses:
+stock `plan()` rewrites every persistent buffer and remains the correctness
+fallback. Models that do not explicitly declare the replay-plan extension
+retain the original stock planning contract.
+
+The comparison uses the same four physical GPUs, immutable checkpoint,
+BF16 KV, four request owners, EP4 ownership, FCFS policy, prompt/completion
+trace, aggregate 65,536-token cache, and disabled speculative decoding. The
+implementations' internal topology remains visible: Kairyu is TP1 plus
+attention-DP4/EP4 with replicated attention projections, while SGLang's
+v0.5.16 CLI records TP4/DP4/EP4 plus `--enable-dp-attention`. SGLang receives
+16,384 cache tokens per owner so its aggregate capacity is 65,536 rather than
+four times Kairyu's global pool. Kairyu configures an 8,192-token global
+batched-prefill limit. SGLang configures an 8,192-token chunked-prefill limit
+that v0.5.16 divides across DP4 and an explicit 2,048-token per-owner
+`max-prefill-tokens`; both therefore resolve to 2,048 tokens per request owner.
+This is a matched request-owner/EP comparison, not a claim that the two
+runtimes use identical internal projection sharding. SGLang also fixes
+`--log-level-http warning`, caps decode CUDA-graph batch size with
+`--cuda-graph-max-bs-decode 32`, and disables prefill CUDA graph.
+
+`bench/g4_ma3_kairyu_server.py` is the dedicated production-server launcher,
+and `bench/g4_ma3_sglang_bench.py` prepares one immutable seed-0 ShareGPT trace.
+The complete matrix contains exactly ten fresh, sequential generations: one
+retained preflight for each already-fixed production arm, then four formal
+pairs in K/S, S/K, S/K, K/S order. The preflights freeze their selection before
+formal traffic. Each formal cell synchronously releases 128 requests at
+concurrency 128 and requires exactly 128 streamed completion tokens per
+request. Completion throughput is successful completion tokens divided by the
+first-start-to-last-terminal span and four GPUs; TTFT p99 is nearest-rank over
+all 128 requests. The gate uses the exact median of the four per-pair K/S
+ratios: throughput must be at least 1 and TTFT p99 at most 1. It performs no
+round-before-gate, outlier removal, retry, or failure exclusion. No additional
+measurement generation belongs to the formal artifact.
+
+The operator hashes every byte of the exact 27-shard checkpoint once before
+the matrix and once after it. Assembly requires identical boundary captures
+and binds every shard to the start descriptor. Every shard also binds one
+fresh sequential server generation to the clean source commit, image
+RepoDigest/platform/config identities, container and read-only model volume
+with no read-write consumer, physical GPU inventory,
+driver/CUDA/NCCL/Torch/FlashInfer versions, resolved runtime argv, and the live
+`/backends` or `/server_info` response. The shard end independently
+re-observes the same running container, source, runtime, GPU-process ownership,
+and volume consumers. All operator commands execute the detached clean
+`SOURCE_ROOT`; `capture-provenance` requires
+`--checkpoint-start`, and assembly requires both boundary captures. Assembly
+rejects a reused/overlapping server, changed provenance, changed
+trace/selection, incomplete SSE/usage, retry, fallback, or unknown raw field.
+The model probe and all serial/graph warmups run through one tracked warmup
+client and connection pool. Only after that traffic completes and the pool is
+fully closed may the operator construct the distinct measurement pool, whose
+prior-request count must be zero and whose first synchronized measurement
+request ordinal is zero. The measurement pool is fully closed after its final
+runtime witness. This lifecycle, its timestamps, exact path counts, path-order
+hash, client roles, and request ordinals are retained in raw evidence;
+`assemble`, `verify`, and raw-only `replay` all fail closed on omission,
+tampering, pool reuse, or invalid ordering.
+Raw JSONL is authoritative; `verify` compares the derived manifest with an
+independent replay, and `replay` ignores the stored manifest. SGLang's SM120
+limitations are always disclosed beside the result but never modify the gate:
+it uses FlashInfer CUTLASS rather than the SM100-only TRTLLM-gen MoE path,
+prefill CUDA graph is disabled while decode graph remains enabled, and
+MTP/speculative decoding is deferred to M-A4.
+
+The first clean-commit matrix at
+`55f3a8ca4513e158182d4b9b4a818c24f5ae7b34` completed all ten fresh
+generations, 4,630 raw rows, and every non-performance binding check. Its four
+throughput ratios were 0.741839/0.798127/0.829296/0.769510 and its exact median
+was 0.783818; the exact median TTFT-p99 ratio was 1.352633. Both performance
+checks therefore failed and retained verification/raw replay correctly reject
+`--assert-gate`. The later 571.542867 tok/s/GPU Kairyu sample was originally
+compared with retained SGLang generations at 449.965–481.865 tok/s/GPU. That
+comparison is withdrawn because the arms used incompatible HTTP client-pool
+lifecycles and therefore does not support a performance conclusion.
+
+A corrected, non-binding fresh-server/fresh-measurement-pool diagnostic
+measured Kairyu at 536.690626 and SGLang at 551.731445 completion tok/s/GPU,
+for a K/S throughput ratio of 0.972739. Its TTFT-p99 K/S ratio was 0.868731
+(Kairyu 1,519.31 ms; SGLang 1,748.88 ms). A full-server SM120 CUTLASS override
+measured 530.616804 tok/s/GPU, 1.13% below the retained FlashInfer `auto` result
+of 536.690626 tok/s/GPU, so throughput priority keeps `auto`. These diagnostics
+do not alter the formal throughput/TTFT thresholds of 1.0/1.0 or the retained
+formal FAIL. The product owner explicitly accepts the remaining 2.73%
+diagnostic throughput gap as a closure deviation, so M-A3 issue scope is
+closed without reclassifying any diagnostic or formal evidence as PASS.
 
 ## 5. Verification
 
@@ -366,5 +558,13 @@ reused as M-A3 evidence.
 - M-A2 formal: the fixed 512-request EP4 trace passes the strict logical
   cache-rate gate, all four rank receipts are invariant, raw radix events are
   exact, and both manifest verification and raw-only replay pass.
+- M-A3 formal: the fixed production arms complete one preflight each, the
+  frozen selection precedes eight fresh sequential paired cells, the full
+  ten-generation window is enclosed by identical checkpoint hashes, and all
+  Kairyu cells prove direct-NCCL plus graph replay without capture/fallback
+  drift. Formal PASS still requires both exact paired medians to satisfy the
+  unchanged throughput and TTFT thresholds; the retained matrix remains FAIL,
+  while issue scope is closed separately by the explicit owner deviation. All
+  declared SGLang limitations remain visible without affecting either verdict.
 - Repository: targeted tests, full applicable CPU/dist/GPU suites, ruff, and
   all required GitHub checks are green before merge.

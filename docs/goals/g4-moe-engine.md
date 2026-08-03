@@ -1,10 +1,12 @@
 # Goal G4: MoE Engine — Fused Experts, EP, MTP, NVFP4 (Roadmap Track E4–E5)
 
 Status: G4.1 M-A1 retains its formal FAIL; M-A2 production integration and
-formal evidence are complete (2026-08-02).
+formal evidence are complete; M-A3 is scope-closed by an explicit product-owner
+deviation while its unchanged formal performance gate remains FAIL
+(2026-08-03).
 Lifts the G2 §6 "MoE / expert parallelism" non-goal (amendment recorded in
 PROGRESS.md). The reviewed mid-MoE design is `docs/design/g4-mid-moe.md`;
-M-A2 passed its independent cache gate; M-A3 remains pending.
+M-A2 passed its independent cache gate; M-A3 did not pass its formal gate.
 Depends on: Roadmap Track E1–E3 (`docs/roadmap.md` §4): real single-GPU engine,
 scheduler multi-token commit (E2), NcclCommunicator (E3). Frontier-class gates
 additionally depend on the E3 hardware decision record (PCIe-switch chassis,
@@ -53,6 +55,54 @@ All numbers from committed `bench/` scripts (G2 §8 evidence rules carry forward
 | M-A3 (baseline comparison) | tok/s/GPU and TTFT p99 ≥ SGLang, same box, same checkpoint, same config — SGLang is the credible MoE-on-SM120 baseline; disclose its known SM120 limitations in the results file | saturation |
 | M-A4 (MTP value) | MTP acceptance ≥2 tokens/step measured; decode throughput ≥1.5× MTP-off at equal quality (spec ≡ non-spec greedy invariant pinned by test, E2 lineage) | latency-bound |
 | E-KV (FP8 KV bake) | `bench/fp8_kv_g4_ekv_bench.py` runs the pinned Qwen3-32B checkpoint on one SM120 with exact 8K/16K/32K prompts, 2,048-token native ragged-prefill chunks, and 16 greedy decode tokens in BF16-KV and explicit unit-scale E4M3-KV arms. PASS requires exact output token IDs/stopping, finite common-prefix selected logprobs with max absolute delta ≤0.25, complete finite/in-range SATFINITE write audits with bit-exact stored E4M3 bytes and the declared quantization-error bound, and fixed cross-cache samples with NRMSE ≤0.05 and cosine ≥0.99. BF16 remains the default; the operator alone may construct the candidate arm, and any runtime or quality failure is retained as FAIL and keeps public FP8 KV disabled. | — |
+
+M-A3 implementation state (2026-08-03): Kairyu now has a bounded Qwen3-235B
+NVFP4 TP1/attention-DP4/EP4 serving path with request-owned attention, KV, and
+sampling; grouped direct-NCCL packed-MoE exchange; one compatible packed QKV
+projection call; coordinated CUDA-graph decode; and production `/backends`
+witnesses. A same-checkpoint implementation diagnostic selected pipeline
+depth 5 over depth 1; depth 5 is fixed before the formal comparison and that
+diagnostic timing is not gate evidence. The comparison pins SGLang v0.5.16 and
+its immutable image/source, uses the same four physical GPUs and checkpoint,
+and matches four request owners, EP4, BF16 KV, FCFS, aggregate 65,536-token
+cache capacity, and the fixed 128-request ShareGPT workload. Kairyu's internal
+TP1 replicated-attention projection layout and SGLang's recorded
+TP4/DP4/EP4 layout remain explicitly visible rather than being relabelled as
+identical. SGLang additionally fixes `--log-level-http warning`,
+`--cuda-graph-max-bs-decode 32`, and disabled prefill CUDA graph.
+
+The binding operator uses exactly ten fresh sequential generations: one fixed
+preflight per arm followed by four formal pairs in K/S, S/K, S/K, K/S order.
+It gates the exact median of the four ratios: Kairyu completion tok/s/GPU over
+SGLang must be at least 1, while Kairyu/SGLang TTFT p99 must be at most 1.
+Failures and retries are retained; there is no outlier removal, rounding before
+the gate, or exclusion. Every shard now completes and closes its warmup
+connection pool before creating a distinct measurement pool with zero prior
+requests; assembly, verification, and raw replay reject any lifecycle or
+request-order violation. The complete checkpoint is hashed before and after
+the matrix, and every generation binds the start capture, a read-only model
+volume with no read-write consumer, and live runtime evidence. All operator
+commands execute the detached clean `SOURCE_ROOT`; provenance receives
+`--checkpoint-start`, while assembly requires both checkpoint boundaries.
+
+The formal matrix at clean commit
+`55f3a8ca4513e158182d4b9b4a818c24f5ae7b34` completed all ten generations and
+every non-performance binding check, but retained a FAIL: exact median
+completion tok/s/GPU was 0.783818× SGLang and TTFT p99 was 1.352633× SGLang.
+All four throughput pairs were below one, so the result is not reclassified as
+jitter. The optimized candidate keeps configured depth 5, removes replay-side
+host drains, and writes ordinary non-aliasing same-device int64 sampled tokens
+into persistent decode slots with one vectorized batched D2D copy. A corrected
+fresh-server/fresh-pool diagnostic measured Kairyu 536.690626 versus SGLang
+551.731445 completion
+tok/s/GPU (0.972739×), with a TTFT-p99 ratio of 0.868731. The previous
+571.542867-versus-449.965–481.865 comparison is withdrawn because its client
+lifecycles were incompatible. A full-server CUTLASS override was also rejected
+because its 530.616804 tok/s/GPU was 1.13% below the retained `auto` result.
+The product owner accepts the remaining 2.73% diagnostic throughput gap as an
+explicit closure deviation so later work can proceed. The formal 1.0/1.0
+thresholds and retained FAIL remain unchanged; this is not a formal PASS. The
+exact procedure and provenance contract are in `docs/gpu-runbook.md` §9.13.
 
 Recorded 2026-07-31: **FAIL** on the pinned Qwen3-32B revision and one RTX PRO
 6000 Blackwell. All K/V write audits passed across 7,522,091,008 values with

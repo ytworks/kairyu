@@ -95,9 +95,25 @@ class DecoderLayer(nn.Module):
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
-    def plan_decode_tensors(self, kv_pool, page_tables, seq_lens, *, q_dtype):
+    def plan_decode_tensors(
+        self,
+        kv_pool,
+        page_tables,
+        seq_lens,
+        *,
+        q_dtype,
+        replay: bool = False,
+        host_seq_lens: tuple[int, ...] | None = None,
+    ):
         """Step-boundary host phase for this layer's attention backend."""
-        self.self_attn.plan_decode_tensors(kv_pool, page_tables, seq_lens, q_dtype=q_dtype)
+        self.self_attn.plan_decode_tensors(
+            kv_pool,
+            page_tables,
+            seq_lens,
+            q_dtype=q_dtype,
+            replay=replay,
+            host_seq_lens=host_seq_lens,
+        )
 
     def forward_decode_tensors(
         self,
@@ -212,6 +228,11 @@ class _Backbone(nn.Module):
 
 class DenseDecoder(nn.Module):
     """Paged incremental decoder; covers the m12 dense family via config."""
+
+    # The runner may pass replay-only scheduler metadata through this model
+    # seam. Models implementing only the original tensor-decode contract omit
+    # this capability and retain stock planning on every replay.
+    supports_fast_replay_plan = True
 
     def __init__(
         self,
@@ -419,6 +440,9 @@ class DenseDecoder(nn.Module):
         kv_pool: PagedKVPool,
         page_tables: torch.Tensor,  # [B, P]
         seq_lens: torch.Tensor,  # [B]
+        *,
+        replay: bool = False,
+        host_seq_lens: tuple[int, ...] | None = None,
     ) -> None:
         """Host phase of ONE tensor decode step (``GraphDecodeBackend``).
 
@@ -442,7 +466,14 @@ class DenseDecoder(nn.Module):
             if backend is None or id(backend) in planned:
                 continue
             planned.add(id(backend))
-            layer.plan_decode_tensors(kv_pool, page_tables, seq_lens, q_dtype=q_dtype)
+            layer.plan_decode_tensors(
+                kv_pool,
+                page_tables,
+                seq_lens,
+                q_dtype=q_dtype,
+                replay=replay,
+                host_seq_lens=host_seq_lens,
+            )
 
     @torch.no_grad()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:

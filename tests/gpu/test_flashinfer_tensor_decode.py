@@ -127,8 +127,14 @@ def test_a_captured_graph_replays_against_the_current_pages():
 
     tables.copy_(torch.tensor([[4, 5], [6, 7]], dtype=torch.int32, device="cuda:0"))
     lengths.copy_(torch.tensor([16, 17], dtype=torch.int32, device="cuda:0"))
-    backend.plan_decode(  # the host half of the step, OUTSIDE the graph
-        pool, tables, lengths, num_qo_heads=QO_HEADS, q_dtype=query.dtype
+    backend.plan_decode(  # replay-only fast host half, OUTSIDE the graph
+        pool,
+        tables,
+        lengths,
+        num_qo_heads=QO_HEADS,
+        q_dtype=query.dtype,
+        replay=True,
+        host_seq_lens=(16, 17),
     )
     replayed = replayable.replay()
     torch.cuda.synchronize()
@@ -136,6 +142,77 @@ def test_a_captured_graph_replays_against_the_current_pages():
     expected = TorchAttentionBackend().attend_decode(query, pool, 0, tables, lengths)
     assert torch.allclose(replayed.float(), expected.float(), atol=5e-2)
     assert not torch.allclose(replayed.float(), captured.float())
+
+
+def test_fast_replay_plan_has_no_stream_sync_or_nonzero_and_keeps_parity():
+    """Steady replay planning is device-only apart from CPU scheduler inputs."""
+
+    from torch.profiler import ProfilerActivity, profile
+
+    from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
+    from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
+
+    _require_cuda()
+    pool = _pool()
+    backend = FlashInferBackend()
+    query = torch.randn(3, QO_HEADS, HEAD_DIM, device="cuda:0", dtype=torch.bfloat16)
+    tables = torch.tensor(
+        [[0, 1, 7], [2, 3, 7], [4, 5, 6]],
+        dtype=torch.int32,
+        device="cuda:0",
+    )
+    lengths = torch.tensor([20, 30, 33], dtype=torch.int32, device="cuda:0")
+
+    # Stock initialization is required once for the wrapper/module.  Warm the
+    # Triton and fast-plan modules before measuring the steady replay path.
+    backend.plan_decode(
+        pool, tables, lengths, num_qo_heads=QO_HEADS, q_dtype=query.dtype
+    )
+    backend.plan_decode(
+        pool,
+        tables,
+        lengths,
+        num_qo_heads=QO_HEADS,
+        q_dtype=query.dtype,
+        replay=True,
+        host_seq_lens=(20, 30, 33),
+    )
+    torch.cuda.synchronize()
+
+    tables.copy_(
+        torch.tensor(
+            [[6, 5, 7], [4, 3, 7], [2, 1, 0]],
+            dtype=torch.int32,
+            device="cuda:0",
+        )
+    )
+    lengths.copy_(torch.tensor([16, 17, 47], dtype=torch.int32, device="cuda:0"))
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        acc_events=True,
+    ) as prof:
+        backend.plan_decode(
+            pool,
+            tables,
+            lengths,
+            num_qo_heads=QO_HEADS,
+            q_dtype=query.dtype,
+            replay=True,
+            host_seq_lens=(16, 17, 47),
+        )
+        actual = backend.attend_decode(query, pool, 0, tables, lengths)
+        torch.cuda.synchronize()
+
+    expected = TorchAttentionBackend().attend_decode(
+        query, pool, 0, tables, lengths
+    )
+    keys = {event.key for event in prof.key_averages()}
+    assert not any("cudaStreamSynchronize" in key for key in keys), sorted(keys)
+    assert "aten::nonzero" not in keys, sorted(keys)
+    assert torch.allclose(actual.float(), expected.float(), atol=5e-2)
+    stats = backend.decode_execution_stats()
+    assert stats["fast_replay_plans"] == 2
+    assert stats["stock_replay_fallbacks"] == 0
 
 
 def test_planning_inside_a_capture_fails_instead_of_corrupting_the_graph():
@@ -278,6 +355,13 @@ def test_flashinfer_decode_captures_and_replays_through_the_runner(llama_dir):
     # captured ONCE and replayed for every later step (not recaptured per step)
     assert list(graph._captured) == [4]
     assert backend._decode_tensor_wrapper is not None
+    stats = backend.decode_execution_stats()
+    # The eager oracle above switches to a different wrapper shape between
+    # graph steps.  Returning to the already-stock-initialized graph wrapper
+    # must still use fast replay rather than treating the global "last wrapper"
+    # pointer as its initialization state.
+    assert stats["fast_replay_plans"] == 4
+    assert stats["stock_replay_fallbacks"] == 0
 
 
 def test_the_capture_itself_is_planned_by_the_hook_not_by_warmup(llama_dir):
@@ -305,7 +389,7 @@ def test_the_replay_follows_the_pages_not_the_capture(llama_dir):
     sequence onto different pages and run again. If the plan were taken once at
     capture, or before `_copy_in`, the second answer would repeat the first."""
     _require_cuda()
-    runner, _backend, cache, pool = _flashinfer_graph_runner(llama_dir)
+    runner, backend, cache, pool = _flashinfer_graph_runner(llama_dir)
 
     first_pages = [[cache.allocate_private_page()] for _ in range(2)]
     second_pages = [[cache.allocate_private_page()] for _ in range(2)]
@@ -321,3 +405,6 @@ def test_the_replay_follows_the_pages_not_the_capture(llama_dir):
     torch.cuda.synchronize()
 
     assert not torch.allclose(first.float(), second.float(), atol=1e-3)
+    stats = backend.decode_execution_stats()
+    assert stats["fast_replay_plans"] == 2
+    assert stats["stock_replay_fallbacks"] == 0

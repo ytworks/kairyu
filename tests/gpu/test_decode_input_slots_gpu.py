@@ -123,6 +123,54 @@ def test_in_flight_staging_grows_the_pool_without_waiting(llama_dir):
     assert grown_positions.tolist() == wide
 
 
+def test_device_token_batch_uses_one_slot_update_kernel(llama_dir):
+    """Thirty-two future-token views use one CUDA kernel and no device allocation."""
+    from torch.profiler import ProfilerActivity, profile
+
+    _require_cuda()
+    runner, _cache = _runner(llama_dir)
+    packet = torch.arange(4 * 33, dtype=torch.long, device="cuda:0").reshape(
+        4, 33
+    )
+    sources = [packet[index % 4, index + 1] for index in range(32)]
+    expected = [(index % 4) * 33 + index + 1 for index in range(32)]
+    positions = list(range(len(sources)))
+
+    # Initialize the cat kernel and staging pool outside the measured range.
+    runner._decode_input_slots(sources, positions)
+    torch.cuda.synchronize()
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        acc_events=True,
+        profile_memory=True,
+    ) as prof:
+        tokens, decoded_positions = runner._decode_input_slots(
+            sources, positions
+        )
+    torch.cuda.synchronize()
+
+    averages = {event.key: event for event in prof.key_averages()}
+    assert averages["aten::stack"].count == 1
+    # CPU staging plus the one position H2D are the only explicit copy_ calls.
+    assert averages["aten::copy_"].count == 2
+    cuda_events = [
+        event
+        for event in prof.events()
+        if event.device_type == torch.autograd.DeviceType.CUDA
+    ]
+    kernels = [
+        event
+        for event in cuda_events
+        if not event.name.startswith(("Memcpy", "Memset"))
+    ]
+    assert len(kernels) == 1, [event.name for event in cuda_events]
+    assert (
+        sum(max(event.self_device_memory_usage, 0) for event in prof.events()) == 0
+    )
+    assert tokens.tolist() == expected
+    assert decoded_positions.tolist() == positions
+
+
 def test_a_whole_generation_reuses_one_slot_allocation(llama_dir):
     """Batched and single-request decode alike: no per-step device allocation."""
     from kairyu.engine.core.engine_core import EngineCore
