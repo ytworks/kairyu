@@ -43,6 +43,13 @@ def _sse_events(body: str) -> list[dict]:
     ]
 
 
+def _assert_sse_response_headers(response: httpx.Response) -> None:
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert "connection" not in response.headers
+
+
 def _tool():
     return {
         "type": "function",
@@ -120,6 +127,23 @@ class LengthBackend(MockBackend):
                 for completion in result.completions
             ),
         )
+
+
+@pytest.mark.parametrize("with_tools", [False, True], ids=["live", "buffered"])
+def test_every_responses_sse_path_sets_transport_headers(
+    tmp_path,
+    with_tools: bool,
+) -> None:
+    payload = {"model": "m", "input": "hello", "stream": True}
+    if with_tools:
+        payload["tools"] = [_tool()]
+
+    with TestClient(_app(tmp_path)) as http:
+        response = http.post("/v1/responses", json=payload)
+
+    assert response.status_code == 200
+    _assert_sse_response_headers(response)
+    assert "event: response.completed" in response.text
 
 
 def test_official_sdk_typed_text_stream_and_final_response(tmp_path):
