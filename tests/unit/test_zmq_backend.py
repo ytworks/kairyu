@@ -995,7 +995,7 @@ async def test_backend_recovers_after_service_death():
     backend = ZmqEngineBackend(num_pages=64, death_timeout_s=2.0)
     try:
         await backend.generate(_request("r1", "warm up", max_tokens=2))
-        queue = await backend._submit(_request("r2", "in flight", max_tokens=64))
+        queue = await backend._submit(_request("r2", "in flight", max_tokens=10_000))
         backend.attention_backend_decision = _decision_from_startup_frame(
             {
                 "startup_wire_version": STARTUP_WIRE_VERSION,
@@ -1004,7 +1004,12 @@ async def test_backend_recovers_after_service_death():
             }
         )
         backend._process.kill()
-        await asyncio.wait_for(queue.get(), timeout=10)  # error event; receiver exits
+        # A token frame can already be queued before kill() takes effect. Wait
+        # for the terminal death event rather than treating the first frame as
+        # proof that the receiver has observed and cleared the dead child.
+        async with asyncio.timeout(10):
+            while "error" not in await queue.get():
+                pass
         assert backend.attention_backend_decision is None
         backend._queues.pop("r2", None)
         backend._release_wire_route("r2")

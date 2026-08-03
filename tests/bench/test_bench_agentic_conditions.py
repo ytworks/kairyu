@@ -49,7 +49,7 @@ def _flag_value(command: list[str], flag: str) -> str:
 
 def test_swebench_sets_fugu_step_limit(tmp_path):
     command = SweBenchProAdapter()._generate_command(
-        _target(), _ctx(tmp_path), Path("preds.json")
+        _target(), _ctx(tmp_path), Path("mini-output")
     )
     configs = [command[i + 1] for i, part in enumerate(command) if part == "--config"]
     # the harness drops its default config as soon as -c is given, so the
@@ -57,6 +57,7 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
     assert configs == ["swebench.yaml", "agent.step_limit=1000"]
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
     assert _flag_value(command, "--split") == "test"
+    assert _flag_value(command, "--output") == "mini-output"
 
 
 def test_swebench_step_limit_is_disclosed():
@@ -72,8 +73,9 @@ def test_terminal_bench_uses_harbor_flags_that_exist(tmp_path):
     # `harbor run` writes to --jobs-dir; --output-dir is a `jobs download` flag
     assert "--output-dir" not in command
     assert _flag_value(command, "--jobs-dir") == str(tmp_path / "jobs")
-    # datasets are selected as name@version
-    assert _flag_value(command, "-d") == "terminal-bench@2.1"
+    # Terminal-Bench 2.1 is a Harbor Hub organization/package, not the legacy
+    # registry's `name@version` entry.
+    assert _flag_value(command, "-d") == "terminal-bench/terminal-bench-2-1"
     assert _flag_value(command, "-a") == "terminus-2"
 
 

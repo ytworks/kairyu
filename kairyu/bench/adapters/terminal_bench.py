@@ -27,9 +27,10 @@ from kairyu.bench.adapters.base import (
 from kairyu.bench.types import BenchTarget, DownloadReport, ItemResult, PairResult
 
 _HARNESS_TIMEOUT_S = 8 * 3600
-# Harbor selects datasets as `name@version`; a slug like
-# "terminal-bench/terminal-bench-2-1" is not a form `-d` accepts.
-_DATASET = "terminal-bench@2.1"
+# Terminal-Bench 2.1 is published on Harbor Hub under this organization/package
+# identifier. `terminal-bench@2.1` addresses the legacy registry instead and is
+# not a published dataset there.
+_DATASET = "terminal-bench/terminal-bench-2-1"
 _AGENT = "terminus-2"
 # Fugu's condition. Harbor's terminus-2 default turn budget is lower, which
 # truncates long traces well before the published limit.
@@ -164,7 +165,7 @@ class TerminalBenchAdapter:
         return DownloadReport(
             adapter=self.info.name,
             status="ok",
-            detail="tasks are fetched by the Harbor harness at run time",
+            detail=f"{_DATASET} tasks are fetched by the Harbor harness at run time",
         )
 
     def _preconditions(self, ctx: RunContext) -> str | None:

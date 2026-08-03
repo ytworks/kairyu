@@ -755,6 +755,13 @@ FlashInfer prefill/decode at TP8 and returned successful thinking-enabled and
 thinking-disabled chat completions; the complete portable suite passes 4,573
 tests with 197 environment-specific cases deselected.
 
+The two agentic Fugu adapters now match their installed harness contracts in
+real execution. mini-swe-agent receives an output directory and its generated
+`preds.json` is verified before SWE-Bench evaluation; Terminal-Bench 2.1 uses
+the official Harbor Hub package `terminal-bench/terminal-bench-2-1`. A real
+one-task oracle smoke resolved 1/1 with zero exceptions, and the complete
+benchmark test suite passes 1,259 tests with 9 deselected.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -762,6 +769,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-03 — [amendment] Agentic Fugu adapters match live harness dataset/output contracts
+- What: Changed SWE-Bench Pro generation to pass mini-swe-agent an output directory, require its `<output>/preds.json` file before evaluation, and pass that file to the official swebench evaluator. Replaced the nonexistent legacy-registry `terminal-bench@2.1` selector with the official Harbor Hub organization/package `terminal-bench/terminal-bench-2-1`. A real one-task Terminal-Bench 2.1 oracle smoke completed at 1/1 with zero exceptions; all 1,259 benchmark tests pass with 9 deselected.
+- Why: The first real Qwen3-32B TP8 suite attempt exposed two contracts that mocked unit tests had accepted incorrectly: mini-swe-agent 2.4.4 created a directory named `preds.json`, causing swebench to raise `IsADirectoryError`, and Harbor 0.17 could not find `terminal-bench@2.1`. Both were development failures rather than model accuracy results or environment skips.
+- Refs: `kairyu/bench/adapters/{swebench_pro,terminal_bench}.py`; `tests/bench/test_bench_agentic*.py`; `docs/benchmarks.md`
 
 ### 2026-08-03 — [amendment] Qwen TP8 Fugu path preflights its real request contract
 - What: Added native, reserved-variable-safe `chat_template_kwargs`, wired the Qwen3-32B example to the exact checkpoint-owned HF template, replaced unsupported `reasoning_effort` fields with Qwen `enable_thinking` controls for target and judge requests, and added a one-token request preflight before any benchmark item. FlashInfer now resolves its exact prefill/decode AOT or JIT modules against live model/KV geometry before readiness; direct virtual-environment entrypoints expose a sibling `ninja`, and FlashAttention delegates its decode preflight. The complete portable suite passes 4,573 tests with 197 deselected. A real RTX PRO 6000 run reported FlashInfer prefill/decode and tensor parallel size 8, accepted both thinking modes, and released all eight GPUs to zero allocated memory after teardown.

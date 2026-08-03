@@ -107,7 +107,7 @@ class SweBenchProAdapter:
         return None
 
     def _generate_command(
-        self, target: BenchTarget, ctx: RunContext, output: Path
+        self, target: BenchTarget, ctx: RunContext, output_dir: Path
     ) -> list[str]:
         command = [
             "mini-extra",
@@ -119,7 +119,7 @@ class SweBenchProAdapter:
             "--split",
             "test",
             "--output",
-            str(output),
+            str(output_dir),
             "--workers",
             str(ctx.concurrency),
             "--config",
@@ -179,11 +179,23 @@ class SweBenchProAdapter:
 
         with tempfile.TemporaryDirectory(prefix="kairyu-swebench-") as tmp:
             workdir = Path(tmp)
-            predictions = workdir / "preds.json"
-            for stage, command in (
-                ("generate", self._generate_command(target, ctx, predictions)),
+            # mini-swe-agent 2.x defines --output as a directory and writes the
+            # evaluation input to <output>/preds.json. Passing preds.json itself
+            # creates a directory named preds.json, which swebench then rejects
+            # with IsADirectoryError.
+            generation_dir = workdir / "mini-output"
+            predictions = generation_dir / "preds.json"
+            stages = (
+                ("generate", self._generate_command(target, ctx, generation_dir)),
                 ("evaluate", self._evaluate_command(predictions, "kairyu-bench")),
-            ):
+            )
+            for stage, command in stages:
+                if stage == "evaluate" and not predictions.is_file():
+                    return self._failed(
+                        target,
+                        started_at,
+                        "generate stage produced no mini-output/preds.json file",
+                    )
                 try:
                     completed = await asyncio.to_thread(_invoke, command, workdir)
                 except subprocess.TimeoutExpired:
@@ -214,7 +226,7 @@ class SweBenchProAdapter:
                 "step_limit": _STEP_LIMIT,
                 "evaluation": "swebench.harness.run_evaluation (docker)",
                 "generate_command": " ".join(
-                    self._generate_command(target, ctx, Path("preds.json"))
+                    self._generate_command(target, ctx, Path("mini-output"))
                 ),
             },
             annotations=self.info.annotations,
