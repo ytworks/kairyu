@@ -648,6 +648,29 @@ def _write_fixture_inputs(root: Path) -> tuple[list[Path], Path]:
     return paths, metadata
 
 
+def _fixture_paths(root: Path) -> list[Path]:
+    return [
+        root / f"shard-{index}.jsonl"
+        for index, _identity in enumerate(gate.SHARD_PLAN)
+    ]
+
+
+def _copy_fixture_inputs(
+    template: Path,
+    destination: Path,
+) -> tuple[list[Path], Path]:
+    shutil.copytree(template, destination)
+    return _fixture_paths(destination), destination / "metadata"
+
+
+def _copy_fixture_metadata(
+    template: Path,
+    destination: Path,
+) -> tuple[list[Path], Path]:
+    shutil.copytree(template / "metadata", destination)
+    return _fixture_paths(template), destination
+
+
 def _write_quality_inputs(
     performance_artifact: Path,
     root: Path,
@@ -721,9 +744,22 @@ def _set_quality_first_distribution(
 
 
 @pytest.fixture(scope="module")
-def passing_artifact(tmp_path_factory: pytest.TempPathFactory):
-    root = tmp_path_factory.mktemp("f4b")
-    paths, metadata = _write_fixture_inputs(root)
+def performance_inputs_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
+    root = tmp_path_factory.mktemp("f4b-performance-inputs")
+    _write_fixture_inputs(root)
+    return root
+
+
+@pytest.fixture(scope="module")
+def passing_artifact(
+    tmp_path_factory: pytest.TempPathFactory,
+    performance_inputs_template: Path,
+):
+    root = tmp_path_factory.mktemp("f4b-passing-artifact")
+    paths = _fixture_paths(performance_inputs_template)
+    metadata = performance_inputs_template / "metadata"
     output = root / "artifact"
     manifest = gate.assemble_artifact(
         paths,
@@ -733,6 +769,59 @@ def passing_artifact(tmp_path_factory: pytest.TempPathFactory):
     )
     rows = gate.read_jsonl(output / gate.RAW_NAME)
     return output, rows, manifest
+
+
+@pytest.fixture(scope="module")
+def quality_inputs_template(
+    tmp_path_factory: pytest.TempPathFactory,
+    passing_artifact,
+) -> Path:
+    performance_artifact, _rows, _manifest_value = passing_artifact
+    root = tmp_path_factory.mktemp("f4b-quality-inputs")
+    _write_quality_inputs(performance_artifact, root)
+    return root
+
+
+@pytest.fixture(scope="module")
+def passing_quality_artifact(
+    tmp_path_factory: pytest.TempPathFactory,
+    passing_artifact,
+    quality_inputs_template: Path,
+) -> tuple[Path, dict[str, object], str]:
+    performance_artifact, _rows, _manifest_value = passing_artifact
+    quality_paths = [
+        quality_inputs_template / f"quality-{identity[0]}.jsonl"
+        for identity in gate.QUALITY_PLAN
+    ]
+    output = tmp_path_factory.mktemp("f4b-passing-quality") / "sealed"
+    original_performance_sha = gate.sha256_file(
+        performance_artifact / gate.RAW_NAME
+    )
+    sealed = gate.seal_quality_artifact(
+        performance_artifact,
+        quality_paths,
+        output,
+        quality_metadata_dir=quality_inputs_template / "metadata",
+        assert_gate=True,
+    )
+    return output, sealed, original_performance_sha
+
+
+def _copy_quality_inputs(
+    template: Path,
+    destination: Path,
+) -> tuple[list[Path], Path]:
+    shutil.copytree(template, destination)
+    paths = [
+        destination / f"quality-{identity[0]}.jsonl"
+        for identity in gate.QUALITY_PLAN
+    ]
+    return paths, destination / "metadata"
+
+
+def _quality_template_rows(template: Path, plan_index: int) -> list[dict]:
+    identity = gate.QUALITY_PLAN[plan_index]
+    return gate.read_jsonl(template / f"quality-{identity[0]}.jsonl")
 
 
 def _request_indices(arm: str) -> list[int]:
@@ -905,26 +994,9 @@ def test_free_running_output_difference_is_retained_as_diagnostic(
 
 
 def test_quality_companion_seals_and_replays_without_changing_performance_raw(
-    passing_artifact,
-    tmp_path: Path,
+    passing_quality_artifact,
 ) -> None:
-    performance_artifact, _rows, _manifest_value = passing_artifact
-    quality_paths, quality_metadata = _write_quality_inputs(
-        performance_artifact,
-        tmp_path / "quality-inputs",
-    )
-    output = tmp_path / "sealed"
-    original_performance_sha = gate.sha256_file(
-        performance_artifact / gate.RAW_NAME
-    )
-
-    sealed = gate.seal_quality_artifact(
-        performance_artifact,
-        quality_paths,
-        output,
-        quality_metadata_dir=quality_metadata,
-        assert_gate=True,
-    )
+    output, sealed, original_performance_sha = passing_quality_artifact
 
     assert sealed["passed"] is True
     assert gate.sha256_file(output / gate.RAW_NAME) == original_performance_sha
@@ -947,10 +1019,12 @@ def test_quality_companion_seals_and_replays_without_changing_performance_raw(
 
 
 def test_quality_first_divergence_passes_sealed_replay_with_reciprocal_top64(
+    performance_inputs_template: Path,
     tmp_path: Path,
 ) -> None:
-    performance_paths, performance_metadata = _write_fixture_inputs(
-        tmp_path / "performance-inputs"
+    performance_paths, performance_metadata = _copy_fixture_inputs(
+        performance_inputs_template,
+        tmp_path / "performance-inputs",
     )
     for path, identity in zip(
         performance_paths,
@@ -1018,11 +1092,12 @@ def test_quality_first_divergence_passes_sealed_replay_with_reciprocal_top64(
 
 def test_quality_common_prefix_material_logprob_delta_fails_sealed_manifest(
     passing_artifact,
+    quality_inputs_template: Path,
     tmp_path: Path,
 ) -> None:
     performance_artifact, _rows, _manifest_value = passing_artifact
-    quality_paths, quality_metadata = _write_quality_inputs(
-        performance_artifact,
+    quality_paths, quality_metadata = _copy_quality_inputs(
+        quality_inputs_template,
         tmp_path / "quality-inputs",
     )
     rows = gate.read_jsonl(quality_paths[1])
@@ -1062,11 +1137,12 @@ def test_quality_common_prefix_material_logprob_delta_fails_sealed_manifest(
 
 def test_quality_tier_stats_parent_binding_rejects_continuous_tamper(
     passing_artifact,
+    quality_inputs_template: Path,
     tmp_path: Path,
 ) -> None:
     performance_artifact, _rows, _manifest_value = passing_artifact
-    quality_paths, quality_metadata = _write_quality_inputs(
-        performance_artifact,
+    quality_paths, quality_metadata = _copy_quality_inputs(
+        quality_inputs_template,
         tmp_path / "quality-inputs",
     )
     rows = gate.read_jsonl(quality_paths[1])
@@ -1094,12 +1170,9 @@ def test_quality_tier_stats_parent_binding_rejects_continuous_tamper(
 @pytest.mark.parametrize("failure", ("discontinuous", "decreased"))
 def test_quality_tier_stats_invalid_sequence_is_rejected_during_parse(
     failure: str,
+    quality_inputs_template: Path,
 ) -> None:
-    rows = _quality_shard(
-        gate.QUALITY_PLAN[1],
-        1,
-        parent_raw_sha256="f" * 64,
-    )
+    rows = _quality_template_rows(quality_inputs_template, 1)
     if failure == "discontinuous":
         rows[2]["initial_tier_stats"]["offload_pages"] += 1
     else:
@@ -1109,12 +1182,10 @@ def test_quality_tier_stats_invalid_sequence_is_rejected_during_parse(
         gate.parse_quality_shard(rows)
 
 
-def test_quality_command_accepts_absolute_source_path() -> None:
-    rows = _quality_shard(
-        gate.QUALITY_PLAN[0],
-        0,
-        parent_raw_sha256="f" * 64,
-    )
+def test_quality_command_accepts_absolute_source_path(
+    quality_inputs_template: Path,
+) -> None:
+    rows = _quality_template_rows(quality_inputs_template, 0)
     rows[0]["container"]["command"][0] = (
         "/workspace/kairyu/" + gate.SOURCE_PATH
     )
@@ -1124,11 +1195,12 @@ def test_quality_command_accepts_absolute_source_path() -> None:
 
 def test_quality_lifecycle_exit_failure_is_rejected_before_seal(
     passing_artifact,
+    quality_inputs_template: Path,
     tmp_path: Path,
 ) -> None:
     performance_artifact, _rows, _manifest_value = passing_artifact
-    quality_paths, quality_metadata = _write_quality_inputs(
-        performance_artifact,
+    quality_paths, quality_metadata = _copy_quality_inputs(
+        quality_inputs_template,
         tmp_path / "quality-inputs",
     )
     exited_path = (
@@ -1150,22 +1222,12 @@ def test_quality_lifecycle_exit_failure_is_rejected_before_seal(
 
 
 def test_verify_quality_detects_retained_metadata_byte_tamper(
-    passing_artifact,
+    passing_quality_artifact,
     tmp_path: Path,
 ) -> None:
-    performance_artifact, _rows, _manifest_value = passing_artifact
-    quality_paths, quality_metadata = _write_quality_inputs(
-        performance_artifact,
-        tmp_path / "quality-inputs",
-    )
+    passing_output, _sealed, _performance_sha = passing_quality_artifact
     output = tmp_path / "sealed"
-    gate.seal_quality_artifact(
-        performance_artifact,
-        quality_paths,
-        output,
-        quality_metadata_dir=quality_metadata,
-        assert_gate=True,
-    )
+    shutil.copytree(passing_output, output)
     identifier = (
         output
         / gate.QUALITY_CONTAINER_METADATA_DIR
@@ -1362,10 +1424,14 @@ def test_retained_f4a_docker_host_config_has_only_known_false_to_null_drift() ->
     ),
 )
 def test_container_metadata_identity_or_configuration_difference_fails_closed(
+    performance_inputs_template: Path,
     tmp_path: Path,
     difference: str,
 ) -> None:
-    paths, metadata = _write_fixture_inputs(tmp_path)
+    paths, metadata = _copy_fixture_metadata(
+        performance_inputs_template,
+        tmp_path / "metadata",
+    )
     label_dir = metadata / gate.SHARD_LABELS[gate.SHARD_PLAN[0]]
     if difference.startswith("image_revision"):
         path = metadata / gate.IMAGE_INSPECT_NAME
@@ -1432,10 +1498,14 @@ def test_container_metadata_identity_or_configuration_difference_fails_closed(
     ),
 )
 def test_container_mount_or_execution_carrier_difference_fails_closed(
+    performance_inputs_template: Path,
     tmp_path: Path,
     difference: str,
 ) -> None:
-    paths, metadata = _write_fixture_inputs(tmp_path)
+    paths, metadata = _copy_fixture_metadata(
+        performance_inputs_template,
+        tmp_path / "metadata",
+    )
     one_shard_differences = {"source_drift", "shared_evidence", "shared_metadata"}
     identities = (
         (gate.SHARD_PLAN[1],) if difference in one_shard_differences else gate.SHARD_PLAN
@@ -1495,10 +1565,14 @@ def test_container_mount_or_execution_carrier_difference_fails_closed(
     ("exit_code", "running", "measurement_outside", "lifecycle_overlap"),
 )
 def test_container_metadata_lifecycle_failure_is_rejected(
+    performance_inputs_template: Path,
     tmp_path: Path,
     difference: str,
 ) -> None:
-    paths, metadata = _write_fixture_inputs(tmp_path)
+    paths, metadata = _copy_fixture_metadata(
+        performance_inputs_template,
+        tmp_path / "metadata",
+    )
     first_label = gate.SHARD_LABELS[gate.SHARD_PLAN[0]]
     if difference == "lifecycle_overlap":
         label = gate.SHARD_LABELS[gate.SHARD_PLAN[1]]
@@ -1533,10 +1607,14 @@ def test_container_metadata_lifecycle_failure_is_rejected(
 
 @pytest.mark.parametrize("missing", ("directory", "file"))
 def test_assemble_requires_complete_container_metadata(
+    performance_inputs_template: Path,
     tmp_path: Path,
     missing: str,
 ) -> None:
-    paths, metadata = _write_fixture_inputs(tmp_path)
+    paths, metadata = _copy_fixture_metadata(
+        performance_inputs_template,
+        tmp_path / "metadata",
+    )
     if missing == "directory":
         metadata = tmp_path / "missing-metadata"
     else:

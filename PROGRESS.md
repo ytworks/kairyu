@@ -47,9 +47,17 @@ the same TP4 ShareGPT token trace measured 495.811 token/s at depth 1 and
 674.181 token/s at depth 5 (+35.98%), versus pinned vLLM at 798.057 token/s.
 The resulting 0.845x ratio is diagnostic rather than the HTTP A6 verdict.
 Steady decode is already approximately equal (Kairyu 19.9 ms versus vLLM
-20.1 ms). Ragged paged-KV writes no longer specialize request-dependent
-token, row, or page-table shapes: after the first compile, previously unseen
-table widths fell from 63.81–67.53 ms to 0.11–0.20 ms with exact K/V output.
+20.1 ms). Ragged and batched paged-KV writes no longer specialize
+request-dependent token, row, or page-table shapes; the batched path also
+keeps the contiguous table stride runtime because it equals the live width.
+After the first ragged compile, previously unseen table widths fell from
+63.81–67.53 ms to 0.11–0.20 ms with exact K/V output; the batched gate now
+binds exact K/V output and one shared compile across changing row/width pairs.
+Portable CPU jobs retain both Python 3.11/3.12 and all 4,579 selected tests,
+but run `tests/bench` with two file-isolated workers and reuse immutable formal
+inputs instead of regenerating them. The exact Python 3.12 two-phase command
+passed in 10m20s versus the prior 16m33s GitHub test step, with zero selected
+skips and 86.74% combined coverage.
 The full TP4/8 HTTP matrix remains an open hard performance gate while the
 verified depth-5 implementation proceeds independently.
 G2 A7 now has an executable real-engine gate. Its Qwen3-32B trace reuses the
@@ -776,6 +784,16 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [amendment] Batched paged-KV live bounds reuse one Triton kernel
+- What: made batched row count, page-table width, and contiguous table stride runtime non-specialized arguments while retaining layout, dtype, head geometry, and write mode as compile-time constants; a real-GPU gate now changes both live dimensions, checks exact K/V output, and requires one compilation.
+- Why: specializing either the explicit width or its equal contiguous stride kept request batch/page-width changes in Triton's cache key and caused avoidable serving-time JIT cliffs.
+- Refs: issue #321; `docs/design/m2-engine.md` §2.3; `kairyu/kernels/paged_kv_write_gpu.py`; `tests/gpu/test_paged_kv_write_gpu.py`
+
+### 2026-08-04 — [progress] Portable CPU coverage gate removes redundant bench work
+- What: retained the full Python 3.11/3.12 portable matrix, all 4,579 selected tests, fail-on-skip policy, and the 80% combined coverage gate; only `tests/bench` uses two file-isolated xdist workers, while repeated formal F4b input/seal generation, an unrelated SciCode network fetch, and production-sized intentional waits are reused or bounded without removing their assertions.
+- Why: the prior GitHub test step spent about 80% of 16m33s in benchmark tests, while the Qwen/Llama parity file itself was sub-second there. The exact final two-phase Python 3.12 run passed in 10m20s with 86.74% coverage and no selected skips.
+- Refs: issue #321; `.github/workflows/ci.yml`; `pyproject.toml`; `tests/bench/test_agentic_kv_tier_f4b_bench.py`; `tests/bench/test_bench_code_adapters.py`; `tests/bench/test_bench_pins.py`; `tests/unit/test_qwen_gpu_detection.py`
 
 ### 2026-08-04 — [amendment] Sequential prefill removes per-layer CUDA host drains
 - What: Dense and MLA sequential attention now receive one scheduler-owned chunk boundary and writable-suffix decision through an explicit model capability. Cached-prefix writes use a contiguous suffix slice instead of CUDA boolean indexing; auxiliary target capture can opt in and the MTP decoder supplies the same metadata. Models without the capability and arbitrary-position direct calls retain the original mask path. CPU gates forbid tensor scalar reads, preserve partial/full cached KV, and pin the arbitrary-position fallback; a real-CUDA profiler gate compares the complete KV/output result to the mask oracle while rejecting `aten::nonzero`, `_local_scalar_dense`, and any stream synchronization parented by those scalar/mask operations.

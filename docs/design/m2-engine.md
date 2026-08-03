@@ -90,6 +90,13 @@ measured 47.1% lower wall time and 56.5% lower TPOT than the list path on the sa
 ### 2.3 KV management: Radix tree over paged blocks
 
 - Fixed-size pages (16 tokens default, FlashInfer paged-KV layout).
+- Ragged and batched paged-KV write kernels keep request-dependent row and
+  page-table bounds as runtime, non-specialized arguments.  The batched
+  kernel also keeps the leading table stride non-specialized because a
+  contiguous table's stride is its live width.  Layout, dtype, head geometry,
+  and write-mode flags remain compile-time constants, so one compiled kernel
+  serves changing request shapes without weakening the static kernel contract
+  (amended 2026-08-04, issue #321).
 - A radix tree keyed on token-ID chunks maps prefixes → page lists. Nodes hold refcounts;
   eviction is leaf-LRU over refcount==0 nodes (SGLang's RadixAttention policy) — this beats
   vLLM's hash-per-block prefix caching on multi-turn reuse because partial-prefix matches

@@ -8,6 +8,7 @@ import zlib
 import httpx
 from conftest import make_config, make_target
 
+from kairyu.bench.adapters import livecodebench as livecodebench_module
 from kairyu.bench.adapters.base import RunContext
 from kairyu.bench.adapters.livecodebench import (
     LiveCodeBenchAdapter,
@@ -105,10 +106,14 @@ def test_grade_code_functional_pass_and_fail():
     assert not passed and "functional test" in detail
 
 
-def test_grade_code_crash_and_timeout_reported():
+def test_grade_code_crash_and_timeout_reported(monkeypatch):
     passed, detail = grade_code("raise RuntimeError('x')", STDIN_TESTS[:1], None)
     assert not passed and "RuntimeError" in detail
 
+    # The production timeout value is asserted through the injected-runner
+    # contract below.  This test only needs to exercise the real timeout and
+    # process-reap branch, not spend the complete service budget doing so.
+    monkeypatch.setattr(livecodebench_module, "_TEST_TIMEOUT_S", 1.0)
     passed, detail = grade_code("import time; time.sleep(30)", STDIN_TESTS[:1], None)
     assert not passed and "timeout" in detail
 
