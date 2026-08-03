@@ -21,10 +21,10 @@ attempts="${ATTEMPTS:-1}"
 concurrency="${BENCH_CONCURRENCY:-8}"
 results_dir="${RESULTS_DIR:-$(pwd)/results/fugu}"
 run_id="${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
-reasoning_effort="${REASONING_EFFORT:-high}"
-judge_reasoning_effort="${JUDGE_REASONING_EFFORT:-low}"
 extra_body_default='{"chat_template_kwargs":{"enable_thinking":true}}'
 extra_body="${EXTRA_BODY:-$extra_body_default}"
+judge_extra_body_default='{"chat_template_kwargs":{"enable_thinking":false}}'
+judge_extra_body="${JUDGE_EXTRA_BODY:-$judge_extra_body_default}"
 # Official tau-three v1.0.1 still ships from the tau2-bench repository and
 # exposes the `tau2` CLI. Pin the resolved tag commit: a moving Git ref would
 # make two nominally identical benchmark runs use different tasks or grading.
@@ -220,6 +220,21 @@ if [ "$found" -ne 1 ]; then
 fi
 printf '[fugu] serving %s\n' "$model"
 
+# readyz and /models prove process/model identity, not that the exact request
+# contract used below can execute. In particular, an older Kairyu process can
+# be healthy yet reject Qwen's chat_template_kwargs, and FlashInfer used to
+# defer a missing JIT helper until this first generation. Admit no benchmark
+# item until one minimal target request succeeds end-to-end.
+preflight_body="{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK.\"}],\"max_tokens\":1,\"temperature\":0,\"chat_template_kwargs\":{\"enable_thinking\":true}}"
+if ! curl --fail --silent --show-error --max-time 300 \
+  -H 'Content-Type: application/json' \
+  --data "$preflight_body" \
+  "${base_url}/chat/completions" >/dev/null; then
+  echo "Kairyu failed the Qwen chat-template/generation preflight; refusing to benchmark" >&2
+  exit 1
+fi
+printf '[fugu] Qwen chat-template/generation preflight passed\n'
+
 set -- \
   --base-url "$base_url" \
   --model "$model" \
@@ -228,9 +243,8 @@ set -- \
   --judge-model "$judge_model" \
   --attempts "$attempts" \
   --concurrency "$concurrency" \
-  --reasoning-effort "$reasoning_effort" \
-  --judge-reasoning-effort "$judge_reasoning_effort" \
   --extra-body "$extra_body" \
+  --judge-extra-body "$judge_extra_body" \
   --exec-runner docker \
   --exec-image "$exec_image" \
   --results-dir "$results_dir" \

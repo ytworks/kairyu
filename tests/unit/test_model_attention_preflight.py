@@ -3,6 +3,8 @@
 import pytest
 import torch
 
+from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.engine.core.model_runner import PagedModelRunner
 from kairyu.models.config import ModelConfig
 from kairyu.models.llama import DenseDecoder
 
@@ -48,3 +50,25 @@ def test_backend_without_model_preflight_retains_existing_construction_path():
     backend = object()
     model = DenseDecoder(_config(), attention_backend=backend)
     assert len(model.model.layers) == 2
+
+
+def test_shared_attention_runtime_preflight_runs_once_with_live_pool_geometry():
+    class Backend:
+        def __init__(self):
+            self.calls = []
+
+        def preflight_runtime(self, config, pool, *, q_dtype):
+            self.calls.append((config, pool, q_dtype))
+
+    backend = Backend()
+    config = _config()
+    model = DenseDecoder(config, attention_backend=backend, dtype=torch.bfloat16)
+    pool = PagedKVPool.for_cache(
+        type("Cache", (), {"num_pages": 8, "page_size": 16})(),
+        config,
+        dtype=torch.bfloat16,
+    )
+
+    PagedModelRunner(model, pool)
+
+    assert backend.calls == [(config, pool, next(model.parameters()).dtype)]

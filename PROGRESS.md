@@ -743,6 +743,18 @@ Qwen3-32B run passes every formal gate: all arms retain 33.33% acceptance,
 standalone-cycle goodput. Its draft latency is 1.2171x dense, so quantized draft
 loading is an opt-in memory tradeoff rather than a performance default.
 
+The Qwen3-32B TP8 Fugu example now exercises the request contract it actually
+serves. It extracts the pinned checkpoint's own chat template at container
+startup, carries safeguarded `chat_template_kwargs` through native chat
+rendering, uses Qwen's `enable_thinking` control for target and judge requests,
+and no longer sends unsupported provider-specific reasoning fields. FlashInfer
+prefill and decode modules are planned with the live model/KV geometry before
+readiness, with the active Python environment's sibling `ninja` discoverable
+for a missing-AOT JIT. A post-merge correction run served Qwen3-32B with
+FlashInfer prefill/decode at TP8 and returned successful thinking-enabled and
+thinking-disabled chat completions; the complete portable suite passes 4,573
+tests with 197 environment-specific cases deselected.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -750,6 +762,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-03 — [amendment] Qwen TP8 Fugu path preflights its real request contract
+- What: Added native, reserved-variable-safe `chat_template_kwargs`, wired the Qwen3-32B example to the exact checkpoint-owned HF template, replaced unsupported `reasoning_effort` fields with Qwen `enable_thinking` controls for target and judge requests, and added a one-token request preflight before any benchmark item. FlashInfer now resolves its exact prefill/decode AOT or JIT modules against live model/KV geometry before readiness; direct virtual-environment entrypoints expose a sibling `ninja`, and FlashAttention delegates its decode preflight. The complete portable suite passes 4,573 tests with 197 deselected. A real RTX PRO 6000 run reported FlashInfer prefill/decode and tensor parallel size 8, accepted both thinking modes, and released all eight GPUs to zero allocated memory after teardown.
+- Why: Post-merge validation of PR #314 found three integrated startup gaps: the example had no configured chat template, sent provider-specific fields that native Kairyu does not implement, and could publish readiness before a first-request FlashInfer module/JIT failure. The correction rejects an unusable request contract before measurement without changing benchmark cases or converting dataset-specific skips into framework policy.
+- Refs: PR #314; m9 D2; `examples/qwen3-32b-multi-gpu/`; `kairyu/entrypoints/{chat_template,server/}`; `kairyu/engine/core/{model_runner,attention/}`; `tests/{server,unit}/`
 
 ### 2026-08-03 — [amendment] Fugu operator owns setup and recognizes official τ³ v1.x
 - What: Made the Qwen3-32B Fugu wrapper start or reuse serving, provision `bench`/`bench-agentic` plus a commit-pinned official τ³ v1.0.1 package and task-data checkout, select an immutable Docker code-execution image, and apply Qwen/Fugu sampling defaults so `HF_TOKEN` is its only required per-run setting. Corrected the adapter to treat the official v1.x `tau2` package/CLI identity as τ³ while retaining pre-1.0 τ² as an explicitly incomparable fallback, and to skip before execution when the official alltools sandbox binaries are unavailable.

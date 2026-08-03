@@ -438,11 +438,16 @@ user simulator at **low**. Sampling belongs to the endpoint, not to a
 benchmark, so it is configured per target (and per judge) and applies to every
 slot:
 
+For the native Kairyu Qwen3 endpoint, use the model's chat-template control;
+`reasoning_effort` is a provider-specific OpenAI field that this endpoint does
+not implement:
+
 ```bash
 kairyu bench run --base-url http://localhost:8000/v1 --model qwen3-32b \
-    --reasoning-effort high --top-p 0.95 --sampling-seed 0 \
+    --top-p 0.95 --sampling-seed 0 \
     --extra-body '{"chat_template_kwargs": {"enable_thinking": true}}' \
-    --judge-model qwen3-32b --judge-reasoning-effort low
+    --judge-model qwen3-32b \
+    --judge-extra-body '{"chat_template_kwargs": {"enable_thinking": false}}'
 ```
 
 ```yaml
@@ -450,17 +455,17 @@ targets:
   - name: qwen3-32b
     base_url: http://localhost:8001/v1
     model: qwen3-32b
-    reasoning_effort: high
     extra_body_json: '{"chat_template_kwargs": {"enable_thinking": true}}'
 judge:
   base_url: http://localhost:8001/v1
   model: qwen3-32b
-  reasoning_effort: low
+  extra_body_json: '{"chat_template_kwargs": {"enable_thinking": false}}'
 ```
 
 `--sampling-seed` is the request `seed`; `--seed` remains the *item sampling*
 seed. Unset knobs are simply absent from the request body, so endpoints that
-reject them are unaffected.
+reject them are unaffected. Use `reasoning_effort` only with an endpoint that
+documents support for it.
 
 `extra_body_json` is merged **last**, so it is validated at load time: it must be
 a JSON object, and it may not override `model`, `messages`, `stream`,

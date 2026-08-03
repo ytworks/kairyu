@@ -485,6 +485,30 @@ def _verification_batch_gap(model: DenseDecoder) -> str | None:
     return None
 
 
+def _preflight_attention_runtime(model: DenseDecoder, pool: PagedKVPool) -> None:
+    """Resolve request-time backend dependencies before a runner is ready.
+
+    Backends are shared across layers in the built-in models, but custom model
+    implementations may expose more than one instance.  Invoke each distinct
+    opt-in hook exactly once with the real model/KV-cache geometry.
+    """
+    layers = getattr(getattr(model, "model", None), "layers", ())
+    seen: set[int] = set()
+    for layer in layers:
+        attention = getattr(layer, "self_attn", None)
+        backend = getattr(attention, "backend", None)
+        hook = getattr(backend, "preflight_runtime", None)
+        identity = id(backend)
+        if not callable(hook) or identity in seen:
+            continue
+        seen.add(identity)
+        hook(
+            model.config,
+            pool,
+            q_dtype=next(model.parameters()).dtype,
+        )
+
+
 class PagedModelRunner:
     supports_batched_verification = True
 
@@ -509,6 +533,7 @@ class PagedModelRunner:
                 )
         if pool.num_layers != model.config.num_hidden_layers:
             raise ValueError("pool layer count disagrees with the model config")
+        _preflight_attention_runtime(model, pool)
         self._model = model
         self._pool = pool
         self._sampler = sampler

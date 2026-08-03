@@ -29,6 +29,10 @@ via the injected fake module.
 from __future__ import annotations
 
 import importlib
+import os
+import shutil
+import sys
+from pathlib import Path
 
 import torch
 
@@ -43,6 +47,24 @@ from kairyu.kernels.flashinfer_decode_plan_gpu import (
 # same shared prefill/decode workspace. Sharing keeps the per-rank reservation
 # at 394 MiB rather than allocating one buffer per wrapper.
 _WORKSPACE_BYTES = 394 * 1024 * 1024
+
+
+def _ensure_python_bin_on_path() -> None:
+    """Expose a venv-local ninja without requiring shell activation.
+
+    FlashInfer invokes ``ninja`` by name only when an exact AOT module is not
+    available. Directly running ``.venv/bin/kairyu`` does not put that sibling
+    directory on PATH, even though the GPU environment installed the helper.
+    """
+    path = os.environ.get("PATH", "")
+    if shutil.which("ninja", path=path) is not None:
+        return
+    python_bin = Path(sys.executable).parent
+    ninja = python_bin / "ninja"
+    if os.access(ninja, os.X_OK):
+        os.environ["PATH"] = os.pathsep.join(
+            part for part in (str(python_bin), path) if part
+        )
 
 
 def _is_capturing() -> bool:
@@ -71,6 +93,7 @@ class FlashInferBackend:
     supports_fast_replay_plan = True
 
     def __init__(self, device: object = "cuda") -> None:
+        _ensure_python_bin_on_path()
         try:
             import flashinfer  # deferred: not installable on macOS; [gpu] extra
         except ModuleNotFoundError as error:
@@ -116,6 +139,64 @@ class FlashInferBackend:
         self._decode_fast_replay_plan_calls = 0
         self._decode_stock_replay_fallback_calls = 0
         self._decode_replay_fallback_reason: str | None = None
+
+    def preflight_runtime(
+        self,
+        config: object,
+        kv_pool: PagedKVPool,
+        *,
+        q_dtype: torch.dtype,
+    ) -> None:
+        """Resolve exact prefill/decode modules before readiness is published.
+
+        ``plan`` loads a matching AOT module when present and otherwise performs
+        FlashInfer's JIT build.  Running both plans with the live TP-local model
+        heads, KV dtype, head width, and page size prevents the first admitted
+        request from discovering a missing build helper or unsupported kernel.
+        No KV data is read or written.
+        """
+        num_qo_heads = getattr(config, "num_attention_heads", None)
+        if not isinstance(num_qo_heads, int) or num_qo_heads < 1:
+            raise RuntimeError(
+                "FlashInfer runtime preflight requires a positive "
+                "model num_attention_heads"
+            )
+        qo_indptr = torch.tensor([0, 1], dtype=torch.int32)
+        paged_kv_indptr = torch.tensor([0, 1], dtype=torch.int32)
+        paged_kv_indices = torch.tensor(
+            [0], dtype=torch.int32, device=self._device
+        )
+        paged_kv_last_page_len = torch.tensor([1], dtype=torch.int32)
+        try:
+            self._prefill.plan(
+                qo_indptr,
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+                num_qo_heads,
+                kv_pool.num_kv_heads,
+                head_dim_qk=kv_pool.head_dim,
+                page_size=kv_pool.page_size,
+                causal=True,
+                q_data_type=q_dtype,
+                kv_data_type=kv_pool.k.dtype,
+            )
+            self._decode.plan(
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+                num_qo_heads,
+                kv_pool.num_kv_heads,
+                kv_pool.head_dim,
+                kv_pool.page_size,
+                q_data_type=q_dtype,
+                kv_data_type=kv_pool.k.dtype,
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "FlashInfer runtime preflight failed before serving became "
+                f"ready: {type(error).__name__}: {error}"
+            ) from error
 
     @property
     def device(self) -> torch.device:

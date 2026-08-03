@@ -72,6 +72,11 @@ token-granularity TPOT, results files).
   encoded with `add_special_tokens=False` (HFTokenizer already does) —
   templates emit `bos_token` themselves; double-BOS would corrupt both
   generation and the "truthful" prompt count.
+  `ChatCompletionRequest.chat_template_kwargs` carries model-specific JSON
+  variables (for example Qwen3's `enable_thinking`) into that Jinja context.
+  It is rejected when the resolved model has no Kairyu template, and cannot
+  replace trusted `messages`, `tools`, `add_generation_prompt`, or configured
+  special-token variables.
   `render_chat(messages)` (legacy concatenator) keeps its signature and
   remains the default when no template is configured.
 - Per-model config (amended — per-MODEL, not per-replica):

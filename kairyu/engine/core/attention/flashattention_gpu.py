@@ -551,6 +551,18 @@ class FlashAttentionBackend:
             }
         return getter(reset=reset)
 
+    def preflight_runtime(
+        self,
+        config: object,
+        kv_pool: PagedKVPool,
+        *,
+        q_dtype: torch.dtype,
+    ) -> None:
+        """Resolve the delegated FlashInfer decode runtime before readiness."""
+        hook = getattr(self._decode_backend, "preflight_runtime", None)
+        if callable(hook):
+            hook(config, kv_pool, q_dtype=q_dtype)
+
     def _supports_head_dim(self, head_dim: int) -> bool:
         if head_dim < 8 or head_dim % 8:
             return False

@@ -216,14 +216,23 @@ class ChatTemplate:
         messages: Sequence[Mapping[str, object]],
         tools: Sequence[Mapping[str, object]] | None = None,
         add_generation_prompt: bool = True,
+        template_kwargs: Mapping[str, object] | None = None,
     ) -> str:
-        return self._template.render(
-            messages=[
+        trusted = {
+            "messages": [
                 _normalize_message(message, index=index)
                 for index, message in enumerate(messages)
             ],
             # None (not []) when absent: templates gate on `tools is not none`
-            tools=list(tools) if tools else None,
-            add_generation_prompt=add_generation_prompt,
+            "tools": list(tools) if tools else None,
+            "add_generation_prompt": add_generation_prompt,
             **self._special_tokens,
-        )
+        }
+        custom = dict(template_kwargs or {})
+        reserved = custom.keys() & trusted.keys()
+        if reserved:
+            raise ValueError(
+                "chat_template_kwargs contains reserved template variables: "
+                f"{sorted(reserved)}"
+            )
+        return self._template.render(**trusted, **custom)

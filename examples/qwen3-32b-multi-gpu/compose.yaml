@@ -58,6 +58,16 @@ services:
             exit 1
             ;;
         esac
+        python3 -c '
+        import json
+        from pathlib import Path
+
+        source = Path("/models/qwen3-32b/tokenizer_config.json")
+        value = json.loads(source.read_text()).get("chat_template")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{source} has no string chat_template")
+        Path("/tmp/qwen3-chat-template.jinja").write_text(value)
+        '
         sed "s/__TENSOR_PARALLEL_SIZE__/$$gpu_count/" \
           /etc/kairyu/config.template.yaml > /tmp/kairyu.yaml
         echo "Starting Qwen3-32B with tensor_parallel_size=$$gpu_count"
