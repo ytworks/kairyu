@@ -2,10 +2,9 @@
 
 The τ-bench family ships its environment (tools, DB, reward function) as a
 package with a `run` CLI; reimplementing it locally would not be comparable,
-so this adapter shells out to the installed harness and translates its results
-file. Official τ³ v1.x retains the `tau2` package and CLI name; only pre-1.0
-`tau2` is the older substitute. Missing harness / missing user-simulator config
-degrade to skipped.
+so this adapter shells out to the installed harness — `tau3` preferred,
+`tau2` accepted with a substitute annotation — and translates its results
+file. Missing harness / missing user-simulator config degrade to skipped.
 
 Three harness facts drive the command built here: the banking domain is named
 `banking_knowledge` (there is no `banking`), results are addressed by `--save-to
@@ -17,13 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import importlib.metadata
 import importlib.util
 import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -55,51 +52,11 @@ _RESULTS_NAME = "results.json"
 
 
 def detect_harness() -> str | None:
-    """Console script exposed by the installed τ-bench package.
-
-    Official τ³ v1.x intentionally retains the historical ``tau2`` package and
-    CLI names. A hypothetical/legacy ``tau3`` wrapper remains accepted first.
-    """
+    """Console script of the installed τ-bench flavor ('tau3' > 'tau2')."""
     for flavor in ("tau3", "tau2"):
         if shutil.which(flavor) is not None:
             return flavor
     return None
-
-
-def harness_version(flavor: str) -> str | None:
-    """Installed distribution version, independent of its console-script name."""
-    distributions = ("tau2", "tau3") if flavor == "tau2" else ("tau3", "tau2")
-    for distribution in distributions:
-        try:
-            return importlib.metadata.version(distribution)
-        except importlib.metadata.PackageNotFoundError:
-            continue
-    return None
-
-
-def is_tau3_release(flavor: str) -> bool:
-    """Whether the harness is official τ³ rather than the pre-1.0 τ² fallback."""
-    if flavor == "tau3":
-        return True
-    version = harness_version(flavor)
-    if version is None:
-        return False
-    try:
-        major = int(version.split(".", 1)[0])
-    except ValueError:
-        return False
-    return major >= 1
-
-
-def missing_alltools_runtime() -> tuple[str, ...]:
-    """Missing official alltools shell-sandbox binaries on this host."""
-    if sys.platform.startswith("linux"):
-        required = ("srt", "rg", "bwrap", "socat")
-    elif sys.platform == "darwin":
-        required = ("srt", "rg")
-    else:
-        return (f"supported platform (got {sys.platform})",)
-    return tuple(binary for binary in required if shutil.which(binary) is None)
 
 
 def harness_data_dir(flavor: str) -> Path | None:
@@ -200,21 +157,12 @@ class TauBenchBankingAdapter:
         return DownloadReport(
             adapter=self.info.name,
             status="ok",
-            detail="dataset ships with the official tau-three/tau2 package",
+            detail="dataset ships with the tau3/tau2 package",
         )
 
     def _preconditions(self, target: BenchTarget, ctx: RunContext) -> str | None:
         if detect_harness() is None:
-            return (
-                "tau harness not installed (install official tau2-bench v1.x "
-                "with the knowledge extra)"
-            )
-        missing_runtime = missing_alltools_runtime()
-        if missing_runtime:
-            return (
-                "tau alltools sandbox runtime unavailable; missing: "
-                + ", ".join(missing_runtime)
-            )
+            return "tau harness not installed (pip install 'kairyu[bench-agentic]')"
         if ctx.judge is None:
             return (
                 "requires a user-simulator LLM: configure the judge endpoint "
@@ -296,12 +244,11 @@ class TauBenchBankingAdapter:
                 self.info.name, target.label(), reason, annotations=self.info.annotations
             )
         flavor = detect_harness()
-        version = harness_version(flavor)
         annotations = self.info.annotations
         incomparable: tuple[str, ...] = ()
-        if not is_tau3_release(flavor):
+        if flavor == "tau2":
             annotations = annotations + (
-                "pre-1.0 tau2 banking substitute — the tau3 release is not installed; "
+                "tau2 banking substitute — the tau3 harness is not installed; "
                 "scores are NOT directly comparable to Fugu's τ³ number",
             )
             # A run-time substitution: the comparison report must withhold this
@@ -372,8 +319,6 @@ class TauBenchBankingAdapter:
             methodology={
                 "metric": metric,
                 "harness": flavor,
-                "harness_version": version,
-                "harness_release": "tau3" if is_tau3_release(flavor) else "tau2",
                 "domain": _DOMAIN,
                 "retrieval_config": _RETRIEVAL_CONFIG,
                 "num_trials": ctx.attempts,

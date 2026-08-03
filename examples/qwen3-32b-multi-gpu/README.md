@@ -135,7 +135,6 @@ benchmarks from Sakana's Fugu release table, then an accuracy report against
 their published scores — start the service and run the suite with one command:
 
 ```console
-export HF_TOKEN=hf_...
 ./examples/qwen3-32b-multi-gpu/run-fugu-benchmark.sh
 ```
 
@@ -150,26 +149,16 @@ Two artifacts land under `results/fugu/<run_id>/`:
   Opus 4.8 / Gemini 3.1 Pro / GPT 5.5 values, with the delta and every reason a
   delta may not mean parity.
 
-The same script also reuses an already-running service. After accepting the
-GPQA Diamond, HLE, and LiveCodeBench Pro dataset licenses, the only required
-operator setting is `HF_TOKEN`:
+To benchmark an already-running service:
 
 ```console
-export HF_TOKEN=hf_...
 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh
 ```
 
-If `HF_TOKEN` is already exported in the machine environment, run only the
-second command. The script deliberately does not read `.env`; it passes the
-inherited value to both Docker Compose's model downloader and the host-side
-benchmark process.
-
-The script starts or reuses Qwen3-32B, asks `uv` to provision both benchmark
-extras plus the commit-pinned official τ³ v1.0.1 harness, downloads missing
-datasets and its task-data checkout, and builds or reuses the hash-pinned Docker
-sandbox for generated code. `uv`, Git, Docker, the NVIDIA driver, sufficient
-disk, and the accepted gated dataset licenses are host prerequisites; they are
-not per-run configuration.
+**This needs [uv](https://docs.astral.sh/uv/) on the host.** The suite downloads
+and normalizes datasets, which needs the `bench` extra; the serving image does
+not carry it, so the suite runs from the repository while the model serves in
+the container.
 
 By default each slot is capped at 20 items, because a full run is tens of
 thousands of judged items (HLE alone is 2,500) and takes hours. The cap is
@@ -187,21 +176,20 @@ OFFLINE_FIXTURES=1 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh     # plumbi
 | `BENCH_LIMIT` | `20` | Items per benchmark; `0` runs everything. Rejected unless a non-negative integer — a typo must not silently become a full run |
 | `BENCH_ONLY` / `BENCH_EXCLUDE` | — | Comma-separated slot names |
 | `ATTEMPTS` | `1` | Trials per task for the agentic slots (Fugu reports τ³ as pass@4) |
-| `REASONING_EFFORT` | `high` | `reasoning_effort` sent with every request (Fugu reports max effort) |
-| `JUDGE_REASONING_EFFORT` | `low` | Effort for the judge / τ user simulator |
-| `EXTRA_BODY` | Qwen thinking enabled | JSON merged into every request |
+| `REASONING_EFFORT` | — | `reasoning_effort` sent with every request (Fugu reports max effort) |
+| `JUDGE_REASONING_EFFORT` | — | Effort for the judge / τ user simulator (Fugu used `low`) |
+| `EXTRA_BODY` | — | JSON merged into every request, e.g. `{"chat_template_kwargs":{"enable_thinking":true}}` |
 | `MODEL` / `JUDGE_MODEL` | `qwen3-32b` | Served model ids |
 | `BENCH_CONCURRENCY` | `8` | In-flight requests |
 | `RESULTS_DIR` / `RUN_ID` | `results/fugu`, timestamp | Where evidence lands; reuse a `RUN_ID` to resume |
 | `OFFLINE_FIXTURES` | — | Synthetic stand-in data: checks the plumbing, scores are meaningless |
 | `VISION` | — | Declare the target vision-capable (see below) |
 | `PORT` | `8001` | Host port; reaches the Compose mapping, so a custom value really is where the service listens |
-| `KAIRYU_BENCH_EXEC_IMAGE` | auto-built | Existing local image/digest for sandboxed code execution |
 
-GPQA Diamond, HLE and LiveCodeBench Pro require the dataset licenses to be
-accepted for the supplied `HF_TOKEN`. SWE-Bench Pro, Terminal-Bench and τ³ use
-Docker and harnesses provisioned by the script. Any remaining unmet runtime
-precondition is recorded as `skipped` rather than fabricated as a score.
+Slots with unmet preconditions report `skipped` rather than failing the run:
+GPQA Diamond, HLE and LiveCodeBench Pro need `HF_TOKEN` with the dataset
+licenses accepted, and SWE-Bench Pro, Terminal-Bench and τ³ need docker plus
+their harnesses (`uv sync --extra bench-agentic`). See `docs/benchmarks.md`.
 
 **The vision slots skip by design here.** `Qwen/Qwen3-32B` is a text-generation
 causal LM — the vision family is the separate Qwen3-VL — so the target is
