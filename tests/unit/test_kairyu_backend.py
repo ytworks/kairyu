@@ -13,11 +13,13 @@ from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
+from kairyu.engine.engine_loop import StreamUpdate
 from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
 from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt, TokensPrompt
 from kairyu.engine.registry import create_backend
 from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.entrypoints.server.app import create_app
+from kairyu.outputs import TokenLogprob
 
 
 def _request(request_id: str, prompt: str, max_tokens: int = 4) -> GenerationRequest:
@@ -386,11 +388,385 @@ async def test_stream_yields_incremental_partials():
     partials = []
     async for partial in backend.stream(_request("r2", "stream me", max_tokens=5)):
         partials.append(partial)
-    assert len(partials) >= 5
+    assert partials
     assert partials[-1].finished is True
     assert all(p.finished is False for p in partials[:-1])
     lengths = [len(p.completions[0].token_ids) for p in partials]
     assert lengths == sorted(lengths)  # monotonically growing
+    assert lengths[-1] == 5
+
+
+async def test_stream_coalesces_backlogged_cumulative_updates_to_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KairyuBackend(num_pages=64)
+    queue: asyncio.Queue[StreamUpdate] = asyncio.Queue()
+    monkeypatch.setattr(backend, "_submit", lambda _request: queue)
+    stream = backend.stream(_request("backlogged", "prompt", max_tokens=4))
+
+    queue.put_nowait(
+        StreamUpdate(
+            outputs=(7,),
+            text="a",
+            finished=False,
+            finish_reason=None,
+            num_prompt_tokens=3,
+            num_cached_tokens=1,
+        )
+    )
+    first = await anext(stream)
+
+    queue.put_nowait(
+        StreamUpdate(
+            outputs=(7, 8),
+            text="ab",
+            finished=False,
+            finish_reason=None,
+            num_prompt_tokens=3,
+            num_cached_tokens=1,
+        )
+    )
+    queue.put_nowait(
+        StreamUpdate(
+            outputs=(7, 8, 9),
+            text="abc",
+            finished=False,
+            finish_reason=None,
+            num_prompt_tokens=3,
+            num_cached_tokens=1,
+        )
+    )
+    queue.put_nowait(
+        StreamUpdate(
+            outputs=(7, 8, 9, 10),
+            text="abcd",
+            finished=True,
+            finish_reason="length",
+            logprobs=({7: -0.1}, {8: -0.2}, {9: -0.3}, {10: -0.4}),
+            cumulative_logprob=-1.0,
+            num_prompt_tokens=3,
+            num_cached_tokens=1,
+        )
+    )
+
+    try:
+        remaining = [partial async for partial in stream]
+    finally:
+        await backend.shutdown()
+
+    assert first.completions[0].token_ids == (7,)
+    assert [len(partial.completions[0].token_ids) for partial in remaining] == [4]
+    final = remaining[-1]
+    assert final.finished is True
+    assert final.usage is not None
+    assert final.usage.prompt_tokens == 3
+    assert final.usage.completion_tokens == 4
+    assert final.usage.cached_tokens == 1
+    completion = final.completions[0]
+    assert completion.text == "abcd"
+    assert completion.token_ids == (7, 8, 9, 10)
+    assert completion.finish_reason == "length"
+    assert completion.logprobs == ({7: -0.1}, {8: -0.2}, {9: -0.3}, {10: -0.4})
+    assert completion.cumulative_logprob == -1.0
+    assert queue.empty()
+
+
+async def test_stream_coalescing_never_discards_a_backlogged_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KairyuBackend(num_pages=64)
+    queue: asyncio.Queue[StreamUpdate] = asyncio.Queue()
+    monkeypatch.setattr(backend, "_submit", lambda _request: queue)
+    stream = backend.stream(_request("backlogged-error", "prompt", max_tokens=3))
+
+    queue.put_nowait(StreamUpdate((7,), "a", False, None))
+    first = await anext(stream)
+    assert first.finished is False
+    rich_logprob = TokenLogprob("a", 7, -0.1, (97,))
+    queue.put_nowait(
+        StreamUpdate(
+            (7,),
+            "a",
+            False,
+            None,
+            logprobs=({7: -0.1},),
+            cumulative_logprob=-0.1,
+            num_prompt_tokens=3,
+            num_cached_tokens=1,
+            logprob_content=(rich_logprob,),
+        )
+    )
+    failure = RuntimeError("backlogged engine failure")
+    queue.put_nowait(StreamUpdate((), "", True, None, failure))
+
+    try:
+        latest = await anext(stream)
+        completion = latest.completions[0]
+        assert completion.text == "a"
+        assert completion.logprobs == ({7: -0.1},)
+        assert completion.cumulative_logprob == -0.1
+        assert completion.logprob_content == (rich_logprob,)
+        assert latest.usage is not None
+        assert latest.usage.prompt_tokens == 3
+        assert latest.usage.completion_tokens == 1
+        assert latest.usage.cached_tokens == 1
+        with pytest.raises(RuntimeError, match="backlogged engine failure"):
+            await anext(stream)
+    finally:
+        await stream.aclose()
+        await backend.shutdown()
+
+    assert queue.empty()
+
+
+async def test_stream_coalescing_stops_at_success_before_a_later_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KairyuBackend(num_pages=64)
+    queue: asyncio.Queue[StreamUpdate] = asyncio.Queue()
+    monkeypatch.setattr(backend, "_submit", lambda _request: queue)
+    stream = backend.stream(_request("terminal-boundary", "prompt", max_tokens=2))
+    queue.put_nowait(StreamUpdate((7,), "d", False, None))
+    queue.put_nowait(StreamUpdate((7, 8), "done", True, "length"))
+    queue.put_nowait(
+        StreamUpdate(
+            (),
+            "",
+            True,
+            None,
+            RuntimeError("failure from a different request"),
+        )
+    )
+
+    try:
+        results = [partial async for partial in stream]
+    finally:
+        await backend.shutdown()
+
+    assert [result.completions[0].text for result in results] == ["d", "done"]
+    assert results[-1].finished is True
+    assert results[-1].completions[0].finish_reason == "length"
+    assert queue.qsize() == 1
+
+
+def test_stream_update_queue_bounds_cumulative_backlog_and_seals_terminal() -> None:
+    queue = kairyu_backend_module._StreamUpdateQueue()
+    queue.publish(
+        StreamUpdate(
+            (),
+            "",
+            False,
+            None,
+            num_prompt_tokens=3,
+            num_cached_tokens=1,
+        )
+    )
+    for length in range(1, 128):
+        queue.publish(
+            StreamUpdate(
+                tuple(range(length)),
+                "x" * length,
+                False,
+                None,
+                num_prompt_tokens=3,
+                num_cached_tokens=1,
+            )
+        )
+        assert queue.qsize() <= 2
+    queue.publish(
+        StreamUpdate(
+            tuple(range(128)),
+            "x" * 128,
+            True,
+            "length",
+            num_prompt_tokens=3,
+            num_cached_tokens=1,
+        )
+    )
+
+    assert queue.qsize() == 2
+    first = queue.get_nowait()
+    final = queue.get_nowait()
+    assert len(first.outputs) == 1
+    assert len(final.outputs) == 128
+    assert final.finished is True
+    assert final.num_prompt_tokens == 3
+    assert final.num_cached_tokens == 1
+
+    queue.publish(StreamUpdate((), "", True, None, RuntimeError("late failure")))
+    assert queue.empty()
+
+
+def test_stream_update_queue_preserves_first_token_after_observed_empty_prefill() -> None:
+    queue = kairyu_backend_module._StreamUpdateQueue()
+    queue.publish(StreamUpdate((), "", False, None, num_prompt_tokens=3))
+    assert queue.get_nowait().outputs == ()
+
+    queue.publish(StreamUpdate((7,), "a", False, None, num_prompt_tokens=3))
+    queue.publish(StreamUpdate((7, 8), "ab", False, None, num_prompt_tokens=3))
+    queue.publish(
+        StreamUpdate((7, 8, 9), "abc", True, "length", num_prompt_tokens=3)
+    )
+
+    assert queue.qsize() == 2
+    assert queue.get_nowait().outputs == (7,)
+    final = queue.get_nowait()
+    assert final.outputs == (7, 8, 9)
+    assert final.finished is True
+
+
+def test_stream_update_queue_keeps_latest_snapshot_before_error() -> None:
+    queue = kairyu_backend_module._StreamUpdateQueue()
+    failure = RuntimeError("engine failed")
+    queue.publish(StreamUpdate((7,), "a", False, None))
+    for length in range(2, 65):
+        queue.publish(StreamUpdate(tuple(range(length)), "x" * length, False, None))
+        assert queue.qsize() <= 2
+    queue.publish(StreamUpdate((), "", True, None, failure))
+
+    assert queue.qsize() == 3
+    first = queue.get_nowait()
+    latest = queue.get_nowait()
+    terminal = queue.get_nowait()
+    assert first.outputs == (7,)
+    assert len(latest.outputs) == 64
+    assert terminal.error is failure
+    assert queue.empty()
+
+
+async def test_multi_stream_coalesces_each_choice_after_its_first_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KairyuBackend(num_pages=64)
+    queues = {
+        "multi-backlog#c0": kairyu_backend_module._StreamUpdateQueue(),
+        "multi-backlog#c1": kairyu_backend_module._StreamUpdateQueue(),
+    }
+    for index, queue in enumerate(queues.values()):
+        base = 10 * (index + 1)
+        queue.publish(StreamUpdate((base,), "a", False, None, num_prompt_tokens=3))
+        queue.publish(
+            StreamUpdate((base, base + 1), "ab", False, None, num_prompt_tokens=3)
+        )
+        queue.publish(
+            StreamUpdate(
+                (base, base + 1, base + 2),
+                "abc",
+                True,
+                "length",
+                num_prompt_tokens=3,
+            )
+        )
+
+    monkeypatch.setattr(
+        backend,
+        "_submit",
+        lambda request, **_kwargs: queues[request.request_id],
+    )
+    request = GenerationRequest(
+        request_id="multi-backlog",
+        prompt="prompt",
+        sampling_params=SamplingParams(max_tokens=3, n=2),
+    )
+
+    try:
+        results = [partial async for partial in backend.stream(request)]
+    finally:
+        await backend.shutdown()
+
+    assert len(results) == 2
+    assert [len(choice.token_ids) for choice in results[0].completions] == [1, 1]
+    assert [len(choice.token_ids) for choice in results[-1].completions] == [3, 3]
+    assert results[-1].finished is True
+    assert results[-1].usage is not None
+    assert results[-1].usage.prompt_tokens == 3
+    assert results[-1].usage.completion_tokens == 6
+    assert all(queue.empty() for queue in queues.values())
+
+
+async def test_multi_stream_defers_choice_error_after_latest_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KairyuBackend(num_pages=64)
+    first_queue = kairyu_backend_module._StreamUpdateQueue()
+    sibling_queue = kairyu_backend_module._StreamUpdateQueue()
+    failure = RuntimeError("choice engine failure")
+    first_queue.publish(StreamUpdate((7,), "a", False, None))
+    first_queue.publish(StreamUpdate((7, 8), "ab", False, None))
+    first_queue.publish(StreamUpdate((), "", True, None, failure))
+    sibling_queue.publish(StreamUpdate((9,), "z", True, "length"))
+    queues = {
+        "multi-error#c0": first_queue,
+        "multi-error#c1": sibling_queue,
+    }
+    monkeypatch.setattr(
+        backend,
+        "_submit",
+        lambda request, **_kwargs: queues[request.request_id],
+    )
+    request = GenerationRequest(
+        request_id="multi-error",
+        prompt="prompt",
+        sampling_params=SamplingParams(max_tokens=2, n=2),
+    )
+    stream = backend.stream(request)
+
+    try:
+        first = await anext(stream)
+        latest = await anext(stream)
+        assert first.completions[0].text == "a"
+        assert latest.completions[0].text == "ab"
+        with pytest.raises(RuntimeError, match="choice engine failure"):
+            await anext(stream)
+    finally:
+        await stream.aclose()
+        await backend.shutdown()
+
+    assert all(queue.empty() for queue in queues.values())
+
+
+async def test_multi_stream_yields_ready_sibling_snapshot_before_direct_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KairyuBackend(num_pages=64)
+    first_queue = kairyu_backend_module._StreamUpdateQueue()
+    sibling_queue = kairyu_backend_module._StreamUpdateQueue()
+    queues = {
+        "multi-ready-error#c0": first_queue,
+        "multi-ready-error#c1": sibling_queue,
+    }
+    monkeypatch.setattr(
+        backend,
+        "_submit",
+        lambda request, **_kwargs: queues[request.request_id],
+    )
+    request = GenerationRequest(
+        request_id="multi-ready-error",
+        prompt="prompt",
+        sampling_params=SamplingParams(max_tokens=3, n=2),
+    )
+    stream = backend.stream(request)
+    first_queue.publish(StreamUpdate((1,), "a", False, None))
+    sibling_queue.publish(StreamUpdate((2,), "b", False, None))
+
+    try:
+        first = await anext(stream)
+        assert [choice.text for choice in first.completions] == ["a", "b"]
+
+        failure = RuntimeError("global pump failure")
+        sibling_queue.publish(StreamUpdate((2, 3), "bc", False, None))
+        first_queue.publish(StreamUpdate((), "", True, None, failure))
+        sibling_queue.publish(StreamUpdate((), "", True, None, failure))
+
+        latest = await anext(stream)
+        assert [choice.text for choice in latest.completions] == ["a", "bc"]
+        with pytest.raises(RuntimeError, match="global pump failure"):
+            await anext(stream)
+    finally:
+        await stream.aclose()
+        await backend.shutdown()
+
+    assert all(queue.empty() for queue in queues.values())
 
 
 async def test_generation_uses_one_long_lived_step_worker(monkeypatch):
@@ -419,7 +795,7 @@ async def test_generation_uses_one_long_lived_step_worker(monkeypatch):
     await backend.shutdown()
 
 
-async def test_long_lived_worker_publishes_each_step_before_it_exits():
+async def test_long_lived_worker_publishes_each_step_before_consumer_coalesces():
     runner = _StepGateRunner(gated_call=2)
     backend = KairyuBackend(num_pages=256, runner=runner)
     stream = backend.stream(_request("cadence", "prompt", max_tokens=3))
@@ -439,6 +815,12 @@ async def test_long_lived_worker_publishes_each_step_before_it_exits():
         assert not backend._pump_task.done()
 
         runner.allow_step.set()
+        queue = backend._queues["cadence"]
+        for _ in range(100):
+            if queue.qsize() == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert queue.qsize() == 1
         async for partial in stream:
             partials.append(partial)
     finally:
@@ -448,10 +830,10 @@ async def test_long_lived_worker_publishes_each_step_before_it_exits():
 
     assert [len(partial.completions[0].token_ids) for partial in partials] == [
         1,
-        2,
         3,
     ]
     assert partials[-1].finished is True
+    assert runner.calls == 3
 
 
 async def test_submit_after_worker_idle_snapshot_restarts_without_stranding():

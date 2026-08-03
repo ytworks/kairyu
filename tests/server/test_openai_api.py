@@ -199,6 +199,119 @@ async def test_streaming_reassembles_to_full_answer(app):
     assert "".join(deltas) == full_text
 
 
+async def test_native_stream_bounds_queue_and_body_sends_under_asgi_backpressure():
+    backend = KairyuBackend(num_pages=256)
+    app = create_app(engines={"native": backend})
+    body = {
+        "model": "native",
+        "messages": [{"role": "user", "content": "backpressure"}],
+        "max_tokens": 128,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    encoded = json.dumps(body).encode()
+    request_sent = False
+    disconnected = asyncio.Event()
+    first_body_blocked = asyncio.Event()
+    release_body = asyncio.Event()
+    response_messages: list[dict] = []
+    blocked_once = False
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": encoded, "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        nonlocal blocked_once
+        response_messages.append(message)
+        if (
+            not blocked_once
+            and message["type"] == "http.response.body"
+            and message.get("body")
+        ):
+            blocked_once = True
+            first_body_blocked.set()
+            await release_body.wait()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"test"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(encoded)).encode()),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 80),
+    }
+    request_task = asyncio.create_task(app(scope, receive, send))
+
+    try:
+        await asyncio.wait_for(first_body_blocked.wait(), timeout=2)
+        assert len(backend._queues) == 1
+        queue = next(iter(backend._queues.values()))
+        for _ in range(200):
+            if queue._sealed:
+                break
+            await asyncio.sleep(0.005)
+        assert queue._sealed is True
+        assert queue.qsize() == 1
+
+        release_body.set()
+        await asyncio.wait_for(request_task, timeout=2)
+
+        body_messages = [
+            message
+            for message in response_messages
+            if message["type"] == "http.response.body"
+        ]
+        wire = b"".join(message.get("body", b"") for message in body_messages)
+        data_lines = [
+            line.removeprefix("data: ")
+            for line in wire.decode().splitlines()
+            if line.startswith("data: ")
+        ]
+        assert data_lines[-1] == "[DONE]"
+        payloads = [json.loads(line) for line in data_lines[:-1]]
+        content_chunks = [
+            choice["delta"].get("content") or ""
+            for payload in payloads
+            for choice in payload["choices"]
+            if choice["delta"].get("content")
+        ]
+        assert len(content_chunks) == 2
+        assert len(content_chunks[0].split()) == 1
+        assert len("".join(content_chunks).split()) == 128
+        assert sum(
+            choice.get("finish_reason") is not None
+            for payload in payloads
+            for choice in payload["choices"]
+        ) == 1
+        usage_payloads = [payload for payload in payloads if payload.get("usage")]
+        assert len(usage_payloads) == 1
+        assert usage_payloads[0]["usage"]["completion_tokens"] == 128
+        assert len(body_messages) <= 7
+        assert backend._queues == {}
+    finally:
+        release_body.set()
+        disconnected.set()
+        if not request_task.done():
+            request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+        await backend.shutdown()
+
+
 async def test_streaming_escapes_unicode_line_separators_on_the_wire():
     separators = "before\u0085middle\u2028after\u2029"
     app = create_app(

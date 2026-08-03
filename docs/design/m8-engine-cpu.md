@@ -1,6 +1,6 @@
 # M8 Design: Engine CPU Core — Real Tokens, Real Sampling, Multi-Token Commit
 
-Status: **Implemented** (2026-07-03; D1/D2 amended 2026-07-28). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D1 amended 2026-08-04, D2 amended 2026-07-28). Reviewed — APPROVE-WITH-AMENDMENTS
 (3-reviewer agent panel, 2026-07-03; all amendments applied inline, see §6).
 All six phases (D1–D6) landed with tests: 328 → 437 tests, 95% coverage.
 Local-complete mandate: everything here is implemented and tested on CPU; no
@@ -117,6 +117,26 @@ media bytes.
   and close seals the queue before reclaiming active requests. Reproduce the
   burst throughput measurements with
   `uv run python bench/op_queue_bench.py --operations 100000 --repeats 5`.
+- **Stream-backpressure conflation (2026-08-04, issue #335)**: the in-process
+  `KairyuBackend` publishes cumulative `StreamUpdate` values through one bounded,
+  single-consumer mailbox per request. Empty prefill states replace one another;
+  the first token-bearing state is retained for TTFT, and later non-terminal
+  states replace the pending latest state. A cumulative successful terminal can
+  replace that latest state. The payload-free error sentinel cannot, so the
+  latest cumulative state is delivered once before the error. Publishing the
+  first FIFO terminal seals the mailbox even after a waiting `get()` removes it,
+  preventing a later unrelated pump failure from turning an already successful
+  stream into an error. The steady queue is at most two snapshots; only the
+  pre-consumer `first-token + latest + error` shape reaches three. Consumers also
+  drain consecutive non-terminal states before the next public yield, with the
+  same rule independently per `n > 1` choice. Tests pin bounded 128-update
+  backlog, first-token cadence, full text/token/logprob/usage preservation,
+  success/error ordering, and sibling error propagation. A direct ASGI gate
+  blocks the first body send while all 128 tokens finish, then requires one
+  queued terminal snapshot, two content chunks, exact usage/finish/DONE, and a
+  constant body-send bound. This does not drop D6 ZMQ v2 wire events: those are
+  sequenced deltas rather than cumulative mailbox snapshots and must all reach
+  the client accumulator.
 
 Tests: tiny BPE built programmatically (no committed blobs); Japanese multi-byte
 boundaries; WordPiece and Metaspace decoder parity; linear operation count;

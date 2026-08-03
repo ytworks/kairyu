@@ -53,11 +53,11 @@ keeps the contiguous table stride runtime because it equals the live width.
 After the first ragged compile, previously unseen table widths fell from
 63.81–67.53 ms to 0.11–0.20 ms with exact K/V output; the batched gate now
 binds exact K/V output and one shared compile across changing row/width pairs.
-Portable CPU jobs retain both Python 3.11/3.12 and all 4,585 selected tests,
+Portable CPU jobs retain both Python 3.11/3.12 and all 4,595 selected tests,
 but run `tests/bench` with two file-isolated workers and reuse immutable formal
 inputs instead of regenerating them. The exact Python 3.12 two-phase command
-passed in 10m18s versus the prior 16m33s GitHub test step, with zero selected
-skips and 86.74% combined coverage.
+passed in 10m20s versus the prior 16m33s GitHub test step, with zero selected
+skips and 86.77% combined coverage.
 The full TP4/8 HTTP matrix remains an open hard performance gate while the
 verified depth-5 implementation proceeds independently.
 G2 A7 now has an executable real-engine gate. Its Qwen3-32B trace reuses the
@@ -786,6 +786,14 @@ explicit fallback of eight. Active connections remain transport-unqueued, idle
 sockets are expiry-checked by later same-origin activity, and replica removal or
 replacement closes the origin-local client immediately.
 
+In-process native streams now conflate cumulative engine snapshots at both the
+producer mailbox and consumer drain boundaries. Each choice preserves its first
+token-bearing snapshot, latest cumulative state, and first FIFO terminal; normal
+mailbox backlog is bounded to two queued snapshots (three only for
+first/latest/error), while any getter-held snapshot remains one additional
+constant slot. Text, tokens, logprobs, usage, finish reasons, and error ordering
+remain exact. The sequenced-delta ZMQ path is intentionally unchanged.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -793,6 +801,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [amendment] Native streams bound and coalesce backpressured snapshots
+- What: replaced each in-process request's unbounded cumulative-update queue with a terminal-sealed conflating mailbox, retained the first token-bearing snapshot per choice, and drained consecutive non-terminal backlog before later public yields. Physical mailbox backlog is bounded to two snapshots and the pre-consumer error edge to three; successful terminals replace cumulative state, while payload-free errors follow the latest state. Single and `n > 1` tests bind 128-update backlog, TTFT cadence, full text/token/logprob/usage preservation, terminal ordering, and sibling error propagation. A direct ASGI gate blocks the first body send through engine completion and binds one queued terminal, two content chunks, exact usage/finish/DONE, and a constant body-send bound. ZMQ v2 remains unchanged because its wire events are sequenced deltas. The final portable Python 3.12 two-phase run passed all 4,595 selected tests in 10m20s with zero selected skips and 86.77% combined coverage.
+- Why: a slow SSE client previously forced one JSON encode/socket write per backlogged engine step and retained an unbounded O(T²)-payload sequence of cumulative text/token/logprob snapshots. Blindly taking the last item would instead lose first-token latency, metering state before errors, or FIFO success when a later unrelated pump failure appended an error.
+- Refs: issue #335; m8 D1; `kairyu/engine/kairyu_backend.py`; `tests/unit/test_kairyu_backend.py`; `tests/server/test_openai_api.py`
 
 ### 2026-08-04 — [amendment] Dynamic replica clients retain one saturated serving wave
 - What: dynamic origin-local clients now snapshot the live replica count when first used and retain `min(64, max(1, ceil(gateway concurrency / live replicas)))` idle connections, with an explicit fallback of eight when gateway concurrency is unbounded. Active connections remain transport-unqueued, expiry remains 30 seconds and same-origin activity driven, and replica removal still closes its client immediately. A real HTTP/1.1 TCP regression gate holds two consecutive 64-request waves at a barrier, requires exact socket reuse, then removes the real backend from its pool and waits for every server handler to observe close.
