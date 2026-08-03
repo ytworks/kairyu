@@ -291,6 +291,121 @@ def test_runner_falls_back_for_torch_backend_and_single_request():
     assert native.prefill_calls == 0
 
 
+def test_runner_passes_contiguous_host_metadata_to_opted_in_model(monkeypatch):
+    model = _model()
+    runner = PagedModelRunner(model, _pool(model))
+    original = model.forward_tokens
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model, "forward_tokens", capture)
+    result = runner.execute(
+        (ScheduledChunk("single", 2, True),),
+        {"single": _state("single", (1, 2), (0,))},
+    )
+
+    assert set(result) == {"single"}
+    assert len(calls) == 1
+    assert calls[0]["chunk_start"] == 0
+    assert calls[0]["has_writable"] is True
+
+
+def test_arbitrary_position_fallback_preserves_the_m12_write_contract():
+    model = _model()
+    pool = _pool(model)
+    pages = [0, 1]
+    model.forward_tokens(
+        torch.tensor([1, 2, 3, 4, 5]),
+        torch.arange(5),
+        pool,
+        pages,
+        seq_len=5,
+    )
+    snapshot = pool.k.clone()
+
+    model.forward_tokens(
+        torch.tensor([8, 9]),
+        torch.tensor([2, 4]),
+        pool,
+        pages,
+        seq_len=5,
+        write_from=3,
+    )
+
+    assert torch.equal(pool.k[:, 0, 2], snapshot[:, 0, 2])
+    assert not torch.equal(pool.k[:, 1, 0], snapshot[:, 1, 0])
+
+
+def test_host_prefill_metadata_avoids_tensor_scalar_reads(monkeypatch):
+    model = _model()
+    pool = _pool(model)
+
+    def fail(name):
+        def method(self, *args, **kwargs):
+            raise AssertionError(f"host tensor scalar read through {name}")
+
+        return method
+
+    monkeypatch.setattr(torch.Tensor, "any", fail("any"))
+    monkeypatch.setattr(torch.Tensor, "item", fail("item"))
+    monkeypatch.setattr(torch.Tensor, "__bool__", fail("bool"))
+
+    model.forward_tokens(
+        torch.tensor([1, 2]),
+        torch.arange(2),
+        pool,
+        [0],
+        seq_len=2,
+        write_from=0,
+        chunk_start=0,
+        has_writable=True,
+    )
+    snapshot = pool.k.clone()
+    model.forward_tokens(
+        torch.tensor([3, 4]),
+        torch.arange(2),
+        pool,
+        [0],
+        seq_len=2,
+        write_from=1,
+        chunk_start=0,
+        has_writable=True,
+    )
+
+    assert torch.equal(pool.k[:, 0, 0], snapshot[:, 0, 0])
+    assert not torch.equal(pool.k[:, 0, 1], snapshot[:, 0, 1])
+
+    snapshot = pool.k.clone()
+    model.forward_tokens(
+        torch.tensor([5, 6]),
+        torch.arange(2),
+        pool,
+        [0],
+        seq_len=2,
+        write_from=2,
+        chunk_start=0,
+        has_writable=False,
+    )
+
+    assert torch.equal(pool.k, snapshot)
+
+    model.forward_tokens_with_aux(
+        torch.tensor([7, 8]),
+        torch.arange(2),
+        pool,
+        [0],
+        seq_len=2,
+        aux_layer_ids=(0,),
+        write_from=2,
+        chunk_start=0,
+        has_writable=False,
+    )
+    assert torch.equal(pool.k, snapshot)
+
+
 def _run_scheduler_preemption_case(*, batched: bool):
     backend = _NativeTorchBackend()
     model = _model(backend)

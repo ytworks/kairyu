@@ -140,6 +140,9 @@ class MlaAttention(nn.Module):
         positions: torch.Tensor,
         seq_len: int,
         write_from: int,
+        *,
+        chunk_start: int | None = None,
+        has_writable: bool | None = None,
     ) -> torch.Tensor:
         mla = self.mla
         chunk_len = hidden.shape[0]
@@ -159,21 +162,40 @@ class MlaAttention(nn.Module):
 
         # cache [c_kv ‖ roped k_pe] as one kv head; skip shared cached slots
         latent = torch.cat([c_kv, k_pe], dim=-1)[:, None, :]
-        writable = positions >= write_from
-        if bool(writable.any()):
-            kv_pool.write(
-                layer,
-                page_table,
-                positions[writable],
-                latent[writable],
-                latent[writable][:, :, :0],  # v tensor has width 0 for MLA
+        if (chunk_start is None) != (has_writable is None):
+            raise ValueError(
+                "chunk_start and has_writable must be provided together"
             )
+        if chunk_start is None:
+            writable = positions >= write_from
+            if bool(writable.any()):
+                kv_pool.write(
+                    layer,
+                    page_table,
+                    positions[writable],
+                    latent[writable],
+                    latent[writable][:, :, :0],  # v tensor has width 0 for MLA
+                )
+            chunk_start = int(positions[0].item())
+        else:
+            write_offset = min(max(write_from - chunk_start, 0), chunk_len)
+            if has_writable != (write_offset < chunk_len):
+                raise ValueError(
+                    "has_writable does not match chunk_start/write_from metadata"
+                )
+            if has_writable:
+                kv_pool.write(
+                    layer,
+                    page_table,
+                    positions[write_offset:],
+                    latent[write_offset:],
+                    latent[write_offset:, :, :0],  # v tensor has width 0 for MLA
+                )
         cached, _ = kv_pool.gather(layer, page_table, seq_len)
         cached = cached[:, 0, :]  # [S, r + d_rope]
         c_all, kpe_all = cached.split([mla.kv_lora_rank, mla.qk_rope_head_dim], dim=-1)
 
         w_uk, w_uv = self._uk_uv()
-        chunk_start = int(positions[0].item())
         form = mla_absorbed if chunk_len == 1 else mla_decompress
         context = form(
             q_nope,

@@ -111,7 +111,13 @@ output (DeepSeek convention).
   FakeGraphBackend with a synthetic decode_fn. The real batched capture rides
   FlashInfer's decode wrapper (use_cuda_graph + fixed-size index buffers) on
   deploy day; the eager torch backend is NON-capturable (per-step shapes,
-  ``positions[0].item()`` host syncs) — recorded, not hidden.
+  Python page-list metadata) — recorded, not hidden. The production runner now
+  passes the host-owned contiguous chunk boundary and writable suffix once to
+  sequential dense and MLA attention; those paths neither extract device
+  scalars per layer nor use CUDA boolean indexing for KV writes. The original
+  arbitrary-position model call retains its mask-based compatibility path.
+  This removes eager prefill host drains without claiming that list metadata is
+  graph-capturable.
 - **A2 (BLOCKING, EAGLE-3 corrected)**: lm_head is TRAINED over a reduced
   draft vocab with a ``d2t`` int64 OFFSET map (target_id = draft_id + d2t);
   midlayer q/k/v in_features = 2H over cat([input_layernorm(embeds),

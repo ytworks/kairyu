@@ -81,6 +81,9 @@ class DecoderLayer(nn.Module):
         positions: torch.Tensor,
         seq_len: int,
         write_from: int,
+        *,
+        chunk_start: int | None = None,
+        has_writable: bool | None = None,
     ) -> torch.Tensor:
         hidden = hidden + self.self_attn(
             self.input_layernorm(hidden),
@@ -92,6 +95,8 @@ class DecoderLayer(nn.Module):
             positions,
             seq_len,
             write_from,
+            chunk_start=chunk_start,
+            has_writable=has_writable,
         )
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
@@ -233,6 +238,9 @@ class DenseDecoder(nn.Module):
     # seam. Models implementing only the original tensor-decode contract omit
     # this capability and retain stock planning on every replay.
     supports_fast_replay_plan = True
+    # The scheduler can provide contiguous chunk bounds without changing the
+    # original arbitrary-position ``forward_tokens`` contract.
+    supports_sequential_host_metadata = True
 
     def __init__(
         self,
@@ -292,14 +300,31 @@ class DenseDecoder(nn.Module):
         page_table: list[int],
         seq_len: int,
         write_from: int = 0,
+        *,
+        chunk_start: int | None = None,
+        has_writable: bool | None = None,
     ) -> torch.Tensor:
         """Write this chunk's KV (skipping cached positions), attend, and return
         post-final-norm hidden states for ALL chunk positions (M17's tap)."""
         hidden = self.model.embed_tokens(token_ids)
         cos, sin = self.model.rotary_emb(positions)  # once per forward, fp32
+        if (chunk_start is None) != (has_writable is None):
+            raise ValueError(
+                "chunk_start and has_writable must be provided together"
+            )
         for index, layer in enumerate(self.model.layers):
             hidden = layer(
-                hidden, cos, sin, kv_pool, index, page_table, positions, seq_len, write_from
+                hidden,
+                cos,
+                sin,
+                kv_pool,
+                index,
+                page_table,
+                positions,
+                seq_len,
+                write_from,
+                chunk_start=chunk_start,
+                has_writable=has_writable,
             )
         return self.model.norm(hidden)
 
@@ -313,6 +338,9 @@ class DenseDecoder(nn.Module):
         seq_len: int,
         aux_layer_ids: tuple[int, ...],
         write_from: int = 0,
+        *,
+        chunk_start: int | None = None,
+        has_writable: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run one target pass and retain selected pre-final-norm residuals.
 
@@ -335,6 +363,10 @@ class DenseDecoder(nn.Module):
 
         hidden = self.model.embed_tokens(token_ids)
         cos, sin = self.model.rotary_emb(positions)
+        if (chunk_start is None) != (has_writable is None):
+            raise ValueError(
+                "chunk_start and has_writable must be provided together"
+            )
         captures: list[torch.Tensor] = []
         capture_ids = frozenset(aux_layer_ids)
         for index, layer in enumerate(self.model.layers):
@@ -348,6 +380,8 @@ class DenseDecoder(nn.Module):
                 positions,
                 seq_len,
                 write_from,
+                chunk_start=chunk_start,
+                has_writable=has_writable,
             )
             if index in capture_ids:
                 captures.append(hidden)

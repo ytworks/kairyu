@@ -102,6 +102,115 @@ def _cuda_event_count(profile) -> int:
     )
 
 
+def test_single_prefill_partial_write_avoids_dynamic_mask_host_sync(cuda):
+    """Host chunk metadata must avoid scalar reads and dynamic CUDA masks."""
+    from torch.profiler import ProfilerActivity, profile
+
+    from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.models.config import parse_model_config
+    from kairyu.models.llama import DenseDecoder
+
+    torch.manual_seed(319)
+    backend = FlashInferBackend(device=cuda)
+    model = DenseDecoder(
+        parse_model_config(TINY), attention_backend=backend
+    ).to(device=cuda, dtype=torch.bfloat16).eval()
+    pool = PagedKVPool(
+        model.config.num_hidden_layers,
+        4,
+        PAGE,
+        model.config.num_key_value_heads,
+        model.config.head_dim,
+        dtype=torch.bfloat16,
+        device=cuda,
+    )
+    token_ids = torch.tensor([41, 42, 43, 44], dtype=torch.long, device=cuda)
+    positions = torch.arange(4, 8, device=cuda)
+
+    # Warm the exact FlashInfer plan and kernels before observing the candidate.
+    model.forward_tokens(
+        token_ids,
+        positions,
+        pool,
+        [0],
+        seq_len=8,
+        write_from=6,
+        chunk_start=4,
+        has_writable=True,
+    )
+    torch.cuda.synchronize()
+
+    torch.manual_seed(320)
+    pool.k.copy_(torch.randn_like(pool.k))
+    pool.v.copy_(torch.randn_like(pool.v))
+    reference_pool = PagedKVPool(
+        model.config.num_hidden_layers,
+        4,
+        PAGE,
+        model.config.num_key_value_heads,
+        model.config.head_dim,
+        dtype=torch.bfloat16,
+        device=cuda,
+    )
+    reference_pool.k.copy_(pool.k)
+    reference_pool.v.copy_(pool.v)
+    cached_k = pool.k[:, 0, 4:6].clone()
+    cached_v = pool.v[:, 0, 4:6].clone()
+    reference = model.forward_tokens(
+        token_ids,
+        positions,
+        reference_pool,
+        [0],
+        seq_len=8,
+        write_from=6,
+    )
+    torch.cuda.synchronize()
+
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        with_stack=True,
+        acc_events=True,
+    ) as candidate:
+        actual = model.forward_tokens(
+            token_ids,
+            positions,
+            pool,
+            [0],
+            seq_len=8,
+            write_from=6,
+            chunk_start=4,
+            has_writable=True,
+        )
+
+    scalar_or_mask_ops = {
+        "aten::nonzero",
+        "aten::_local_scalar_dense",
+        "aten::item",
+        "aten::is_nonzero",
+    }
+    forbidden_events = [
+        (
+            event.name,
+            None if event.cpu_parent is None else event.cpu_parent.name,
+            event.stack,
+        )
+        for event in candidate.events()
+        if event.name in scalar_or_mask_ops
+        or (
+            event.name == "cudaStreamSynchronize"
+            and event.cpu_parent is not None
+            and event.cpu_parent.name in scalar_or_mask_ops
+        )
+    ]
+    assert not forbidden_events, forbidden_events
+    assert torch.equal(pool.k[:, 0, 4:6], cached_k)
+    assert torch.equal(pool.v[:, 0, 4:6], cached_v)
+    assert torch.equal(pool.k, reference_pool.k)
+    assert torch.equal(pool.v, reference_pool.v)
+    assert torch.allclose(actual, reference, atol=1e-3)
+
+
 def test_real_flashinfer_ragged_prefill_matches_sequential_and_reduces_launches(
     cuda,
 ):

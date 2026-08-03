@@ -196,6 +196,9 @@ class Attention(nn.Module):
         positions: torch.Tensor,
         seq_len: int,
         write_from: int,
+        *,
+        chunk_start: int | None = None,
+        has_writable: bool | None = None,
     ) -> torch.Tensor:
         chunk_len = hidden.shape[0]
         query, keys, values = self._project_qkv(hidden)
@@ -215,10 +218,42 @@ class Attention(nn.Module):
         # KV-write skip (m12 D4, BLOCKING amendment): positions below
         # num_cached_tokens already hold valid (possibly SHARED) KV — never
         # rewrite them; recomputing their Q is enough.
-        writable = positions >= write_from
-        if bool(writable.any()):
-            kv_pool.write(layer, page_table, positions[writable], keys[writable], values[writable])
-        chunk_start = int(positions[0].item())
+        if (chunk_start is None) != (has_writable is None):
+            raise ValueError(
+                "chunk_start and has_writable must be provided together"
+            )
+        if chunk_start is None:
+            # Compatibility path for the m12 public contract, which accepts
+            # arbitrary explicit positions rather than only a contiguous
+            # scheduler chunk.
+            writable = positions >= write_from
+            if bool(writable.any()):
+                kv_pool.write(
+                    layer,
+                    page_table,
+                    positions[writable],
+                    keys[writable],
+                    values[writable],
+                )
+            chunk_start = int(positions[0].item())
+        else:
+            # Boolean indexing a CUDA tensor performs a dynamic-shape
+            # ``nonzero`` and synchronizes the stream. Scheduler chunks are
+            # contiguous, so host metadata identifies the same suffix as a
+            # fixed-shape slice.
+            write_offset = min(max(write_from - chunk_start, 0), chunk_len)
+            if has_writable != (write_offset < chunk_len):
+                raise ValueError(
+                    "has_writable does not match chunk_start/write_from metadata"
+                )
+            if has_writable:
+                kv_pool.write(
+                    layer,
+                    page_table,
+                    positions[write_offset:],
+                    keys[write_offset:],
+                    values[write_offset:],
+                )
         context = self.backend.attend(query, kv_pool, layer, page_table, seq_len, chunk_start)
         return self.o_proj(context)
 
