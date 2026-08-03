@@ -32,12 +32,13 @@ targets:
     model: kairyu-auto-max
 
 # Sampling policy belongs to the endpoint and applies to every slot. Fugu
-# reports its table at each model's maximum reasoning effort, so set it here
-# (per target) rather than per benchmark:
+# reports its table at each model's maximum reasoning effort, so set the
+# endpoint-supported equivalent here (per target) rather than per benchmark:
 #
-#   reasoning_effort: high
+#   reasoning_effort: high  # only when the endpoint implements this field
 #   top_p: 0.95
 #   seed: 0
+#   # Native Kairyu Qwen3 uses this instead of reasoning_effort:
 #   extra_body_json: '{"chat_template_kwargs": {"enable_thinking": true}}'
 
 # LLM judge for free-form grading (HLE, CharXiv) and the tau-bench user
@@ -46,8 +47,8 @@ targets:
 judge:
   base_url: http://localhost:8000/v1
   model: kairyu-auto
-  # Fugu ran its tau-3 user simulator at low effort:
-  # reasoning_effort: low
+  # Fugu ran its tau-3 user simulator at low effort. For native Kairyu Qwen3:
+  # extra_body_json: '{"chat_template_kwargs": {"enable_thinking": false}}'
 
 # limit: 50                  # optional: cap items per benchmark
 # smoke: true                # tiny deterministic subset (CI)

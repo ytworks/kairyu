@@ -200,6 +200,10 @@ class ChatCompletionRequest(BaseModel):
     seed: int | None = None
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
+    # vLLM-compatible per-request variables for the configured HF Jinja
+    # template (for example Qwen3's ``enable_thinking``). Trusted prompt
+    # carriers remain reserved by ChatTemplate.
+    chat_template_kwargs: dict[str, object] | None = None
     response_format: dict | None = None
     extra_args: dict[str, object] | None = None
     user: str | None = None

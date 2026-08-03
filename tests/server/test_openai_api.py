@@ -923,6 +923,60 @@ async def test_absent_tool_calls_does_not_change_template_message_shape():
     assert backend.prompts_seen == ("False|hello",)
 
 
+async def test_chat_template_kwargs_reach_only_a_configured_template():
+    templated, plain = MockBackend(), MockBackend()
+    app = create_app(
+        engines={"templated": templated, "plain": plain},
+        chat_templates={
+            "templated": ChatTemplate(
+                "{{ messages[0].content }}|{{ enable_thinking }}"
+            )
+        },
+    )
+    body = {
+        "messages": [{"role": "user", "content": "hello"}],
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    async with _client(app) as client:
+        accepted = await client.post(
+            "/v1/chat/completions", json={"model": "templated", **body}
+        )
+        rejected = await client.post(
+            "/v1/chat/completions", json={"model": "plain", **body}
+        )
+
+    assert accepted.status_code == 200
+    assert templated.prompts_seen == ("hello|False",)
+    assert rejected.status_code == 400
+    assert "has no Kairyu chat template" in rejected.json()["error"]["message"]
+    assert plain.prompts_seen == ()
+
+
+async def test_chat_template_kwargs_cannot_replace_messages():
+    backend = MockBackend()
+    app = create_app(
+        engines={"chat": backend},
+        chat_templates={"chat": ChatTemplate("{{ messages[0].content }}")},
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "chat",
+                "messages": [{"role": "user", "content": "trusted"}],
+                "chat_template_kwargs": {
+                    "messages": [{"role": "user", "content": "replacement"}]
+                },
+            },
+        )
+
+    assert response.status_code == 400
+    assert "reserved template variables" in response.json()["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
 @pytest.mark.parametrize("stream", [False, True])
 async def test_completion_token_prompt_is_dispatched_losslessly(stream):
     backend = MockBackend()

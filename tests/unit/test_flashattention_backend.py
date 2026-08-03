@@ -203,6 +203,16 @@ class _FakeDecodeBackend:
         self.batch_calls: list[tuple] = []
         self.plan_calls: list[tuple] = []
         self.decode_calls: list[tuple] = []
+        self.preflight_calls: list[tuple] = []
+
+    def preflight_runtime(
+        self,
+        config: object,
+        kv_pool: PagedKVPool,
+        *,
+        q_dtype: torch.dtype,
+    ) -> None:
+        self.preflight_calls.append((config, kv_pool, q_dtype))
 
     def attend(
         self,
@@ -396,6 +406,17 @@ def test_decode_list_tensor_and_graph_contracts_are_explicitly_delegated():
     assert graph_capture_gap(backend) is None
     assert backend.components["decode"] == "flashinfer"
     assert not isinstance(backend, torch.nn.Module)
+
+
+def test_runtime_preflight_reaches_the_delegated_flashinfer_backend():
+    pool, _, query = _case()
+    delegate = _FakeDecodeBackend()
+    backend = _backend(4, _FakeFA4(), sm=120, decode=delegate)
+    config = object()
+
+    backend.preflight_runtime(config, pool, q_dtype=query.dtype)
+
+    assert delegate.preflight_calls == [(config, pool, query.dtype)]
 
 
 def test_mixed_batch_groups_decode_and_keeps_prefill_output_order():

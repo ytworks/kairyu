@@ -29,3 +29,9 @@ engines:
       # reference backend it does not attend over this padded maximum width.
       cuda_graph_max_pages: 512
       cuda_graph_warmup_iters: 3
+
+# The model download owns the exact Qwen template. compose.yaml extracts its
+# tokenizer_config.json value to this process-local path before Kairyu starts,
+# rather than committing a copy that can drift from the served checkpoint.
+chat_templates:
+  qwen3-32b: /tmp/qwen3-chat-template.jinja

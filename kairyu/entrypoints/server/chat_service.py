@@ -216,8 +216,20 @@ def render_prompt(
         messages.append(data)
     tools = None if request.tool_choice == "none" else request.tools
     if template is None:
+        if request.chat_template_kwargs:
+            raise ChatRequestError(
+                f"model {request.model!r} has no Kairyu chat template; "
+                "chat_template_kwargs cannot be applied"
+            )
         return render_chat(messages)
-    return template.render(messages, tools=tools)
+    try:
+        return template.render(
+            messages,
+            tools=tools,
+            template_kwargs=request.chat_template_kwargs,
+        )
+    except ValueError as error:
+        raise ChatRequestError(str(error)) from error
 
 
 def _render_multimodal_prompt(

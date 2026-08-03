@@ -91,6 +91,30 @@ def test_tools_none_not_empty_list():
     assert ChatTemplate(source).render([{"role": "user", "content": "x"}]) == "NO_TOOLS"
 
 
+def test_request_template_kwargs_reach_the_jinja_template():
+    source = "{% if enable_thinking %}THINK{% else %}ANSWER{% endif %}"
+    template = ChatTemplate(source)
+    messages = [{"role": "user", "content": "x"}]
+
+    assert template.render(
+        messages, template_kwargs={"enable_thinking": True}
+    ) == "THINK"
+    assert template.render(
+        messages, template_kwargs={"enable_thinking": False}
+    ) == "ANSWER"
+
+
+@pytest.mark.parametrize(
+    "reserved", ["messages", "tools", "add_generation_prompt", "bos_token"]
+)
+def test_request_template_kwargs_cannot_replace_trusted_variables(reserved):
+    with pytest.raises(ValueError, match="reserved template variables"):
+        ChatTemplate("ok").render(
+            [{"role": "user", "content": "x"}],
+            template_kwargs={reserved: "untrusted"},
+        )
+
+
 def test_unknown_role_raises_via_template():
     source = (TEMPLATES / "qwen-style.jinja").read_text()
     with pytest.raises(ValueError, match="unknown role"):

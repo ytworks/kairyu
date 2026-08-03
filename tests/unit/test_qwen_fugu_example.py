@@ -92,6 +92,17 @@ def test_served_model_is_preflighted_by_exact_id(fugu_text):
     assert re.search(r"is not served at.*\n.*exit 1", fugu_text, re.S)
 
 
+def test_request_contract_is_preflighted_before_benchmarking(fugu_text):
+    preflight = fugu_text.index("Qwen chat-template/generation preflight")
+    benchmark = fugu_text.index("kairyu bench run")
+
+    assert preflight < benchmark
+    assert '"chat_template_kwargs"' in fugu_text
+    assert '\"enable_thinking\":true' in fugu_text
+    assert '"${base_url}/chat/completions"' in fugu_text
+    assert "--max-time 300" in fugu_text
+
+
 def test_judge_defaults_to_the_same_gateway(fugu_text):
     """The tau user simulator must share one OPENAI_BASE_URL with the target."""
     assert "--judge-base-url" in fugu_text
@@ -114,9 +125,8 @@ def test_fixture_mode_says_its_scores_are_meaningless(fugu_text):
 
 def test_fugu_conditions_are_reachable_from_the_environment(fugu_text):
     for flag in (
-        "--reasoning-effort",
-        "--judge-reasoning-effort",
         "--extra-body",
+        "--judge-extra-body",
         "--attempts",
         "--only",
         "--exclude",
@@ -155,10 +165,13 @@ def test_generated_code_uses_an_immutable_docker_runner(fugu_text):
     assert '--exec-image "$exec_image"' in fugu_text
 
 
-def test_qwen_sampling_defaults_match_the_documented_fugu_recipe(fugu_text):
-    assert 'reasoning_effort="${REASONING_EFFORT:-high}"' in fugu_text
-    assert 'judge_reasoning_effort="${JUDGE_REASONING_EFFORT:-low}"' in fugu_text
-    assert "enable_thinking" in fugu_text
+def test_qwen_sampling_defaults_use_supported_template_controls(fugu_text):
+    assert "--reasoning-effort" not in fugu_text
+    assert "--judge-reasoning-effort" not in fugu_text
+    assert "extra_body_default=" in fugu_text
+    assert "judge_extra_body_default=" in fugu_text
+    assert '"enable_thinking":true' in fugu_text
+    assert '"enable_thinking":false' in fugu_text
 
 
 def test_one_command_entry_point_starts_then_benchmarks(run_fugu_text):
@@ -251,6 +264,17 @@ def test_compose_uses_the_hardware_selected_attention_backend_by_default():
 
     assert "KAIRYU_ATTENTION_BACKEND: ${KAIRYU_ATTENTION_BACKEND:-}" in compose
     assert "KAIRYU_ATTENTION_BACKEND:-torch" not in compose
+
+
+def test_compose_serves_with_the_checkpoint_owned_qwen_chat_template():
+    compose = (EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
+    config = (EXAMPLE / "kairyu.template.yaml").read_text(encoding="utf-8")
+
+    assert "/models/qwen3-32b/tokenizer_config.json" in compose
+    assert '.get("chat_template")' in compose
+    assert "has no string chat_template" in compose
+    assert "/tmp/qwen3-chat-template.jinja" in compose
+    assert "qwen3-32b: /tmp/qwen3-chat-template.jinja" in config
 
 
 def test_readme_documents_the_quality_suite():
@@ -425,10 +449,34 @@ def _serve_models(ids: list[str]):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self):  # noqa: N802 - http.server API
+            length = int(self.headers.get("Content-Length", "0"))
+            request_body = self.rfile.read(length)
+            self.server.chat_bodies.append(_json.loads(request_body))
+            body = _json.dumps(
+                {
+                    "id": "chatcmpl-preflight",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "OK"},
+                            "finish_reason": "length",
+                        }
+                    ],
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *args):
             return
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
+    server.chat_bodies = []
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -463,6 +511,15 @@ def test_model_preflight_accepts_the_exact_id(tmp_path):
         )
         assert completed.returncode == 0, completed.stderr
         assert "serving qwen3-32b" in completed.stdout
+        assert server.chat_bodies == [
+            {
+                "model": "qwen3-32b",
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 1,
+                "temperature": 0,
+                "chat_template_kwargs": {"enable_thinking": True},
+            }
+        ]
         assert marker.exists(), "the benchmark should have been launched"
     finally:
         server.shutdown()

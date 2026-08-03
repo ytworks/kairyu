@@ -141,7 +141,10 @@ export HF_TOKEN=hf_...
 
 It starts Qwen3-32B on every visible GPU (reusing an already-running service),
 waits for readiness, verifies that `qwen3-32b` is the model actually served, and
-runs the suite. Progress is reported per slot and per item while it runs.
+runs the suite. The serving container extracts the exact checkpoint-owned HF
+chat template from `tokenizer_config.json` into a process-local temporary file;
+it does not use a stale committed copy. Progress is reported per slot and per
+item while it runs.
 
 Two artifacts land under `results/fugu/<run_id>/`:
 
@@ -178,7 +181,7 @@ announced on every run and recorded in the scoreboard's item counts.
 ```console
 BENCH_LIMIT=0 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh          # full suite
 BENCH_ONLY=gpqa-diamond,mrcr-v2 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh
-REASONING_EFFORT=high ATTEMPTS=4 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh
+ATTEMPTS=4 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh
 OFFLINE_FIXTURES=1 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh     # plumbing only
 ```
 
@@ -187,9 +190,8 @@ OFFLINE_FIXTURES=1 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh     # plumbi
 | `BENCH_LIMIT` | `20` | Items per benchmark; `0` runs everything. Rejected unless a non-negative integer — a typo must not silently become a full run |
 | `BENCH_ONLY` / `BENCH_EXCLUDE` | — | Comma-separated slot names |
 | `ATTEMPTS` | `1` | Trials per task for the agentic slots (Fugu reports τ³ as pass@4) |
-| `REASONING_EFFORT` | `high` | `reasoning_effort` sent with every request (Fugu reports max effort) |
-| `JUDGE_REASONING_EFFORT` | `low` | Effort for the judge / τ user simulator |
-| `EXTRA_BODY` | Qwen thinking enabled | JSON merged into every request |
+| `EXTRA_BODY` | Qwen thinking enabled | JSON merged into every target request |
+| `JUDGE_EXTRA_BODY` | Qwen thinking disabled | JSON merged into judge / τ user-simulator requests |
 | `MODEL` / `JUDGE_MODEL` | `qwen3-32b` | Served model ids |
 | `BENCH_CONCURRENCY` | `8` | In-flight requests |
 | `RESULTS_DIR` / `RUN_ID` | `results/fugu`, timestamp | Where evidence lands; reuse a `RUN_ID` to resume |
@@ -202,6 +204,12 @@ GPQA Diamond, HLE and LiveCodeBench Pro require the dataset licenses to be
 accepted for the supplied `HF_TOKEN`. SWE-Bench Pro, Terminal-Bench and τ³ use
 Docker and harnesses provisioned by the script. Any remaining unmet runtime
 precondition is recorded as `skipped` rather than fabricated as a score.
+
+The local Qwen endpoint does not implement OpenAI's provider-specific
+`reasoning_effort` field. Instead, this example uses Qwen3's native chat-template
+control: target requests set `enable_thinking=true`, while judge and τ user
+simulator requests set it to `false`. Kairyu applies these variables while
+rendering the configured HF template and rejects them when no template exists.
 
 **The vision slots skip by design here.** `Qwen/Qwen3-32B` is a text-generation
 causal LM — the vision family is the separate Qwen3-VL — so the target is

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import sys
 import types
 
@@ -184,6 +185,67 @@ class TestFlashInferAdapterContract:
             assert wrapper.workspace.numel() == 64
             assert torch.count_nonzero(wrapper.workspace).item() == 0
         assert backend._prefill.workspace is backend._decode.workspace
+
+    def test_direct_venv_entrypoint_exposes_its_sibling_ninja(
+        self, tmp_path, monkeypatch
+    ):
+        from kairyu.engine.core.attention import flashinfer_gpu
+
+        python_bin = tmp_path / "venv" / "bin"
+        python_bin.mkdir(parents=True)
+        ninja = python_bin / "ninja"
+        ninja.write_text("#!/bin/sh\nexit 0\n")
+        ninja.chmod(0o755)
+        monkeypatch.setattr(sys, "executable", str(python_bin / "python"))
+        monkeypatch.setattr(flashinfer_gpu.shutil, "which", lambda *a, **k: None)
+        monkeypatch.setenv("PATH", "/usr/local/sbin")
+
+        flashinfer_gpu._ensure_python_bin_on_path()
+
+        assert os.environ["PATH"].split(os.pathsep)[0] == str(python_bin)
+
+    def test_runtime_preflight_plans_exact_prefill_and_decode_shapes(
+        self, fake_flashinfer
+    ):
+        backend = self._backend()
+        pool = _pool(dtype=torch.bfloat16)
+        config = types.SimpleNamespace(num_attention_heads=4)
+
+        backend.preflight_runtime(config, pool, q_dtype=torch.bfloat16)
+
+        prefill = backend._prefill.plans[-1]
+        decode = backend._decode.plans[-1]
+        assert prefill["args"][4:6] == (4, 2)
+        assert prefill["kwargs"] == {
+            "head_dim_qk": 8,
+            "page_size": PAGE,
+            "causal": True,
+            "q_data_type": torch.bfloat16,
+            "kv_data_type": torch.bfloat16,
+        }
+        assert decode["args"][3:7] == (4, 2, 8, PAGE)
+        assert decode["kwargs"] == {
+            "q_data_type": torch.bfloat16,
+            "kv_data_type": torch.bfloat16,
+        }
+
+    def test_runtime_preflight_reports_jit_failure_before_readiness(
+        self, fake_flashinfer
+    ):
+        backend = self._backend()
+        backend._prefill.plan = lambda *a, **k: (_ for _ in ()).throw(
+            FileNotFoundError("ninja")
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="preflight failed before serving became ready.*ninja",
+        ):
+            backend.preflight_runtime(
+                types.SimpleNamespace(num_attention_heads=4),
+                _pool(),
+                q_dtype=torch.float32,
+            )
 
     def test_prefill_plan_pins_indptr_math_and_kwargs(self, fake_flashinfer):
         backend = self._backend()
