@@ -3,6 +3,7 @@
 import json
 
 import httpx
+import pytest
 from conftest import make_config, make_target
 
 from kairyu.bench.adapters import tau_bench
@@ -24,6 +25,11 @@ SAMPLE_RESULTS = {
         {"task_id": "banking_003", "reward": 0.5},
     ]
 }
+
+
+@pytest.fixture(autouse=True)
+def _alltools_runtime_available(monkeypatch):
+    monkeypatch.setattr(tau_bench, "missing_alltools_runtime", lambda: ())
 
 
 def _ctx(tmp_path, judge_base="http://gw/v1", **overrides) -> RunContext:
@@ -60,7 +66,17 @@ async def test_skipped_without_harness(tmp_path, monkeypatch):
     adapter = TauBenchBankingAdapter()
     pair = await adapter.run(make_target(), _ctx(tmp_path))
     assert pair.status == "skipped"
-    assert "bench-agentic" in pair.reason
+    assert "tau2-bench" in pair.reason
+
+
+async def test_skipped_without_alltools_runtime(tmp_path, monkeypatch):
+    monkeypatch.setattr(tau_bench, "detect_harness", lambda: "tau2")
+    monkeypatch.setattr(
+        tau_bench, "missing_alltools_runtime", lambda: ("srt", "socat")
+    )
+    pair = await TauBenchBankingAdapter().run(make_target(), _ctx(tmp_path))
+    assert pair.status == "skipped"
+    assert "srt, socat" in pair.reason
 
 
 async def test_skipped_without_user_simulator(tmp_path, monkeypatch):
@@ -94,6 +110,7 @@ def _write_harness_results(tmp_path, command) -> None:
 
 async def test_harness_invocation_and_translation(tmp_path, monkeypatch):
     monkeypatch.setattr(tau_bench, "detect_harness", lambda: "tau3")
+    monkeypatch.setattr(tau_bench, "harness_version", lambda flavor: "1.0.1")
     monkeypatch.setenv("TAU2_DATA_DIR", str(tmp_path / "tau-data"))
     seen = {}
 
@@ -122,8 +139,11 @@ async def test_harness_invocation_and_translation(tmp_path, monkeypatch):
     assert pair.methodology["harness"] == "tau3"
 
 
-async def test_tau2_fallback_adds_substitute_annotation(tmp_path, monkeypatch):
+async def test_official_tau3_v1_keeps_tau2_cli_without_substitute_annotation(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(tau_bench, "detect_harness", lambda: "tau2")
+    monkeypatch.setattr(tau_bench, "harness_version", lambda flavor: "1.0.1")
     monkeypatch.setenv("TAU2_DATA_DIR", str(tmp_path / "tau-data"))
 
     def fake_run(command, capture_output, timeout, env, check):
@@ -139,7 +159,32 @@ async def test_tau2_fallback_adds_substitute_annotation(tmp_path, monkeypatch):
     monkeypatch.setattr(tau_bench.subprocess, "run", fake_run)
     adapter = TauBenchBankingAdapter()
     pair = await adapter.run(make_target(), _ctx(tmp_path))
-    assert any("tau2 banking substitute" in note for note in pair.annotations)
+    assert pair.comparable is True
+    assert not any("substitute" in note for note in pair.annotations)
+    assert pair.methodology["harness"] == "tau2"
+    assert pair.methodology["harness_version"] == "1.0.1"
+    assert pair.methodology["harness_release"] == "tau3"
+
+
+async def test_pre_v1_tau2_adds_substitute_annotation(tmp_path, monkeypatch):
+    monkeypatch.setattr(tau_bench, "detect_harness", lambda: "tau2")
+    monkeypatch.setattr(tau_bench, "harness_version", lambda flavor: "0.9.0")
+    monkeypatch.setenv("TAU2_DATA_DIR", str(tmp_path / "tau-data"))
+
+    def fake_run(command, capture_output, timeout, env, check):
+        _write_harness_results(tmp_path, command)
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(tau_bench.subprocess, "run", fake_run)
+    pair = await TauBenchBankingAdapter().run(make_target(), _ctx(tmp_path))
+    assert pair.comparable is False
+    assert any("pre-1.0 tau2" in note for note in pair.annotations)
 
 
 async def test_harness_failure_is_failed_pair(tmp_path, monkeypatch):

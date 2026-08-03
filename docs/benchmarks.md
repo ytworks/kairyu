@@ -158,10 +158,8 @@ vs `kairyu-auto-max` in one run.
 | Humanity's Last Exam | `cais/hle` (gated) | MCQ exact match + judge for free-form | HF token; judge for free-form |
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
-| τ³-Bench Banking | tau3/tau2 `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
-
 | SciCode | `SciCode1/SciCode` | sequential sub-step tests (+`test_data.h5` golden data) | numpy in venv |
-| τ³-Bench Banking | tau3 harness package | official reward (agent = target, user-sim = judge) | tau3/tau2 harness + judge |
+| τ³-Bench Banking | official `tau2` v1.x package, `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau2-bench `[knowledge]` + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
 | MRCRv2 | `openai/mrcr` (8-needle, ≤128K) | official prepend + SequenceMatcher ratio | long-context target |
 
@@ -498,7 +496,11 @@ Without a judge, MCQ items still score exact-match; free-form items are recorded
 
 ```bash
 uv sync --extra bench-agentic          # mini-swe-agent, swebench, harbor
-# tau3 is not on PyPI: pip install git+https://github.com/sierra-research/tau3-bench
+# Official tau-three is not on PyPI. Its v1.x package and CLI remain named
+# tau2; pin the v1.0.1 release commit and include the banking knowledge extra:
+uv pip install 'tau2[knowledge] @ git+https://github.com/sierra-research/tau2-bench.git@fc0055dc4e0a316c3f83133267fbd6faaa770992'
+# A non-editable install omits task data; retain the same pinned checkout and:
+export TAU2_DATA_DIR=/path/to/tau2-bench/data
 ```
 
 SWE-Bench Pro and Terminal-Bench evaluate inside per-task docker containers.
