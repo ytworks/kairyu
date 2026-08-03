@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 
 from kairyu.engine.backend import (
     AdmissionUpperBound,
@@ -94,6 +94,7 @@ from kairyu.entrypoints.server.protocol import (
     Usage,
 )
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.orchestration.orchestrator import (
     Orchestrator,
     OrchestratorExecutionError,
@@ -1197,7 +1198,7 @@ def create_app(
             # and logprobs otherwise stay on the low-latency pull-through path.
             buffered_stream = bool(request.tools)
             if request.stream and not buffered_stream:
-                return StreamingResponse(
+                return sse_response(
                     _stream_orchestrator(
                         selected,
                         orchestration_request,
@@ -1205,8 +1206,7 @@ def create_app(
                         include_usage,
                         want_trace,
                         http_request,
-                    ),
-                    media_type="text/event-stream",
+                    )
                 )
             try:
                 _mark_tenant_dispatched(http_request)
@@ -1303,15 +1303,14 @@ def create_app(
                 usage_exact=False,
             )
             if request.stream:
-                return StreamingResponse(
+                return sse_response(
                     _stream_choices(
                         response.choices,
                         request.model,
                         usage=response.usage if include_usage else None,
                         orchestration_result=result,
                         want_trace=want_trace,
-                    ),
-                    media_type="text/event-stream",
+                    )
                 )
             if want_trace:
                 payload = _chat_response_payload(response)
@@ -1376,15 +1375,14 @@ def create_app(
                 source="http",
             )
         if request.stream and not request.tools:
-            return StreamingResponse(
+            return sse_response(
                 _stream_engine(
                     validated.engine,
                     validated.generation_request,
                     request.model,
                     request,
                     http_request,
-                ),
-                media_type="text/event-stream",
+                )
             )
         try:
             _mark_tenant_dispatched(http_request)
@@ -1412,13 +1410,12 @@ def create_app(
         if request.stream:
             # Tool calling + streaming: generate fully, then emit structured chunks so
             # tool_calls and finish_reason stay correct.
-            return StreamingResponse(
+            return sse_response(
                 _stream_choices(
                     response.choices,
                     request.model,
                     usage=(response.usage if validated.input.include_usage else None),
-                ),
-                media_type="text/event-stream",
+                )
             )
         return JSONResponse(content=_chat_response_payload(response))
 
@@ -1552,14 +1549,13 @@ def create_app(
                     source="http",
                 )
         if request.stream:
-            return StreamingResponse(
+            return sse_response(
                 _stream_completions(
                     engine,
                     generation_requests[0],
                     request,
                     http_request,
-                ),
-                media_type="text/event-stream",
+                )
             )
         choices: list[CompletionChoice] = []
         usage_totals = [0, 0, 0]  # prompt, completion, cached

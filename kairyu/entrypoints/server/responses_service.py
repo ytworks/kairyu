@@ -17,7 +17,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from kairyu.engine.backend import CacheHint, GenerationResult, admission_upper_bound
@@ -35,6 +35,7 @@ from kairyu.entrypoints.server.metering import (
     stream_usage_owner_from_state,
 )
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.sse import escape_json_line_separators
 
 logger = logging.getLogger(__name__)
@@ -1280,7 +1281,7 @@ def add_responses_route(
         response_id = f"resp_{uuid.uuid4().hex}"
         created_at = int(time.time())
         if request.stream and not request.tools:
-            return StreamingResponse(
+            return sse_response(
                 _live_text_events(
                     request,
                     validated,
@@ -1290,8 +1291,7 @@ def add_responses_route(
                     store=store,
                     owner=owner,
                     http_request=http_request,
-                ),
-                media_type="text/event-stream",
+                )
             )
         try:
             if admission is not None:
@@ -1320,7 +1320,7 @@ def add_responses_route(
             return _chat_error(error)
         _record_execution(http_request, request, execution)
         if request.stream:
-            return StreamingResponse(
+            return sse_response(
                 _buffered_events(
                     request,
                     execution,
@@ -1329,8 +1329,7 @@ def add_responses_route(
                     stored_items=all_items,
                     store=store,
                     owner=owner,
-                ),
-                media_type="text/event-stream",
+                )
             )
         output = _output_items(request, execution)
         usage = _usage_payload(

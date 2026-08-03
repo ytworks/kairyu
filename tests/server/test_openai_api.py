@@ -87,6 +87,13 @@ def _chat_body(content: str, **extra) -> dict:
     }
 
 
+def _assert_sse_response_headers(response: httpx.Response) -> None:
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert "connection" not in response.headers
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("endpoint", ["chat", "completions"])
 async def test_zero_token_prompt_returns_400_before_streaming(endpoint, stream):
@@ -179,6 +186,65 @@ async def test_chat_completion_happy_path(app):
     assert data["usage"]["total_tokens"] >= 0
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "model", "buffered"),
+    [
+        pytest.param("chat", "kairyu-mock", False, id="chat-direct-live"),
+        pytest.param("chat", "kairyu-mock", True, id="chat-direct-buffered"),
+        pytest.param("chat", "kairyu-auto", False, id="chat-auto-live"),
+        pytest.param("chat", "kairyu-auto", True, id="chat-auto-buffered"),
+        pytest.param("completions", "kairyu-mock", False, id="legacy-completions"),
+    ],
+)
+async def test_every_chat_and_completions_sse_path_sets_transport_headers(
+    app,
+    endpoint: str,
+    model: str,
+    buffered: bool,
+) -> None:
+    if endpoint == "completions":
+        path = "/v1/completions"
+        body = {"model": model, "prompt": "hello", "stream": True}
+    else:
+        path = "/v1/chat/completions"
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        }
+        if buffered:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "optional_tool",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+
+    async with _client(app) as client:
+        response = await client.post(path, json=body)
+
+    assert response.status_code == 200
+    _assert_sse_response_headers(response)
+    assert response.text.rstrip().endswith("data: [DONE]")
+
+
+async def test_non_streaming_json_does_not_get_sse_response_headers(app) -> None:
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hello"),
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert "cache-control" not in response.headers
+    assert "x-accel-buffering" not in response.headers
+    assert "connection" not in response.headers
+
+
 async def test_streaming_reassembles_to_full_answer(app):
     async with _client(app) as client:
         full = (await client.post("/v1/chat/completions", json=_chat_body("hello"))).json()
@@ -187,7 +253,7 @@ async def test_streaming_reassembles_to_full_answer(app):
             "/v1/chat/completions", json=_chat_body("hello", stream=True)
         )
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
+    _assert_sse_response_headers(response)
     lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
     assert lines[-1] == "data: [DONE]"
     deltas = []
