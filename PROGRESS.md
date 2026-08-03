@@ -450,7 +450,7 @@ trace/span/parent IDs across distinct gateway and replica services and rejects
 prompt/output canaries; it does not infer success from log order or timing.
 Production/fabric drills remain untouched.**
 
-_Last updated: 2026-08-03_
+_Last updated: 2026-08-04_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -762,6 +762,13 @@ the official Harbor Hub package `terminal-bench/terminal-bench-2-1`. A real
 one-task oracle smoke resolved 1/1 with zero exceptions, and the complete
 benchmark test suite passes 1,259 tests with 9 deselected.
 
+Sequential dense and MLA attention now consume one scheduler-owned contiguous
+chunk boundary and writable suffix across every layer, including opt-in
+auxiliary target capture and MTP. KV writes use fixed-shape slices rather than
+CUDA boolean indexing, eliminating the per-layer scalar and `nonzero` stream
+drains from the single-chunk prefill path while the public arbitrary-position
+model contract retains its exact compatibility behavior.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -769,6 +776,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [amendment] Sequential prefill removes per-layer CUDA host drains
+- What: Dense and MLA sequential attention now receive one scheduler-owned chunk boundary and writable-suffix decision through an explicit model capability. Cached-prefix writes use a contiguous suffix slice instead of CUDA boolean indexing; auxiliary target capture can opt in and the MTP decoder supplies the same metadata. Models without the capability and arbitrary-position direct calls retain the original mask path. CPU gates forbid tensor scalar reads, preserve partial/full cached KV, and pin the arbitrary-position fallback; a real-CUDA profiler gate compares the complete KV/output result to the mask oracle while rejecting `aten::nonzero`, `_local_scalar_dense`, and any stream synchronization parented by those scalar/mask operations.
+- Why: Reading `writable.any()` and `positions[0]` on every layer caused two explicit device-to-host synchronizations, while boolean indexing the writable mask introduced another dynamic-shape `nonzero` synchronization. Qwen3-32B TP4 therefore paid up to 128 explicit drains per single-chunk prefill step before the indexing cost, directly inflating TTFT.
+- Refs: issue #319; m12 D2; m17 A1; `kairyu/engine/core/model_runner.py`; `kairyu/models/{attention,llama,mla,mtp}.py`; `bench/draft_quant_qwen.py`; `tests/{unit/test_batched_prefill,unit/test_eagle_mtp,gpu/test_batched_prefill_gpu}.py`
 
 ### 2026-08-03 — [amendment] Agentic Fugu adapters match live harness dataset/output contracts
 - What: Changed SWE-Bench Pro generation to pass mini-swe-agent an output directory, require its `<output>/preds.json` file before evaluation, and pass that file to the official swebench evaluator. Replaced the nonexistent legacy-registry `terminal-bench@2.1` selector with the official Harbor Hub organization/package `terminal-bench/terminal-bench-2-1`. A real one-task Terminal-Bench 2.1 oracle smoke completed at 1/1 with zero exceptions; all 1,259 benchmark tests pass with 9 deselected.

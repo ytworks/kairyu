@@ -116,7 +116,19 @@ class MtpDraftHead(nn.Module):
         positions = torch.arange(length, device=target_hidden.device)
         cos, sin = rotary_emb(positions)
         page_table = list(range(pool.num_pages))
-        return self.decoder(fused, cos, sin, pool, 0, page_table, positions, length, 0)
+        return self.decoder(
+            fused,
+            cos,
+            sin,
+            pool,
+            0,
+            page_table,
+            positions,
+            length,
+            0,
+            chunk_start=0,
+            has_writable=length > 0,
+        )
 
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.head(self.shared_head["norm"](hidden))

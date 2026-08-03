@@ -504,6 +504,8 @@ def _build_trace(
         page_table,
         seq_len=prompt.numel(),
         aux_layer_ids=aux_layer_ids,
+        chunk_start=0,
+        has_writable=prompt.numel() > 0,
     )
     sequence = list(prompt_ids)
     teacher_logprobs: dict[int, torch.Tensor] = {}
@@ -530,6 +532,8 @@ def _build_trace(
             seq_len=position + 1,
             aux_layer_ids=aux_layer_ids,
             write_from=position,
+            chunk_start=position,
+            has_writable=True,
         )
         aux_hidden = torch.cat([aux_hidden, aux_row], dim=0)
     first_anchor = len(prompt_ids)
@@ -635,6 +639,8 @@ def _evaluate_trace(
             seq_len=anchor + draft_tokens + 1,
             aux_layer_ids=aux_layer_ids,
             write_from=anchor,
+            chunk_start=anchor,
+            has_writable=True,
         )
         verify_logits = target.logits(verify_hidden)
         torch.cuda.synchronize(device)

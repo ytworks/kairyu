@@ -1515,10 +1515,14 @@ class PagedModelRunner:
         cached = state.allocation.num_cached_tokens if state.allocation else 0
         end = state.computed_prompt
         start = end - chunk.num_tokens
-        hidden = self._model.forward_tokens(
+        hidden = self._forward_sequential_tokens(
             torch.tensor(prompt[start:end], dtype=torch.long, device=self._device),
             torch.arange(start, end, device=self._device),
-            self._pool, page_table, seq_len=end, write_from=cached,
+            page_table,
+            seq_len=end,
+            write_from=cached,
+            chunk_start=start,
+            has_writable=end > cached,
         )
         self._prefill_rows_executed = (
             getattr(self, "_prefill_rows_executed", 0) + 1
@@ -1535,6 +1539,34 @@ class PagedModelRunner:
             if isinstance(token, SampledToken):
                 self._remember(chunk.request_id, 0, token)
             sampled[chunk.request_id] = (token,)
+
+    def _forward_sequential_tokens(
+        self,
+        token_ids: torch.Tensor,
+        positions: torch.Tensor,
+        page_table: list[int],
+        *,
+        seq_len: int,
+        write_from: int,
+        chunk_start: int,
+        has_writable: bool,
+    ) -> torch.Tensor:
+        """Use host chunk metadata only when the model explicitly opts in."""
+        metadata = {}
+        if getattr(self._model, "supports_sequential_host_metadata", False):
+            metadata = {
+                "chunk_start": chunk_start,
+                "has_writable": has_writable,
+            }
+        return self._model.forward_tokens(
+            token_ids,
+            positions,
+            self._pool,
+            page_table,
+            seq_len=seq_len,
+            write_from=write_from,
+            **metadata,
+        )
 
     def _execute_prefill_batch(
         self,
@@ -1812,9 +1844,14 @@ class PagedModelRunner:
         # workload that drops to one request must not fall back to rebuilding a
         # fresh device tensor every step
         token_slot, position_slot = self._decode_input_slots([input_token], [absolute])
-        hidden = self._model.forward_tokens(
-            token_slot, position_slot,
-            self._pool, page_table, seq_len=absolute + 1, write_from=cached,
+        hidden = self._forward_sequential_tokens(
+            token_slot,
+            position_slot,
+            page_table,
+            seq_len=absolute + 1,
+            write_from=cached,
+            chunk_start=absolute,
+            has_writable=absolute >= cached,
         )
         if sampled is None:
             return

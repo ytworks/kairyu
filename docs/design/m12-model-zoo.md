@@ -57,7 +57,11 @@ original_max_position_embeddings), `attention_bias` (Qwen2 qkv bias),
   into the pool at the given positions and attends over `seq_len` entries via
   the page table; **hidden is returned for ALL chunk positions,
   post-final-norm** (M17's EAGLE tap); `logits(hidden) -> [*, vocab]` stays a
-  separate method. Attention lives in ONE function with the M13-extractable
+  separate method. The arbitrary-position contract remains the compatibility
+  default. The production scheduler may additionally provide paired host
+  `chunk_start` / `has_writable` metadata for its proven-contiguous chunks;
+  that opt-in path writes the identical cached-prefix suffix without device
+  scalar reads or CUDA boolean indexing. Attention lives in ONE function with the M13-extractable
   signature `attention(query, kv_pool, layer, page_table, seq_len,
   chunk_start)` (it takes the pool + page table, not pre-gathered K/V).
   **Chunk mask (amended, verified)**: `is_causal=True` is WRONG for a chunk

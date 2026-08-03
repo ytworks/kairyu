@@ -255,6 +255,84 @@ class TestEagleHead:
 
 
 class TestMtpHead:
+    def test_mla_partial_cached_suffix_uses_host_metadata(self, monkeypatch):
+        from kairyu.engine.core.kv_pool import PagedKVPool
+        from kairyu.engine.core.radix_kv import RadixKVCache
+        from kairyu.models.llama import DenseDecoder
+
+        torch.manual_seed(319)
+        config = parse_model_config(DSV3_RAW)
+        model = DenseDecoder(config).eval()
+        pool = PagedKVPool.for_cache(
+            RadixKVCache(num_pages=4, page_size=4), config
+        )
+        attention = model.model.layers[0].self_attn
+        positions = torch.arange(2)
+        cos, sin = model.model.rotary_emb(positions)
+        attention(
+            torch.randn(2, config.hidden_size),
+            cos,
+            sin,
+            pool,
+            0,
+            [0],
+            positions,
+            2,
+            0,
+            chunk_start=0,
+            has_writable=True,
+        )
+        snapshot = pool.k.clone()
+
+        def fail(name):
+            def method(self, *args, **kwargs):
+                raise AssertionError(f"host tensor scalar read through {name}")
+
+            return method
+
+        monkeypatch.setattr(torch.Tensor, "any", fail("any"))
+        monkeypatch.setattr(torch.Tensor, "item", fail("item"))
+        monkeypatch.setattr(torch.Tensor, "__bool__", fail("bool"))
+        attention(
+            torch.randn(2, config.hidden_size),
+            cos,
+            sin,
+            pool,
+            0,
+            [0],
+            positions,
+            2,
+            1,
+            chunk_start=0,
+            has_writable=True,
+        )
+
+        assert torch.equal(pool.k[0, 0, 0], snapshot[0, 0, 0])
+        assert not torch.equal(pool.k[0, 0, 1], snapshot[0, 0, 1])
+
+    def test_forward_chain_passes_host_metadata_to_mla(self, monkeypatch):
+        from kairyu.models.layers import RotaryEmbedding
+
+        config = parse_model_config(DSV3_RAW)
+        head = MtpDraftHead(config).eval()
+        original = head.decoder.self_attn.forward
+        calls = []
+
+        def capture(*args, **kwargs):
+            calls.append(kwargs)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(head.decoder.self_attn, "forward", capture)
+        head.forward_chain(
+            torch.tensor([1, 2]),
+            torch.randn(2, config.hidden_size),
+            RotaryEmbedding(config),
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["chunk_start"] == 0
+        assert calls[0]["has_writable"] is True
+
     def test_forward_chain_shapes_and_moe_block(self):
         from kairyu.models.moe import DeepseekV3MoeBlock
 
