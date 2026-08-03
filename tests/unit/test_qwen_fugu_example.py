@@ -131,8 +131,34 @@ def test_operator_is_pointed_at_both_artifacts(fugu_text):
 
 def test_dataset_extra_is_installed_for_the_run(fugu_text):
     """The serving image has no dataset deps; the suite runs on the host."""
-    assert "uv run --extra bench kairyu bench run" in fugu_text
+    assert "--extra bench" in fugu_text
+    assert "--extra bench-agentic" in fugu_text
+    assert "--with \"$tau_requirement\"" in fugu_text
+    assert "fc0055dc4e0a316c3f83133267fbd6faaa770992" in fugu_text
+    assert "TAU2_DATA_DIR" in fugu_text
+    assert "banking_knowledge" in fugu_text
     assert "command -v uv" in fugu_text
+
+
+def test_only_required_operator_setting_is_hf_token(fugu_text):
+    assert 'if [ -z "${HF_TOKEN:-}" ]' in fugu_text
+    assert "export HF_TOKEN" in fugu_text
+    assert 'HF_TOKEN="$HF_TOKEN" PORT="$port" ./run.sh --detach' in fugu_text
+    assert ".env file" in fugu_text
+    assert "./run.sh --detach" in fugu_text
+
+
+def test_generated_code_uses_an_immutable_docker_runner(fugu_text):
+    assert "deploy/bench/Dockerfile.exec" in fugu_text
+    assert "docker image inspect --format '{{.Id}}'" in fugu_text
+    assert "--exec-runner docker" in fugu_text
+    assert '--exec-image "$exec_image"' in fugu_text
+
+
+def test_qwen_sampling_defaults_match_the_documented_fugu_recipe(fugu_text):
+    assert 'reasoning_effort="${REASONING_EFFORT:-high}"' in fugu_text
+    assert 'judge_reasoning_effort="${JUDGE_REASONING_EFFORT:-low}"' in fugu_text
+    assert "enable_thinking" in fugu_text
 
 
 def test_one_command_entry_point_starts_then_benchmarks(run_fugu_text):
@@ -250,8 +276,8 @@ def test_auto_gateway_serves_distinct_conductor_and_moa_tiers():
 # -- runtime boundaries (executed, not only grepped) ---------------------------
 
 
-def _stub_uv(tmp_path: Path) -> Path:
-    """A PATH where `uv` records that it ran, so "never reached" is provable."""
+def _stub_tools(tmp_path: Path) -> Path:
+    """A PATH where uv/docker are harmless and record benchmark invocation."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     marker = tmp_path / "uv-was-invoked"
@@ -259,18 +285,60 @@ def _stub_uv(tmp_path: Path) -> Path:
         f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8"
     )
     (bindir / "uv").chmod(0o755)
+    (bindir / "docker").write_text(
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" = info ]; then exit 0; fi\n"
+        "if [ \"${1:-}\" = image ] && [ \"${2:-}\" = inspect ]; then\n"
+        "  case \" $* \" in\n"
+        "    *\" {{.Id}} \"*) printf '%s\\n' "
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    (bindir / "docker").chmod(0o755)
+    (bindir / "git").write_text(
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" = clone ]; then\n"
+        "  for destination do :; done\n"
+        "  mkdir -p \"$destination/.git\" "
+        "\"$destination/data/tau2/domains/banking_knowledge\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"${1:-}\" = -C ] && [ \"${3:-}\" = rev-parse ]; then\n"
+        "  printf '%s\\n' fc0055dc4e0a316c3f83133267fbd6faaa770992\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    (bindir / "git").chmod(0o755)
     return bindir
 
 
-def _run_script(tmp_path: Path, env: dict[str, str], *, port: int | None = None):
+def _run_script(
+    tmp_path: Path,
+    env: dict[str, str],
+    *,
+    port: int | None = None,
+    provision_tau_data: bool = True,
+):
     """Run fugu-benchmark.sh with a stub uv; returns (CompletedProcess, marker)."""
     import os
     import subprocess
 
-    bindir = _stub_uv(tmp_path)
+    bindir = _stub_tools(tmp_path)
     marker = tmp_path / "uv-was-invoked"
     environ = dict(os.environ)
     environ["PATH"] = f"{bindir}{os.pathsep}{environ['PATH']}"
+    environ["HF_TOKEN"] = "hf_test"
+    if provision_tau_data:
+        tau_data = tmp_path / "tau-data"
+        (tau_data / "tau2" / "domains" / "banking_knowledge").mkdir(parents=True)
+        environ["TAU2_DATA_DIR"] = str(tau_data)
+    else:
+        environ.pop("TAU2_DATA_DIR", None)
     environ.update(env)
     if port is not None:
         environ["PORT"] = str(port)
@@ -283,6 +351,39 @@ def _run_script(tmp_path: Path, env: dict[str, str], *, port: int | None = None)
         check=False,
     )
     return completed, marker
+
+
+def test_missing_hf_token_fails_before_setup(tmp_path):
+    completed, marker = _run_script(tmp_path, {"HF_TOKEN": ""})
+    assert completed.returncode == 2
+    assert "HF_TOKEN is required" in completed.stderr
+    assert not marker.exists()
+
+
+def test_tau_task_data_checkout_is_provisioned_automatically(tmp_path):
+    server = _serve_models(["qwen3-32b"])
+    try:
+        cache = tmp_path / "cache"
+        completed, marker = _run_script(
+            tmp_path,
+            {
+                "KAIRYU_BENCH_CACHE": str(cache),
+                "BENCH_LIMIT": "1",
+                "RESULTS_DIR": str(tmp_path / "results"),
+            },
+            port=server.server_address[1],
+            provision_tau_data=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        checkout = (
+            cache
+            / "harnesses"
+            / "tau2-fc0055dc4e0a316c3f83133267fbd6faaa770992"
+        )
+        assert (checkout / "data/tau2/domains/banking_knowledge").is_dir()
+        assert marker.exists()
+    finally:
+        server.shutdown()
 
 
 @pytest.mark.parametrize("value", ["invalid", "-5", "1.5", "20x", " "])
