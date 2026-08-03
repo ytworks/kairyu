@@ -48,8 +48,23 @@ _EMBEDDING_BACKEND_FACTORIES: dict[str, Callable[..., EmbeddingBackend]] = {
 _SERVICE_ACCOUNT_NAMESPACE_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 
 
-_DYNAMIC_REPLICA_MAX_KEEPALIVE = 1
+_DYNAMIC_REPLICA_MAX_KEEPALIVE = 64
+_DYNAMIC_REPLICA_UNBOUNDED_KEEPALIVE = 8
 _DYNAMIC_PROBE_CONCURRENCY = 16
+
+
+def _dynamic_replica_keepalive_limit(
+    max_concurrency: int | None,
+    replica_count: int,
+) -> int:
+    if max_concurrency is None:
+        return _DYNAMIC_REPLICA_UNBOUNDED_KEEPALIVE
+    live_replicas = max(1, replica_count)
+    expected_per_replica = (max_concurrency + live_replicas - 1) // live_replicas
+    return min(
+        _DYNAMIC_REPLICA_MAX_KEEPALIVE,
+        max(1, expected_per_replica),
+    )
 
 
 class _DynamicPoolHTTPClientFactory:
@@ -64,7 +79,12 @@ class _DynamicPoolHTTPClientFactory:
     leaves the pool, while client construction no longer reloads certificates.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_concurrency: int | None,
+        replica_count: Callable[[], int],
+    ) -> None:
         # EndpointSlice addresses are cluster-internal. Proxy environment
         # variables must not redirect either data or readiness traffic. Build
         # the context with trust_env enabled once so an explicitly supported
@@ -73,18 +93,28 @@ class _DynamicPoolHTTPClientFactory:
             verify=True,
             trust_env=True,
         )
+        self._max_concurrency = max_concurrency
+        self._replica_count = replica_count
 
     def create_replica_client(self) -> httpx.AsyncClient:
-        # Active connections remain admission-bounded but uncapped here, so
-        # concurrent long generations never queue behind a transport limit.
-        # Retain one warm idle socket per replica: fleet-wide FD retention is
-        # O(replicas), while excess burst sockets close after use.
+        # When configured, gateway admission bounds active connections. The
+        # transport itself remains uncapped so concurrent long generations do
+        # not queue behind a second limit.
+        # Snapshot the live membership only when this origin is first used.
+        # A bounded gateway retains its expected per-replica share (up to the
+        # reviewed 64-request wave); an unbounded gateway uses a conservative
+        # explicit fallback. The 30-second expiry is evaluated on later
+        # activity for this origin, while replica removal closes the client.
+        max_keepalive_connections = _dynamic_replica_keepalive_limit(
+            self._max_concurrency,
+            self._replica_count(),
+        )
         return httpx.AsyncClient(
             verify=self.ssl_context,
             trust_env=False,
             limits=httpx.Limits(
                 max_connections=None,
-                max_keepalive_connections=_DYNAMIC_REPLICA_MAX_KEEPALIVE,
+                max_keepalive_connections=max_keepalive_connections,
                 keepalive_expiry=30.0,
             ),
         )
@@ -244,7 +274,10 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
 
         discovery = pool_spec.discovery
         assert discovery is not None
-        http_client_factory = _DynamicPoolHTTPClientFactory()
+        http_client_factory = _DynamicPoolHTTPClientFactory(
+            max_concurrency=server_settings.max_concurrency,
+            replica_count=lambda _pool=pool: _pool.replica_count,
+        )
         dynamic_http_client_factories.append(http_client_factory)
         source = KubernetesEndpointSliceDiscovery(
             discovery.service,
