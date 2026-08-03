@@ -8,6 +8,7 @@ from typing import IO
 import httpx
 
 from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints.server import tenancy as tenancy_module
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.tenancy import UsageLedger
 
@@ -37,6 +38,46 @@ class _SlowFile:
 
     def close(self) -> None:
         self._handle.close()
+
+
+def test_usage_ledger_defers_json_encoding_to_writer_thread(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    producer_thread = threading.get_ident()
+    encoder_threads: list[int] = []
+    original_dumps = tenancy_module.json.dumps
+
+    def tracked_dumps(value, *args, **kwargs):
+        encoder_threads.append(threading.get_ident())
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(tenancy_module.json, "dumps", tracked_dumps)
+    ledger = UsageLedger(tmp_path / "usage.jsonl")
+    ledger.record(
+        "tenant-a",
+        "model-a",
+        prompt_tokens=7,
+        completion_tokens=3,
+        cached_tokens=2,
+    )
+    ledger.close()
+
+    assert len(encoder_threads) == 1
+    assert encoder_threads[0] != producer_thread
+    payload = tenancy_module.json.loads(
+        (tmp_path / "usage.jsonl").read_text(encoding="utf-8")
+    )
+    timestamp = payload.pop("ts")
+    assert type(timestamp) is float
+    assert payload == {
+        "tenant": "tenant-a",
+        "model": "model-a",
+        "prompt_tokens": 7,
+        "completion_tokens": 3,
+        "cached_tokens": 2,
+        "uncached_tokens": 5,
+    }
 
 
 async def test_slow_ledger_filesystem_does_not_delay_stream_completion(tmp_path):
