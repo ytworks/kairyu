@@ -1,6 +1,7 @@
 """Agentic wrappers (SWE-Bench Pro / Terminal-Bench): skip paths + translation."""
 
 import json
+from pathlib import Path
 
 import httpx
 from conftest import make_config, make_target
@@ -89,7 +90,13 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
 
     def fake_run(command, capture_output, timeout, env, cwd, check):
         stages.append(list(command))
-        if "run_evaluation" in " ".join(command):
+        if "run_evaluation" not in " ".join(command):
+            output_dir = Path(command[command.index("--output") + 1])
+            output_dir.mkdir()
+            (output_dir / "preds.json").write_text("{}", encoding="utf-8")
+        else:
+            predictions = Path(command[command.index("--predictions_path") + 1])
+            assert predictions.is_file()
             (cwd / "kairyu-bench.report.json").write_text(
                 json.dumps(SWEBENCH_REPORT), encoding="utf-8"
             )
@@ -110,7 +117,30 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
     assert stages[0][:2] == ["mini-extra", "swebench"]
     assert "openai/kairyu-auto" in stages[0]
     assert "--slice" in stages[0]
+    output_dir = Path(stages[0][stages[0].index("--output") + 1])
+    predictions = Path(stages[1][stages[1].index("--predictions_path") + 1])
+    assert output_dir.name == "mini-output"
+    assert predictions == output_dir / "preds.json"
     assert "swebench.harness.run_evaluation" in " ".join(stages[1])
+
+
+async def test_swebench_fails_closed_when_generation_writes_no_predictions(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+
+    def fake_run(command, capture_output, timeout, env, cwd, check):
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
+    pair = await SweBenchProAdapter().run(make_target(), _ctx(tmp_path, limit=1))
+    assert pair.status == "failed"
+    assert "mini-output/preds.json" in pair.reason
 
 
 async def test_terminal_bench_flow(tmp_path, monkeypatch):
@@ -137,7 +167,12 @@ async def test_terminal_bench_flow(tmp_path, monkeypatch):
     pair = await TerminalBenchAdapter().run(make_target(model="m"), _ctx(tmp_path))
     assert pair.status == "partial"  # tb-004 has no verdict
     assert pair.metrics["n_total"] == 4
-    assert seen["command"][:4] == ["harbor", "run", "-d", "terminal-bench@2.1"]
+    assert seen["command"][:4] == [
+        "harbor",
+        "run",
+        "-d",
+        "terminal-bench/terminal-bench-2-1",
+    ]
     assert seen["env"]["OPENAI_BASE_URL"] == "http://gw/v1"
 
 
