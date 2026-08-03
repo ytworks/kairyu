@@ -588,18 +588,16 @@ class UsageLedger:
                 "usage token counts must be non-negative integers and "
                 "cached_tokens must not exceed prompt_tokens"
             )
-        line = json.dumps(
-            {
-                "tenant": tenant,
-                "model": model,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "cached_tokens": cached_tokens,
-                "uncached_tokens": prompt_tokens - cached_tokens,
-                "ts": time.time(),
-            }
-        )
-        self._writer.append(line)
+        payload = {
+            "tenant": tenant,
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cached_tokens": cached_tokens,
+            "uncached_tokens": prompt_tokens - cached_tokens,
+            "ts": time.time(),
+        }
+        self._writer.append_deferred(lambda payload=payload: json.dumps(payload))
 
     def flush(self) -> None:
         """Wait until every accepted record is flushed and reader-visible."""
