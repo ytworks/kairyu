@@ -62,6 +62,88 @@ _EXPERT_PARALLEL_SIZES = frozenset({1, 2, 4})
 logger = logging.getLogger(__name__)
 
 
+class _StreamUpdateQueue(asyncio.Queue[StreamUpdate]):
+    """Bound cumulative snapshots while preserving the first and terminal edge.
+
+    One consumer owns each request queue.  Before that consumer observes its
+    first token-bearing snapshot, replace empty prefill snapshots and then retain
+    the first token snapshot plus the newest cumulative state.  Once token
+    delivery has started, only the newest pending state is useful.  A successful
+    terminal snapshot is cumulative and can replace that newest state; an error
+    sentinel is not, so it must follow the newest state instead.  The exceptional
+    pre-consumer ``first-token + latest + error`` shape is the only three-slot
+    state.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._first_token_observed = False
+        self._sealed = False
+
+    def get_nowait(self) -> StreamUpdate:
+        update = super().get_nowait()
+        if update.outputs:
+            self._first_token_observed = True
+        return update
+
+    def publish(self, update: StreamUpdate) -> None:
+        """Conflate one producer snapshot without crossing a FIFO terminal."""
+
+        if self._sealed:
+            return
+
+        pending = self._queue
+        if not pending:
+            super().put_nowait(update)
+        elif update.error is not None:
+            # The error carries no cumulative output, usage, or logprobs.  Keep
+            # the latest normal snapshot immediately before it.
+            super().put_nowait(update)
+        elif update.finished:
+            if (
+                not self._first_token_observed
+                and pending[0].outputs
+                and len(pending) == 1
+            ):
+                super().put_nowait(update)
+            else:
+                pending[-1] = update
+        elif (
+            not self._first_token_observed
+            and pending[0].outputs
+            and len(pending) == 1
+        ):
+            super().put_nowait(update)
+        else:
+            pending[-1] = update
+
+        if update.error is not None or update.finished:
+            # Keep the FIFO terminal boundary even after a waiting get() has
+            # removed the terminal item from the physical queue.
+            self._sealed = True
+
+
+def _coalesce_stream_updates(
+    queue: asyncio.Queue[StreamUpdate],
+    first: StreamUpdate,
+) -> tuple[StreamUpdate, StreamUpdate | None]:
+    """Drain non-terminal snapshots up to, but never across, FIFO terminal state."""
+
+    if first.error is not None or first.finished:
+        return first, None
+    latest = first
+    while True:
+        try:
+            update = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return latest, None
+        if update.error is not None:
+            return latest, update
+        if update.finished:
+            return update, None
+        latest = update
+
+
 def _graph_row_capacity(
     request_batch_capacity: int,
     token_budget: int,
@@ -1014,7 +1096,7 @@ class KairyuBackend:
         self.dram_kv_tier_min_restore_tokens = (
             self._loop.dram_kv_tier_min_restore_tokens
         )
-        self._queues: dict[str, asyncio.Queue] = {}  # event-loop thread only
+        self._queues: dict[str, _StreamUpdateQueue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
         self._engine_error: Exception | None = None  # last step failure, for readiness()
@@ -1136,7 +1218,7 @@ class KairyuBackend:
         for request_id, update in updates:
             queue = self._queues.get(request_id)
             if queue is not None:
-                queue.put_nowait(update)
+                queue.publish(update)
 
     @staticmethod
     def _mark_delivery_drained(delivery_drained: asyncio.Future) -> None:
@@ -1220,7 +1302,7 @@ class KairyuBackend:
         for request_id in request_ids:
             queue = self._queues.get(request_id)
             if queue is not None:
-                queue.put_nowait(failure)
+                queue.publish(failure)
         if cancelled is not None:
             raise cancelled
 
@@ -1376,7 +1458,7 @@ class KairyuBackend:
     def _release_request_ids(self, request_ids: tuple[str, ...]) -> None:
         self._active_request_ids.difference_update(request_ids)
 
-    def _remove_queue(self, request_id: str, queue: asyncio.Queue) -> None:
+    def _remove_queue(self, request_id: str, queue: _StreamUpdateQueue) -> None:
         if self._queues.get(request_id) is queue:
             del self._queues[request_id]
 
@@ -1386,12 +1468,12 @@ class KairyuBackend:
         *,
         pre_reserved: bool = False,
         prepared_prompt: PreparedPrompt | None = None,
-    ) -> asyncio.Queue:
+    ) -> _StreamUpdateQueue:
         request_id = request.request_id
         if not pre_reserved:
             self._reserve_request_ids((request_id,))
         submitted = False
-        queue: asyncio.Queue | None = None
+        queue: _StreamUpdateQueue | None = None
         try:
             if prepared_prompt is None:
                 prepared_prompt = self._take_or_prepare_request(request)
@@ -1404,7 +1486,7 @@ class KairyuBackend:
                 prepared_prompt=prepared_prompt,
             )
             submitted = True
-            queue = asyncio.Queue()
+            queue = _StreamUpdateQueue()
             self._queues[request_id] = queue
             self._ensure_pump()
             return queue
@@ -1583,15 +1665,25 @@ class KairyuBackend:
         emitted = -1
         finished_cleanly = False
         pump_failed = False
+        deferred: StreamUpdate | None = None
+        first_token_seen = False
         try:
             while True:
-                update: StreamUpdate = await queue.get()
+                update = deferred if deferred is not None else await queue.get()
+                if first_token_seen:
+                    update, deferred = _coalesce_stream_updates(queue, update)
+                elif update.outputs:
+                    first_token_seen = True
                 if update.error is not None:
                     pump_failed = True
                     raise update.error
                 if update.finished:
                     finished_cleanly = True
-                if len(update.outputs) > emitted or update.finished:
+                if (
+                    len(update.outputs) > emitted
+                    or update.finished
+                    or deferred is not None
+                ):
                     emitted = len(update.outputs)
                     yield self._result(request, update)
                 if update.finished:
@@ -1613,10 +1705,11 @@ class KairyuBackend:
         subs = self._sub_requests(request)
         request_ids = tuple(sub.request_id for sub in subs)
         self._reserve_request_ids(request_ids)
-        queues: dict[int, asyncio.Queue] = {}
+        queues: dict[int, _StreamUpdateQueue] = {}
         pending: dict[int, asyncio.Future] = {}
         latest: dict[int, StreamUpdate] = {}
         finished: set[int] = set()
+        first_token_seen: set[int] = set()
         pump_failed = False
         try:
             prepared_prompt = self._take_or_prepare_request(request)
@@ -1629,20 +1722,42 @@ class KairyuBackend:
             pending = {index: asyncio.ensure_future(queue.get()) for index, queue in queues.items()}
             while len(finished) < len(subs):
                 done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED)
+                ready_error: Exception | None = None
+                updated = False
                 for index in list(pending):
                     task = pending[index]
                     if task not in done:
                         continue
-                    update: StreamUpdate = task.result()
+                    update = task.result()
+                    deferred = None
+                    if index in first_token_seen:
+                        update, deferred = _coalesce_stream_updates(
+                            queues[index],
+                            update,
+                        )
+                    elif update.outputs:
+                        first_token_seen.add(index)
                     if update.error is not None:
-                        pump_failed = True
-                        raise update.error
+                        if ready_error is None:
+                            ready_error = update.error
+                        del pending[index]
+                        continue
                     latest[index] = update
+                    updated = True
                     if update.finished:
                         finished.add(index)
                         del pending[index]
+                    elif deferred is not None:
+                        next_update = asyncio.get_running_loop().create_future()
+                        next_update.set_result(deferred)
+                        pending[index] = next_update
                     else:
                         pending[index] = asyncio.ensure_future(queues[index].get())
+                if ready_error is not None:
+                    if updated:
+                        yield self._merged(request, latest, finished=False)
+                    pump_failed = True
+                    raise ready_error
                 yield self._merged(request, latest, finished=len(finished) == len(subs))
         except BaseException:
             if not pump_failed:
