@@ -21,7 +21,13 @@ except ImportError:  # pragma: no cover - the caller retains the torch fallback
 
 if triton is not None:
 
-    @triton.jit
+    @triton.jit(
+        do_not_specialize=(
+            "table_stride_0",
+            "NUM_ROWS",
+            "NUM_TABLE_PAGES",
+        )
+    )
     def _write_batched_kernel(
         k_pool,
         v_pool,
@@ -40,8 +46,8 @@ if triton is not None:
         value_stride_1,
         value_stride_2,
         write_from_stride,
-        NUM_ROWS: tl.constexpr,
-        NUM_TABLE_PAGES: tl.constexpr,
+        NUM_ROWS,
+        NUM_TABLE_PAGES,
         NUM_POOL_PAGES: tl.constexpr,
         PAGE_SIZE: tl.constexpr,
         NUM_HEADS: tl.constexpr,
@@ -311,6 +317,10 @@ def try_write_batched(
     elements = keys.shape[1] * keys.shape[2]
     block = triton.next_power_of_2(elements)
     dummy_write_from = positions if write_from is None else write_from
+    # Request-dependent batch and page-table bounds must remain runtime kernel
+    # arguments.  ``table_stride_0`` is the live page width for contiguous
+    # tables, so specializing it would still recompile on width changes even
+    # when ``NUM_TABLE_PAGES`` itself is runtime-valued.
     _write_batched_kernel[(rows,)](
         k_pool,
         v_pool,

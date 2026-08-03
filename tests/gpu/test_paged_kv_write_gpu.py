@@ -263,6 +263,104 @@ def test_batched_write_cuda_graph_replay_reads_current_buffers(monkeypatch):
     assert torch.equal(pool.v, expected_v)
 
 
+def test_batched_request_shape_bounds_are_runtime_kernel_arguments():
+    from kairyu.kernels import paged_kv_write_gpu
+
+    _require_cuda()
+    parameters = {
+        parameter.name: parameter
+        for parameter in paged_kv_write_gpu._write_batched_kernel.params
+    }
+
+    for name in ("NUM_ROWS", "NUM_TABLE_PAGES"):
+        assert parameters[name].is_constexpr is False
+    for name in (
+        "NUM_POOL_PAGES",
+        "PAGE_SIZE",
+        "NUM_HEADS",
+        "HEAD_DIM",
+        "HAS_WRITE_FROM",
+        "FP8_DEST",
+        "BLOCK",
+    ):
+        assert parameters[name].is_constexpr is True
+    assert {
+        parameters[index].name
+        for index in paged_kv_write_gpu._write_batched_kernel.do_not_specialize
+    } == {
+        "table_stride_0",
+        "NUM_ROWS",
+        "NUM_TABLE_PAGES",
+    }
+
+
+def test_batched_request_shapes_share_one_compiled_kernel(monkeypatch):
+    from triton import knobs
+
+    from kairyu.kernels import paged_kv_write_gpu
+
+    device = _require_cuda()
+    compiled = []
+
+    def record_compile(**kwargs):
+        if (
+            kwargs["fn"].jit_function
+            is paged_kv_write_gpu._write_batched_kernel
+        ):
+            compiled.append(kwargs["repr"])
+
+    monkeypatch.setattr(knobs.runtime, "jit_post_compile_hook", record_compile)
+    paged_kv_write_gpu._write_batched_kernel.device_caches.clear()
+
+    for rows, table_pages, positions_list in (
+        (2, 1, [0, 1]),
+        (5, 3, [0, 4, 8, 5, 2]),
+    ):
+        pool = _pool(pages=32)
+        _randomize_pool(pool)
+        expected_k = pool.k.clone()
+        expected_v = pool.v.clone()
+        page_tables = torch.arange(
+            rows * table_pages,
+            dtype=torch.int32,
+            device=device,
+        ).view(rows, table_pages)
+        positions = torch.tensor(
+            positions_list, dtype=torch.int64, device=device
+        )
+        write_from = torch.zeros(rows, dtype=torch.int32, device=device)
+        keys = torch.randn(
+            rows, 2, 128, device=device, dtype=torch.bfloat16
+        )
+        values = _packed_values(rows, device=device)
+        _reference_write(
+            expected_k,
+            expected_v,
+            page_size=pool.page_size,
+            page_tables=page_tables,
+            row_ids=torch.arange(rows, device=device),
+            positions=positions,
+            keys=keys,
+            values=values,
+            write_from=write_from,
+        )
+
+        assert paged_kv_write_gpu.try_write_batched(
+            pool.k[0],
+            pool.v[0],
+            pool.page_size,
+            page_tables,
+            positions,
+            keys,
+            values,
+            write_from,
+        )
+        torch.cuda.synchronize()
+        assert torch.equal(pool.k, expected_k)
+        assert torch.equal(pool.v, expected_v)
+        assert len(compiled) == 1
+
+
 @pytest.mark.parametrize(
     "dtype",
     [torch.bfloat16, torch.float8_e4m3fn],

@@ -192,7 +192,13 @@ def test_ci_jobs_are_bounded_and_uv_uses_the_committed_lockfile() -> None:
         "Lint",
     )["run"]
     assert lint_command == "uv run --frozen ruff check ."
-    assert "--fail-on-skip" in test_command
+    assert test_command.count("--fail-on-skip") == 2
+    assert "coverage erase" in test_command
+    assert "-n 2 --dist loadfile tests/bench" in test_command
+    assert "tests --ignore=tests/bench" in test_command
+    assert "--cov-report= --cov-fail-under=0" in test_command
+    assert "--cov-append --cov-report=term-missing" in test_command
+    assert "--cov-fail-under=80" in test_command
     docker_command = _named_step(
         workflow["jobs"]["bench-exec-container"],
         "Real Docker runner conformance",

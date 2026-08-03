@@ -279,8 +279,9 @@ def test_benchmark_rejects_a_digit_bearing_line_from_the_container(tmp_path):
     assert "found 3" not in result.stderr
 
 
-def test_benchmark_accepts_a_supported_count(tmp_path):
+def test_benchmark_accepts_a_supported_count(tmp_path, monkeypatch):
     bin_dir = _benchmark_stubs(tmp_path, "0\n1")
+    monkeypatch.setenv("PROGRESS_INTERVAL_S", "1")
     result = _run(EXAMPLE / "benchmark.sh", bin_dir)
 
     # it gets past the guard (and then fails later on the stubbed environment)

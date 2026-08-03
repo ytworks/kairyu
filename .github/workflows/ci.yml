@@ -40,9 +40,15 @@ jobs:
       - name: Lint
         run: uv run --frozen ruff check .
       - name: Test with coverage gate
-        run: >-
-          uv run --frozen pytest --fail-on-skip -ra
-          --cov=kairyu --cov-fail-under=80
+        run: |
+          uv run --frozen coverage erase
+          uv run --frozen pytest --fail-on-skip -ra \
+            -n 2 --dist loadfile tests/bench \
+            --cov=kairyu --cov-report= --cov-fail-under=0
+          uv run --frozen pytest --fail-on-skip -ra \
+            tests --ignore=tests/bench \
+            --cov=kairyu --cov-append --cov-report=term-missing \
+            --cov-fail-under=80
 
   compose-smoke:
     # Black-box gate C3 (goal G3): gateway + 3 mock replicas from a cold

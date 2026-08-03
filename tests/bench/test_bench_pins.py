@@ -154,6 +154,7 @@ def test_charxiv_passes_the_pin_on_both_split_attempts(tmp_path, monkeypatch):
 def test_scicode_golden_data_fetch_carries_the_pin(tmp_path, monkeypatch):
     import kairyu.bench.hub as hub
     from kairyu.bench.adapters.base import DownloadContext
+    from kairyu.bench.adapters.scicode import SciCodeAdapter
     from kairyu.bench.cache import BenchCache
 
     seen: list[dict] = []
@@ -164,6 +165,7 @@ def test_scicode_golden_data_fetch_carries_the_pin(tmp_path, monkeypatch):
 
     monkeypatch.setattr(hub, "download_file", fake_download)
     monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: [])
+    monkeypatch.setattr(SciCodeAdapter, "_fetch_provided_steps", lambda self: {})
     adapter = all_adapters()["scicode"]
     # an empty split fails closed on the sub-step count; the golden-data fetch
     # has already happened by then, which is what this test is about

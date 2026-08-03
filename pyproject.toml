@@ -97,6 +97,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5",
+    "pytest-xdist>=3.6",
     "ruff>=0.6",
     "torch>=2.6",
     "xgrammar>=0.2.3",
@@ -129,7 +130,7 @@ testpaths = ["tests"]
 # Environment-dependent suites are deselected from the portable CPU suite.
 # Dedicated jobs/scripts select applicable gates only after checking their
 # prerequisites, and reject selected skips. CLI `-m` overrides this expression.
-addopts = "--cov=kairyu --cov-report=term-missing --strict-markers -m 'not gpu and not hf_hub and not docker_exec and not helm and not postgres and not vllm'"
+addopts = "--cov=kairyu --strict-markers -m 'not gpu and not hf_hub and not docker_exec and not helm and not postgres and not vllm'"
 # Pytest's built-in default ignores every directory named `dist`, including
 # tests/dist. Keep build outputs ignored without hiding distributed tests.
 norecursedirs = [".git", ".tox", ".venv", "build"]
@@ -148,6 +149,9 @@ markers = [
 concurrency = ["thread", "multiprocessing"]
 sigterm = true
 omit = ["*/*_gpu.py", "kairyu/kernels/*"]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.ruff]
 line-length = 100
