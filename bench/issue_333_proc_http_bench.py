@@ -808,9 +808,7 @@ def container_launch_attestation(
     ports = host.get("PortBindings")
     bindings = ports.get("8000/tcp") if isinstance(ports, dict) else None
     requests = host.get("DeviceRequests")
-    gpu_requests = [
-        item for item in requests or [] if isinstance(item, dict) and item.get("Driver") == "nvidia"
-    ]
+    gpu_requests = [item for item in requests or [] if isinstance(item, dict)]
     expected_devices = [str(index) for index in range(TP_SIZE)]
     if (
         host.get("IpcMode") != "host"
@@ -825,7 +823,11 @@ def container_launch_attestation(
         or bindings[0].get("HostIp") != "127.0.0.1"
         or bindings[0].get("HostPort") != str(args.port)
         or len(gpu_requests) != 1
+        or gpu_requests[0].get("Driver") not in {"", "nvidia"}
+        or gpu_requests[0].get("Count") != 0
         or gpu_requests[0].get("DeviceIDs") != expected_devices
+        or gpu_requests[0].get("Capabilities") != [["gpu"]]
+        or gpu_requests[0].get("Options") != {}
     ):
         raise DiagnosticRunError("container HostConfig differs from the TP4 pin")
 
@@ -876,7 +878,11 @@ def container_launch_attestation(
             "memlock_hard": memlock[0].get("Hard"),
             "published_host_ip": bindings[0].get("HostIp"),
             "published_host_port": int(bindings[0]["HostPort"]),
+            "gpu_driver": gpu_requests[0].get("Driver"),
+            "gpu_count": gpu_requests[0].get("Count"),
             "gpu_device_ids": gpu_requests[0].get("DeviceIDs"),
+            "gpu_capabilities": gpu_requests[0].get("Capabilities"),
+            "gpu_options": gpu_requests[0].get("Options"),
         },
         "source_files": container_hashes,
         "engine_imports": container_imports,
@@ -1863,7 +1869,11 @@ def validate_provenance_descriptor(value: object, *, cell: Cell) -> bool:
         and launch_host.get("published_host_ip") == "127.0.0.1"
         and type(launch_host.get("published_host_port")) is int
         and 1 <= int(launch_host["published_host_port"]) <= 65535
+        and launch_host.get("gpu_driver") in {"", "nvidia"}
+        and launch_host.get("gpu_count") == 0
         and launch_host.get("gpu_device_ids") == [str(index) for index in range(TP_SIZE)]
+        and launch_host.get("gpu_capabilities") == [["gpu"]]
+        and launch_host.get("gpu_options") == {}
     ):
         return False
     return True

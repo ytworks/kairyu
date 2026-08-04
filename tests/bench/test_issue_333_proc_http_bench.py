@@ -548,7 +548,11 @@ def _provenance(
                 "memlock_hard": -1,
                 "published_host_ip": "127.0.0.1",
                 "published_host_port": 18080,
+                "gpu_driver": "",
+                "gpu_count": 0,
                 "gpu_device_ids": ["0", "1", "2", "3"],
+                "gpu_capabilities": [["gpu"]],
+                "gpu_options": {},
             },
             "source_files": source_hashes,
             "engine_imports": engine_imports,
@@ -925,6 +929,11 @@ def test_provenance_replay_rejects_rehashed_launch_env_mount_and_port_tamper() -
         assert isinstance(host, dict)
         host["tmpfs"] = {}
 
+    def invalid_gpu_request(launch: dict[str, object]) -> None:
+        host = launch["host_config"]
+        assert isinstance(host, dict)
+        host["gpu_capabilities"] = [["compute"]]
+
     def weakened_import_policy(launch: dict[str, object]) -> None:
         policy = launch["python_import_policy"]
         assert isinstance(policy, dict)
@@ -938,6 +947,7 @@ def test_provenance_replay_rejects_rehashed_launch_env_mount_and_port_tamper() -
         invalid_port,
         wrong_network,
         missing_pycache_tmpfs,
+        invalid_gpu_request,
         weakened_import_policy,
     ):
         tampered = _rehash_launch_tamper(valid, mutate)
